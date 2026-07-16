@@ -52,7 +52,7 @@ impl Checker {
     /// payloads / collection elements does — a monotone fixpoint over the declared type graph. Then
     /// records the parameters whose type is reachable (locals are recorded inline during checking).
     pub(crate) fn compute_relevance(&mut self, program: &Program) {
-        let mut reachable = self.destructor_classes.clone();
+        let mut reachable = self.symbols.destructor_classes.clone();
         loop {
             let mut changed = false;
             // A field/payload mentioning a **generic parameter** is conservatively relevant: the
@@ -61,8 +61,9 @@ impl Checker {
             // *name* alone), so a generic container's name must be marked destruct-reachable whenever a
             // payload mentions a parameter. Substituting each parameter to `dyn` (which is relevant)
             // before the check achieves exactly that; a concrete field is unaffected.
-            for (name, fields) in &self.records {
+            for (name, fields) in &self.symbols.records {
                 let params = self
+                    .symbols
                     .generic_types
                     .get(name)
                     .map(Vec::as_slice)
@@ -76,8 +77,9 @@ impl Checker {
                     changed = true;
                 }
             }
-            for (name, variants) in &self.enums {
+            for (name, variants) in &self.symbols.enums {
                 let params = self
+                    .symbols
                     .generic_types
                     .get(name)
                     .map(Vec::as_slice)
@@ -97,7 +99,7 @@ impl Checker {
                 break;
             }
         }
-        self.destruct_reachable = reachable.clone();
+        self.symbols.destruct_reachable = reachable.clone();
         // Export the per-type reachable set for the backends' field-walk gate (Phase 4.3), alongside
         // the per-binding sets the drop pass reads.
         self.relevance.reachable_types = reachable;
@@ -106,7 +108,7 @@ impl Checker {
 
     /// Whether a binding of type `ty` is destructor-relevant under the computed reachable set.
     pub(crate) fn type_relevant(&self, ty: &Type) -> bool {
-        type_relevant(ty, &self.destruct_reachable)
+        type_relevant(ty, &self.symbols.destruct_reachable)
     }
 
     /// Record each `fn`/method parameter whose declared type is destruct-reachable, keyed by
@@ -128,7 +130,7 @@ impl Checker {
         body: &[Stmt],
     ) {
         for p in params {
-            if self.type_relevant(&param_type(p, &self.extern_types)) {
+            if self.type_relevant(&param_type(p, &self.imports.extern_types)) {
                 self.relevance.params.insert((fn_span, p.name.clone()));
             }
         }

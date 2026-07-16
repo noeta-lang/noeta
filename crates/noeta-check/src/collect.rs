@@ -28,7 +28,7 @@ impl Checker {
                 // member-function-miss diagnostic); slice 2 tightens it to a hard E0019.
                 match self.reg().classify_use(path, &name.name) {
                     UseKind::Module(qualified) => {
-                        self.modules.insert(local, qualified);
+                        self.imports.modules.insert(local, qualified);
                     }
                     UseKind::Namespace(prefix) => {
                         // Expose the group's types under the bound name so a dotted annotation
@@ -36,19 +36,20 @@ impl Checker {
                         // resolve for a call — mapping `<local>.<rel>` to the type's qualified
                         // identity, the same channel a leaf `use std.http.Response` import uses.
                         for (rel, qualified) in self.reg().namespace_types(&prefix) {
-                            self.extern_types
+                            self.imports
+                                .extern_types
                                 .insert(format!("{local}.{rel}"), qualified);
                         }
-                        self.namespaces.insert(local, prefix);
+                        self.imports.namespaces.insert(local, prefix);
                     }
                     UseKind::ExternType(qualified) => {
                         // An **extern-type** import (`use std.id.Uuid`, `use std.metrics.Counter as
                         // C`): bind the local name (alias or short) to its qualified identity — the
                         // annotation resolver keys on this.
-                        self.extern_types.insert(local, qualified);
+                        self.imports.extern_types.insert(local, qualified);
                     }
                     UseKind::MemberFn { module, func } => {
-                        self.imported_fns.insert(local, (module, func));
+                        self.imports.imported_fns.insert(local, (module, func));
                     }
                     UseKind::UnknownUnderRoot => {
                         // A known extension root is fully enumerable, so a target that resolves to no
@@ -78,7 +79,7 @@ impl Checker {
                         }
                     }
                     UseKind::UserImport => {
-                        self.types.insert(local);
+                        self.symbols.types.insert(local);
                     }
                 }
             }
@@ -93,11 +94,11 @@ impl Checker {
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Binding { name, .. } => {
-                    self.global_binding_names.insert(name.clone());
+                    self.symbols.global_binding_names.insert(name.clone());
                 }
                 Stmt::Destructure { targets, .. } => {
                     for (name, _) in targets {
-                        self.global_binding_names.insert(name.clone());
+                        self.symbols.global_binding_names.insert(name.clone());
                     }
                 }
                 _ => {}
@@ -109,13 +110,18 @@ impl Checker {
                     let fields = r
                         .fields
                         .iter()
-                        .map(|f| (f.name.clone(), field_type(&f.ty, &self.extern_types)))
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                field_type(&f.ty, &self.imports.extern_types),
+                            )
+                        })
                         .collect();
-                    self.records.insert(r.name.clone(), fields);
+                    self.symbols.records.insert(r.name.clone(), fields);
                     if let Some(directive) = &r.packed {
-                        self.packed_structs.insert(r.name.clone());
+                        self.symbols.packed_structs.insert(r.name.clone());
                         if directive.layout == noeta_ast::PackedLayout::Column {
-                            self.column_structs.insert(r.name.clone());
+                            self.symbols.column_structs.insert(r.name.clone());
                         }
                     }
                     // A struct's `mut` fields are assignable via `x.f = v` (value-semantic, so the
@@ -128,10 +134,11 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !muts.is_empty() {
-                        self.mut_fields.insert(r.name.clone(), muts);
+                        self.symbols.mut_fields.insert(r.name.clone(), muts);
                     }
-                    self.types.insert(r.name.clone());
-                    self.type_kinds
+                    self.symbols.types.insert(r.name.clone());
+                    self.symbols
+                        .type_kinds
                         .insert(r.name.clone(), noeta_types::TypeKind::Struct);
                     self.record_optional_fields(&r.name, &r.fields);
                     // A struct satisfies a trait it `@derive`s or in-body `impl`s — the same
@@ -146,7 +153,7 @@ impl Checker {
                     );
                     self.record_derived(&r.name, &r.derives);
                     self.record_attribute(&r.name, r.attribute.as_deref());
-                    self.generic_types.insert(
+                    self.symbols.generic_types.insert(
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
@@ -166,19 +173,19 @@ impl Checker {
                         .iter()
                         .chain(r.impls.iter().flat_map(|b| b.methods.iter()));
                     for m in methods {
-                        self.method_instance.insert(
+                        self.symbols.method_instance.insert(
                             (r.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
                         let raw_params: Vec<Type> = m
                             .params
                             .iter()
-                            .map(|p| param_type(p, &self.extern_types))
+                            .map(|p| param_type(p, &self.imports.extern_types))
                             .collect();
                         let raw_ret = async_return(
                             m.ret
                                 .as_ref()
-                                .map(|t| from_ref_q(t, &self.extern_types))
+                                .map(|t| from_ref_q(t, &self.imports.extern_types))
                                 .unwrap_or(Type::Unknown),
                             m.is_async,
                         );
@@ -193,7 +200,7 @@ impl Checker {
                             raw_params,
                             raw_ret,
                         });
-                        self.methods.insert(
+                        self.symbols.methods.insert(
                             (r.name.clone(), m.name.clone()),
                             FnSig {
                                 params,
@@ -208,9 +215,14 @@ impl Checker {
                     let fields = c
                         .fields
                         .iter()
-                        .map(|f| (f.name.clone(), field_type(&f.ty, &self.extern_types)))
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                field_type(&f.ty, &self.imports.extern_types),
+                            )
+                        })
                         .collect();
-                    self.records.insert(c.name.clone(), fields);
+                    self.symbols.records.insert(c.name.clone(), fields);
                     let muts: HashSet<String> = c
                         .fields
                         .iter()
@@ -218,7 +230,7 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !muts.is_empty() {
-                        self.mut_fields.insert(c.name.clone(), muts);
+                        self.symbols.mut_fields.insert(c.name.clone(), muts);
                     }
                     // Class fields default **private**; only those declared `pub` are public
                     // (object-model slice 2d). Struct fields are always public, so structs never
@@ -230,14 +242,15 @@ impl Checker {
                         .map(|f| f.name.clone())
                         .collect();
                     if !private.is_empty() {
-                        self.private_fields.insert(c.name.clone(), private);
+                        self.symbols.private_fields.insert(c.name.clone(), private);
                     }
-                    self.types.insert(c.name.clone());
-                    self.type_kinds
+                    self.symbols.types.insert(c.name.clone());
+                    self.symbols
+                        .type_kinds
                         .insert(c.name.clone(), noeta_types::TypeKind::Class);
                     // A class with a `destruct { ... }` block seeds destruct-reachability (Phase 3.2b).
                     if c.destructor.is_some() {
-                        self.destructor_classes.insert(c.name.clone());
+                        self.symbols.destructor_classes.insert(c.name.clone());
                     }
                     // A class satisfies a trait it `@derive`s or `impl`s; record both for bound
                     // enforcement (the `impl`/`derive` *names* are validated elsewhere).
@@ -278,7 +291,7 @@ impl Checker {
                         .iter()
                         .map(|p| (p.name.clone(), p.bounds.clone()))
                         .collect();
-                    self.generic_types.insert(
+                    self.symbols.generic_types.insert(
                         c.name.clone(),
                         c.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
@@ -287,19 +300,19 @@ impl Checker {
                         .iter()
                         .chain(c.impls.iter().flat_map(|b| b.methods.iter()));
                     for m in methods {
-                        self.method_instance.insert(
+                        self.symbols.method_instance.insert(
                             (c.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
                         let raw_params: Vec<Type> = m
                             .params
                             .iter()
-                            .map(|p| param_type(p, &self.extern_types))
+                            .map(|p| param_type(p, &self.imports.extern_types))
                             .collect();
                         let raw_ret = async_return(
                             m.ret
                                 .as_ref()
-                                .map(|t| from_ref_q(t, &self.extern_types))
+                                .map(|t| from_ref_q(t, &self.imports.extern_types))
                                 .unwrap_or(Type::Unknown),
                             m.is_async,
                         );
@@ -314,7 +327,7 @@ impl Checker {
                             raw_params,
                             raw_ret,
                         });
-                        self.methods.insert(
+                        self.symbols.methods.insert(
                             (c.name.clone(), m.name.clone()),
                             FnSig {
                                 params,
@@ -332,7 +345,7 @@ impl Checker {
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
                             // A variant's **accurate** payload types (via `variant_field_type`, R2b),
-                            // exactly as a struct's field types live in `self.records`: one source of
+                            // exactly as a struct's field types live in `self.symbols.records`: one source of
                             // truth for enum-construction type-argument inference **and** the `Send`
                             // classifier **and** destructor-relevance. (Previously `field_type(&p.ty)`,
                             // which is `Unknown` for a positional payload whose type parses into the
@@ -341,18 +354,19 @@ impl Checker {
                             fields: v
                                 .fields
                                 .iter()
-                                .map(|v| variant_field_type(v, &self.extern_types))
+                                .map(|v| variant_field_type(v, &self.imports.extern_types))
                                 .collect(),
                         })
                         .collect();
-                    self.enums.insert(e.name.clone(), variants);
-                    self.types.insert(e.name.clone());
-                    self.type_kinds
+                    self.symbols.enums.insert(e.name.clone(), variants);
+                    self.symbols.types.insert(e.name.clone());
+                    self.symbols
+                        .type_kinds
                         .insert(e.name.clone(), noeta_types::TypeKind::Enum);
                     // `@semantic` makes the enum role-eligible (its fieldless variants may be named
                     // by `@role(Enum.Variant)`); recorded for the post-collect role-validation pass.
                     if e.semantic.is_some() {
-                        self.semantic_enums.insert(e.name.clone());
+                        self.symbols.semantic_enums.insert(e.name.clone());
                     }
                     // An enum satisfies a trait it `@derive`s or `impl`s (its in-body blocks are
                     // uniform with a class's — object-model slice 3); record both so an operator
@@ -365,7 +379,7 @@ impl Checker {
                             .chain(e.impls.iter().map(|b| b.trait_name.as_str())),
                     );
                     self.record_derived(&e.name, &e.derives);
-                    self.generic_types.insert(
+                    self.symbols.generic_types.insert(
                         e.name.clone(),
                         e.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
@@ -381,19 +395,19 @@ impl Checker {
                         .map(|p| (p.name.clone(), p.bounds.clone()))
                         .collect();
                     for m in &e.methods {
-                        self.method_instance.insert(
+                        self.symbols.method_instance.insert(
                             (e.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
                         let raw_params: Vec<Type> = m
                             .params
                             .iter()
-                            .map(|p| param_type(p, &self.extern_types))
+                            .map(|p| param_type(p, &self.imports.extern_types))
                             .collect();
                         let raw_ret = async_return(
                             m.ret
                                 .as_ref()
-                                .map(|t| from_ref_q(t, &self.extern_types))
+                                .map(|t| from_ref_q(t, &self.imports.extern_types))
                                 .unwrap_or(Type::Unknown),
                             m.is_async,
                         );
@@ -408,7 +422,7 @@ impl Checker {
                             raw_params,
                             raw_ret,
                         });
-                        self.methods.insert(
+                        self.symbols.methods.insert(
                             (e.name.clone(), m.name.clone()),
                             FnSig {
                                 params,
@@ -429,14 +443,14 @@ impl Checker {
                     let raw_params: Vec<Type> = f
                         .params
                         .iter()
-                        .map(|p| param_type(p, &self.extern_types))
+                        .map(|p| param_type(p, &self.imports.extern_types))
                         .collect();
                     // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
                         f.ret
                             .as_ref()
-                            .map(|t| from_ref_q(t, &self.extern_types))
+                            .map(|t| from_ref_q(t, &self.imports.extern_types))
                             .unwrap_or(Type::Unknown),
                         f.is_async,
                     );
@@ -455,7 +469,7 @@ impl Checker {
                         raw_params,
                         raw_ret,
                     });
-                    self.functions.insert(
+                    self.symbols.functions.insert(
                         f.name.clone(),
                         FnSig {
                             params,
@@ -479,7 +493,8 @@ impl Checker {
                         &decl.target,
                         std::iter::once(decl.trait_name.as_str()),
                     );
-                    self.standalone_impls
+                    self.symbols
+                        .standalone_impls
                         .entry(decl.target.clone())
                         .or_default()
                         .push((decl.trait_name.clone(), decl.trait_span));
@@ -495,7 +510,11 @@ impl Checker {
             if let Stmt::Impl(decl) = stmt
                 && let Some((module, bundle)) = self.resolve_bundle_ref(&decl.trait_name)
             {
-                let bindings = self.bundle_impls.entry(decl.target.clone()).or_default();
+                let bindings = self
+                    .symbols
+                    .bundle_impls
+                    .entry(decl.target.clone())
+                    .or_default();
                 // A duplicate binding of the same bundle is a coherence error (reported there);
                 // don't double-record it, or method typing would see each method twice.
                 if !bindings
@@ -520,7 +539,7 @@ impl Checker {
         trait_name: &str,
     ) -> Option<(String, &'static noeta_stdlib::ExtBundle)> {
         let (module_ref, bundle_name) = trait_name.rsplit_once('.')?;
-        let qualified = self.modules.get(module_ref)?;
+        let qualified = self.imports.modules.get(module_ref)?;
         let bundle = self.reg().find_bundle(qualified, bundle_name)?;
         Some((qualified.clone(), bundle))
     }
@@ -535,7 +554,8 @@ impl Checker {
             .map(|f| f.name.clone())
             .collect();
         if !optional.is_empty() {
-            self.attribute_optional_fields
+            self.symbols
+                .attribute_optional_fields
                 .insert(type_name.to_string(), optional);
         }
     }
@@ -543,7 +563,8 @@ impl Checker {
     /// Whether field `field` of attribute `attr_name` is optional (has a default), so a `#[...]`
     /// construction may omit it.
     pub(crate) fn is_optional_attribute_field(&self, attr_name: &str, field: &str) -> bool {
-        self.attribute_optional_fields
+        self.symbols
+            .attribute_optional_fields
             .get(attr_name)
             .is_some_and(|set| set.contains(field))
     }
@@ -555,7 +576,11 @@ impl Checker {
     /// (see [`Self::derived_traits`]). Called beside [`Self::record_trait_impls`] at the three
     /// declaration sites.
     pub(crate) fn record_derived(&mut self, name: &str, derives: &[DeriveSpec]) {
-        let entry = self.derived_traits.entry(name.to_string()).or_default();
+        let entry = self
+            .symbols
+            .derived_traits
+            .entry(name.to_string())
+            .or_default();
         for t in derives
             .iter()
             .filter_map(|d| BuiltinTrait::from_name(&d.name))
@@ -569,7 +594,11 @@ impl Checker {
         name: &str,
         traits: impl Iterator<Item = &'a str>,
     ) {
-        let entry = self.trait_impls.entry(name.to_string()).or_default();
+        let entry = self
+            .symbols
+            .trait_impls
+            .entry(name.to_string())
+            .or_default();
         // Map each name to its trait at the boundary; a non-built-in name (a typo, or an
         // `@attribute` record name) is dead data here — it could never satisfy a real bound —
         // so it is dropped rather than stored. Name validity is diagnosed on the `impl`/`@derive`
@@ -587,7 +616,7 @@ impl Checker {
     /// restriction.
     pub(crate) fn record_attribute(&mut self, name: &str, kinds: Option<&[(String, Span)]>) {
         let Some(kinds) = kinds else { return };
-        self.attributes.insert(name.to_string());
+        self.symbols.attributes.insert(name.to_string());
         let mut recognized = Vec::new();
         for (kind_name, span) in kinds {
             match TargetKind::from_name(kind_name) {
@@ -605,7 +634,7 @@ impl Checker {
             }
         }
         if !recognized.is_empty() {
-            self.attachable.insert(name.to_string(), recognized);
+            self.symbols.attachable.insert(name.to_string(), recognized);
         }
     }
 }

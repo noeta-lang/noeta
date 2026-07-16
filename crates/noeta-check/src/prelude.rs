@@ -12,8 +12,8 @@ impl Checker {
     /// element type of `attributes_of::<T>()`'s result; it is an ordinary generic struct so member
     /// access (`a.target`, `a.value`) and `value`'s instantiation to `T` reuse the generic path.
     pub(crate) fn register_prelude(&mut self) {
-        self.types.insert("Attributed".to_string());
-        self.records.insert(
+        self.symbols.types.insert("Attributed".to_string());
+        self.symbols.records.insert(
             "Attributed".to_string(),
             vec![
                 ("target".to_string(), Type::String),
@@ -23,9 +23,11 @@ impl Checker {
                 ),
             ],
         );
-        self.generic_types
+        self.symbols
+            .generic_types
             .insert("Attributed".to_string(), vec!["T".to_string()]);
-        self.type_kinds
+        self.symbols
+            .type_kinds
             .insert("Attributed".to_string(), noeta_types::TypeKind::Struct);
         self.register_type_enum();
         self.register_semantic_prelude();
@@ -70,9 +72,10 @@ impl Checker {
                 .iter()
                 .map(|f| (f.name.to_string(), attr_field_type(f.ty)))
                 .collect();
-            self.types.insert(attr.name.to_string());
-            self.records.insert(attr.name.to_string(), fields);
-            self.type_kinds
+            self.symbols.types.insert(attr.name.to_string());
+            self.symbols.records.insert(attr.name.to_string(), fields);
+            self.symbols
+                .type_kinds
                 .insert(attr.name.to_string(), noeta_types::TypeKind::Struct);
             // Mark `@attribute` (bare — attachable anywhere) so the E0029 capability gate passes.
             self.record_attribute(attr.name, Some(&[]));
@@ -83,7 +86,8 @@ impl Checker {
                 .map(|f| f.name.to_string())
                 .collect();
             if !optional.is_empty() {
-                self.attribute_optional_fields
+                self.symbols
+                    .attribute_optional_fields
                     .insert(attr.name.to_string(), optional);
             }
         }
@@ -104,23 +108,27 @@ impl Checker {
                 fields: Vec::new(),
             })
             .collect();
-        self.types
+        self.symbols
+            .types
             .insert(noeta_ast::reflect::SEMANTIC_ENUM.to_string());
-        self.enums
+        self.symbols
+            .enums
             .insert(noeta_ast::reflect::SEMANTIC_ENUM.to_string(), variants);
-        self.type_kinds.insert(
+        self.symbols.type_kinds.insert(
             noeta_ast::reflect::SEMANTIC_ENUM.to_string(),
             noeta_types::TypeKind::Enum,
         );
-        self.semantic_enums
+        self.symbols
+            .semantic_enums
             .insert(noeta_ast::reflect::SEMANTIC_ENUM.to_string());
-        self.type_kinds.insert(
+        self.symbols.type_kinds.insert(
             noeta_ast::reflect::ROLE_BINDING.to_string(),
             noeta_types::TypeKind::Struct,
         );
-        self.types
+        self.symbols
+            .types
             .insert(noeta_ast::reflect::ROLE_BINDING.to_string());
-        self.records.insert(
+        self.symbols.records.insert(
             noeta_ast::reflect::ROLE_BINDING.to_string(),
             vec![
                 ("target".to_string(), Type::String),
@@ -138,10 +146,11 @@ impl Checker {
     /// type, so a user declaration shadows it.
     pub(crate) fn register_tier_prelude(&mut self) {
         let name = noeta_ast::reflect::TIER_ROOT.to_string();
-        self.types.insert(name.clone());
-        self.type_kinds
+        self.symbols.types.insert(name.clone());
+        self.symbols
+            .type_kinds
             .insert(name.clone(), noeta_types::TypeKind::Struct);
-        self.records.insert(
+        self.symbols.records.insert(
             name,
             vec![
                 ("name".to_string(), Type::String),
@@ -156,10 +165,11 @@ impl Checker {
         );
         // Its text-tier counterpart (text-tiers arc): one `TierText` per activated verbatim body.
         let name = noeta_ast::reflect::TIER_TEXT.to_string();
-        self.types.insert(name.clone());
-        self.type_kinds
+        self.symbols.types.insert(name.clone());
+        self.symbols
+            .type_kinds
             .insert(name.clone(), noeta_types::TypeKind::Struct);
-        self.records.insert(
+        self.symbols.records.insert(
             name,
             vec![
                 ("target".to_string(), Type::String),
@@ -210,9 +220,10 @@ impl Checker {
             name: "Union".to_string(),
             fields: vec![list_of_ty()],
         });
-        self.types.insert("Type".to_string());
-        self.enums.insert("Type".to_string(), variants);
-        self.type_kinds
+        self.symbols.types.insert("Type".to_string());
+        self.symbols.enums.insert("Type".to_string(), variants);
+        self.symbols
+            .type_kinds
             .insert("Type".to_string(), noeta_types::TypeKind::Enum);
     }
 }

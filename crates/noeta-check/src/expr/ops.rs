@@ -159,7 +159,7 @@ impl Checker {
             Type::Unknown | Type::Dyn => true,
             Type::Kind(noeta_types::TypeKind::Class) => true,
             Type::Named(n, _) => matches!(
-                self.type_kinds.get(n),
+                self.symbols.type_kinds.get(n),
                 Some(noeta_types::TypeKind::Class) | None
             ),
             Type::Union(members) => members.iter().all(|m| self.is_reference_comparable(m)),
@@ -175,7 +175,7 @@ impl Checker {
             return true;
         }
         if let Type::Named(n, _) = operand
-            && let Some(bounds) = self.type_params.get(n)
+            && let Some(bounds) = self.coloring.type_params.get(n)
         {
             return bounds.iter().any(|b| b == t.name());
         }
@@ -186,7 +186,7 @@ impl Checker {
     /// or `None` if `operand` is not such a parameter — used to pick the diagnostic flavor.
     pub(crate) fn unbounded_type_param(&self, operand: &Type, t: BuiltinTrait) -> Option<String> {
         match operand {
-            Type::Named(n, _) => match self.type_params.get(n) {
+            Type::Named(n, _) => match self.coloring.type_params.get(n) {
                 Some(bounds) if !bounds.iter().any(|b| b == t.name()) => Some(n.clone()),
                 _ => None,
             },

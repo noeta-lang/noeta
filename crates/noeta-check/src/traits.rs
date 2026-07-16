@@ -102,7 +102,9 @@ impl Checker {
             self.check_bundle_impl(decl);
             return;
         }
-        if !self.records.contains_key(&decl.target) && !self.enums.contains_key(&decl.target) {
+        if !self.symbols.records.contains_key(&decl.target)
+            && !self.symbols.enums.contains_key(&decl.target)
+        {
             self.error(
                 DiagnosticCode::UnknownType,
                 decl.target_span,
@@ -140,7 +142,7 @@ impl Checker {
     /// or an earlier binding's.
     pub(crate) fn check_bundle_impl(&mut self, decl: &ImplDecl) {
         let (module_ref, bundle_name) = decl.trait_name.rsplit_once('.').expect("dotted path");
-        if !self.modules.contains_key(module_ref) {
+        if !self.imports.modules.contains_key(module_ref) {
             self.error(
                 DiagnosticCode::UnknownTrait,
                 decl.trait_span,
@@ -205,6 +207,7 @@ impl Checker {
             match m.receiver {
                 noeta_stdlib::BundleReceiver::Element => {
                     if self
+                        .symbols
                         .methods
                         .contains_key(&(decl.target.clone(), m.sig.name.to_string()))
                     {
@@ -214,6 +217,7 @@ impl Checker {
                         ));
                     }
                     if self
+                        .symbols
                         .records
                         .get(&decl.target)
                         .is_some_and(|fields| fields.iter().any(|(f, _)| f == m.sig.name))
@@ -237,7 +241,13 @@ impl Checker {
                 }
             }
         }
-        for earlier in self.bundle_impls.get(&decl.target).into_iter().flatten() {
+        for earlier in self
+            .symbols
+            .bundle_impls
+            .get(&decl.target)
+            .into_iter()
+            .flatten()
+        {
             // Only bindings textually before this one (single-report discipline, like
             // `check_coherence`); skip this binding's own collect record.
             if earlier.bundle.name == bundle_name || earlier.span.start >= decl.trait_span.start {
@@ -389,17 +399,18 @@ impl Checker {
         };
         if matches!(t, BuiltinTrait::Comparable | BuiltinTrait::Serialize) {
             let params: Vec<String> = self
+                .symbols
                 .generic_types
                 .get(type_name)
                 .cloned()
                 .unwrap_or_default();
-            let offender = if let Some(fields) = self.records.get(type_name) {
+            let offender = if let Some(fields) = self.symbols.records.get(type_name) {
                 fields
                     .iter()
                     .find(|(_, ty)| !mentions_param(ty, &params) && !ok(self, ty))
                     .map(|(fname, ty)| (format!("field `{fname}`"), ty.clone()))
             } else {
-                self.enums.get(type_name).and_then(|variants| {
+                self.symbols.enums.get(type_name).and_then(|variants| {
                     variants.iter().find_map(|v| {
                         v.fields
                             .iter()
@@ -452,14 +463,14 @@ impl Checker {
             Type::Result(a, b) => {
                 self.type_orderable(a, visited) && self.type_orderable(b, visited)
             }
-            Type::Named(name, args) => match self.type_kinds.get(name) {
+            Type::Named(name, args) => match self.symbols.type_kinds.get(name) {
                 Some(noeta_types::TypeKind::Struct) | Some(noeta_types::TypeKind::Class) => {
                     if visited.iter().any(|v| v == name) {
                         return true; // recursive nominal — covered by the outer frame
                     }
                     visited.push(name.clone());
                     let subst = self.type_arg_subst(name, args);
-                    let ordered = self.records.get(name).is_none_or(|fs| {
+                    let ordered = self.symbols.records.get(name).is_none_or(|fs| {
                         fs.iter()
                             .all(|(_, t)| self.type_orderable(&apply_subst(t, &subst), visited))
                     });
@@ -472,7 +483,7 @@ impl Checker {
                     }
                     visited.push(name.clone());
                     let subst = self.type_arg_subst(name, args);
-                    let ordered = self.enums.get(name).is_none_or(|vs| {
+                    let ordered = self.symbols.enums.get(name).is_none_or(|vs| {
                         vs.iter().all(|v| {
                             v.fields
                                 .iter()
@@ -518,10 +529,10 @@ impl Checker {
                 }
                 visited.push(name.clone());
                 let subst = self.type_arg_subst(name, args);
-                let fields_ok = self.records.get(name).is_none_or(|fs| {
+                let fields_ok = self.symbols.records.get(name).is_none_or(|fs| {
                     fs.iter()
                         .all(|(_, t)| self.type_serializable(&apply_subst(t, &subst), visited))
-                }) && self.enums.get(name).is_none_or(|vs| {
+                }) && self.symbols.enums.get(name).is_none_or(|vs| {
                     vs.iter().all(|v| {
                         v.fields
                             .iter()
@@ -695,7 +706,12 @@ impl Checker {
             return true;
         }
         if let Type::Named(n, args) = ty {
-            if !self.trait_impls.get(n).is_some_and(|s| s.contains(&t)) {
+            if !self
+                .symbols
+                .trait_impls
+                .get(n)
+                .is_some_and(|s| s.contains(&t))
+            {
                 return false;
             }
             // A **generic** derive is conditional (derive-soundness S4): `Box<T>` deriving
@@ -705,7 +721,13 @@ impl Checker {
             // substitute the arguments into the field types, so a non-generic type (already
             // validated at its declaration) passes trivially. A hand-written `impl` is
             // unconditional — the author wrote the body, no field constraint applies.
-            if !args.is_empty() && self.derived_traits.get(n).is_some_and(|s| s.contains(&t)) {
+            if !args.is_empty()
+                && self
+                    .symbols
+                    .derived_traits
+                    .get(n)
+                    .is_some_and(|s| s.contains(&t))
+            {
                 return match t {
                     BuiltinTrait::Comparable => self.type_orderable(ty, &mut Vec::new()),
                     BuiltinTrait::Serialize => self.type_serializable(ty, &mut Vec::new()),

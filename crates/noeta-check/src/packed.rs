@@ -221,11 +221,11 @@ impl Checker {
         let Type::Named(name, args) = ty else {
             return None;
         };
-        if !args.is_empty() || !self.packed_structs.contains(name) {
+        if !args.is_empty() || !self.symbols.packed_structs.contains(name) {
             return None;
         }
         let mut fields = Vec::new();
-        for (fname, fty) in self.records.get(name)? {
+        for (fname, fty) in self.symbols.records.get(name)? {
             let kind = match fty {
                 Type::Int => PackedKind::Int,
                 Type::Float => PackedKind::Float,
@@ -242,7 +242,7 @@ impl Checker {
         Some(PackedLayout {
             type_name: name.clone(),
             fields,
-            column: self.column_structs.contains(name),
+            column: self.symbols.column_structs.contains(name),
         })
     }
 
@@ -269,9 +269,9 @@ impl Checker {
         // the *parameter name* as if it were a concrete type; erasing to `Holder<dyn>` is the honest
         // runtime fidelity. A direct literal whose args the checker inferred concretely (`Box { value:
         // 5 }` → `Box<int>`) is unaffected (it has no in-scope param to erase).
-        let params: HashSet<String> = self.type_params.keys().cloned().collect();
+        let params: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
         let ty = erase_type_params(ty.clone(), &params);
-        if let Some(repr) = type_to_repr_top(&ty, &self.type_kinds) {
+        if let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds) {
             if is_nongeneric_nominal(&repr) {
                 return;
             }
@@ -295,7 +295,7 @@ impl Checker {
             return;
         }
         for f in &r.fields {
-            let ty = field_type(&f.ty, &self.extern_types);
+            let ty = field_type(&f.ty, &self.imports.extern_types);
             if !self.is_packable_type(&ty) {
                 self.error(
                         DiagnosticCode::InvalidPackedType,

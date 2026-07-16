@@ -25,8 +25,8 @@ impl Checker {
     /// previously never recorded, so hover and inlay hints missed them.
     pub(crate) fn check(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
         let ty = self.check_inner(expr, expected, env);
-        if self.record_expr_types
-            && let Some(repr) = type_to_repr_top(&ty, &self.type_kinds)
+        if self.config.record_expr_types
+            && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {
             self.sites.expr_types.insert(expr.span(), repr);
         }
@@ -153,7 +153,7 @@ impl Checker {
                     .enumerate()
                     .map(|(i, p)| {
                         p.ty.as_ref()
-                            .map(|t| from_ref_q(t, &self.extern_types))
+                            .map(|t| from_ref_q(t, &self.imports.extern_types))
                             .or_else(|| expected_params.get(i).cloned())
                             .unwrap_or(Type::Unknown)
                     })
@@ -168,7 +168,9 @@ impl Checker {
                 // result" shape (`map` expects `(T) -> dyn`): checking against `dyn` would erase the
                 // body's real type and starve the call-site refinements (`xs.map(f) → List<R>`), so
                 // the body is inferred instead; `dyn` accepts whatever comes out.
-                let declared = ann.as_ref().map(|t| from_ref_q(t, &self.extern_types));
+                let declared = ann
+                    .as_ref()
+                    .map(|t| from_ref_q(t, &self.imports.extern_types));
                 let body_expected = declared
                     .clone()
                     .or_else(|| (!matches!(**ret, Type::Dyn)).then(|| (**ret).clone()));
@@ -252,7 +254,7 @@ impl Checker {
     /// Whether `name` is a declared (or prelude) type of `kind` — the registry-dependent half of the
     /// abstract kind-type membership rule the pure lattice cannot decide.
     pub(crate) fn is_of_kind(&self, name: &str, kind: noeta_types::TypeKind) -> bool {
-        self.type_kinds.get(name) == Some(&kind)
+        self.symbols.type_kinds.get(name) == Some(&kind)
     }
 
     /// Kind-aware assignability: `actual <: expected`, extending [`Type::subtype`] with the one rule
@@ -296,8 +298,8 @@ impl Checker {
     /// through this one choke point, so the index covers the whole tree with a single insertion site.
     pub(crate) fn synth(&mut self, expr: &Expr, env: &mut Env) -> Type {
         let ty = self.synth_inner(expr, env);
-        if self.record_expr_types
-            && let Some(repr) = type_to_repr_top(&ty, &self.type_kinds)
+        if self.config.record_expr_types
+            && let Some(repr) = type_to_repr_top(&ty, &self.symbols.type_kinds)
         {
             self.sites.expr_types.insert(expr.span(), repr);
         }
@@ -348,7 +350,7 @@ impl Checker {
                 holes,
                 span,
             } => {
-                let handler = self.tier_registry.expr_tier_handler(tier);
+                let handler = self.symbols.tier_registry.expr_tier_handler(tier);
                 match handler {
                     Some(handler) => {
                         let call = noeta_ast::desugar::tier_expr_call(
@@ -384,17 +386,20 @@ impl Checker {
                 // position. (Was params-erased until higher-order-abi H2 made module signatures
                 // carry declared `Fn` params, which an erased handle could never satisfy.)
                 .or_else(|| {
-                    self.functions.get(name).map(|sig| Type::Fn {
+                    self.symbols.functions.get(name).map(|sig| Type::Fn {
                         params: sig.params.clone(),
                         ret: Box::new(sig.ret.clone()),
                     })
                 })
                 // A selectively-imported module function referenced as a value (`let f = sqrt`).
                 .or_else(|| {
-                    self.imported_fns.contains_key(name).then(|| Type::Fn {
-                        params: Vec::new(),
-                        ret: Box::new(Type::Dyn),
-                    })
+                    self.imports
+                        .imported_fns
+                        .contains_key(name)
+                        .then(|| Type::Fn {
+                            params: Vec::new(),
+                            ret: Box::new(Type::Dyn),
+                        })
                 }) {
                 Some(t) => t,
                 None => {
@@ -402,8 +407,9 @@ impl Checker {
                     // targeted static error (prelude-redesign EX.1): member access is explicit, so
                     // the field is only reachable as `self.name`. Any other unknown ident stays
                     // tolerated here (deferred to the runtime E0005, as before).
-                    if let Some(ct) = self.current_type.clone()
+                    if let Some(ct) = self.coloring.current_type.clone()
                         && self
+                            .symbols
                             .records
                             .get(&ct)
                             .is_some_and(|fs| fs.iter().any(|(f, _)| f == name))
@@ -416,7 +422,7 @@ impl Checker {
                         .help(format!(
                             "member access is explicit — the field is `self.{name}`"
                         ));
-                    } else if !self.session_mode && !self.is_known_name(name, env) {
+                    } else if !self.config.session_mode && !self.is_known_name(name, env) {
                         // A bare reference to a name that resolves to nothing — a genuinely
                         // undefined value (F1), the same static `E0005` as an unknown callee. A
                         // session defers (a later entry may define it).
@@ -517,18 +523,20 @@ impl Checker {
                 env.push(HashMap::new());
                 for p in params {
                     self.check_reserved_name(&p.name, p.name_span);
-                    bind(env, &p.name, param_type(p, &self.extern_types));
+                    bind(env, &p.name, param_type(p, &self.imports.extern_types));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the
                 // closure's return type); otherwise infer it from the body (the arrow expression's
                 // type, or a block's joined `return`s).
-                let declared = ann.as_ref().map(|t| from_ref_q(t, &self.extern_types));
+                let declared = ann
+                    .as_ref()
+                    .map(|t| from_ref_q(t, &self.imports.extern_types));
                 let ret = self.closure_body_type(body, declared.as_ref(), env);
                 env.pop();
                 Type::Fn {
                     params: params
                         .iter()
-                        .map(|p| param_type(p, &self.extern_types))
+                        .map(|p| param_type(p, &self.imports.extern_types))
                         .collect(),
                     ret: Box::new(ret),
                 }
@@ -686,7 +694,7 @@ impl Checker {
                 // Recorded here — where the receiver's type is already in hand — so `synth_member`
                 // need not re-synthesize the inner receiver.
                 if matches!(recv, Type::List(_)) {
-                    self.index_on_list.insert(*span);
+                    self.coloring.index_on_list.insert(*span);
                 }
                 match stdlib::index_return(&recv) {
                     Some(t) => t,
@@ -719,11 +727,13 @@ impl Checker {
                 // generic parameters the result is the bare name; if nothing constrained any
                 // parameter the arguments stay empty (a wildcard, compatible with any instantiation).
                 let params = self
+                    .symbols
                     .generic_types
                     .get(&lit.type_name)
                     .cloned()
                     .unwrap_or_default();
                 let decls = self
+                    .symbols
                     .records
                     .get(&lit.type_name)
                     .cloned()
@@ -800,7 +810,7 @@ impl Checker {
                 // Coloring (Track A): `.await` is legal only inside an async context (an `async fn`
                 // body or the implicitly-async top level). A `.await` in a sync `fn` — or in a closure
                 // passed to a builtin, where `current_async` was reset at the boundary — is E0040.
-                if !self.current_async {
+                if !self.coloring.current_async {
                     self.error(
                         DiagnosticCode::AsyncMisuse,
                         *span,
@@ -841,7 +851,7 @@ impl Checker {
                 // `concurrent { }` scope. An orphan one (no enclosing scope — incl. one in a closure,
                 // where the depth was reset) is E0041 by construction, so a spawned unit can never
                 // outlive a scope.
-                if self.concurrent_depth == 0 {
+                if self.coloring.concurrent_depth == 0 {
                     self.error(
                         DiagnosticCode::OrphanSpawn,
                         *span,
@@ -891,7 +901,7 @@ impl Checker {
             Expr::As { expr, ty, span } => {
                 let src = self.synth(expr, env);
                 self.check_type_ref(ty);
-                let target = from_ref_q(ty, &self.extern_types);
+                let target = from_ref_q(ty, &self.imports.extern_types);
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
                 // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
                 // **kind-type** (`Enum`/`Struct`/`Class` — narrow to a concrete member). A value
@@ -923,12 +933,12 @@ impl Checker {
             }
             Expr::AttributesOf { ty, span } => {
                 self.check_type_ref(ty);
-                let target = from_ref_q(ty, &self.extern_types);
+                let target = from_ref_q(ty, &self.imports.extern_types);
                 // The type argument must itself be an attribute — a struct marked `@attribute` (the
                 // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
                 // materialize.
                 let is_attribute = matches!(&target, Type::Named(n, _)
-                    if self.attributes.contains(n));
+                    if self.symbols.attributes.contains(n));
                 if !is_attribute {
                     self.error(
                         DiagnosticCode::NotAnAttribute,
@@ -951,7 +961,7 @@ impl Checker {
                 // `TypeRepr` so the backends bake a full-fidelity `Type` constant (A); otherwise the
                 // site stays absent and falls back to the runtime head-constructor path (B).
                 let operand = self.synth(value, env);
-                if let Some(repr) = type_to_repr_top(&operand, &self.type_kinds) {
+                if let Some(repr) = type_to_repr_top(&operand, &self.symbols.type_kinds) {
                     self.sites.type_of_sites.insert(*span, repr);
                 }
                 Type::Named("Type".to_string(), Vec::new())
@@ -962,9 +972,9 @@ impl Checker {
                 // `@attribute` gate — must be a `@semantic` enum (only those contribute roles).
                 if let Some(ty) = ty {
                     self.check_type_ref(ty);
-                    let target = from_ref_q(ty, &self.extern_types);
+                    let target = from_ref_q(ty, &self.imports.extern_types);
                     let is_semantic = matches!(&target, Type::Named(n, _)
-                        if self.semantic_enums.contains(n));
+                        if self.symbols.semantic_enums.contains(n));
                     if !is_semantic {
                         self.error(
                             DiagnosticCode::InvalidRole,
@@ -992,7 +1002,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(ty);
-                let elem = from_ref_q(ty, &self.extern_types);
+                let elem = from_ref_q(ty, &self.imports.extern_types);
                 // The element type must be a packable `@packed` struct — the blob is a flat packed
                 // buffer. Recording the layout in `packed_list_sites` (the channel list literals use)
                 // hands the backend the schema to rebuild the list. Generic over any declared packable
@@ -1028,7 +1038,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(elem);
-                let t = from_ref_q(elem, &self.extern_types);
+                let t = from_ref_q(elem, &self.imports.extern_types);
                 // The split-endpoint pair: a `Sender<T>` and a `Receiver<T>` over the message type.
                 Type::Tuple(vec![
                     Type::Named(stdlib::SENDER.to_string(), vec![t.clone()]),
@@ -1081,7 +1091,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(ty);
-                let t = from_ref_q(ty, &self.extern_types);
+                let t = from_ref_q(ty, &self.imports.extern_types);
                 // Record the build recipe; a type with no JSON decoding (an enum, class, generic, …)
                 // is an error here.
                 match self.type_to_recipe(&t) {
@@ -1110,7 +1120,7 @@ impl Checker {
                 // unknown name / wrong arity are runtime `Err`, never static errors.
                 let recv_is_type = matches!(
                     recv.as_ref(),
-                    Expr::Ident { name, .. } if self.types.contains(name)
+                    Expr::Ident { name, .. } if self.symbols.types.contains(name)
                 );
                 if !recv_is_type {
                     self.synth(recv, env);

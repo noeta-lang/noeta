@@ -25,7 +25,7 @@ impl Checker {
             env.push(HashMap::new());
             self.bind_pattern(&arm.pattern, &scrut, env);
             if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern) {
-                bind(env, name, from_ref_q(ty, &self.extern_types));
+                bind(env, name, from_ref_q(ty, &self.imports.extern_types));
             }
             let t = self.synth(&arm.body, env);
             env.pop();
@@ -56,7 +56,7 @@ impl Checker {
         let type_targets: Vec<Type> = arms
             .iter()
             .filter_map(|a| match &a.pattern {
-                Pattern::IsType { ty, .. } => Some(from_ref_q(ty, &self.extern_types)),
+                Pattern::IsType { ty, .. } => Some(from_ref_q(ty, &self.imports.extern_types)),
                 _ => None,
             })
             .collect();
@@ -84,7 +84,7 @@ impl Checker {
         let all: Vec<String> = match scrut {
             Type::Result(..) => vec!["Ok".into(), "Err".into()],
             Type::Option(..) => vec!["some".into(), "none".into()],
-            Type::Named(n, _) => match self.enums.get(n) {
+            Type::Named(n, _) => match self.symbols.enums.get(n) {
                 Some(variants) => variants.iter().map(|v| v.name.clone()).collect(),
                 None => return,
             },
@@ -202,6 +202,7 @@ impl Checker {
             // where `t: Tree<int>` types `n` as `int`, not the abstract parameter `T`. Mirrors the
             // construction-side inference (R2b.1); the two are the same generic type-argument flow.
             Type::Named(n, args) => self
+                .symbols
                 .enums
                 .get(n)
                 .and_then(|vs| vs.iter().find(|v| v.name == variant))
@@ -220,7 +221,8 @@ impl Checker {
     }
 
     pub(crate) fn is_enum_variant(&self, type_name: &str, variant: &str) -> bool {
-        self.enums
+        self.symbols
+            .enums
             .get(type_name)
             .is_some_and(|vs| vs.iter().any(|v| v.name == variant))
     }

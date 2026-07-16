@@ -237,9 +237,12 @@ fn check_all_impl(
     editions: EditionMap,
 ) -> Checked {
     let mut checker = Checker {
-        record_expr_types,
-        registry,
-        editions,
+        config: Config {
+            record_expr_types,
+            registry,
+            editions,
+            ..Config::default()
+        },
         ..Checker::default()
     };
     checker.register_prelude();
@@ -272,7 +275,10 @@ pub fn check_all_session_with(
     editions: EditionMap,
 ) -> (Checked, SessionChecker) {
     let mut checker = Checker {
-        editions,
+        config: Config {
+            editions,
+            ..Config::default()
+        },
         ..Checker::default()
     };
     checker.register_prelude();
@@ -294,7 +300,7 @@ pub fn check_all_session_with(
     // are real errors. But the returned session, over which console fragments and later entries
     // are checked, defers unknown names (F1): a fragment may reference a name a *later* fragment
     // defines, and frame locals a fragment reads are seeded per-evaluation, not in this env.
-    checker.session_mode = true;
+    checker.config.session_mode = true;
     (checked, SessionChecker { checker, env })
 }
 
@@ -359,8 +365,11 @@ impl SessionChecker {
         registry: Option<&'static noeta_stdlib::registry::Registry>,
     ) -> SessionChecker {
         let mut checker = Checker {
-            session_mode: true,
-            registry,
+            config: Config {
+                session_mode: true,
+                registry,
+                ..Config::default()
+            },
             ..Checker::default()
         };
         checker.register_prelude();
@@ -460,16 +469,16 @@ impl SessionChecker {
     /// these neutral on a *clean* pass, but an entry that errored mid-body may not — and a session
     /// must isolate entries regardless.
     fn reset_scratch(&mut self) {
-        self.checker.current_type = None;
-        self.checker.in_dev_tier = false;
-        self.checker.type_params.clear();
-        self.checker.current_ret = Type::Unknown;
-        self.checker.collected_returns = None;
-        self.checker.current_yield = None;
-        self.checker.current_async = false;
-        self.checker.concurrent_depth = 0;
-        self.checker.loop_depth = 0;
-        self.checker.index_on_list.clear();
+        self.checker.coloring.current_type = None;
+        self.checker.coloring.in_dev_tier = false;
+        self.checker.coloring.type_params.clear();
+        self.checker.coloring.current_ret = Type::Unknown;
+        self.checker.coloring.collected_returns = None;
+        self.checker.coloring.current_yield = None;
+        self.checker.coloring.current_async = false;
+        self.checker.coloring.concurrent_depth = 0;
+        self.checker.coloring.loop_depth = 0;
+        self.checker.coloring.index_on_list.clear();
     }
 }
 
@@ -644,12 +653,13 @@ struct BoundBundle {
     span: Span,
 }
 
-// `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
-// prompt-scale state, so the per-entry clone is cheap insurance, never a hot path.
+/// The checker's **symbol tables** — everything `collect` (pass 0/1) registers about the
+/// program's declarations, read by every later pass. One of [`Checker`]'s four field groups
+/// (audit-3 Finding 2): grouping makes each module's borrow surface explicit.
 #[derive(Clone, Default)]
-struct Checker {
+struct Symbols {
     /// User-declared enums: name → variants (each with its **accurate** payload types, like a
-    /// struct's fields in [`Self::records`]).
+    /// struct's fields in [`Checker::records`]).
     enums: HashMap<String, Vec<VariantInfo>>,
     /// Top-level functions: name → signature.
     functions: HashMap<String, FnSig>,
@@ -665,25 +675,6 @@ struct Checker {
     /// inside the declaring type's own methods ([`Checker::current_type`]); read/write/construction
     /// elsewhere is E0035.
     private_fields: HashMap<String, HashSet<String>>,
-    /// While checking a type's own methods/destructor, the name of that type — so a private-field
-    /// access on `self` *or* any same-type value is permitted (the type-scoped privacy rule). `None`
-    /// at top level and inside free functions.
-    current_type: Option<String>,
-    /// While checking the body of a fn lifted from a **dev-tier block** (`@test`/…, slice 6d), the
-    /// type-scoped field-privacy gate is relaxed to white-box access: co-located developer tooling
-    /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
-    /// for ordinary fns and methods. Set from [`FnDecl::is_dev_tier`] in [`Checker::check_fn`].
-    in_dev_tier: bool,
-    /// When set, [`Checker::synth`] records every expression's inferred type into
-    /// [`SiteMaps::expr_types`] for the IDE hover path. Off by default so the compile path is
-    /// unaffected; enabled by [`check_all_with_types`].
-    record_expr_types: bool,
-    /// A REPL / debug-console session (set only by [`SessionChecker`]). Relaxes the unknown-name
-    /// gate (F1): a name undefined *this* entry may be defined in a *later* one, so an unresolved
-    /// reference stays deferred to the runtime rather than being a static `E0005` — the
-    /// cross-entry forward reference the prompt relies on. A whole-file check (the default, and
-    /// the hot-reload transactional gate) has no future entry, so an unknown name is an error.
-    session_mode: bool,
     /// Every top-level value binding's name, collected in the pre-pass (F1). Top-level globals are
     /// **hoisted** — a function body may reference one declared textually later — so the
     /// unknown-name gate treats them all as known regardless of order. (A top-level *direct*
@@ -704,10 +695,10 @@ struct Checker {
     /// (E0047) and the associated-vs-instance shape of a `Type.method` handle.
     method_instance: HashMap<(String, String), bool>,
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
-    /// or `impl`s. The basis (with the built-in-type table in [`Self::satisfies`]) for enforcing a
+    /// or `impl`s. The basis (with the built-in-type table in [`Checker::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
     trait_impls: HashMap<String, HashSet<BuiltinTrait>>,
-    /// The subset of [`Self::trait_impls`] that came from `@derive(...)` (not a hand-written
+    /// The subset of [`Checker::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
     derived_traits: HashMap<String, HashSet<BuiltinTrait>>,
@@ -715,33 +706,10 @@ struct Checker {
     /// map an instance's type arguments (`Box<int>`) back onto the declaration's parameters (`T`)
     /// and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
     generic_types: HashMap<String, Vec<String>>,
-    /// Names bound to a native module by a `use std.{…}` import (`json`, `fs`, …) or a nested
-    /// import (`use std.http.client` → `client`), each mapped to the module's **root-qualified
-    /// identity** (`"std.json"`, `"std.http.client"`). A call `m.f(args)` on the bound name resolves
-    /// through [`stdlib::module_return`] against that identity.
-    modules: HashMap<String, String>,
-    /// Names bound to a **namespace group** by `use std.http` — each mapped to the group's
-    /// **root-qualified prefix** (`http` → `"std.http"`). A member access `http.client` resolves one
-    /// hop through [`noeta_stdlib::registry::Registry::resolve_namespace_child`] against this prefix;
-    /// a landing module identity is recorded in `namespace_module_sites` for lowering. The handle is
-    /// not a value on its own — a bare reference is an error (a group must be dotted into).
-    namespaces: HashMap<String, String>,
-    /// Names brought into scope bare by a selective member import (`use std.math.sqrt` → `sqrt`),
-    /// each mapped to its `(module, func)`. A bare call `sqrt(args)` types through
-    /// [`stdlib::module_return`] exactly like the qualified `math.sqrt(args)`.
-    imported_fns: HashMap<String, (String, String)>,
-    /// Local names bound to a **registered extern type** by a `use std.<ns>.<Type> [as Alias]`
-    /// import, each mapped to that type's **qualified identity** (`Uuid` → `std.id.Uuid`,
-    /// `Metric` → `std.metrics.Counter`). An extern annotation resolves through this map — so a
-    /// native type must be imported to be named (like a user type), an alias renames it, and a
-    /// user-declared type of the same short name shadows it (user names in [`Self::types`] take
-    /// precedence). This is what lets a file pull in two same-short-named types from different
-    /// namespaces, and a native `Counter` coexist with a user's own.
-    extern_types: HashMap<String, String>,
     /// Every name a type annotation may legally resolve to: declared records/classes/enums plus
     /// names brought in by a `use` (whether merged in by the linker or left as an opaque stub).
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
-    /// separately (a built-in via [`Type::is_builtin_name`], a parameter via [`Self::type_params`]).
+    /// separately (a built-in via [`Type::is_builtin_name`], a parameter via [`Checker::type_params`]).
     types: HashSet<String>,
     /// Standalone `impl Trait for T {}` declarations, grouped by target type name, as
     /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
@@ -763,14 +731,14 @@ struct Checker {
     /// a `@semantic` enum declared later in the file).
     semantic_enums: HashSet<String>,
     /// The tier name-space (tier-providers T2): built-ins ∪ this program's `@tier` declarations.
-    /// Built by [`Self::check_tier_decls`] (which also validates each declaration, E0051); the
+    /// Built by [`Checker::check_tier_decls`] (which also validates each declaration, E0051); the
     /// in-place `TierBlock` arm resolves names and config attributes against it.
     tier_registry: tiers::TierRegistry,
     /// Every struct marked `@packed` (P-PACK) — the value structs laid out unboxed and contiguous.
     /// Collected in pass 1 so a packed struct's field-type validation (a field may be another packed
     /// struct declared later) sees the full set, and so `List<Packed>` specialization can consult it.
     packed_structs: HashSet<String>,
-    /// Every `@packed(layout: column)` struct (P-SIMD C2) — a subset of [`Self::packed_structs`]
+    /// Every `@packed(layout: column)` struct (P-SIMD C2) — a subset of [`Checker::packed_structs`]
     /// whose lists are stored column-major. Collected alongside `packed_structs` so `packed_layout`
     /// can flag the runtime schema; layout is a performance-only property (behaviour-invisible).
     column_structs: HashSet<String>,
@@ -784,6 +752,58 @@ struct Checker {
     /// default supplies it. Keyed by type name → optional field names. The construction gate consults
     /// this to suppress the missing-field error (E0009) for a defaulted field.
     attribute_optional_fields: HashMap<String, HashSet<String>>,
+    /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
+    destructor_classes: HashSet<String>,
+    /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
+    /// through the type's own block, its fields, or its collection elements (the fixpoint
+    /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.
+    destruct_reachable: HashSet<String>,
+}
+
+/// The checker's **import bindings** — the four `use`-import channels `collect_imports`
+/// resolves (native modules, namespace groups, selective functions, extern types). One of
+/// [`Checker`]'s four field groups.
+#[derive(Clone, Default)]
+struct Imports {
+    /// Names bound to a native module by a `use std.{…}` import (`json`, `fs`, …) or a nested
+    /// import (`use std.http.client` → `client`), each mapped to the module's **root-qualified
+    /// identity** (`"std.json"`, `"std.http.client"`). A call `m.f(args)` on the bound name resolves
+    /// through [`stdlib::module_return`] against that identity.
+    modules: HashMap<String, String>,
+    /// Names bound to a **namespace group** by `use std.http` — each mapped to the group's
+    /// **root-qualified prefix** (`http` → `"std.http"`). A member access `http.client` resolves one
+    /// hop through [`noeta_stdlib::registry::Registry::resolve_namespace_child`] against this prefix;
+    /// a landing module identity is recorded in `namespace_module_sites` for lowering. The handle is
+    /// not a value on its own — a bare reference is an error (a group must be dotted into).
+    namespaces: HashMap<String, String>,
+    /// Names brought into scope bare by a selective member import (`use std.math.sqrt` → `sqrt`),
+    /// each mapped to its `(module, func)`. A bare call `sqrt(args)` types through
+    /// [`stdlib::module_return`] exactly like the qualified `math.sqrt(args)`.
+    imported_fns: HashMap<String, (String, String)>,
+    /// Local names bound to a **registered extern type** by a `use std.<ns>.<Type> [as Alias]`
+    /// import, each mapped to that type's **qualified identity** (`Uuid` → `std.id.Uuid`,
+    /// `Metric` → `std.metrics.Counter`). An extern annotation resolves through this map — so a
+    /// native type must be imported to be named (like a user type), an alias renames it, and a
+    /// user-declared type of the same short name shadows it (user names in [`Checker::types`] take
+    /// precedence). This is what lets a file pull in two same-short-named types from different
+    /// namespaces, and a native `Counter` coexist with a user's own.
+    extern_types: HashMap<String, String>,
+}
+
+/// The checker's **effect/scope coloring state** — the save/restore context that tracks where
+/// checking currently is (enclosing function's return/yield/async, loop and concurrent depth,
+/// current type, in-scope type params). One of [`Checker`]'s four field groups.
+#[derive(Clone, Default)]
+struct Coloring {
+    /// While checking a type's own methods/destructor, the name of that type — so a private-field
+    /// access on `self` *or* any same-type value is permitted (the type-scoped privacy rule). `None`
+    /// at top level and inside free functions.
+    current_type: Option<String>,
+    /// While checking the body of a fn lifted from a **dev-tier block** (`@test`/…, slice 6d), the
+    /// type-scoped field-privacy gate is relaxed to white-box access: co-located developer tooling
+    /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
+    /// for ordinary fns and methods. Set from [`FnDecl::is_dev_tier`] in [`Checker::check_fn`].
+    in_dev_tier: bool,
     /// The generic type parameters in scope while checking the current declaration, each mapped to
     /// its declared trait **bounds** (`<T: Comparable>` → `{"T": ["Comparable"]}`). Empty at top
     /// level; saved and restored around each generic declaration. The bounds drive body-side
@@ -823,20 +843,22 @@ struct Checker {
     /// re-synthesizing (and re-diagnosing) the inner receiver. Internal scratch, not exported (so it
     /// stays a plain `Checker` field, not part of [`SiteMaps`]).
     index_on_list: HashSet<Span>,
-    /// The span-keyed **codegen site maps** the checker produces for the backends and lowering — its
-    /// codegen-hint output, grouped apart from the checker's own type-environment/coloring state. See
-    /// [`SiteMaps`].
-    sites: SiteMaps,
-    /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
-    destructor_classes: HashSet<String>,
-    /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
-    /// through the type's own block, its fields, or its collection elements (the fixpoint
-    /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.
-    destruct_reachable: HashSet<String>,
-    /// The destructor-relevance of each binding (memory-management migration, Phase 3.2b): the
-    /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
-    /// the destructor check for a value whose type can run no destructor.
-    relevance: DestructorRelevance,
+}
+
+/// The checker's **run configuration** — what varies a whole-program check (mirrors
+/// [`CheckOptions`]) plus session mode. One of [`Checker`]'s four field groups.
+#[derive(Clone, Default)]
+struct Config {
+    /// When set, [`Checker::synth`] records every expression's inferred type into
+    /// [`SiteMaps::expr_types`] for the IDE hover path. Off by default so the compile path is
+    /// unaffected; enabled by [`check_all_with_types`].
+    record_expr_types: bool,
+    /// A REPL / debug-console session (set only by [`SessionChecker`]). Relaxes the unknown-name
+    /// gate (F1): a name undefined *this* entry may be defined in a *later* one, so an unresolved
+    /// reference stays deferred to the runtime rather than being a static `E0005` — the
+    /// cross-entry forward reference the prompt relies on. A whole-file check (the default, and
+    /// the hot-reload transactional gate) has no future entry, so an unknown name is an error.
+    session_mode: bool,
     /// The **extension registry** this checker resolves native modules, functions, extern types,
     /// tiers, and attributes against (instance-registry F2). `None` — the default — routes every
     /// lookup through the process-global default registry (via [`Checker::reg`]), so an ordinary
@@ -854,6 +876,28 @@ struct Checker {
     /// editions arc's S3 (the first edition-gated behaviour); until then this is threaded and
     /// per-span-queryable but consulted by no rule.
     editions: EditionMap,
+}
+
+// `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
+// prompt-scale state, so the per-entry clone is cheap insurance, never a hot path.
+#[derive(Clone, Default)]
+struct Checker {
+    /// The symbol tables `collect` builds (see [`Symbols`]).
+    symbols: Symbols,
+    /// The `use`-import bindings (see [`Imports`]).
+    imports: Imports,
+    /// The effect/scope coloring state (see [`Coloring`]).
+    coloring: Coloring,
+    /// The run configuration (see [`Config`]).
+    config: Config,
+    /// The span-keyed **codegen site maps** the checker produces for the backends and lowering — its
+    /// codegen-hint output, grouped apart from the checker's own type-environment/coloring state. See
+    /// [`SiteMaps`].
+    sites: SiteMaps,
+    /// The destructor-relevance of each binding (memory-management migration, Phase 3.2b): the
+    /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
+    /// the destructor check for a value whose type can run no destructor.
+    relevance: DestructorRelevance,
     diags: Vec<Diagnostic>,
 }
 
@@ -864,7 +908,8 @@ impl Checker {
     /// data. Every stdlib/extern/tier lookup in the checker goes through here, so pointing a session
     /// at a different extension set is a single field — no lookup site knows which registry it holds.
     fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
-        self.registry
+        self.config
+            .registry
             .unwrap_or_else(noeta_stdlib::registry::default_seeded)
     }
 
@@ -879,7 +924,7 @@ impl Checker {
     /// unit-tested now so that slice adds only the divergent behaviour, not the plumbing.
     #[allow(dead_code)]
     fn edition_at(&self, span: Span) -> Edition {
-        self.editions.at(span)
+        self.config.editions.at(span)
     }
 
     /// Record an error diagnostic, returning `&mut` to the just-pushed diagnostic so a help line can
@@ -930,7 +975,8 @@ impl Checker {
     /// the `use`-import map (`Uuid` → `std.id.Uuid`, an alias → its target) — or `None` if the name
     /// is not an imported native type. The scope-aware counterpart to a bare `registry::find_type`.
     fn imported_extern(&self, name: &str) -> Option<&'static noeta_stdlib::registry::ExtType> {
-        self.extern_types
+        self.imports
+            .extern_types
             .get(name)
             .and_then(|q| self.reg().find_type_qualified(q))
     }
@@ -940,7 +986,7 @@ impl Checker {
     /// local declaration. Mirrors the linker's user-import collision rule — the reason a user type
     /// and a same-named native type can safely coexist is that they can never both be in scope.
     fn check_extern_import_collision(&mut self, name: &str, span: Span) {
-        if let Some(qualified) = self.extern_types.get(name) {
+        if let Some(qualified) = self.imports.extern_types.get(name) {
             self.error(
                 DiagnosticCode::NameCollision,
                 span,
@@ -985,7 +1031,8 @@ impl Checker {
     /// ([`Checked::packed_layouts`]). A malformed packed struct (a field E0038 already diagnosed)
     /// yields no layout and is simply absent.
     fn packed_layouts_public(&self) -> HashMap<String, noeta_ast::reflect::PackedLayout> {
-        self.packed_structs
+        self.symbols
+            .packed_structs
             .iter()
             .filter_map(|name| {
                 let ty = Type::Named(name.clone(), Vec::new());
@@ -997,7 +1044,8 @@ impl Checker {
     /// The bundle bindings as the public `(module, bundle)` form (kernel-methods K4) — what the
     /// IDE reads to offer bound methods in member completion.
     fn bundle_bindings_public(&self) -> HashMap<String, Vec<(String, String)>> {
-        self.bundle_impls
+        self.symbols
+            .bundle_impls
             .iter()
             .map(|(ty, bindings)| {
                 (
@@ -1026,11 +1074,11 @@ impl Checker {
         // Implicit async top level (Track A): if the module body contains a top-level `.await` (one
         // not inside a nested `fn`/closure), the top level is itself an async context, so its awaits
         // are legal (executable since A.1 — a top-level `.await` runs its future to completion).
-        self.current_async = block_has_await(&program.stmts);
+        self.coloring.current_async = block_has_await(&program.stmts);
         for stmt in &program.stmts {
             self.check_stmt(stmt, env);
         }
-        self.current_async = false;
+        self.coloring.current_async = false;
         self.check_unrefined_muts(&program.stmts);
     }
 
@@ -1090,12 +1138,12 @@ impl Checker {
                 let params = decl
                     .params
                     .iter()
-                    .map(|p| param_type(p, &self.extern_types))
+                    .map(|p| param_type(p, &self.imports.extern_types))
                     .collect();
                 let ret = decl
                     .ret
                     .as_ref()
-                    .map(|t| from_ref_q(t, &self.extern_types))
+                    .map(|t| from_ref_q(t, &self.imports.extern_types))
                     .unwrap_or(Type::Unknown);
                 bind(
                     env,
@@ -1129,15 +1177,15 @@ impl Checker {
         // it (a `yield` inside a closure is E0039 — the coloring rule), and neither does an enclosing
         // async context (a `.await` inside a closure is E0040 — the same coloring rule). Restored
         // after the body.
-        let saved_yield = self.current_yield.take();
-        let saved_async = std::mem::replace(&mut self.current_async, false);
+        let saved_yield = self.coloring.current_yield.take();
+        let saved_async = std::mem::replace(&mut self.coloring.current_async, false);
         // A `concurrent` scope likewise does not cross into a closure — a `spawn` inside a closure
         // passed to a builtin is an orphan (E0041), the same coloring rule.
-        let saved_concurrent = std::mem::replace(&mut self.concurrent_depth, 0);
+        let saved_concurrent = std::mem::replace(&mut self.coloring.concurrent_depth, 0);
         let result = self.closure_body_type_inner(body, expected, env);
-        self.concurrent_depth = saved_concurrent;
-        self.current_async = saved_async;
-        self.current_yield = saved_yield;
+        self.coloring.concurrent_depth = saved_concurrent;
+        self.coloring.current_async = saved_async;
+        self.coloring.current_yield = saved_yield;
         result
     }
 
@@ -1153,29 +1201,32 @@ impl Checker {
                 None => self.synth(e, env),
             },
             noeta_ast::ClosureBody::Block(stmts) => {
-                let saved_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let saved_loop = std::mem::replace(&mut self.coloring.loop_depth, 0);
                 let ret = match expected {
                     Some(exp) => {
                         // Check each `return` against `exp`; the closure's return type is `exp`.
-                        let saved_ret = std::mem::replace(&mut self.current_ret, exp.clone());
-                        let saved_col = self.collected_returns.take();
+                        let saved_ret =
+                            std::mem::replace(&mut self.coloring.current_ret, exp.clone());
+                        let saved_col = self.coloring.collected_returns.take();
                         self.check_block(stmts, env);
-                        self.collected_returns = saved_col;
-                        self.current_ret = saved_ret;
+                        self.coloring.collected_returns = saved_col;
+                        self.coloring.current_ret = saved_ret;
                         exp.clone()
                     }
                     None => {
                         // Infer: collect the `return` types and join them.
-                        let saved_ret = std::mem::replace(&mut self.current_ret, Type::Unknown);
-                        let saved_col = self.collected_returns.replace(Vec::new());
+                        let saved_ret =
+                            std::mem::replace(&mut self.coloring.current_ret, Type::Unknown);
+                        let saved_col = self.coloring.collected_returns.replace(Vec::new());
                         self.check_block(stmts, env);
-                        let collected = std::mem::replace(&mut self.collected_returns, saved_col)
-                            .unwrap_or_default();
-                        self.current_ret = saved_ret;
+                        let collected =
+                            std::mem::replace(&mut self.coloring.collected_returns, saved_col)
+                                .unwrap_or_default();
+                        self.coloring.current_ret = saved_ret;
                         join_closure_returns(stmts, collected)
                     }
                 };
-                self.loop_depth = saved_loop;
+                self.coloring.loop_depth = saved_loop;
                 ret
             }
         }
@@ -1204,7 +1255,7 @@ impl Checker {
                 match ty {
                     Some(ty) => {
                         self.check_type_ref(ty);
-                        let expected = from_ref_q(ty, &self.extern_types);
+                        let expected = from_ref_q(ty, &self.imports.extern_types);
                         self.check(value, &expected, env);
                         // Record destructor-relevance of this binding for the drop-insertion pass.
                         if self.type_relevant(&expected) {
@@ -1357,7 +1408,7 @@ impl Checker {
             Stmt::Return { value, span } => {
                 // In a generator, only bare `return;` is allowed (it ends iteration); a value has no
                 // place under pure-pull `next() -> ?T` (no completion type) → E0039.
-                if self.current_yield.is_some() {
+                if self.coloring.current_yield.is_some() {
                     if value.is_some() {
                         self.error(
                             DiagnosticCode::GeneratorMisuse,
@@ -1375,19 +1426,19 @@ impl Checker {
                 // the closure can join all `return`s into its inferred return.
                 let ty = match value {
                     Some(value) => {
-                        let expected = self.current_ret.clone();
+                        let expected = self.coloring.current_ret.clone();
                         self.check(value, &expected, env)
                     }
                     None => Type::Unit,
                 };
-                if let Some(returns) = &mut self.collected_returns {
+                if let Some(returns) = &mut self.coloring.collected_returns {
                     returns.push(ty);
                 }
             }
             Stmt::Yield { value, span } => {
                 // `yield e` is valid only inside a generator (a function containing `yield`), where it
                 // is checked against the element type `T` of the declared `Iterator<T>` return.
-                match self.current_yield.clone() {
+                match self.coloring.current_yield.clone() {
                     Some(elem) => {
                         self.check(value, &elem, env);
                     }
@@ -1419,7 +1470,7 @@ impl Checker {
                     && !reassigns(then_body, name)
                 {
                     env.push(HashMap::new());
-                    bind(env, name, from_ref_q(ty, &self.extern_types));
+                    bind(env, name, from_ref_q(ty, &self.imports.extern_types));
                     self.check_block(then_body, env);
                     env.pop();
                 } else {
@@ -1444,26 +1495,26 @@ impl Checker {
                 }
                 env.push(HashMap::new());
                 self.bind_for_pattern(pattern, &iter_ty, env);
-                self.loop_depth += 1;
+                self.coloring.loop_depth += 1;
                 for stmt in body {
                     self.check_stmt(stmt, env);
                 }
-                self.loop_depth -= 1;
+                self.coloring.loop_depth -= 1;
                 env.pop();
             }
             Stmt::While { cond, body, .. } => {
                 // Like `if`, the condition's bool-ness is enforced at runtime (`RequireCondBool`,
                 // identical on both backends); synth it for nested checks and check the body.
                 self.synth(cond, env);
-                self.loop_depth += 1;
+                self.coloring.loop_depth += 1;
                 self.check_block(body, env);
-                self.loop_depth -= 1;
+                self.coloring.loop_depth -= 1;
             }
             Stmt::Concurrent { body, span } => {
                 // `concurrent { }` is a structured-concurrency scope (Track A.3b). It is async-only —
                 // joining spawned tasks needs suspend machinery — so it is illegal in a sync context
                 // (the coloring rule, E0040), exactly like `.await`.
-                if !self.current_async {
+                if !self.coloring.current_async {
                     self.error(
                         DiagnosticCode::AsyncMisuse,
                         *span,
@@ -1482,16 +1533,16 @@ impl Checker {
                 // bindings do not but a concurrent block's do. So check the body *in the current
                 // frame* rather than pushing one (F1: the unknown-name gate would otherwise flag a
                 // later reference to such a binding, which the tolerated-unknown behavior masked).
-                self.concurrent_depth += 1;
+                self.coloring.concurrent_depth += 1;
                 self.bind_nested_fns(body, env);
                 for stmt in body {
                     self.check_stmt(stmt, env);
                 }
-                self.concurrent_depth -= 1;
+                self.coloring.concurrent_depth -= 1;
             }
             Stmt::Break { span } | Stmt::Continue { span } => {
                 // A loop-control statement is only meaningful inside a `for`/`while` body.
-                if self.loop_depth == 0 {
+                if self.coloring.loop_depth == 0 {
                     let kw = if matches!(stmt, Stmt::Break { .. }) {
                         "break"
                     } else {
@@ -1536,20 +1587,25 @@ impl Checker {
                 args,
                 ..
             } => {
-                if !self.tier_registry.is_known(tier) {
+                if !self.symbols.tier_registry.is_known(tier) {
                     self.diags
                         .push(tiers::unknown_tier_diagnostic(self.reg(), tier, *tier_span));
-                } else if self.tier_registry.is_expr_tier(tier) {
+                } else if self.symbols.tier_registry.is_expr_tier(tier) {
                     // An expression tier's block in *statement* position (expr-tiers arc): its
                     // value would be silently discarded — and it never activates/strips, so a
                     // bare block would otherwise just vanish. Shared E0052 with activation.
                     self.diags
                         .push(tiers::expr_tier_statement_diagnostic(tier, *tier_span));
-                } else if let Some(d) = self.tier_registry.knobless_args_diagnostic(tier, args) {
+                } else if let Some(d) = self
+                    .symbols
+                    .tier_registry
+                    .knobless_args_diagnostic(tier, args)
+                {
                     // Args on a knob-less tier (`@test(x)`) — E0037.
                     self.diags.push(d);
                 } else if !args.is_empty()
                     && let Some(attr_name) = self
+                        .symbols
                         .tier_registry
                         .config_attribute(tier)
                         .map(str::to_string)
@@ -1584,8 +1640,8 @@ impl Checker {
         // carries none of its own). Union with the current set so a method does not lose the
         // class's parameters; restored after the body. Bounds are validated here too.
         self.check_type_param_bounds(&decl.type_params);
-        let saved_type_params = self.type_params.clone();
-        self.type_params.extend(
+        let saved_type_params = self.coloring.type_params.clone();
+        self.coloring.type_params.extend(
             decl.type_params
                 .iter()
                 .map(|p| (p.name.clone(), p.bounds.clone())),
@@ -1597,7 +1653,7 @@ impl Checker {
         // Validate parameter defaults: trailing-only (`E0026`) and each default's type against its
         // parameter (`E0007`). Checked here, before the parameter frame is pushed, so a default is
         // evaluated against the definition scope — for a named function/method that is globals only
-        // (mirroring how both backends evaluate it). `self.type_params` already includes this
+        // (mirroring how both backends evaluate it). `self.coloring.type_params` already includes this
         // function's own.
         self.validate_param_defaults(&decl.params, env);
         // The body's `return`s are checked against the declared return type; `Unknown` when
@@ -1606,7 +1662,7 @@ impl Checker {
         let ret = decl
             .ret
             .as_ref()
-            .map(|t| from_ref_q(t, &self.extern_types))
+            .map(|t| from_ref_q(t, &self.imports.extern_types))
             .unwrap_or(Type::Unknown);
         // A function whose body contains `yield` is a generator (Track G): its declared return must
         // be `Iterator<T>`, and its body's `yield e` are checked against the element type `T`. The
@@ -1641,27 +1697,27 @@ impl Checker {
         let must_return_value =
             !is_generator && !matches!(ret, Type::Unknown) && !Type::subtype(&Type::Unit, &ret);
         let declared_ret = ret.clone();
-        let saved_yield = std::mem::replace(&mut self.current_yield, yield_elem);
+        let saved_yield = std::mem::replace(&mut self.coloring.current_yield, yield_elem);
         // An `async fn` body is an async context: its `.await`s are legal (Track A). `current_ret`
         // stays the *inner* declared type `T` (the body writes `return t`); a call site sees the
         // wrapped `Future<T>` via the signature. Reset for a non-async function so an enclosing async
         // context does not leak into a nested ordinary function.
-        let saved_async = std::mem::replace(&mut self.current_async, decl.is_async);
-        let saved_ret = std::mem::replace(&mut self.current_ret, ret);
+        let saved_async = std::mem::replace(&mut self.coloring.current_async, decl.is_async);
+        let saved_ret = std::mem::replace(&mut self.coloring.current_ret, ret);
         // A function body is a fresh control-flow context: `break`/`continue` inside it cannot
         // target a loop the *enclosing* code is in, so reset the depth (restored after).
-        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        let saved_loop_depth = std::mem::replace(&mut self.coloring.loop_depth, 0);
         // White-box field privacy inside a dev-tier fn (slice 6d). Sticky: a nested fn declared in a
         // dev-tier body stays white-box too (co-located tooling). Restored after the body.
-        let saved_dev_tier = self.in_dev_tier;
-        self.in_dev_tier = decl.is_dev_tier || saved_dev_tier;
+        let saved_dev_tier = self.coloring.in_dev_tier;
+        self.coloring.in_dev_tier = decl.is_dev_tier || saved_dev_tier;
         env.push(HashMap::new());
         for (name, ty) in extra {
             bind(env, name, ty.clone());
         }
         for p in &decl.params {
             self.check_reserved_name(&p.name, p.name_span);
-            bind(env, &p.name, param_type(p, &self.extern_types));
+            bind(env, &p.name, param_type(p, &self.imports.extern_types));
         }
         self.bind_nested_fns(&decl.body, env);
         for stmt in &decl.body {
@@ -1696,12 +1752,12 @@ impl Checker {
         // iterator protocol with the source cursor held as machine state (G.4), so no control-flow
         // context around a `yield` is rejected here.
         env.pop();
-        self.in_dev_tier = saved_dev_tier;
-        self.current_ret = saved_ret;
-        self.current_async = saved_async;
-        self.current_yield = saved_yield;
-        self.loop_depth = saved_loop_depth;
-        self.type_params = saved_type_params;
+        self.coloring.in_dev_tier = saved_dev_tier;
+        self.coloring.current_ret = saved_ret;
+        self.coloring.current_async = saved_async;
+        self.coloring.current_yield = saved_yield;
+        self.coloring.loop_depth = saved_loop_depth;
+        self.coloring.type_params = saved_type_params;
     }
 }
 

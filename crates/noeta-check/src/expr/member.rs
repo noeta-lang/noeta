@@ -41,7 +41,7 @@ impl Checker {
         // (E0006); a reference `class` field-set mutates the shared instance in place, needing no
         // `mut` binding. (The field itself must still be declared `mut` — E0033, checked below.)
         if matches!(
-            self.type_kinds.get(&name),
+            self.symbols.type_kinds.get(&name),
             Some(noeta_types::TypeKind::Struct)
         ) && let Expr::Ident {
             name: recv_name,
@@ -63,11 +63,13 @@ impl Checker {
             ));
         }
         let is_mut = self
+            .symbols
             .mut_fields
             .get(&name)
             .is_some_and(|fields| fields.contains(field));
         if !is_mut {
             let exists = self
+                .symbols
                 .records
                 .get(&name)
                 .is_some_and(|fs| fs.iter().any(|(n, _)| n == field));
@@ -95,12 +97,18 @@ impl Checker {
         // The field is `mut`; check the new value against its declared type, substituting the
         // class's generic parameters from the receiver's type arguments (mirroring `synth_member`).
         if let Some((_, fty)) = self
+            .symbols
             .records
             .get(&name)
             .and_then(|fs| fs.iter().find(|(n, _)| n == field))
             .map(|(n, t)| (n.clone(), t.clone()))
         {
-            let params = self.generic_types.get(&name).cloned().unwrap_or_default();
+            let params = self
+                .symbols
+                .generic_types
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
             let subst: HashMap<String, Type> = params
                 .iter()
                 .cloned()
@@ -144,7 +152,7 @@ impl Checker {
             },
             _ => return None,
         };
-        let bindings = self.bundle_impls.get(type_name)?;
+        let bindings = self.symbols.bundle_impls.get(type_name)?;
         let (route, method) = bindings.iter().find_map(|b| {
             b.bundle
                 .method(name)
@@ -168,7 +176,7 @@ impl Checker {
             return t;
         }
         if let Type::Named(n, _) = recv
-            && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
+            && let Some(sig) = self.symbols.methods.get(&(n.clone(), name.to_string()))
         {
             return sig.ret.clone();
         }
@@ -183,12 +191,15 @@ impl Checker {
     /// declared `pub`) only inside the declaring type's own methods/destructor ([`Self::current_type`]).
     pub(crate) fn field_visible(&self, type_name: &str, field: &str) -> bool {
         let private = self
+            .symbols
             .private_fields
             .get(type_name)
             .is_some_and(|fs| fs.contains(field));
         // White-box for dev-tier (`@test`/…) fn bodies: co-located tooling sees its module's
         // privates (slice 6d), so a private field is visible there regardless of `current_type`.
-        !private || self.in_dev_tier || self.current_type.as_deref() == Some(type_name)
+        !private
+            || self.coloring.in_dev_tier
+            || self.coloring.current_type.as_deref() == Some(type_name)
     }
 
     /// Report an access to a private field from outside its type (E0035). `access` names the action
@@ -220,7 +231,7 @@ impl Checker {
         use noeta_stdlib::registry::NsChild;
         match expr {
             Expr::Ident { name, .. } if lookup(env, name).is_none() => {
-                self.namespaces.get(name).cloned()
+                self.imports.namespaces.get(name).cloned()
             }
             Expr::Member { receiver, name, .. } => {
                 let prefix = self.resolve_namespace_prefix(receiver, env)?;
@@ -301,13 +312,14 @@ impl Checker {
         // `Rvalue::MethodHandle`. (Built-in-type receivers — `list.len` — land in a later slice.)
         if let Expr::Ident { name: tn, .. } = receiver
             && lookup(env, tn).is_none()
-            && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string()))
+            && let Some(sig) = self.symbols.methods.get(&(tn.clone(), name.to_string()))
         {
             // The handle's shape follows the derived classification (EX.2): an INSTANCE method's
             // handle takes the receiver as its first argument (`Fn(T, ...params) -> ret`); an
             // ASSOCIATED function's handle is the function itself (`Fn(params) -> ret`) — e.g.
             // `ctor = Stack.new`.
             let instance = self
+                .symbols
                 .method_instance
                 .get(&(tn.clone(), name.to_string()))
                 .copied()
@@ -370,6 +382,7 @@ impl Checker {
         let recv = self.synth(receiver, env);
         if let Type::Named(n, recv_args) = &recv
             && let Some(ty) = self
+                .symbols
                 .records
                 .get(n)
                 .and_then(|fields| fields.iter().find(|(fname, _)| fname == name))
@@ -385,14 +398,19 @@ impl Checker {
             // (P-PACK 2.5+); restricting to a `List` receiver keeps the backends' fast path / boxed
             // fallback list-only (no map/string/`Index`-trait dispatch to reproduce).
             if let Expr::Index { span: idx_span, .. } = receiver
-                && self.index_on_list.contains(idx_span)
+                && self.coloring.index_on_list.contains(idx_span)
             {
                 self.sites.index_field_sites.insert(member_span);
             }
             // Substitute the class's type parameters from the receiver's type arguments, so a field
             // of a `Box<int>` reads as `int`. An unresolved parameter (the receiver's arguments are
             // unknown, e.g. from a literal) erases to `dyn` rather than leaking the parameter name.
-            let params = self.generic_types.get(n).cloned().unwrap_or_default();
+            let params = self
+                .symbols
+                .generic_types
+                .get(n)
+                .cloned()
+                .unwrap_or_default();
             let subst: HashMap<String, Type> = params
                 .iter()
                 .cloned()
@@ -404,7 +422,7 @@ impl Checker {
             // field read did). Only parameters NOT in scope erase.
             let pset: HashSet<String> = params
                 .into_iter()
-                .filter(|p| !self.type_params.contains_key(p))
+                .filter(|p| !self.coloring.type_params.contains_key(p))
                 .collect();
             return erase_type_params(apply_subst(&ty, &subst), &pset);
         }
@@ -414,11 +432,12 @@ impl Checker {
         // types (instance methods only — binding an associated fn through a value is the E0047
         // wrong-way shape) and built-in receivers (`xs.len`, `s.upper`).
         if let Type::Named(n, _) = &recv
-            && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
+            && let Some(sig) = self.symbols.methods.get(&(n.clone(), name.to_string()))
         {
             let params = sig.params.clone();
             let ret = sig.ret.clone();
             let instance = self
+                .symbols
                 .method_instance
                 .get(&(n.clone(), name.to_string()))
                 .copied()

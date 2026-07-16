@@ -51,17 +51,17 @@ impl Checker {
     /// is genuinely undefined, a static `E0005` rather than a deferral to the runtime `E0005`.
     pub(crate) fn is_known_name(&self, name: &str, env: &Env) -> bool {
         lookup(env, name).is_some()
-            || self.functions.contains_key(name)
-            || self.imported_fns.contains_key(name)
-            || self.modules.contains_key(name)
-            || self.types.contains(name)
-            || self.enums.contains_key(name)
+            || self.symbols.functions.contains_key(name)
+            || self.imports.imported_fns.contains_key(name)
+            || self.imports.modules.contains_key(name)
+            || self.symbols.types.contains(name)
+            || self.symbols.enums.contains_key(name)
             || RESERVED_PRELUDE.contains(&name)
             // Built-in namable types/enums (`Ordering`, `Type`, `Semantic`, iterator types, …)
             // are legitimate bare references — `Ordering.Less` names the prelude enum's variant.
             || PRELUDE_TYPES.contains(&name)
             // A hoisted top-level global (a fn body may reference one declared later).
-            || self.global_binding_names.contains(name)
+            || self.symbols.global_binding_names.contains(name)
     }
 
     pub(crate) fn synth_call(
@@ -114,7 +114,7 @@ impl Checker {
             }
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
-                if let Some(sig) = self.functions.get(name) {
+                if let Some(sig) = self.symbols.functions.get(name) {
                     let required = sig.required;
                     // A generic function is instantiated per call: bind its type parameters from the
                     // argument types, check arguments against the substituted parameters, enforce
@@ -140,7 +140,7 @@ impl Checker {
                 // A selectively-imported module function (`use std.math.sqrt`) called bare — typed
                 // exactly like the qualified `math.sqrt(args)` (same params/return tables). A local
                 // binding of the same name shadows it (checked first, in the arms above via `env`).
-                if let Some((module, func)) = self.imported_fns.get(name).cloned()
+                if let Some((module, func)) = self.imports.imported_fns.get(name).cloned()
                     && lookup(env, name).is_none()
                 {
                     if let Some(params) = stdlib::module_params(self.reg(), &module, &func, args) {
@@ -168,7 +168,7 @@ impl Checker {
                 // is a genuinely undefined callee — a static `E0005` (F1), so a typo is caught at
                 // check time instead of failing at runtime. A session defers (a later entry may
                 // define it).
-                if !self.session_mode && !self.is_known_name(name, env) {
+                if !self.config.session_mode && !self.is_known_name(name, env) {
                     self.error(
                         DiagnosticCode::UnknownName,
                         span,
@@ -184,7 +184,7 @@ impl Checker {
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && (name == "try_from" || name == "from")
                     && lookup(env, tn).is_none()
-                    && self.enums.contains_key(tn)
+                    && self.symbols.enums.contains_key(tn)
                 {
                     self.check_args(&[Type::String], 1, args, arg_exprs, span, name);
                     let ty = Type::Named(tn.clone(), Vec::new());
@@ -209,7 +209,7 @@ impl Checker {
                 // key the same stdlib return-type tables, and the chain form records its span so
                 // lowering materializes the leaf module value (`std.http.client`).
                 let module_id = match receiver.as_ref() {
-                    Expr::Ident { name: m, .. } => self.modules.get(m).cloned(),
+                    Expr::Ident { name: m, .. } => self.imports.modules.get(m).cloned(),
                     _ => None,
                 }
                 .or_else(|| self.resolve_namespace_module(receiver, env));
@@ -248,13 +248,18 @@ impl Checker {
                 // by a local variable.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && lookup(env, tn).is_none()
-                    && self.types.contains(tn)
-                    && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string())).cloned()
+                    && self.symbols.types.contains(tn)
+                    && let Some(sig) = self
+                        .symbols
+                        .methods
+                        .get(&(tn.clone(), name.to_string()))
+                        .cloned()
                 {
                     // An INSTANCE method (its body references `self`) cannot be called
                     // associated-style — there is no receiver to become `self` (E0047,
                     // prelude-redesign EX.2). The classification is derived from the body.
                     if self
+                        .symbols
                         .method_instance
                         .get(&(tn.clone(), name.to_string()))
                         .copied()
@@ -283,11 +288,16 @@ impl Checker {
                 // the instantiation so the result is precise. A built-in method or a deferred
                 // receiver falls through below.
                 if let Type::Named(n, recv_args) = &recv
-                    && let Some(sig) = self.methods.get(&(n.clone(), name.to_string())).cloned()
+                    && let Some(sig) = self
+                        .symbols
+                        .methods
+                        .get(&(n.clone(), name.to_string()))
+                        .cloned()
                 {
                     // An ASSOCIATED function (never touches `self`) is not callable on a value —
                     // the receiver would be silently discarded (E0047, prelude-redesign EX.2).
                     if !self
+                        .symbols
                         .method_instance
                         .get(&(n.clone(), name.to_string()))
                         .copied()
@@ -422,6 +432,7 @@ impl Checker {
         span: Span,
     ) -> Type {
         let params = self
+            .symbols
             .generic_types
             .get(enum_name)
             .cloned()
@@ -432,6 +443,7 @@ impl Checker {
             let pset: HashSet<String> = params.iter().cloned().collect();
             let mut subst: HashMap<String, Type> = HashMap::new();
             if let Some(fields) = self
+                .symbols
                 .enums
                 .get(enum_name)
                 .and_then(|vs| vs.iter().find(|v| v.name == variant))
@@ -495,7 +507,7 @@ impl Checker {
             let required = stdlib::method_required(self.reg(), recv, name).unwrap_or(params.len());
             self.check_args(&params, required, args, arg_exprs, span, name);
         } else if let Type::Named(n, _) = recv
-            && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
+            && let Some(sig) = self.symbols.methods.get(&(n.clone(), name.to_string()))
         {
             let params = sig.params.clone();
             let required = sig.required;

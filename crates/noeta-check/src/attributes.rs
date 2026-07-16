@@ -30,7 +30,7 @@ impl Checker {
                 continue;
             }
             // The capability gate: only a struct marked `@attribute` may be used as `#[Foo(...)]`.
-            if !self.attributes.contains(&attr.name) {
+            if !self.symbols.attributes.contains(&attr.name) {
                 self.error(
                     DiagnosticCode::NotAnAttribute,
                     attr.name_span,
@@ -44,7 +44,7 @@ impl Checker {
             }
             // Placement gate (P2.5): when `Foo` declared `@attribute(Kind, …)`, this use site's kind
             // must be among the permitted ones, else `E0030`.
-            if let Some(allowed) = self.attachable.get(&attr.name)
+            if let Some(allowed) = self.symbols.attachable.get(&attr.name)
                 && !allowed.contains(&target)
             {
                 let permitted = allowed
@@ -75,7 +75,12 @@ impl Checker {
     /// to its field's type (`E0007`). An identifier argument carries no static type, so its value
     /// is not type-checked (only its field binding is).
     fn check_attribute_construction(&mut self, attr: &Attribute) {
-        let fields = self.records.get(&attr.name).cloned().unwrap_or_default();
+        let fields = self
+            .symbols
+            .records
+            .get(&attr.name)
+            .cloned()
+            .unwrap_or_default();
         let mut filled = vec![false; fields.len()];
         let mut next_positional = 0usize;
         for arg in &attr.args {
@@ -193,7 +198,7 @@ impl Checker {
             AttrValue::TypeRef(name) => {
                 if !Type::is_builtin_name(name)
                     && !PRELUDE_TYPES.contains(&name.as_str())
-                    && !self.types.contains(name)
+                    && !self.symbols.types.contains(name)
                 {
                     self.error(
                         DiagnosticCode::UnknownType,
@@ -228,7 +233,7 @@ impl Checker {
         fields: &[(String, AttrValue)],
         span: Span,
     ) {
-        let Some(decl) = self.records.get(type_name).cloned() else {
+        let Some(decl) = self.symbols.records.get(type_name).cloned() else {
             return;
         };
         for (fname, fval) in fields {

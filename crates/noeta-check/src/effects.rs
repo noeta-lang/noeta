@@ -42,7 +42,7 @@ impl Checker {
         // The arguments cross into the fresh isolate — check the called function's declared parameter
         // types (a direct-call callee), so a `class` argument is rejected without re-synthesizing args.
         if let Expr::Ident { name, .. } = callee.as_ref()
-            && let Some(sig) = self.functions.get(name)
+            && let Some(sig) = self.symbols.functions.get(name)
         {
             for param in sig.params.clone() {
                 if !self.is_send(&param, &mut Vec::new()) {
@@ -70,7 +70,8 @@ impl Checker {
     /// supplied (`Box<int>` → `{T: int}`) — used to instantiate field/payload types before the `Send`
     /// check. Empty for a non-generic type or when no arguments are given.
     pub(crate) fn type_arg_subst(&self, name: &str, args: &[Type]) -> HashMap<String, Type> {
-        self.generic_types
+        self.symbols
+            .generic_types
             .get(name)
             .map(|params| params.iter().cloned().zip(args.iter().cloned()).collect())
             .unwrap_or_default()
@@ -93,7 +94,7 @@ impl Checker {
             Type::Tuple(elems) | Type::Union(elems) => {
                 elems.iter().all(|e| self.is_send(e, visited))
             }
-            Type::Named(name, args) => match self.type_kinds.get(name) {
+            Type::Named(name, args) => match self.symbols.type_kinds.get(name) {
                 Some(noeta_types::TypeKind::Class) => false,
                 Some(noeta_types::TypeKind::Struct) => {
                     if visited.iter().any(|v| v == name) {
@@ -105,7 +106,7 @@ impl Checker {
                     // `Box<Conn>` → `!Send`). Without this a generic struct's field `T` (`Named("T")`)
                     // classified `!Send` unconditionally, making every generic struct `!Send`.
                     let subst = self.type_arg_subst(name, args);
-                    let fields_send = self.records.get(name).is_none_or(|fs| {
+                    let fields_send = self.symbols.records.get(name).is_none_or(|fs| {
                         fs.iter()
                             .all(|(_, t)| self.is_send(&apply_subst(t, &subst), visited))
                     });
@@ -119,7 +120,7 @@ impl Checker {
                     visited.push(name.clone());
                     // Substitute the type arguments into the payload types (as for a struct's fields).
                     let subst = self.type_arg_subst(name, args);
-                    let payloads_send = self.enums.get(name).is_none_or(|vs| {
+                    let payloads_send = self.symbols.enums.get(name).is_none_or(|vs| {
                         vs.iter().all(|v| {
                             v.fields
                                 .iter()

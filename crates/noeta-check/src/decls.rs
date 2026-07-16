@@ -31,14 +31,14 @@ impl Checker {
                 .help("give this parameter a default too, or move it before the optional ones");
             }
         }
-        let tps: HashSet<String> = self.type_params.keys().cloned().collect();
+        let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
         for p in params {
             let Some(default) = &p.default else { continue };
             let actual = self.synth(default, env);
             // Skip the type check when the parameter has no annotation (already an `E0022`) or its
             // type is generic/`dyn` (erases to `dyn`, which accepts any default).
             if p.ty.is_some() {
-                let expected = erase_type_params(param_type(p, &self.extern_types), &tps);
+                let expected = erase_type_params(param_type(p, &self.imports.extern_types), &tps);
                 if !self.arg_assignable(&actual, &expected) {
                     self.error(
                         DiagnosticCode::TypeMismatch,
@@ -60,14 +60,15 @@ impl Checker {
     /// trailing-only rule**: literal fields are named, so a default makes its field optional
     /// regardless of position. Call before binding fields into `env`.
     pub(crate) fn validate_field_defaults(&mut self, fields: &[FieldDecl], env: &mut Env) {
-        let tps: HashSet<String> = self.type_params.keys().cloned().collect();
+        let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
         for f in fields {
             let Some(default) = &f.default else { continue };
             let actual = self.synth(default, env);
             // Skip the type check when the field has no annotation (every field requires one, so an
             // un-annotated field is already reported) or its type erases to `dyn` (accepts any).
             if f.ty.is_some() {
-                let expected = erase_type_params(field_type(&f.ty, &self.extern_types), &tps);
+                let expected =
+                    erase_type_params(field_type(&f.ty, &self.imports.extern_types), &tps);
                 if !self.arg_assignable(&actual, &expected) {
                     self.error(
                         DiagnosticCode::TypeMismatch,
@@ -128,21 +129,25 @@ impl Checker {
         self.check_attrs(&r.attrs, TargetKind::Struct);
         // Inside the type's own body, its (always-public) fields are accessible; the marker is
         // uniform with classes (a struct simply has no private fields to gate).
-        let saved_type = self.current_type.replace(r.name.clone());
+        let saved_type = self.coloring.current_type.replace(r.name.clone());
         for block in &r.impls {
             self.check_impl(block);
         }
         for method in &r.methods {
             self.check_fn(method, env, &fields, TargetKind::Method);
         }
-        self.current_type = saved_type;
-        self.type_params = saved;
+        self.coloring.current_type = saved_type;
+        self.coloring.type_params = saved;
     }
 
     /// The `(trait, span)` occurrences of every standalone `impl Trait for <name> {}`, cloned so a
-    /// `&mut self` coherence check can borrow them without conflicting with `self.standalone_impls`.
+    /// `&mut self` coherence check can borrow them without conflicting with `self.symbols.standalone_impls`.
     pub(crate) fn standalone_for(&self, name: &str) -> Vec<(String, Span)> {
-        self.standalone_impls.get(name).cloned().unwrap_or_default()
+        self.symbols
+            .standalone_impls
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(crate) fn check_class(&mut self, c: &ClassDecl, env: &mut Env) {
@@ -163,7 +168,7 @@ impl Checker {
         self.check_attrs(&c.attrs, TargetKind::Class);
         // Inside the class's own methods/destructor its private fields are accessible — on `self`
         // and on any same-type value (the type-scoped privacy rule, object-model slice 2d).
-        let saved_type = self.current_type.replace(c.name.clone());
+        let saved_type = self.coloring.current_type.replace(c.name.clone());
         for block in &c.impls {
             self.check_impl(block);
         }
@@ -180,8 +185,8 @@ impl Checker {
             }
             env.pop();
         }
-        self.current_type = saved_type;
-        self.type_params = saved;
+        self.coloring.current_type = saved_type;
+        self.coloring.type_params = saved;
     }
 
     pub(crate) fn check_enum(&mut self, e: &EnumDecl, env: &mut Env) {
@@ -205,7 +210,7 @@ impl Checker {
         // `self`). Bind `self` to the enum type so that `match self` is exhaustiveness-checked, and
         // set `current_type` for the same type-scoped resolution a class uses.
         let self_ty = Type::Named(e.name.clone(), Vec::new());
-        let saved_type = self.current_type.replace(e.name.clone());
+        let saved_type = self.coloring.current_type.replace(e.name.clone());
         for block in &e.impls {
             self.check_impl(block);
         }
@@ -217,8 +222,8 @@ impl Checker {
                 TargetKind::Method,
             );
         }
-        self.current_type = saved_type;
-        self.type_params = saved;
+        self.coloring.current_type = saved_type;
+        self.coloring.type_params = saved;
     }
 
     // ----- unknown-type resolution (E0013) -----
@@ -233,7 +238,7 @@ impl Checker {
     ) -> HashMap<String, Vec<String>> {
         self.check_type_param_bounds(params);
         std::mem::replace(
-            &mut self.type_params,
+            &mut self.coloring.type_params,
             params
                 .iter()
                 .map(|p| (p.name.clone(), p.bounds.clone()))
@@ -296,12 +301,12 @@ impl Checker {
             TypeRef::Named { name, args, span } => {
                 if !Type::is_builtin_name(name)
                     && !PRELUDE_TYPES.contains(&name.as_str())
-                    && !self.type_params.contains_key(name)
-                    && !self.types.contains(name)
+                    && !self.coloring.type_params.contains_key(name)
+                    && !self.symbols.types.contains(name)
                     // A native extern type is a valid annotation only when `use`-imported into this
                     // file (`use std.id.Uuid` → `extern_types["Uuid"]`), like a user type — it is no
                     // longer globally in scope by bare name.
-                    && !self.extern_types.contains_key(name)
+                    && !self.imports.extern_types.contains_key(name)
                 {
                     self.error(
                         DiagnosticCode::UnknownType,
@@ -391,7 +396,8 @@ impl Checker {
         if let Some(layout) = self.packed_layout(&Type::Named(key_name.to_string(), Vec::new())) {
             return Some(layout_key_capable(&layout));
         }
-        if self.records.contains_key(key_name) || self.enums.contains_key(key_name) {
+        if self.symbols.records.contains_key(key_name) || self.symbols.enums.contains_key(key_name)
+        {
             // A set additionally admits any **value kind** (derive-soundness follow-up F2): a
             // non-packed struct or an enum orders structurally (`set_order` — the same total
             // ordering `@derive(Comparable)` and `.sorted()` use), so `Set<P>`/`Set<Dir>` are
@@ -400,7 +406,7 @@ impl Checker {
             // only the packed/int/string/extern kinds above have.
             if for_set {
                 return Some(!matches!(
-                    self.type_kinds.get(key_name),
+                    self.symbols.type_kinds.get(key_name),
                     Some(noeta_types::TypeKind::Class)
                 ));
             }

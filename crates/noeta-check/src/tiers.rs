@@ -913,7 +913,8 @@ impl Checker {
         // Resolve the extension-tier half of the name-space against THIS checker's registry
         // (instance-registry IR4), so an embed session whose own extension declares a `@tier`
         // validates its `@<tier>` blocks correctly. Defaults to the process-global registry.
-        self.tier_registry = tiers::TierRegistry::collect_with_registry(program, self.reg());
+        self.symbols.tier_registry =
+            tiers::TierRegistry::collect_with_registry(program, self.reg());
         let mut seen: HashMap<(String, String), Span> = HashMap::new();
         for stmt in &program.stmts {
             let Stmt::Fn(f) = stmt else { continue };
@@ -943,7 +944,7 @@ impl Checker {
                 seen.insert((decl.name.clone(), root), decl.name_span);
             }
             if let Some((config, config_span)) = &decl.config
-                && !self.attributes.contains(config)
+                && !self.symbols.attributes.contains(config)
             {
                 self.error(
                     DiagnosticCode::InvalidTierDeclaration,
@@ -1125,7 +1126,9 @@ impl Checker {
     pub(crate) fn is_packable_type(&self, ty: &Type) -> bool {
         match ty {
             Type::Int | Type::Float | Type::F32 | Type::Bool => true,
-            Type::Named(name, args) if args.is_empty() => self.packed_structs.contains(name),
+            Type::Named(name, args) if args.is_empty() => {
+                self.symbols.packed_structs.contains(name)
+            }
             _ => false,
         }
     }
@@ -1159,9 +1162,11 @@ impl Checker {
             // canonical JSON shape). The field set is the declared record fields, in order.
             Type::Named(name, args)
                 if args.is_empty()
-                    && self.type_kinds.get(name) == Some(&noeta_types::TypeKind::Struct) =>
+                    && self.symbols.type_kinds.get(name)
+                        == Some(&noeta_types::TypeKind::Struct) =>
             {
                 let fields = self
+                    .symbols
                     .records
                     .get(name)?
                     .iter()
@@ -1228,7 +1233,7 @@ impl Checker {
                 continue;
             }
             // The enum must be `@semantic` (the built-in `Semantic` always is).
-            if !self.semantic_enums.contains(&tag.enum_name) {
+            if !self.symbols.semantic_enums.contains(&tag.enum_name) {
                 self.error(
                     DiagnosticCode::InvalidRole,
                     tag.span,
@@ -1240,6 +1245,7 @@ impl Checker {
             // The variant must exist on that enum and be fieldless (a payload would have to be
             // built per use site — genuine comptime, the one thing roles defer).
             match self
+                .symbols
                 .enums
                 .get(&tag.enum_name)
                 .and_then(|vs| vs.iter().find(|v| v.name == tag.variant))
