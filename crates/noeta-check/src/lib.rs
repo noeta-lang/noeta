@@ -1327,7 +1327,7 @@ impl Checker {
                                         // (2) A still-unresolved inferred type (`mut acc = []`) — this
                                         // write completes / refines it (the accumulator pattern).
                                         assign(env, name, vty);
-                                    } else if !self.assignable(&vty, &existing) {
+                                    } else if !self.assignable(&vty, existing) {
                                         // (3) Type stability: a resolved `mut` binding keeps its type;
                                         // a value that is not assignable to it — a different type, or a
                                         // widening of a resolved type — is rejected. Use a declared

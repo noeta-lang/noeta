@@ -9,7 +9,9 @@
 //! foreign extension **consumes** it per-run via [`noeta_native::capability`], and neither the
 //! engine's representation (`ReactiveExt`, the graph's storage) nor the consumer's node type
 //! (`SyncedSignalBox`) ever crosses. Only [`noeta_reactive::NodeId`] handles and arena
-//! [`noeta_native::Retained`] cells do.
+//! [`noeta_native::Retained`] cells do. The contract's second half runs the other way:
+//! [`ViewSourceExtract`] is a capability the *foreign extension* provides so the engine's
+//! `view.expose` recognizes the foreign node type — same broker, inverse direction.
 //!
 //! Why a capability trait rather than the engine's own `pub` items: the previous seam exposed
 //! free functions that reached into a `pub`-fielded engine struct, so "the contract" and "the
@@ -51,43 +53,35 @@ pub trait ReactiveSource {
 /// Where a view binding's current value is read from: a signal's content cell, or a computed's
 /// body+memo (a dirty memo recomputes on read, exactly like `.get()`).
 ///
-/// Part of the same contract: a foreign node type produces a `ViewSource` (via a registered
-/// [`ViewSourceExtractor`]) so the engine's `view.expose` accepts it without naming — or depending
-/// on — that type. The engine holds the other side (it reads the cell / recomputes the memo).
+/// Part of the same contract: a foreign node type produces a `ViewSource` (via its
+/// [`ViewSourceExtract`] capability) so the engine's `view.expose` accepts it without naming — or
+/// depending on — that type. The engine holds the other side (it reads the cell / recomputes the memo).
 #[derive(Debug)]
 pub enum ViewSource {
     Signal { cell: Retained },
     Computed { body: Retained, memo: Retained },
 }
 
-/// An extractor that recognizes a foreign extern handle as a node over the shared reactive graph and
-/// yields its `(NodeId, ViewSource)` for `view.expose`. Registered by the foreign extension (e.g.
-/// `para.synced`) with [`register_view_source_extractor`] so `view.expose` accepts its node type.
-pub type ViewSourceExtractor = fn(&dyn Any) -> Option<(NodeId, ViewSource)>;
-
-/// The registered foreign view-source extractors. Process-global and additive; the engine consults
-/// them (via [`extract_view_source`]) after its own built-in `Signal`/`Computed` handles.
-/// Const-initialized so no lazy init sits on the read path.
-static FOREIGN_VIEW_EXTRACTORS: std::sync::RwLock<Vec<ViewSourceExtractor>> =
-    std::sync::RwLock::new(Vec::new());
-
-/// Register a foreign view-source extractor (idempotent by function pointer). Called by an
-/// out-of-`std` reactive-node module so the engine's `view.expose` accepts its handle type.
-pub fn register_view_source_extractor(f: ViewSourceExtractor) {
-    let mut v = FOREIGN_VIEW_EXTRACTORS
-        .write()
-        .expect("view-extractor lock");
-    if !v.iter().any(|g| std::ptr::fn_addr_eq(*g, f)) {
-        v.push(f);
-    }
-}
-
-/// Try every registered foreign extractor against `any`, returning the first match — what the
-/// engine's `view.expose` calls to resolve a non-core handle to a `(NodeId, ViewSource)`.
-pub fn extract_view_source(any: &dyn Any) -> Option<(NodeId, ViewSource)> {
-    FOREIGN_VIEW_EXTRACTORS
-        .read()
-        .expect("view-extractor lock")
-        .iter()
-        .find_map(|f| f(any))
+/// The **foreign view-source extractor**, as a capability trait: recognizes a foreign extern handle
+/// as a node over the shared reactive graph and yields its `(NodeId, ViewSource)` for `view.expose`.
+///
+/// The inverse-direction twin of [`ReactiveSource`]: there the *engine* provides and the foreign
+/// extension consumes; here the foreign extension (e.g. `para.synced`) **provides** — an
+/// `ExtCapability` on its unit declaring `dyn ViewSourceExtract` — and the engine's `view.expose`
+/// **consumes** it per-run via `noeta_native::capability::<dyn ViewSourceExtract>`, after trying its
+/// own built-in `Signal`/`Computed` handles. This replaced a process-global `RwLock<Vec<fn>>`
+/// extractor list registered from dispatch bodies (audit-2 Finding 12): a registry-declared
+/// capability is scoped to the run's registry (a session whose registry lacks the extension never
+/// sees its extractor — the per-session-registry model), needs no first-use registration side
+/// effect, and does not stand up a second ad-hoc cross-extension mechanism beside the capability
+/// broker that was built to be the one mechanism.
+///
+/// One provider per registry: the broker resolves a capability trait to a single provider (a
+/// duplicate is rejected at assembly by the registry's `validate()`, not silently shadowed). If a
+/// second foreign reactive-node extension ever materializes, extend the broker with a plural
+/// lookup rather than resurrecting a global list.
+pub trait ViewSourceExtract {
+    /// Recognize `any` (an extern handle's [`Any`] view) as this extension's reactive-node type and
+    /// yield its graph node + value source, or `None` when the handle is not this extension's.
+    fn extract(&self, any: &dyn Any) -> Option<(NodeId, ViewSource)>;
 }

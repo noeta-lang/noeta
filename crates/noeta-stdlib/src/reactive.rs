@@ -41,7 +41,7 @@ use noeta_native::{
 use noeta_reactive::{MAX_FLUSH_STEPS, NodeId, ReactiveGraph};
 // The reactive extension **contract** this engine implements/serves: the `ReactiveSource`
 // capability (provided below) and the foreign view-source extractors (`view.expose` consults them).
-use noeta_reactive_abi::{ReactiveSource, ViewSource, extract_view_source};
+use noeta_reactive_abi::{ReactiveSource, ViewSource, ViewSourceExtract};
 
 pub const SIGNAL_TYPE_NAME: &str = "Signal";
 pub const COMPUTED_TYPE_NAME: &str = "Computed";
@@ -368,10 +368,12 @@ struct ViewBinding {
 }
 
 // `ViewSource` (where a view binding reads its value — a signal cell or a computed body+memo) and
-// the foreign view-source extractor registry now live in `noeta-reactive-abi`, the reactive
-// extension contract. `view.expose` recognizes a foreign node type (e.g. `para.synced`'s
-// `SyncedSignal`) by calling `extract_view_source` after its own built-in `Signal`/`Computed`
-// handles — without naming or depending on that type.
+// the foreign view-source extractor contract (`ViewSourceExtract`) live in `noeta-reactive-abi`,
+// the reactive extension contract. `view.expose` recognizes a foreign node type (e.g.
+// `para.synced`'s `SyncedSignal`) by consuming the foreign extension's `ViewSourceExtract`
+// **capability** after its own built-in `Signal`/`Computed` handles — without naming or depending
+// on that type, and scoped to the run's registry (audit-2 Finding 12: this replaced a
+// process-global extractor list).
 
 // ===== The `ReactiveSource` capability provider (the capability-broker seam) =====================
 //
@@ -548,8 +550,11 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 .into());
             };
             // Accept any handle that is a node over the shared graph: Signal, Computed, or a
-            // foreign node registered through the reactive seam — `para.synced`'s SyncedSignal IS a
-            // signal node (LiveView over synced state), recognized via `extract_view_source`.
+            // foreign node reached through the reactive seam — `para.synced`'s SyncedSignal IS a
+            // signal node (LiveView over synced state), recognized via the foreign extension's
+            // `ViewSourceExtract` capability. Resolved up front because the broker needs `ctx`,
+            // which `with_extern` borrows; `None` just means no installed extension provides one.
+            let foreign = noeta_native::capability::<dyn ViewSourceExtract, C>(ctx);
             let mut found: Option<(NodeId, ViewSource)> = None;
             let _ = ctx.with_extern(args[1], &mut |e| {
                 if let Some(s) = e.as_any().downcast_ref::<SignalBox>() {
@@ -562,7 +567,7 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                             memo: c.memo,
                         },
                     ));
-                } else if let Some(hit) = extract_view_source(e.as_any()) {
+                } else if let Some(hit) = foreign.as_ref().and_then(|f| f.extract(e.as_any())) {
                     found = Some(hit);
                 }
             });

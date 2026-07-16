@@ -47,6 +47,12 @@ impl Extension for ParaP2pExtension {
     fn types(&self) -> &'static [ExtType] {
         PARA_P2P_TYPES
     }
+    /// The `ViewSourceExtract` capability the reactive engine's `view.expose` resolves a
+    /// `SyncedSignal` through (see [`synced::SYNCED_CAPABILITIES`]) — declared on the unit so it is
+    /// scoped to whatever registry this extension is assembled into.
+    fn capabilities(&self) -> &'static [noeta_native::registry::ExtCapability] {
+        synced::SYNCED_CAPABILITIES
+    }
 }
 
 /// The fixed native-extension export convention (package-manager Phase 3): the package's native

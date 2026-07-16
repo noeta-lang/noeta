@@ -44,8 +44,17 @@ pub enum MapKey {
 /// The **field-name registry** for packed keys (P-PKEY): `type name → field names`, registered
 /// once per key-capable type by each backend as it loads/declares the type, and read only when a
 /// packed key must *render* (display, JSON) — key construction, hashing, and comparison never
-/// touch it. Process-global like the shape interner; both backends register from the same
-/// declarations, so renders agree. An unregistered type (defensive) renders positionally.
+/// touch it. An unregistered type (defensive) renders positionally.
+///
+/// **Deliberately process-global** — like the shape interner, and *outside* the per-session
+/// `Registry` story (audit-2 Finding 12, disposition recorded here): it caches display-only
+/// derived data keyed by type name, both backends register from the same declarations so renders
+/// agree, and first-registration-wins is idempotent for a given program. The known limit is
+/// cosmetic and accepted: two *sessions* in one process whose `@packed` types share a short name
+/// (or a hot-swap that renames fields) get the first registration's field names in *rendered*
+/// output only — never in key identity, hashing, or comparison, which carry the names nowhere.
+/// Move it onto the session/VM when a real per-session need materializes (tracked in
+/// `plans/deferred.md`, "Instance-registry residue").
 pub mod packed_names {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
