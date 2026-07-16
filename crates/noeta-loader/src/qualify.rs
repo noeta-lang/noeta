@@ -267,14 +267,19 @@ fn q_variant(variant: &mut VariantDecl, visit: &mut NameVisitor) {
 }
 
 fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
-    // The trait name is a built-in capability, not a namespaced user type — left as-is.
+    // The trait name qualifies iff it is a user-defined trait (L1) — `visit` only rewrites names in
+    // the module map (local/imported user traits); a built-in trait (`Add`, `Clone`) is absent from
+    // it and left as-is.
+    visit(&mut b.trait_name);
     for m in &mut b.methods {
         q_fn(m, visit);
     }
 }
 
 fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
-    // The `impl Trait for Target` target names a user type in this module → visit it.
+    // The `impl Trait for Target` target names a user type in this module → visit it. The trait name
+    // qualifies iff it is a user trait (built-ins are absent from the module map).
+    visit(&mut decl.trait_name);
     visit(&mut decl.target);
     for m in &mut decl.methods {
         q_fn(m, visit);

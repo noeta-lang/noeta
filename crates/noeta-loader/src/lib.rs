@@ -1071,6 +1071,7 @@ fn decl_is_public(stmt: &Stmt) -> bool {
         Stmt::Struct(d) => d.is_public,
         Stmt::Enum(d) => d.is_public,
         Stmt::Fn(d) => d.is_public,
+        Stmt::Trait(d) => d.is_public,
         _ => false,
     }
 }
@@ -1083,6 +1084,9 @@ fn decl_name(stmt: &Stmt) -> Option<&str> {
         Stmt::Struct(decl) => Some(&decl.name),
         Stmt::Enum(decl) => Some(&decl.name),
         Stmt::Fn(decl) => Some(&decl.name),
+        // A user-defined trait is an importable name (L1) — `use pkg.mod.{MyTrait}` brings it into
+        // scope for `dyn MyTrait`, a `<T: MyTrait>` bound, or an `impl MyTrait for T`.
+        Stmt::Trait(decl) => Some(&decl.name),
         _ => None,
     }
 }

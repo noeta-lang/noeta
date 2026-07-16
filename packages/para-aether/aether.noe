@@ -139,15 +139,68 @@ fn run_before(pipeline: List<dyn Middleware>, req: Request): ?Response {
     return none
 }
 
+// --- Configuration registry. ------------------------------------------------------------------
+//
+// An app-wide key/value store (`std.cell`-style shared state via the class's reference identity):
+// service providers write it during setup, handlers read it. Values are strings — the caller parses
+// richer shapes (a port to `int`, a JSON blob via `json.decode`).
+
+pub class Config {
+    mut values: Map<string, string>
+
+    fn new(): Config {
+        return Config { values: {} }
+    }
+
+    fn set(key: string, value: string): void {
+        self.values = self.values.set(key, value)
+    }
+
+    fn get(key: string, fallback: string): string {
+        return self.values.get_or(key, fallback)
+    }
+
+    fn has(key: string): bool {
+        return self.values.has(key)
+    }
+}
+
+// --- Service providers. -----------------------------------------------------------------------
+//
+// A service provider modularizes application setup: its `register(app)` wires controllers, config,
+// and middleware into the app. Registering a provider runs its `register` immediately (Laravel's
+// deferred `boot` phase awaits trait default methods — UT5). Providers are `dyn ServiceProvider`
+// (L1), so an app composes features by registering a list of them.
+
+pub trait ServiceProvider {
+    fn register(app: App): void
+}
+
 // --- The application. -------------------------------------------------------------------------
 
 pub class App {
     mut routes: List<Route>
     mut controllers: Map<string, dyn>
     mut middleware: List<dyn Middleware>
+    config: Config
 
     fn new(): App {
-        return App { routes: [], controllers: {}, middleware: [] }
+        return App { routes: [], controllers: {}, middleware: [], config: Config.new() }
+    }
+
+    // Run a service provider's setup against this app (register controllers, config, middleware).
+    fn provider(p: dyn ServiceProvider): void {
+        p.register(self)
+    }
+
+    // Set an app configuration value (providers write it during setup).
+    fn configure(key: string, value: string): void {
+        self.config.set(key, value)
+    }
+
+    // Read an app configuration value, or `fallback` if unset.
+    fn setting(key: string, fallback: string): string {
+        return self.config.get(key, fallback)
     }
 
     // Add a middleware to the pipeline (run in registration order before every handler).
