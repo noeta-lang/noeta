@@ -57,10 +57,6 @@ pub(crate) fn cmd_fmt(
 
     let mut failed = false; // a parse or IO error on any file
     let mut would_change = false; // `--check`: some file is not already formatted
-    // Per-directory text-tier sets (text-tiers arc): a tier declared in a sibling file or a
-    // dependency package must keep this file's `@<name> { … }` bodies verbatim.
-    let mut tier_sets: std::collections::HashMap<PathBuf, noeta_lexer::TextTiers> =
-        std::collections::HashMap::new();
 
     // Extension-registered body formatters, keyed by body **language** (e.g. std's `"json"`). A tier
     // — native or program-declared — whose `text:` language is here has its body reflowed; every
@@ -75,8 +71,14 @@ pub(crate) fn cmd_fmt(
         lang_formatters.insert(language, formatter);
         sub_formatters.insert(language.to_string(), formatter);
     }
-    let mut formatter_sets: std::collections::HashMap<PathBuf, noeta_fmt::TierBodyFormatters> =
-        std::collections::HashMap::new();
+    // Per-directory tier discovery (one scan per directory, audit-4 F10): the text-tier set —
+    // a tier declared in a sibling file or a dependency package must keep this file's
+    // `@<name> { … }` bodies verbatim (text-tiers arc) — and the tier → body-formatter map,
+    // produced together by `fmt_dir_tiers`.
+    let mut dir_tiers: std::collections::HashMap<
+        PathBuf,
+        (noeta_lexer::TextTiers, noeta_fmt::TierBodyFormatters),
+    > = std::collections::HashMap::new();
 
     for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -95,13 +97,9 @@ pub(crate) fn cmd_fmt(
                 continue;
             }
         };
-        let text_tiers = tier_sets
+        let (text_tiers, tier_formatters) = dir_tiers
             .entry(dir.to_path_buf())
-            .or_insert_with(|| fmt_text_tiers(dir, file))
-            .clone();
-        let tier_formatters = formatter_sets
-            .entry(dir.to_path_buf())
-            .or_insert_with(|| fmt_tier_formatters(dir, file, &lang_formatters))
+            .or_insert_with(|| fmt_dir_tiers(dir, file, &lang_formatters))
             .clone();
 
         match noeta_fmt::format_source_in_with_formatters(
@@ -139,63 +137,35 @@ pub(crate) fn cmd_fmt(
     }
 }
 
-/// The project-wide text-tier set for formatting files in `dir` (text-tiers arc): the union of
-/// `@tier(…, text: "…")` declarations across the directory's sibling `.noe` files and — when the
-/// entry's package graph resolves (a manifest with dependencies) — every dependency module.
-/// Mirrors the loader's program-wide lex, so `noeta fmt` and `noeta run` agree on which bodies
-/// are verbatim. A standalone file with no siblings or manifest gets the default set (same-file
-/// declarations need no help — the lexer discovers those itself).
-pub(crate) fn fmt_text_tiers(
-    dir: &std::path::Path,
-    entry: &std::path::Path,
-) -> noeta_lexer::TextTiers {
-    let mut names: Vec<String> = Vec::new();
-    let mut scan = |name: &str, text: &str| {
-        let source = Source::new(SourceId(0), name, text);
-        names.extend(noeta_lexer::lex(&source).text_tier_decls);
-    };
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "noe")
-                && let Ok(text) = std::fs::read_to_string(&path)
-            {
-                scan(&path.to_string_lossy(), &text);
-            }
-        }
-    }
-    // A query resolve: `noeta fmt` scanning dependency modules for text tiers must not refresh
-    // `noeta.lock` as a side effect of formatting.
-    if let Ok(graph) = graph::resolve_graph_query(entry) {
-        for dep in &graph.packages {
-            for module in &dep.modules {
-                scan(&module.name, &module.text);
-            }
-        }
-    }
-    // Plus the installed extensions' verbatim-body tiers (no `.noe` file declares a native one).
-    names.extend(
-        noeta_stdlib::registry::ext_verbatim_tier_names()
-            .into_iter()
-            .map(str::to_string),
-    );
-    noeta_lexer::TextTiers::with(names)
-}
-
-/// The `tier name → body formatter` map for formatting files in `dir` (extension-driven tier-body
-/// formatting). A tier — a program `@tier(name, …, text: "lang")` in the directory's siblings or a
-/// dependency module, or an installed native `ExtTier { name, text }` — is mapped to the formatter
-/// registered for its `text:` language, if any. So `@html` (a program tier declaring `text: "html"`)
-/// gets a first-party HTML formatter, while its reactive handler stays in Noeta. Mirrors
-/// [`fmt_text_tiers`]'s scan so the same tiers are seen.
-pub(crate) fn fmt_tier_formatters(
+/// The per-directory tier discovery for formatting, in **one scan** (audit-4 F10): each sibling
+/// `.noe` file — and, when the entry's package graph resolves (a manifest with dependencies),
+/// each dependency module — is read once, producing both artifacts together:
+///
+/// - the project-wide **text-tier set** (text-tiers arc): the union of `@tier(…, text:/expr:)`
+///   declarations, whose `@<name> { … }` bodies must stay verbatim. Mirrors the loader's
+///   program-wide lex, so `noeta fmt` and `noeta run` agree on which bodies are verbatim. A
+///   standalone file with no siblings or manifest gets the default set (same-file declarations
+///   need no help — the lexer discovers those itself).
+/// - the **`tier name → body formatter` map** (extension-driven tier-body formatting): a tier —
+///   a program `@tier(name, …, text: "lang")`, or an installed native `ExtTier { name, text }` —
+///   mapped to the formatter registered for its `text:` language, if any. So `@html` (a program
+///   tier declaring `text: "html"`) gets a first-party HTML formatter, while its reactive
+///   handler stays in Noeta.
+///
+/// These were two mirrored scans, each re-reading the directory and each resolving the
+/// dependency graph, held identical by a comment; one scan resolves the graph once and cannot
+/// drift. (Each file still lexes twice — `text_tier_decls` and `declared_tier_languages` are
+/// separate lexer entry points; folding them needs a lexer seam, a follow-up.)
+fn fmt_dir_tiers(
     dir: &std::path::Path,
     entry: &std::path::Path,
     lang_formatters: &std::collections::HashMap<&'static str, noeta_fmt::TierBodyFormatter>,
-) -> noeta_fmt::TierBodyFormatters {
+) -> (noeta_lexer::TextTiers, noeta_fmt::TierBodyFormatters) {
+    let mut names: Vec<String> = Vec::new();
     let mut map = noeta_fmt::TierBodyFormatters::new();
     let mut scan = |name: &str, text: &str| {
         let source = Source::new(SourceId(0), name, text);
+        names.extend(noeta_lexer::lex(&source).text_tier_decls);
         for (tier, lang) in noeta_lexer::declared_tier_languages(&source) {
             if let Some(&f) = lang_formatters.get(lang.as_str()) {
                 map.insert(tier, f);
@@ -221,7 +191,13 @@ pub(crate) fn fmt_tier_formatters(
             }
         }
     }
-    // Native tiers: an installed `ExtTier { name, text }` whose language has a registered formatter.
+    // Plus the installed extensions' verbatim-body tiers (no `.noe` file declares a native one),
+    // and any native `ExtTier { name, text }` whose language has a registered formatter.
+    names.extend(
+        noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string),
+    );
     for t in noeta_stdlib::registry::ext_tiers() {
         if let Some(lang) = t.text
             && let Some(&f) = lang_formatters.get(lang)
@@ -229,7 +205,7 @@ pub(crate) fn fmt_tier_formatters(
             map.insert(t.name.to_string(), f);
         }
     }
-    map
+    (noeta_lexer::TextTiers::with(names), map)
 }
 
 /// Recursively collect every `.noe` file under `dir` (skipping dot-directories like `.git`).
