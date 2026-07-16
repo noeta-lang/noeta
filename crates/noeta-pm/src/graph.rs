@@ -78,6 +78,11 @@ pub struct NativeCrate {
     pub identity: String,
     /// The crate directory, absolute (package root + the manifest's relative `native` dir).
     pub crate_dir: PathBuf,
+    /// The owning package's materialized-tree content hash (the same hash the lockfile pins).
+    /// Folded into the compose cache key: a **path** dependency's `crate_dir` never changes on
+    /// edit (unlike a store-materialized git/registry dep, whose dir is per-SHA), so without the
+    /// content hash an edit to the crate's source would keep serving the stale composed binary.
+    pub content_hash: String,
 }
 
 /// A resolved package pinned for the lockfile (package-manager P2.4c).
@@ -1221,6 +1226,7 @@ fn assemble(
             native_crates.push(NativeCrate {
                 identity: identity.clone(),
                 crate_dir: inst.dir.join(native),
+                content_hash: inst.content_hash.clone(),
             });
             // Commands only exist inside a native package; grant its commands only if command-trusted.
             if trusted_commands.contains(identity) {

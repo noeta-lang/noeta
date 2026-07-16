@@ -73,3 +73,8 @@ pub use git::{Authorship, authorship, commit_web_url, repo_web_url};
 /// Resolve a git `url`@`tag` to its current commit SHA (package-manager Phase 4, S2) — the one git
 /// operation `noeta publish` needs, to pin the SHA into the registry index at publish time.
 pub use git::resolve_tag_sha;
+
+/// The content hash of a source tree — the same hash the resolver pins into the lockfile and the
+/// compose key folds in. Re-exported for the one out-of-graph consumer (`noeta publish`'s API-docs
+/// build hands the composer a crate dir directly, with no resolved graph to copy the hash from).
+pub use store::hash_tree;

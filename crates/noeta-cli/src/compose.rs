@@ -156,6 +156,9 @@ pub fn package_api_docs(identity: &str, crate_dir: &Path, root_ns: &str) -> Resu
     let nc = NativeCrate {
         identity: identity.to_string(),
         crate_dir: crate_dir.to_path_buf(),
+        // No resolved graph here (publish hands us the crate dir directly) — hash it ourselves so
+        // the publish quality gate also recomposes on source edits.
+        content_hash: noeta_pm::hash_tree(crate_dir).unwrap_or_default(),
     };
     // A doc-generation query exposes no CLI of its own, so command-trust is irrelevant — `&[]`.
     let binary = compose_binary(&[nc], &[], ShimKind::Toolchain)?;
@@ -269,6 +272,9 @@ struct Entry {
     identity: String,
     /// The crate dir (absolute).
     dir: PathBuf,
+    /// The owning package's tree content hash (from the resolved graph) — folded into the compose
+    /// key so an edit to a **path** dependency's source recomposes (its `dir` never changes).
+    content_hash: String,
     /// The crate's cargo `[package] name` — the dependency line's `package = …`.
     cargo_name: String,
     /// `cargo_name` as a Rust identifier (`-` → `_`) — how `main.rs` references the crate.
@@ -310,6 +316,7 @@ fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
         entries.push(Entry {
             identity: nc.identity.clone(),
             dir: nc.crate_dir.clone(),
+            content_hash: nc.content_hash.clone(),
             cargo_name,
             ident,
             dev_features,
@@ -372,11 +379,12 @@ fn toolchain_source() -> Result<ToolchainSource, String> {
 }
 
 /// The composition's content address: the running binary's build identity (any toolchain rebuild
-/// recomposes), the toolchain-source form, and each entry crate's identity + dir. The entry
-/// crates' *content* is covered by re-resolution: a path dep's tree hash changes on edit and the
-/// resolve step feeds fresh dirs — but the dir alone doesn't see edits, so the package tree hash
-/// is folded in by the caller passing entries derived from the freshly-hashed graph. To keep the
-/// key honest about content, each entry dir's own `Cargo.toml` bytes are folded in as well.
+/// recomposes), the toolchain-source form, and each entry crate's identity + dir + **package tree
+/// content hash**. The hash is what makes the key honest for a **path** dependency: its `dir`
+/// never changes on edit (unlike a store-materialized git/registry dep, whose dir is per-SHA), so
+/// without the hash an edited native crate kept serving the stale composed binary. The entry
+/// dir's own `Cargo.toml` bytes are folded in as well (feature/dep changes recompose even when a
+/// caller passes a hashless entry).
 fn compose_key(
     entries: &[Entry],
     toolchain: &ToolchainSource,
@@ -415,6 +423,8 @@ fn compose_key(
     for e in entries {
         h.update(&e.identity);
         h.update(e.dir.display().to_string());
+        h.update(b"tree:");
+        h.update(&e.content_hash);
         h.update(std::fs::read(e.dir.join("Cargo.toml")).unwrap_or_default());
     }
     hex(&h.finalize())
@@ -903,10 +913,30 @@ fn exec(binary: &Path) -> Result<Never, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn compose_key_changes_when_the_crate_source_changes() {
+        // The stale-composed-binary regression: a PATH dependency's dir never changes on edit, so
+        // the key must fold in the package tree's content hash — two compositions identical in
+        // everything but the hash cache to different binaries.
+        let toolchain = ToolchainSource::GitTag {
+            repo: "https://example.com/noeta".to_string(),
+            tag: "v0.1.0".to_string(),
+        };
+        let before = compose_key(&entries(), &toolchain, &[], ShimKind::Toolchain, &[]);
+        let mut edited = entries();
+        edited[0].content_hash = "editedhash".to_string();
+        let after = compose_key(&edited, &toolchain, &[], ShimKind::Toolchain, &[]);
+        assert_ne!(
+            before, after,
+            "an edit to a path-dep native crate's source must recompose"
+        );
+    }
+
     fn entries() -> Vec<Entry> {
         vec![Entry {
             identity: "acme/imgfx".to_string(),
             dir: PathBuf::from("/store/acme_imgfx/native"),
+            content_hash: "testhash".to_string(),
             cargo_name: "imgfx-native".to_string(),
             ident: "imgfx_native".to_string(),
             dev_features: vec![],
@@ -919,6 +949,7 @@ mod tests {
         vec![Entry {
             identity: "acme/imgfx".to_string(),
             dir: PathBuf::from("/store/acme_imgfx/native"),
+            content_hash: "testhash".to_string(),
             cargo_name: "imgfx-native".to_string(),
             ident: "imgfx_native".to_string(),
             dev_features: vec!["fmt".to_string()],
@@ -931,6 +962,7 @@ mod tests {
         vec![Entry {
             identity: "acme/imgfx".to_string(),
             dir: PathBuf::from("/store/acme_imgfx/native"),
+            content_hash: "testhash".to_string(),
             cargo_name: "imgfx-native".to_string(),
             ident: "imgfx_native".to_string(),
             dev_features: vec![],
