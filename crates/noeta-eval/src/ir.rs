@@ -1,7 +1,8 @@
 //! The **Core-IR tree-interpreter** — the reference evaluation backend. It walks the lowered
 //! [`noeta_ir`] (not the surface AST: the original AST walker was retired once it was neither a
 //! production path nor the differential oracle — the oracle is this interpreter vs. the bytecode
-//! VM), and is the path `lang run` and the conformance reference both execute.
+//! VM), and is what the conformance reference executes. Production (`noeta run`) is the VM;
+//! nothing in the shipped toolchain runs this path.
 //!
 //! # The shared machinery
 //!
@@ -17,10 +18,11 @@
 //!
 //! Source variables live in [`Scope`] exactly as before (so captures, reassignment, and
 //! `destroy_globals` are unchanged). ANF temporaries live in a [`Frame`] — a flat per-
-//! activation store that drops at activation end. Because destructors fire **only** at
-//! global teardown (never on a local or temporary drop), a temporary's lifetime is invisible
-//! to observable behavior, so the `Frame` model needs no last-use analysis to stay faithful
-//! in this phase.
+//! activation store that drops at activation end. Last-use destruction is real (the RC
+//! migration's whole point): the interpreter honors the IR's inserted `drop`s, so destructors
+//! fire at last use exactly as the VM's do — the differential asserts the two agree. A
+//! temporary's `Frame` slot needs no separate last-use analysis because the drops are already
+//! explicit in the lowered IR it walks.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -32,7 +34,7 @@ use noeta_span::Span;
 
 use crate::{
     ChannelId, Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, IterState, ListRepr,
-    PackedList, RunResult, ScopeId, TaskId, TreeWalkBackend, TypeDef, Unwind, Value, VariantInfo,
+    PackedList, RunResult, ScopeId, TaskId, IrRefBackend, TypeDef, Unwind, Value, VariantInfo,
     compare_primitive,
 };
 
@@ -91,7 +93,7 @@ impl Frame {
     }
 }
 
-impl TreeWalkBackend {
+impl IrRefBackend {
     /// Run a program through the Core-IR interpreter. `ast` supplies the reflection manifest
     /// (built identically to the AST walker, so attributes/roles/type facts match);
     /// `ir` is the lowered program to execute; `type_of_sites` is the checker's `type_of` map.
@@ -106,7 +108,7 @@ impl TreeWalkBackend {
         Interpreter::new().run_ir(ast, ir, type_of_sites)
     }
 
-    /// As [`TreeWalkBackend::run_ir`], plus the abort traceback (empty for a clean run) — the
+    /// As [`IrRefBackend::run_ir`], plus the abort traceback (empty for a clean run) — the
     /// oracle's twin of the VM's traced entries, letting the two backends' tracebacks be compared.
     pub fn run_ir_traced(
         &self,
@@ -117,11 +119,11 @@ impl TreeWalkBackend {
         Interpreter::new().run_ir_traced(ast, ir, type_of_sites)
     }
 
-    /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`noeta_stdlib::Host`]
-    /// (the real host) instead of the deterministic sandbox. `lang run` uses this so its
-    /// user-facing execution goes through the same Core-IR reference (with last-use destruction)
-    /// the conformance oracle pins, rather than the superseded AST-walk path (Phase 7 retired the
-    /// AST-walk host entry points; this is the sole host-mode runner).
+    /// As [`IrRefBackend::run_ir`], but against a caller-provided [`noeta_stdlib::Host`]
+    /// (the real host) instead of the deterministic sandbox — the host-mode runner the
+    /// conformance reference drives for host-dependent corpus programs. (Historical note: `run`
+    /// executed through this during the RC migration, before the VM became the sole production
+    /// backend; only the conformance harness calls it now.)
     pub fn run_ir_with_host(
         &self,
         ast: &Program,
@@ -132,7 +134,7 @@ impl TreeWalkBackend {
         Interpreter::with_host(host).run_ir(ast, ir, type_of_sites)
     }
 
-    /// As [`TreeWalkBackend::run_ir_with_host`], but also swapping the async executor (Track A.4).
+    /// As [`IrRefBackend::run_ir_with_host`], but also swapping the async executor (Track A.4).
     /// The CLI pairs a real host with a real wall-clock executor so `sleep`/`concurrent` run against
     /// real time; conformance never calls this (it keeps the default [`noeta_stdlib::SandboxExecutor`]),
     /// so this path is out-of-oracle.

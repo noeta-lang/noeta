@@ -8,7 +8,7 @@
 //! rather than cascading downstream noise.
 
 use noeta_diagnostics::render;
-use noeta_eval::{Backend, TreeWalkBackend};
+use noeta_eval::{Backend, IrRefBackend};
 use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId};
@@ -31,7 +31,7 @@ fn render_first_failing_stage(src: &str) -> String {
             .map(|d| render(&source, d))
             .collect();
     }
-    TreeWalkBackend::new()
+    IrRefBackend::new()
         .run(&parsed.program)
         .diagnostics
         .iter()

@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 
 use noeta_ast::Pretty;
-use noeta_eval::{Backend, RunResult, TreeWalkBackend};
+use noeta_eval::{Backend, RunResult, IrRefBackend};
 use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId};
@@ -29,7 +29,7 @@ fn run_pipeline(src: &str) -> RunResult {
     let source = Source::new(SourceId::FIRST, "prop.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
-    TreeWalkBackend::new().run(&parsed.program)
+    IrRefBackend::new().run(&parsed.program)
 }
 
 /// The pretty-printed AST of a source string (the snapshot form).
@@ -140,7 +140,7 @@ proptest! {
             parsed.diagnostics
         );
         prop_assert_eq!(pretty_of(&src), pretty_of(&src));
-        let result = TreeWalkBackend::new().run(&parsed.program);
+        let result = IrRefBackend::new().run(&parsed.program);
         prop_assert_eq!(result.exit_code, 0);
     }
 }

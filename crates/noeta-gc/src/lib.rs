@@ -3,7 +3,7 @@
 //! M1's GC is **refcount + a cycle collector** (architecture §5). This crate owns the *policy*
 //! — when to retain and when to release-and-free, and the trial-deletion cycle collector —
 //! while the unsafe refcount/graph primitives live in `noeta-value`'s heap module. Keeping
-//! policy here (safe) and mechanism there (unsafe, `miri`-gated) lets the collector grow
+//! policy here (safe) and mechanism there (unsafe, miri-covered under `cargo miri test`) lets the collector grow
 //! without touching the value representation.
 //!
 //! The acyclic floor: `retain` bumps the count, `release` drops it and frees at zero (running

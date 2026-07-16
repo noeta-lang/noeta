@@ -1,12 +1,15 @@
-//! The evaluator: an AST → a [`RunResult`].
+//! The **reference evaluation backend**: the Core-IR interpreter plus the shared execution
+//! engine it drives ([`Interpreter`] — builtins, method dispatch, native marshalling,
+//! tasks/channels — over an `Rc`-based value model and lexical [`Scope`]s).
 //!
-//! Crucially, evaluation runs behind the [`Backend`] trait and returns a *structured*
-//! [`RunResult`] — it never writes to `stdout` or calls `process::exit` directly. That
-//! is what makes the M0 tree-walker a clean differential oracle: in M1 the bytecode VM
-//! becomes a second [`Backend`] and the two are run against the same programs and their
-//! `RunResult`s compared. Build the seam now; retrofitting it later is the trap.
-//!
-//! M0 scope grows one vertical slice at a time.
+//! **Role: differential oracle, test-only.** This crate is consumed ONLY by the dev-only
+//! `noeta-conformance` harness (enforced by the dependency graph — `noeta-cli` does not link it;
+//! `noeta run` executes on the bytecode VM via `noeta-runner`). It interprets the same
+//! RC-annotated Core IR the VM compiles from, behind the [`Backend`] trait, returning a
+//! *structured* [`RunResult`] — never writing stdout or exiting — so the two backends' results
+//! can be asserted byte-identical. The M0 AST tree-walker this crate began as was retired in the
+//! memory-management migration (it fired destructors only at teardown, so it could not reproduce
+//! last-use destruction); only the crate's *name history* survives in old comments.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -35,34 +38,41 @@ use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
 // `noeta_eval::{Backend, RunResult}` users keep working.
 pub use noeta_backend::{Backend, RunResult};
 
-/// The M0 tree-walking interpreter, exposed as a [`Backend`].
-/// (The id-source seed field left with `IdGen` — sequential ids are host-owned now, so the
-/// deterministic counter is the sandbox host's, not this backend's.)
+/// The Core-IR **reference interpreter**, exposed as a [`Backend`] — the differential oracle's
+/// non-VM half. (Named `IrRefBackend` in its M0 life; the AST walk was retired in the RC
+/// migration and the old name kept misleading readers into treating this as a production path,
+/// so it now says what it is. A deprecated alias keeps the old spelling compiling.)
 #[derive(Debug, Clone)]
-pub struct TreeWalkBackend {}
+pub struct IrRefBackend {}
 
-impl TreeWalkBackend {
-    pub fn new() -> TreeWalkBackend {
-        TreeWalkBackend {}
+/// The pre-RC-migration name of [`IrRefBackend`], kept as a compiling alias.
+#[deprecated(
+    note = "renamed to IrRefBackend: the AST tree-walk was retired in the RC migration; \
+            this backend interprets the Core IR"
+)]
+pub type TreeWalkBackend = IrRefBackend;
+
+impl IrRefBackend {
+    pub fn new() -> IrRefBackend {
+        IrRefBackend {}
     }
 
     // The AST-walk entry points (`run_with_host`, `run_with_sites`, `run_with_host_sites`) were
-    // retired in migration Phase 7: `lang run` executes on the Core IR via
-    // [`TreeWalkBackend::run_ir_with_host`], and the reference oracle lowers unconditionally, so
-    // nothing drove the AST-walk host/sites wrappers any longer. The plain [`Backend::run`] path
-    // remains for the perf benches and property tests (an AST-walk baseline, not an oracle), and
+    // retired in migration Phase 7; production execution is the bytecode VM (`noeta-runner`).
+    // The plain [`Backend::run`] path remains for the perf benches and property tests (it lowers
+    // to Core IR like everything else — there is no AST walk left), and
     // `Interpreter::run_with_sites` stays as the shared executor the IR interpreter reuses.
 }
 
-impl Default for TreeWalkBackend {
-    fn default() -> TreeWalkBackend {
-        TreeWalkBackend::new()
+impl Default for IrRefBackend {
+    fn default() -> IrRefBackend {
+        IrRefBackend::new()
     }
 }
 
-impl Backend for TreeWalkBackend {
-    /// Execute a program through the canonical **Core-IR interpreter** — the same path `lang run`
-    /// and the conformance reference take. (The AST tree-walker this crate began as was retired:
+impl Backend for IrRefBackend {
+    /// Execute a program through the canonical **Core-IR interpreter** — the same lowering the
+    /// conformance reference runs. (The AST tree-walker this crate began as was retired:
     /// it was neither a production path nor the differential oracle — the oracle is VM-vs-IR — so it
     /// was pure duplication. Lowering is total over the parsed language, so this never fails.)
     fn run(&self, program: &Program) -> RunResult {
@@ -111,7 +121,7 @@ fn relevance_of(r: &noeta_check::DestructorRelevance) -> noeta_ir_passes::Releva
     }
 }
 
-/// A persistent evaluation session — the REPL backend. Unlike [`TreeWalkBackend::run`],
+/// A persistent evaluation session — the REPL backend. Unlike [`IrRefBackend::run`],
 /// which builds a fresh interpreter per program (the clean slate the differential oracle
 /// needs), a session keeps its scope and id counter alive across [`Session::eval`] calls,
 /// so bindings, `fn`/`type`/`enum`/`class` declarations, and `next_id()` continuity persist
@@ -5238,7 +5248,7 @@ mod tests {
     use noeta_span::{Source, SourceId};
 
     fn run(text: &str) -> RunResult {
-        TreeWalkBackend::new().run(&program_of(text))
+        IrRefBackend::new().run(&program_of(text))
     }
 
     #[test]

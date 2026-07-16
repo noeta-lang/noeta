@@ -19,8 +19,9 @@ noeta-reactive = { workspace = true }
 noeta-reactive-abi = { workspace = true }
 # The real p2panda transport (para-namespace F2b). Optional and behind the `ring-p2p` ring: when a
 # host permits real networking (`RealHost`) this crate owns a live p2panda node; off ⇒ the extension
-# uses only the dep-free loopback broker, so a loopback/wasm build never links iroh/QUIC. Needs the
-# `iroh-gossip` git `[patch]` in the workspace Cargo.toml (present).
+# uses only the dep-free loopback broker, so a loopback/wasm build never links iroh/QUIC.
+# (Historical: this once needed an `iroh-gossip` git `[patch]` in the workspace Cargo.toml; the
+# patch is gone — iroh-gossip resolves from crates.io — so don't go looking for it.)
 noeta-para-p2p-net = { workspace = true, optional = true }
 
 [features]

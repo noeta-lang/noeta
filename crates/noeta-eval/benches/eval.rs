@@ -1,4 +1,4 @@
-//! Criterion benchmarks over the **Core-IR interpreter** (`TreeWalkBackend::run`, the reference
+//! Criterion benchmarks over the **Core-IR interpreter** (`IrRefBackend::run`, the reference
 //! eval backend that `lang run` and the conformance oracle execute) hot paths.
 //!
 //! The `accumulate` group is **parameterized over input size** so an *asymptotic* change is
@@ -11,7 +11,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use noeta_ast::Program;
 use noeta_backend::Backend;
-use noeta_eval::TreeWalkBackend;
+use noeta_eval::IrRefBackend;
 use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId};
@@ -110,7 +110,7 @@ fn eval_hot_paths(c: &mut Criterion) {
     let mut group = c.benchmark_group("eval");
     let dispatch = program(&dispatch_src());
     group.bench_function("dispatch_fib", |b| {
-        b.iter(|| black_box(TreeWalkBackend::new().run(black_box(&dispatch))));
+        b.iter(|| black_box(IrRefBackend::new().run(black_box(&dispatch))));
     });
     group.finish();
 
@@ -118,7 +118,7 @@ fn eval_hot_paths(c: &mut Criterion) {
     for &n in ACC_SIZES {
         let prog = program(&accumulate_src(n));
         acc.bench_with_input(BenchmarkId::from_parameter(n), &prog, |b, prog| {
-            b.iter(|| black_box(TreeWalkBackend::new().run(black_box(prog))));
+            b.iter(|| black_box(IrRefBackend::new().run(black_box(prog))));
         });
     }
     acc.finish();
@@ -127,7 +127,7 @@ fn eval_hot_paths(c: &mut Criterion) {
     for &n in STRUCT_SIZES {
         let prog = program(&struct_fields_src(n));
         sf.bench_with_input(BenchmarkId::from_parameter(n), &prog, |b, prog| {
-            b.iter(|| black_box(TreeWalkBackend::new().run(black_box(prog))));
+            b.iter(|| black_box(IrRefBackend::new().run(black_box(prog))));
         });
     }
     sf.finish();
@@ -136,11 +136,11 @@ fn eval_hot_paths(c: &mut Criterion) {
     for &n in PACKED_SIZES {
         let packed = program(&packed_list_src(n, true));
         pl.bench_with_input(BenchmarkId::new("packed", n), &packed, |b, prog| {
-            b.iter(|| black_box(TreeWalkBackend::new().run(black_box(prog))));
+            b.iter(|| black_box(IrRefBackend::new().run(black_box(prog))));
         });
         let boxed = program(&packed_list_src(n, false));
         pl.bench_with_input(BenchmarkId::new("boxed", n), &boxed, |b, prog| {
-            b.iter(|| black_box(TreeWalkBackend::new().run(black_box(prog))));
+            b.iter(|| black_box(IrRefBackend::new().run(black_box(prog))));
         });
     }
     pl.finish();

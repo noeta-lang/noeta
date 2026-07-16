@@ -952,9 +952,11 @@ impl Jit<JITModule> {
         self.breakdown.finalize_ns += finalize_start.elapsed().as_nanos() as u64;
         self.breakdown.bodies += 1;
         let code = self.module.get_finalized_function(func_id);
-        // SAFETY: `code` is a finalized function whose Cranelift signature is exactly the
-        // `extern "C" fn(ptr, ptr, usize) -> u32` this transmutes to, and it stays valid for as long
-        // as `self.module` (which owns the code page) lives.
+        // SAFETY: `code` is a finalized function whose Cranelift signature is built (in
+        // `from_module`) to exactly the 7-parameter `noeta_jit_abi::CompiledFn` ABI —
+        // `unsafe extern "C" fn(vm, regs, base, globals, frames, regs_vec, …) -> i64` — that this
+        // transmutes to, and it stays valid for as long as `self.module` (which owns the code
+        // page) lives.
         Ok(unsafe { std::mem::transmute::<*const u8, CompiledFn>(code) })
     }
 }

@@ -17,7 +17,7 @@
 
 use noeta_alloc_probe::{TrackingAlloc, peak_during};
 use noeta_bytecode::Module;
-use noeta_eval::TreeWalkBackend;
+use noeta_eval::IrRefBackend;
 use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId};
@@ -109,7 +109,7 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&relevance));
     let ir = noeta_ir_passes::thread_reuse(&ir);
     let sites = checked.sites.type_of_sites;
-    move || TreeWalkBackend::new().run_ir(&program, &ir, sites)
+    move || IrRefBackend::new().run_ir(&program, &ir, sites)
 }
 
 /// Build an `n`-element packed/boxed `Vec3` list, run it through a flat-preserving **producer**

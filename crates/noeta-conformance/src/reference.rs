@@ -20,7 +20,7 @@
 
 use noeta_ast::Program;
 use noeta_backend::RunResult;
-use noeta_eval::TreeWalkBackend;
+use noeta_eval::IrRefBackend;
 
 /// Run `program` through the Core-IR interpreter on the checker's [`Sites`] bundle, lowering it
 /// and inserting the precise-RC drops (with destructor relevance) exactly as the bytecode pipeline
@@ -70,7 +70,7 @@ pub fn reference_run_traced(
     // Thread reuse tokens identically to the bytecode pipeline so the reference and the VM consume
     // the same annotated IR (Phase 5).
     let ir = noeta_ir_passes::thread_reuse(&ir);
-    TreeWalkBackend::new().run_ir_traced(program, &ir, sites.type_of_sites)
+    IrRefBackend::new().run_ir_traced(program, &ir, sites.type_of_sites)
 }
 
 /// As [`reference_run`], but against a caller-provided [`noeta_stdlib::Host`] — the telemetry
@@ -104,7 +104,7 @@ pub fn reference_run_with_host(
     );
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&to_relevance(&sites.destructor_relevance)));
     let ir = noeta_ir_passes::thread_reuse(&ir);
-    TreeWalkBackend::new().run_ir_with_host(program, &ir, host, sites.type_of_sites)
+    IrRefBackend::new().run_ir_with_host(program, &ir, host, sites.type_of_sites)
 }
 
 /// The drop pass's relevance form, copied from the checker's (identical sets). Mirrors the

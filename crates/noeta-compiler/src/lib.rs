@@ -8,43 +8,39 @@
 //! becomes an `Op::Binary`, a constructor an `Op::MakeStruct`/`MakeEnum`, an IR `if` a branch —
 //! rather than re-deriving order by recursively flattening nested expressions. Type
 //! registration (shapes, the method/destructor proto table) still reads the surface declarations
-//! the IR carries verbatim. Register allocation stays monotonic this phase; the reuse-aware
-//! allocator and precise drops are the next phase's IR passes (which also re-establish the
-//! record-update/COW in-place reuse this phase drops — see the migration README).
+//! the IR carries verbatim.
 //!
-//! As of M1.5 the compiler lowers the **whole** M0 language: the literal/binding/arithmetic
-//! core (M1.0); **functions** (`fn`, calls, arrow closures, the `|>` pipeline, `return`,
-//! `if`/`else` — M1.2); **collections** (`[...]`/`{...}` literals, `for`-iteration, the
-//! `len`/`map`/`filter`/`sum` builtins, `.count()`/`.enumerate()`, string interpolation —
-//! M1.3); the **object model** (records/classes/enums on shapes, member access, methods,
-//! `...spread` — M1.4); and **`match`/`?`/`??`** with the `Result`/`Option` constructors and
-//! `panic`/`next_id` (M1.5). A nested closure or `fn` that captures an enclosing function's
-//! local is lowered via **upvalues** (slice F1 — see [`freevars`]); the few constructs still
-//! outside the subset (a closure inside a *method* capturing `self`/a field; a prelude
-//! value/builtin used as a value) return [`Unsupported`] and the differential harness skips
-//! them — but every M0 corpus program compiles and is asserted identical to the tree-walker.
+//! The compiler covers the **whole** language: every program that parses and type-checks
+//! compiles to bytecode — the conformance differential (`--differential`, 0 skipped) holds the
+//! VM at 100% coverage against the Core-IR reference interpreter by construction, and an
+//! [`Unsupported`] from this crate is an internal invariant break the callers surface loudly,
+//! never a silently-skipped construct. Closures capture via **upvalues** (see [`freevars`]);
+//! string interpolation, `match`/`?`/`??`, the object model on shapes, and `...spread` all
+//! lower here.
 //!
 //! ## The scope model
 //!
-//! The tree-walker resolves names through a chain of reference-counted lexical scopes. The
-//! VM splits that into three tiers:
+//! The reference interpreter resolves names through a chain of reference-counted lexical
+//! scopes. The VM splits that into three tiers:
 //!
 //! - **Globals.** Every top-level binding and `fn` name lives in a runtime global table,
 //!   read/written by name (`LoadGlobal`/`StoreGlobal`). A top-level function's free variables
-//!   resolve here at call time — faithful, because the tree-walker's captured scope for a
-//!   top-level function *is* the (shared, mutable) global scope, so reads see live values.
+//!   resolve here at call time — faithful, because the reference interpreter's captured scope
+//!   for a top-level function *is* the (shared, mutable) global scope, so reads see live values.
 //! - **Frame-locals.** Parameters and locals live in registers, one register file per call
 //!   frame. Block scopes (`if`/`else` bodies) nest within the same register file.
 //! - **Upvalues.** A local captured by an inner closure is boxed into a heap *cell* shared
 //!   between the defining frame and every capturing closure, so a closure reads (and mutates)
-//!   the live binding — matching the tree-walker's `Rc`-captured scope chain. The free-variable
-//!   analysis in [`freevars`] decides which locals are celled and lays out each closure's
-//!   ordered upvalues; the closure carries the cells (`MakeClosure` captures), and the body
-//!   reaches them with `UpvalueGet`/`UpvalueSet`.
+//!   the live binding — matching the reference interpreter's `Rc`-captured scope chain. The
+//!   free-variable analysis in [`freevars`] decides which locals are celled and lays out each
+//!   closure's ordered upvalues; the closure carries the cells (`MakeClosure` captures), and the
+//!   body reaches them with `UpvalueGet`/`UpvalueSet`.
 //!
-//! The compiler stays faithful to the tree-walker's evaluation order and exact diagnostic
-//! text/spans, because the differential oracle compares full `RunResult`s. Registers are
-//! allocated monotonically (one per value, no reuse) — simple and obviously correct.
+//! The compiler stays faithful to the reference interpreter's evaluation order and exact
+//! diagnostic text/spans, because the differential oracle compares full `RunResult`s.
+//! Registers are emitted against a virtual (monotonic) numbering, then compacted by the
+//! graph-coloring allocator in [`regalloc`] — see that module's header for its three safety
+//! invariants.
 
 use std::collections::{HashMap, HashSet};
 
