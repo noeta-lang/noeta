@@ -390,7 +390,6 @@ impl SessionChecker {
                 record_expr_types: opts.record_expr_types,
                 registry: opts.registry,
                 editions: opts.editions,
-                ..Config::default()
             },
             ..Checker::default()
         };

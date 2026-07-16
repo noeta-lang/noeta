@@ -65,6 +65,29 @@ fn base64(input: &[u8]) -> String {
     out
 }
 
+/// Run `git` with the crate's auth config prepended — THE subprocess choke point (this module's
+/// header calls out that credential injection must flow through every git invocation; one runner
+/// keeps that true by construction, where two copies drifted on error detail).
+pub(crate) fn run_git<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
+    let args: Vec<&str> = args.into_iter().collect();
+    let auth = git_auth_args();
+    let output = std::process::Command::new("git")
+        .args(auth.iter().map(String::as_str))
+        .args(&args)
+        .output()
+        .map_err(|err| format!("cannot run `git` (is it installed and on PATH?): {err}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "`git {}` failed: {}",
+            args.join(" "),
+            stderr.trim()
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,28 +118,5 @@ mod tests {
             args[1],
             format!("http.https://github.com.extraHeader=Authorization: Basic {expected}")
         );
-    }
-}
-
-/// Run `git` with the crate's auth config prepended — THE subprocess choke point (this module's
-/// header calls out that credential injection must flow through every git invocation; one runner
-/// keeps that true by construction, where two copies drifted on error detail).
-pub(crate) fn run_git<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
-    let args: Vec<&str> = args.into_iter().collect();
-    let auth = git_auth_args();
-    let output = std::process::Command::new("git")
-        .args(auth.iter().map(String::as_str))
-        .args(&args)
-        .output()
-        .map_err(|err| format!("cannot run `git` (is it installed and on PATH?): {err}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "`git {}` failed: {}",
-            args.join(" "),
-            stderr.trim()
-        ))
     }
 }
