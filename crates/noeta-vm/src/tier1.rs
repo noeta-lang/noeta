@@ -704,6 +704,41 @@ extern "C" fn jit_run_leaf_op(
     }
 }
 
+/// The 11 runtime-helper symbols generated tier-1 code links against, as ONE table (audit
+/// finding 10): [`Vm::init_jit`] (the synchronous oracle engine) borrows it directly and
+/// [`Vm::init_jit_service`] (the off-thread production service) maps each pointer to a `usize`
+/// for the thread hand-off. Previously the two inits built the same 11 `(name, ptr)` pairs
+/// verbatim, and a helper added to one but not the other failed only at JIT-time symbol
+/// resolution — one list makes that miss impossible.
+#[cfg(feature = "jit")]
+fn jit_helpers() -> [(&'static str, *const u8); 11] {
+    [
+        (noeta_jit_abi::OBSERVE_HELPER, jit_observe as *const u8),
+        (
+            noeta_jit_abi::NOTE_GLOBAL_BOUND_HELPER,
+            jit_note_global_bound as *const u8,
+        ),
+        (noeta_jit_abi::FMOD_HELPER, jit_fmod as *const u8),
+        (noeta_jit_abi::RETAIN_HELPER, jit_retain as *const u8),
+        (noeta_jit_abi::RELEASE_HELPER, jit_release as *const u8),
+        (
+            noeta_jit_abi::RELEASE_VALUE_HELPER,
+            jit_release_value as *const u8,
+        ),
+        (noeta_jit_abi::CALL_HELPER, jit_call as *const u8),
+        (noeta_jit_abi::RETURN_HELPER, jit_return as *const u8),
+        (
+            noeta_jit_abi::PREPARE_CALL_HELPER,
+            jit_prepare_call as *const u8,
+        ),
+        (
+            noeta_jit_abi::AFTER_CALL_HELPER,
+            jit_after_call as *const u8,
+        ),
+        (noeta_jit_abi::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
+    ]
+}
+
 impl<'m> Vm<'m> {
     /// Build the tier-1 JIT engine and, when `force_jit` is set, eagerly compile every prototype so
     /// the whole run goes through tier 1 (the oracle path). Registers the runtime-helper symbols the
@@ -711,36 +746,12 @@ impl<'m> Vm<'m> {
     /// interprets — behaviour is identical either way (J0 always bails to tier 0).
     #[cfg(feature = "jit")]
     pub(crate) fn init_jit(&mut self) {
-        let helpers: &[(&str, *const u8)] = &[
-            (noeta_jit_abi::OBSERVE_HELPER, jit_observe as *const u8),
-            (
-                noeta_jit_abi::NOTE_GLOBAL_BOUND_HELPER,
-                jit_note_global_bound as *const u8,
-            ),
-            (noeta_jit_abi::FMOD_HELPER, jit_fmod as *const u8),
-            (noeta_jit_abi::RETAIN_HELPER, jit_retain as *const u8),
-            (noeta_jit_abi::RELEASE_HELPER, jit_release as *const u8),
-            (
-                noeta_jit_abi::RELEASE_VALUE_HELPER,
-                jit_release_value as *const u8,
-            ),
-            (noeta_jit_abi::CALL_HELPER, jit_call as *const u8),
-            (noeta_jit_abi::RETURN_HELPER, jit_return as *const u8),
-            (
-                noeta_jit_abi::PREPARE_CALL_HELPER,
-                jit_prepare_call as *const u8,
-            ),
-            (
-                noeta_jit_abi::AFTER_CALL_HELPER,
-                jit_after_call as *const u8,
-            ),
-            (noeta_jit_abi::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
-        ];
+        let helpers = jit_helpers();
         let template = self
             .jit_frame_template
             .get_or_insert_with(fresh_frame_template);
         let template_ptr = template.as_ref() as *const Frame as *const u8;
-        match noeta_jit::Jit::new(helpers, frame_layout(), template_ptr) {
+        match noeta_jit::Jit::new(&helpers, frame_layout(), template_ptr) {
             Ok(mut jit) => {
                 if self.force_jit {
                     for p in 0..self.module.protos.len() {
@@ -762,46 +773,12 @@ impl<'m> Vm<'m> {
     /// borrow the mutator holds.
     #[cfg(feature = "jit")]
     pub(crate) fn init_jit_service(&mut self, module: Arc<Module>) {
-        let helpers: Vec<(&'static str, usize)> = vec![
-            (
-                noeta_jit_abi::OBSERVE_HELPER,
-                jit_observe as *const u8 as usize,
-            ),
-            (
-                noeta_jit_abi::NOTE_GLOBAL_BOUND_HELPER,
-                jit_note_global_bound as *const u8 as usize,
-            ),
-            (noeta_jit_abi::FMOD_HELPER, jit_fmod as *const u8 as usize),
-            (
-                noeta_jit_abi::RETAIN_HELPER,
-                jit_retain as *const u8 as usize,
-            ),
-            (
-                noeta_jit_abi::RELEASE_HELPER,
-                jit_release as *const u8 as usize,
-            ),
-            (
-                noeta_jit_abi::RELEASE_VALUE_HELPER,
-                jit_release_value as *const u8 as usize,
-            ),
-            (noeta_jit_abi::CALL_HELPER, jit_call as *const u8 as usize),
-            (
-                noeta_jit_abi::RETURN_HELPER,
-                jit_return as *const u8 as usize,
-            ),
-            (
-                noeta_jit_abi::PREPARE_CALL_HELPER,
-                jit_prepare_call as *const u8 as usize,
-            ),
-            (
-                noeta_jit_abi::AFTER_CALL_HELPER,
-                jit_after_call as *const u8 as usize,
-            ),
-            (
-                noeta_jit_abi::LEAF_OP_HELPER,
-                jit_run_leaf_op as *const u8 as usize,
-            ),
-        ];
+        // The shared helper table, each pointer as a `usize` so the list can cross to the
+        // compile thread (a raw pointer is not `Send`; the addresses themselves are immortal).
+        let helpers: Vec<(&'static str, usize)> = jit_helpers()
+            .into_iter()
+            .map(|(name, ptr)| (name, ptr as usize))
+            .collect();
         let template = self
             .jit_frame_template
             .get_or_insert_with(fresh_frame_template);
