@@ -156,6 +156,12 @@ own; these are additive capabilities.
 | **HTTP library** — the first out-of-tree-shaped async client | extern-types X5 design | Its own arc: a network `Host` capability + a deterministic virtual network (the Vfs analog) + a real stack. The `ExternIo` seam is ready for it (`RealBody::Async`). |
 | **Async extern-type *methods*** | extern-types X5 | Falls out free (`TypeDispatch` returns `NativeOut`, so a method may return `Spawn`) — untested until a client needs one. |
 
+## Instance-registry residue (per-session registries are DONE — one accepted process-global remains)
+
+| Item | Source | Trigger to implement |
+|---|---|---|
+| **`packed_names` stays process-global** (`noeta-native/src/map_key.rs`) — the packed-key *display* field-name cache, first-registration-wins, invisible to the per-session registry model | audit-2 Finding 12 (disposition: documented as deliberate at the definition site) | A real per-session need: two co-hosted sessions whose `@packed` types share a short name and whose *rendered* key output must differ, or a hot-swap renaming a packed key type's fields. Cosmetic-only until then — key identity/hashing/compare never touch the names. Move it onto the session/VM alongside the shape story. (Its sibling in the same finding, the foreign view-extractor global, was **closed**: `ViewSourceExtract` is now a registry-declared capability.) |
+
 ## Crypto (crypto arc — the module is COMPLETE, these are follow-ons)
 
 | Item | Source | Trigger to implement |

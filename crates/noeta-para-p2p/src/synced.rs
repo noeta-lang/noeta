@@ -49,7 +49,8 @@ use noeta_reactive::NodeId;
 // graph, so a peer's merge propagates to `computed`/`effect` like a local `set`. It reaches the
 // engine through the `ReactiveSource` **capability** (never the engine's internals), and depends on
 // nothing of `noeta-stdlib` — only the tiny `noeta-reactive-abi` contract crate.
-use noeta_reactive_abi::{ReactiveSource, ViewSource, register_view_source_extractor};
+use noeta_native::registry::ExtCapability;
+use noeta_reactive_abi::{ReactiveSource, ViewSource, ViewSourceExtract};
 
 use crate::crdt::{from_bytes_like, merge_dyn, to_bytes_dyn};
 use crate::provider::with_p2p;
@@ -62,20 +63,35 @@ fn reactive<C: NativeCtx + ?Sized>(ctx: &mut C) -> Cap<dyn ReactiveSource> {
         .expect("std.reactive capability (the engine para.synced extends)")
 }
 
-/// Register the `SyncedSignal` → reactive-`view` extractor exactly once (the reactive seam that lets
-/// core `view.expose` accept a `SyncedSignalBox` — a signal node over the shared graph — without
-/// naming this out-of-`std` type). Called on every `synced` dispatch; a `SyncedSignal` can never be
-/// exposed to a `view` before it is first constructed here, so registration always precedes use.
-fn ensure_view_seam_registered() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        register_view_source_extractor(|any| {
-            any.downcast_ref::<SyncedSignalBox>()
-                .map(|s| (s.node, ViewSource::Signal { cell: s.cell }))
-        });
-    });
+/// The `SyncedSignal` → reactive-`view` extractor (the reactive seam that lets core `view.expose`
+/// accept a [`SyncedSignalBox`] — a signal node over the shared graph — without naming this
+/// out-of-`std` type). Provided to the engine as the `dyn ViewSourceExtract` **capability**
+/// declared on this unit ([`SYNCED_CAPABILITIES`]), the same broker `para.synced` already consumes
+/// the engine's `ReactiveSource` through — replacing the process-global extractor list a dispatch
+/// side effect used to fill (audit-2 Finding 12): registry-scoped, no first-use registration.
+struct SyncedViewExtract;
+
+impl ViewSourceExtract for SyncedViewExtract {
+    fn extract(&self, any: &dyn Any) -> Option<(NodeId, ViewSource)> {
+        any.downcast_ref::<SyncedSignalBox>()
+            .map(|s| (s.node, ViewSource::Signal { cell: s.cell }))
+    }
 }
+
+/// The capabilities `para.p2p` provides (declared on the unit's `Extension::capabilities`): the
+/// [`ViewSourceExtract`] seam `view.expose` resolves a `SyncedSignal` through. The extractor is
+/// stateless, so the backing state cell is an inert unit — the broker requires a state slot, and
+/// sharing [`crate::provider::STATE_KEY`] would wrongly couple extractor resolution to the p2p
+/// backend's lifecycle.
+pub const SYNCED_CAPABILITIES: &[ExtCapability] = &[ExtCapability {
+    id: || std::any::TypeId::of::<dyn ViewSourceExtract>(),
+    state_key: "para.synced.view",
+    init: || Box::new(()),
+    build: |_state| {
+        let handle: Box<dyn ViewSourceExtract> = Box::new(SyncedViewExtract);
+        Box::new(handle)
+    },
+}];
 
 pub const SYNCED_SIGNAL_TYPE_NAME: &str = "SyncedSignal";
 
@@ -198,7 +214,6 @@ pub fn synced_ctx_dispatch(
     ctx: &mut dyn NativeCtx,
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
-    ensure_view_seam_registered();
     match func {
         "synced_signal" => {
             // 2 required args (initial, topic); an optional 3rd (members) opts into encryption.
