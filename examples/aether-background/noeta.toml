@@ -1,0 +1,6 @@
+[package]
+name = "noeta/aether_background"
+version = "0.1.0"
+
+[dependencies]
+para = { path = "../../packages/para-aether" }

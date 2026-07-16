@@ -33,7 +33,7 @@ Branch/worktree: `noeta-aether` (off main `cc3c55a6`).
 |---|-----|---------|
 | L1 | User-defined traits (closed built-in set today) | **BUILD (foundational, first).** Typed Controller/Middleware/ServiceProvider/Resource contracts + `dyn Trait`. |
 | L2 | Typed deserialization for DI | **BUILD.** `@derive(Deserialize<Json>)` → `from_json` (mirror of Serialize) + **parameter-type reflection** so the router injects by declared param type. |
-| L3 | Background tasks / scheduler alongside `serve` | **SMALL RUNTIME CHANGE (spike-confirmed).** `server.serve` returns `Unit` — it's a *blocking* native call that runs the accept loop inline and never yields to sibling tasks, so a worker spawned next to it starves. Fix: an **async `serve`** returning `Future<Unit>` so it's a cooperative sibling in a nursery. Then background scope + scheduler are pure-Noeta (nursery + in-heap channel + `sleep`). |
+| L3 | Background tasks / scheduler alongside `serve` | **NO RUNTIME CHANGE (re-verified).** The serve loop already calls `ctx.advance_tasks()` each round (`serve.rs:650`), so it DRIVES sibling `spawn`ed tasks. `concurrent { spawn worker(); spawn scheduler(); serve(port, handler) }` runs server + background scope + scheduler on one heap. Fire-and-forget = a handler enqueues onto an in-heap `channel` the worker drains (PROVEN: jobs processed). Scheduler = a `sleep`-loop task (PROVEN: ticks). My earlier "starvation" spike was buffered stdout lost to a `timeout` kill — the user's original instinct (top-level async can host background tasks) was right. L3 = pure-Noeta framework API only. |
 | L4 | Request ergonomics (header/query enumeration, cookies, forms) | Small `std.http` additions, as needed. |
 | L5 | DB driver / real ORM persistence | **LAST.** Separate native `para/db` package. Aether ships a Resource/Repository seam + in-memory driver first. |
 
@@ -46,11 +46,13 @@ Branch/worktree: `noeta-aether` (off main `cc3c55a6`).
   running its own accept loop inline. A worker spawned beside it never gets polled (starves), and
   `spawn server.serve(...)` is rejected (`spawn` needs a `Future`, serve is `void`). So serve does
   **not** compose as a nursery sibling today.
-- **Decision:** add an async serve returning `Future<Unit>` (contained change in
-  `crates/noeta-stdlib/src/serve.rs`; the loop already awaits accept + drives handler futures). Then
-  `concurrent { spawn scheduler(app); spawn worker(app); serve_async(port, dispatch).await }` runs
-  server + background scope + scheduler on one shared heap, cooperatively. Aether wraps this as
-  `background(job)` / `every(ms, fn)`. Rejected: isolate-per-worker (loses shared heap/state).
+- **CORRECTED (re-verified):** No async serve needed. The blocking `serve` loop calls
+  `ctx.advance_tasks()` each round (`serve.rs:650`) → it drives sibling `spawn`ed tasks. So
+  `concurrent { spawn scheduler(); spawn worker(); serve(port, handler) }` already runs server +
+  background scope + scheduler on one shared heap. The original spike's "starvation" was buffered
+  stdout lost to a `timeout` kill, not real starvation. Aether wraps this pattern as
+  `background(job)` (enqueue to an in-heap channel a worker drains) / `every(ms, fn)` (a sleep-loop
+  task) — pure Noeta, no runtime change.
 
 ## Sequencing
 

@@ -14,6 +14,7 @@ namespace para.aether
 use std.http.server
 use std.http.{Request, Response}
 use std.json
+use std.task.sleep
 
 // --- Route attributes: users tag controller methods with these. -------------------------------
 
@@ -73,6 +74,44 @@ fn invoke_action(ctrl: dyn, r: Route, body: string): string {
     return match invoke(ctrl, r.action, args) {
         Ok(result) => result.as<string>() ?? "200 OK",
         Err(e) => "500 ${e}",
+    }
+}
+
+// --- Background task scope & scheduler. --------------------------------------------------------
+//
+// The serve loop drives sibling `spawn`ed tasks (its accept loop calls `advance_tasks` each round),
+// so a `concurrent { spawn work(rx); spawn every(...); serve(port, app.route) }` nursery runs the
+// server, a background-job worker, and scheduled tasks together on one heap — no async-serve
+// primitive needed. A handler "fires and forgets" by enqueuing a thunk onto the job channel and
+// returning immediately; the worker runs it off the request path.
+
+fn noop(): void {}
+
+// The background worker: drain the job queue, running each enqueued thunk. Spawn one per app.
+pub async fn work(rx: Receiver<() -> void>): void {
+    mut going = true
+    while going {
+        job = rx.recv().await
+        if job == none {
+            going = false
+        } else {
+            f = job ?? noop
+            f()
+        }
+    }
+}
+
+// Enqueue a fire-and-forget background job — the handler returns without waiting for it to run.
+pub async fn background(tx: Sender<() -> void>, job: () -> void): void {
+    tx.send(job).await
+}
+
+// A scheduled task: run `action` every `ms` milliseconds, forever. Spawn one per schedule.
+pub async fn every(ms: int, action: () -> void): void {
+    mut running = true
+    while running {
+        sleep(ms).await
+        action()
     }
 }
 
