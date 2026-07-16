@@ -77,10 +77,31 @@ and depends on both via a scope dependency. Two language gaps surfaced and were 
 **standalone** `impl Trait for T {}` linking (a dependency's standalone impl was silently dropped;
 only inline impls survived). Both fixed + covered by conformance tests.
 
-## F8 (minor) — para.db silently swallows an unbindable bind parameter
-`"7".to_int()` correctly returns `?int` (`some(7)`); passing that Option straight to a query binds an
-unbindable value — the driver's `sql_value_of` errors, but `run`/`exec` swallow it and return an
-empty result, so a query silently finds nothing instead of surfacing the type error. The demo unwraps
-(`id.to_int() ?? -1`); **follow-up:** either bind `some(x)` as `x` / `none` as `NULL` in
-`sql_value_of`, or propagate the bind error out of `run`/`exec` so a mis-bound param fails loudly.
-Surfaced during DB3.
+## F8 — an Option marshaled to its variant name, not its payload — ✅ RESOLVED
+`"7".to_int()` correctly returns `?int` (`some(7)`); binding that Option to a query silently matched
+nothing. Root cause: **both backends' `to_native_deep` marshaled *any* enum — including an `Option` —
+to its variant *name*** (`some(1)` → the string `"some"`), so it bound the text `'some'` and
+`json.stringify(some(1))` produced `"some"`. **Fixed** by marshaling an `Option` through its payload
+(`some(x)` → x, `none` → null/unit) in `noeta_value::to_native_deep` and eval's `value_to_native_deep`
+(differential-identical). The demo now binds a bare `id.to_int()` with no unwrap. Conformance
++std/json_option_payload.
+
+## para/db PostgreSQL driver — ✅ DONE (swappable-driver seam proven)
+A second `SqlDriver` (`pg::PostgresDriver`, behind `ring-postgres`) over the sync `postgres` client.
+`db.connect("postgres://…")` runs the same Noeta surface as SQLite — the driver rewrites `?`→`$1,$2,…`
+and binds each value to its inferred column type (a `PgVal` `ToSql` adapter; untyped NULL fits any
+column). The native entry crate declares `ring-postgres`, so the composed toolchain auto-enables it.
+Verified with hermetic unit tests + a live round-trip against real PostgreSQL 16, and a Noeta demo.
+**New follow-ups:** F9 — Postgres uses `NoTls` (add a rustls TLS connector for managed/hosted PG); F10
+— a `--native` footprint scan enables *all* `para.db` rings (both drivers share the one `para.db`
+module), so a native binary pulls both SQLite and PG deps; let the app select a driver ring.
+
+## @sql editor highlighting — MECHANISM in place (not core), per design
+Editor coloring of a tier body is **not** wired into the core grammar (only the built-in `doc`→markdown
+is static). By design, a third-party tier plugs into VS Code with a **one-rule injection grammar**
+targeting `L:source.noeta` — documented in `editors/vscode-noeta/README.md` (Text tiers section) and
+shown by `examples/sql_tier_injection.tmLanguage.json`. `@html` is in the same boat (no shipped
+coloring; noeta-html contributes only a `noeta fmt` **body formatter** + the tier's `text:` language →
+LSP hover). **Open choice:** ship para/db's `@sql` one-rule injection grammar as a package artifact,
+and/or build a VS-Code-addon bridge that generates injections from declared `text:` tier languages so
+any package's tier lights up without a hand-written grammar. Not started (pending a direction).
