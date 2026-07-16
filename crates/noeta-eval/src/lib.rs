@@ -4489,6 +4489,7 @@ fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
             Value::Str(name.clone()),
             list(args.iter().map(build_type_value).collect()),
         ],
+        TypeRepr::DynTrait(name) => vec![Value::Str(name.clone())],
         TypeRepr::Fn(params, ret) => vec![
             list(params.iter().map(build_type_value).collect()),
             build_type_value(ret),

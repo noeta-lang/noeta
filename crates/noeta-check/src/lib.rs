@@ -1559,6 +1559,12 @@ impl Checker {
             name: "Union".to_string(),
             fields: vec![list_of_ty()],
         });
+        // A trait object `dyn Trait` carries its trait name — so `params_of` can recover the interface
+        // a parameter is bound to (service injection). A bare `dyn` param is still `Type.Dyn`.
+        variants.push(VariantInfo {
+            name: "DynTrait".to_string(),
+            fields: vec![Type::String],
+        });
         self.types.insert("Type".to_string());
         self.enums.insert("Type".to_string(), variants);
         self.type_kinds
@@ -2165,7 +2171,9 @@ impl Checker {
                 // or `<T: Trait>` bound textually above the `trait`) resolve. A duplicate declaration
                 // keeps the first; pass 2 (`check_trait_decl`) reports the collision.
                 Stmt::Trait(t) => {
-                    self.user_traits.entry(t.name.clone()).or_insert_with(|| t.clone());
+                    self.user_traits
+                        .entry(t.name.clone())
+                        .or_insert_with(|| t.clone());
                 }
                 _ => {}
             }
@@ -3668,7 +3676,10 @@ impl Checker {
                     trait_span,
                     format!("`impl {}` must define `fn {}`", decl.name, req_name),
                 )
-                .help(format!("the `{}` trait requires `fn {}`", decl.name, req_name));
+                .help(format!(
+                    "the `{}` trait requires `fn {}`",
+                    decl.name, req_name
+                ));
                 continue;
             };
             if m.params.len() != tm.sig.params.len() {
@@ -3734,8 +3745,11 @@ impl Checker {
     /// [`Self::check_coherence`].
     fn check_standalone_impl(&mut self, decl: &ImplDecl) {
         // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
-        // validation — bundle resolution, packed-target + constraint checks, conflict rules.
-        if decl.trait_name.contains('.') {
+        // validation — bundle resolution, packed-target + constraint checks, conflict rules. But a
+        // cross-package **user trait** is *also* dotted once qualified (`para.aether.Store`), so a
+        // known user trait is never a bundle — check that first, or a dependency's standalone
+        // `impl Trait for T` would be misread as a bundle impl.
+        if decl.trait_name.contains('.') && !self.user_traits.contains_key(&decl.trait_name) {
             self.check_bundle_impl(decl);
             return;
         }
@@ -3782,7 +3796,10 @@ impl Checker {
             self.error(
                 DiagnosticCode::InvalidTraitDeclaration,
                 decl.name_span,
-                format!("`{}` is a built-in trait and cannot be redeclared", decl.name),
+                format!(
+                    "`{}` is a built-in trait and cannot be redeclared",
+                    decl.name
+                ),
             );
         } else if self.types.contains(&decl.name)
             || self.records.contains_key(&decl.name)
@@ -3792,7 +3809,10 @@ impl Checker {
             self.error(
                 DiagnosticCode::InvalidTraitDeclaration,
                 decl.name_span,
-                format!("`{}` is already declared as a type; a trait cannot reuse the name", decl.name),
+                format!(
+                    "`{}` is already declared as a type; a trait cannot reuse the name",
+                    decl.name
+                ),
             );
         } else if self
             .user_traits
@@ -4567,7 +4587,9 @@ impl Checker {
             };
         }
         if let Type::DynTrait(_) = actual {
-            return matches!(expected, Type::Dyn) || actual == expected || expected.defers_to_runtime();
+            return matches!(expected, Type::Dyn)
+                || actual == expected
+                || expected.defers_to_runtime();
         }
         // The pure subtype lattice, plus the one registry-dependent rule it defers: whether a
         // `Named(n)` is a member of an abstract `Kind(k)`. Threading it through [`Type::subtype_with`]
@@ -7038,7 +7060,10 @@ impl Checker {
             return true;
         }
         match ty {
-            Type::Named(n, _) => self.user_trait_impls.get(n).is_some_and(|s| s.contains(bound)),
+            Type::Named(n, _) => self
+                .user_trait_impls
+                .get(n)
+                .is_some_and(|s| s.contains(bound)),
             _ => false,
         }
     }

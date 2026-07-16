@@ -358,6 +358,7 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
             Value::string(name),
             Value::list(args.iter().map(build_type_value).collect()),
         ],
+        TypeRepr::DynTrait(name) => vec![Value::string(name)],
         TypeRepr::Fn(params, ret) => vec![
             Value::list(params.iter().map(build_type_value).collect()),
             build_type_value(ret),

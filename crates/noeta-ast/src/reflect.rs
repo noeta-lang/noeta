@@ -510,6 +510,11 @@ pub enum TypeRepr {
     Bytes,
     Unit,
     Dyn,
+    /// A **trait object** `dyn Trait` — the dynamic top *refined by a trait bound*, carrying the trait
+    /// name. Distinct from bare `Dyn` so reflection (`params_of`) can recover which trait a parameter
+    /// is bound to — what a framework needs to inject a service by its interface (`fn(store: dyn
+    /// Store)`). The runtime value still carries its own concrete type; this is the declared bound.
+    DynTrait(String),
     List(Box<TypeRepr>),
     Set(Box<TypeRepr>),
     Option(Box<TypeRepr>),
@@ -574,6 +579,7 @@ impl TypeRepr {
             TypeRepr::Bytes => "Bytes",
             TypeRepr::Unit => "Unit",
             TypeRepr::Dyn => "Dyn",
+            TypeRepr::DynTrait(_) => "DynTrait",
             TypeRepr::List(_) => "List",
             TypeRepr::Set(_) => "Set",
             TypeRepr::Option(_) => "Option",
@@ -605,6 +611,7 @@ impl std::fmt::Display for TypeRepr {
             TypeRepr::Bytes => f.write_str("bytes"),
             TypeRepr::Unit => f.write_str("void"),
             TypeRepr::Dyn => f.write_str("dyn"),
+            TypeRepr::DynTrait(name) => write!(f, "dyn {name}"),
             TypeRepr::List(t) => write!(f, "List<{t}>"),
             TypeRepr::Set(t) => write!(f, "Set<{t}>"),
             TypeRepr::Option(t) => write!(f, "?{t}"),
@@ -675,8 +682,9 @@ pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
             TypeRepr::Union(members.iter().map(typeref_to_repr).collect())
         }
         TypeRef::Optional { inner, .. } => TypeRepr::Option(boxed(inner)),
-        // A trait object reflects as the dynamic top — the runtime value carries its concrete type.
-        TypeRef::DynTrait { .. } => TypeRepr::Dyn,
+        // A trait object reflects as `DynTrait(name)` — the dynamic top refined by its trait bound, so
+        // reflection can recover which trait a parameter is bound to (service injection by interface).
+        TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.clone()),
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
         TypeRef::Fn { params, ret, .. } => TypeRepr::Fn(
             params.iter().map(typeref_to_repr).collect(),
@@ -721,6 +729,7 @@ pub fn arg_matches(expected: &TypeRepr, actual: &TypeRepr) -> bool {
         | (Str, Str)
         | (Bytes, Bytes)
         | (Unit, Unit) => true,
+        (DynTrait(e), DynTrait(a)) => e == a,
         (Union(es), a) => es.iter().any(|e| arg_matches(e, a)),
         (e, Union(as_)) => as_.iter().any(|a| arg_matches(e, a)),
         // A nominal type matches by name (kind-tolerant: a `Named` target vs a `Struct`/`Class`/`Enum`
