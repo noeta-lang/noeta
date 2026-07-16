@@ -608,6 +608,8 @@ fn type_to_repr(
     use noeta_ast::reflect::TypeRepr;
     let rec = |t: &Type| type_to_repr(t, kinds);
     match ty {
+        // A trait object reflects as the dynamic top — the value carries its own concrete type.
+        Type::DynTrait(_) => TypeRepr::Dyn,
         Type::Int => TypeRepr::Int,
         Type::Float => TypeRepr::Float,
         Type::F32 => TypeRepr::F32,
@@ -3395,6 +3397,19 @@ impl Checker {
                 self.check_type_ref(ret);
             }
             TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
+            // `dyn Trait` — the trait must resolve to a built-in or user-defined trait (L1, UT4).
+            TypeRef::DynTrait { trait_name, span } => {
+                if BuiltinTrait::from_name(trait_name).is_none()
+                    && !self.user_traits.contains_key(trait_name)
+                {
+                    self.error(
+                        DiagnosticCode::UnknownTrait,
+                        *span,
+                        format!("unknown trait `{trait_name}` in `dyn {trait_name}`"),
+                    )
+                    .help("`dyn` must be followed by a built-in trait or a `trait` you declare");
+                }
+            }
             TypeRef::Named { name, args, span } => {
                 if !Type::is_builtin_name(name)
                     && !PRELUDE_TYPES.contains(&name.as_str())
@@ -4070,6 +4085,7 @@ impl Checker {
         match ty {
             Type::Unknown
             | Type::Dyn
+            | Type::DynTrait(_)
             | Type::Int
             | Type::Float
             | Type::F32
@@ -4445,10 +4461,31 @@ impl Checker {
     /// the rule composes (`List<WebRole> <: List<Enum>`); every non-kind case delegates to the pure
     /// lattice. This is the single funnel for assignment, argument, return, and field checks.
     fn assignable(&self, actual: &Type, expected: &Type) -> bool {
+        // A **trait object** `dyn Trait` (L1 user traits, UT4) — a registry-dependent membership rule
+        // like `Kind`, decided here rather than in the pure lattice. An implementor widens into it; a
+        // `dyn`/hole defers; a `dyn Trait` widens into bare `dyn` (or the same trait object). This is
+        // the direct/element-wise coercion the common cases (a `dyn Trait` parameter, an annotated
+        // `List<dyn Trait>` literal checked element-by-element) go through.
+        if let Type::DynTrait(tr) = expected {
+            return match actual {
+                Type::DynTrait(a) => a == tr,
+                Type::Named(n, _) => self.type_impls_trait(n, tr),
+                other => other.defers_to_runtime(),
+            };
+        }
+        if let Type::DynTrait(_) = actual {
+            return matches!(expected, Type::Dyn) || actual == expected || expected.defers_to_runtime();
+        }
         // The pure subtype lattice, plus the one registry-dependent rule it defers: whether a
         // `Named(n)` is a member of an abstract `Kind(k)`. Threading it through [`Type::subtype_with`]
         // reaches every nested covariant position without re-implementing the variance walk here.
         Type::subtype_with(actual, expected, &|n, k| self.is_of_kind(n, k))
+    }
+
+    /// Whether the named type `n` implements the user trait `tr` (L1, UT4) — a recorded in-body or
+    /// standalone `impl`. The membership rule behind `dyn Trait` coercion.
+    fn type_impls_trait(&self, n: &str, tr: &str) -> bool {
+        self.user_trait_impls.get(n).is_some_and(|s| s.contains(tr))
     }
 
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware
@@ -6944,6 +6981,14 @@ impl Checker {
         {
             return sig.ret.clone();
         }
+        // A method call on a trait object (L1 user traits, UT4) resolves against the trait's declared
+        // signatures — dispatched dynamically at runtime, but statically typed by the contract.
+        if let Type::DynTrait(tr) = recv
+            && let Some(decl) = self.user_traits.get(tr)
+            && let Some(m) = decl.methods.iter().find(|m| m.sig.name == name)
+        {
+            return field_type(&m.sig.ret, &self.extern_types);
+        }
         if recv.defers_to_runtime() {
             return recv.clone();
         }
@@ -8187,8 +8232,9 @@ fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
         | Type::Bool
         | Type::String
         | Type::Bytes => false,
-        // Missing information / the dynamic top / an abstract kind / a function value: assume relevant.
-        Type::Unknown | Type::Dyn | Type::Kind(_) | Type::Fn { .. } => true,
+        // Missing information / the dynamic top / a trait object / an abstract kind / a function
+        // value: assume relevant (a trait object may hold an implementor with a destructor).
+        Type::Unknown | Type::Dyn | Type::DynTrait(_) | Type::Kind(_) | Type::Fn { .. } => true,
         // Aggregates are relevant exactly when a part they own is.
         Type::List(e) | Type::Set(e) | Type::Option(e) => type_relevant(e, reachable),
         Type::Map(k, v) => type_relevant(k, reachable) || type_relevant(v, reachable),

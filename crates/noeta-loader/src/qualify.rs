@@ -48,6 +48,8 @@ fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
                 q_typeref(a, visit);
             }
         }
+        // A trait object qualifies its trait name like any nominal leaf.
+        TypeRef::DynTrait { trait_name, .. } => visit(trait_name),
         TypeRef::Optional { inner, .. } => q_typeref(inner, visit),
         TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
         TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_typeref(e, visit)),

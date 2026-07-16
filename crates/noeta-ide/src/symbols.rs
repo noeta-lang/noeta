@@ -219,6 +219,7 @@ pub fn render_type_ref(ty: &TypeRef) -> String {
                 format!("{}<{}>", name, join(args))
             }
         }
+        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
         TypeRef::Optional { inner, .. } => format!("?{}", render_type_ref(inner)),
         TypeRef::Union { members, .. } => members
             .iter()

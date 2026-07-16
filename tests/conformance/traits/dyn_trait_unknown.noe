@@ -1,0 +1,6 @@
+// `dyn` followed by a name that is neither a built-in nor a declared `trait` is unknown (L1, UT4).
+// E0014.
+// expect: error E0014 at 5:9
+// expect: exit 1
+fn f(x: dyn Ghost): int { return 1 }
+echo f(3)

@@ -962,6 +962,16 @@ where
                 }
                 name
             });
+        // `dyn Trait` — a trait object (L1 user traits, UT4): the identifier `dyn` immediately
+        // followed by a (possibly dotted) trait name. Tried before `named` in the `base` choice; a
+        // bare `dyn` (no following type name) fails here and falls through to `named` as the top type.
+        let dyn_trait = ident_parser(ctx)
+            .filter(|(name, _): &(String, Span)| name == "dyn")
+            .ignore_then(dotted_name.clone())
+            .map_with(move |trait_name, e| TypeRef::DynTrait {
+                trait_name,
+                span: ctx.to_span(e.span()),
+            });
         let named = dotted_name
             .then(
                 type_
@@ -1022,7 +1032,14 @@ where
                     inner: Box::new(inner),
                     span: ctx.to_span(e.span()),
                 });
-            choice((optional, fn_type.clone(), tuple_type.clone(), named.clone())).boxed()
+            choice((
+                optional,
+                fn_type.clone(),
+                tuple_type.clone(),
+                dyn_trait.clone(),
+                named.clone(),
+            ))
+            .boxed()
         });
         // A union is the loosest type combinator: `base (| base)*`. A lone base is returned bare,
         // so any non-union annotation parses byte-identically to before.

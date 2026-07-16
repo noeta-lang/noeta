@@ -142,6 +142,13 @@ pub enum Type {
     /// slice 4). Always ≥2 elements (a 1-tuple is unrepresentable in the surface — `(T)` is a
     /// parenthesized type — and `()` is `unit`). Subtyping is element-wise covariant.
     Tuple(Vec<Type>),
+    /// A **trait object** `dyn Trait` (L1 user traits, UT4): the abstract supertype of every type
+    /// that `impl`s the named user trait. Like [`Type::Kind`] it is static-only and dispatched
+    /// dynamically — no runtime value *is* a `dyn Trait` (each is a concrete implementor) — but it
+    /// is stronger than bare `dyn`: an implementor widens in (a registry-dependent rule, decided in
+    /// the checker's `assignable`, not the pure lattice), and a method call resolves against the
+    /// trait's declared signatures. Carries the trait's name.
+    DynTrait(String),
 }
 
 /// Decode a **fixed-width integer type name** (`i8 i16 i32 i64 u8 u16 u32 u64`) into its
@@ -418,6 +425,7 @@ impl Type {
                 ret: Box::new(Type::from_ref(ret)),
             },
             TypeRef::Optional { inner, .. } => Type::Option(Box::new(Type::from_ref(inner))),
+            TypeRef::DynTrait { trait_name, .. } => Type::DynTrait(trait_name.clone()),
             TypeRef::Named { name, args, .. } => {
                 let arg = |i: usize| args.get(i).map(Type::from_ref).unwrap_or(Type::Unknown);
                 match name.as_str() {
@@ -482,6 +490,7 @@ impl std::fmt::Display for Type {
             Type::Option(t) => write!(f, "Option<{t}>"),
             Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Type::Kind(k) => f.write_str(k.name()),
+            Type::DynTrait(tr) => write!(f, "dyn {}", short_type_name(tr)),
             Type::Named(n, args) if args.is_empty() => f.write_str(short_type_name(n)),
             Type::Named(n, args) => {
                 write!(f, "{}<", short_type_name(n))?;

@@ -1,0 +1,30 @@
+// A heterogeneous `List<dyn Greeter>` (L1 user traits, UT4): distinct implementors coexist in one
+// list and each `.greet()` dispatches to the value's own `impl`. The framework's middleware/provider
+// collections are exactly this shape.
+// expect: stdout "hello"
+// expect: stdout "bonjour"
+// expect: exit 0
+trait Greeter {
+    fn greet(): string
+}
+
+class En {
+    fn new(): En { return En {} }
+}
+
+impl Greeter for En {
+    fn greet(): string { return "hello" }
+}
+
+class Fr {
+    fn new(): Fr { return Fr {} }
+}
+
+impl Greeter for Fr {
+    fn greet(): string { return "bonjour" }
+}
+
+people: List<dyn Greeter> = [En.new(), Fr.new()]
+for p in people {
+    echo p.greet()
+}

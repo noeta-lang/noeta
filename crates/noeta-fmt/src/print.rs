@@ -1328,6 +1328,7 @@ impl Printer<'_> {
                     ])
                 }
             }
+            TypeRef::DynTrait { trait_name, .. } => Doc::text(format!("dyn {trait_name}")),
             TypeRef::Optional { inner, .. } => Doc::concat([Doc::text("?"), self.type_ref(inner)?]),
             TypeRef::Union { members, .. } => {
                 let ds: Result<Vec<_>, _> = members.iter().map(|m| self.type_ref(m)).collect();

@@ -374,6 +374,8 @@ impl Lowerer<'_> {
                 inner: Box::new(self.resolve_type_aliases(inner)),
                 span: *span,
             },
+            // A trait object's trait name is not an import alias — narrowing never targets it.
+            TypeRef::DynTrait { .. } => ty.clone(),
         }
     }
 

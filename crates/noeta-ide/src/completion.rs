@@ -389,6 +389,7 @@ fn push_type_span(ty: &TypeRef, out: &mut Vec<Span>) {
     out.push(ty.span());
     match ty {
         TypeRef::Named { args, .. } => args.iter().for_each(|a| push_type_span(a, out)),
+        TypeRef::DynTrait { .. } => {}
         TypeRef::Optional { inner, .. } => push_type_span(inner, out),
         TypeRef::Union { members, .. } => members.iter().for_each(|m| push_type_span(m, out)),
         TypeRef::Tuple { elements, .. } => elements.iter().for_each(|e| push_type_span(e, out)),

@@ -4571,6 +4571,9 @@ fn runtime_matches(reg: &noeta_stdlib::registry::Registry, value: &Value, ty: &T
         TypeRef::Optional { .. } => {
             matches!(value, Value::Enum(e) if e.enum_name == "Option")
         }
+        // Narrowing to a trait object matches any value (the permissive over-approximation, matching
+        // the VM's `NarrowTarget::Dyn`); a precise implementor test is future work.
+        TypeRef::DynTrait { .. } => true,
         // A tuple target matches any tuple value — head-constructor only, arity/elements erased
         // (object-model slice 4), exactly like `List` ignoring its element type.
         TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),

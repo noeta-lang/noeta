@@ -562,6 +562,8 @@ pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
             TypeRepr::Union(members.iter().map(typeref_to_repr).collect())
         }
         TypeRef::Optional { inner, .. } => TypeRepr::Option(boxed(inner)),
+        // A trait object reflects as the dynamic top — the runtime value carries its concrete type.
+        TypeRef::DynTrait { .. } => TypeRepr::Dyn,
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
         TypeRef::Fn { params, ret, .. } => TypeRepr::Fn(
             params.iter().map(typeref_to_repr).collect(),

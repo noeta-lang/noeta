@@ -4457,6 +4457,9 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             NarrowTarget::AnyOf(members.iter().map(narrow_target).collect())
         }
         TypeRef::Optional { .. } => NarrowTarget::Named("Option".to_string()),
+        // Narrowing to a trait object reduces to the dynamic top (a permissive over-approximation;
+        // `x.as<dyn Trait>()` is a rare corner and a precise implementor test is future work).
+        TypeRef::DynTrait { .. } => NarrowTarget::Dyn,
         TypeRef::Tuple { .. } => NarrowTarget::Tuple,
         // Function types are erased: narrowing to one is a head-constructor "is callable" test
         // (params/return dropped), matching any function/closure value — like `List` ignoring its

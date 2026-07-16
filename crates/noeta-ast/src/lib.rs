@@ -735,6 +735,10 @@ pub enum TypeRef {
         args: Vec<TypeRef>,
         span: Span,
     },
+    /// A **trait object** `dyn Trait` (L1 user traits, UT4): a value of any type that `impl`s
+    /// `trait_name`, dispatched dynamically on its runtime type. The typed counterpart of the bare
+    /// `dyn` top type — method calls resolve against the trait's declared signatures.
+    DynTrait { trait_name: String, span: Span },
     /// `?T`, sugar for `Option<T>`. Kept as its own node (not desugared) so M1 can
     /// produce precise diagnostics on the nullability surface.
     Optional { inner: Box<TypeRef>, span: Span },
@@ -760,6 +764,7 @@ impl TypeRef {
     pub fn span(&self) -> Span {
         match self {
             TypeRef::Named { span, .. }
+            | TypeRef::DynTrait { span, .. }
             | TypeRef::Optional { span, .. }
             | TypeRef::Union { span, .. }
             | TypeRef::Tuple { span, .. }
