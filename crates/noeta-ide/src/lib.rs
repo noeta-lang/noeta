@@ -493,7 +493,7 @@ impl DocumentStore {
                     id as u32,
                     u.clone(),
                     text.clone(),
-                    edition_of_uri(u).as_str().to_string(),
+                    edition_of_uri(u),
                 ),
             })
             .collect();
@@ -651,8 +651,7 @@ impl DocumentStore {
                     Some((dep, src)) => {
                         src.set_id(&mut self.db).to(next_id);
                         src.set_text(&mut self.db).to(module.text.clone());
-                        src.set_edition(&mut self.db)
-                            .to(package.edition.as_str().to_string());
+                        src.set_edition(&mut self.db).to(package.edition);
                         dep.set_root(&mut self.db).to(package.root.clone());
                         dep.set_key(&mut self.db).to(package.key.clone());
                         dep.set_renames(&mut self.db).to(renames.clone());
@@ -664,9 +663,8 @@ impl DocumentStore {
                             next_id,
                             module.name.clone(),
                             module.text.clone(),
-                            // The dependency package's own edition (typed on `DepPackage`; the
-                            // salsa input stores the canonical string).
-                            package.edition.as_str().to_string(),
+                            // The dependency package's own edition (typed end to end).
+                            package.edition,
                         );
                         let dep = DepModule::new(
                             &self.db,

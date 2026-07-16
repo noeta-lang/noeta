@@ -69,13 +69,13 @@ pub struct SourceProgram {
     #[returns(ref)]
     pub text: String,
     /// The language [`Edition`](noeta_lexer::Edition) this source is written against, in canonical
-    /// string form (`"2026"`) — its package's edition (editions arc). Every db query that
+    /// typed form — its package's edition (editions arc). Every db query that
     /// lexes/parses/checks this source does so under it, so the IDE stack honors a future edition's
     /// grammar/rules exactly as the batch compiler does. A string (not the enum) because a salsa
     /// input field must be `Update`, which the leaf `Edition` enum does not implement; the queries
-    /// parse it back with [`edition_of`]. Editing it invalidates exactly the queries that read it.
+    /// read it back with [`edition_of`]. Editing it invalidates exactly the queries that read it.
     #[returns(ref)]
-    pub edition: String,
+    pub edition: noeta_lexer::Edition,
 }
 
 /// Build (or rebuild) the [`SourceProgram`] input from a [`Source`] and the language edition its
@@ -90,15 +90,16 @@ pub fn source_program(
         source.id().0,
         source.name().to_string(),
         source.text().to_string(),
-        edition.as_str().to_string(),
+        edition,
     )
 }
 
-/// The language edition a [`SourceProgram`] declares, parsed from its canonical string form back to
-/// the enum. An unrecognised value (only reachable if a caller stored a non-canonical string) falls
-/// back to the default edition rather than failing a query.
+/// The language edition a [`SourceProgram`] declares. The input stores the enum itself (cross-
+/// cutting audit finding 4): the typed → string → lenient-re-parse round-trip is gone, so a
+/// non-canonical edition can no longer silently compile as the default — invalid values are
+/// unrepresentable here, rejected where strings genuinely enter (manifest parse, hard error).
 fn edition_of(db: &dyn salsa::Database, src: SourceProgram) -> noeta_lexer::Edition {
-    noeta_lexer::Edition::parse(src.edition(db)).unwrap_or_default()
+    *src.edition(db)
 }
 
 /// A one-source [`EditionMap`](noeta_lexer::EditionMap) for the single-file query family: the source

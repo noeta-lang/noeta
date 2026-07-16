@@ -568,6 +568,12 @@ pub fn root_edition(entry: &Path) -> crate::edition::Edition {
     };
     match Manifest::parse(&text) {
         Ok(m) => m.package().map(|p| p.edition()).unwrap_or_default(),
+        // A corrupt manifest is NOT silently accepted overall (cross-cutting audit finding 4):
+        // every invocation that calls this also resolves dependencies through the same manifest,
+        // and that parse fails loudly (`PmError::Manifest` → CLI error / IDE diagnostic). This
+        // cheap pre-read just must not duplicate that report or fail a never-fail caller (fmt,
+        // hover), so it defaults and lets the authoritative path speak. A *valid* manifest with a
+        // bad edition value never reaches here — `Manifest::parse` hard-errors on it.
         Err(_) => crate::edition::Edition::DEFAULT,
     }
 }
