@@ -143,7 +143,7 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
 /// as h` → `h` → `std.http`). What member completion consults to recognize a group receiver.
 pub fn namespace_bindings(program: &Program) -> std::collections::HashMap<String, String> {
     use noeta_stdlib::registry::UseKind;
-    let reg = noeta_stdlib::registry::default_seeded();
+    let reg = noeta_stdlib::registry::single_registry_process();
     let mut map = std::collections::HashMap::new();
     for stmt in &program.stmts {
         if let Stmt::Use { path, names, .. } = stmt {
@@ -162,7 +162,7 @@ pub fn namespace_bindings(program: &Program) -> std::collections::HashMap<String
 /// `http.`. A submodule/sub-namespace child is a `Module`; an extension type is a `Type`.
 pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
     use noeta_stdlib::registry::NsChild;
-    let reg = noeta_stdlib::registry::default_seeded();
+    let reg = noeta_stdlib::registry::single_registry_process();
     reg.namespace_children(prefix)
         .into_iter()
         .map(|name| {

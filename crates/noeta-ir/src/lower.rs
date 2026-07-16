@@ -201,7 +201,7 @@ impl Default for LowerOptions {
     fn default() -> Self {
         LowerOptions {
             real_isolates: false,
-            registry: noeta_stdlib::registry::default_seeded(),
+            registry: noeta_stdlib::registry::single_registry_process(),
         }
     }
 }

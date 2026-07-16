@@ -126,7 +126,7 @@ impl Default for CompileOptions {
         CompileOptions {
             real_isolates: false,
             debug: false,
-            registry: noeta_stdlib::registry::default_seeded(),
+            registry: noeta_stdlib::registry::single_registry_process(),
         }
     }
 }
@@ -497,7 +497,7 @@ impl SessionCompiler {
             debug: false,
             // A fresh REPL session resolves native names against the process-global default; an
             // embed session that assembled its own set installs it explicitly (instance-registry IR5).
-            registry: noeta_stdlib::registry::default_seeded(),
+            registry: noeta_stdlib::registry::single_registry_process(),
         };
         SessionCompiler {
             mc,
@@ -4503,7 +4503,7 @@ mod tests {
     /// through the real classification path.
     #[test]
     fn the_static_ctx_fast_route_keys_match_the_emitted_module_identity() {
-        let reg = noeta_stdlib::registry::default_seeded();
+        let reg = noeta_stdlib::registry::single_registry_process();
         let emitted = |name: &str| match reg.classify_use(&["std".to_string()], name) {
             noeta_stdlib::registry::UseKind::Module(q) => q,
             other => panic!("`use std.{name}` must classify as a module, got {other:?}"),

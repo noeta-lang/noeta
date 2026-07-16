@@ -819,7 +819,7 @@ impl DocumentStore {
         let name = &entry_text[token.span.range()];
         let entry_ast = noeta_db::ast(db, doc);
         let prefix = completion::namespace_bindings(&entry_ast.0.program).remove(name)?;
-        let members = noeta_stdlib::registry::default_seeded().namespace_children(&prefix);
+        let members = noeta_stdlib::registry::single_registry_process().namespace_children(&prefix);
         let members = if members.is_empty() {
             String::new()
         } else {

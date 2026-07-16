@@ -456,6 +456,18 @@ pub fn default_seeded() -> &'static noeta_native::registry::Registry {
         .expect("the default registry is seeded by `ensure()` immediately above")
 }
 
+/// The process-global default [`Registry`], named for what calling it MEANS: **this call site
+/// assumes a single-registry process** (cross-cutting audit finding 5). The CLI, LSP, MCP, and IDE
+/// run one registry per process (the recorded instance-registry decision), so their leaf lookups —
+/// loader tier-seeding, IDE completion/namespace answers, the compiler's default entry presets —
+/// take the global by design. A session assembled with extra extensions (noeta-embed, a composed
+/// MCP toolchain) must NOT reach code that calls this; it threads its own registry via the
+/// options/`_with_registry` seams. Grepping this name finds every site to upgrade if the IDE ever
+/// goes session-aware. Behavior-identical to [`default_seeded`].
+pub fn single_registry_process() -> &'static noeta_native::registry::Registry {
+    default_seeded()
+}
+
 /// Assemble the registry for a toolchain binary: the std units plus a composed shim's `extra`
 /// extension units (package-manager Phase 3). Called by `noeta_cli::run_cli` at entry, before
 /// anything can look a name up. With no extras this is exactly the lazy default; with extras it
