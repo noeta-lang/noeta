@@ -1,0 +1,36 @@
+// `json.decode_typed(name, text)` (L2.2 DI) is the ROUTER-facing decode-by-runtime-type: a web
+// framework knows a handler's parameter type only as a runtime string, so it decodes a JSON body
+// into the type named by that string. `@derive(Deserialize<Json>)` records the type's decode recipe
+// into a per-type runtime registry keyed by name; a bad body or an unregistered type name is a
+// recoverable `Result.Err`, never an abort. Runs identically on both backends.
+// expect: stdout "ok: Ada is 36"
+// expect: stdout "err: invalid JSON: key must be a string at line 1 column 3"
+// expect: stdout "err: unknown deserializable type `Ghost`"
+// expect: stdout "field: Ada"
+// expect: exit 0
+use std.json
+
+@derive(Deserialize<Json>)
+struct User { name: string  age: int }
+
+// A valid body decodes into a real `User`; a malformed body or an unregistered type name is a
+// recoverable `Err`. The `Ok` arm reaches the decoded value's fields directly, proving it is a
+// genuine materialized struct, not an opaque handle.
+fn describe(r: Result<dyn, string>): string {
+    return match r {
+        Ok(u) => "ok: ${u.name} is ${u.age}",
+        Err(e) => "err: ${e}",
+    }
+}
+
+fn field(r: Result<dyn, string>): string {
+    return match r {
+        Ok(u) => "field: ${u.name}",
+        Err(e) => "field: ${e}",
+    }
+}
+
+echo describe(json.decode_typed("User", "{\"name\": \"Ada\", \"age\": 36}"))
+echo describe(json.decode_typed("User", "{ bad json"))
+echo describe(json.decode_typed("Ghost", "{}"))
+echo field(json.decode_typed("User", "{\"name\": \"Ada\", \"age\": 36}"))

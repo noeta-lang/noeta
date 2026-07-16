@@ -402,6 +402,9 @@ impl Printer<'_> {
                 None => "roles_of()".to_string(),
             },
             Rvalue::ParamsOf { target, .. } => format!("params_of({})", atom(target)),
+            Rvalue::DecodeTyped { name, text, .. } => {
+                format!("decode_typed({}, {})", atom(name), atom(text))
+            }
             Rvalue::Invoke {
                 recv, name, args, ..
             } => format!("invoke({}, {}, {})", atom(recv), atom(name), atom(args)),

@@ -32,6 +32,7 @@ fn lowered_ir(src: &str) -> String {
             packed_list_sites: &checked.sites.packed_list_sites,
             index_field_sites: &checked.sites.index_field_sites,
             typed_module_call_sites: &checked.sites.typed_module_call_sites,
+            decode_typed_sites: &checked.sites.decode_typed_sites,
             for_stream_sites: &checked.sites.for_stream_sites,
             width_sites: &checked.sites.width_sites,
             construction_sites: &checked.sites.construction_sites,

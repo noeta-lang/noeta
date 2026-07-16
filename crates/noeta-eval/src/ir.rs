@@ -36,6 +36,12 @@ use crate::{
     compare_primitive,
 };
 
+/// The `@derive(Deserialize<Json>)` decode registry (L2.2 DI) an [`Interpreter`] runs
+/// `json.decode_typed` against — a runtime type-name → recipe map lifted from
+/// `noeta_check::Sites::deserialize_recipes`. Threaded through the `run_ir` entry points beside
+/// `type_of_sites`, so the reference backend decodes by runtime type identically to the VM.
+pub type DeserializeRecipes = std::collections::HashMap<String, noeta_stdlib::TypeRecipe>;
+
 /// The flat temporary store for one function activation (or the top level). Indexed by
 /// [`noeta_ir::Temp`]; a slot is `None` until its defining `let` runs.
 /// Whether an atom is an ANF temporary (vs a named source variable or a constant). A temp receiver
@@ -102,8 +108,9 @@ impl TreeWalkBackend {
         ast: &Program,
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+        deserialize_recipes: DeserializeRecipes,
     ) -> RunResult {
-        Interpreter::new().run_ir(ast, ir, type_of_sites)
+        Interpreter::new().run_ir(ast, ir, type_of_sites, deserialize_recipes)
     }
 
     /// As [`TreeWalkBackend::run_ir`], plus the abort traceback (empty for a clean run) — the
@@ -113,8 +120,9 @@ impl TreeWalkBackend {
         ast: &Program,
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+        deserialize_recipes: DeserializeRecipes,
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
-        Interpreter::new().run_ir_traced(ast, ir, type_of_sites)
+        Interpreter::new().run_ir_traced(ast, ir, type_of_sites, deserialize_recipes)
     }
 
     /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`noeta_stdlib::Host`]
@@ -128,8 +136,9 @@ impl TreeWalkBackend {
         ir: &noeta_ir::Program,
         host: Box<dyn noeta_stdlib::Host>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+        deserialize_recipes: DeserializeRecipes,
     ) -> RunResult {
-        Interpreter::with_host(host).run_ir(ast, ir, type_of_sites)
+        Interpreter::with_host(host).run_ir(ast, ir, type_of_sites, deserialize_recipes)
     }
 
     /// As [`TreeWalkBackend::run_ir_with_host`], but also swapping the async executor (Track A.4).
@@ -143,8 +152,10 @@ impl TreeWalkBackend {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+        deserialize_recipes: DeserializeRecipes,
     ) -> RunResult {
-        Interpreter::with_host_and_executor(host, executor).run_ir(ast, ir, type_of_sites)
+        Interpreter::with_host_and_executor(host, executor)
+            .run_ir(ast, ir, type_of_sites, deserialize_recipes)
     }
 }
 
@@ -157,8 +168,10 @@ impl Interpreter {
         ast: &Program,
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+        deserialize_recipes: DeserializeRecipes,
     ) -> RunResult {
-        self.run_ir_traced(ast, ir, type_of_sites).0
+        self.run_ir_traced(ast, ir, type_of_sites, deserialize_recipes)
+            .0
     }
 
     /// [`Interpreter::run_ir`] plus the abort traceback (empty for a clean run) — the tree-walker
@@ -168,12 +181,16 @@ impl Interpreter {
         ast: &Program,
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+        deserialize_recipes: DeserializeRecipes,
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
         self.reflection = noeta_ast::reflect::build(ast);
         // Extension attribute shapes ride the artifact (tier-extensions port) — same embed the
         // bytecode path does, so the differential stays green by construction.
         noeta_check::extend_reflection(&mut self.reflection);
         self.type_of_sites = type_of_sites;
+        // The `@derive(Deserialize<Json>)` decode registry (L2.2 DI) `json.decode_typed` resolves
+        // against — lifted from the checker's sites, identical to the VM's map by construction.
+        self.deserialize_recipes = deserialize_recipes;
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
@@ -1619,6 +1636,41 @@ impl Interpreter {
                             "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
                         ),
                     ))
+                }
+            }
+            noeta_ir::Rvalue::DecodeTyped { name, text, span } => {
+                // The router-facing runtime decode (L2.2 DI). Fully recoverable — an unknown type name,
+                // a non-string operand, or a malformed body all become `Result.Err`; a good decode is
+                // `Result.Ok(value)`. Mirrors the recoverable `json.decode::<T>` branch above, but the
+                // recipe is looked up by runtime type name rather than baked at the call site.
+                let name_val = self.eval_ir_atom(name, frame)?;
+                let text_val = self.eval_ir_atom(text, frame)?;
+                let (Value::Str(type_name), Value::Str(text)) = (&name_val, &text_val) else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "`json.decode_typed` expects two `string` arguments".to_string(),
+                    ));
+                };
+                match self.deserialize_recipes.get(type_name).cloned() {
+                    None => Ok(crate::builtin_enum(
+                        "Result",
+                        "Err",
+                        vec![Value::Str(format!(
+                            "unknown deserializable type `{type_name}`"
+                        ))],
+                    )),
+                    Some(recipe) => match noeta_stdlib::json::parse_typed(text, &recipe) {
+                        Ok(out) => {
+                            let value = self.materialize_recipe(out, *span)?;
+                            Ok(crate::builtin_enum("Result", "Ok", vec![value]))
+                        }
+                        Err(error) => Ok(crate::builtin_enum(
+                            "Result",
+                            "Err",
+                            vec![Value::Str(error.message)],
+                        )),
+                    },
                 }
             }
         }

@@ -81,6 +81,7 @@ impl Backend for TreeWalkBackend {
                 packed_list_sites: &checked.sites.packed_list_sites,
                 index_field_sites: &checked.sites.index_field_sites,
                 typed_module_call_sites: &checked.sites.typed_module_call_sites,
+                decode_typed_sites: &checked.sites.decode_typed_sites,
                 for_stream_sites: &checked.sites.for_stream_sites,
                 width_sites: &checked.sites.width_sites,
                 construction_sites: &checked.sites.construction_sites,
@@ -97,7 +98,13 @@ impl Backend for TreeWalkBackend {
             Some(&relevance_of(&checked.sites.destructor_relevance)),
         );
         let ir = noeta_ir_passes::thread_reuse(&ir);
-        self.run_ir(program, &ir, checked.sites.type_of_sites)
+        let deserialize_recipes = checked.sites.deserialize_recipes.iter().cloned().collect();
+        self.run_ir(
+            program,
+            &ir,
+            checked.sites.type_of_sites,
+            deserialize_recipes,
+        )
     }
 }
 
@@ -1182,6 +1189,11 @@ struct Interpreter {
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
     /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
     type_of_sites: std::collections::HashMap<noeta_span::Span, noeta_ast::reflect::TypeRepr>,
+    /// The `@derive(Deserialize<Json>)` decode registry (L2.2 DI), keyed by type name — the
+    /// tree-walker twin of the VM's `deserialize_recipes`. Lifted from the checker's sites at
+    /// `run_ir` start; `Rvalue::DecodeTyped` (`json.decode_typed(name, text)`) looks a runtime type
+    /// name up here to decode a JSON body into that type. Empty on every run with no such derive.
+    deserialize_recipes: std::collections::HashMap<String, noeta_stdlib::TypeRecipe>,
     /// The live **call-site shadow stack**: one `(callee name, call-site span)` per function/method
     /// activation currently on the Rust call stack, pushed at each call boundary and popped on the
     /// way out (abort included). Only read when an abort snapshots [`Self::abort_trace`], so it
@@ -1278,6 +1290,7 @@ impl Interpreter {
             ext_state: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
+            deserialize_recipes: std::collections::HashMap::new(),
             call_sites: Vec::new(),
             abort_trace: Vec::new(),
             registry: None,

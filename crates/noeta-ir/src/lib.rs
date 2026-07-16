@@ -509,6 +509,16 @@ pub enum Rvalue {
         recipe: Option<noeta_native::TypeRecipe>,
         span: Span,
     },
+    /// The **router-facing** runtime JSON decode `json.decode_typed(name, text)` (L2.2 DI): decode
+    /// `text` into the type named by the runtime string `name`, using the recipe a
+    /// `@derive(Deserialize<Json>)` type registered (baked into the backend's per-type recipe
+    /// registry). Recoverable end to end — a malformed body **or** an unknown type name yields
+    /// `Result.Err(message)`, a successful decode `Result.Ok(value)`.
+    DecodeTyped {
+        name: Atom,
+        text: Atom,
+        span: Span,
+    },
     /// A **native module function as a first-class value** (expr-tiers arc) — the same value a
     /// `use std.math.sqrt` binding holds (`Const::ModuleFn`), but produced from a compiler
     /// [`noeta_ast::Expr::NativeFnRef`] rather than a user import. The expression-tier desugar

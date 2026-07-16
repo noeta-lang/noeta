@@ -803,6 +803,20 @@ pub enum Op {
         err_shape: u32,
         span: Span,
     },
+    /// The **router-facing** runtime JSON decode (`json.decode_typed(name, text)` → `Result<dyn,
+    /// string>`, L2.2 DI): decode the JSON in register `text` into the type named by the runtime
+    /// string in register `name`, using the recipe registered for a `@derive(Deserialize<Json>)`
+    /// type (baked into [`Module::deserialize_recipes`]). Fully recoverable — a malformed body **or**
+    /// an unknown/unregistered type name lands as `Result.Err` (`err_shape`); a successful decode as
+    /// `Result.Ok` (`ok_shape`) wrapping the materialized value.
+    DecodeTyped {
+        dst: Reg,
+        name: Reg,
+        text: Reg,
+        ok_shape: u32,
+        err_shape: u32,
+        span: Span,
+    },
     /// A **method-bundle** method call (kernel-methods K2/K3): `recv.method(args)` statically
     /// routed to a registered bundle (`impl <module>.<Bundle> for T {}` — the checker verified the
     /// binding and baked the route). Dispatches through the bundle's shared ctx dispatch with the
@@ -1225,6 +1239,11 @@ pub struct Module {
     /// Type names that `@derive(ToJson)` without a hand-written `to_json` method — the VM
     /// synthesizes a structural JSON serializer for `o.to_json()`.
     pub tojson_derives: Vec<String>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): each deriving struct's type name paired
+    /// with the [`noeta_native::TypeRecipe`] the checker resolved from its fields. The VM lifts this
+    /// into a name→recipe map so `json.decode_typed(name, text)` decodes a JSON body into the type
+    /// named by a runtime string. Empty for a program with no `@derive(Deserialize<Json>)`.
+    pub deserialize_recipes: Vec<(String, noeta_native::TypeRecipe)>,
     /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
     /// transitively-owned field / variant-payload / collection element (the checker's
     /// destruct-reachability fixpoint). The VM's **container-before-contained field-walk gate**
@@ -1695,6 +1714,9 @@ fn op_repr(
                 args.join(", ")
             )
         }
+        Op::DecodeTyped {
+            dst, name, text, ..
+        } => format!("DecodeTyped r{dst} <- json.decode_typed(r{name}, r{text})"),
         Op::BundleMethod {
             dst,
             recv,

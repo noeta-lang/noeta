@@ -145,6 +145,16 @@ pub struct Sites {
     /// [`noeta_stdlib::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
     /// program, like the other site maps.
     pub typed_module_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): each deriving **struct**'s type name
+    /// paired with the [`noeta_stdlib::TypeRecipe`] the checker resolved from its fields, in declaration
+    /// order. Baked into a per-type runtime registry both backends lift, so `json.decode_typed(name,
+    /// text)` can decode a JSON body into the type named by a runtime string. A pure function of the
+    /// program, like the other site maps.
+    pub deserialize_recipes: Vec<(String, noeta_stdlib::TypeRecipe)>,
+    /// `json.decode_typed(name, text)` call spans (L2.2 DI): the router-facing runtime decode. Lowering
+    /// reads this to emit an [`Rvalue::DecodeTyped`](noeta_ir::Rvalue) at these spans instead of a
+    /// generic method call. A pure function of the program.
+    pub decode_typed_sites: HashSet<Span>,
     /// `map(...)` call spans whose result element type is packed → the result element's layout. The
     /// VM's `map` builtin builds a flat result at these sites (P-PACK 2.6 category B); invisible to
     /// `RunResult`, so the eval reference may ignore it and stay boxed.
@@ -840,6 +850,11 @@ struct SiteMaps {
     /// span → the turbofish `T` resolved into a [`noeta_stdlib::TypeRecipe`]. Both backends harvest
     /// this on the same program, so the lowering bakes identical recipes into `Rvalue::TypedModuleCall`.
     typed_module_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI) — see [`Sites::deserialize_recipes`].
+    /// Accumulated as each deriving struct is validated in `check_derives`.
+    deserialize_recipes: Vec<(String, noeta_stdlib::TypeRecipe)>,
+    /// `json.decode_typed(name, text)` call spans (L2.2 DI) — see [`Sites::decode_typed_sites`].
+    decode_typed_sites: HashSet<Span>,
     /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
     /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
     /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
@@ -887,6 +902,8 @@ impl SiteMaps {
             construction_sites: self.construction_sites,
             packed_list_sites: self.packed_list_sites,
             typed_module_call_sites: self.typed_module_call_sites,
+            deserialize_recipes: self.deserialize_recipes,
+            decode_typed_sites: self.decode_typed_sites,
             map_packed_sites: self.map_packed_sites,
             index_field_sites: self.index_field_sites,
             for_stream_sites: self.for_stream_sites,
@@ -4037,7 +4054,8 @@ impl Checker {
                     )
                     .help(
                         "derivable traits are `Equatable`, `Comparable`, `Display`, `Clone`, \
-                         `Serialize<Format>`; mark attribute records with the `@attribute` directive",
+                         `Serialize<Format>`, `Deserialize<Format>`; mark attribute records with the \
+                         `@attribute` directive",
                     );
                 continue;
             }
@@ -4055,15 +4073,44 @@ impl Checker {
                     )
                 };
                 self.error(DiagnosticCode::UnknownTrait, spec.span, msg).help(
-                        "`Serialize` is `@derive(Serialize<Json>)`; the other derivable traits take \
-                         no arguments",
+                        "`Serialize`/`Deserialize` are `@derive(Serialize<Json>)` / \
+                         `@derive(Deserialize<Json>)`; the other derivable traits take no arguments",
                     );
                 continue;
             }
-            // `Serialize`'s argument is a serialization **format** (a blessed token, not a general
-            // type), validated against the format vocabulary rather than the type namespace.
-            if spec.name == "Serialize" {
+            // `Serialize`/`Deserialize`'s argument is a serialization **format** (a blessed token, not a
+            // general type), validated against the format vocabulary rather than the type namespace.
+            if spec.name == "Serialize" || spec.name == "Deserialize" {
                 self.check_serialize_format(&spec.args[0]);
+            }
+            // `Deserialize<Json>` (L2.2 DI): the type must decode from JSON — a non-generic value struct
+            // all of whose fields are themselves decodable. `type_to_recipe` answers exactly that (it
+            // returns `None` for a class/enum/generic, or a struct with an undecodable field), so it is
+            // both the field-constraint check and the recipe the runtime registry needs. On success the
+            // `(type_name, recipe)` pair is recorded for the backends to bake; on failure it is E0050.
+            if spec.name == "Deserialize" {
+                match self.type_to_recipe(&Type::Named(type_name.to_string(), Vec::new())) {
+                    Some(recipe) => {
+                        self.sites
+                            .deserialize_recipes
+                            .push((type_name.to_string(), recipe));
+                    }
+                    None => {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            spec.span,
+                            format!(
+                                "cannot derive `Deserialize<Json>` for `{type_name}`: it has a \
+                                 field (or a shape) that cannot be decoded from JSON"
+                            ),
+                        )
+                        .help(
+                            "`Deserialize<Json>` is derivable for a value struct whose fields are all \
+                             JSON-decodable (numbers, `bool`, `string`, `Option`, `List`, \
+                             string-keyed `Map`, or another such struct)",
+                        );
+                    }
+                }
             }
             self.check_derive_field_constraint(type_name, t, spec.span);
         }
@@ -5992,6 +6039,31 @@ impl Checker {
                 }
                 .or_else(|| self.resolve_namespace_module(receiver, env));
                 if let Some(qm) = module_id {
+                    // The router-facing runtime decode `json.decode_typed(name, text)` (L2.2 DI): a
+                    // 2-string-arg call whose result is `Result<dyn, string>` (it decodes a JSON body
+                    // into the type named by a *runtime* string, recoverably). It is not a registered
+                    // native signature — `Result` has no `SigType` — so it is typed here directly, its
+                    // call span recorded so lowering emits the dedicated `Rvalue::DecodeTyped`.
+                    if name == "decode_typed"
+                        && self.reg().find_module(&qm).map(|m| m.name) == Some("json")
+                    {
+                        self.finalize_closure_args(
+                            &[Type::String, Type::String],
+                            args,
+                            arg_exprs,
+                            env,
+                        );
+                        self.check_args(
+                            &[Type::String, Type::String],
+                            2,
+                            args,
+                            arg_exprs,
+                            span,
+                            name,
+                        );
+                        self.sites.decode_typed_sites.insert(call_span);
+                        return Type::Result(Box::new(Type::Dyn), Box::new(Type::String));
+                    }
                     if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
                         let required =
                             stdlib::module_required(self.reg(), &qm, name).unwrap_or(params.len());
@@ -7929,6 +8001,7 @@ fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         // reaching here — no primitive is ever `Mergeable`.
         Bt::Clone
         | Bt::Serialize
+        | Bt::Deserialize
         | Bt::Index
         | Bt::Length
         | Bt::Iterable

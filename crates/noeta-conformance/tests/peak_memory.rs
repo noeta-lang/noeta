@@ -91,6 +91,7 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
             packed_list_sites: &checked.sites.packed_list_sites,
             index_field_sites: &checked.sites.index_field_sites,
             typed_module_call_sites: &checked.sites.typed_module_call_sites,
+            decode_typed_sites: &checked.sites.decode_typed_sites,
             for_stream_sites: &checked.sites.for_stream_sites,
             width_sites: &checked.sites.width_sites,
             construction_sites: &checked.sites.construction_sites,
@@ -109,7 +110,8 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&relevance));
     let ir = noeta_ir_passes::thread_reuse(&ir);
     let sites = checked.sites.type_of_sites;
-    move || TreeWalkBackend::new().run_ir(&program, &ir, sites)
+    let deserialize_recipes = checked.sites.deserialize_recipes.iter().cloned().collect();
+    move || TreeWalkBackend::new().run_ir(&program, &ir, sites, deserialize_recipes)
 }
 
 /// Build an `n`-element packed/boxed `Vec3` list, run it through a flat-preserving **producer**

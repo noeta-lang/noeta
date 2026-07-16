@@ -547,6 +547,13 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
         }
+        Op::DecodeTyped {
+            dst, name, text, ..
+        } => {
+            f.def = Some(*dst);
+            f.uses.push(*name);
+            f.uses.push(*text);
+        }
         Op::BundleMethod {
             dst, recv, args, ..
         } => {
@@ -1019,6 +1026,13 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             for r in args.iter_mut() {
                 m(r);
             }
+        }
+        Op::DecodeTyped {
+            dst, name, text, ..
+        } => {
+            m(dst);
+            m(name);
+            m(text);
         }
         Op::BundleMethod {
             dst, recv, args, ..

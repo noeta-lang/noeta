@@ -84,6 +84,9 @@ pub struct LoweringSites<'a> {
     pub index_field_sites: &'a HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::TypedModuleCall`].
     pub typed_module_call_sites: &'a HashMap<Span, noeta_native::TypeRecipe>,
+    /// `json.decode_typed(name, text)` call spans (L2.2 DI) → lowered to [`Rvalue::DecodeTyped`]
+    /// instead of a generic method call, routing to the runtime decode-by-type registry.
+    pub decode_typed_sites: &'a HashSet<Span>,
     /// `for` spans whose iterable is statically an `Iterator<T>` → the lowered [`Stmt::For`] streams
     /// via `next()` rather than snapshotting a list (Track I.2).
     pub for_stream_sites: &'a HashSet<Span>,
@@ -121,6 +124,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
     let packed = HashMap::new();
     let index = HashSet::new();
     let ext = HashMap::new();
+    let decode_typed = HashSet::new();
     let stream = HashSet::new();
     let width = HashMap::new();
     let construction = HashMap::new();
@@ -135,6 +139,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
             packed_list_sites: &packed,
             index_field_sites: &index,
             typed_module_call_sites: &ext,
+            decode_typed_sites: &decode_typed,
             for_stream_sites: &stream,
             width_sites: &width,
             construction_sites: &construction,
@@ -1186,6 +1191,24 @@ impl Lowerer<'_> {
                     ..
                 } = callee.as_ref()
                 {
+                    // Router-facing runtime decode `json.decode_typed(name, text)` (L2.2 DI): the
+                    // checker recorded this call span. Emit the dedicated op over the two argument
+                    // atoms — the receiver (the `json` module handle) is not a runtime value, so it is
+                    // not lowered.
+                    if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
+                        let mut arg_atoms = self.lower_args(args, out)?;
+                        let text = arg_atoms.pop().expect("decode_typed takes 2 args");
+                        let name = arg_atoms.pop().expect("decode_typed takes 2 args");
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::DecodeTyped {
+                                name,
+                                text,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
                     let receiver = self.lower_expr(receiver, out)?;
                     let arg_atoms = self.lower_args(args, out)?;
                     // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
@@ -1748,6 +1771,26 @@ impl Lowerer<'_> {
                     ..
                 } = callee.as_ref()
                 {
+                    // Router-facing runtime decode via a pipe (`name |> json.decode_typed(text)`,
+                    // L2.2 DI): `left` threads in as the leading (`name`) argument. Emit the dedicated
+                    // op; the receiver (the `json` module handle) is not a runtime value.
+                    if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
+                        let mut arg_atoms = vec![left_atom];
+                        for a in args {
+                            arg_atoms.push(self.lower_expr(a, out)?);
+                        }
+                        let text = arg_atoms.pop().expect("decode_typed takes 2 args");
+                        let name = arg_atoms.pop().expect("decode_typed takes 2 args");
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::DecodeTyped {
+                                name,
+                                text,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
                     let receiver = self.lower_expr(receiver, out)?;
                     let mut arg_atoms = vec![left_atom];
                     for a in args {

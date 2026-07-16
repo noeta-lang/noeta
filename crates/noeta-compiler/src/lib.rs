@@ -213,6 +213,7 @@ fn compile_inner(
         field_defaults: module.field_defaults,
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
+        deserialize_recipes: module.deserialize_recipes,
         destruct_reachable,
         cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
@@ -309,6 +310,8 @@ fn compile_to_mc(
         construction_sites,
         packed_list_sites,
         typed_module_call_sites,
+        deserialize_recipes,
+        decode_typed_sites,
         map_packed_sites,
         index_field_sites,
         for_stream_sites,
@@ -341,6 +344,7 @@ fn compile_to_mc(
             packed_list_sites: &packed_list_sites,
             index_field_sites: &index_field_sites,
             typed_module_call_sites: &typed_module_call_sites,
+            decode_typed_sites: &decode_typed_sites,
             for_stream_sites: &for_stream_sites,
             width_sites: &width_sites,
             construction_sites: &construction_sites,
@@ -370,6 +374,7 @@ fn compile_to_mc(
         field_defaults: Vec::new(),
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
+        deserialize_recipes,
         structural_eq_types: HashSet::new(),
         packed_fields: HashMap::new(),
         key_capable_types: HashSet::new(),
@@ -470,6 +475,7 @@ impl SessionCompiler {
             field_defaults: Vec::new(),
             comparable_derives: Vec::new(),
             tojson_derives: Vec::new(),
+            deserialize_recipes: Vec::new(),
             structural_eq_types: HashSet::new(),
             packed_fields: HashMap::new(),
             key_capable_types: HashSet::new(),
@@ -540,6 +546,7 @@ impl SessionCompiler {
                     packed_list_sites: &sites.packed_list_sites,
                     index_field_sites: &sites.index_field_sites,
                     typed_module_call_sites: &sites.typed_module_call_sites,
+                    decode_typed_sites: &sites.decode_typed_sites,
                     for_stream_sites: &sites.for_stream_sites,
                     width_sites: &sites.width_sites,
                     construction_sites: &sites.construction_sites,
@@ -656,6 +663,7 @@ impl SessionCompiler {
             field_defaults: self.mc.field_defaults.clone(),
             comparable_derives: self.mc.comparable_derives.clone(),
             tojson_derives: self.mc.tojson_derives.clone(),
+            deserialize_recipes: self.mc.deserialize_recipes.clone(),
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
             reflection: self.reflection.clone(),
@@ -744,6 +752,9 @@ struct ModuleCompiler {
     field_defaults: Vec<(String, String, u32)>,
     comparable_derives: Vec<String>,
     tojson_derives: Vec<String>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI), taken verbatim from the checker's
+    /// [`noeta_check::Sites::deserialize_recipes`] and copied onto [`Module::deserialize_recipes`].
+    deserialize_recipes: Vec<(String, noeta_stdlib::TypeRecipe)>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
@@ -3388,6 +3399,24 @@ impl<'m> FnCompiler<'m> {
                     func: func_id,
                     args,
                     recipe: recipe.clone().map(Box::new),
+                    ok_shape,
+                    err_shape,
+                    span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::DecodeTyped { name, text, span } => {
+                // The router-facing runtime decode (L2.2 DI): load the type-name and JSON-text
+                // operands into registers and carry the `Result.Ok`/`Result.Err` shapes (as
+                // `Op::Invoke`/`TypedModuleCall` do) — the VM wraps a decode / lookup outcome in one.
+                let name = self.atom_reg(name)?;
+                let text = self.atom_reg(text)?;
+                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
+                let err_shape = self.module.builtin_enum_shape("Result", "Err");
+                self.code.push(Op::DecodeTyped {
+                    dst,
+                    name,
+                    text,
                     ok_shape,
                     err_shape,
                     span: *span,

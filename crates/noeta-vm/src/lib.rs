@@ -1105,6 +1105,10 @@ struct Vm<'m> {
     /// Type names that `@derive(Serialize<Json>)` (without a hand-written `to_json`): `o.to_json()` on
     /// their instances synthesizes a structural JSON serializer.
     tojson_derives: HashSet<String>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI), keyed by type name — lifted from
+    /// [`noeta_bytecode::Module::deserialize_recipes`]. `Op::DecodeTyped` (`json.decode_typed(name,
+    /// text)`) looks up the runtime type name here to decode a JSON body into that type.
+    deserialize_recipes: HashMap<String, noeta_stdlib::TypeRecipe>,
     /// The per-run global slots (P-VMT-GSLOT), indexed by [`GlobalId`] — sized to
     /// `module.global_names.len()`. A slot holds [`Value::unbound`] until first bound (a
     /// `LoadGlobal`/`TakeGlobal` of an unbound slot raises E0005); the compiler assigns a dense slot
@@ -2284,6 +2288,13 @@ impl<'m> Vm<'m> {
         let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
         let comparable_derives = module.comparable_derives.iter().cloned().collect();
         let tojson_derives = module.tojson_derives.iter().cloned().collect();
+        // Lift the `@derive(Deserialize<Json>)` decode recipes into a name→recipe map (L2.2 DI) so
+        // `Op::DecodeTyped` can look up a runtime type name in O(1).
+        let deserialize_recipes = module
+            .deserialize_recipes
+            .iter()
+            .cloned()
+            .collect::<HashMap<_, _>>();
         // One shared `&'static Shape` per shape-table entry, then resolve each packed-list layout against it.
         // Schemas are interned inner-before-outer, so a nested struct's schema (a lower index) is always
         // built before the parent that references it.
@@ -2349,6 +2360,7 @@ impl<'m> Vm<'m> {
             destruct_reachable,
             comparable_derives,
             tojson_derives,
+            deserialize_recipes,
             globals: vec![Value::unbound(); module.global_names.len()],
             global_order: Vec::new(),
             host,
@@ -4217,6 +4229,47 @@ impl<'m> Vm<'m> {
                             ),
                         ));
                         }
+                        pc += 1;
+                    }
+                    Op::DecodeTyped {
+                        dst,
+                        name,
+                        text,
+                        ok_shape,
+                        err_shape,
+                        span,
+                    } => {
+                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown type
+                        // name, a non-string operand, or a malformed body all land as `Result.Err`; a
+                        // good decode is `Result.Ok(value)` wrapping the materialized struct. Mirrors
+                        // the recoverable `json.decode::<T>` branch above, but the recipe is looked up by
+                        // runtime type name rather than baked at the call site.
+                        let err = |vm: &Self, msg: String| {
+                            Value::enum_value(vm.shapes[*err_shape as usize], vec![Value::string(&msg)])
+                        };
+                        let name_val = regs[fbase + *name as usize].as_string();
+                        let text_val = regs[fbase + *text as usize].as_string();
+                        let (Some(type_name), Some(text)) = (name_val, text_val) else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "`json.decode_typed` expects two `string` arguments".to_string(),
+                            ));
+                        };
+                        let value = match self.deserialize_recipes.get(&type_name) {
+                            None => err(
+                                self,
+                                format!("unknown deserializable type `{type_name}`"),
+                            ),
+                            Some(recipe) => match noeta_stdlib::json::parse_typed(&text, recipe) {
+                                Ok(out) => Value::enum_value(
+                                    self.shapes[*ok_shape as usize],
+                                    vec![materialize_recipe(out)],
+                                ),
+                                Err(error) => err(self, error.message),
+                            },
+                        };
+                        set_reg(regs, fbase, *dst, value);
                         pc += 1;
                     }
                     Op::BundleMethod {
@@ -6775,6 +6828,8 @@ impl<'m> Vm<'m> {
             .extend(extended.comparable_derives.iter().cloned());
         self.tojson_derives
             .extend(extended.tojson_derives.iter().cloned());
+        self.deserialize_recipes
+            .extend(extended.deserialize_recipes.iter().cloned());
         self.destruct_reachable
             .extend(extended.destruct_reachable.iter().cloned());
         self.globals
