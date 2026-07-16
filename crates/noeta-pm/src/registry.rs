@@ -25,6 +25,8 @@ use std::path::PathBuf;
 
 use semver::{Version, VersionReq};
 
+use crate::error::PmError;
+
 /// The git coordinates a registry release resolves to (package-manager P2.5). The **commit SHA** the
 /// tag resolved to at publish time is pinned here too (Phase 4, S2): the index — not just the
 /// lockfile — is authoritative on "this version = this commit", so a *first* registry resolve fetches
@@ -79,12 +81,12 @@ impl Release {
     /// A release carries **at most one** trust root: `signature` (key) or `bundle` (keyless), never
     /// both — two roots would make "which one did the consumer verify?" ambiguous and give a
     /// downgrade attack a second surface. Both `None` = unsigned (allowed, unverified).
-    pub fn check_provenance_shape(&self) -> Result<(), String> {
+    pub fn check_provenance_shape(&self) -> Result<(), PmError> {
         if self.signature.is_some() && self.bundle.is_some() {
-            return Err(
+            return Err(PmError::Trust(
                 "a release carries either a key signature or a keyless bundle, not both"
                     .to_string(),
-            );
+            ));
         }
         Ok(())
     }
@@ -96,24 +98,24 @@ impl Release {
 pub trait Index {
     /// Every published [`Release`] of `name` (`company/package`). An unknown package yields an empty
     /// list; an `Err` is a real lookup failure (a corrupt/unreadable index).
-    fn releases(&self, name: &str) -> Result<Vec<Release>, String>;
+    fn releases(&self, name: &str) -> Result<Vec<Release>, PmError>;
 
     /// Record a `name` release (the `noeta publish` write path). Re-publishing the same version with
     /// identical coordinates + deps is idempotent; a *different* coordinate for an existing version is
     /// rejected (a published release is immutable).
-    fn publish(&self, name: &str, release: &Release) -> Result<(), String>;
+    fn publish(&self, name: &str, release: &Release) -> Result<(), PmError>;
 
     /// The registered Ed25519 **public key** (hex) of `scope` (a `company`), for verifying that
     /// scope's release signatures. `None` if the scope registered no key. Default: `None` (an index
     /// that doesn't serve keys yet — a consumer then treats releases as unverified).
-    fn scope_key(&self, _scope: &str) -> Result<Option<String>, String> {
+    fn scope_key(&self, _scope: &str) -> Result<Option<String>, PmError> {
         Ok(None)
     }
 
     /// Register a scope's public key. Default: a **no-op** — the hosted registry registers keys via
     /// its admin endpoint (scope ownership), so `noeta publish` doesn't self-register there. The
     /// local index overrides this to record the key, so an offline publish/verify round-trips.
-    fn set_scope_key(&self, _scope: &str, _public_hex: &str) -> Result<(), String> {
+    fn set_scope_key(&self, _scope: &str, _public_hex: &str) -> Result<(), PmError> {
         Ok(())
     }
 
@@ -123,12 +125,14 @@ pub trait Index {
     /// immutable release is fine), and a hosted registry may choose to regenerate them from
     /// source itself (the docs.rs model) rather than trust the upload. Default: an error — an
     /// index that does not store docs says so, and `noeta publish` degrades to a warning.
-    fn put_docs(&self, _name: &str, _version: &Version, _docs_json: &str) -> Result<(), String> {
-        Err("this registry does not store documentation".to_string())
+    fn put_docs(&self, _name: &str, _version: &Version, _docs_json: &str) -> Result<(), PmError> {
+        Err(PmError::Network(
+            "this registry does not store documentation".to_string(),
+        ))
     }
 
     /// The stored `docs.json` for `name@version`, if any. Default: `None`.
-    fn docs(&self, _name: &str, _version: &Version) -> Result<Option<String>, String> {
+    fn docs(&self, _name: &str, _version: &Version) -> Result<Option<String>, PmError> {
         Ok(None)
     }
 
@@ -137,12 +141,14 @@ pub trait Index {
     /// README is only ever what the publisher uploads). Same posture as docs: *advisory metadata*,
     /// unsigned and last-wins, never part of the immutable release record. Default: an error — an
     /// index that does not store READMEs says so, and `noeta publish` degrades to a warning.
-    fn put_readme(&self, _name: &str, _version: &Version, _readme_md: &str) -> Result<(), String> {
-        Err("this registry does not store READMEs".to_string())
+    fn put_readme(&self, _name: &str, _version: &Version, _readme_md: &str) -> Result<(), PmError> {
+        Err(PmError::Network(
+            "this registry does not store READMEs".to_string(),
+        ))
     }
 
     /// The stored README markdown for `name@version`, if any. Default: `None`.
-    fn readme(&self, _name: &str, _version: &Version) -> Result<Option<String>, String> {
+    fn readme(&self, _name: &str, _version: &Version) -> Result<Option<String>, PmError> {
         Ok(None)
     }
 
@@ -163,10 +169,12 @@ pub fn resolve_coords(
     index: &dyn Index,
     name: &str,
     req: &VersionReq,
-) -> Result<(Version, GitCoords), String> {
+) -> Result<(Version, GitCoords), PmError> {
     let mut releases = index.releases(name)?;
     if releases.is_empty() {
-        return Err(format!("registry has no package `{name}`"));
+        return Err(PmError::Conflict(format!(
+            "registry has no package `{name}`"
+        )));
     }
     // Highest first, so the first match is the selection.
     releases.sort_by(|a, b| b.version.cmp(&a.version));
@@ -176,10 +184,10 @@ pub fn resolve_coords(
         .map(|r| (r.version.clone(), r.coords.clone()))
         .ok_or_else(|| {
             let available: Vec<String> = releases.iter().map(|r| r.version.to_string()).collect();
-            format!(
+            PmError::Conflict(format!(
                 "no version of `{name}` matches `{req}` (published: {})",
                 available.join(", ")
-            )
+            ))
         })
 }
 
@@ -194,13 +202,15 @@ pub struct LocalIndex {
 impl LocalIndex {
     /// Open the configured local index, creating its directory. `NOETA_REGISTRY_DIR` overrides the
     /// default `<cache>/registry`. Errors when no location can be resolved or created.
-    pub fn open() -> Result<LocalIndex, String> {
+    pub fn open() -> Result<LocalIndex, PmError> {
         let dir = match std::env::var_os("NOETA_REGISTRY_DIR") {
             Some(dir) => PathBuf::from(dir),
             None => noeta_cache::Cache::locate()
                 .ok_or_else(|| {
-                    "cannot locate a registry directory (set NOETA_REGISTRY_DIR or HOME)"
-                        .to_string()
+                    PmError::Io(
+                        "cannot locate a registry directory (set NOETA_REGISTRY_DIR or HOME)"
+                            .to_string(),
+                    )
                 })?
                 .join("registry"),
         };
@@ -208,10 +218,14 @@ impl LocalIndex {
     }
 
     /// Open an index at an explicit directory (tests / an override).
-    pub fn open_at(dir: impl Into<PathBuf>) -> Result<LocalIndex, String> {
+    pub fn open_at(dir: impl Into<PathBuf>) -> Result<LocalIndex, PmError> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir)
-            .map_err(|err| format!("cannot create registry dir `{}`: {err}", dir.display()))?;
+        std::fs::create_dir_all(&dir).map_err(|err| {
+            PmError::Io(format!(
+                "cannot create registry dir `{}`: {err}",
+                dir.display()
+            ))
+        })?;
         Ok(LocalIndex { dir })
     }
 
@@ -240,14 +254,17 @@ impl LocalIndex {
 }
 
 impl Index for LocalIndex {
-    fn releases(&self, name: &str) -> Result<Vec<Release>, String> {
+    fn releases(&self, name: &str) -> Result<Vec<Release>, PmError> {
         let path = self.file_for(name);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Ok(Vec::new()); // unknown package
         };
-        let table: toml::Table = text
-            .parse()
-            .map_err(|err| format!("corrupt registry entry `{}`: {err}", path.display()))?;
+        let table: toml::Table = text.parse().map_err(|err| {
+            PmError::Network(format!(
+                "corrupt registry entry `{}`: {err}",
+                path.display()
+            ))
+        })?;
         let mut out = Vec::new();
         if let Some(entries) = table.get("version").and_then(|v| v.as_array()) {
             for entry in entries {
@@ -296,20 +313,22 @@ impl Index for LocalIndex {
         Ok(out)
     }
 
-    fn scope_key(&self, scope: &str) -> Result<Option<String>, String> {
+    fn scope_key(&self, scope: &str) -> Result<Option<String>, PmError> {
         match std::fs::read_to_string(self.scope_key_file(scope)) {
             Ok(text) => Ok(Some(text.trim().to_string())),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(format!("cannot read scope key for `{scope}`: {err}")),
+            Err(err) => Err(PmError::Io(format!(
+                "cannot read scope key for `{scope}`: {err}"
+            ))),
         }
     }
 
-    fn set_scope_key(&self, scope: &str, public_hex: &str) -> Result<(), String> {
+    fn set_scope_key(&self, scope: &str, public_hex: &str) -> Result<(), PmError> {
         std::fs::write(self.scope_key_file(scope), format!("{public_hex}\n"))
-            .map_err(|err| format!("cannot write scope key for `{scope}`: {err}"))
+            .map_err(|err| PmError::Io(format!("cannot write scope key for `{scope}`: {err}")))
     }
 
-    fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
+    fn publish(&self, name: &str, release: &Release) -> Result<(), PmError> {
         release.check_provenance_shape()?;
         let mut releases = self.releases(name)?;
         // The rewrite below regenerates the WHOLE file from what `releases()` parsed — and that
@@ -324,21 +343,21 @@ impl Index for LocalIndex {
                 .and_then(|t| t.get("version").and_then(|v| v.as_array()).map(|a| a.len()))
                 .unwrap_or(0);
             if on_disk != releases.len() {
-                return Err(format!(
+                return Err(PmError::Network(format!(
                     "registry entry for `{name}` records {on_disk} version(s) but only {} parse                      with this toolchain — refusing to rewrite the entry (it would silently drop                      the rest). It may be written by a newer toolchain, or corrupted: fix or                      remove `{}` first",
                     releases.len(),
                     self.file_for(name).display()
-                ));
+                )));
             }
         }
         if let Some(existing) = releases.iter().find(|r| r.version == release.version) {
             if existing == release {
                 return Ok(()); // idempotent re-publish
             }
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "`{name}`@{} is already published at {}#{} — a release is immutable",
                 release.version, existing.coords.url, existing.coords.tag
-            ));
+            )));
         }
         releases.push(release.clone());
         releases.sort_by(|a, b| a.version.cmp(&b.version));
@@ -366,35 +385,41 @@ impl Index for LocalIndex {
             }
         }
         std::fs::write(self.file_for(name), text)
-            .map_err(|err| format!("cannot write registry entry for `{name}`: {err}"))
+            .map_err(|err| PmError::Io(format!("cannot write registry entry for `{name}`: {err}")))
     }
-    fn put_docs(&self, name: &str, version: &Version, docs_json: &str) -> Result<(), String> {
+    fn put_docs(&self, name: &str, version: &Version, docs_json: &str) -> Result<(), PmError> {
         let path = self.docs_file(name, version);
         std::fs::write(&path, docs_json)
-            .map_err(|err| format!("cannot write docs `{}`: {err}", path.display()))
+            .map_err(|err| PmError::Io(format!("cannot write docs `{}`: {err}", path.display())))
     }
 
-    fn docs(&self, name: &str, version: &Version) -> Result<Option<String>, String> {
+    fn docs(&self, name: &str, version: &Version) -> Result<Option<String>, PmError> {
         let path = self.docs_file(name, version);
         match std::fs::read_to_string(&path) {
             Ok(text) => Ok(Some(text)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(format!("cannot read docs `{}`: {err}", path.display())),
+            Err(err) => Err(PmError::Io(format!(
+                "cannot read docs `{}`: {err}",
+                path.display()
+            ))),
         }
     }
 
-    fn put_readme(&self, name: &str, version: &Version, readme_md: &str) -> Result<(), String> {
+    fn put_readme(&self, name: &str, version: &Version, readme_md: &str) -> Result<(), PmError> {
         let path = self.readme_file(name, version);
         std::fs::write(&path, readme_md)
-            .map_err(|err| format!("cannot write readme `{}`: {err}", path.display()))
+            .map_err(|err| PmError::Io(format!("cannot write readme `{}`: {err}", path.display())))
     }
 
-    fn readme(&self, name: &str, version: &Version) -> Result<Option<String>, String> {
+    fn readme(&self, name: &str, version: &Version) -> Result<Option<String>, PmError> {
         let path = self.readme_file(name, version);
         match std::fs::read_to_string(&path) {
             Ok(text) => Ok(Some(text)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(format!("cannot read readme `{}`: {err}", path.display())),
+            Err(err) => Err(PmError::Io(format!(
+                "cannot read readme `{}`: {err}",
+                path.display()
+            ))),
         }
     }
 }
@@ -408,12 +433,12 @@ fn quote(s: &str) -> String {
 /// `registry-http` feature and `NOETA_REGISTRY_URL` set, this is the **networked** [`HttpIndex`]
 /// (the hosted index); otherwise the file-backed [`LocalIndex`] (offline / tests). A future default
 /// production URL flips the else-branch once the hosted registry is live.
-pub fn open_default() -> Result<Box<dyn Index>, String> {
+pub fn open_default() -> Result<Box<dyn Index>, PmError> {
     #[cfg(feature = "registry-http")]
     if let Some(url) = std::env::var_os("NOETA_REGISTRY_URL") {
         let base = url
             .into_string()
-            .map_err(|_| "NOETA_REGISTRY_URL is not valid UTF-8".to_string())?;
+            .map_err(|_| PmError::Network("NOETA_REGISTRY_URL is not valid UTF-8".to_string()))?;
         return Ok(Box::new(HttpIndex::new(base)?));
     }
     Ok(Box::new(LocalIndex::open()?))
@@ -424,7 +449,7 @@ pub fn open_default() -> Result<Box<dyn Index>, String> {
 /// git-forge index over that org. This is what lets a project route each scope to its own registry.
 pub fn open_source(
     source: Option<&crate::manifest::RegistrySource>,
-) -> Result<Box<dyn Index>, String> {
+) -> Result<Box<dyn Index>, PmError> {
     match source {
         None => open_default(),
         Some(crate::manifest::RegistrySource::Hosted(url)) => open_hosted(url),
@@ -434,21 +459,21 @@ pub fn open_source(
 
 /// Open a hosted HTTP registry at an explicit base URL (a `[registries]` `https://…` source).
 #[cfg(feature = "registry-http")]
-fn open_hosted(url: &str) -> Result<Box<dyn Index>, String> {
+fn open_hosted(url: &str) -> Result<Box<dyn Index>, PmError> {
     Ok(Box::new(HttpIndex::new(url.to_string())?))
 }
 
 #[cfg(not(feature = "registry-http"))]
-fn open_hosted(_url: &str) -> Result<Box<dyn Index>, String> {
-    Err(
+fn open_hosted(_url: &str) -> Result<Box<dyn Index>, PmError> {
+    Err(PmError::Network(
         "a hosted `[registries]` source needs the `registry-http` build of the toolchain"
             .to_string(),
-    )
+    ))
 }
 
 /// Open a git forge as a registry (a `[registries]` `github:`/`gitlab:`/`git:` source, normalized to a
 /// base URL): packages resolve from `<base>/<package>` by their semver tags (private-registries arc).
-fn open_git_forge(base: &str) -> Result<Box<dyn Index>, String> {
+fn open_git_forge(base: &str) -> Result<Box<dyn Index>, PmError> {
     Ok(Box::new(crate::git_forge::GitForgeIndex::from_base(base)?))
 }
 
@@ -522,13 +547,15 @@ struct ScopeResponse {
 impl HttpIndex {
     /// A client for the registry at `base` (e.g. `https://registry.noeta.dev`). The publish token,
     /// if any, comes from `NOETA_REGISTRY_TOKEN`.
-    pub fn new(base: impl Into<String>) -> Result<HttpIndex, String> {
+    pub fn new(base: impl Into<String>) -> Result<HttpIndex, PmError> {
         let base = base.into().trim_end_matches('/').to_string();
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .user_agent(concat!("noeta/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map_err(|err| format!("cannot build the registry HTTP client: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!("cannot build the registry HTTP client: {err}"))
+            })?;
         Ok(HttpIndex {
             base,
             token: std::env::var("NOETA_REGISTRY_TOKEN").ok(),
@@ -551,7 +578,7 @@ impl HttpIndex {
         scope: &str,
         token: &str,
         proof: &ClaimProof,
-    ) -> Result<String, String> {
+    ) -> Result<String, PmError> {
         let mut body = serde_json::json!({ "scope": scope, "token": token });
         match proof {
             ClaimProof::Oidc(jwt) => body["oidc"] = serde_json::json!(jwt),
@@ -563,7 +590,7 @@ impl HttpIndex {
             .post(format!("{}/v1/scopes/claim", self.base))
             .json(&body)
             .send()
-            .map_err(|err| format!("claiming scope `{scope}` failed: {err}"))?;
+            .map_err(|err| PmError::Network(format!("claiming scope `{scope}` failed: {err}")))?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
         if status.is_success() {
@@ -580,7 +607,9 @@ impl HttpIndex {
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| status.to_string());
-        Err(format!("registry refused the claim of `{scope}`: {detail}"))
+        Err(PmError::Auth(format!(
+            "registry refused the claim of `{scope}`: {detail}"
+        )))
     }
 
     /// Set a scope's **publishing policy** (namespace-protection #1, require-provenance): `POST
@@ -593,11 +622,13 @@ impl HttpIndex {
         scope: &str,
         require_provenance: bool,
         root: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, PmError> {
         let token = self.token.as_ref().ok_or_else(|| {
-            "setting a scope policy needs a token — set NOETA_REGISTRY_TOKEN to the scope's publish \
-             token"
-                .to_string()
+            PmError::Auth(
+                "setting a scope policy needs a token — set NOETA_REGISTRY_TOKEN to the scope's \
+                 publish token"
+                    .to_string(),
+            )
         })?;
         let mut body = serde_json::json!({ "require_provenance": require_provenance });
         if let Some(root) = root {
@@ -609,7 +640,11 @@ impl HttpIndex {
             .bearer_auth(token)
             .json(&body)
             .send()
-            .map_err(|err| format!("setting the policy for scope `{scope}` failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "setting the policy for scope `{scope}` failed: {err}"
+                ))
+            })?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
         if status.is_success() {
@@ -624,44 +659,51 @@ impl HttpIndex {
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| status.to_string());
-        Err(format!(
+        Err(PmError::Auth(format!(
             "registry rejected the policy for `{scope}`: {detail}"
-        ))
+        )))
     }
 
     /// The transparency log's current **signed checkpoint** (namespace-protection #1): `GET
     /// /v1/log/checkpoint`.
-    pub fn log_checkpoint(&self) -> Result<LogCheckpoint, String> {
+    pub fn log_checkpoint(&self) -> Result<LogCheckpoint, PmError> {
         let resp = self
             .client
             .get(format!("{}/v1/log/checkpoint", self.base))
             .send()
-            .map_err(|err| format!("fetching the transparency-log checkpoint failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "fetching the transparency-log checkpoint failed: {err}"
+                ))
+            })?;
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for the transparency-log checkpoint",
                 resp.status()
-            ));
+            )));
         }
-        resp.json()
-            .map_err(|err| format!("malformed transparency-log checkpoint: {err}"))
+        resp.json().map_err(|err| {
+            PmError::Network(format!("malformed transparency-log checkpoint: {err}"))
+        })
     }
 
     /// The transparency log's **public key** (hex) to pin, or `None` if the registry serves none.
-    pub fn log_public_key(&self) -> Result<Option<String>, String> {
+    pub fn log_public_key(&self) -> Result<Option<String>, PmError> {
         let resp = self
             .client
             .get(format!("{}/v1/log/key", self.base))
             .send()
-            .map_err(|err| format!("fetching the transparency-log key failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!("fetching the transparency-log key failed: {err}"))
+            })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for the transparency-log key",
                 resp.status()
-            ));
+            )));
         }
         #[derive(serde::Deserialize)]
         struct KeyResponse {
@@ -669,36 +711,42 @@ impl HttpIndex {
         }
         Ok(Some(
             resp.json::<KeyResponse>()
-                .map_err(|err| format!("malformed transparency-log key: {err}"))?
+                .map_err(|err| PmError::Network(format!("malformed transparency-log key: {err}")))?
                 .public_key,
         ))
     }
 
     /// The **inclusion proof** for `name`@`version`, or `None` if the release is not logged: `GET
     /// /v1/log/proof/{name}/{version}`.
-    pub fn log_inclusion(&self, name: &str, version: &str) -> Result<Option<LogInclusion>, String> {
+    pub fn log_inclusion(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<LogInclusion>, PmError> {
         let resp = self
             .client
             .get(format!("{}/v1/log/proof/{name}/{version}", self.base))
             .send()
-            .map_err(|err| format!("fetching the transparency-log proof failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!("fetching the transparency-log proof failed: {err}"))
+            })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for the transparency-log proof of `{name}`@{version}",
                 resp.status()
-            ));
+            )));
         }
         Ok(Some(resp.json().map_err(|err| {
-            format!("malformed transparency-log proof: {err}")
+            PmError::Network(format!("malformed transparency-log proof: {err}"))
         })?))
     }
 
     /// A **consistency proof** that the log at size `from` is a prefix of size `to`: `GET
     /// /v1/log/consistency?from&to` (namespace-protection #1, append-only across checkpoints).
-    pub fn log_consistency(&self, from: u64, to: u64) -> Result<LogConsistency, String> {
+    pub fn log_consistency(&self, from: u64, to: u64) -> Result<LogConsistency, PmError> {
         let resp = self
             .client
             .get(format!(
@@ -707,16 +755,21 @@ impl HttpIndex {
             ))
             .send()
             .map_err(|err| {
-                format!("fetching the transparency-log consistency proof failed: {err}")
+                PmError::Network(format!(
+                    "fetching the transparency-log consistency proof failed: {err}"
+                ))
             })?;
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for the transparency-log consistency proof",
                 resp.status()
-            ));
+            )));
         }
-        resp.json()
-            .map_err(|err| format!("malformed transparency-log consistency proof: {err}"))
+        resp.json().map_err(|err| {
+            PmError::Network(format!(
+                "malformed transparency-log consistency proof: {err}"
+            ))
+        })
     }
 }
 
@@ -753,12 +806,12 @@ pub struct LogConsistency {
 /// Open the **hosted** registry as a concrete [`HttpIndex`] when `NOETA_REGISTRY_URL` is set (needed
 /// for transparency-log verification, which uses HttpIndex-only endpoints), else `None`.
 #[cfg(feature = "registry-http")]
-pub fn open_http() -> Result<Option<HttpIndex>, String> {
+pub fn open_http() -> Result<Option<HttpIndex>, PmError> {
     match std::env::var_os("NOETA_REGISTRY_URL") {
         Some(url) => {
-            let base = url
-                .into_string()
-                .map_err(|_| "NOETA_REGISTRY_URL is not valid UTF-8".to_string())?;
+            let base = url.into_string().map_err(|_| {
+                PmError::Network("NOETA_REGISTRY_URL is not valid UTF-8".to_string())
+            })?;
             Ok(Some(HttpIndex::new(base)?))
         }
         None => Ok(None),
@@ -793,21 +846,21 @@ impl HttpIndex {
         sha: &str,
         license: Option<&str>,
         pinned_key: Option<&str>,
-    ) -> Result<VerifiedLog, String> {
+    ) -> Result<VerifiedLog, PmError> {
         use crate::transparency;
         let key = match pinned_key {
             Some(k) => k.to_string(),
-            None => self
-                .log_public_key()?
-                .ok_or("the registry serves no transparency-log public key")?,
+            None => self.log_public_key()?.ok_or_else(|| {
+                PmError::Trust("the registry serves no transparency-log public key".to_string())
+            })?,
         };
         let cp = self.log_checkpoint()?;
         if !transparency::verify_checkpoint(&key, cp.tree_size, &cp.root_hash, &cp.signature)? {
-            return Err(
+            return Err(PmError::Trust(
                 "the transparency-log checkpoint signature does not verify against the log key \
                  — the registry may be equivocating, or the log key changed"
                     .to_string(),
-            );
+            ));
         }
         self.verify_inclusion_at(name, version, url, tag, sha, license, &cp)?;
         Ok(VerifiedLog {
@@ -831,18 +884,18 @@ impl HttpIndex {
         sha: &str,
         license: Option<&str>,
         cp: &LogCheckpoint,
-    ) -> Result<(), String> {
+    ) -> Result<(), PmError> {
         use crate::transparency;
-        let incl = self
-            .log_inclusion(name, version)?
-            .ok_or_else(|| format!("`{name}`@{version} is not in the transparency log"))?;
+        let incl = self.log_inclusion(name, version)?.ok_or_else(|| {
+            PmError::Trust(format!("`{name}`@{version} is not in the transparency log"))
+        })?;
         // The inclusion proof must be against the *signed* checkpoint's tree, else a registry could
         // prove inclusion in some other (unsigned) tree.
         if incl.root_hash != cp.root_hash || incl.tree_size != cp.tree_size {
-            return Err(format!(
+            return Err(PmError::Trust(format!(
                 "the transparency inclusion proof for `{name}`@{version} is not against the signed \
                  checkpoint (a concurrent publish can cause this — retry)"
-            ));
+            )));
         }
         // The logged record must be for exactly the release we resolved: identity, version, and git
         // coordinates. The record's provenance field rides along, authenticated by inclusion. We check
@@ -856,10 +909,10 @@ impl HttpIndex {
             && fields[4] == tag
             && fields[5] == sha;
         if !matches {
-            return Err(format!(
+            return Err(PmError::Trust(format!(
                 "the transparency-log record for `{name}`@{version} does not match the resolved \
                  release (coordinates differ)"
-            ));
+            )));
         }
         // The license field was appended after the original six + provenance (fields are only ever
         // appended; the record ends in `\n`, so a post-license record splits into ≥ 9 parts, a
@@ -872,20 +925,20 @@ impl HttpIndex {
             && fields.len() >= 9
             && fields[7] != expected
         {
-            return Err(format!(
+            return Err(PmError::Trust(format!(
                 "the transparency-log record for `{name}`@{version} binds license `{}` but the \
                  index serves `{expected}` — the registry may be equivocating",
                 fields[7],
-            ));
+            )));
         }
         let root = transparency::hex_to_array::<32>(&cp.root_hash)
-            .ok_or("malformed checkpoint root hash")?;
+            .ok_or_else(|| PmError::Trust("malformed checkpoint root hash".to_string()))?;
         let proof = incl
             .proof
             .iter()
             .map(|h| transparency::hex_to_array::<32>(h))
             .collect::<Option<Vec<_>>>()
-            .ok_or("malformed inclusion-proof hash")?;
+            .ok_or_else(|| PmError::Trust("malformed inclusion-proof hash".to_string()))?;
         let leaf = transparency::leaf_hash(incl.record.as_bytes());
         if !transparency::verify_inclusion(
             leaf,
@@ -894,9 +947,9 @@ impl HttpIndex {
             &proof,
             &root,
         ) {
-            return Err(format!(
+            return Err(PmError::Trust(format!(
                 "the transparency inclusion proof for `{name}`@{version} does not verify"
-            ));
+            )));
         }
         Ok(())
     }
@@ -927,20 +980,22 @@ pub struct VerifiedAdvisories {
 #[cfg(all(feature = "registry-http", feature = "provenance"))]
 impl HttpIndex {
     /// The advisory feed's **public key** (hex) to pin, or `None` if the registry serves none.
-    pub fn advisory_public_key(&self) -> Result<Option<String>, String> {
+    pub fn advisory_public_key(&self) -> Result<Option<String>, PmError> {
         let resp = self
             .client
             .get(format!("{}/v1/advisories/key", self.base))
             .send()
-            .map_err(|err| format!("fetching the advisory-feed key failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!("fetching the advisory-feed key failed: {err}"))
+            })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for the advisory-feed key",
                 resp.status()
-            ));
+            )));
         }
         #[derive(serde::Deserialize)]
         struct KeyResponse {
@@ -948,40 +1003,44 @@ impl HttpIndex {
         }
         Ok(Some(
             resp.json::<KeyResponse>()
-                .map_err(|err| format!("malformed advisory-feed key: {err}"))?
+                .map_err(|err| PmError::Network(format!("malformed advisory-feed key: {err}")))?
                 .public_key,
         ))
     }
 
     /// The advisory feed's current **signed head**: `GET /v1/advisories/checkpoint`.
-    pub fn advisory_checkpoint(&self) -> Result<AdvisoryCheckpoint, String> {
+    pub fn advisory_checkpoint(&self) -> Result<AdvisoryCheckpoint, PmError> {
         let resp = self
             .client
             .get(format!("{}/v1/advisories/checkpoint", self.base))
             .send()
-            .map_err(|err| format!("fetching the advisory-feed checkpoint failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "fetching the advisory-feed checkpoint failed: {err}"
+                ))
+            })?;
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for the advisory-feed checkpoint",
                 resp.status()
-            ));
+            )));
         }
         resp.json()
-            .map_err(|err| format!("malformed advisory-feed checkpoint: {err}"))
+            .map_err(|err| PmError::Network(format!("malformed advisory-feed checkpoint: {err}")))
     }
 
     /// The raw advisory feed: `GET /v1/advisories`.
-    pub fn list_advisories(&self) -> Result<Vec<crate::advisory::Advisory>, String> {
+    pub fn list_advisories(&self) -> Result<Vec<crate::advisory::Advisory>, PmError> {
         let resp = self
             .client
             .get(format!("{}/v1/advisories", self.base))
             .send()
-            .map_err(|err| format!("fetching the advisory feed failed: {err}"))?;
+            .map_err(|err| PmError::Network(format!("fetching the advisory feed failed: {err}")))?;
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for the advisory feed",
                 resp.status()
-            ));
+            )));
         }
         #[derive(serde::Deserialize)]
         struct FeedResponse {
@@ -989,7 +1048,7 @@ impl HttpIndex {
         }
         Ok(resp
             .json::<FeedResponse>()
-            .map_err(|err| format!("malformed advisory feed: {err}"))?
+            .map_err(|err| PmError::Network(format!("malformed advisory feed: {err}")))?
             .advisories)
     }
 
@@ -999,38 +1058,41 @@ impl HttpIndex {
     /// head's digest is required to equal the digest recomputed from the served advisories — so a
     /// registry can't withhold an advisory (the digest would diverge) or serve a tampered one. Returns
     /// the verified feed and its head, for the caller to pin and to match against resolved versions.
-    pub fn fetch_advisories(&self, pinned_key: Option<&str>) -> Result<VerifiedAdvisories, String> {
+    pub fn fetch_advisories(
+        &self,
+        pinned_key: Option<&str>,
+    ) -> Result<VerifiedAdvisories, PmError> {
         use crate::advisory;
         let key = match pinned_key {
             Some(k) => k.to_string(),
-            None => self
-                .advisory_public_key()?
-                .ok_or("the registry serves no advisory-feed public key")?,
+            None => self.advisory_public_key()?.ok_or_else(|| {
+                PmError::Trust("the registry serves no advisory-feed public key".to_string())
+            })?,
         };
         let advisories = self.list_advisories()?;
         for a in &advisories {
             if !a.verify(&key)? {
-                return Err(format!(
+                return Err(PmError::Trust(format!(
                     "advisory `{}` does not verify against the advisory-feed key — the feed may be \
                      tampered, or the key changed",
                     a.id
-                ));
+                )));
             }
         }
         let cp = self.advisory_checkpoint()?;
         if !advisory::verify_feed_head(&key, cp.count, &cp.digest, &cp.signature)? {
-            return Err(
+            return Err(PmError::Trust(
                 "the advisory-feed head signature does not verify against the feed key".to_string(),
-            );
+            ));
         }
         // The signed head must attest to exactly the advisories served (else one was withheld).
         let recomputed = advisory::feed_digest(&advisories);
         if cp.count != advisories.len() || cp.digest != recomputed {
-            return Err(
+            return Err(PmError::Trust(
                 "the advisory-feed head does not match the served advisories — the registry may be \
                  withholding an advisory"
                     .to_string(),
-            );
+            ));
         }
         Ok(VerifiedAdvisories {
             public_key: key,
@@ -1042,23 +1104,27 @@ impl HttpIndex {
 
     /// The inclusion proof for an advisory's current transparency-log leaf (`GET
     /// /v1/log/advisory/{id}`), or `None` if the advisory is not logged.
-    pub fn advisory_inclusion(&self, id: &str) -> Result<Option<LogInclusion>, String> {
+    pub fn advisory_inclusion(&self, id: &str) -> Result<Option<LogInclusion>, PmError> {
         let resp = self
             .client
             .get(format!("{}/v1/log/advisory/{id}", self.base))
             .send()
-            .map_err(|err| format!("fetching the advisory inclusion proof failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "fetching the advisory inclusion proof failed: {err}"
+                ))
+            })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for the advisory inclusion proof of `{id}`",
                 resp.status()
-            ));
+            )));
         }
         Ok(Some(resp.json().map_err(|err| {
-            format!("malformed advisory inclusion proof: {err}")
+            PmError::Network(format!("malformed advisory inclusion proof: {err}"))
         })?))
     }
 
@@ -1073,7 +1139,7 @@ impl HttpIndex {
         &self,
         advisories: &[crate::advisory::Advisory],
         pinned_log_key: Option<&str>,
-    ) -> Result<Option<(usize, Vec<String>)>, String> {
+    ) -> Result<Option<(usize, Vec<String>)>, PmError> {
         use crate::transparency;
         let log_key = match pinned_log_key {
             Some(k) => k.to_string(),
@@ -1084,10 +1150,10 @@ impl HttpIndex {
         };
         let cp = self.log_checkpoint()?;
         if !transparency::verify_checkpoint(&log_key, cp.tree_size, &cp.root_hash, &cp.signature)? {
-            return Err(
+            return Err(PmError::Trust(
                 "the transparency-log checkpoint signature does not verify against the log key"
                     .to_string(),
-            );
+            ));
         }
         let mut verified = 0usize;
         let mut unlogged = Vec::new();
@@ -1105,25 +1171,28 @@ impl HttpIndex {
             };
             // The proof must be against the *signed* checkpoint, the logged record must be exactly this
             // advisory's canonical bytes, and the audit path must verify.
-            let canonical = String::from_utf8(a.canonical_bytes())
-                .map_err(|_| "advisory canonical bytes are not UTF-8".to_string())?;
+            let canonical = String::from_utf8(a.canonical_bytes()).map_err(|_| {
+                PmError::Trust("advisory canonical bytes are not UTF-8".to_string())
+            })?;
             if incl.root_hash != cp.root_hash
                 || incl.tree_size != cp.tree_size
                 || incl.record != canonical
             {
-                return Err(format!(
+                return Err(PmError::Trust(format!(
                     "advisory `{}` in the feed does not match its transparency-log leaf",
                     a.id
-                ));
+                )));
             }
             let root = transparency::hex_to_array::<32>(&cp.root_hash)
-                .ok_or("malformed checkpoint root hash")?;
+                .ok_or_else(|| PmError::Trust("malformed checkpoint root hash".to_string()))?;
             let proof = incl
                 .proof
                 .iter()
                 .map(|h| transparency::hex_to_array::<32>(h))
                 .collect::<Option<Vec<_>>>()
-                .ok_or("malformed advisory inclusion-proof hash")?;
+                .ok_or_else(|| {
+                    PmError::Trust("malformed advisory inclusion-proof hash".to_string())
+                })?;
             let leaf = transparency::leaf_hash(canonical.as_bytes());
             if !transparency::verify_inclusion(
                 leaf,
@@ -1132,10 +1201,10 @@ impl HttpIndex {
                 &proof,
                 &root,
             ) {
-                return Err(format!(
+                return Err(PmError::Trust(format!(
                     "the transparency inclusion proof for advisory `{}` does not verify",
                     a.id
-                ));
+                )));
             }
             verified += 1;
         }
@@ -1175,9 +1244,10 @@ impl std::fmt::Debug for ClaimProof {
 /// Mint a fresh 256-bit publish token (hex) from OS entropy — what `noeta claim` binds to a scope
 /// when the user doesn't supply one (namespace-protection #1).
 #[cfg(feature = "registry-http")]
-pub fn generate_publish_token() -> Result<String, String> {
+pub fn generate_publish_token() -> Result<String, PmError> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|err| format!("cannot read OS entropy: {err}"))?;
+    getrandom::fill(&mut bytes)
+        .map_err(|err| PmError::Io(format!("cannot read OS entropy: {err}")))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -1187,7 +1257,7 @@ pub fn generate_publish_token() -> Result<String, String> {
 /// workflow grants `id-token: write`); the response is `{ "value": "<jwt>" }`. The `audience` must
 /// match the registry's configured `OIDC_AUDIENCE`.
 #[cfg(feature = "registry-http")]
-pub fn fetch_github_oidc(audience: &str) -> Result<Option<String>, String> {
+pub fn fetch_github_oidc(audience: &str) -> Result<Option<String>, PmError> {
     let (Ok(req_url), Ok(req_token)) = (
         std::env::var("ACTIONS_ID_TOKEN_REQUEST_URL"),
         std::env::var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
@@ -1198,43 +1268,48 @@ pub fn fetch_github_oidc(audience: &str) -> Result<Option<String>, String> {
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(concat!("noeta/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|err| format!("cannot build the OIDC HTTP client: {err}"))?;
+        .map_err(|err| PmError::Network(format!("cannot build the OIDC HTTP client: {err}")))?;
     let sep = if req_url.contains('?') { '&' } else { '?' };
     let resp = client
         .get(format!("{req_url}{sep}audience={audience}"))
         .bearer_auth(req_token)
         .send()
-        .map_err(|err| format!("requesting a GitHub OIDC token failed: {err}"))?;
+        .map_err(|err| PmError::Network(format!("requesting a GitHub OIDC token failed: {err}")))?;
     if !resp.status().is_success() {
-        return Err(format!(
+        return Err(PmError::Auth(format!(
             "GitHub OIDC token endpoint returned {} (does the workflow grant `id-token: write`?)",
             resp.status()
-        ));
+        )));
     }
     #[derive(serde::Deserialize)]
     struct TokenResponse {
         value: String,
     }
-    let token: TokenResponse = resp
-        .json()
-        .map_err(|err| format!("GitHub OIDC token response was not the expected JSON: {err}"))?;
+    let token: TokenResponse = resp.json().map_err(|err| {
+        PmError::Network(format!(
+            "GitHub OIDC token response was not the expected JSON: {err}"
+        ))
+    })?;
     Ok(Some(token.value))
 }
 
 #[cfg(feature = "registry-http")]
 impl Index for HttpIndex {
-    fn releases(&self, name: &str) -> Result<Vec<Release>, String> {
-        let resp = self
-            .client
-            .get(self.url_for(name))
-            .send()
-            .map_err(|err| format!("registry request for `{name}` failed: {err}"))?;
+    fn releases(&self, name: &str) -> Result<Vec<Release>, PmError> {
+        let resp = self.client.get(self.url_for(name)).send().map_err(|err| {
+            PmError::Network(format!("registry request for `{name}` failed: {err}"))
+        })?;
         if !resp.status().is_success() {
-            return Err(format!("registry returned {} for `{name}`", resp.status()));
+            return Err(PmError::Network(format!(
+                "registry returned {} for `{name}`",
+                resp.status()
+            )));
         }
-        let body: VersionsResponse = resp
-            .json()
-            .map_err(|err| format!("registry sent an unreadable response for `{name}`: {err}"))?;
+        let body: VersionsResponse = resp.json().map_err(|err| {
+            PmError::Network(format!(
+                "registry sent an unreadable response for `{name}`: {err}"
+            ))
+        })?;
         let mut out = Vec::new();
         for v in body.versions {
             // A yanked release is never *newly* selected (an existing lockfile pin bypasses the index
@@ -1272,32 +1347,40 @@ impl Index for HttpIndex {
         Ok(out)
     }
 
-    fn scope_key(&self, scope: &str) -> Result<Option<String>, String> {
+    fn scope_key(&self, scope: &str) -> Result<Option<String>, PmError> {
         let resp = self
             .client
             .get(format!("{}/v1/scopes/{scope}", self.base))
             .send()
-            .map_err(|err| format!("registry scope-key request for `{scope}` failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "registry scope-key request for `{scope}` failed: {err}"
+                ))
+            })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for scope `{scope}`",
                 resp.status()
-            ));
+            )));
         }
         let body: ScopeResponse = resp.json().map_err(|err| {
-            format!("registry sent an unreadable scope response for `{scope}`: {err}")
+            PmError::Network(format!(
+                "registry sent an unreadable scope response for `{scope}`: {err}"
+            ))
         })?;
         Ok(body.public_key)
     }
 
-    fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
+    fn publish(&self, name: &str, release: &Release) -> Result<(), PmError> {
         release.check_provenance_shape()?;
         let token = self.token.as_ref().ok_or_else(|| {
-            "publishing needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
-                .to_string()
+            PmError::Auth(
+                "publishing needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
+                    .to_string(),
+            )
         })?;
         let deps: Vec<_> = release
             .deps
@@ -1320,7 +1403,12 @@ impl Index for HttpIndex {
             .bearer_auth(token)
             .json(&body)
             .send()
-            .map_err(|err| format!("publishing `{name}`@{} failed: {err}", release.version))?;
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "publishing `{name}`@{} failed: {err}",
+                    release.version
+                ))
+            })?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());
@@ -1331,15 +1419,18 @@ impl Index for HttpIndex {
             .ok()
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| status.to_string());
-        Err(format!(
+        Err(PmError::Network(format!(
             "registry rejected `{name}`@{}: {detail}",
             release.version
-        ))
+        )))
     }
-    fn put_docs(&self, name: &str, version: &Version, docs_json: &str) -> Result<(), String> {
+    fn put_docs(&self, name: &str, version: &Version, docs_json: &str) -> Result<(), PmError> {
         let token = self.token.as_ref().ok_or_else(|| {
-            "uploading docs needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
-                .to_string()
+            PmError::Auth(
+                "uploading docs needs a token — set NOETA_REGISTRY_TOKEN to your registry publish \
+                 token"
+                    .to_string(),
+            )
         })?;
         let resp = self
             .client
@@ -1348,40 +1439,47 @@ impl Index for HttpIndex {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(docs_json.to_string())
             .send()
-            .map_err(|err| format!("registry docs upload for `{name}` failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!("registry docs upload for `{name}` failed: {err}"))
+            })?;
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} uploading docs for `{name}@{version}`",
                 resp.status()
-            ));
+            )));
         }
         Ok(())
     }
 
-    fn docs(&self, name: &str, version: &Version) -> Result<Option<String>, String> {
+    fn docs(&self, name: &str, version: &Version) -> Result<Option<String>, PmError> {
         let resp = self
             .client
             .get(format!("{}/docs/{version}", self.url_for(name)))
             .send()
-            .map_err(|err| format!("registry docs request for `{name}` failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!("registry docs request for `{name}` failed: {err}"))
+            })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for `{name}@{version}` docs",
                 resp.status()
-            ));
+            )));
         }
-        resp.text()
-            .map(Some)
-            .map_err(|err| format!("registry sent unreadable docs for `{name}`: {err}"))
+        resp.text().map(Some).map_err(|err| {
+            PmError::Network(format!("registry sent unreadable docs for `{name}`: {err}"))
+        })
     }
 
-    fn put_readme(&self, name: &str, version: &Version, readme_md: &str) -> Result<(), String> {
+    fn put_readme(&self, name: &str, version: &Version, readme_md: &str) -> Result<(), PmError> {
         let token = self.token.as_ref().ok_or_else(|| {
-            "uploading a README needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
-                .to_string()
+            PmError::Auth(
+                "uploading a README needs a token — set NOETA_REGISTRY_TOKEN to your registry \
+                 publish token"
+                    .to_string(),
+            )
         })?;
         let resp = self
             .client
@@ -1390,34 +1488,42 @@ impl Index for HttpIndex {
             .header(reqwest::header::CONTENT_TYPE, "text/markdown")
             .body(readme_md.to_string())
             .send()
-            .map_err(|err| format!("registry README upload for `{name}` failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!("registry README upload for `{name}` failed: {err}"))
+            })?;
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} uploading the README for `{name}@{version}`",
                 resp.status()
-            ));
+            )));
         }
         Ok(())
     }
 
-    fn readme(&self, name: &str, version: &Version) -> Result<Option<String>, String> {
+    fn readme(&self, name: &str, version: &Version) -> Result<Option<String>, PmError> {
         let resp = self
             .client
             .get(format!("{}/readme/{version}", self.url_for(name)))
             .send()
-            .map_err(|err| format!("registry README request for `{name}` failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "registry README request for `{name}` failed: {err}"
+                ))
+            })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!(
+            return Err(PmError::Network(format!(
                 "registry returned {} for `{name}@{version}` README",
                 resp.status()
-            ));
+            )));
         }
-        resp.text()
-            .map(Some)
-            .map_err(|err| format!("registry sent unreadable README for `{name}`: {err}"))
+        resp.text().map(Some).map_err(|err| {
+            PmError::Network(format!(
+                "registry sent unreadable README for `{name}`: {err}"
+            ))
+        })
     }
 }
 
@@ -1451,7 +1557,7 @@ mod tests {
         let err = index
             .publish("acme/lib", &release(2, 0, 0, "v2.0.0"))
             .expect_err("must refuse the lossy rewrite");
-        assert!(err.contains("refusing to rewrite"), "{err}");
+        assert!(err.message().contains("refusing to rewrite"), "{err}");
         // The half-understood entry is still on disk, untouched.
         assert!(
             std::fs::read_to_string(&file)
@@ -1605,7 +1711,7 @@ mod tests {
         rel.signature = Some("a".repeat(128));
         rel.bundle = Some("{}".to_string());
         let err = index.publish("acme/foo", &rel).unwrap_err();
-        assert!(err.contains("not both"), "{err}");
+        assert!(err.message().contains("not both"), "{err}");
     }
 
     #[test]
@@ -1636,9 +1742,9 @@ mod tests {
             .unwrap();
         let err =
             resolve_coords(&index, "guzzle/http", &VersionReq::parse("^2").unwrap()).unwrap_err();
-        assert!(err.contains("no version"), "{err}");
+        assert!(err.message().contains("no version"), "{err}");
         let err = resolve_coords(&index, "who/dis", &VersionReq::parse("^1").unwrap()).unwrap_err();
-        assert!(err.contains("no package"), "{err}");
+        assert!(err.message().contains("no package"), "{err}");
     }
 
     #[test]
@@ -1651,7 +1757,7 @@ mod tests {
         let err = index
             .publish("a/b", &release(1, 0, 0, "v9.9.9"))
             .unwrap_err();
-        assert!(err.contains("immutable"), "{err}");
+        assert!(err.message().contains("immutable"), "{err}");
     }
 }
 
@@ -1846,7 +1952,7 @@ mod http_tests {
         // Both trust roots on one release never reach the wire.
         rel.signature = Some("deadbeef".to_string());
         let err = index.publish("a/b", &rel).unwrap_err();
-        assert!(err.contains("not both"), "{err}");
+        assert!(err.message().contains("not both"), "{err}");
     }
 
     #[test]
@@ -1874,7 +1980,7 @@ mod http_tests {
                 },
             )
             .unwrap_err();
-        assert!(err.contains("NOETA_REGISTRY_TOKEN"), "{err}");
+        assert!(err.message().contains("NOETA_REGISTRY_TOKEN"), "{err}");
     }
 
     #[test]
@@ -1923,7 +2029,7 @@ mod http_tests {
                 &ClaimProof::Oidc("eyJ.header.sig".into()),
             )
             .unwrap_err();
-        assert!(err.contains("cannot claim scope"), "{err}");
+        assert!(err.message().contains("cannot claim scope"), "{err}");
     }
 
     #[test]
@@ -1958,7 +2064,7 @@ mod http_tests {
             .unwrap()
             .set_scope_policy("para", true, None)
             .unwrap_err();
-        assert!(err.contains("NOETA_REGISTRY_TOKEN"), "{err}");
+        assert!(err.message().contains("NOETA_REGISTRY_TOKEN"), "{err}");
     }
 
     #[test]
@@ -2067,7 +2173,7 @@ mod http_tests {
                 None,
             )
             .unwrap_err();
-        assert!(err.contains("license"), "{err}");
+        assert!(err.message().contains("license"), "{err}");
 
         // A wrong pinned log key is rejected — the checkpoint signature won't verify against it.
         let err = index
@@ -2081,6 +2187,6 @@ mod http_tests {
                 Some(&"00".repeat(32)),
             )
             .unwrap_err();
-        assert!(err.contains("checkpoint signature"), "{err}");
+        assert!(err.message().contains("checkpoint signature"), "{err}");
     }
 }

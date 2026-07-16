@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use semver::Version;
 
+use crate::error::PmError;
 use crate::registry::{Dep, GitCoords, Index, Release};
 
 /// A git-forge registry over one org/group **base URL** (any git host). Version discovery + per-tag
@@ -38,11 +39,16 @@ impl GitForgeIndex {
     /// Open the git forge at `base` (an org/group prefix URL) as a registry. The cache dir comes from
     /// `NOETA_GIT_FORGE_CACHE` or the toolchain cache. Private-repo auth is separate (ambient git
     /// credentials, or `NOETA_GITHUB_TOKEN` — see [`crate::git_auth`]).
-    pub fn from_base(base: &str) -> Result<GitForgeIndex, String> {
+    pub fn from_base(base: &str) -> Result<GitForgeIndex, PmError> {
         let cache_dir = match std::env::var_os("NOETA_GIT_FORGE_CACHE") {
             Some(dir) => PathBuf::from(dir),
             None => noeta_cache::Cache::locate()
-                .ok_or("cannot locate a cache directory for git-forge registries (set HOME)")?
+                .ok_or_else(|| {
+                    PmError::Io(
+                        "cannot locate a cache directory for git-forge registries (set HOME)"
+                            .to_string(),
+                    )
+                })?
                 .join("git-forge"),
         };
         Ok(GitForgeIndex::new(base, cache_dir))
@@ -72,7 +78,7 @@ impl GitForgeIndex {
     /// Ensure an up-to-date bare clone of the repo exists in the cache; return its path. A first call
     /// clones; a later call refreshes tags. A clone failure (the repo doesn't exist, or is private and
     /// we're unauthenticated) surfaces as the error — which is exactly "no such package here".
-    fn ensure_clone(&self, package: &str) -> Result<PathBuf, String> {
+    fn ensure_clone(&self, package: &str) -> Result<PathBuf, PmError> {
         let bare = self.bare_path(package);
         let url = self.repo_url(package);
         if bare.join("HEAD").exists() {
@@ -87,17 +93,18 @@ impl GitForgeIndex {
                 &url,
                 "refs/tags/*:refs/tags/*",
             ])
-            .map_err(|err| format!("refreshing `{url}`: {err}"))?;
+            .map_err(|err| PmError::Network(format!("refreshing `{url}`: {err}")))?;
         } else {
             if let Some(parent) = bare.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|err| format!("cannot create the git-forge cache: {err}"))?;
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    PmError::Io(format!("cannot create the git-forge cache: {err}"))
+                })?;
             }
             git(&["clone", "--bare", "--quiet", &url, path_str(&bare)?]).map_err(|err| {
-                format!(
+                PmError::Network(format!(
                     "cannot access `{url}` — the repo may not exist, or be private and require \
                      authentication: {err}"
-                )
+                ))
             })?;
         }
         Ok(bare)
@@ -119,16 +126,18 @@ fn slug(base: &str) -> String {
 }
 
 impl Index for GitForgeIndex {
-    fn releases(&self, name: &str) -> Result<Vec<Release>, String> {
+    fn releases(&self, name: &str) -> Result<Vec<Release>, PmError> {
         let package = name
             .split('/')
             .nth(1)
             .filter(|p| !p.is_empty())
-            .ok_or_else(|| format!("`{name}` is not a `company/package` identity"))?;
+            .ok_or_else(|| {
+                PmError::Manifest(format!("`{name}` is not a `company/package` identity"))
+            })?;
         let bare = self.ensure_clone(package)?;
         let bare_str = path_str(&bare)?;
 
-        let tag_list = git(&["-C", bare_str, "tag", "--list", "v*"])?;
+        let tag_list = git(&["-C", bare_str, "tag", "--list", "v*"]).map_err(PmError::Network)?;
         let mut releases = Vec::new();
         for tag in tag_list.lines().map(str::trim).filter(|t| !t.is_empty()) {
             // A version tag is `v<semver>`; anything else (a non-release tag) is skipped.
@@ -136,7 +145,8 @@ impl Index for GitForgeIndex {
                 continue;
             };
             // The commit the tag resolves to (peeling an annotated tag to its commit).
-            let sha = git(&["-C", bare_str, "rev-list", "-n", "1", tag])?
+            let sha = git(&["-C", bare_str, "rev-list", "-n", "1", tag])
+                .map_err(PmError::Network)?
                 .trim()
                 .to_string();
             if sha.is_empty() {
@@ -171,12 +181,12 @@ impl Index for GitForgeIndex {
         Ok(releases)
     }
 
-    fn publish(&self, _name: &str, _release: &Release) -> Result<(), String> {
-        Err(
+    fn publish(&self, _name: &str, _release: &Release) -> Result<(), PmError> {
+        Err(PmError::Network(
             "a git-forge registry has no publish endpoint — publish by pushing a semver tag \
              (`git tag v1.2.3 && git push --tags`)"
                 .to_string(),
-        )
+        ))
     }
 
     /// The bare clone this index already fetched for `name` (populated by [`Self::releases`]), so the
@@ -194,7 +204,7 @@ impl Index for GitForgeIndex {
 /// Extract a published package's **registry** dependency edges from its `noeta.toml` — the only edges a
 /// resolver needs from the index. Path/git edges in a published package are ignored (a published
 /// package depends on other packages by registry).
-fn registry_deps(manifest_text: &str) -> Result<Vec<Dep>, String> {
+fn registry_deps(manifest_text: &str) -> Result<Vec<Dep>, PmError> {
     let manifest = crate::manifest::Manifest::parse(manifest_text)?;
     let mut deps = Vec::new();
     for dep in manifest.dependencies().values() {
@@ -212,9 +222,9 @@ fn registry_deps(manifest_text: &str) -> Result<Vec<Dep>, String> {
     Ok(deps)
 }
 
-fn path_str(p: &Path) -> Result<&str, String> {
+fn path_str(p: &Path) -> Result<&str, PmError> {
     p.to_str()
-        .ok_or_else(|| format!("path `{}` is not valid UTF-8", p.display()))
+        .ok_or_else(|| PmError::Io(format!("path `{}` is not valid UTF-8", p.display())))
 }
 
 /// Run `git` with `args`, returning trimmed stdout or an error built from stderr. Token auth
@@ -341,7 +351,7 @@ mod tests {
         );
         let err = idx.releases("acme/nope").unwrap_err();
         assert!(
-            err.contains("may not exist") || err.contains("private"),
+            err.message().contains("may not exist") || err.message().contains("private"),
             "{err}"
         );
     }
@@ -365,6 +375,7 @@ mod tests {
         assert!(
             idx.publish("acme/thing", &r)
                 .unwrap_err()
+                .message()
                 .contains("pushing a semver tag")
         );
     }

@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use pubgrub::{DefaultStringReporter, OfflineDependencyProvider, Ranges, Reporter};
 use semver::{Comparator, Op, Version, VersionReq};
 
+use crate::error::PmError;
+
 /// PubGrub's version-set type over SemVer versions — a union of half-open intervals.
 type Vs = Ranges<Version>;
 
@@ -37,7 +39,7 @@ pub fn resolve(
     root: &str,
     root_version: &Version,
     root_deps: &[(String, VersionReq)],
-) -> Result<BTreeMap<String, Version>, String> {
+) -> Result<BTreeMap<String, Version>, PmError> {
     let mut provider = OfflineDependencyProvider::<String, Vs>::new();
 
     // The root, with its declared dependencies.
@@ -77,8 +79,10 @@ pub fn resolve(
             .into_iter()
             .filter(|(name, _)| name != root)
             .collect()),
-        Err(pubgrub::PubGrubError::NoSolution(tree)) => Err(DefaultStringReporter::report(&tree)),
-        Err(err) => Err(format!("{err}")),
+        Err(pubgrub::PubGrubError::NoSolution(tree)) => {
+            Err(PmError::Conflict(DefaultStringReporter::report(&tree)))
+        }
+        Err(err) => Err(PmError::Conflict(format!("{err}"))),
     }
 }
 
@@ -339,6 +343,6 @@ mod tests {
         )
         .expect_err("no solution");
         // The explainable report names the unsatisfiable package.
-        assert!(err.contains("acme/bytes"), "report was: {err}");
+        assert!(err.message().contains("acme/bytes"), "report was: {err}");
     }
 }

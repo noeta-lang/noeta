@@ -15,6 +15,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::error::PmError;
 use crate::manifest::GitRef;
 use crate::store::{Store, hash_tree};
 
@@ -35,8 +36,8 @@ pub struct Fetched {
 /// commit SHA at the remote (`ls-remote`), then materialized. If that SHA is already stored, no clone
 /// happens — only the cheap `ls-remote`. Use [`fetch_pinned`] when the lockfile already records the
 /// SHA (it skips even the `ls-remote`).
-pub fn fetch(url: &str, git_ref: &GitRef, store: &Store) -> Result<Fetched, String> {
-    let sha = ls_remote_ref(url, git_ref)?;
+pub fn fetch(url: &str, git_ref: &GitRef, store: &Store) -> Result<Fetched, PmError> {
+    let sha = ls_remote_ref(url, git_ref).map_err(PmError::Network)?;
     materialize_sha(url, git_ref, sha, store)
 }
 
@@ -50,7 +51,7 @@ pub fn fetch_pinned(
     git_ref: &GitRef,
     sha: &str,
     store: &Store,
-) -> Result<Fetched, String> {
+) -> Result<Fetched, PmError> {
     materialize_sha(url, git_ref, sha.to_string(), store)
 }
 
@@ -61,16 +62,20 @@ fn materialize_sha(
     git_ref: &GitRef,
     sha: String,
     store: &Store,
-) -> Result<Fetched, String> {
+) -> Result<Fetched, PmError> {
     let path = if store.contains(&sha) {
         store.path_for(&sha)
     } else {
+        // The publish's build step IS the network clone, so a failure here is the fetch failing
+        // (a filesystem error inside the store rides along under the same message).
         store
             .publish(&sha, |staging| clone_ref(url, git_ref, &sha, staging))
-            .map_err(|err| format!("storing `{url}`@`{}`: {err}", git_ref.describe()))?
+            .map_err(|err| {
+                PmError::Network(format!("storing `{url}`@`{}`: {err}", git_ref.describe()))
+            })?
     };
     let content_hash = hash_tree(&path)
-        .map_err(|err| format!("hashing `{url}`@`{}`: {err}", git_ref.describe()))?;
+        .map_err(|err| PmError::Io(format!("hashing `{url}`@`{}`: {err}", git_ref.describe())))?;
     Ok(Fetched {
         sha,
         content_hash,
@@ -81,8 +86,8 @@ fn materialize_sha(
 /// Resolve `url`@`tag` to the commit SHA it currently points at, without cloning (package-manager
 /// Phase 4, S2) — used by `noeta publish` to pin the SHA into the registry index at publish time
 /// (a published release is always a tag).
-pub fn resolve_tag_sha(url: &str, tag: &str) -> Result<String, String> {
-    ls_remote_ref(url, &GitRef::Tag(tag.to_string()))
+pub fn resolve_tag_sha(url: &str, tag: &str) -> Result<String, PmError> {
+    ls_remote_ref(url, &GitRef::Tag(tag.to_string())).map_err(PmError::Network)
 }
 
 /// Resolve `git_ref` to its commit SHA at the remote, without cloning (a lightweight network call).
@@ -183,13 +188,13 @@ impl Authorship {
 /// commit graph without file contents, a network op run only for `noeta update`/`add` on the deps that
 /// changed, never on the resolve hot path. Best-effort: an `Err` means "couldn't tell", so the caller
 /// stays quiet rather than failing the command.
-pub fn authorship(url: &str, sha: &str, since: Option<&str>) -> Result<Authorship, String> {
+pub fn authorship(url: &str, sha: &str, since: Option<&str>) -> Result<Authorship, PmError> {
     let short = &sha[..sha.len().min(12)];
     let dir = std::env::temp_dir().join(format!("noeta-authorship-{}-{short}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let dir_str = dir
         .to_str()
-        .ok_or_else(|| "temp path is not valid UTF-8".to_string())?
+        .ok_or_else(|| PmError::Io("temp path is not valid UTF-8".to_string()))?
         .to_string();
     // A blobless bare clone: full commit graph, no blobs, no checkout. On a local `file` transport the
     // filter is a no-op (still a full but cheap clone), so tests and real remotes both work.
@@ -203,7 +208,7 @@ pub fn authorship(url: &str, sha: &str, since: Option<&str>) -> Result<Authorshi
     ]);
     let result = clone.and_then(|_| authorship_from(&dir_str, sha, since));
     let _ = std::fs::remove_dir_all(&dir);
-    result
+    result.map_err(PmError::Network)
 }
 
 /// Compute the new committers from an already-cloned `git_dir` (split out so the git-plumbing is
@@ -381,7 +386,7 @@ mod tests {
             &store,
         )
         .unwrap_err();
-        assert!(err.contains("no tag"), "got: {err}");
+        assert!(err.message().contains("no tag"), "got: {err}");
     }
 
     /// Fetch an **untagged** repo by its default-branch HEAD, and by a named branch — the tag-free
@@ -432,7 +437,7 @@ mod tests {
             &store,
         )
         .unwrap_err();
-        assert!(err.contains("no branch"), "got: {err}");
+        assert!(err.message().contains("no branch"), "got: {err}");
     }
     /// Commit `file` (created with unique content) authored by `name <email>`.
     fn commit_as(repo: &Path, file: &str, name: &str, email: &str) {

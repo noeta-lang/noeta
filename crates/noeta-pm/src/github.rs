@@ -10,6 +10,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::error::PmError;
+
 /// A pending device authorization — what to show the user, plus the state [`poll_for_token`] needs.
 #[derive(Debug, Clone)]
 pub struct DeviceAuth {
@@ -26,12 +28,12 @@ pub struct DeviceAuth {
 }
 
 /// A blocking HTTP client for the device flow (short timeout — these are quick calls).
-fn client() -> Result<reqwest::blocking::Client, String> {
+fn client() -> Result<reqwest::blocking::Client, PmError> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(concat!("noeta/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|err| format!("cannot build the GitHub OAuth client: {err}"))
+        .map_err(|err| PmError::Network(format!("cannot build the GitHub OAuth client: {err}")))
 }
 
 /// Start the device flow: request a device + user code for `client_id` with the given `scope`
@@ -40,19 +42,21 @@ pub fn request_device_code(
     oauth_base: &str,
     client_id: &str,
     scope: &str,
-) -> Result<DeviceAuth, String> {
+) -> Result<DeviceAuth, PmError> {
     let base = oauth_base.trim_end_matches('/');
     let resp = client()?
         .post(format!("{base}/login/device/code"))
         .header(reqwest::header::ACCEPT, "application/json")
         .form(&[("client_id", client_id), ("scope", scope)])
         .send()
-        .map_err(|err| format!("requesting a GitHub device code failed: {err}"))?;
+        .map_err(|err| {
+            PmError::Network(format!("requesting a GitHub device code failed: {err}"))
+        })?;
     if !resp.status().is_success() {
-        return Err(format!(
+        return Err(PmError::Auth(format!(
             "GitHub device-code request returned {} (is the OAuth client id correct?)",
             resp.status()
-        ));
+        )));
     }
     #[derive(serde::Deserialize)]
     struct DeviceResponse {
@@ -67,9 +71,11 @@ pub fn request_device_code(
     fn default_interval() -> u64 {
         5
     }
-    let d: DeviceResponse = resp
-        .json()
-        .map_err(|err| format!("GitHub device-code response was not the expected JSON: {err}"))?;
+    let d: DeviceResponse = resp.json().map_err(|err| {
+        PmError::Network(format!(
+            "GitHub device-code response was not the expected JSON: {err}"
+        ))
+    })?;
     Ok(DeviceAuth {
         verification_uri: d.verification_uri,
         user_code: d.user_code,
@@ -86,7 +92,7 @@ pub fn poll_for_token(
     oauth_base: &str,
     client_id: &str,
     device: &DeviceAuth,
-) -> Result<String, String> {
+) -> Result<String, PmError> {
     let base = oauth_base.trim_end_matches('/');
     let client = client()?;
     let deadline = Instant::now() + Duration::from_secs(device.expires_in);
@@ -101,16 +107,20 @@ pub fn poll_for_token(
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ])
             .send()
-            .map_err(|err| format!("polling for the GitHub token failed: {err}"))?;
+            .map_err(|err| {
+                PmError::Network(format!("polling for the GitHub token failed: {err}"))
+            })?;
         #[derive(serde::Deserialize)]
         struct TokenResponse {
             access_token: Option<String>,
             error: Option<String>,
             interval: Option<u64>,
         }
-        let body: TokenResponse = resp
-            .json()
-            .map_err(|err| format!("GitHub token response was not the expected JSON: {err}"))?;
+        let body: TokenResponse = resp.json().map_err(|err| {
+            PmError::Network(format!(
+                "GitHub token response was not the expected JSON: {err}"
+            ))
+        })?;
         if let Some(token) = body.access_token {
             return Ok(token);
         }
@@ -119,22 +129,26 @@ pub fn poll_for_token(
             Some("authorization_pending") => {}
             // GitHub asked us to back off; it also sends a new interval.
             Some("slow_down") => interval = body.interval.unwrap_or(interval + 5),
-            Some("access_denied") => return Err("authorization was denied".to_string()),
+            Some("access_denied") => {
+                return Err(PmError::Auth("authorization was denied".to_string()));
+            }
             Some("expired_token") => {
-                return Err(
+                return Err(PmError::Auth(
                     "the device code expired before you authorized — run the command again"
                         .to_string(),
-                );
+                ));
             }
             other => {
-                return Err(format!(
+                return Err(PmError::Auth(format!(
                     "GitHub device authorization failed: {}",
                     other.unwrap_or("unknown error")
-                ));
+                )));
             }
         }
         if Instant::now() >= deadline {
-            return Err("timed out waiting for GitHub authorization".to_string());
+            return Err(PmError::Auth(
+                "timed out waiting for GitHub authorization".to_string(),
+            ));
         }
         std::thread::sleep(Duration::from_secs(interval));
     }
@@ -236,6 +250,6 @@ mod tests {
         });
         let device = request_device_code(&base, "client-id", "read:org").unwrap();
         let err = poll_for_token(&base, "client-id", &device).unwrap_err();
-        assert!(err.contains("denied"), "{err}");
+        assert!(err.message().contains("denied"), "{err}");
     }
 }
