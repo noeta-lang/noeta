@@ -484,6 +484,43 @@ pub fn assemble_with_extras(
     noeta_native::registry::Registry::new(units)
 }
 
+/// Assemble (std ∪ `extra`) as an **interned** `&'static` registry — the per-session entry
+/// (instance-registry IR5) for hosts that create sessions repeatedly. The whole pipeline hands out
+/// `&'static Registry`, so a per-session assembly must leak; interning by the unit **pointer set**
+/// bounds that leak by *distinct configurations* instead of by session count (a game engine
+/// reloading levels re-uses one assembly forever). Fallible: a mis-assembled unit set (duplicate
+/// identities, a type namespaced outside its unit's root) is an `Err` for the host to surface,
+/// never a panic out of a library entry point.
+pub fn interned_with_extras(
+    extra: &[&'static (dyn Extension + Sync)],
+) -> Result<&'static noeta_native::registry::Registry, String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static INTERNED: OnceLock<
+        Mutex<HashMap<Vec<usize>, &'static noeta_native::registry::Registry>>,
+    > = OnceLock::new();
+    // Key on the extras' pointer identities, order-normalized: `&'static dyn Extension` units are
+    // statics, so pointer equality is configuration equality.
+    let mut key: Vec<usize> = extra
+        .iter()
+        .map(|e| std::ptr::from_ref::<dyn Extension>(*e).cast::<()>() as usize)
+        .collect();
+    key.sort_unstable();
+    let mut interned = INTERNED
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("registry intern table poisoned");
+    if let Some(registry) = interned.get(&key) {
+        return Ok(registry);
+    }
+    let mut units = std_units();
+    units.extend_from_slice(extra);
+    let registry: &'static _ =
+        Box::leak(Box::new(noeta_native::registry::Registry::try_new(units)?));
+    interned.insert(key, registry);
+    Ok(registry)
+}
+
 /// All registered extensions.
 pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
     ensure();

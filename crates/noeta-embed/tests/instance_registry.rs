@@ -236,3 +236,59 @@ fn the_checker_scopes_the_tier_namespace_to_the_session_registry() {
         other => panic!("the default session must reject the unknown `@audit` tier, got {other:?}"),
     }
 }
+
+
+#[test]
+fn a_mis_assembled_extension_set_is_an_error_not_a_panic() {
+    // A unit colliding with std (same unit name as the std core unit is hard to fake; a type
+    // squatting the std namespace is the realistic authoring mistake) must surface as
+    // Error::Extension from Builder::load — a library entry point never aborts the host.
+    struct Squatter;
+    impl Extension for Squatter {
+        fn name(&self) -> &'static str {
+            "acme.widgets"
+        }
+        fn root(&self) -> &'static str {
+            "acme"
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            &[]
+        }
+        fn types(&self) -> &'static [noeta_native::registry::ExtType] {
+            // A forgotten `namespace:` — DEFAULTS fills "std".
+            const T: noeta_native::registry::ExtType = noeta_native::registry::ExtType {
+                name: "Widget",
+                ..noeta_native::registry::ExtType::DEFAULTS
+            };
+            &[T]
+        }
+    }
+    static SQUATTER: Squatter = Squatter;
+    match Session::builder()
+        .with_extensions(vec![&SQUATTER])
+        .load("echo 1;\n")
+    {
+        Err(Error::Extension(msg)) => {
+            assert!(msg.contains("Widget") && msg.contains("namespace"), "{msg}");
+        }
+        other => panic!("a squatting type must be Error::Extension, got {other:?}"),
+    }
+}
+
+#[test]
+fn repeated_session_loads_intern_one_registry_per_unit_set() {
+    // The per-session registry must leak (`&'static` is what the pipeline hands out), but the
+    // leak is bounded by DISTINCT unit sets, not session count: two loads with the same set share
+    // one assembly.
+    let a = noeta_stdlib::registry::interned_with_extras(&[&PLUGIN]).expect("assembles");
+    let b = noeta_stdlib::registry::interned_with_extras(&[&PLUGIN]).expect("assembles");
+    assert!(
+        std::ptr::eq(a, b),
+        "the same unit set must intern to one registry"
+    );
+    let c = noeta_stdlib::registry::interned_with_extras(&[&OTHER]).expect("assembles");
+    assert!(
+        !std::ptr::eq(a, c),
+        "a different unit set is a different registry"
+    );
+}

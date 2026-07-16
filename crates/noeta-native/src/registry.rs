@@ -912,8 +912,17 @@ impl Registry {
     /// Assemble a registry from its complete unit list, validating uniqueness (a violation is a
     /// `panic` — a mis-assembled binary must not start; see [`Registry::validate`]).
     pub fn new(units: Vec<&'static (dyn Extension + Sync)>) -> Registry {
-        validate(&units);
-        Registry { units }
+        match Registry::try_new(units) {
+            Ok(registry) => registry,
+            Err(msg) => panic!("{msg}"),
+        }
+    }
+
+    /// The fallible twin of [`Registry::new`] — for library entry points (`noeta-embed`) that
+    /// promised a `Result` and must not abort the host process over a mis-assembled unit set.
+    pub fn try_new(units: Vec<&'static (dyn Extension + Sync)>) -> Result<Registry, String> {
+        validate(&units)?;
+        Ok(Registry { units })
     }
 
     /// All units in this registry.
@@ -1366,14 +1375,15 @@ pub fn install_default(provider: fn() -> Vec<&'static (dyn Extension + Sync)>) {
 }
 
 /// The uniqueness sweep behind [`Registry::new`] — O(n²) over a handful of units.
-fn validate(units: &[&'static (dyn Extension + Sync)]) {
+fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
     for (i, unit) in units.iter().enumerate() {
         for other in &units[i + 1..] {
-            assert!(
-                unit.name() != other.name(),
-                "duplicate extension unit name `{}` in the assembled registry",
-                unit.name()
-            );
+            if unit.name() == other.name() {
+                return Err(format!(
+                    "duplicate extension unit name `{}` in the assembled registry",
+                    unit.name()
+                ));
+            }
         }
     }
     let mut modules: Vec<String> = units
@@ -1386,11 +1396,12 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
         .collect();
     modules.sort();
     for pair in modules.windows(2) {
-        assert!(
-            pair[0] != pair[1],
-            "duplicate qualified module `{}` in the assembled registry",
-            pair[0]
-        );
+        if pair[0] == pair[1] {
+            return Err(format!(
+                "duplicate qualified module `{}` in the assembled registry",
+                pair[0]
+            ));
+        }
     }
     // Extern-type identities. The runtime resolves a value's type by its SHORT `type_name()`
     // (`find_type` scans units in registration order), so two types sharing a short name — even
@@ -1404,15 +1415,14 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
         .collect();
     types.sort_unstable();
     for pair in types.windows(2) {
-        assert!(
-            pair[0].0 != pair[1].0,
-            "duplicate extern type `{}` in the assembled registry (units `{}` and `{}`): \
-             runtime dispatch resolves extern types by their short name, so two extensions \
-             cannot register the same type name",
-            pair[0].0,
-            pair[0].1,
-            pair[1].1
-        );
+        if pair[0].0 == pair[1].0 {
+            return Err(format!(
+                "duplicate extern type `{}` in the assembled registry (units `{}` and `{}`): \
+                 runtime dispatch resolves extern types by their short name, so two extensions \
+                 cannot register the same type name",
+                pair[0].0, pair[0].1, pair[1].1
+            ));
+        }
     }
     // A type's namespace must live under its own unit's root — the assembly-time form of the
     // publish lint (`compose --lint`), moved here so EVERY path hits it: `ExtType::DEFAULTS`
@@ -1421,13 +1431,16 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
     for unit in units {
         let root = unit.root();
         for t in unit.types() {
-            assert!(
-                t.namespace == root || t.namespace.starts_with(&format!("{root}.")),
-                "extern type `{}` of unit `{}` declares namespace `{}`, outside the unit's root                  `{root}` — a missing `namespace:` defaults to `std`, which only std may claim",
-                t.name,
-                unit.name(),
-                t.namespace
-            );
+            if t.namespace != root && !t.namespace.starts_with(&format!("{root}.")) {
+                return Err(format!(
+                    "extern type `{}` of unit `{}` declares namespace `{}`, outside the unit's \
+                     root `{root}` — a missing `namespace:` defaults to `std`, which only std \
+                     may claim",
+                    t.name,
+                    unit.name(),
+                    t.namespace
+                ));
+            }
         }
     }
     // The remaining registration axes are first-wins at lookup, so a collision would silently
@@ -1470,9 +1483,9 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
         ),
     ] {
         if let Some(((a, b), name)) = dup_of(names) {
-            panic!(
+            return Err(format!(
                 "duplicate {axis} `{name}` in the assembled registry (units `{a}` and `{b}`)"
-            );
+            ));
         }
     }
     // Capability providers dedupe by trait `TypeId` (the lookup key `find_capability` scans).
@@ -1486,38 +1499,38 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
         .collect();
     caps.sort_unstable_by_key(|(id, _, _)| *id);
     for w in caps.windows(2) {
-        assert!(
-            w[0].0 != w[1].0,
-            "duplicate capability provider (state keys `{}` and `{}`, units `{}` and `{}`): two              extensions provide the same capability trait, and lookup would silently shadow one",
-            w[0].1,
-            w[1].1,
-            w[0].2,
-            w[1].2
-        );
+        if w[0].0 == w[1].0 {
+            return Err(format!(
+                "duplicate capability provider (state keys `{}` and `{}`, units `{}` and `{}`): \
+                 two extensions provide the same capability trait, and lookup would silently \
+                 shadow one",
+                w[0].1, w[1].1, w[0].2, w[1].2
+            ));
+        }
     }
     for module in units.iter().flat_map(|e| e.modules()) {
         for (i, bundle) in module.bundles.iter().enumerate() {
             for other in &module.bundles[i + 1..] {
-                assert!(
-                    bundle.name != other.name,
-                    "duplicate bundle `{}` in module `{}`",
-                    bundle.name,
-                    module.name
-                );
+                if bundle.name == other.name {
+                    return Err(format!(
+                        "duplicate bundle `{}` in module `{}`",
+                        bundle.name, module.name
+                    ));
+                }
             }
             for (j, method) in bundle.methods.iter().enumerate() {
                 for other in &bundle.methods[j + 1..] {
-                    assert!(
-                        method.sig.name != other.sig.name,
-                        "duplicate method `{}` in bundle `{}.{}`",
-                        method.sig.name,
-                        module.name,
-                        bundle.name
-                    );
+                    if method.sig.name == other.sig.name {
+                        return Err(format!(
+                            "duplicate method `{}` in bundle `{}.{}`",
+                            method.sig.name, module.name, bundle.name
+                        ));
+                    }
                 }
             }
         }
     }
+    Ok(())
 }
 
 // ----- the free-function facade over the default registry (every existing call site) -----
@@ -1963,8 +1976,8 @@ mod runtime_registry_tests {
             ..ExtModule::DEFAULTS
         };
         static H: Unit = Unit("h.core", "h", &[M_DUP]);
-        let result = std::panic::catch_unwind(|| validate(&[&H]));
-        assert!(result.is_err(), "duplicate bundle name must panic");
+        assert!(
+            validate(&[&H]).is_err(), "duplicate bundle name must panic");
     }
 
     #[test]
@@ -1995,24 +2008,23 @@ mod runtime_registry_tests {
             ..ExtModule::DEFAULTS
         };
         static I: Unit = Unit("i.core", "i", &[M_DUP]);
-        let result = std::panic::catch_unwind(|| validate(&[&I]));
         assert!(
-            result.is_err(),
+            validate(&[&I]).is_err(),
             "duplicate method name in a bundle must panic"
         );
     }
 
     #[test]
     fn duplicate_unit_name_is_rejected() {
-        let result = std::panic::catch_unwind(|| validate(&[&A, &B_DUP_NAME]));
-        assert!(result.is_err(), "duplicate unit name must panic");
+        assert!(
+            validate(&[&A, &B_DUP_NAME]).is_err(), "duplicate unit name must panic");
     }
 
     #[test]
     fn duplicate_qualified_module_is_rejected() {
         // Same root (`a`) + same module name (`math`) across two differently-named units.
-        let result = std::panic::catch_unwind(|| validate(&[&A, &B_DUP_MODULE]));
-        assert!(result.is_err(), "duplicate qualified module must panic");
+        assert!(
+            validate(&[&A, &B_DUP_MODULE]).is_err(), "duplicate qualified module must panic");
     }
 
     #[test]
@@ -2033,9 +2045,8 @@ mod runtime_registry_tests {
         };
         static SM: NsUnit = NsUnit("std", &[], &[T_STD_COUNTER]);
         static AM: TypedUnit = TypedUnit("acme.metrics", "acme", &[T_ACME_COUNTER]);
-        let result = std::panic::catch_unwind(|| validate(&[&SM, &AM]));
         assert!(
-            result.is_err(),
+            validate(&[&SM, &AM]).is_err(),
             "duplicate extern-type short name must refuse to assemble"
         );
     }
@@ -2051,9 +2062,8 @@ mod runtime_registry_tests {
             ..ExtType::DEFAULTS
         };
         static SQ: TypedUnit = TypedUnit("acme.widgets", "acme", &[T_SQUATTER]);
-        let result = std::panic::catch_unwind(|| validate(&[&SQ]));
         assert!(
-            result.is_err(),
+            validate(&[&SQ]).is_err(),
             "a type namespaced outside its unit's root must refuse to assemble"
         );
     }
@@ -2084,9 +2094,8 @@ mod runtime_registry_tests {
         }
         static A_TIER: TierUnit = TierUnit("a.tools", "a");
         static B_TIER: TierUnit = TierUnit("b.tools", "b");
-        let result = std::panic::catch_unwind(|| validate(&[&A_TIER, &B_TIER]));
         assert!(
-            result.is_err(),
+            validate(&[&A_TIER, &B_TIER]).is_err(),
             "a duplicate tier name across units must refuse to assemble"
         );
     }

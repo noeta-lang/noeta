@@ -238,6 +238,9 @@ pub enum Error {
     Panic { message: String, stdout: String },
     /// A [`TryFrom`] conversion mismatch.
     WrongType { expected: &'static str, got: String },
+    /// The session's extension set does not assemble (duplicate identities, a type namespaced
+    /// outside its unit's root, …) — the registry's validation message.
+    Extension(String),
 }
 
 impl std::fmt::Display for Error {
@@ -250,6 +253,7 @@ impl std::fmt::Display for Error {
             Error::WrongType { expected, got } => {
                 write!(f, "expected {expected}, got {got}")
             }
+            Error::Extension(msg) => write!(f, "extension set does not assemble: {msg}"),
         }
     }
 }
@@ -338,16 +342,19 @@ impl Builder {
     /// Load `source` and run its top level; the session is live afterwards.
     pub fn load(self, source: &str) -> Result<Session, Error> {
         let program = parse(source)?;
-        // A session with its own extension set assembles a private registry (leaked to `'static`,
-        // matching the `'static` extension-data model the whole pipeline assumes) and threads it
+        // A session with its own extension set resolves against a private registry threaded
         // through every stage; otherwise it rides the process-global default (`None`). IR5.
+        // Assemblies are interned by unit set (`'static` is what the pipeline hands out, so the
+        // registry must leak — interning bounds the leak by distinct configurations, not session
+        // count), and a mis-assembled set is a proper `Err`, not a panic out of a library call.
         let registry: Option<&'static noeta_stdlib::registry::Registry> =
             if self.extensions.is_empty() {
                 None
             } else {
-                Some(Box::leak(Box::new(
-                    noeta_stdlib::registry::assemble_with_extras(&self.extensions),
-                )))
+                Some(
+                    noeta_stdlib::registry::interned_with_extras(&self.extensions)
+                        .map_err(Error::Extension)?,
+                )
             };
         let checked = match registry {
             Some(reg) => noeta_check::check_all_with_registry(&program, reg),
