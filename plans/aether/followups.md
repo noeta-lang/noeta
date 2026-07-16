@@ -16,6 +16,8 @@ early-return helpers (`arg_for` in the DI router). This is an ergonomic wall a r
 constantly. **Follow-up:** support block/statement bodies in match arms (a general language slice —
 lower a block arm to a scoped statement sequence with a tail value). Surfaced during L2.4 DI router.
 
+> Corollary (DB2): a per-branch SIDE-EFFECT is also blocked in a match arm — `match x { some(u) => echo ..., none => ... }` fails because `echo` is a statement, not just reassignment/return. Display/side-effect code must decompose into helper fns that RETURN a value, called at statement level.
+
 ## F2 — Deserialize recipes don't register in the checkerless REPL `extend` path
 `@derive(Deserialize<Json>)` records its `TypeRecipe` via the checker's `type_to_recipe`. The REPL
 session's `extend` path (`noeta-compiler` `extend_impl`) lowers checkerless, so a deserializable type
