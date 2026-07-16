@@ -927,19 +927,17 @@ impl<'m> Vm<'m> {
                                     ),
                                 ));
                             }
-                            let new_base =
-                                reserve_window(regs, callee_chunk.num_registers as usize);
-                            retain(v);
-                            regs[new_base] = v;
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
                                 proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::None,
-                                upvalues: Vec::new(),
-                            });
+                                Some(v),
+                                &[],
+                                *dst,
+                                RetTransform::None,
+                                pc + 1,
+                            )?;
                             continue 'reload;
                         }
                         // A packed list (P-PACK 2.4) materializes directly into an owned boxed snapshot
@@ -1056,19 +1054,17 @@ impl<'m> Vm<'m> {
                                         ),
                                     ));
                                 }
-                                let new_base =
-                                    reserve_window(regs, callee_chunk.num_registers as usize);
-                                retain(recv);
-                                regs[new_base] = recv;
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
+                                self.push_callee_frame(
+                                    frames,
+                                    regs,
+                                    top,
                                     proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues: Vec::new(),
-                                });
+                                    Some(recv),
+                                    &[],
+                                    *dst,
+                                    RetTransform::None,
+                                    pc + 1,
+                                )?;
                                 continue 'reload;
                             }
                         }
@@ -1298,37 +1294,18 @@ impl<'m> Vm<'m> {
                                     arity_message("method", required, total, args.len()),
                                 ));
                             }
-                            let num_registers = callee_chunk.num_registers as usize;
-                            let defaults = callee_chunk.defaults.clone();
-                            let new_base = reserve_window(regs, num_registers);
-                            retain(v);
-                            regs[new_base] = v;
-                            for (i, &arg_reg) in args.iter().enumerate() {
-                                let a = regs[fbase + arg_reg as usize];
-                                retain(a);
-                                regs[new_base + i + 1] = a;
-                            }
-                            // Fill any omitted trailing parameters from their default thunks. The
-                            // receiver and supplied args occupy registers `0..=args.len()`, so a default
-                            // register at or beyond that was not supplied.
-                            // A method frame carries no upvalues (it is defined at module scope), so its
-                            // default thunks resolve globals only.
-                            let filled = args.len() + 1;
-                            for (reg, proto) in &defaults {
-                                if *reg as usize >= filled {
-                                    let value = self.run_thunk(*proto, &[])?;
-                                    regs[new_base + *reg as usize] = value;
-                                }
-                            }
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
                                 proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::None,
-                                upvalues: Vec::new(),
-                            });
+                                Some(v),
+                                arg_values.as_slice(),
+                                *dst,
+                                RetTransform::None,
+                                pc + 1,
+                            )?;
                             continue 'reload;
                         }
                         // An enum value dispatches to a user method (the unified body, object-model
@@ -1379,32 +1356,18 @@ impl<'m> Vm<'m> {
                                         arity_message("method", required, total, args.len()),
                                     ));
                                 }
-                                let num_registers = callee_chunk.num_registers as usize;
-                                let defaults = callee_chunk.defaults.clone();
-                                let new_base = reserve_window(regs, num_registers);
-                                retain(v);
-                                regs[new_base] = v;
-                                for (i, &arg_reg) in args.iter().enumerate() {
-                                    let a = regs[fbase + arg_reg as usize];
-                                    retain(a);
-                                    regs[new_base + i + 1] = a;
-                                }
-                                let filled = args.len() + 1;
-                                for (reg, proto) in &defaults {
-                                    if *reg as usize >= filled {
-                                        let value = self.run_thunk(*proto, &[])?;
-                                        regs[new_base + *reg as usize] = value;
-                                    }
-                                }
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
+                                let arg_values = ArgBuf::collect(args, regs, fbase);
+                                self.push_callee_frame(
+                                    frames,
+                                    regs,
+                                    top,
                                     proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues: Vec::new(),
-                                });
+                                    Some(v),
+                                    arg_values.as_slice(),
+                                    *dst,
+                                    RetTransform::None,
+                                    pc + 1,
+                                )?;
                                 continue 'reload;
                             }
                         }
@@ -1456,21 +1419,17 @@ impl<'m> Vm<'m> {
                                     ),
                                 ));
                             }
-                            let new_base =
-                                reserve_window(regs, callee_chunk.num_registers as usize);
-                            retain(v);
-                            regs[new_base] = v;
-                            retain(idx);
-                            regs[new_base + 1] = idx;
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
                                 proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::None,
-                                upvalues: Vec::new(),
-                            });
+                                Some(v),
+                                &[idx],
+                                *dst,
+                                RetTransform::None,
+                                pc + 1,
+                            )?;
                             continue 'reload;
                         }
                         // A built-in list addresses an element by integer position (bounds-checked).
@@ -2517,41 +2476,23 @@ impl<'m> Vm<'m> {
                                 pc += 1;
                             }
                             Ok((proto, is_assoc, arg_items)) => {
-                                let callee_chunk = &module.protos[proto as usize];
-                                let num_registers = callee_chunk.num_registers as usize;
-                                let defaults = callee_chunk.defaults.clone();
-                                let new_base = reserve_window(regs, num_registers);
                                 // An associated call leaves register 0 as unit (no receiver); an instance
-                                // call places the retained receiver there.
-                                if !is_assoc {
-                                    retain(recv_val);
-                                    regs[new_base] = recv_val;
-                                }
-                                for (i, &arg) in arg_items.iter().enumerate() {
-                                    retain(arg);
-                                    regs[new_base + i + 1] = arg;
-                                }
-                                // Fill any omitted trailing parameters from their default thunks (module
-                                // scope only, like a method frame).
-                                let filled = arg_items.len() + 1;
-                                for (reg, proto) in &defaults {
-                                    if *reg as usize >= filled {
-                                        let value = self.run_thunk(*proto, &[])?;
-                                        regs[new_base + *reg as usize] = value;
-                                    }
-                                }
-                                // The result is wrapped in `Result.Ok` as it lands in the caller, so the
-                                // invocation yields a `Result` whichever way the body returns.
+                                // call places the retained receiver there. The result is wrapped in
+                                // `Result.Ok` as it lands in the caller, so the invocation yields a
+                                // `Result` whichever way the body returns.
+                                let recv = (!is_assoc).then_some(recv_val);
                                 let ok = self.persist.shapes[*ok_shape as usize];
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
+                                self.push_callee_frame(
+                                    frames,
+                                    regs,
+                                    top,
                                     proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::WrapOk(ok),
-                                    upvalues: Vec::new(),
-                                });
+                                    recv,
+                                    &arg_items,
+                                    *dst,
+                                    RetTransform::WrapOk(ok),
+                                    pc + 1,
+                                )?;
                                 // Release the temporary boxed args list before transferring (its
                                 // elements were already retained into the call frame above); `take`
                                 // leaves the after-match release for the non-transferring `Err` path.
@@ -2720,22 +2661,17 @@ impl<'m> Vm<'m> {
                         if let Some((proto, transform)) = dispatch
                             && module.protos[proto as usize].num_params == 2
                         {
-                            let callee_chunk = &module.protos[proto as usize];
-                            let new_base =
-                                reserve_window(regs, callee_chunk.num_registers as usize);
-                            retain(left);
-                            regs[new_base] = left;
-                            retain(right);
-                            regs[new_base + 1] = right;
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
                                 proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: transform,
-                                upvalues: Vec::new(),
-                            });
+                                Some(left),
+                                &[right],
+                                *dst,
+                                transform,
+                                pc + 1,
+                            )?;
                             continue 'reload;
                         }
                         // Derived structural comparison: `< <= > >=` on an object or enum whose
@@ -2923,19 +2859,17 @@ impl<'m> Vm<'m> {
                                     ),
                                 ));
                             }
-                            let new_base =
-                                reserve_window(regs, callee_chunk.num_registers as usize);
-                            retain(v);
-                            regs[new_base] = v;
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
                                 proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::None,
-                                upvalues: Vec::new(),
-                            });
+                                Some(v),
+                                &[],
+                                *dst,
+                                RetTransform::None,
+                                pc + 1,
+                            )?;
                             continue 'reload;
                         }
                         // Identity for every other value: the consuming `Echo`/`Concat` stringifies
@@ -3080,6 +3014,78 @@ impl<'m> Vm<'m> {
                 }
             }
         }
+    }
+
+    /// The shared callee-frame-push choreography (audit-1 finding 6): reserve the callee's
+    /// register window, retain the receiver and arguments into it, fill omitted trailing
+    /// defaults from their thunks, save the caller's resume pc, and push the callee frame.
+    /// Extracted from the near-verbatim copies in the object/enum `Op::CallMethod` arms,
+    /// `Op::Invoke`, `Op::Binary`'s operator dispatch, and the single-argument trait
+    /// dispatches (`Iterable::iter`, `Length::len`, `Index::get`, `Display::to_string`) —
+    /// the retain/default-thunk choreography is exactly where refcount bugs live, so it
+    /// exists once.
+    ///
+    /// Contract points, all preserved from the arms:
+    /// - **Arity is the caller's job.** The arms report violations on different channels
+    ///   (abort vs. `Op::Invoke`'s soft `Result.Err`), so this function assumes a fitting
+    ///   `args` slice.
+    /// - `recv: None` leaves register 0 unit (an associated `Invoke`); `Some` is retained in.
+    /// - `args` are **borrowed** (register/list-owned) values, each retained into the window.
+    /// - Frames pushed here carry no upvalues (methods/operators are defined at module
+    ///   scope), so default thunks resolve globals only; register 0 counts as filled whether
+    ///   or not a receiver was placed, exactly as every arm computed `filled = args + 1`.
+    /// - The caller ends its arm with `continue 'reload` — this only stages state.
+    ///
+    /// `#[inline]` so each (monomorphic) arm folds it back into the dispatch loop — the same
+    /// contract as the `call_builtin_method` extraction (A/B-benched at ±0).
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn push_callee_frame(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        top: usize,
+        proto: u32,
+        recv: Option<Value>,
+        args: &[Value],
+        ret_dst: u16,
+        ret_transform: RetTransform,
+        resume_pc: usize,
+    ) -> Result<(), Abort> {
+        let module = self.module;
+        let callee_chunk = &module.protos[proto as usize];
+        let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
+        if let Some(r) = recv {
+            retain(r);
+            regs[new_base] = r;
+        }
+        for (i, &a) in args.iter().enumerate() {
+            retain(a);
+            regs[new_base + i + 1] = a;
+        }
+        // Fill any omitted trailing parameters from their default thunks. The receiver slot and
+        // supplied args occupy registers `0..=args.len()`, so a default register at or beyond
+        // that was not supplied.
+        if !callee_chunk.defaults.is_empty() {
+            let defaults = callee_chunk.defaults.clone();
+            let filled = args.len() + 1;
+            for (reg, dproto) in &defaults {
+                if *reg as usize >= filled {
+                    let value = self.run_thunk(*dproto, &[])?;
+                    regs[new_base + *reg as usize] = value;
+                }
+            }
+        }
+        frames[top].pc = resume_pc;
+        frames.push(Frame {
+            proto,
+            base: new_base,
+            pc: 0,
+            ret_dst,
+            ret_transform,
+            upvalues: Vec::new(),
+        });
+        Ok(())
     }
 }
 
