@@ -416,7 +416,7 @@ impl DocumentStore {
         // module as a `DepModule` input (SourceIds continue past the siblings), so cross-package
         // `use <dep-key>.…` resolves in hover/goto/completion exactly as the CLI resolves it.
         let deps = self.resolve_dep_modules(uri, programs.len() as u32);
-        let workspace = Workspace::new(&self.db, programs[0], programs[1..].to_vec(), deps.modules);
+        let workspace = Workspace::new(&self.db, programs.clone(), deps.modules);
         self.workspaces.insert(
             uri.to_string(),
             WorkspaceCache {
