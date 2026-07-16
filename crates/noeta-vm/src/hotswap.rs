@@ -259,7 +259,9 @@ impl<'m> Vm<'m> {
         }
         for m in &extended.methods[self.module.methods.len()..] {
             self.methods
-                .insert((m.type_name.clone(), m.method.clone()), m.proto);
+                .entry(m.type_name.clone())
+                .or_default()
+                .insert(m.method.clone(), m.proto);
         }
         for (ty, proto) in &extended.destructors[self.module.destructors.len()..] {
             self.destructors.insert(ty.clone(), *proto);

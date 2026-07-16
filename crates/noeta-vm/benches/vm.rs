@@ -593,6 +593,59 @@ fn member_dispatch_src(n: usize) -> String {
     )
 }
 
+/// A hot method-call site on ENUM receivers (audit-1 finding 7): the enum arm historically
+/// bypassed the shape-pointer inline cache and cloned `(type_name, method)` into owned `String`
+/// keys per call. Two receivers of the same enum type keep the site monomorphic on the shape.
+fn enum_method_src(n: usize) -> String {
+    format!(
+        "enum Status {{\n    Pending;\n    Paid;\n    \
+            fn score(): int {{\n        \
+                return match self {{\n            \
+                    Status.Pending => 1,\n            \
+                    Status.Paid => 2,\n        \
+                }};\n    \
+            }}\n\
+         }}\n\
+         fn run(n: int): int {{\n    \
+            s = Status.Pending;\n    \
+            p = Status.Paid;\n    \
+            mut total = 0;\n    \
+            mut i = 0;\n    \
+            while i < n {{\n        \
+                total = total + s.score() + p.score();\n        \
+                i = i + 1;\n    \
+            }}\n    \
+            return total;\n\
+         }}\n\
+         echo run({n});\n"
+    )
+}
+
+/// A hot operator-overload site (same finding): `+` on a class with `impl Add` dispatches through
+/// the `(type_name, method)` table — historically two `String` allocations per executed operator.
+fn operator_overload_src(n: usize) -> String {
+    format!(
+        "class Vec2 {{\n    x: int\n    y: int\n    \
+            impl Add {{\n        \
+                fn add(other: Vec2): Vec2 {{\n            \
+                    return Vec2 {{ x: self.x + other.x, y: self.y + other.y }};\n        \
+                }}\n    \
+            }}\n\
+         }}\n\
+         fn run(n: int): int {{\n    \
+            mut acc = Vec2 {{ x: 0, y: 0 }};\n    \
+            step = Vec2 {{ x: 1, y: 2 }};\n    \
+            mut i = 0;\n    \
+            while i < n {{\n        \
+                acc = acc + step;\n        \
+                i = i + 1;\n    \
+            }}\n    \
+            return acc.x + acc.y;\n\
+         }}\n\
+         echo run({n});\n"
+    )
+}
+
 /// Sizes for the parameterized loops. Each doubles the previous, so the per-step time ratio reveals
 /// the complexity class (≈4× per doubling ⇒ O(n²); ≈2× ⇒ O(n)).
 const LOOP_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
@@ -920,6 +973,26 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     disp.finish();
+
+    // Enum-method + operator-overload dispatch loops (audit-1 finding 7): the enum inline cache
+    // and the alloc-free method-table probe.
+    let mut edisp = c.benchmark_group("vm_enum_method");
+    for &n in LOOP_SIZES {
+        let module = compile(&enum_method_src(n));
+        edisp.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    edisp.finish();
+
+    let mut odisp = c.benchmark_group("vm_operator_overload");
+    for &n in LOOP_SIZES {
+        let module = compile(&operator_overload_src(n));
+        odisp.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    odisp.finish();
 
     // Blind-overwrite struct accumulator (`acc = Wide { ...acc, f0: i }`), parameterized over n so
     // the complexity class is visible. Today's copying lowering is O(n·fields); the anchor for the

@@ -266,11 +266,13 @@ impl<'m> Vm<'m> {
     pub(crate) fn load_with(module: &'m Module, persist: SessionState) -> Vm<'m> {
         // Cached: fixed per host (see the `tel_on` field).
         let tel_on = persist.host.tel_enabled();
-        let methods = module
-            .methods
-            .iter()
-            .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
-            .collect();
+        let mut methods: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        for m in &module.methods {
+            methods
+                .entry(m.type_name.clone())
+                .or_default()
+                .insert(m.method.clone(), m.proto);
+        }
         let destructors = module.destructors.iter().cloned().collect();
         let field_defaults = module
             .field_defaults
@@ -318,6 +320,9 @@ impl<'m> Vm<'m> {
                 traced_futures: Vec::new(),
             },
             ctx_table_pool: Vec::new(),
+            reentry_pool: Vec::new(),
+            cache_pool: Vec::new(),
+            run_depth: 0,
             isolates: IsolateState {
                 parallel_isolates: false,
                 isolate_module: None,
@@ -1025,21 +1030,21 @@ impl<'m> Vm<'m> {
     /// duration, so the block sees a live object and the net reference count is unchanged —
     /// the caller's subsequent `release` performs the actual free.
     fn run_destructor(&mut self, proto: u32, instance: Value) {
-        let chunk = &self.module.protos[proto as usize];
-        let mut regs = vec![Value::unit(); chunk.num_registers as usize];
+        let num_registers = self.module.protos[proto as usize].num_registers as usize;
+        let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
         retain(instance);
         regs[0] = instance;
-        let frame = Frame {
+        frames.push(Frame {
             proto,
             base: 0,
             pc: 0,
             ret_dst: 0,
             ret_transform: RetTransform::None,
             upvalues: Vec::new(),
-        };
+        });
         // A destructor returns unit (its body is run for its effects); discard it. An abort
         // inside a destructor has already recorded its diagnostic.
-        if let Ok(v) = self.run(vec![frame], regs) {
+        if let Ok(v) = self.run(frames, regs) {
             release(v);
         }
     }

@@ -15,7 +15,11 @@
 
 use std::rc::Rc;
 
-use noeta_ast::{Program, Stmt};
+// The trailing-expression desugar + its sentinel live in `noeta_ast::desugar` (audit-3
+// finding 10), shared with the `noeta-eval` oracle session so the two backends agree by
+// construction (the `session_parity` differential gates).
+use noeta_ast::Program;
+use noeta_ast::desugar::{REPL_VALUE as SENTINEL, rewrite_trailing_expr};
 use noeta_backend::TraceFrame;
 use noeta_bytecode::{Module, PackedFieldDef};
 use noeta_compiler::SessionCompiler;
@@ -674,39 +678,6 @@ impl SessionOutput {
             value: None,
             trace: Vec::new(),
         }
-    }
-}
-
-/// The reserved binding name a trailing bare REPL expression is rewritten into, so the IR path
-/// captures its value in a persistent global slot. Contains a NUL so it can never collide with a user
-/// identifier and never appears in `:bindings`.
-const SENTINEL: &str = "\0repl-value";
-
-/// If `program`'s final statement is a bare expression, return a copy with that statement rewritten to
-/// `mut <SENTINEL> = <expr>;` (so the IR path captures its value) and `true`; otherwise return the
-/// program unchanged and `false`. Only the trailing statement is touched — earlier bare expressions
-/// stay discarded statements.
-fn rewrite_trailing_expr(program: &Program) -> (Program, bool) {
-    match program.stmts.last() {
-        Some(Stmt::Expr { expr, span }) => {
-            let mut stmts = program.stmts.clone();
-            *stmts.last_mut().expect("non-empty: matched last") = Stmt::Binding {
-                mut_decl: true,
-                name: SENTINEL.to_string(),
-                name_span: *span,
-                ty: None,
-                value: expr.clone(),
-                span: *span,
-            };
-            (
-                Program {
-                    stmts,
-                    span: program.span,
-                },
-                true,
-            )
-        }
-        _ => (program.clone(), false),
     }
 }
 

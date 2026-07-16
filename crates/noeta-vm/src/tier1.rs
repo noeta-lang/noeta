@@ -532,15 +532,12 @@ extern "C" fn jit_run_leaf_op(
             inclusive,
             ..
         } => {
-            let (Some(a), Some(b)) = (
-                regs[base + *start as usize].as_int(),
-                regs[base + *end as usize].as_int(),
-            ) else {
+            let lo = regs[base + *start as usize];
+            let hi = regs[base + *end as usize];
+            let Some(list) = make_range_list(lo, hi, *inclusive) else {
                 return bail; // non-int bounds → interpreter raises the error
             };
-            let upper = if *inclusive { b.saturating_add(1) } else { b };
-            let elements: Vec<Value> = (a..upper).map(Value::int).collect();
-            set_reg(regs, base, *dst, Value::list(elements));
+            set_reg(regs, base, *dst, list);
             noeta_jit_abi::OUTCOME_CONTINUE
         }
         Op::IterSnapshot { dst, src, .. } => {
@@ -548,20 +545,9 @@ extern "C" fn jit_run_leaf_op(
             if v.is_object() {
                 return bail; // `Iterable::iter` dispatch → interpreter
             }
-            if v.is_packed_list() {
-                set_reg(regs, base, *dst, v.realize_list());
-                return noeta_jit_abi::OUTCOME_CONTINUE;
-            }
-            match v
-                .list_items()
-                .or_else(|| v.set_items())
-                .or_else(|| v.map_values())
-            {
-                Some(elements) => {
-                    for &e in &elements {
-                        retain(e);
-                    }
-                    set_reg(regs, base, *dst, Value::list(elements));
+            match iter_snapshot_value(v) {
+                Some(snapshot) => {
+                    set_reg(regs, base, *dst, snapshot);
                     noeta_jit_abi::OUTCOME_CONTINUE
                 }
                 None => bail, // not iterable → interpreter raises the error
@@ -575,13 +561,8 @@ extern "C" fn jit_run_leaf_op(
             None => bail,
         },
         Op::ListGet { dst, list, index } => {
-            let element = regs[base + *index as usize]
-                .as_int()
-                .filter(|&i| i >= 0)
-                .and_then(|i| regs[base + *list as usize].list_get(i as usize));
-            match element {
+            match list_get_retained(regs[base + *list as usize], regs[base + *index as usize]) {
                 Some(element) => {
-                    retain(element);
                     set_reg(regs, base, *dst, element);
                     noeta_jit_abi::OUTCOME_CONTINUE
                 }
@@ -643,16 +624,7 @@ extern "C" fn jit_run_leaf_op(
                 let Some(i) = idx.as_int().filter(|&i| i >= 0 && (i as usize) < len) else {
                     return bail;
                 };
-                // A packed list materializes the one element (owned, refcount 1); a boxed list borrows
-                // and retains it into `dst` — matching the interpreter exactly.
-                let element = if v.is_packed_list() {
-                    v.packed_get(i as usize)
-                } else {
-                    let element = v.list_get(i as usize).expect("bounds checked above");
-                    retain(element);
-                    element
-                };
-                set_reg(regs, base, *dst, element);
+                set_reg(regs, base, *dst, list_element_retained(v, i as usize));
                 noeta_jit_abi::OUTCOME_CONTINUE
             } else if v.is_map() {
                 let Some(element) = idx.with_str(|key| v.map_get(key)).flatten() else {
@@ -676,15 +648,9 @@ extern "C" fn jit_run_leaf_op(
             }
         }
         Op::MakeTuple { dst, items } => {
-            // Retain each element into a fresh tuple (no bail path — construction never fails). The
-            // retains land in the local `elements`, then the tuple is stored, so nothing leaks.
-            let mut elements = Vec::with_capacity(items.len());
-            for &r in items.iter() {
-                let v = regs[base + r as usize];
-                retain(v);
-                elements.push(v);
-            }
-            set_reg(regs, base, *dst, Value::tuple(elements));
+            // No bail path — construction never fails.
+            let tuple = make_tuple(items, regs, base);
+            set_reg(regs, base, *dst, tuple);
             noeta_jit_abi::OUTCOME_CONTINUE
         }
         Op::TupleIndex {
@@ -697,9 +663,8 @@ extern "C" fn jit_run_leaf_op(
             // the native `ListGet` for `for (i, x) in xs.enumerate()` loops. Out of range bails so the
             // interpreter raises (the checker makes this unreachable for well-typed code).
             let v = regs[base + *receiver as usize];
-            match v.tuple_field(*index as usize) {
+            match tuple_element_retained(v, *index as usize) {
                 Some(element) => {
-                    retain(element);
                     set_reg(regs, base, *dst, element);
                     noeta_jit_abi::OUTCOME_CONTINUE
                 }

@@ -16,7 +16,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
 
 use noeta_ast::reflect::TypeRepr;
-use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, Stmt, TypeRef, UnaryOp};
+// The trailing-expression desugar + its sentinel live in `noeta_ast::desugar` (audit-3
+// finding 10), shared with the VM session so the two backends agree by construction (the
+// `session_parity` differential gates).
+use noeta_ast::desugar::{REPL_VALUE, rewrite_trailing_expr};
+use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, TypeRef, UnaryOp};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
@@ -85,11 +89,8 @@ impl Backend for IrRefBackend {
         // Lower with the checker's site maps: packed-list literals stream into a flat buffer
         // (P-PACK 2.5) and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+). Both are
         // carried inline on the IR, so `run_ir` needs no map.
-        let ir = noeta_ir::lower_with_sites(
-            program,
-            noeta_ir::lowering_sites!(checked.sites),
-        )
-        .expect("Core-IR lowering is total over the parsed language");
+        let ir = noeta_ir::lower_with_sites(program, noeta_ir::lowering_sites!(checked.sites))
+            .expect("Core-IR lowering is total over the parsed language");
         let ir = noeta_ir_passes::insert_drops(
             &ir,
             Some(&relevance_of(&checked.sites.destructor_relevance)),
@@ -268,39 +269,6 @@ fn describe_type(value: &Value) -> String {
         Value::Type(def) => format!("type {}", def.name()),
         Value::EnumType(def) => format!("enum type {}", def.name()),
         other => other.type_name().to_string(),
-    }
-}
-
-/// The reserved binding name a trailing bare REPL expression is rewritten into, so its value is
-/// captured in the persistent scope. Contains a NUL so it can never collide with a user identifier
-/// and never appears in displayed output.
-const REPL_VALUE: &str = "\0repl-value";
-
-/// If `program`'s final statement is a bare expression, return a copy with that statement rewritten
-/// to `mut <REPL_VALUE> = <expr>;` (so the IR path captures its value) and `true`; otherwise return
-/// the program unchanged and `false`. Only the trailing statement is touched — earlier bare
-/// expressions stay discarded statements.
-fn rewrite_trailing_expr(program: &Program) -> (Program, bool) {
-    match program.stmts.last() {
-        Some(Stmt::Expr { expr, span }) => {
-            let mut stmts = program.stmts.clone();
-            *stmts.last_mut().expect("non-empty: matched last") = Stmt::Binding {
-                mut_decl: true,
-                name: REPL_VALUE.to_string(),
-                name_span: *span,
-                ty: None,
-                value: expr.clone(),
-                span: *span,
-            };
-            (
-                Program {
-                    stmts,
-                    span: program.span,
-                },
-                true,
-            )
-        }
-        _ => (program.clone(), false),
     }
 }
 

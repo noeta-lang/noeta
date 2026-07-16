@@ -117,3 +117,43 @@ pub fn tier_expr_call(
         span,
     }
 }
+
+// --- REPL trailing-expression desugar (audit-3 finding 10) -------------------------------------
+//
+// Shared by BOTH session backends — `noeta-vm`'s `VmSession` and the `noeta-eval` oracle session —
+// which previously carried verbatim copies of this constant + function that only the
+// `session_parity` differential held together. The desugared shape exists here once, beside the
+// expression-tier desugar above, for the same reason: both backends must agree by construction.
+
+/// The reserved binding name a trailing bare REPL expression is rewritten into, so the lowering
+/// path captures its value in a persistent slot both session backends can read back. Contains a
+/// NUL so it can never collide with a user identifier and never shows up in displayed bindings.
+pub const REPL_VALUE: &str = "\0repl-value";
+
+/// If `program`'s final statement is a bare expression, return a copy with that statement
+/// rewritten to `mut <REPL_VALUE> = <expr>;` (so the lowering path captures its value) and `true`;
+/// otherwise return the program unchanged and `false`. Only the trailing statement is touched —
+/// earlier bare expressions stay discarded statements.
+pub fn rewrite_trailing_expr(program: &Program) -> (Program, bool) {
+    match program.stmts.last() {
+        Some(Stmt::Expr { expr, span }) => {
+            let mut stmts = program.stmts.clone();
+            *stmts.last_mut().expect("non-empty: matched last") = Stmt::Binding {
+                mut_decl: true,
+                name: REPL_VALUE.to_string(),
+                name_span: *span,
+                ty: None,
+                value: expr.clone(),
+                span: *span,
+            };
+            (
+                Program {
+                    stmts,
+                    span: program.span,
+                },
+                true,
+            )
+        }
+        _ => (program.clone(), false),
+    }
+}

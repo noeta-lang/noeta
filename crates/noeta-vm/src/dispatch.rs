@@ -16,14 +16,20 @@ impl<'m> Vm<'m> {
         mut frames: Vec<Frame>,
         mut regs: Vec<Value>,
     ) -> Result<Value, Abort> {
+        self.run_depth += 1;
         // Give the register stack generous headroom up front (P-JIT J3): a native direct call only
         // fires when the callee window fits without reallocating (so the caller's register pointer
         // stays valid), so a pre-reserved buffer keeps common recursion on the fast path. A deeper
         // stack simply reallocates once and the direct-call check re-passes at the new capacity, so
         // this only affects performance, never correctness — and is a no-op without the `jit` feature.
+        // Outermost run only (audit-1 finding 5): a re-entrant entry — a closure applied per mapped
+        // element — must not pay a 64 KB reserve per call; its pooled stack grows once and stays.
         #[cfg(feature = "jit")]
-        regs.reserve(8192usize.saturating_sub(regs.len()));
+        if self.run_depth == 1 {
+            regs.reserve(8192usize.saturating_sub(regs.len()));
+        }
         let result = self.dispatch(&mut frames, &mut regs);
+        self.run_depth -= 1;
         if result.is_err() {
             // Capture this stack segment for the abort traceback, innermost frame first, before the
             // teardown below reclaims anything. Costs nothing until an abort actually happens.
@@ -81,26 +87,61 @@ impl<'m> Vm<'m> {
                 }
             }
         }
+        // Return the (now fully released) stacks to the re-entrant pool (finding 5) so the next
+        // re-entry pops them instead of allocating. On the `Ok` path both are already empty (the
+        // bottom frame's return truncated to base 0); on abort the teardown above released every
+        // value, so clearing loses nothing. Capacity caps keep a one-off deep run (or the
+        // JIT-reserved outermost stack) from pinning memory, exactly like `ctx_table_pool`.
+        if self.reentry_pool.len() < 8 && regs.capacity() <= 16384 && frames.capacity() <= 1024 {
+            frames.clear();
+            regs.clear();
+            self.reentry_pool.push((frames, regs));
+        }
         result
     }
 
-    /// The dispatch loop. Returns `Ok(value)` once the bottom frame returns (the stack is
-    /// then empty), or `Err(Abort)` with the stack left intact for [`Vm::run`] to release.
+    /// The dispatch loop's entry: stage the per-run inline-cache tables (from the pool — audit-1
+    /// finding 5) around [`Vm::dispatch_inner`]. Returns `Ok(value)` once the bottom frame returns
+    /// (the stack is then empty), or `Err(Abort)` with the stack left intact for [`Vm::run`] to
+    /// release.
     fn dispatch(&mut self, frames: &mut Vec<Frame>, regs: &mut Vec<Value>) -> Result<Value, Abort> {
         // Per-run inline caches, one slot per cacheable call site (`LoadField`/`CallMethod`),
         // indexed by the op's `cache` field. Each entry memoizes the last receiver shape and the
         // resolved field-slot / method prototype; a hit is a pointer compare against the cached
         // shape, skipping the field-name scan / `(type, method)` hashmap lookup. A local (not a
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
-        // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed shape.
-        let mut caches: Vec<Option<(&'static Shape, u32)>> =
-            vec![None; self.module.cache_slots as usize];
+        // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed
+        // shape. Pooled (finding 5): a re-entrant entry pops the spare pair instead of allocating
+        // two vectors sized to the whole module's cache-slot count; the entries were cleared on the
+        // previous exit, so a run still starts cold — the same fresh-per-run semantics as before.
+        let (mut caches, mut extern_caches) = self.cache_pool.pop().unwrap_or_default();
+        caches.resize(self.module.cache_slots as usize, None);
         // Extern-method route cache (H5 perf): per `CallMethod` site, the resolved routing for an
         // extern receiver, keyed by the extern type's name pointer (a registry `&'static str`, a
         // stable identity). A hit is one heap probe + one pointer compare — no registry scans on
         // the `signal.get()`/`.set()` hot paths.
-        let mut extern_caches: Vec<Option<(*const u8, crate::methods::ExternRoute)>> =
-            vec![None; self.module.cache_slots as usize];
+        extern_caches.resize(self.module.cache_slots as usize, None);
+        let result = self.dispatch_inner(frames, regs, &mut caches, &mut extern_caches);
+        // Cleared before pooling — a resolution must never carry across runs (a hot-swap or
+        // fragment install between entries can rebind a method).
+        caches.clear();
+        extern_caches.clear();
+        if self.cache_pool.len() < 8 {
+            self.cache_pool.push((caches, extern_caches));
+        }
+        result
+    }
+
+    /// The dispatch loop proper — deliberately ONE function containing the whole op match (see
+    /// the module header). `caches`/`extern_caches` are this entry's inline-cache tables, staged
+    /// by [`Vm::dispatch`].
+    fn dispatch_inner(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        caches: &mut Vec<MethodCacheEntry>,
+        extern_caches: &mut [ExternCacheEntry],
+    ) -> Result<Value, Abort> {
         // S3 dispatch window (P-VMT-DISP). The interpreter is two nested loops. The OUTER `'reload`
         // loop re-derives the active frame's register window — its base, prototype (`chunk`), and
         // starting `pc` — and is re-entered ONLY when control transfers to a *different* frame: a
@@ -736,13 +777,8 @@ impl<'m> Vm<'m> {
                     // A tuple builds exactly like a list (object-model slice 4): retain each element into
                     // the aggregate, which owns one reference to each.
                     Op::MakeTuple { dst, items } => {
-                        let mut elements = Vec::with_capacity(items.len());
-                        for &r in items.iter() {
-                            let v = regs[fbase + r as usize];
-                            retain(v);
-                            elements.push(v);
-                        }
-                        set_reg(regs, fbase, *dst, Value::tuple(elements));
+                        let tuple = make_tuple(items, regs, fbase);
+                        set_reg(regs, fbase, *dst, tuple);
                         pc += 1;
                     }
                     // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
@@ -754,7 +790,7 @@ impl<'m> Vm<'m> {
                         span,
                     } => {
                         let v = regs[fbase + *receiver as usize];
-                        let Some(element) = v.tuple_field(*index as usize) else {
+                        let Some(element) = tuple_element_retained(v, *index as usize) else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
@@ -764,7 +800,6 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        retain(element);
                         set_reg(regs, fbase, *dst, element);
                         pc += 1;
                     }
@@ -777,17 +812,12 @@ impl<'m> Vm<'m> {
                     } => {
                         let lo = regs[fbase + *start as usize];
                         let hi = regs[fbase + *end as usize];
-                        match (lo.as_int(), hi.as_int()) {
-                            (Some(a), Some(b)) => {
-                                // `..=` shifts the exclusive upper to `b + 1`; `saturating_add` keeps
-                                // the unmaterializable `i64::MAX` edge from panicking. The elements are
-                                // fresh int immediates (no refcount), so no retain is needed.
-                                let upper = if *inclusive { b.saturating_add(1) } else { b };
-                                let elements: Vec<Value> = (a..upper).map(Value::int).collect();
-                                set_reg(regs, fbase, *dst, Value::list(elements));
+                        match make_range_list(lo, hi, *inclusive) {
+                            Some(list) => {
+                                set_reg(regs, fbase, *dst, list);
                                 pc += 1;
                             }
-                            _ => {
+                            None => {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
@@ -872,68 +902,43 @@ impl<'m> Vm<'m> {
                         // its `iter` method returns. The method runs bytecode, so it is pushed as a
                         // call frame; its returned value becomes the snapshot (the following `ListLen`
                         // raises E0007 if it was not a list). Matches the tree-walker's `exec_for`.
-                        if v.is_object() {
-                            let type_name = v.shape().unwrap().name.clone();
-                            if let Some(&proto) =
-                                self.methods.get(&(type_name.clone(), "iter".to_string()))
-                            {
-                                let callee_chunk = &module.protos[proto as usize];
-                                if callee_chunk.num_params != 1 {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!(
-                                            "this method takes {} argument(s) but 0 were supplied",
-                                            callee_chunk.num_params - 1
-                                        ),
-                                    ));
-                                }
-                                let new_base =
-                                    reserve_window(regs, callee_chunk.num_registers as usize);
-                                retain(v);
-                                regs[new_base] = v;
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
-                                    proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues: Vec::new(),
-                                });
-                                continue 'reload;
-                            }
-                        }
-                        // A packed list (P-PACK 2.4) materializes directly into an owned boxed snapshot
-                        // (a fresh list owning each element) — the loop then indexes that boxed snapshot,
-                        // so `ListLen`/`ListGet` never see the flat form.
-                        if v.is_packed_list() {
-                            let snapshot = v.realize_list();
-                            set_reg(regs, fbase, *dst, snapshot);
-                            pc += 1;
-                            continue;
-                        }
-                        // Snapshot the elements to iterate (a list's elements, a set's canonical
-                        // elements, or a map's values in sorted-key order), each retained so the loop
-                        // owns them independently.
-                        let snapshot = match v
-                            .list_items()
-                            .or_else(|| v.set_items())
-                            .or_else(|| v.map_values())
+                        if v.is_object()
+                            && let Some(proto) = self.method_proto(&v.shape().unwrap().name, "iter")
                         {
-                            Some(elements) => {
-                                for &e in &elements {
-                                    retain(e);
-                                }
-                                Value::list(elements)
-                            }
-                            None => {
+                            let callee_chunk = &module.protos[proto as usize];
+                            if callee_chunk.num_params != 1 {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
-                                    format!("cannot iterate over {}", v.type_name()),
+                                    format!(
+                                        "this method takes {} argument(s) but 0 were supplied",
+                                        callee_chunk.num_params - 1
+                                    ),
                                 ));
                             }
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
+                                proto,
+                                Some(v),
+                                &[],
+                                *dst,
+                                RetTransform::None,
+                                pc + 1,
+                            )?;
+                            continue 'reload;
+                        }
+                        // Snapshot the elements to iterate: a packed list materializes into an owned
+                        // boxed snapshot (so `ListLen`/`ListGet` never see the flat form); a list's
+                        // elements, a set's canonical elements, or a map's values in sorted-key order
+                        // are each retained so the loop owns them independently.
+                        let Some(snapshot) = iter_snapshot_value(v) else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("cannot iterate over {}", v.type_name()),
+                            ));
                         };
                         set_reg(regs, fbase, *dst, snapshot);
                         pc += 1;
@@ -958,14 +963,11 @@ impl<'m> Vm<'m> {
                         }
                     }
                     Op::ListGet { dst, list, index } => {
-                        let idx = regs[fbase + *index as usize]
-                            .as_int()
-                            .expect("a loop index is an int")
-                            as usize;
-                        let element = regs[fbase + *list as usize]
-                            .list_get(idx)
-                            .expect("the loop keeps the index in bounds");
-                        retain(element);
+                        let element = list_get_retained(
+                            regs[fbase + *list as usize],
+                            regs[fbase + *index as usize],
+                        )
+                        .expect("the loop keeps the (int) index in bounds");
                         set_reg(regs, fbase, *dst, element);
                         pc += 1;
                     }
@@ -1003,14 +1005,13 @@ impl<'m> Vm<'m> {
                         // `Builtin::Len` object case.)
                         if *builtin == Builtin::Len && args.len() == 1 {
                             let recv = regs[fbase + args[0] as usize];
-                            if recv.is_object() {
-                                let type_name = recv.shape().unwrap().name.clone();
-                                if let Some(&proto) =
-                                    self.methods.get(&(type_name.clone(), "len".to_string()))
-                                {
-                                    let callee_chunk = &module.protos[proto as usize];
-                                    if callee_chunk.num_params != 1 {
-                                        return Err(self.error(
+                            if recv.is_object()
+                                && let Some(proto) =
+                                    self.method_proto(&recv.shape().unwrap().name, "len")
+                            {
+                                let callee_chunk = &module.protos[proto as usize];
+                                if callee_chunk.num_params != 1 {
+                                    return Err(self.error(
                                         DiagnosticCode::TypeMismatch,
                                         *span,
                                         format!(
@@ -1018,22 +1019,19 @@ impl<'m> Vm<'m> {
                                             callee_chunk.num_params - 1
                                         ),
                                     ));
-                                    }
-                                    let new_base =
-                                        reserve_window(regs, callee_chunk.num_registers as usize);
-                                    retain(recv);
-                                    regs[new_base] = recv;
-                                    frames[top].pc = pc + 1;
-                                    frames.push(Frame {
-                                        proto,
-                                        base: new_base,
-                                        pc: 0,
-                                        ret_dst: *dst,
-                                        ret_transform: RetTransform::None,
-                                        upvalues: Vec::new(),
-                                    });
-                                    continue 'reload;
                                 }
+                                self.push_callee_frame(
+                                    frames,
+                                    regs,
+                                    top,
+                                    proto,
+                                    Some(recv),
+                                    &[],
+                                    *dst,
+                                    RetTransform::None,
+                                    pc + 1,
+                                )?;
+                                continue 'reload;
                             }
                         }
                         // Builtins borrow their arguments (the registers keep ownership); the
@@ -1234,9 +1232,7 @@ impl<'m> Vm<'m> {
                                 Some(proto) => proto,
                                 None => {
                                     let shape = v.shape().unwrap();
-                                    let Some(&proto) =
-                                        self.methods.get(&(shape.name.clone(), method.to_string()))
-                                    else {
+                                    let Some(proto) = self.method_proto(&shape.name, method) else {
                                         return Err(self.error(
                                             DiagnosticCode::UnknownName,
                                             *span,
@@ -1264,59 +1260,58 @@ impl<'m> Vm<'m> {
                                     arity_message("method", required, total, args.len()),
                                 ));
                             }
-                            let num_registers = callee_chunk.num_registers as usize;
-                            let defaults = callee_chunk.defaults.clone();
-                            let new_base = reserve_window(regs, num_registers);
-                            retain(v);
-                            regs[new_base] = v;
-                            for (i, &arg_reg) in args.iter().enumerate() {
-                                let a = regs[fbase + arg_reg as usize];
-                                retain(a);
-                                regs[new_base + i + 1] = a;
-                            }
-                            // Fill any omitted trailing parameters from their default thunks. The
-                            // receiver and supplied args occupy registers `0..=args.len()`, so a default
-                            // register at or beyond that was not supplied.
-                            // A method frame carries no upvalues (it is defined at module scope), so its
-                            // default thunks resolve globals only.
-                            let filled = args.len() + 1;
-                            for (reg, proto) in &defaults {
-                                if *reg as usize >= filled {
-                                    let value = self.run_thunk(*proto, &[])?;
-                                    regs[new_base + *reg as usize] = value;
-                                }
-                            }
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
                                 proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::None,
-                                upvalues: Vec::new(),
-                            });
+                                Some(v),
+                                arg_values.as_slice(),
+                                *dst,
+                                RetTransform::None,
+                                pc + 1,
+                            )?;
                             continue 'reload;
                         }
                         // An enum value dispatches to a user method (the unified body, object-model
-                        // slice 3) through the same `(type, method)` table as an object. Enums carry no
-                        // inline-cache shape pointer, so this is a direct table lookup. An unknown method
-                        // falls through to the built-in paths below.
+                        // slice 3) through the same type→method table as an object — and, audit-1
+                        // finding 7, through the same per-site inline cache: an enum's `&'static
+                        // Shape` handle is as stable an identity as an object's, so a hit resolves
+                        // the prototype with one pointer compare (the object arm's exact hit test;
+                        // the two kinds share the slot safely because their shapes are distinct).
+                        // An unknown method falls through to the built-in paths below — never
+                        // cached, so the fall-through re-probes exactly as before.
                         if hk == Some(HeapKind::Enum) {
-                            let type_name = v.shape().unwrap().name.clone();
+                            let shape = v.shape().unwrap();
                             // `e.to_json()` on an enum that `@derive(Serialize<Json>)`s (and has no
                             // hand-written `to_json`): the variant rendering, exactly what
                             // `json.stringify` produces — the enum twin of the object arm above.
                             if method == "to_json"
                                 && args.is_empty()
-                                && self.tojson_derives.contains(&type_name)
+                                && self.tojson_derives.contains(&shape.name)
                             {
                                 let json = Value::string(&v.to_json());
                                 set_reg(regs, fbase, *dst, json);
                                 pc += 1;
                                 continue;
                             }
-                            if let Some(&proto) = self.methods.get(&(type_name, method.to_string()))
-                            {
+                            let ci = *cache as usize;
+                            let hit = match &caches[ci] {
+                                Some((cs, p)) if std::ptr::eq::<Shape>(*cs, shape) => Some(*p),
+                                _ => None,
+                            };
+                            let proto = match hit {
+                                Some(proto) => Some(proto),
+                                None => {
+                                    let resolved = self.method_proto(&shape.name, method);
+                                    if let Some(proto) = resolved {
+                                        caches[ci] = Some((shape, proto));
+                                    }
+                                    resolved
+                                }
+                            };
+                            if let Some(proto) = proto {
                                 let callee_chunk = &module.protos[proto as usize];
                                 let total = callee_chunk.num_params as usize - 1;
                                 let required = total - callee_chunk.defaults.len();
@@ -1327,32 +1322,18 @@ impl<'m> Vm<'m> {
                                         arity_message("method", required, total, args.len()),
                                     ));
                                 }
-                                let num_registers = callee_chunk.num_registers as usize;
-                                let defaults = callee_chunk.defaults.clone();
-                                let new_base = reserve_window(regs, num_registers);
-                                retain(v);
-                                regs[new_base] = v;
-                                for (i, &arg_reg) in args.iter().enumerate() {
-                                    let a = regs[fbase + arg_reg as usize];
-                                    retain(a);
-                                    regs[new_base + i + 1] = a;
-                                }
-                                let filled = args.len() + 1;
-                                for (reg, proto) in &defaults {
-                                    if *reg as usize >= filled {
-                                        let value = self.run_thunk(*proto, &[])?;
-                                        regs[new_base + *reg as usize] = value;
-                                    }
-                                }
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
+                                let arg_values = ArgBuf::collect(args, regs, fbase);
+                                self.push_callee_frame(
+                                    frames,
+                                    regs,
+                                    top,
                                     proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues: Vec::new(),
-                                });
+                                    Some(v),
+                                    arg_values.as_slice(),
+                                    *dst,
+                                    RetTransform::None,
+                                    pc + 1,
+                                )?;
                                 continue 'reload;
                             }
                         }
@@ -1385,10 +1366,8 @@ impl<'m> Vm<'m> {
                         // without an `Index` impl has no `get` method, so this reports the missing
                         // method — matching the tree-walker's `eval_index`.
                         if v.is_object() {
-                            let type_name = v.shape().unwrap().name.clone();
-                            let Some(&proto) =
-                                self.methods.get(&(type_name.clone(), "get".to_string()))
-                            else {
+                            let type_name = &v.shape().unwrap().name;
+                            let Some(proto) = self.method_proto(type_name, "get") else {
                                 return Err(self.error(
                                     DiagnosticCode::UnknownName,
                                     *span,
@@ -1406,21 +1385,17 @@ impl<'m> Vm<'m> {
                                     ),
                                 ));
                             }
-                            let new_base =
-                                reserve_window(regs, callee_chunk.num_registers as usize);
-                            retain(v);
-                            regs[new_base] = v;
-                            retain(idx);
-                            regs[new_base + 1] = idx;
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
                                 proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::None,
-                                upvalues: Vec::new(),
-                            });
+                                Some(v),
+                                &[idx],
+                                *dst,
+                                RetTransform::None,
+                                pc + 1,
+                            )?;
                             continue 'reload;
                         }
                         // A built-in list addresses an element by integer position (bounds-checked).
@@ -1439,17 +1414,7 @@ impl<'m> Vm<'m> {
                                     format!("index {i} out of bounds for list of length {len}"),
                                 ));
                             }
-                            // A packed list (P-PACK 2.4) materializes the one indexed element (owned,
-                            // refcount 1) — no full-list materialization, no extra retain. A boxed list
-                            // borrows the element and retains it into `dst`.
-                            let element = if v.is_packed_list() {
-                                v.packed_get(i as usize)
-                            } else {
-                                let element = v.list_get(i as usize).expect("bounds checked above");
-                                retain(element);
-                                element
-                            };
-                            set_reg(regs, fbase, *dst, element);
+                            set_reg(regs, fbase, *dst, list_element_retained(v, i as usize));
                             pc += 1;
                             continue;
                         }
@@ -2438,9 +2403,7 @@ impl<'m> Vm<'m> {
                             } else {
                                 "method"
                             };
-                            let Some(&proto) =
-                                self.methods.get(&(type_name.clone(), method.clone()))
-                            else {
+                            let Some(proto) = self.method_proto(&type_name, &method) else {
                                 break 'resolve Err(format!(
                                     "type `{type_name}` has no {kind} `{method}`"
                                 ));
@@ -2469,41 +2432,23 @@ impl<'m> Vm<'m> {
                                 pc += 1;
                             }
                             Ok((proto, is_assoc, arg_items)) => {
-                                let callee_chunk = &module.protos[proto as usize];
-                                let num_registers = callee_chunk.num_registers as usize;
-                                let defaults = callee_chunk.defaults.clone();
-                                let new_base = reserve_window(regs, num_registers);
                                 // An associated call leaves register 0 as unit (no receiver); an instance
-                                // call places the retained receiver there.
-                                if !is_assoc {
-                                    retain(recv_val);
-                                    regs[new_base] = recv_val;
-                                }
-                                for (i, &arg) in arg_items.iter().enumerate() {
-                                    retain(arg);
-                                    regs[new_base + i + 1] = arg;
-                                }
-                                // Fill any omitted trailing parameters from their default thunks (module
-                                // scope only, like a method frame).
-                                let filled = arg_items.len() + 1;
-                                for (reg, proto) in &defaults {
-                                    if *reg as usize >= filled {
-                                        let value = self.run_thunk(*proto, &[])?;
-                                        regs[new_base + *reg as usize] = value;
-                                    }
-                                }
-                                // The result is wrapped in `Result.Ok` as it lands in the caller, so the
-                                // invocation yields a `Result` whichever way the body returns.
+                                // call places the retained receiver there. The result is wrapped in
+                                // `Result.Ok` as it lands in the caller, so the invocation yields a
+                                // `Result` whichever way the body returns.
+                                let recv = (!is_assoc).then_some(recv_val);
                                 let ok = self.persist.shapes[*ok_shape as usize];
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
+                                self.push_callee_frame(
+                                    frames,
+                                    regs,
+                                    top,
                                     proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::WrapOk(ok),
-                                    upvalues: Vec::new(),
-                                });
+                                    recv,
+                                    &arg_items,
+                                    *dst,
+                                    RetTransform::WrapOk(ok),
+                                    pc + 1,
+                                )?;
                                 // Release the temporary boxed args list before transferring (its
                                 // elements were already retained into the call frame above); `take`
                                 // leaves the after-match release for the non-transferring `Err` path.
@@ -2648,24 +2593,21 @@ impl<'m> Vm<'m> {
                         // is keyed by the value's shape name, identical for objects and enums. Built-in
                         // semantics apply otherwise; the checker guarantees a dispatched method's arity.
                         let dispatch = if left.is_object() || left.is_enum() {
-                            let type_name = left.shape().unwrap().name.clone();
+                            let type_name = &left.shape().unwrap().name;
                             if let Some(method_name) = op.overload_method() {
-                                self.methods
-                                    .get(&(type_name, method_name.to_string()))
-                                    .map(|&proto| (proto, RetTransform::None))
+                                self.method_proto(type_name, method_name)
+                                    .map(|proto| (proto, RetTransform::None))
                             } else if let Some(negate) = op.equatable_negation() {
                                 let transform = if negate {
                                     RetTransform::Negate
                                 } else {
                                     RetTransform::None
                                 };
-                                self.methods
-                                    .get(&(type_name, "eq".to_string()))
-                                    .map(|&proto| (proto, transform))
+                                self.method_proto(type_name, "eq")
+                                    .map(|proto| (proto, transform))
                             } else if let Some(method_name) = op.comparable_method() {
-                                self.methods
-                                    .get(&(type_name, method_name.to_string()))
-                                    .map(|&proto| (proto, RetTransform::Ordering(*op)))
+                                self.method_proto(type_name, method_name)
+                                    .map(|proto| (proto, RetTransform::Ordering(*op)))
                             } else {
                                 None
                             }
@@ -2675,22 +2617,17 @@ impl<'m> Vm<'m> {
                         if let Some((proto, transform)) = dispatch
                             && module.protos[proto as usize].num_params == 2
                         {
-                            let callee_chunk = &module.protos[proto as usize];
-                            let new_base =
-                                reserve_window(regs, callee_chunk.num_registers as usize);
-                            retain(left);
-                            regs[new_base] = left;
-                            retain(right);
-                            regs[new_base + 1] = right;
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
                                 proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: transform,
-                                upvalues: Vec::new(),
-                            });
+                                Some(left),
+                                &[right],
+                                *dst,
+                                transform,
+                                pc + 1,
+                            )?;
                             continue 'reload;
                         }
                         // Derived structural comparison: `< <= > >=` on an object or enum whose
@@ -2863,38 +2800,33 @@ impl<'m> Vm<'m> {
                         // `to_string` method (which runs bytecode, so it is pushed as a call frame). The
                         // method table is keyed by the value's shape name, identical for both kinds
                         // (object-model slice 3). Matches the tree-walker's `display_value`.
-                        if v.is_object() || v.is_enum() {
-                            let type_name = v.shape().unwrap().name.clone();
-                            if let Some(&proto) = self
-                                .methods
-                                .get(&(type_name.clone(), "to_string".to_string()))
-                            {
-                                let callee_chunk = &module.protos[proto as usize];
-                                if callee_chunk.num_params != 1 {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!(
-                                            "this method takes {} argument(s) but 0 were supplied",
-                                            callee_chunk.num_params - 1
-                                        ),
-                                    ));
-                                }
-                                let new_base =
-                                    reserve_window(regs, callee_chunk.num_registers as usize);
-                                retain(v);
-                                regs[new_base] = v;
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
-                                    proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues: Vec::new(),
-                                });
-                                continue 'reload;
+                        if (v.is_object() || v.is_enum())
+                            && let Some(proto) =
+                                self.method_proto(&v.shape().unwrap().name, "to_string")
+                        {
+                            let callee_chunk = &module.protos[proto as usize];
+                            if callee_chunk.num_params != 1 {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "this method takes {} argument(s) but 0 were supplied",
+                                        callee_chunk.num_params - 1
+                                    ),
+                                ));
                             }
+                            self.push_callee_frame(
+                                frames,
+                                regs,
+                                top,
+                                proto,
+                                Some(v),
+                                &[],
+                                *dst,
+                                RetTransform::None,
+                                pc + 1,
+                            )?;
+                            continue 'reload;
                         }
                         // Identity for every other value: the consuming `Echo`/`Concat` stringifies
                         // it via `display`.
@@ -3039,6 +2971,78 @@ impl<'m> Vm<'m> {
             }
         }
     }
+
+    /// The shared callee-frame-push choreography (audit-1 finding 6): reserve the callee's
+    /// register window, retain the receiver and arguments into it, fill omitted trailing
+    /// defaults from their thunks, save the caller's resume pc, and push the callee frame.
+    /// Extracted from the near-verbatim copies in the object/enum `Op::CallMethod` arms,
+    /// `Op::Invoke`, `Op::Binary`'s operator dispatch, and the single-argument trait
+    /// dispatches (`Iterable::iter`, `Length::len`, `Index::get`, `Display::to_string`) —
+    /// the retain/default-thunk choreography is exactly where refcount bugs live, so it
+    /// exists once.
+    ///
+    /// Contract points, all preserved from the arms:
+    /// - **Arity is the caller's job.** The arms report violations on different channels
+    ///   (abort vs. `Op::Invoke`'s soft `Result.Err`), so this function assumes a fitting
+    ///   `args` slice.
+    /// - `recv: None` leaves register 0 unit (an associated `Invoke`); `Some` is retained in.
+    /// - `args` are **borrowed** (register/list-owned) values, each retained into the window.
+    /// - Frames pushed here carry no upvalues (methods/operators are defined at module
+    ///   scope), so default thunks resolve globals only; register 0 counts as filled whether
+    ///   or not a receiver was placed, exactly as every arm computed `filled = args + 1`.
+    /// - The caller ends its arm with `continue 'reload` — this only stages state.
+    ///
+    /// `#[inline]` so each (monomorphic) arm folds it back into the dispatch loop — the same
+    /// contract as the `call_builtin_method` extraction (A/B-benched at ±0).
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn push_callee_frame(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        top: usize,
+        proto: u32,
+        recv: Option<Value>,
+        args: &[Value],
+        ret_dst: u16,
+        ret_transform: RetTransform,
+        resume_pc: usize,
+    ) -> Result<(), Abort> {
+        let module = self.module;
+        let callee_chunk = &module.protos[proto as usize];
+        let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
+        if let Some(r) = recv {
+            retain(r);
+            regs[new_base] = r;
+        }
+        for (i, &a) in args.iter().enumerate() {
+            retain(a);
+            regs[new_base + i + 1] = a;
+        }
+        // Fill any omitted trailing parameters from their default thunks. The receiver slot and
+        // supplied args occupy registers `0..=args.len()`, so a default register at or beyond
+        // that was not supplied.
+        if !callee_chunk.defaults.is_empty() {
+            let defaults = callee_chunk.defaults.clone();
+            let filled = args.len() + 1;
+            for (reg, dproto) in &defaults {
+                if *reg as usize >= filled {
+                    let value = self.run_thunk(*dproto, &[])?;
+                    regs[new_base + *reg as usize] = value;
+                }
+            }
+        }
+        frames[top].pc = resume_pc;
+        frames.push(Frame {
+            proto,
+            base: new_base,
+            pc: 0,
+            ret_dst,
+            ret_transform,
+            upvalues: Vec::new(),
+        });
+        Ok(())
+    }
 }
 
 /// A stack-allocated argument buffer for built-in dispatch (string/list/map/set/iter methods,
@@ -3107,4 +3111,102 @@ pub(crate) fn reserve_window(regs: &mut Vec<Value>, n: usize) -> usize {
     }
     regs.resize(base + n, Value::unit());
     base
+}
+
+// --- Shared leaf-op happy paths (audit-1 finding 2a) --------------------------------------------
+//
+// The tier-1 JIT's `jit_run_leaf_op` (tier1.rs) runs the NON-dispatching, NON-erroring path of a
+// handful of collection ops natively-called from compiled code; those paths were verbatim copies
+// of the interpreter arms above. The shared computation now lives here as `#[inline]` pure-compute
+// free functions BOTH call (`#[inline(always)]`: the dispatch loop is a huge inlining site a
+// plain hint loses — A/B measured the plain-#[inline] form costing ~2% on the index loop): `None`/
+// precondition failure means "not the happy path" — the
+// interpreter raises its exact diagnostic, the leaf-op helper bails to the interpreter (which
+// re-runs the op and raises the same diagnostic). Each helper performs **no register write** and
+// no failure-side effect, preserving the leaf-op contract that every early return happens before
+// any register write. The residual duplication in `jit_run_leaf_op` — the map/string `Op::Index`
+// cases and `Op::LoadField` (interpreter-side inline cache, measured not-profitable for tier 1 in
+// J6) — stays at its call sites with the divergence documented there.
+
+/// `Op::MakeRange`'s happy path: int bounds → the materialized element list (refcount 1).
+/// `None` = non-int bounds (the interpreter raises TypeMismatch; the JIT bails). `..=` shifts
+/// the exclusive upper to `b + 1`; `saturating_add` keeps the unmaterializable `i64::MAX` edge
+/// from panicking. The elements are fresh int immediates (no refcount), so no retain is needed.
+#[inline(always)]
+pub(crate) fn make_range_list(lo: Value, hi: Value, inclusive: bool) -> Option<Value> {
+    let (a, b) = (lo.as_int()?, hi.as_int()?);
+    let upper = if inclusive { b.saturating_add(1) } else { b };
+    let elements: Vec<Value> = (a..upper).map(Value::int).collect();
+    Some(Value::list(elements))
+}
+
+/// `Op::IterSnapshot`'s happy path for a non-object source: a packed list materializes directly
+/// into an owned boxed snapshot; a list's elements, a set's canonical elements, or a map's values
+/// in sorted-key order are snapshotted with each element retained, so the loop owns them
+/// independently. `None` = not iterable (the interpreter raises; the JIT bails). The caller
+/// handles the `Iterable::iter` object dispatch before calling.
+#[inline(always)]
+pub(crate) fn iter_snapshot_value(v: Value) -> Option<Value> {
+    if v.is_packed_list() {
+        return Some(v.realize_list());
+    }
+    let elements = v
+        .list_items()
+        .or_else(|| v.set_items())
+        .or_else(|| v.map_values())?;
+    for &e in &elements {
+        retain(e);
+    }
+    Some(Value::list(elements))
+}
+
+/// `Op::ListGet`'s happy path: a non-negative int index in bounds → the element, owned by the
+/// caller (retained here). `None` = non-int/negative/out-of-bounds — unreachable for the
+/// loop-generated op (the interpreter asserts; the JIT bails). The source is always a boxed list
+/// here (`IterSnapshot` materialized any packed form).
+#[inline(always)]
+pub(crate) fn list_get_retained(list: Value, index: Value) -> Option<Value> {
+    let element = index
+        .as_int()
+        .filter(|&i| i >= 0)
+        .and_then(|i| list.list_get(i as usize))?;
+    retain(element);
+    Some(element)
+}
+
+/// `Op::Index`'s list happy path, bounds already checked: a packed list materializes the one
+/// indexed element (owned, refcount 1) — no full-list materialization, no extra retain; a boxed
+/// list borrows the element and retains it into the destination.
+#[inline(always)]
+pub(crate) fn list_element_retained(v: Value, i: usize) -> Value {
+    if v.is_packed_list() {
+        v.packed_get(i)
+    } else {
+        let element = v.list_get(i).expect("bounds checked by the caller");
+        retain(element);
+        element
+    }
+}
+
+/// `Op::MakeTuple` (no failure path — construction never fails): retain each element register
+/// into a fresh tuple. The retains land in the local vector, then the tuple owns them.
+#[inline(always)]
+pub(crate) fn make_tuple(items: &[u16], regs: &[Value], base: usize) -> Value {
+    let mut elements = Vec::with_capacity(items.len());
+    for &r in items.iter() {
+        let v = regs[base + r as usize];
+        retain(v);
+        elements.push(v);
+    }
+    Value::tuple(elements)
+}
+
+/// `Op::TupleIndex`'s happy path: positional projection `receiver.N`, retaining the element for
+/// the caller. `None` = out of range / not a tuple (unreachable for well-typed code — the
+/// interpreter raises; the JIT bails).
+#[inline(always)]
+pub(crate) fn tuple_element_retained(v: Value, index: usize) -> Option<Value> {
+    let element = v.tuple_field(index)?;
+    retain(element);
+    Some(element)
 }
