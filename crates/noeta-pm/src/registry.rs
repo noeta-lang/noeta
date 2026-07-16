@@ -127,6 +127,20 @@ pub trait Index {
         Ok(None)
     }
 
+    /// Store a release's **README markdown** (the package's `README.md`, rendered on the hosted
+    /// registry's package page — the npm/crates.io model; the registry never fetches source, so a
+    /// README is only ever what the publisher uploads). Same posture as docs: *advisory metadata*,
+    /// unsigned and last-wins, never part of the immutable release record. Default: an error — an
+    /// index that does not store READMEs says so, and `noeta publish` degrades to a warning.
+    fn put_readme(&self, _name: &str, _version: &Version, _readme_md: &str) -> Result<(), String> {
+        Err("this registry does not store READMEs".to_string())
+    }
+
+    /// The stored README markdown for `name@version`, if any. Default: `None`.
+    fn readme(&self, _name: &str, _version: &Version) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     /// A **local git repository** already holding `name`'s commits, if this index maintains one, so the
     /// resolver can materialize a release's tree from it instead of a second network clone
     /// (private-registries arc). The default `None` means "fetch from the release's coordinates URL"
@@ -211,6 +225,12 @@ impl LocalIndex {
     fn docs_file(&self, name: &str, version: &Version) -> PathBuf {
         self.dir
             .join(format!("docs__{}__{version}.json", name.replace('/', "__")))
+    }
+
+    /// The file holding a release's README markdown (readme-on-package-page follow-up).
+    fn readme_file(&self, name: &str, version: &Version) -> PathBuf {
+        self.dir
+            .join(format!("readme__{}__{version}.md", name.replace('/', "__")))
     }
 }
 
@@ -332,6 +352,21 @@ impl Index for LocalIndex {
             Ok(text) => Ok(Some(text)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(format!("cannot read docs `{}`: {err}", path.display())),
+        }
+    }
+
+    fn put_readme(&self, name: &str, version: &Version, readme_md: &str) -> Result<(), String> {
+        let path = self.readme_file(name, version);
+        std::fs::write(&path, readme_md)
+            .map_err(|err| format!("cannot write readme `{}`: {err}", path.display()))
+    }
+
+    fn readme(&self, name: &str, version: &Version) -> Result<Option<String>, String> {
+        let path = self.readme_file(name, version);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(format!("cannot read readme `{}`: {err}", path.display())),
         }
     }
 }
@@ -1290,6 +1325,48 @@ impl Index for HttpIndex {
             .map(Some)
             .map_err(|err| format!("registry sent unreadable docs for `{name}`: {err}"))
     }
+
+    fn put_readme(&self, name: &str, version: &Version, readme_md: &str) -> Result<(), String> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            "uploading a README needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
+                .to_string()
+        })?;
+        let resp = self
+            .client
+            .put(format!("{}/readme/{version}", self.url_for(name)))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, "text/markdown")
+            .body(readme_md.to_string())
+            .send()
+            .map_err(|err| format!("registry README upload for `{name}` failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} uploading the README for `{name}@{version}`",
+                resp.status()
+            ));
+        }
+        Ok(())
+    }
+
+    fn readme(&self, name: &str, version: &Version) -> Result<Option<String>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/readme/{version}", self.url_for(name)))
+            .send()
+            .map_err(|err| format!("registry README request for `{name}` failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for `{name}@{version}` README",
+                resp.status()
+            ));
+        }
+        resp.text()
+            .map(Some)
+            .map_err(|err| format!("registry sent unreadable README for `{name}`: {err}"))
+    }
 }
 
 #[cfg(test)]
@@ -1385,6 +1462,29 @@ mod tests {
         // Another version's docs are independent.
         let v2 = Version::parse("2.0.0").unwrap();
         assert_eq!(index.docs("acme/pkg", &v2).unwrap(), None);
+    }
+
+    #[test]
+    fn readme_round_trips_through_the_local_index() {
+        let index = mem("readme_round_trip");
+        let v = Version::parse("1.2.0").unwrap();
+        assert_eq!(index.readme("acme/pkg", &v).unwrap(), None);
+        index
+            .put_readme("acme/pkg", &v, "# pkg\n\nHello.")
+            .expect("put");
+        assert_eq!(
+            index.readme("acme/pkg", &v).unwrap().as_deref(),
+            Some("# pkg\n\nHello.")
+        );
+        // Last-wins, like docs — a corrected README overwrites.
+        index.put_readme("acme/pkg", &v, "# pkg v2").expect("re-put");
+        assert_eq!(
+            index.readme("acme/pkg", &v).unwrap().as_deref(),
+            Some("# pkg v2")
+        );
+        // Another version's README is independent.
+        let v2 = Version::parse("2.0.0").unwrap();
+        assert_eq!(index.readme("acme/pkg", &v2).unwrap(), None);
     }
 
     #[test]
