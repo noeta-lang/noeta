@@ -140,12 +140,37 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
     resolve_graph_for(entry, None)
 }
 
+/// As [`resolve_graph`], but **without the lockfile refresh** — for query-shaped consumers. A
+/// resolve is a build-command step for `run`/`build`/`add`/`update` (their pins should persist),
+/// but the IDE resolves the same graph just so hover/completions see dependency modules, and the
+/// formatter scans it for text tiers: a query API must not mutate project state on disk (or
+/// silently re-pin versions) because a file was opened or formatted. Same selection, same trust
+/// enforcement; only the write is skipped.
+pub fn resolve_graph_query(entry: &Path) -> Result<ResolvedGraph, String> {
+    resolve_graph_impl(entry, None, LockRefresh::Skip)
+}
+
 /// As [`resolve_graph`], but resolving the graph for a specific build **target** (dev-deps arc): the
 /// root's dependency set is [`Manifest::active_dependencies`] for `target` — the global
 /// `[dependencies]` plus that target's own and inherited `[targets.<name>.dependencies]`. `None`
 /// (the [`resolve_graph`] default) is the global set, so every existing caller is unchanged. A
 /// dependency's *own* target-scoped deps never apply — a dep contributes only its `[dependencies]`.
 pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedGraph, String> {
+    resolve_graph_impl(entry, target, LockRefresh::Refresh)
+}
+
+/// Whether a resolve refreshes `noeta.lock` afterwards ([`resolve_graph_query`] skips it).
+#[derive(Clone, Copy, PartialEq)]
+enum LockRefresh {
+    Refresh,
+    Skip,
+}
+
+fn resolve_graph_impl(
+    entry: &Path,
+    target: Option<&str>,
+    refresh: LockRefresh,
+) -> Result<ResolvedGraph, String> {
     let dir = entry.parent().unwrap_or_else(|| Path::new("."));
     let Some(manifest_path) = crate::manifest::find(dir) else {
         return Ok(ResolvedGraph {
@@ -225,8 +250,9 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     }
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
-    // manifest with no resolved dependencies, so a bare-`[targets]` project grows no lock.
-    if !graph.locked.is_empty() {
+    // manifest with no resolved dependencies, so a bare-`[targets]` project grows no lock — and
+    // for a query resolve ([`resolve_graph_query`]), which must not write project state at all.
+    if refresh == LockRefresh::Refresh && !graph.locked.is_empty() {
         // Resolution doesn't touch the advisory feed (that's `noeta audit`), so preserve any advisory
         // pin already in the lock rather than erasing it on every build.
         let advisory_trust = crate::lock::Lock::read(&manifest_dir)
@@ -1290,6 +1316,50 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tiny two-package fixture on disk: `app` with one path dependency `lib`.
+    fn path_dep_fixture(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("noeta_graph_test_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let lib = base.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(lib.join("lib.noe"), "pub fn one(): int { return 1; }\n").unwrap();
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+        app
+    }
+
+    #[test]
+    fn a_query_resolve_never_writes_the_lockfile() {
+        // The IDE (and `noeta fmt`) resolve the graph purely to SEE dependency modules — a query
+        // must not mutate project state on disk. The build-command resolve refreshes the lock;
+        // the query resolve leaves the directory untouched.
+        let app = path_dep_fixture("query_no_lock");
+        let entry = app.join("main.noe");
+        let graph = resolve_graph_query(&entry).expect("query resolves");
+        assert_eq!(graph.packages.len(), 1, "the path dep resolves");
+        assert!(
+            !app.join("noeta.lock").exists(),
+            "a query resolve must not create noeta.lock"
+        );
+        let graph = resolve_graph(&entry).expect("build resolve");
+        assert_eq!(graph.packages.len(), 1);
+        assert!(
+            app.join("noeta.lock").exists(),
+            "the build-command resolve refreshes noeta.lock"
+        );
+    }
 
     fn dated_release(major: u64, published_at: Option<i64>) -> crate::registry::Release {
         crate::registry::Release {

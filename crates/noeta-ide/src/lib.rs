@@ -474,7 +474,7 @@ impl DocumentStore {
         let Some(entry_path) = uri_to_path(uri) else {
             return deps;
         };
-        let Ok(packages) = noeta_pm::manifest::dependency_packages(&entry_path) else {
+        let Ok(packages) = noeta_pm::manifest::dependency_packages_query(&entry_path) else {
             return deps;
         };
         let mut next_id = first_id;

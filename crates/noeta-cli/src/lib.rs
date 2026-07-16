@@ -2132,7 +2132,9 @@ fn fmt_text_tiers(dir: &std::path::Path, entry: &std::path::Path) -> noeta_lexer
             }
         }
     }
-    if let Ok(graph) = graph::resolve_graph(entry) {
+    // A query resolve: `noeta fmt` scanning dependency modules for text tiers must not refresh
+    // `noeta.lock` as a side effect of formatting.
+    if let Ok(graph) = graph::resolve_graph_query(entry) {
         for dep in &graph.packages {
             for module in &dep.modules {
                 scan(&module.name, &module.text);
@@ -2178,7 +2180,9 @@ fn fmt_tier_formatters(
             }
         }
     }
-    if let Ok(graph) = graph::resolve_graph(entry) {
+    // A query resolve: `noeta fmt` scanning dependency modules for text tiers must not refresh
+    // `noeta.lock` as a side effect of formatting.
+    if let Ok(graph) = graph::resolve_graph_query(entry) {
         for dep in &graph.packages {
             for module in &dep.modules {
                 scan(&module.name, &module.text);

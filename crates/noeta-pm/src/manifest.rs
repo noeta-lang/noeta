@@ -520,6 +520,13 @@ pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>
     Ok(crate::graph::resolve_graph(entry)?.packages)
 }
 
+/// As [`dependency_packages`], but a pure **query** ([`crate::graph::resolve_graph_query`]): no
+/// lockfile refresh. What the IDE calls — opening a file in the editor must not rewrite
+/// `noeta.lock` (or silently re-pin versions) as a side effect of making hover/completions work.
+pub fn dependency_packages_query(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, String> {
+    Ok(crate::graph::resolve_graph_query(entry)?.packages)
+}
+
 /// The **effective language edition** the entry compiles under (follow-on F1) — its own
 /// `[package].edition`, or [`Edition::DEFAULT`] when it declares none or has no manifest at all (a
 /// bare script). This is the entry's *own* package edition, independent of its dependency graph
