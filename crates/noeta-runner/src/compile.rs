@@ -82,7 +82,7 @@ pub fn resolve_providers(
 ) -> Result<BTreeMap<String, String>, String> {
     match target {
         None => Ok(BTreeMap::new()),
-        Some(name) => manifest::resolve_active_tier_providers(entry, name),
+        Some(name) => Ok(manifest::resolve_active_tier_providers(entry, name)?),
     }
 }
 
@@ -148,9 +148,8 @@ pub fn resolve_front_with(
     // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags.
     let mut active: Vec<String> = match target {
-        Some(name) => {
-            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
-        }
+        Some(name) => manifest::resolve_active_tiers(file, name)
+            .map_err(|err| CompileFailure::Message(err.to_string()))?,
         None => Vec::new(),
     };
     for tier in tiers {
@@ -174,7 +173,7 @@ pub fn resolve_front_with(
         // *different* selection than the compose probe's default resolve, so the target path
         // re-resolves rather than contorting the probe to anticipate every target (audit-5 F2).
         _ => manifest::dependency_packages_for(file, target.as_deref())
-            .map_err(CompileFailure::Message)?,
+            .map_err(|err| CompileFailure::Message(err.to_string()))?,
     };
     // The entry's effective language edition (follow-on F1) — part of the compilation identity.
     let edition = manifest::root_edition(file);

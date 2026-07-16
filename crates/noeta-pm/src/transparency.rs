@@ -10,6 +10,8 @@
 use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
+use crate::error::PmError;
+
 /// A 32-byte SHA-256 hash — a Merkle node or leaf.
 pub type Hash = [u8; 32];
 
@@ -47,7 +49,9 @@ pub fn log_record(
     provenance: &str,
     license: &str,
 ) -> String {
-    format!("noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n{license}\n")
+    format!(
+        "noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n{license}\n"
+    )
 }
 
 /// Verify that `leaf` at index `m` in a tree of `size` with `root` is proven by `proof`.
@@ -132,11 +136,13 @@ pub fn verify_checkpoint(
     size: u64,
     root_hex: &str,
     signature_hex: &str,
-) -> Result<bool, String> {
-    let pk: [u8; 32] = hex_to_array(public_hex).ok_or("log public key is not 32 hex bytes")?;
-    let key = VerifyingKey::from_bytes(&pk).map_err(|err| format!("bad log public key: {err}"))?;
-    let sig: [u8; 64] =
-        hex_to_array(signature_hex).ok_or("checkpoint signature is not 64 hex bytes")?;
+) -> Result<bool, PmError> {
+    let pk: [u8; 32] = hex_to_array(public_hex)
+        .ok_or_else(|| PmError::Trust("log public key is not 32 hex bytes".to_string()))?;
+    let key = VerifyingKey::from_bytes(&pk)
+        .map_err(|err| PmError::Trust(format!("bad log public key: {err}")))?;
+    let sig: [u8; 64] = hex_to_array(signature_hex)
+        .ok_or_else(|| PmError::Trust("checkpoint signature is not 64 hex bytes".to_string()))?;
     let signature = Signature::from_bytes(&sig);
     let msg = format!("noeta-log-checkpoint-v1\n{size}\n{root_hex}\n");
     Ok(key.verify_strict(msg.as_bytes(), &signature).is_ok())

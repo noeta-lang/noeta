@@ -47,7 +47,8 @@
 //! # Status
 //!
 //! **Arc complete (F0–F7).** Crate skeleton, [`FmtConfig`] seam + `noeta.toml` `[fmt]` parsing
-//! ([`FmtConfig::from_toml`] / [`FmtConfig::discover`], shared by the CLI and LSP), the
+//! ([`FmtConfig::from_toml`], shared by the CLI and LSP — discovery of the manifest itself lives
+//! in `noeta-pm`, the one owner of the `noeta.toml` ancestor walk), the
 //! [`format_source`] entry point with the safety gate, the **full printer** ([`print`], on the
 //! [`doc`] algebra) — total over every parseable program (precedence-minimal parentheses,
 //! restricted-head handling, list-spread re-sugaring, per-member `;`, config-driven match-arm

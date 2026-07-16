@@ -16,6 +16,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use semver::{Version, VersionReq};
 use sha2::{Digest, Sha256};
 
+use crate::error::PmError;
 use crate::transparency::hex_to_array;
 
 const ADVISORY_PREFIX: &str = "noeta-advisory-v1";
@@ -78,7 +79,7 @@ impl Advisory {
 
     /// Verify this advisory's signature against the pinned advisory public key (hex). `Ok(false)` = a
     /// well-formed but non-verifying signature (tampered or wrong key); `Err` = malformed input.
-    pub fn verify(&self, public_hex: &str) -> Result<bool, String> {
+    pub fn verify(&self, public_hex: &str) -> Result<bool, PmError> {
         verify_ed25519(public_hex, &self.canonical_bytes(), &self.signature)
     }
 
@@ -118,7 +119,7 @@ pub fn verify_feed_head(
     count: usize,
     digest_hex: &str,
     signature_hex: &str,
-) -> Result<bool, String> {
+) -> Result<bool, PmError> {
     verify_ed25519(
         public_hex,
         &feed_head_bytes(count, digest_hex),
@@ -126,12 +127,13 @@ pub fn verify_feed_head(
     )
 }
 
-fn verify_ed25519(public_hex: &str, message: &[u8], signature_hex: &str) -> Result<bool, String> {
-    let pk: [u8; 32] = hex_to_array(public_hex).ok_or("advisory public key is not 32 hex bytes")?;
-    let key =
-        VerifyingKey::from_bytes(&pk).map_err(|err| format!("bad advisory public key: {err}"))?;
-    let sig: [u8; 64] =
-        hex_to_array(signature_hex).ok_or("advisory signature is not 64 hex bytes")?;
+fn verify_ed25519(public_hex: &str, message: &[u8], signature_hex: &str) -> Result<bool, PmError> {
+    let pk: [u8; 32] = hex_to_array(public_hex)
+        .ok_or_else(|| PmError::Trust("advisory public key is not 32 hex bytes".to_string()))?;
+    let key = VerifyingKey::from_bytes(&pk)
+        .map_err(|err| PmError::Trust(format!("bad advisory public key: {err}")))?;
+    let sig: [u8; 64] = hex_to_array(signature_hex)
+        .ok_or_else(|| PmError::Trust("advisory signature is not 64 hex bytes".to_string()))?;
     let signature = Signature::from_bytes(&sig);
     Ok(key.verify_strict(message, &signature).is_ok())
 }

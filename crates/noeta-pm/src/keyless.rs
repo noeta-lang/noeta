@@ -29,6 +29,7 @@ use sigstore_types::Sha256Hash;
 use sigstore_verify::types::Bundle;
 use sigstore_verify::{VerificationPolicy, verify};
 
+use crate::error::PmError;
 use crate::provenance::Attestation;
 use crate::registry::GitCoords;
 
@@ -99,23 +100,23 @@ pub struct VerifiedIdentity {
 /// `trusted_root.json`) overrides it: the operational escape hatch for a Sigstore root rotation
 /// that lands before a toolchain update ships (and what hermetic tests point at their minted
 /// test root). TUF-based rotation is the surfaced v-next.
-pub fn trust_root() -> Result<TrustedRoot, String> {
+pub fn trust_root() -> Result<TrustedRoot, PmError> {
     if let Some(path) = std::env::var_os("NOETA_SIGSTORE_TRUST_ROOT") {
         let text = std::fs::read_to_string(&path).map_err(|err| {
-            format!(
+            PmError::Io(format!(
                 "cannot read NOETA_SIGSTORE_TRUST_ROOT `{}`: {err}",
                 std::path::Path::new(&path).display()
-            )
+            ))
         })?;
         return TrustedRoot::from_json(&text).map_err(|err| {
-            format!(
+            PmError::Trust(format!(
                 "NOETA_SIGSTORE_TRUST_ROOT `{}` is not a valid trust root: {err}",
                 std::path::Path::new(&path).display()
-            )
+            ))
         });
     }
     TrustedRoot::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT)
-        .map_err(|err| format!("embedded Sigstore trust root is invalid: {err}"))
+        .map_err(|err| PmError::Trust(format!("embedded Sigstore trust root is invalid: {err}")))
 }
 
 /// Verify a Sigstore bundle offline against the embedded production trust root: the bundle's DSSE
@@ -125,7 +126,7 @@ pub fn verify_bundle(
     bundle_json: &str,
     artifact_sha256: &str,
     policy: Option<&IdentityPolicy>,
-) -> Result<VerifiedIdentity, String> {
+) -> Result<VerifiedIdentity, PmError> {
     let root = trust_root()?;
     verify_bundle_with_root(bundle_json, artifact_sha256, policy, &root)
 }
@@ -158,20 +159,20 @@ impl AmbientIdentity {
 
     /// Wrap a raw OIDC JWT handed over directly (a CI system that injects the token itself,
     /// or a test fixture). The token's *authenticity* is Fulcio's to judge, not ours.
-    pub fn from_jwt(jwt: &str) -> Result<AmbientIdentity, String> {
+    pub fn from_jwt(jwt: &str) -> Result<AmbientIdentity, PmError> {
         sigstore_oidc::IdentityToken::from_jwt(jwt)
             .map(AmbientIdentity)
-            .map_err(|err| format!("malformed OIDC token: {err}"))
+            .map_err(|err| PmError::Auth(format!("malformed OIDC token: {err}")))
     }
 }
 
 /// Detect an ambient OIDC identity (CI). Errors only on a *broken* ambient environment (e.g. the
 /// token endpoint refused) — a plain "not in CI" is `Ok(None)`.
-pub fn ambient_identity() -> Result<Option<AmbientIdentity>, String> {
+pub fn ambient_identity() -> Result<Option<AmbientIdentity>, PmError> {
     let runtime = publish_runtime()?;
     let token = runtime
         .block_on(sigstore_oidc::IdentityToken::detect_ambient())
-        .map_err(|err| format!("ambient OIDC detection failed: {err}"))?;
+        .map_err(|err| PmError::Auth(format!("ambient OIDC detection failed: {err}")))?;
     Ok(token.map(AmbientIdentity))
 }
 
@@ -181,7 +182,7 @@ pub fn ambient_identity() -> Result<Option<AmbientIdentity>, String> {
 /// and waits on a local redirect server; a headless environment (or `force_oob`) falls back to
 /// print-the-URL / paste-the-code. `NOETA_OIDC_URL` overrides the provider (tests, private
 /// deployments).
-pub fn interactive_identity(force_oob: bool) -> Result<AmbientIdentity, String> {
+pub fn interactive_identity(force_oob: bool) -> Result<AmbientIdentity, PmError> {
     interactive_identity_with(sigstore_oidc::oauth::DefaultAuthCallback, force_oob)
 }
 
@@ -190,7 +191,7 @@ pub fn interactive_identity(force_oob: bool) -> Result<AmbientIdentity, String> 
 pub fn interactive_identity_with(
     callback: impl sigstore_oidc::oauth::AuthCallback,
     force_oob: bool,
-) -> Result<AmbientIdentity, String> {
+) -> Result<AmbientIdentity, PmError> {
     let oidc_url = std::env::var("NOETA_OIDC_URL").ok();
     interactive_identity_at(oidc_url.as_deref(), callback, force_oob)
 }
@@ -201,7 +202,7 @@ pub fn interactive_identity_at(
     oidc_url: Option<&str>,
     callback: impl sigstore_oidc::oauth::AuthCallback,
     force_oob: bool,
-) -> Result<AmbientIdentity, String> {
+) -> Result<AmbientIdentity, PmError> {
     let config = match oidc_url {
         Some(url) => sigstore_oidc::oauth::OAuthConfig::from_oidc_url(url),
         None => sigstore_oidc::oauth::OAuthConfig::sigstore(),
@@ -211,14 +212,14 @@ pub fn interactive_identity_at(
     let runtime = publish_runtime()?;
     let token = runtime
         .block_on(client.auth_with_options(callback, options))
-        .map_err(|err| format!("interactive sign-in failed: {err}"))?;
+        .map_err(|err| PmError::Auth(format!("interactive sign-in failed: {err}")))?;
     Ok(AmbientIdentity(token))
 }
 
 /// Where a keyless publish sends its requests. Production sigstore.dev by default;
 /// `NOETA_FULCIO_URL` / `NOETA_REKOR_URL` override both together (tests, or a private Sigstore
 /// deployment — set both or neither).
-fn signing_config() -> Result<sigstore_sign::SigningConfig, String> {
+fn signing_config() -> Result<sigstore_sign::SigningConfig, PmError> {
     let overrides = (
         std::env::var("NOETA_FULCIO_URL").ok(),
         std::env::var("NOETA_REKOR_URL").ok(),
@@ -242,10 +243,10 @@ fn signing_config() -> Result<sigstore_sign::SigningConfig, String> {
             config
         }
         _ => {
-            return Err(
+            return Err(PmError::Trust(
                 "set both NOETA_FULCIO_URL and NOETA_REKOR_URL, or neither (production)"
                     .to_string(),
-            );
+            ));
         }
     })
 }
@@ -255,7 +256,7 @@ fn signing_config() -> Result<sigstore_sign::SigningConfig, String> {
 /// Sigstore bundle (JSON) the registry stores. The ephemeral private key exists only inside this
 /// call — nothing survives to steal. Endpoints: production sigstore.dev, or the
 /// `NOETA_FULCIO_URL`/`NOETA_REKOR_URL` override pair.
-pub fn publish_bundle(statement: &[u8], identity: AmbientIdentity) -> Result<String, String> {
+pub fn publish_bundle(statement: &[u8], identity: AmbientIdentity) -> Result<String, PmError> {
     publish_bundle_with_config(statement, identity, signing_config()?)
 }
 
@@ -266,7 +267,7 @@ pub fn publish_bundle_at(
     identity: AmbientIdentity,
     fulcio_url: &str,
     rekor_url: &str,
-) -> Result<String, String> {
+) -> Result<String, PmError> {
     publish_bundle_with_config(
         statement,
         identity,
@@ -285,26 +286,26 @@ fn publish_bundle_with_config(
     statement: &[u8],
     identity: AmbientIdentity,
     config: sigstore_sign::SigningConfig,
-) -> Result<String, String> {
+) -> Result<String, PmError> {
     let context = sigstore_sign::SigningContext::with_config(config);
     let signer = context.signer(identity.0);
     let runtime = publish_runtime()?;
     let bundle = runtime
         .block_on(signer.sign_raw_statement(statement))
-        .map_err(|err| format!("keyless signing failed: {err}"))?;
+        .map_err(|err| PmError::Trust(format!("keyless signing failed: {err}")))?;
     bundle
         .to_json()
-        .map_err(|err| format!("cannot serialize the Sigstore bundle: {err}"))
+        .map_err(|err| PmError::Trust(format!("cannot serialize the Sigstore bundle: {err}")))
 }
 
 /// A small current-thread runtime for the async sigstore clients — publish is a CLI-only,
 /// one-shot flow, so a scoped runtime (the `reqwest::blocking` pattern) beats threading an
 /// executor through the package manager.
-fn publish_runtime() -> Result<tokio::runtime::Runtime, String> {
+fn publish_runtime() -> Result<tokio::runtime::Runtime, PmError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|err| format!("cannot start the signing runtime: {err}"))
+        .map_err(|err| PmError::Io(format!("cannot start the signing runtime: {err}")))
 }
 
 /// [`verify_bundle`] against an explicit trust root — the seam tests use to substitute a fixture
@@ -314,11 +315,11 @@ pub fn verify_bundle_with_root(
     artifact_sha256: &str,
     policy: Option<&IdentityPolicy>,
     root: &TrustedRoot,
-) -> Result<VerifiedIdentity, String> {
+) -> Result<VerifiedIdentity, PmError> {
     let bundle = Bundle::from_json(bundle_json)
-        .map_err(|err| format!("malformed Sigstore bundle: {err}"))?;
+        .map_err(|err| PmError::Trust(format!("malformed Sigstore bundle: {err}")))?;
     let digest = Sha256Hash::from_hex(artifact_sha256)
-        .map_err(|err| format!("malformed artifact digest: {err}"))?;
+        .map_err(|err| PmError::Trust(format!("malformed artifact digest: {err}")))?;
 
     let mut verification = VerificationPolicy::default();
     if let Some(pin) = policy {
@@ -328,12 +329,14 @@ pub fn verify_bundle_with_root(
     }
 
     let result = verify(digest, &bundle, &verification, root)
-        .map_err(|err| format!("keyless verification failed: {err}"))?;
+        .map_err(|err| PmError::Trust(format!("keyless verification failed: {err}")))?;
 
     // Fulcio certificates always carry both; their absence means the bundle proved nothing an
     // identity pin could hold on to, so fail closed rather than pin an empty identity.
     let (Some(identity), Some(issuer)) = (result.identity, result.issuer) else {
-        return Err("keyless verification failed: certificate carries no identity/issuer".into());
+        return Err(PmError::Trust(
+            "keyless verification failed: certificate carries no identity/issuer".to_string(),
+        ));
     };
     Ok(VerifiedIdentity {
         issuer,
@@ -384,7 +387,7 @@ mod tests {
                 .into(),
         };
         let err = verify_bundle(GHA_BUNDLE, GHA_SUBJECT_SHA256, Some(&pin)).unwrap_err();
-        assert!(err.contains("identity mismatch"), "{err}");
+        assert!(err.message().contains("identity mismatch"), "{err}");
     }
 
     #[test]
@@ -394,14 +397,17 @@ mod tests {
             identity: GHA_IDENTITY.into(),
         };
         let err = verify_bundle(GHA_BUNDLE, GHA_SUBJECT_SHA256, Some(&pin)).unwrap_err();
-        assert!(err.contains("issuer mismatch"), "{err}");
+        assert!(err.message().contains("issuer mismatch"), "{err}");
     }
 
     #[test]
     fn an_attestation_over_different_bytes_is_rejected() {
         let other = "0000000000000000000000000000000000000000000000000000000000000000";
         let err = verify_bundle(GHA_BUNDLE, other, None).unwrap_err();
-        assert!(err.contains("does not match any subject"), "{err}");
+        assert!(
+            err.message().contains("does not match any subject"),
+            "{err}"
+        );
     }
 
     /// Parse the real bundle, apply one structural mutation, re-serialize. Each K2 tamper test
@@ -435,7 +441,10 @@ mod tests {
             b["verificationMaterial"]["certificate"]["rawBytes"] = flip(&cert).into();
         });
         let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
-        assert!(err.contains("keyless verification failed"), "{err}");
+        assert!(
+            err.message().contains("keyless verification failed"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -450,7 +459,8 @@ mod tests {
         });
         let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
         assert!(
-            err.to_lowercase().contains("inclusion") || err.to_lowercase().contains("proof"),
+            err.message().to_lowercase().contains("inclusion")
+                || err.message().to_lowercase().contains("proof"),
             "{err}"
         );
     }
@@ -473,7 +483,7 @@ mod tests {
                 format!("{head}{}", flip(sig)).into();
         });
         let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
-        assert!(err.to_lowercase().contains("checkpoint"), "{err}");
+        assert!(err.message().to_lowercase().contains("checkpoint"), "{err}");
     }
 
     #[test]
@@ -484,7 +494,8 @@ mod tests {
         });
         let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
         assert!(
-            err.to_lowercase().contains("checkpoint") || err.contains("validation failed"),
+            err.message().to_lowercase().contains("checkpoint")
+                || err.message().contains("validation failed"),
             "{err}"
         );
     }
@@ -497,7 +508,7 @@ mod tests {
             b["verificationMaterial"]["tlogEntries"] = serde_json::json!([]);
         });
         let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
-        assert!(err.contains("must have inclusion proof"), "{err}");
+        assert!(err.message().contains("must have inclusion proof"), "{err}");
     }
 
     #[test]
@@ -509,7 +520,10 @@ mod tests {
                 "1838060096".to_string().into();
         });
         let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
-        assert!(err.contains("keyless verification failed"), "{err}");
+        assert!(
+            err.message().contains("keyless verification failed"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -527,7 +541,7 @@ mod tests {
         };
         bundle["dsseEnvelope"]["signatures"][0]["sig"] = flipped.into();
         let err = verify_bundle(&bundle.to_string(), GHA_SUBJECT_SHA256, None).unwrap_err();
-        assert!(err.contains("failed"), "{err}");
+        assert!(err.message().contains("failed"), "{err}");
     }
 
     #[test]

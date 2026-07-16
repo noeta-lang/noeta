@@ -5,9 +5,6 @@ use std::path::Path;
 
 use crate::{ArrowStyle, FmtConfig, ParenStyle, SemicolonStyle};
 
-/// The project manifest that carries the `[fmt]` table.
-const MANIFEST_NAME: &str = "noeta.toml";
-
 impl FmtConfig {
     /// Overlay a `noeta.toml`'s `[fmt]` table (if any) onto [`FmtConfig::default`]. Unknown keys
     /// inside `[fmt]` are ignored (room for later knobs); known keys are type-checked and
@@ -145,27 +142,6 @@ impl FmtConfig {
         {
             self.trim_trailing = v.eq_ignore_ascii_case("true");
         }
-    }
-
-    /// Discover the nearest `noeta.toml` at or above `start_dir` and read its `[fmt]` config,
-    /// **leniently**: a missing manifest, an unreadable file, or a malformed `[fmt]` table all yield
-    /// [`FmtConfig::default`]. Suited to the editor path, where formatting should never fail on a
-    /// config problem; the CLI uses [`FmtConfig::from_toml`] directly so it can report the error.
-    pub fn discover(start_dir: &Path) -> FmtConfig {
-        // Same precedence as the CLI: defaults, then `.editorconfig`, then the nearest `noeta.toml`
-        // `[fmt]` table. A representative `*.noe` path lets `.editorconfig` globs apply.
-        let mut config = FmtConfig::default();
-        config.overlay_editorconfig(&start_dir.join("_.noe"));
-        for dir in start_dir.ancestors() {
-            let candidate = dir.join(MANIFEST_NAME);
-            if candidate.is_file() {
-                if let Ok(text) = std::fs::read_to_string(&candidate) {
-                    let _ = config.overlay_toml(&text);
-                }
-                break;
-            }
-        }
-        config
     }
 }
 

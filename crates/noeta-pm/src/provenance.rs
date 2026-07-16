@@ -22,6 +22,8 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use semver::Version;
 
+use crate::error::PmError;
+
 /// The signed binding (package-manager Phase 4, #2): a release's identity, version, and the commit
 /// SHA it resolves to. Signing this is what makes "version → commit" verifiable and non-repudiable.
 #[derive(Debug)]
@@ -52,9 +54,10 @@ pub struct Keypair {
 }
 
 /// Generate a fresh signing keypair from OS entropy.
-pub fn generate_keypair() -> Result<Keypair, String> {
+pub fn generate_keypair() -> Result<Keypair, PmError> {
     let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed).map_err(|err| format!("cannot read OS entropy: {err}"))?;
+    getrandom::fill(&mut seed)
+        .map_err(|err| PmError::Io(format!("cannot read OS entropy: {err}")))?;
     let signing = SigningKey::from_bytes(&seed);
     let public = signing.verifying_key();
     Ok(Keypair {
@@ -64,7 +67,7 @@ pub fn generate_keypair() -> Result<Keypair, String> {
 }
 
 /// The hex public key corresponding to a hex private key (the seed) — for registering a scope's key.
-pub fn public_key_hex(private_hex: &str) -> Result<String, String> {
+pub fn public_key_hex(private_hex: &str) -> Result<String, PmError> {
     let seed = from_hex::<32>(private_hex, "private key")?;
     Ok(to_hex(
         SigningKey::from_bytes(&seed).verifying_key().as_bytes(),
@@ -72,7 +75,7 @@ pub fn public_key_hex(private_hex: &str) -> Result<String, String> {
 }
 
 /// Sign `attestation` with the hex-encoded private key, returning the hex signature (128 chars).
-pub fn sign(attestation: &Attestation, private_hex: &str) -> Result<String, String> {
+pub fn sign(attestation: &Attestation, private_hex: &str) -> Result<String, PmError> {
     let seed = from_hex::<32>(private_hex, "private key")?;
     let signing = SigningKey::from_bytes(&seed);
     let signature = signing.sign(&attestation.canonical_bytes());
@@ -85,15 +88,15 @@ pub fn verify(
     attestation: &Attestation,
     signature_hex: &str,
     public_hex: &str,
-) -> Result<(), String> {
+) -> Result<(), PmError> {
     let public_bytes = from_hex::<32>(public_hex, "public key")?;
     let verifying = VerifyingKey::from_bytes(&public_bytes)
-        .map_err(|err| format!("invalid public key: {err}"))?;
+        .map_err(|err| PmError::Trust(format!("invalid public key: {err}")))?;
     let signature_bytes = from_hex::<64>(signature_hex, "signature")?;
     let signature = Signature::from_bytes(&signature_bytes);
     verifying
         .verify_strict(&attestation.canonical_bytes(), &signature)
-        .map_err(|_| "signature does not verify against the public key".to_string())
+        .map_err(|_| PmError::Trust("signature does not verify against the public key".to_string()))
 }
 
 /// Lowercase hex of `bytes`.
@@ -101,19 +104,20 @@ fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Decode exactly `N` bytes of hex, tagging errors with `what`.
-fn from_hex<const N: usize>(s: &str, what: &str) -> Result<[u8; N], String> {
+/// Decode exactly `N` bytes of hex, tagging errors with `what`. Malformed key/signature material
+/// is a [`PmError::Trust`] problem — it can never verify.
+fn from_hex<const N: usize>(s: &str, what: &str) -> Result<[u8; N], PmError> {
     if s.len() != N * 2 {
-        return Err(format!(
+        return Err(PmError::Trust(format!(
             "{what} must be {} hex chars, got {}",
             N * 2,
             s.len()
-        ));
+        )));
     }
     let mut out = [0u8; N];
     for (i, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-            .map_err(|_| format!("{what} is not valid hex"))?;
+            .map_err(|_| PmError::Trust(format!("{what} is not valid hex")))?;
     }
     Ok(out)
 }
