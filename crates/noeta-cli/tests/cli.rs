@@ -5259,6 +5259,7 @@ impl Extension for ImgfxExtension {
     fn types(&self) -> &'static [ExtType] {
         &[ExtType {
             name: "Acc",
+            namespace: "imgfx.fx",
             methods: ACC_METHODS,
             dispatch: acc_method_dispatch,
             ctx_methods: ACC_CTX_METHODS,
@@ -5452,23 +5453,19 @@ fn doc_api_in_a_composed_toolchain_documents_the_native_package() {
         "--root imgfx must exclude the stdlib"
     );
 
-    // The publish namespace lint (`--lint`) rejects the fixture's `Acc` extern type: it omits
-    // `namespace:`, so it defaults to `std` — a package must namespace its types under its own
-    // root, or a consumer's re-rooting (and the published docs) can't reach them. This is the gate
-    // `noeta publish` runs; it would block publishing this (deliberately sloppy) fixture. Reuses
-    // the already-cached composed binary, so no rebuild.
+    // The publish namespace lint (`--lint`) passes on the well-namespaced fixture. The negative
+    // case — a type omitting `namespace:` and so defaulting to `std` — no longer *reaches* the
+    // lint: registry assembly refuses the unit at startup (`validate()`, unit-tested in
+    // noeta-native as `a_type_namespace_outside_the_units_root_is_rejected`), so a sloppy package
+    // fails at its very first composed run with the type named, not at publish time.
     let lint = std::process::Command::new(&composed)
         .args(["doc", "--api", "--root", "imgfx", "--lint"])
         .output()
         .expect("run the publish namespace lint");
     assert!(
-        !lint.status.success(),
-        "the lint must reject a package type that defaults to the std namespace"
-    );
-    let msg = String::from_utf8_lossy(&lint.stderr);
-    assert!(
-        msg.contains("Acc") && msg.contains("namespace"),
-        "the lint names the offending type and its namespace: {msg}"
+        lint.status.success(),
+        "the lint passes a package whose types are namespaced under its own root: {}",
+        String::from_utf8_lossy(&lint.stderr)
     );
 }
 

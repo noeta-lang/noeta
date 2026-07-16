@@ -1414,6 +1414,87 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
             pair[1].1
         );
     }
+    // A type's namespace must live under its own unit's root — the assembly-time form of the
+    // publish lint (`compose --lint`), moved here so EVERY path hits it: `ExtType::DEFAULTS`
+    // fills `namespace: "std"`, so a third-party type that forgets `namespace:` would otherwise
+    // silently squat the reserved std namespace (winning `use std.X` resolution) until publish.
+    for unit in units {
+        let root = unit.root();
+        for t in unit.types() {
+            assert!(
+                t.namespace == root || t.namespace.starts_with(&format!("{root}.")),
+                "extern type `{}` of unit `{}` declares namespace `{}`, outside the unit's root                  `{root}` — a missing `namespace:` defaults to `std`, which only std may claim",
+                t.name,
+                unit.name(),
+                t.namespace
+            );
+        }
+    }
+    // The remaining registration axes are first-wins at lookup, so a collision would silently
+    // shadow: refuse each at assembly instead (the registry's philosophy — a mis-assembled binary
+    // must not start). One loop each: tier names, attribute names, body-formatter languages,
+    // command names, capability ids.
+    let dup_of = |mut names: Vec<(&str, &str)>| -> Option<((String, String), String)> {
+        names.sort_unstable();
+        names.windows(2).find(|w| w[0].0 == w[1].0).map(|w| {
+            (
+                (w[0].1.to_string(), w[1].1.to_string()),
+                w[0].0.to_string(),
+            )
+        })
+    };
+    let collect = |f: &dyn Fn(&'static (dyn Extension + Sync)) -> Vec<(&'static str, &'static str)>| {
+        units.iter().flat_map(|e| f(*e)).collect::<Vec<_>>()
+    };
+    for (axis, names) in [
+        (
+            "tier",
+            collect(&|e| e.tiers().iter().map(|t| (t.name, e.name())).collect()),
+        ),
+        (
+            "attribute",
+            collect(&|e| e.attributes().iter().map(|a| (a.name, e.name())).collect()),
+        ),
+        (
+            "body-formatter language",
+            collect(&|e| {
+                e.body_formatters()
+                    .iter()
+                    .map(|(lang, _)| (*lang, e.name()))
+                    .collect()
+            }),
+        ),
+        (
+            "command",
+            collect(&|e| e.commands().iter().map(|c| (c.name, e.name())).collect()),
+        ),
+    ] {
+        if let Some(((a, b), name)) = dup_of(names) {
+            panic!(
+                "duplicate {axis} `{name}` in the assembled registry (units `{a}` and `{b}`)"
+            );
+        }
+    }
+    // Capability providers dedupe by trait `TypeId` (the lookup key `find_capability` scans).
+    let mut caps: Vec<(std::any::TypeId, &str, &str)> = units
+        .iter()
+        .flat_map(|e| {
+            e.capabilities()
+                .iter()
+                .map(|c| ((c.id)(), c.state_key, e.name()))
+        })
+        .collect();
+    caps.sort_unstable_by_key(|(id, _, _)| *id);
+    for w in caps.windows(2) {
+        assert!(
+            w[0].0 != w[1].0,
+            "duplicate capability provider (state keys `{}` and `{}`, units `{}` and `{}`): two              extensions provide the same capability trait, and lookup would silently shadow one",
+            w[0].1,
+            w[1].1,
+            w[0].2,
+            w[1].2
+        );
+    }
     for module in units.iter().flat_map(|e| e.modules()) {
         for (i, bundle) in module.bundles.iter().enumerate() {
             for other in &module.bundles[i + 1..] {
@@ -1956,6 +2037,57 @@ mod runtime_registry_tests {
         assert!(
             result.is_err(),
             "duplicate extern-type short name must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_type_namespace_outside_the_units_root_is_rejected() {
+        // `ExtType::DEFAULTS` fills `namespace: "std"`; a third-party unit that forgets the field
+        // would silently squat std. Assembly refuses it (the publish lint's rule, moved to where
+        // every path hits it).
+        const T_SQUATTER: ExtType = ExtType {
+            name: "Widget",
+            // The DEFAULTS value a forgotten `namespace:` leaves behind.
+            ..ExtType::DEFAULTS
+        };
+        static SQ: TypedUnit = TypedUnit("acme.widgets", "acme", &[T_SQUATTER]);
+        let result = std::panic::catch_unwind(|| validate(&[&SQ]));
+        assert!(
+            result.is_err(),
+            "a type namespaced outside its unit's root must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_tier_name_across_units_is_rejected() {
+        // Tier lookup is first-wins; a collision must refuse at assembly instead of shadowing.
+        struct TierUnit(&'static str, &'static str);
+        impl Extension for TierUnit {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+            fn root(&self) -> &'static str {
+                self.1
+            }
+            fn modules(&self) -> &'static [ExtModule] {
+                &[]
+            }
+            fn tiers(&self) -> &'static [ExtTier] {
+                &[ExtTier {
+                    name: "audit",
+                    config: None,
+                    text: None,
+                    expr: None,
+                    handler: None,
+                }]
+            }
+        }
+        static A_TIER: TierUnit = TierUnit("a.tools", "a");
+        static B_TIER: TierUnit = TierUnit("b.tools", "b");
+        let result = std::panic::catch_unwind(|| validate(&[&A_TIER, &B_TIER]));
+        assert!(
+            result.is_err(),
+            "a duplicate tier name across units must refuse to assemble"
         );
     }
 
