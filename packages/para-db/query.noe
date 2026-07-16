@@ -1,0 +1,111 @@
+// para.db.query — a general-purpose SQL query builder (aether DB1), pure Noeta over the native
+// `para.db` driver. It composes a `Query` (statement text + ordered bound parameters) safely: every
+// user value becomes a `?` placeholder + a binding, never string-spliced — so a query built from
+// untrusted input carries no injection risk. The repository/unit-of-work layer (DB2) builds on this;
+// it is also usable directly.
+
+namespace para.db.query
+
+// A composed SQL statement ready to run: the text (with `?` placeholders) and its bound parameters.
+pub struct Query {
+    sql: string
+    params: List<dyn>
+}
+
+// A fluent query builder over a single table. Each method returns the builder, so calls chain:
+// `table("users").filter("age", ">", 18).order("name", "asc").limit(20).select("id, name")`.
+pub class Q {
+    mut tbl: string
+    mut conditions: List<string>
+    mut bindings: List<dyn>
+    mut orderings: List<string>
+    mut lim: int
+
+    fn new(name: string): Q {
+        return Q { tbl: name, conditions: [], bindings: [], orderings: [], lim: 0 }
+    }
+
+    // Add a `WHERE col <op> ?` clause (ANDed with the others); `value` becomes a bound parameter.
+    fn filter(col: string, op: string, value: dyn): Q {
+        self.conditions = self.conditions ~ ["${col} ${op} ?"]
+        self.bindings = self.bindings ~ [value]
+        return self
+    }
+
+    // Add an `ORDER BY col <dir>` term (`dir` is "asc"/"desc").
+    fn order(col: string, dir: string): Q {
+        self.orderings = self.orderings ~ ["${col} ${dir}"]
+        return self
+    }
+
+    // Limit the result set.
+    fn limit(n: int): Q {
+        self.lim = n
+        return self
+    }
+
+    // The `WHERE …`/`ORDER BY …`/`LIMIT …` tail shared by SELECT/UPDATE/DELETE.
+    fn tail(): string {
+        mut sql = ""
+        if self.conditions.len() > 0 {
+            sql = sql ~ " WHERE " ~ self.conditions.join(" AND ")
+        }
+        if self.orderings.len() > 0 {
+            sql = sql ~ " ORDER BY " ~ self.orderings.join(", ")
+        }
+        if self.lim > 0 {
+            sql = sql ~ " LIMIT ${self.lim}"
+        }
+        return sql
+    }
+
+    // Build a `SELECT <cols> FROM <table> …`.
+    fn select(cols: string): Query {
+        sql = "SELECT ${cols} FROM ${self.tbl}${self.tail()}"
+        return Query { sql: sql, params: self.bindings }
+    }
+
+    // Build a `DELETE FROM <table> WHERE …` (its bindings are this builder's filters).
+    fn delete(): Query {
+        sql = "DELETE FROM ${self.tbl}${self.tail()}"
+        return Query { sql: sql, params: self.bindings }
+    }
+
+    // Build an `INSERT INTO <table> (cols) VALUES (?, …)`. `columns` names the columns; `values` are
+    // the bound row values, positionally aligned.
+    fn insert(columns: List<string>, values: List<dyn>): Query {
+        placeholders = values.map(fn(v) => "?")
+        col_list = columns.join(", ")
+        value_list = placeholders.join(", ")
+        sql = "INSERT INTO ${self.tbl} (${col_list}) VALUES (${value_list})"
+        return Query { sql: sql, params: values }
+    }
+
+    // Build an `UPDATE <table> SET col = ?, … WHERE …`. `columns`/`values` are the SET assignments;
+    // the WHERE bindings (this builder's filters) follow the SET bindings in order.
+    fn update(columns: List<string>, values: List<dyn>): Query {
+        assignments = columns.map(fn(c) => "${c} = ?")
+        set_list = assignments.join(", ")
+        clause = self.tail()
+        sql = "UPDATE ${self.tbl} SET ${set_list}${clause}"
+        return Query { sql: sql, params: values ~ self.bindings }
+    }
+}
+
+// Start a query on `name`.
+pub fn table(name: string): Q {
+    return Q.new(name)
+}
+
+// Run a composed query on a connection, returning its rows (a `List<Map<string, dyn>>`). `conn` is
+// a `para.db.Connection`; typed `dyn` here because a native extern type imported across the package
+// boundary does not yet unify by identity with the value a sibling module's `db.connect` returns
+// (tracked as a follow-up) — method dispatch still reaches the native `query`.
+pub fn run(conn: dyn, q: Query): List<Map<string, dyn>> {
+    return conn.query(q.sql, q.params).as<List<Map<string, dyn>>>() ?? []
+}
+
+// Execute a composed non-query statement (INSERT/UPDATE/DELETE), returning rows affected.
+pub fn exec(conn: dyn, q: Query): int {
+    return conn.execute(q.sql, q.params).as<int>() ?? 0
+}
