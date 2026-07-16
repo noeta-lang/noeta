@@ -1177,29 +1177,38 @@ fn cmd_publish(
     // it and fail to build. Reject up front (before touching git), naming the offending dependency.
     let mut deps: Vec<registry::Dep> = Vec::new();
     for (key, dep) in manifest.dependencies() {
-        match dep {
-            manifest::Dependency::Registry {
-                package: Some(pkg),
-                req,
-            } => deps.push(registry::Dep {
-                package: format!("{}/{}", pkg.company, pkg.package),
-                req: req.clone(),
-            }),
-            manifest::Dependency::Registry { package: None, .. } => {
-                eprintln!(
-                    "lang: dependency `{key}` is a registry dependency but names no `package = \
-                     \"company/pkg\"` — a published package's dependencies must each name their \
-                     registry identity."
-                );
-                return ExitCode::from(1);
-            }
-            manifest::Dependency::Path { .. } | manifest::Dependency::Git { .. } => {
-                eprintln!(
-                    "lang: dependency `{key}` is a path/git dependency — a published package must \
-                     depend only via the registry (`{key} = {{ version = \"…\", package = \
-                     \"company/pkg\" }}`), so consumers can resolve it. Publish aborted."
-                );
-                return ExitCode::from(1);
+        // A scope dependency (`para = [ … ]`) publishes as its member packages — each member is
+        // subject to the same registry-only rule, so flatten and validate each leaf.
+        let leaves: Vec<&manifest::Dependency> = match dep {
+            manifest::Dependency::Scope(members) => members.iter().collect(),
+            other => vec![other],
+        };
+        for dep in leaves {
+            match dep {
+                manifest::Dependency::Registry {
+                    package: Some(pkg),
+                    req,
+                } => deps.push(registry::Dep {
+                    package: format!("{}/{}", pkg.company, pkg.package),
+                    req: req.clone(),
+                }),
+                manifest::Dependency::Registry { package: None, .. } => {
+                    eprintln!(
+                        "lang: dependency `{key}` is a registry dependency but names no `package = \
+                         \"company/pkg\"` — a published package's dependencies must each name their \
+                         registry identity."
+                    );
+                    return ExitCode::from(1);
+                }
+                manifest::Dependency::Path { .. } | manifest::Dependency::Git { .. } => {
+                    eprintln!(
+                        "lang: dependency `{key}` is a path/git dependency — a published package must \
+                         depend only via the registry (`{key} = {{ version = \"…\", package = \
+                         \"company/pkg\" }}`), so consumers can resolve it. Publish aborted."
+                    );
+                    return ExitCode::from(1);
+                }
+                manifest::Dependency::Scope(_) => unreachable!("scopes were flattened above"),
             }
         }
     }

@@ -112,6 +112,15 @@ pub enum ResolvedSource {
     },
 }
 
+/// Which namespace root segment a dependency's modules re-root from ([`Walker::walk_one`]). A normal
+/// dependency authored `namespace <package>.…`, so its root is the package half; a **scope** member
+/// authored `namespace <scope>.<package>.…`, so its root is the company/scope segment.
+#[derive(Clone, Copy)]
+enum ScopeRoot {
+    Package,
+    Scope,
+}
+
 /// A materialized package during the walk — its identity, version, its own namespace root segment,
 /// its on-disk tree, and its dependency edges (local key → child identity).
 struct Instance {
@@ -123,8 +132,10 @@ struct Instance {
     source: ResolvedSource,
     /// The manifest's relative native-crate dir, validated against `dir` (Phase 3, N3.1).
     native: Option<String>,
-    /// This package's own `[dependencies]`: local key → resolved child identity.
-    edges: BTreeMap<String, String>,
+    /// This package's own `[dependencies]`: local key → the resolved child identities. A normal
+    /// dependency contributes exactly one identity; a **scope** dependency (`key = [ … ]`) contributes
+    /// one per member package, all sharing the scope, so a key may map to several.
+    edges: BTreeMap<String, Vec<String>>,
 }
 
 /// Resolve the full dependency graph rooted at `entry`'s manifest (package-manager P2.4). Returns an
@@ -367,92 +378,140 @@ impl Walker<'_> {
         &mut self,
         deps: &BTreeMap<String, Dependency>,
         base_dir: &Path,
-        edges: &mut BTreeMap<String, String>,
+        edges: &mut BTreeMap<String, Vec<String>>,
     ) -> Result<(), String> {
         for (key, dep) in deps {
-            let (dir, source) = self.materialize(key, dep, base_dir)?;
-            let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
-                .map_err(|err| format!("dependency `{key}`: {err}"))?;
-            let pkg = child_manifest.package().ok_or_else(|| {
-                format!(
-                    "dependency `{key}` at `{}` has no `[package]` table (needed for its identity \
-                     and namespace root)",
-                    dir.display()
-                )
-            })?;
-            let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
-            edges.insert(key.clone(), identity.clone());
-
-            if let Some(existing) = self.instances.get(&identity) {
-                if existing.version != pkg.version {
-                    return Err(format!(
-                        "dependency conflict: `{identity}` is required at both {} and {} — a \
-                         package may appear at only one version (they share one flat namespace)",
-                        existing.version, pkg.version
-                    ));
+            match dep {
+                // A scope dependency binds several member packages under one import root: materialize
+                // each, require they all share one `company` segment (the scope the key stands for),
+                // and record every member identity under the key. The shared company is what re-roots
+                // to the key ([`assemble`]), so a `use <key>.<member>.…` reaches the right package.
+                Dependency::Scope(members) => {
+                    let mut scope_company: Option<String> = None;
+                    for member in members {
+                        let identity =
+                            self.walk_one(key, member, base_dir, ScopeRoot::Scope)?;
+                        let company = identity.split('/').next().unwrap_or(&identity).to_string();
+                        match &scope_company {
+                            None => scope_company = Some(company),
+                            Some(first) if *first != company => {
+                                return Err(format!(
+                                    "scope dependency `{key}` mixes packages from different scopes \
+                                     (`{first}` and `{company}`) — every member of a scope must share \
+                                     one `company` segment (the scope the key `{key}` stands for)"
+                                ));
+                            }
+                            _ => {}
+                        }
+                        edges.entry(key.clone()).or_default().push(identity);
+                    }
                 }
-                continue; // already materialized and its subtree walked
-            }
-
-            // A declared native crate must exist where the manifest points (Phase 3, N3.1) —
-            // checked here, where the materialized package root is known, so a git dep's typo'd
-            // `native` fails at resolve time with the dependency named, not at compose time.
-            if let Some(native) = &pkg.native {
-                // Phase 4 authority gate: a native-declaring package runs arbitrary Rust (its
-                // `cargo` build + the composed code), so it is refused unless the **root** app's
-                // `[trust].native` lists its identity — even when reached transitively. Authority is
-                // never inherited from a dependency, so a package can't smuggle native code in
-                // through its own sub-dependencies; the human sees the whole native footprint.
-                if !self.native_trust.contains(&identity) {
-                    return Err(format!(
-                        "dependency `{key}` (`{identity}`) ships native code (`native = \
-                         \"{native}\"`), which runs arbitrary Rust at build + run time. It is not \
-                         authorized: add `{identity}` to the `[trust].native` list in your \
-                         `noeta.toml` to allow it (this grant is deliberately explicit — a \
-                         dependency, even a transitive one, can never authorize its own native code)."
-                    ));
+                _ => {
+                    let identity = self.walk_one(key, dep, base_dir, ScopeRoot::Package)?;
+                    edges.entry(key.clone()).or_default().push(identity);
                 }
-                validate_native_crate(&dir, native)
-                    .map_err(|err| format!("dependency `{key}` (`{identity}`): {err}"))?;
             }
-            let content_hash = hash_tree(&dir)
-                .map_err(|err| format!("dependency `{key}`: hashing `{}`: {err}", dir.display()))?;
-            // A git source is immutable, so a lock-recorded hash must match — a mismatch means the
-            // stored tree drifted from what the lock pinned. A path source is a mutable local tree,
-            // so its hash legitimately changes as the developer edits it; it is not verified.
-            if matches!(source, ResolvedSource::Git { .. })
-                && let Some(locked) = self.lock.content_hash(&identity)
-                && locked != content_hash
-            {
-                return Err(format!(
-                    "dependency `{key}` (`{identity}`) content hash does not match `{}` — the \
-                     stored source drifted from the lock; run `noeta update` to re-pin",
-                    crate::lock::LOCK_NAME
-                ));
-            }
-            // Insert before recursing so a dependency cycle terminates (a back-edge sees the
-            // in-progress instance and dedups).
-            self.instances.insert(
-                identity.clone(),
-                Instance {
-                    version: pkg.version.clone(),
-                    edition: pkg.edition(),
-                    root_segment: pkg.name.root().to_string(),
-                    dir: dir.clone(),
-                    content_hash,
-                    source,
-                    native: pkg.native.clone(),
-                    edges: BTreeMap::new(),
-                },
-            );
-            let mut child_edges = BTreeMap::new();
-            self.walk(child_manifest.dependencies(), &dir, &mut child_edges)?;
-            self.instances
-                .get_mut(&identity)
-                .expect("just inserted")
-                .edges = child_edges;
         }
         Ok(())
+    }
+
+    /// Materialize and install one **leaf** dependency (a `path`/`git`/`registry` source, never a
+    /// scope), recursing into its own subtree, and return its `company/package` identity. `root`
+    /// selects the namespace root segment recorded for re-rooting: [`ScopeRoot::Package`] (a normal
+    /// dependency) uses the package half — the package authored `namespace <package>.…`; a scope
+    /// member uses the company/scope segment, since a scope package authored `namespace <scope>.…`.
+    fn walk_one(
+        &mut self,
+        key: &str,
+        dep: &Dependency,
+        base_dir: &Path,
+        root: ScopeRoot,
+    ) -> Result<String, String> {
+        let (dir, source) = self.materialize(key, dep, base_dir)?;
+        let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
+            .map_err(|err| format!("dependency `{key}`: {err}"))?;
+        let pkg = child_manifest.package().ok_or_else(|| {
+            format!(
+                "dependency `{key}` at `{}` has no `[package]` table (needed for its identity \
+                 and namespace root)",
+                dir.display()
+            )
+        })?;
+        let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
+        let root_segment = match root {
+            ScopeRoot::Package => pkg.name.root().to_string(),
+            ScopeRoot::Scope => pkg.name.company.clone(),
+        };
+
+        if let Some(existing) = self.instances.get(&identity) {
+            if existing.version != pkg.version {
+                return Err(format!(
+                    "dependency conflict: `{identity}` is required at both {} and {} — a \
+                     package may appear at only one version (they share one flat namespace)",
+                    existing.version, pkg.version
+                ));
+            }
+            return Ok(identity); // already materialized and its subtree walked
+        }
+
+        // A declared native crate must exist where the manifest points (Phase 3, N3.1) —
+        // checked here, where the materialized package root is known, so a git dep's typo'd
+        // `native` fails at resolve time with the dependency named, not at compose time.
+        if let Some(native) = &pkg.native {
+            // Phase 4 authority gate: a native-declaring package runs arbitrary Rust (its
+            // `cargo` build + the composed code), so it is refused unless the **root** app's
+            // `[trust].native` lists its identity — even when reached transitively. Authority is
+            // never inherited from a dependency, so a package can't smuggle native code in
+            // through its own sub-dependencies; the human sees the whole native footprint.
+            if !self.native_trust.contains(&identity) {
+                return Err(format!(
+                    "dependency `{key}` (`{identity}`) ships native code (`native = \
+                     \"{native}\"`), which runs arbitrary Rust at build + run time. It is not \
+                     authorized: add `{identity}` to the `[trust].native` list in your \
+                     `noeta.toml` to allow it (this grant is deliberately explicit — a \
+                     dependency, even a transitive one, can never authorize its own native code)."
+                ));
+            }
+            validate_native_crate(&dir, native)
+                .map_err(|err| format!("dependency `{key}` (`{identity}`): {err}"))?;
+        }
+        let content_hash = hash_tree(&dir)
+            .map_err(|err| format!("dependency `{key}`: hashing `{}`: {err}", dir.display()))?;
+        // A git source is immutable, so a lock-recorded hash must match — a mismatch means the
+        // stored tree drifted from what the lock pinned. A path source is a mutable local tree,
+        // so its hash legitimately changes as the developer edits it; it is not verified.
+        if matches!(source, ResolvedSource::Git { .. })
+            && let Some(locked) = self.lock.content_hash(&identity)
+            && locked != content_hash
+        {
+            return Err(format!(
+                "dependency `{key}` (`{identity}`) content hash does not match `{}` — the \
+                 stored source drifted from the lock; run `noeta update` to re-pin",
+                crate::lock::LOCK_NAME
+            ));
+        }
+        // Insert before recursing so a dependency cycle terminates (a back-edge sees the
+        // in-progress instance and dedups).
+        self.instances.insert(
+            identity.clone(),
+            Instance {
+                version: pkg.version.clone(),
+                edition: pkg.edition(),
+                root_segment,
+                dir: dir.clone(),
+                content_hash,
+                source,
+                native: pkg.native.clone(),
+                edges: BTreeMap::new(),
+            },
+        );
+        let mut child_edges = BTreeMap::new();
+        self.walk(child_manifest.dependencies(), &dir, &mut child_edges)?;
+        self.instances
+            .get_mut(&identity)
+            .expect("just inserted")
+            .edges = child_edges;
+        Ok(identity)
     }
 
     /// Materialize one dependency to an on-disk directory (package-manager P2.4): a path dep is its
@@ -475,6 +534,12 @@ impl Walker<'_> {
                 Ok((dir, ResolvedSource::Path { path: path.clone() }))
             }
             Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None, None),
+            // A scope is a group of member packages, not a single source — [`Walker::walk`] and
+            // [`Walker::gather`] expand it into its members before ever materializing, so a bare
+            // scope never reaches here.
+            Dependency::Scope(_) => Err(format!(
+                "internal error: scope dependency `{key}` reached `materialize` unexpanded"
+            )),
             Dependency::Registry { package, .. } => {
                 // Materialize the **resolver-selected** version (Phase 4, S5b): the PubGrub solve
                 // already chose one compatible version per identity, so look up the coordinates of
@@ -797,59 +862,85 @@ impl Walker<'_> {
         let mut reqs = Vec::new();
         for (key, dep) in deps {
             match dep {
-                Dependency::Path { .. } | Dependency::Git { .. } => {
-                    let (dir, _source) = self.materialize(key, dep, base_dir)?;
-                    let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
-                        .map_err(|err| format!("dependency `{key}`: {err}"))?;
-                    let pkg = child_manifest.package().ok_or_else(|| {
-                        format!(
-                            "dependency `{key}` at `{}` has no `[package]` table",
-                            dir.display()
-                        )
-                    })?;
-                    let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
-                    reqs.push((identity.clone(), exact_req(&pkg.version)));
-                    if !path_git.contains_key(&identity) {
-                        // Insert a placeholder before recursing so a dependency cycle terminates.
-                        path_git.insert(
-                            identity.clone(),
-                            PathGitCandidate {
-                                version: pkg.version.clone(),
-                                deps: Vec::new(),
-                            },
-                        );
-                        let child_reqs = self.gather(
-                            child_manifest.dependencies(),
-                            &dir,
+                // A scope contributes each of its member packages as its own resolver requirement.
+                Dependency::Scope(members) => {
+                    for member in members {
+                        reqs.push(self.gather_one(
+                            key,
+                            member,
+                            base_dir,
                             path_git,
                             registry_queue,
-                        )?;
-                        path_git.get_mut(&identity).expect("just inserted").deps = child_reqs;
+                        )?);
                     }
                 }
-                Dependency::Registry { package, req } => {
-                    let package = package.as_ref().ok_or_else(|| {
-                        format!(
-                            "dependency `{key}` is a registry dependency but names no package — add \
-                             `package = \"company/pkg\"`"
-                        )
-                    })?;
-                    let identity = format!("{}/{}", package.company, package.package);
-                    // Supply-chain invariant (namespace-protection #2): a built-in scope
-                    // (`std`/`noeta`/`core`) is served by the compiler, never a registry — refuse it
-                    // here, before it can enter the candidate graph, so no registry can shadow core.
-                    if crate::reserved::is_builtin(&package.company) {
-                        return Err(format!(
-                            "dependency `{key}`: {}",
-                            crate::reserved::builtin_registry_refusal(&package.company, &identity)
-                        ));
-                    }
-                    reqs.push((identity.clone(), req.clone()));
-                    registry_queue.push(identity);
-                }
+                _ => reqs.push(self.gather_one(key, dep, base_dir, path_git, registry_queue)?),
             }
         }
         Ok(reqs)
+    }
+
+    /// Gather one **leaf** dependency (never a scope) into the candidate graph, returning its
+    /// `(identity, requirement)` for the resolver. Part of [`Walker::gather`].
+    fn gather_one(
+        &mut self,
+        key: &str,
+        dep: &Dependency,
+        base_dir: &Path,
+        path_git: &mut BTreeMap<String, PathGitCandidate>,
+        registry_queue: &mut Vec<String>,
+    ) -> Result<(String, VersionReq), String> {
+        match dep {
+            Dependency::Path { .. } | Dependency::Git { .. } => {
+                let (dir, _source) = self.materialize(key, dep, base_dir)?;
+                let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
+                    .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                let pkg = child_manifest.package().ok_or_else(|| {
+                    format!(
+                        "dependency `{key}` at `{}` has no `[package]` table",
+                        dir.display()
+                    )
+                })?;
+                let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
+                if !path_git.contains_key(&identity) {
+                    // Insert a placeholder before recursing so a dependency cycle terminates.
+                    path_git.insert(
+                        identity.clone(),
+                        PathGitCandidate {
+                            version: pkg.version.clone(),
+                            deps: Vec::new(),
+                        },
+                    );
+                    let child_reqs =
+                        self.gather(child_manifest.dependencies(), &dir, path_git, registry_queue)?;
+                    path_git.get_mut(&identity).expect("just inserted").deps = child_reqs;
+                }
+                Ok((identity, exact_req(&pkg.version)))
+            }
+            Dependency::Registry { package, req } => {
+                let package = package.as_ref().ok_or_else(|| {
+                    format!(
+                        "dependency `{key}` is a registry dependency but names no package — add \
+                         `package = \"company/pkg\"`"
+                    )
+                })?;
+                let identity = format!("{}/{}", package.company, package.package);
+                // Supply-chain invariant (namespace-protection #2): a built-in scope
+                // (`std`/`noeta`/`core`) is served by the compiler, never a registry — refuse it
+                // here, before it can enter the candidate graph, so no registry can shadow core.
+                if crate::reserved::is_builtin(&package.company) {
+                    return Err(format!(
+                        "dependency `{key}`: {}",
+                        crate::reserved::builtin_registry_refusal(&package.company, &identity)
+                    ));
+                }
+                registry_queue.push(identity.clone());
+                Ok((identity, req.clone()))
+            }
+            Dependency::Scope(_) => Err(format!(
+                "internal error: scope dependency `{key}` reached `gather_one` unexpanded"
+            )),
+        }
     }
 
     /// Drop registry candidates published within `[trust].publish_cooldown` (namespace-protection #1),
@@ -1156,7 +1247,7 @@ fn provenance_decision(
 /// global segments of the packages they resolve to ([`DepPackage::dep_renames`]).
 fn assemble(
     instances: BTreeMap<String, Instance>,
-    root_edges: &BTreeMap<String, String>,
+    root_edges: &BTreeMap<String, Vec<String>>,
     trusted_commands: &std::collections::BTreeSet<String>,
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
     root_edition: crate::edition::Edition,
@@ -1166,14 +1257,40 @@ fn assemble(
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
     let mut global: BTreeMap<String, String> = BTreeMap::new();
     let mut used: HashSet<String> = HashSet::new();
-    for (key, identity) in root_edges {
-        // First root key wins if the same identity is aliased under several keys.
-        global
-            .entry(identity.clone())
-            .or_insert_with(|| key.clone());
+    for (key, identities) in root_edges {
+        // A direct dependency keeps the consumer's key; every member of a root **scope** dependency
+        // shares that one key, so they all land under the scope root in the flat pool. First root key
+        // wins if an identity is aliased under several keys.
+        for identity in identities {
+            global.entry(identity.clone()).or_insert_with(|| key.clone());
+        }
         used.insert(key.clone());
     }
-    // Deterministic assignment order for synthesized segments.
+    // A **transitive** scope group (a dependency's own scope dependency resolving several members)
+    // must likewise share one global segment, so its members co-locate under one scope root. Reuse a
+    // segment a member already has (e.g. also reached from the root), else synthesize one shared
+    // segment from the scope company (each scope member's `root_segment` is its company).
+    for inst in instances.values() {
+        for children in inst.edges.values() {
+            if children.len() < 2 {
+                continue;
+            }
+            let seg = children
+                .iter()
+                .find_map(|id| global.get(id).cloned())
+                .unwrap_or_else(|| {
+                    let base = instances
+                        .get(&children[0])
+                        .map(|i| i.root_segment.clone())
+                        .unwrap_or_else(|| children[0].clone());
+                    unique_segment(&base, &mut used)
+                });
+            for id in children {
+                global.entry(id.clone()).or_insert_with(|| seg.clone());
+            }
+        }
+    }
+    // Deterministic assignment order for the remaining single transitive-only packages.
     for identity in instances.keys() {
         if !global.contains_key(identity) {
             let seg = unique_segment(&instances[identity].root_segment, &mut used);
@@ -1189,10 +1306,13 @@ fn assemble(
     let mut trusted_command_roots: Vec<String> = Vec::new();
     for (identity, inst) in &instances {
         let key = global[identity].clone();
+        // A local dependency key re-roots to the global segment of the package it resolves to. A
+        // scope key's members all share one global segment (assigned above), so any member is a
+        // faithful representative — the leading segment `<local key>.…` maps to that one scope root.
         let dep_renames: BTreeMap<String, String> = inst
             .edges
             .iter()
-            .map(|(local_key, child)| (local_key.clone(), global[child].clone()))
+            .map(|(local_key, children)| (local_key.clone(), global[&children[0]].clone()))
             .collect();
         let modules = noeta_loader::read_package_sources(&inst.dir).unwrap_or_default();
         packages.push(noeta_loader::DepPackage {
@@ -1456,6 +1576,85 @@ mod tests {
             names(&dev).contains(&"acme/tool".to_string()),
             "dev dep missing under --target dev"
         );
+    }
+
+    #[test]
+    fn a_scope_dependency_binds_several_packages_under_one_key() {
+        // Two packages of the same scope `para` (`para/aether` + `para/db`) bound under one array
+        // key: both resolve, and both get the scope key `para` as their global segment (so the app's
+        // `use para.aether.…` and `use para.db.…` both reach the flat pool).
+        let base = std::env::temp_dir().join("noeta_graph_test_scope_dep");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        for pkg in ["aether", "db"] {
+            let d = base.join(format!("para-{pkg}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("noeta.toml"),
+                format!("[package]\nname = \"para/{pkg}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                d.join(format!("{pkg}.noe")),
+                format!("namespace para.{pkg}.m;\npub fn one(): int {{ return 1; }}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\npara = [ { path = \"../para-aether\" }, { path = \"../para-db\" } ]\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves");
+        let ids: Vec<String> = graph.locked.iter().map(|l| l.identity.clone()).collect();
+        assert!(ids.contains(&"para/aether".to_string()));
+        assert!(ids.contains(&"para/db".to_string()));
+        // Both members share the scope key `para` as their global segment, and each re-roots from its
+        // company (`para`) — an identity re-root here — so its literal `para.<pkg>.…` lands in the pool.
+        for pkg in ["aether", "db"] {
+            let p = graph
+                .packages
+                .iter()
+                .find(|p| p.modules.iter().any(|m| m.name.contains(&format!("para-{pkg}"))))
+                .unwrap_or_else(|| panic!("package para/{pkg} missing from the link set"));
+            assert_eq!(p.key, "para", "scope member para/{pkg} must key on the scope");
+            assert_eq!(p.root, "para", "scope member para/{pkg} re-roots from its scope");
+        }
+    }
+
+    #[test]
+    fn a_scope_dependency_rejects_members_from_different_scopes() {
+        let base = std::env::temp_dir().join("noeta_graph_test_scope_mixed");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        for (dir, ident) in [("para-aether", "para/aether"), ("other-thing", "other/thing")] {
+            let d = base.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("noeta.toml"),
+                format!("[package]\nname = \"{ident}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                d.join("m.noe"),
+                "namespace x.m;\npub fn one(): int { return 1; }\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\npara = [ { path = \"../para-aether\" }, { path = \"../other-thing\" } ]\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("mixed scopes must be refused");
+        assert!(err.contains("different scopes"), "unexpected error: {err}");
     }
 
     #[test]

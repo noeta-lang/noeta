@@ -353,6 +353,15 @@ pub enum Dependency {
         package: Option<PackageName>,
         req: semver::VersionReq,
     },
+    /// A **scope** dependency — `para = [ { path = … }, { path = … } ]` — several packages that share
+    /// one namespace scope, bound under one import-root key. This is what lets an app depend on more
+    /// than one package of the same scope (`para/aether` *and* `para/db`) without two colliding TOML
+    /// keys: the key is the shared scope root, and each member is a package under it. Every member
+    /// package must share a single `company` segment (the scope), and that scope re-roots to the key —
+    /// so the members address as `<key>.<member-package>.…` in the flat link pool (an identity re-root
+    /// when the key already *is* the scope, the usual case; an alias otherwise). A member is any
+    /// non-scope source (`path`/`git`/`version`); scopes do not nest.
+    Scope(Vec<Dependency>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1079,6 +1088,31 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
         })?;
         return Ok(Dependency::Registry { package: None, req });
     }
+    // An array value is a **scope** dependency: several packages sharing the scope `key`, each an
+    // ordinary (non-array) source. Empty arrays and nested scopes are rejected so the shape stays a
+    // flat list of member packages.
+    if let Some(array) = value.as_array() {
+        if array.is_empty() {
+            return Err(format!(
+                "dependency `{key}` is an empty array — a scope dependency must list at least one \
+                 member package (`{key} = [ {{ path = … }}, … ]`)"
+            ));
+        }
+        let mut members = Vec::with_capacity(array.len());
+        for element in array {
+            if element.is_array() {
+                return Err(format!(
+                    "dependency `{key}`: a scope dependency's members must be package sources \
+                     (`{{ path/git/version = … }}`), not nested arrays"
+                ));
+            }
+            match parse_dependency(key, element)? {
+                Dependency::Scope(_) => unreachable!("a nested array was already rejected"),
+                member => members.push(member),
+            }
+        }
+        return Ok(Dependency::Scope(members));
+    }
     let table = value.as_table().ok_or_else(|| {
         format!(
             "dependency `{key}` must be a SemVer string or a table (`{{ path/git/version = … }}`)"
@@ -1776,6 +1810,39 @@ mod tests {
         // A second add of the same key is rejected (and a non-identifier key too).
         assert!(add_dependency(&path, "http", "\"^1\"").is_err());
         assert!(add_dependency(&path, "bad-key", "\"^1\"").is_err());
+    }
+
+    #[test]
+    fn parses_a_scope_dependency_array() {
+        let m = Manifest::parse(
+            "[dependencies]\n\
+             para = [ { path = \"../para-aether\" }, { path = \"../para-db\" } ]\n",
+        )
+        .expect("valid");
+        match &m.dependencies()["para"] {
+            Dependency::Scope(members) => {
+                assert_eq!(members.len(), 2);
+                assert!(matches!(members[0], Dependency::Path { .. }));
+                assert!(matches!(members[1], Dependency::Path { .. }));
+            }
+            other => panic!("expected a scope dependency, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_scope_dependency_rejects_empty_and_nested_arrays() {
+        // An empty scope names no member packages.
+        assert!(
+            Manifest::parse("[dependencies]\npara = []\n")
+                .unwrap_err()
+                .contains("at least one")
+        );
+        // A scope's members are package sources, not nested scopes.
+        assert!(
+            Manifest::parse("[dependencies]\npara = [ [ { path = \"x\" } ] ]\n")
+                .unwrap_err()
+                .contains("nested")
+        );
     }
 
     #[test]
