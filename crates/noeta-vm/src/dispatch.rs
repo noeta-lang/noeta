@@ -777,13 +777,8 @@ impl<'m> Vm<'m> {
                     // A tuple builds exactly like a list (object-model slice 4): retain each element into
                     // the aggregate, which owns one reference to each.
                     Op::MakeTuple { dst, items } => {
-                        let mut elements = Vec::with_capacity(items.len());
-                        for &r in items.iter() {
-                            let v = regs[fbase + r as usize];
-                            retain(v);
-                            elements.push(v);
-                        }
-                        set_reg(regs, fbase, *dst, Value::tuple(elements));
+                        let tuple = make_tuple(items, regs, fbase);
+                        set_reg(regs, fbase, *dst, tuple);
                         pc += 1;
                     }
                     // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
@@ -795,7 +790,7 @@ impl<'m> Vm<'m> {
                         span,
                     } => {
                         let v = regs[fbase + *receiver as usize];
-                        let Some(element) = v.tuple_field(*index as usize) else {
+                        let Some(element) = tuple_element_retained(v, *index as usize) else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
@@ -805,7 +800,6 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        retain(element);
                         set_reg(regs, fbase, *dst, element);
                         pc += 1;
                     }
@@ -818,17 +812,12 @@ impl<'m> Vm<'m> {
                     } => {
                         let lo = regs[fbase + *start as usize];
                         let hi = regs[fbase + *end as usize];
-                        match (lo.as_int(), hi.as_int()) {
-                            (Some(a), Some(b)) => {
-                                // `..=` shifts the exclusive upper to `b + 1`; `saturating_add` keeps
-                                // the unmaterializable `i64::MAX` edge from panicking. The elements are
-                                // fresh int immediates (no refcount), so no retain is needed.
-                                let upper = if *inclusive { b.saturating_add(1) } else { b };
-                                let elements: Vec<Value> = (a..upper).map(Value::int).collect();
-                                set_reg(regs, fbase, *dst, Value::list(elements));
+                        match make_range_list(lo, hi, *inclusive) {
+                            Some(list) => {
+                                set_reg(regs, fbase, *dst, list);
                                 pc += 1;
                             }
-                            _ => {
+                            None => {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
@@ -940,36 +929,16 @@ impl<'m> Vm<'m> {
                             )?;
                             continue 'reload;
                         }
-                        // A packed list (P-PACK 2.4) materializes directly into an owned boxed snapshot
-                        // (a fresh list owning each element) — the loop then indexes that boxed snapshot,
-                        // so `ListLen`/`ListGet` never see the flat form.
-                        if v.is_packed_list() {
-                            let snapshot = v.realize_list();
-                            set_reg(regs, fbase, *dst, snapshot);
-                            pc += 1;
-                            continue;
-                        }
-                        // Snapshot the elements to iterate (a list's elements, a set's canonical
-                        // elements, or a map's values in sorted-key order), each retained so the loop
-                        // owns them independently.
-                        let snapshot = match v
-                            .list_items()
-                            .or_else(|| v.set_items())
-                            .or_else(|| v.map_values())
-                        {
-                            Some(elements) => {
-                                for &e in &elements {
-                                    retain(e);
-                                }
-                                Value::list(elements)
-                            }
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!("cannot iterate over {}", v.type_name()),
-                                ));
-                            }
+                        // Snapshot the elements to iterate: a packed list materializes into an owned
+                        // boxed snapshot (so `ListLen`/`ListGet` never see the flat form); a list's
+                        // elements, a set's canonical elements, or a map's values in sorted-key order
+                        // are each retained so the loop owns them independently.
+                        let Some(snapshot) = iter_snapshot_value(v) else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("cannot iterate over {}", v.type_name()),
+                            ));
                         };
                         set_reg(regs, fbase, *dst, snapshot);
                         pc += 1;
@@ -994,14 +963,11 @@ impl<'m> Vm<'m> {
                         }
                     }
                     Op::ListGet { dst, list, index } => {
-                        let idx = regs[fbase + *index as usize]
-                            .as_int()
-                            .expect("a loop index is an int")
-                            as usize;
-                        let element = regs[fbase + *list as usize]
-                            .list_get(idx)
-                            .expect("the loop keeps the index in bounds");
-                        retain(element);
+                        let element = list_get_retained(
+                            regs[fbase + *list as usize],
+                            regs[fbase + *index as usize],
+                        )
+                        .expect("the loop keeps the (int) index in bounds");
                         set_reg(regs, fbase, *dst, element);
                         pc += 1;
                     }
@@ -1448,17 +1414,7 @@ impl<'m> Vm<'m> {
                                     format!("index {i} out of bounds for list of length {len}"),
                                 ));
                             }
-                            // A packed list (P-PACK 2.4) materializes the one indexed element (owned,
-                            // refcount 1) — no full-list materialization, no extra retain. A boxed list
-                            // borrows the element and retains it into `dst`.
-                            let element = if v.is_packed_list() {
-                                v.packed_get(i as usize)
-                            } else {
-                                let element = v.list_get(i as usize).expect("bounds checked above");
-                                retain(element);
-                                element
-                            };
-                            set_reg(regs, fbase, *dst, element);
+                            set_reg(regs, fbase, *dst, list_element_retained(v, i as usize));
                             pc += 1;
                             continue;
                         }
@@ -3155,4 +3111,102 @@ pub(crate) fn reserve_window(regs: &mut Vec<Value>, n: usize) -> usize {
     }
     regs.resize(base + n, Value::unit());
     base
+}
+
+// --- Shared leaf-op happy paths (audit-1 finding 2a) --------------------------------------------
+//
+// The tier-1 JIT's `jit_run_leaf_op` (tier1.rs) runs the NON-dispatching, NON-erroring path of a
+// handful of collection ops natively-called from compiled code; those paths were verbatim copies
+// of the interpreter arms above. The shared computation now lives here as `#[inline]` pure-compute
+// free functions BOTH call (`#[inline(always)]`: the dispatch loop is a huge inlining site a
+// plain hint loses — A/B measured the plain-#[inline] form costing ~2% on the index loop): `None`/
+// precondition failure means "not the happy path" — the
+// interpreter raises its exact diagnostic, the leaf-op helper bails to the interpreter (which
+// re-runs the op and raises the same diagnostic). Each helper performs **no register write** and
+// no failure-side effect, preserving the leaf-op contract that every early return happens before
+// any register write. The residual duplication in `jit_run_leaf_op` — the map/string `Op::Index`
+// cases and `Op::LoadField` (interpreter-side inline cache, measured not-profitable for tier 1 in
+// J6) — stays at its call sites with the divergence documented there.
+
+/// `Op::MakeRange`'s happy path: int bounds → the materialized element list (refcount 1).
+/// `None` = non-int bounds (the interpreter raises TypeMismatch; the JIT bails). `..=` shifts
+/// the exclusive upper to `b + 1`; `saturating_add` keeps the unmaterializable `i64::MAX` edge
+/// from panicking. The elements are fresh int immediates (no refcount), so no retain is needed.
+#[inline(always)]
+pub(crate) fn make_range_list(lo: Value, hi: Value, inclusive: bool) -> Option<Value> {
+    let (a, b) = (lo.as_int()?, hi.as_int()?);
+    let upper = if inclusive { b.saturating_add(1) } else { b };
+    let elements: Vec<Value> = (a..upper).map(Value::int).collect();
+    Some(Value::list(elements))
+}
+
+/// `Op::IterSnapshot`'s happy path for a non-object source: a packed list materializes directly
+/// into an owned boxed snapshot; a list's elements, a set's canonical elements, or a map's values
+/// in sorted-key order are snapshotted with each element retained, so the loop owns them
+/// independently. `None` = not iterable (the interpreter raises; the JIT bails). The caller
+/// handles the `Iterable::iter` object dispatch before calling.
+#[inline(always)]
+pub(crate) fn iter_snapshot_value(v: Value) -> Option<Value> {
+    if v.is_packed_list() {
+        return Some(v.realize_list());
+    }
+    let elements = v
+        .list_items()
+        .or_else(|| v.set_items())
+        .or_else(|| v.map_values())?;
+    for &e in &elements {
+        retain(e);
+    }
+    Some(Value::list(elements))
+}
+
+/// `Op::ListGet`'s happy path: a non-negative int index in bounds → the element, owned by the
+/// caller (retained here). `None` = non-int/negative/out-of-bounds — unreachable for the
+/// loop-generated op (the interpreter asserts; the JIT bails). The source is always a boxed list
+/// here (`IterSnapshot` materialized any packed form).
+#[inline(always)]
+pub(crate) fn list_get_retained(list: Value, index: Value) -> Option<Value> {
+    let element = index
+        .as_int()
+        .filter(|&i| i >= 0)
+        .and_then(|i| list.list_get(i as usize))?;
+    retain(element);
+    Some(element)
+}
+
+/// `Op::Index`'s list happy path, bounds already checked: a packed list materializes the one
+/// indexed element (owned, refcount 1) — no full-list materialization, no extra retain; a boxed
+/// list borrows the element and retains it into the destination.
+#[inline(always)]
+pub(crate) fn list_element_retained(v: Value, i: usize) -> Value {
+    if v.is_packed_list() {
+        v.packed_get(i)
+    } else {
+        let element = v.list_get(i).expect("bounds checked by the caller");
+        retain(element);
+        element
+    }
+}
+
+/// `Op::MakeTuple` (no failure path — construction never fails): retain each element register
+/// into a fresh tuple. The retains land in the local vector, then the tuple owns them.
+#[inline(always)]
+pub(crate) fn make_tuple(items: &[u16], regs: &[Value], base: usize) -> Value {
+    let mut elements = Vec::with_capacity(items.len());
+    for &r in items.iter() {
+        let v = regs[base + r as usize];
+        retain(v);
+        elements.push(v);
+    }
+    Value::tuple(elements)
+}
+
+/// `Op::TupleIndex`'s happy path: positional projection `receiver.N`, retaining the element for
+/// the caller. `None` = out of range / not a tuple (unreachable for well-typed code — the
+/// interpreter raises; the JIT bails).
+#[inline(always)]
+pub(crate) fn tuple_element_retained(v: Value, index: usize) -> Option<Value> {
+    let element = v.tuple_field(index)?;
+    retain(element);
+    Some(element)
 }
