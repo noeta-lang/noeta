@@ -1449,16 +1449,15 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
     // command names, capability ids.
     let dup_of = |mut names: Vec<(&str, &str)>| -> Option<((String, String), String)> {
         names.sort_unstable();
-        names.windows(2).find(|w| w[0].0 == w[1].0).map(|w| {
-            (
-                (w[0].1.to_string(), w[1].1.to_string()),
-                w[0].0.to_string(),
-            )
-        })
+        names
+            .windows(2)
+            .find(|w| w[0].0 == w[1].0)
+            .map(|w| ((w[0].1.to_string(), w[1].1.to_string()), w[0].0.to_string()))
     };
-    let collect = |f: &dyn Fn(&'static (dyn Extension + Sync)) -> Vec<(&'static str, &'static str)>| {
-        units.iter().flat_map(|e| f(*e)).collect::<Vec<_>>()
-    };
+    let collect =
+        |f: &dyn Fn(&'static (dyn Extension + Sync)) -> Vec<(&'static str, &'static str)>| {
+            units.iter().flat_map(|e| f(*e)).collect::<Vec<_>>()
+        };
     for (axis, names) in [
         (
             "tier",
@@ -1845,7 +1844,7 @@ mod runtime_registry_tests {
             BundleReceiver::Bulk
         );
         assert!(bundle.method("nope").is_none());
-        validate(&[&G]); // well-formed: unique bundle + method names
+        validate(&[&G]).expect("well-formed: unique bundle + method names");
     }
 
     // --- namespace groups (module-namespaces) ---
@@ -1976,8 +1975,7 @@ mod runtime_registry_tests {
             ..ExtModule::DEFAULTS
         };
         static H: Unit = Unit("h.core", "h", &[M_DUP]);
-        assert!(
-            validate(&[&H]).is_err(), "duplicate bundle name must panic");
+        assert!(validate(&[&H]).is_err(), "duplicate bundle name must panic");
     }
 
     #[test]
@@ -2017,14 +2015,18 @@ mod runtime_registry_tests {
     #[test]
     fn duplicate_unit_name_is_rejected() {
         assert!(
-            validate(&[&A, &B_DUP_NAME]).is_err(), "duplicate unit name must panic");
+            validate(&[&A, &B_DUP_NAME]).is_err(),
+            "duplicate unit name must panic"
+        );
     }
 
     #[test]
     fn duplicate_qualified_module_is_rejected() {
         // Same root (`a`) + same module name (`math`) across two differently-named units.
         assert!(
-            validate(&[&A, &B_DUP_MODULE]).is_err(), "duplicate qualified module must panic");
+            validate(&[&A, &B_DUP_MODULE]).is_err(),
+            "duplicate qualified module must panic"
+        );
     }
 
     #[test]
@@ -2121,7 +2123,7 @@ mod runtime_registry_tests {
     #[test]
     fn shared_root_across_units_is_fine() {
         // The std pattern: six units all rooted `std`. Distinct names, distinct modules.
-        validate(&[&A, &A2]);
+        validate(&[&A, &A2]).expect("shared roots across distinctly-named units are valid");
     }
 
     // One test drives the whole process-global lifecycle (the `OnceLock` is per-process, so
