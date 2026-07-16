@@ -201,6 +201,47 @@ replace_update!(Checked);
 replace_update!(Bytecode);
 replace_update!(LinkedProgram);
 
+/// The **extension environment** as an explicit salsa input (singleton): the installed
+/// extensions' verbatim-body tier names, which [`ast`] and [`workspace_text_tiers`] fold into
+/// lexing. Previously these were read straight off the process-global registry inside tracked
+/// queries — a hidden non-salsa input, sound only while the global never changes after first
+/// query, and a silent-staleness landmine for an embedder pairing a `LangDatabase` with a
+/// per-session registry. Constructors that know their registry seed this via [`seed_ext_env`];
+/// an unseeded db falls back to the global default (the documented single-registry stance for
+/// the CLI tools), and the fallback is *recorded on this input* so it stays one dependency.
+#[salsa::input(singleton, debug)]
+pub struct ExtEnv {
+    #[returns(ref)]
+    pub verbatim_tier_names: Vec<String>,
+}
+
+/// Create (or overwrite) the db's [`ExtEnv`] from an explicit tier-name set. What an embedder
+/// with a per-session registry calls after assembling it.
+pub fn seed_ext_env(db: &mut dyn salsa::Database, verbatim_tier_names: Vec<String>) {
+    use salsa::Setter as _;
+    match ExtEnv::try_get(db) {
+        Some(env) => {
+            env.set_verbatim_tier_names(db).to(verbatim_tier_names);
+        }
+        None => {
+            ExtEnv::new(db, verbatim_tier_names);
+        }
+    }
+}
+
+/// The extension verbatim-tier names for `db`: the seeded [`ExtEnv`], or — first read of an
+/// unseeded db — the process-global default registry's, captured onto the input so later reads
+/// depend on salsa state, not the global.
+fn ext_verbatim_tier_names(db: &dyn salsa::Database) -> Vec<String> {
+    match ExtEnv::try_get(db) {
+        Some(env) => env.verbatim_tier_names(db).clone(),
+        None => noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
 /// Tokenize the source. Memoized; re-runs only when `SourceProgram::text` changes.
 #[salsa::tracked(returns(ref))]
 pub fn tokens(db: &dyn salsa::Database, src: SourceProgram) -> Tokens {
@@ -220,11 +261,7 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
     // The file's own verbatim-body tiers plus the installed extensions', so a `${…}` hole with a
     // nested `@html { … }` (an inline loop body) re-lexes its body verbatim.
     let mut names = toks.0.text_tier_decls.clone();
-    names.extend(
-        noeta_stdlib::registry::ext_verbatim_tier_names()
-            .into_iter()
-            .map(str::to_string),
-    );
+    names.extend(ext_verbatim_tier_names(db));
     let set = noeta_lexer::TextTiers::with(names);
     Ast(noeta_parser::parse_in(
         &source,
@@ -445,12 +482,9 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
         .flat_map(|src| tokens(db, src).0.text_tier_decls.iter().cloned())
         .collect();
     // Plus the installed extensions' verbatim-body tiers (`doc`, native `@json`/`@sql`) — no
-    // member file declares these, so the LSP/pipeline must seed them like the loader does.
-    names.extend(
-        noeta_stdlib::registry::ext_verbatim_tier_names()
-            .into_iter()
-            .map(str::to_string),
-    );
+    // member file declares these, so the LSP/pipeline must seed them like the loader does. Read
+    // through the [`ExtEnv`] input (seeded, or the global default).
+    names.extend(ext_verbatim_tier_names(db));
     names.sort();
     names.dedup();
     names
@@ -655,6 +689,28 @@ mod tests {
         let source = Source::new(SourceId::FIRST, "test.noe", text);
         let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
         (db, src)
+    }
+
+    #[test]
+    fn the_ext_env_input_drives_workspace_text_tiers_and_invalidates() {
+        // The extensions' verbatim-tier set is a real salsa INPUT: seeding it changes the
+        // memoized answer, re-seeding invalidates. (Before, tracked queries read the process
+        // global directly — a change could never invalidate a memoized parse.)
+        let mut db = LangDatabase::default();
+        let source = Source::new(SourceId::FIRST, "test.noe", "echo 1;\n");
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+        let ws = Workspace::new(&db, src, Vec::new(), Vec::new());
+        seed_ext_env(&mut db, vec!["blueprint".to_string()]);
+        assert!(
+            workspace_text_tiers(&db, ws).contains(&"blueprint".to_string()),
+            "the seeded tier set flows into the workspace tier union"
+        );
+        // Re-seeding the input invalidates the memoized answer.
+        seed_ext_env(&mut db, Vec::new());
+        assert!(
+            !workspace_text_tiers(&db, ws).contains(&"blueprint".to_string()),
+            "re-seeding the ExtEnv input must invalidate"
+        );
     }
 
     #[test]
