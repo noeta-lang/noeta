@@ -1,0 +1,46 @@
+// para.db.sql — a typed `@sql { … }` block tier (aether DB4), pure Noeta over the DB0 native driver.
+//
+// `@sql { SELECT * FROM users WHERE id = ${id} }` evaluates to a `Sql` value — the statement text
+// with `?` placeholders plus the ordered bound parameters. A `${…}` hole is ALWAYS a bound
+// parameter, never string-spliced into the SQL, so a statement built from untrusted input carries no
+// injection risk by construction. Importing `sql` brings the `@sql` tier into scope (the `@tier`
+// declaration rides on the handler fn), exactly like para.html's `@html`.
+
+namespace para.db.sql
+
+// A typed SQL statement: the text (with positional `?` placeholders) and its bound parameters.
+pub struct Sql {
+    text: string
+    params: List<dyn>
+}
+
+// The `@sql` expression tier handler. The block's verbatim SQL arrives as `statics` (one more than
+// the holes); each `${…}` hole is a thunk evaluated here and appended as a bound parameter, with a
+// `?` placeholder spliced into the text in its place.
+@tier(sql, text: "sql", expr: Sql)
+pub fn sql(statics: List<string>, holes: List<() -> dyn>): Sql {
+    mut text = ""
+    mut params: List<dyn> = []
+    mut i = 0
+    for s in statics {
+        text = text ~ s
+        if i < holes.len() {
+            text = text ~ "?"
+            h = holes[i]
+            params = params ~ [h()]
+        }
+        i = i + 1
+    }
+    return Sql { text: text, params: params }
+}
+
+// Run a `@sql` statement as a query, returning its rows (`List<Map<string, dyn>>`). `conn` is a
+// `para.db.Connection` (typed `dyn` — see the F5 follow-up; dispatch still reaches the native query).
+pub fn query(conn: dyn, stmt: Sql): List<Map<string, dyn>> {
+    return conn.query(stmt.text, stmt.params).as<List<Map<string, dyn>>>() ?? []
+}
+
+// Run a `@sql` statement as a non-query (INSERT/UPDATE/DELETE/DDL), returning rows affected.
+pub fn execute(conn: dyn, stmt: Sql): int {
+    return conn.execute(stmt.text, stmt.params).as<int>() ?? 0
+}
