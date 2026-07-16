@@ -1,15 +1,154 @@
-//! The crate's **entry points**: [`VmBackend`] and its `run_module_*` family,
-//! the `execute*` drivers, [`Vm::run_top`] + [`run_and_teardown`] (the two
-//! phases a session splits), and the `--jit-stats` report types ([`JitStats`],
-//! [`JitReport`], [`JitBailSite`], [`JitDeclinedLoop`]). Every item is moved
-//! verbatim from the crate root (re-exported there, so the public API is
-//! unchanged) purely to shrink `lib.rs` — no behavior change.
+//! The crate's **entry points**: [`VmBackend`] with the [`RunOptions`] →
+//! [`RunOutcome`] core runner and its `run_module_*` presets, [`Vm::run_top`] +
+//! [`run_and_teardown`] (the two phases a session splits), and the
+//! `--jit-stats` report types ([`JitStats`], [`JitReport`], [`JitBailSite`],
+//! [`JitDeclinedLoop`]).
 
 use crate::*;
 
 /// The bytecode-VM backend.
 #[derive(Debug, Clone, Default)]
 pub struct VmBackend;
+
+/// How the tier-1 JIT participates in a run — one axis instead of a `run_module_*`
+/// variant per combination (audit-1 finding 14).
+///
+/// - `Off` pins tier-0. The debugger/profiler paths **require** this: every frame stays
+///   interpreter-executed and therefore observable (a JIT'd region has no readable pc or
+///   register file mid-execution); tier-0 is held observably identical to tier-1 by the
+///   JIT's bail-before-mutate contract, so turning the perf tier off changes speed, not
+///   behavior. Also the `--jit-differential` oracle's pure tier-0 baseline.
+/// - `Hot` is production tiering: hot-counter + OSR promotion, compiling OFF-THREAD
+///   (P-PAR S4) so the mutator never pauses for Cranelift.
+/// - `Forced` compiles every eligible prototype synchronously from the first dispatch —
+///   the oracle's tier-1 side and the deterministic hot-swap stress entry.
+///
+/// Without the `jit` feature, `Hot` and `Forced` are no-ops (everything interprets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tiering {
+    #[default]
+    Off,
+    Hot,
+    Forced,
+}
+
+/// Everything one VM run can vary, in one place (audit-1 finding 14 / the `CheckOptions`
+/// pattern) — instead of the `run_module_*` family growing a method per host × executor ×
+/// tiering × debugger × session × stats combination. The presets below cover the
+/// established entry points; a new combination is a struct literal, not a new method.
+///
+/// Defaults are the conformance differential's deterministic sandbox run: sandbox host +
+/// sandbox executor, [`CollectorMode::Trace`], tier-0, nothing attached.
+///
+/// [`CollectorMode::Trace`]: noeta_value::CollectorMode::Trace
+pub struct RunOptions {
+    pub host: Box<dyn noeta_stdlib::Host>,
+    pub executor: Box<dyn noeta_stdlib::Executor>,
+    pub collector: noeta_value::CollectorMode,
+    pub tiering: Tiering,
+    /// Attached debugger (`noeta dap`). Callers pair this with [`Tiering::Off`] — see the
+    /// observability contract on [`Tiering`].
+    pub debugger: Option<Box<dyn Debugger>>,
+    /// Attached profiler (`noeta profile`), consulted before every instruction; handed back
+    /// in [`RunOutcome::profiler`] so its accumulated counters can be reclaimed. Tier-0 only,
+    /// like the debugger.
+    pub profiler: Option<Box<dyn ProfileHook>>,
+    /// Debug-console / hot-reload session (tooling-unification T5): the live compiler
+    /// returned alongside `module`; every console fragment or swap plan compiles through it
+    /// and installs into the running Vm. The arena owning each extended module snapshot
+    /// lives inside the core runner, for exactly the run's duration.
+    #[cfg(feature = "compile")]
+    pub session: Option<noeta_compiler::SessionCompiler>,
+    /// Hot-reload mailbox the run thread polls at every scheduler tick (server-hmr W1);
+    /// requires `session`.
+    pub hot_mailbox: Option<HotSwapMailbox>,
+    /// Real OS-thread isolates (isolates I.4b): the module by `Arc` (worker threads own it)
+    /// plus the fresh-VM factory. CLI-only / out-of-oracle.
+    pub isolates: Option<(Arc<Module>, IsolateFactory)>,
+    /// Record the `--jit-stats` bail histogram; the assembled [`JitReport`] rides back in
+    /// [`RunOutcome::report`]. Costs one branch per bail *event* (a tier transition), so it
+    /// observes without perturbing what it measures.
+    #[cfg(feature = "jit")]
+    pub bail_histogram: bool,
+    /// Stats determinism for hot-counter runs: compile the outstanding queue at exit so
+    /// promotion counts don't race the program's runtime (the OSR tests assert them exactly).
+    #[cfg(feature = "jit")]
+    pub drain_at_exit: bool,
+}
+
+// Hand-written: the host/executor/debugger/profiler/session fields are trait objects with
+// no Debug bound, so presence is the honest thing to print.
+impl std::fmt::Debug for RunOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("RunOptions");
+        d.field("collector", &self.collector)
+            .field("tiering", &self.tiering)
+            .field("debugger", &self.debugger.is_some())
+            .field("profiler", &self.profiler.is_some())
+            .field("hot_mailbox", &self.hot_mailbox.is_some())
+            .field("isolates", &self.isolates.is_some());
+        #[cfg(feature = "compile")]
+        d.field("session", &self.session.is_some());
+        #[cfg(feature = "jit")]
+        d.field("bail_histogram", &self.bail_histogram)
+            .field("drain_at_exit", &self.drain_at_exit);
+        d.finish_non_exhaustive()
+    }
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        RunOptions {
+            host: Box::new(noeta_stdlib::SandboxHost::new()),
+            executor: Box::new(noeta_stdlib::SandboxExecutor::new()),
+            collector: noeta_value::CollectorMode::Trace,
+            tiering: Tiering::default(),
+            debugger: None,
+            profiler: None,
+            #[cfg(feature = "compile")]
+            session: None,
+            hot_mailbox: None,
+            isolates: None,
+            #[cfg(feature = "jit")]
+            bail_histogram: false,
+            #[cfg(feature = "jit")]
+            drain_at_exit: false,
+        }
+    }
+}
+
+/// What one VM run produced. `result` is the differential's compared unit; the trace is
+/// deliberately not part of it (yet) — the oracle grows its own traceback first.
+// Debug by hand: the handed-back profiler is a trait object with no Debug bound.
+pub struct RunOutcome {
+    pub result: RunResult,
+    /// The abort traceback (empty for a clean run).
+    pub trace: Vec<TraceFrame>,
+    /// The profiler handed back (present iff one was attached), so the concrete collector's
+    /// accumulated counters/samples can be reclaimed via [`ProfileHook::into_any`].
+    pub profiler: Option<Box<dyn ProfileHook>>,
+    /// JIT-coverage counts: the synchronous engine's live accounting for [`Tiering::Forced`]
+    /// runs, the service's parked final accounting for [`Tiering::Hot`] runs (meaningful
+    /// there only with [`RunOptions::drain_at_exit`]). Default-empty when the report below
+    /// already consumed the accounting — the two are never requested together today.
+    #[cfg(feature = "jit")]
+    pub stats: JitStats,
+    /// The assembled `--jit-stats` report, iff [`RunOptions::bail_histogram`] was set.
+    #[cfg(feature = "jit")]
+    pub report: Option<JitReport>,
+}
+
+impl std::fmt::Debug for RunOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("RunOutcome");
+        d.field("result", &self.result)
+            .field("trace", &self.trace)
+            .field("profiler", &self.profiler.is_some());
+        #[cfg(feature = "jit")]
+        d.field("stats", &self.stats).field("report", &self.report);
+        d.finish_non_exhaustive()
+    }
+}
 
 impl VmBackend {
     pub fn new() -> VmBackend {
@@ -21,50 +160,131 @@ impl VmBackend {
     pub fn try_run(&self, program: &Program) -> Result<RunResult, Unsupported> {
         let module = compile(program)?;
         // The differential harness path stays pure tier-0 (see `run_module`).
-        Ok(execute(
-            &module,
-            Box::new(noeta_stdlib::SandboxHost::new()),
-            false,
-        ))
+        Ok(self.run_module_with(&module, RunOptions::default()).result)
+    }
+
+    /// The core runner every preset delegates to: load a [`Vm`] configured by `opts`, run
+    /// `main` to completion, tear down, and hand back everything the run produced. One body
+    /// owns the load→attach→arm→run→collect protocol, so a new run mode is a [`RunOptions`]
+    /// combination — not another copy of the protocol (audit-1 finding 14).
+    pub fn run_module_with(&self, module: &Module, opts: RunOptions) -> RunOutcome {
+        noeta_value::set_collector_mode(opts.collector);
+        // The arena owning each debug-session/hot-swap module snapshot lives here, for
+        // exactly the run's duration: an escaped fragment value stays resolvable until the
+        // program exits.
+        #[cfg(feature = "compile")]
+        let arena = typed_arena::Arena::new();
+        let mut vm = Vm::load(module, opts.host, opts.executor);
+        vm.debugger = opts.debugger;
+        vm.profiler = opts.profiler;
+        #[cfg(feature = "compile")]
+        if let Some(session) = opts.session {
+            vm.debug_session = Some(DebugSession {
+                compiler: Box::new(session),
+                arena: &arena,
+                memo: HashMap::new(),
+            });
+        }
+        vm.hot_mailbox = opts.hot_mailbox;
+        // The isolate module `Arc` doubles as the hot tier's module handle below, saving the
+        // `module.clone()` when a parallel run arms the JIT service.
+        #[cfg(feature = "jit")]
+        let isolate_arc = opts.isolates.as_ref().map(|(m, _)| Arc::clone(m));
+        if let Some((arc, factory)) = opts.isolates {
+            vm.isolates.parallel_isolates = true;
+            vm.isolates.isolate_module = Some(arc);
+            vm.isolates.isolate_factory = Some(factory);
+        }
+        match opts.tiering {
+            Tiering::Off => {}
+            // Without the `jit` feature both arms are no-ops: everything interprets.
+            Tiering::Hot => {
+                #[cfg(feature = "jit")]
+                vm.init_jit_service(isolate_arc.unwrap_or_else(|| Arc::new(module.clone())));
+            }
+            Tiering::Forced => {
+                #[cfg(feature = "jit")]
+                {
+                    vm.tier1.force_jit = true;
+                    vm.init_jit();
+                }
+            }
+        }
+        #[cfg(feature = "jit")]
+        if opts.bail_histogram {
+            vm.tier1.jit_bail_counts = Some(std::collections::HashMap::new());
+        }
+        #[cfg(feature = "jit")]
+        if opts.drain_at_exit {
+            vm.tier1.jit_drain_at_exit = true;
+        }
+        let result = run_and_teardown(&mut vm, opts.collector);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
+        let profiler = vm.profiler.take();
+        // Report before stats: assembling the report consumes the service's parked final
+        // accounting, which is also the `Hot` path's stats source — no caller asks for both.
+        #[cfg(feature = "jit")]
+        let report = opts.bail_histogram.then(|| vm.take_jit_report());
+        #[cfg(feature = "jit")]
+        let stats = vm
+            .tier1
+            .jit
+            .as_ref()
+            .map(|j| JitStats {
+                native: j.native_count(),
+                compiled: j.compiled_count(),
+                compile_ns_total: j.compile_ns_total(),
+                compile_ns_max: j.compile_ns_max(),
+                breakdown: j.compile_breakdown(),
+            })
+            .unwrap_or_else(|| vm.tier1.jit_final_stats.take().unwrap_or_default());
+        RunOutcome {
+            result,
+            trace,
+            profiler,
+            #[cfg(feature = "jit")]
+            stats,
+            #[cfg(feature = "jit")]
+            report,
+        }
     }
 
     /// Execute an already-compiled [`Module`]. This is the seam the salsa graph (`noeta-db`)
     /// drives: it produces the `Module` via the memoized `bytecode` query, then hands it here.
     /// Splitting compilation from execution is what lets the VM "consume `chunk(db)`" (M1.1)
     /// without the VM crate depending on the database. Runs against a deterministic
-    /// [`noeta_stdlib::SandboxHost`] — the host the conformance differential always uses.
+    /// [`noeta_stdlib::SandboxHost`] — the host the conformance differential always uses; pure
+    /// tier-0, so it never auto-JITs (the oracle's tier-1 tier is `run_module_jit`'s explicit
+    /// `Forced`).
     pub fn run_module(&self, module: &Module) -> RunResult {
-        // The sandbox path is the `--jit-differential` oracle's pure tier-0 baseline, so it never
-        // auto-JITs (the oracle's tier-1 tier is `run_module_jit`'s explicit `force_jit`).
-        execute(module, Box::new(noeta_stdlib::SandboxHost::new()), false)
+        self.run_module_with(module, RunOptions::default()).result
     }
 
     /// [`VmBackend::run_module`] plus the abort traceback (empty for a clean run) — the sandboxed,
     /// deterministic entry the traceback's own tests drive.
     pub fn run_module_traced(&self, module: &Module) -> (RunResult, Vec<TraceFrame>) {
-        let mode = noeta_value::CollectorMode::Trace;
-        noeta_value::set_collector_mode(mode);
-        let mut vm = Vm::load(
-            module,
-            Box::new(noeta_stdlib::SandboxHost::new()),
-            Box::new(noeta_stdlib::SandboxExecutor::new()),
-        );
-        let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.out.abort_trace);
-        (result, trace)
+        let out = self.run_module_with(module, RunOptions::default());
+        (out.result, out.trace)
     }
 
     /// Execute a module against a caller-provided [`noeta_stdlib::Host`] (M2.3). The CLI/REPL pass
     /// a real host here; the conformance harness keeps using the sandbox default via
-    /// [`VmBackend::run_module`], so the differential stays deterministic.
+    /// [`VmBackend::run_module`], so the differential stays deterministic. A real-host production
+    /// run drives the tier-1 JIT under ordinary hot-counter promotion (P-JIT).
     pub fn run_module_with_host(
         &self,
         module: &Module,
         host: Box<dyn noeta_stdlib::Host>,
     ) -> RunResult {
-        // A real-host production run (`lang bench`, single-isolate CLI): drive the tier-1 JIT under
-        // ordinary hot-counter promotion (P-JIT). A no-op without the `jit` feature.
-        execute(module, host, true)
+        self.run_module_with(
+            module,
+            RunOptions {
+                host,
+                tiering: Tiering::Hot,
+                ..RunOptions::default()
+            },
+        )
+        .result
     }
 
     /// Execute a module against a caller-provided host *and* async executor (Track A.4). The CLI
@@ -76,22 +296,22 @@ impl VmBackend {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
     ) -> RunResult {
-        // Real-host production run with a real async executor: hot-counter JIT (P-JIT).
-        execute_with_collector(
+        self.run_module_with(
             module,
-            host,
-            executor,
-            noeta_value::CollectorMode::Trace,
-            true,
+            RunOptions {
+                host,
+                executor,
+                tiering: Tiering::Hot,
+                ..RunOptions::default()
+            },
         )
+        .result
     }
 
     /// Execute a module against a real host + executor **with the JIT unarmed** — the debugger's run
-    /// path (`noeta dap`). A debug session pins tier-0 so every frame stays interpreter-executed and
-    /// therefore observable (a JIT'd region has no readable pc or register file mid-execution); tier-0
-    /// is held observably identical to tier-1 by the JIT's bail-before-mutate contract, so turning the
-    /// perf tier off changes speed, not behavior. Single-isolate/cooperative (real OS-thread isolate
-    /// debugging is a later milestone); the differential never calls this, so it is out-of-oracle.
+    /// path (`noeta dap`); see the tier-0 observability contract on [`Tiering`]. Single-isolate /
+    /// cooperative (real OS-thread isolate debugging is a later milestone); the differential never
+    /// calls this, so it is out-of-oracle.
     pub fn run_module_with_host_and_executor_no_jit(
         &self,
         module: &Module,
@@ -112,22 +332,23 @@ impl VmBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         debugger: Option<Box<dyn Debugger>>,
     ) -> (RunResult, Vec<TraceFrame>) {
-        let mode = noeta_value::CollectorMode::Trace;
-        noeta_value::set_collector_mode(mode);
-        let mut vm = Vm::load(module, host, executor);
-        vm.debugger = debugger;
-        let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.out.abort_trace);
-        (result, trace)
+        let out = self.run_module_with(
+            module,
+            RunOptions {
+                host,
+                executor,
+                debugger,
+                ..RunOptions::default()
+            },
+        );
+        (out.result, out.trace)
     }
 
     /// Like [`VmBackend::run_module_debug`], but with the **debug console armed** (tooling-
     /// unification T5): `session` is the live compiler
     /// [`noeta_compiler::compile_with_sites_session`] returned alongside `module`, and every
     /// console fragment the debugger sends compiles through it and installs into the running Vm —
-    /// full language, closures included. The arena owning each extended module snapshot lives
-    /// here, for exactly the run's duration; an escaped fragment value stays resolvable until the
-    /// program exits.
+    /// full language, closures included.
     #[cfg(feature = "compile")]
     pub fn run_module_debug_session(
         &self,
@@ -137,27 +358,26 @@ impl VmBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         debugger: Option<Box<dyn Debugger>>,
     ) -> (RunResult, Vec<TraceFrame>) {
-        let mode = noeta_value::CollectorMode::Trace;
-        noeta_value::set_collector_mode(mode);
-        let arena = typed_arena::Arena::new();
-        let mut vm = Vm::load(module, host, executor);
-        vm.debugger = debugger;
-        vm.debug_session = Some(DebugSession {
-            compiler: Box::new(session),
-            arena: &arena,
-            memo: HashMap::new(),
-        });
-        let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.out.abort_trace);
-        (result, trace)
+        let out = self.run_module_with(
+            module,
+            RunOptions {
+                host,
+                executor,
+                debugger,
+                session: Some(session),
+                ..RunOptions::default()
+            },
+        );
+        (out.result, out.trace)
     }
 
     /// Run a module with **in-process hot reload armed** (server-hmr W1): the debug-session
     /// machinery (live [`SessionCompiler`] + module arena — the same stable-prefix swap the debug
     /// console uses) plus a [`HotSwapMailbox`] the run thread polls at every scheduler tick. This
     /// is `noeta serve --watch`'s hot mode: the CLI's watcher thread deposits [`SwapPlan`]s and the
-    /// serving program absorbs them between polls without restarting. JIT stays unarmed (the
-    /// debug-path contract `install_fragment` asserts; H3 lifts this).
+    /// serving program absorbs them between polls without restarting. Hot serving runs tier-1 like
+    /// any production serve (server-hmr H3): the hot-counter service compiles off-thread, and a
+    /// swap retires + re-arms it (`install_fragment`).
     ///
     /// [`SessionCompiler`]: noeta_compiler::SessionCompiler
     /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
@@ -170,23 +390,18 @@ impl VmBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         mailbox: HotSwapMailbox,
     ) -> (RunResult, Vec<TraceFrame>) {
-        let mode = noeta_value::CollectorMode::Trace;
-        noeta_value::set_collector_mode(mode);
-        let arena = typed_arena::Arena::new();
-        let mut vm = Vm::load(module, host, executor);
-        vm.debug_session = Some(DebugSession {
-            compiler: Box::new(session),
-            arena: &arena,
-            memo: HashMap::new(),
-        });
-        vm.hot_mailbox = Some(mailbox);
-        // Hot serving runs tier-1 like any production serve (server-hmr H3): the hot-counter
-        // service compiles off-thread, and a swap retires + re-arms it (`install_fragment`).
-        #[cfg(feature = "jit")]
-        vm.init_jit_service(Arc::new(module.clone()));
-        let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.out.abort_trace);
-        (result, trace)
+        let out = self.run_module_with(
+            module,
+            RunOptions {
+                host,
+                executor,
+                session: Some(session),
+                hot_mailbox: Some(mailbox),
+                tiering: Tiering::Hot,
+                ..RunOptions::default()
+            },
+        );
+        (out.result, out.trace)
     }
 
     /// [`VmBackend::run_module_hot`] with the **synchronous force-JIT engine** — the H3 oracle
@@ -203,21 +418,18 @@ impl VmBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         mailbox: HotSwapMailbox,
     ) -> (RunResult, Vec<TraceFrame>) {
-        let mode = noeta_value::CollectorMode::Trace;
-        noeta_value::set_collector_mode(mode);
-        let arena = typed_arena::Arena::new();
-        let mut vm = Vm::load(module, host, executor);
-        vm.debug_session = Some(DebugSession {
-            compiler: Box::new(session),
-            arena: &arena,
-            memo: HashMap::new(),
-        });
-        vm.hot_mailbox = Some(mailbox);
-        vm.tier1.force_jit = true;
-        vm.init_jit();
-        let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.out.abort_trace);
-        (result, trace)
+        let out = self.run_module_with(
+            module,
+            RunOptions {
+                host,
+                executor,
+                session: Some(session),
+                hot_mailbox: Some(mailbox),
+                tiering: Tiering::Forced,
+                ..RunOptions::default()
+            },
+        );
+        (out.result, out.trace)
     }
 
     /// Run a module **tier-0 under a profiler** (`noeta profile`): the JIT is never armed and a
@@ -232,25 +444,29 @@ impl VmBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         profiler: Box<dyn ProfileHook>,
     ) -> (RunResult, Box<dyn ProfileHook>, Vec<TraceFrame>) {
-        let mode = noeta_value::CollectorMode::Trace;
-        noeta_value::set_collector_mode(mode);
-        let mut vm = Vm::load(module, host, executor);
-        vm.profiler = Some(profiler);
-        let result = run_and_teardown(&mut vm, mode);
-        let profiler = vm
+        let out = self.run_module_with(
+            module,
+            RunOptions {
+                host,
+                executor,
+                profiler: Some(profiler),
+                ..RunOptions::default()
+            },
+        );
+        let profiler = out
             .profiler
-            .take()
             .expect("the profiler stays attached for the whole run");
-        let trace = std::mem::take(&mut vm.out.abort_trace);
-        (result, profiler, trace)
+        (out.result, profiler, out.trace)
     }
 
     /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
     /// `module` is an `Arc` (the compiled module is `Send + Sync`) so worker threads can own it; each
     /// `isolate f(args)` with `Send`, channel-free arguments runs on its own thread with a fresh VM +
     /// host + executor from `factory`, communicating by copied [`isolate::Wire`] values. Channel-shipping
-    /// isolates fall back to cooperative tasks (cross-thread channels are I.4c). The differential never
-    /// calls this (it keeps the deterministic cooperative sandbox), so it stays out-of-oracle.
+    /// isolates fall back to cooperative tasks (cross-thread channels are I.4c). The main isolate is a
+    /// real-host production run (hot-counter JIT, compiled off-thread); worker isolates load through
+    /// `Vm::load` and stay tier-0 (the engine lives on the compile-service thread). The differential
+    /// never calls this (it keeps the deterministic cooperative sandbox), so it stays out-of-oracle.
     pub fn run_module_with_host_and_executor_parallel(
         &self,
         module: Arc<Module>,
@@ -259,34 +475,25 @@ impl VmBackend {
         factory: IsolateFactory,
         jit_report: bool,
     ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
-        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
-        let mut vm = Vm::load(&module, host, executor);
-        vm.isolates.parallel_isolates = true;
-        vm.isolates.isolate_module = Some(Arc::clone(&module));
-        vm.isolates.isolate_factory = Some(factory);
-        // The main isolate is a real-host production run: enable the hot-counter JIT (P-JIT),
-        // compiling off-thread (P-PAR S4). Worker isolates load through `Vm::load` and stay
-        // tier-0 (the engine lives on the compile-service thread).
-        #[cfg(feature = "jit")]
-        vm.init_jit_service(Arc::clone(&module));
-        // `--jit-stats`: arm the bail histogram before the run. Recording costs one branch per
-        // bail *event* (a tier transition), so it observes without perturbing what it measures.
-        #[cfg(feature = "jit")]
-        if jit_report {
-            vm.tier1.jit_bail_counts = Some(std::collections::HashMap::new());
-        }
+        let out = self.run_module_with(
+            &Arc::clone(&module),
+            RunOptions {
+                host,
+                executor,
+                isolates: Some((module, factory)),
+                tiering: Tiering::Hot,
+                #[cfg(feature = "jit")]
+                bail_histogram: jit_report,
+                ..RunOptions::default()
+            },
+        );
         #[cfg(not(feature = "jit"))]
         let _ = jit_report;
-        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
-        // The abort traceback (empty for a clean run) rides beside the result — `RunResult` itself
-        // stays the differential's compared unit, which the trace is deliberately not part of (yet):
-        // the oracle grows its own traceback first.
-        let trace = std::mem::take(&mut vm.out.abort_trace);
         #[cfg(feature = "jit")]
-        let report = jit_report.then(|| vm.take_jit_report());
+        let report = out.report;
         #[cfg(not(feature = "jit"))]
         let report = None;
-        (result, trace, report)
+        (out.result, out.trace, report)
     }
 
     /// Run a module whose native prototype entries were **compiled ahead of time and linked in**
@@ -294,7 +501,8 @@ impl VmBackend {
     /// [`noeta_jit_abi::AOT_DISPATCH_SYMBOL`] table (`[count][main_0, fast_0, …]`, pointer-width words the
     /// linker resolved to real code addresses) — into the mutable per-proto mirror tables, then run.
     /// Prototypes with a null slot (ineligible, or no fast body) interpret. Real host + executor +
-    /// isolate factory, exactly like the production `parallel` path; out-of-oracle.
+    /// isolate factory, exactly like the production `parallel` path; out-of-oracle. Stays off the
+    /// [`RunOptions`] core: the dispatch bind is an unsafe pre-run step no other mode has.
     ///
     /// # Safety
     /// `dispatch` must point at a valid dispatch table of that layout whose function pointers stay
@@ -325,18 +533,21 @@ impl VmBackend {
 
     /// Execute under an explicit cycle-collector mode (Phase 6.4 benchmark seam). Production paths
     /// use the default [`CollectorMode::Trace`]; the head-to-head benchmark drives both.
+    ///
+    /// [`CollectorMode::Trace`]: noeta_value::CollectorMode::Trace
     pub fn run_module_with_collector(
         &self,
         module: &Module,
         mode: noeta_value::CollectorMode,
     ) -> RunResult {
-        execute_with_collector(
+        self.run_module_with(
             module,
-            Box::new(noeta_stdlib::SandboxHost::new()),
-            Box::new(noeta_stdlib::SandboxExecutor::new()),
-            mode,
-            false,
+            RunOptions {
+                collector: mode,
+                ..RunOptions::default()
+            },
         )
+        .result
     }
 
     /// Execute a module through the tier-1 JIT (milestone P-JIT), forcing every eligible prototype
@@ -353,28 +564,14 @@ impl VmBackend {
     /// vs total) — the JIT-coverage numbers the oracle reports and the tests assert on.
     #[cfg(feature = "jit")]
     pub fn run_module_jit_with_stats(&self, module: &Module) -> (RunResult, JitStats) {
-        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
-        let mut vm = Vm::load(
+        let out = self.run_module_with(
             module,
-            Box::new(noeta_stdlib::SandboxHost::new()),
-            Box::new(noeta_stdlib::SandboxExecutor::new()),
+            RunOptions {
+                tiering: Tiering::Forced,
+                ..RunOptions::default()
+            },
         );
-        vm.tier1.force_jit = true;
-        vm.init_jit();
-        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
-        let stats = vm
-            .tier1
-            .jit
-            .as_ref()
-            .map(|j| JitStats {
-                native: j.native_count(),
-                compiled: j.compiled_count(),
-                compile_ns_total: j.compile_ns_total(),
-                compile_ns_max: j.compile_ns_max(),
-                breakdown: j.compile_breakdown(),
-            })
-            .unwrap_or_default();
-        (result, stats)
+        (out.result, out.stats)
     }
 
     /// Execute a module with **ordinary hot-counter promotion** (the production tiering) — like the
@@ -385,26 +582,37 @@ impl VmBackend {
     }
 
     /// Like [`VmBackend::run_module_jit_with_stats`] but with **ordinary hot-counter promotion**
-    /// (`force_jit` off) — the real production tiering. A prototype compiles only once it crosses
+    /// (`Forced` off) — the real production tiering. A prototype compiles only once it crosses
     /// [`JIT_HOT_THRESHOLD`] entries *or back-edges* (P-JIT J5 OSR), so this exercises the promotion
     /// path itself: a top-level loop entered once must still go native via its loop back-edges.
     #[cfg(feature = "jit")]
     pub fn run_module_jit_hot_with_stats(&self, module: &Module) -> (RunResult, JitStats) {
-        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
-        let mut vm = Vm::load(
+        let out = self.run_module_with(
             module,
-            Box::new(noeta_stdlib::SandboxHost::new()),
-            Box::new(noeta_stdlib::SandboxExecutor::new()),
+            RunOptions {
+                tiering: Tiering::Hot,
+                drain_at_exit: true,
+                ..RunOptions::default()
+            },
         );
-        // force_jit stays false → hot-counter + OSR promotion, compiled OFF-THREAD (P-PAR S4).
-        vm.init_jit_service(Arc::new(module.clone()));
-        // Stats determinism: compile the outstanding queue at exit so promotion counts don't
-        // race the program's runtime (the OSR tests assert them exactly).
-        vm.tier1.jit_drain_at_exit = true;
-        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
-        // Teardown shut the service down and parked its final accounting.
-        let stats = vm.tier1.jit_final_stats.take().unwrap_or_default();
-        (result, stats)
+        (out.result, out.stats)
+    }
+
+    /// Like [`VmBackend::run_module_jit`] (forced tier-1, sandbox host) but returning the **bail
+    /// histogram** — the `--jit-stats` recording seam under the oracle's deterministic conditions,
+    /// so tests can pin exactly which (proto, pc) sites bail and how often.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit_bails(&self, module: &Module) -> (RunResult, Vec<JitBailSite>) {
+        let out = self.run_module_with(
+            module,
+            RunOptions {
+                tiering: Tiering::Forced,
+                bail_histogram: true,
+                ..RunOptions::default()
+            },
+        );
+        let bails = out.report.map(|r| r.bails).unwrap_or_default();
+        (out.result, bails)
     }
 }
 
@@ -449,27 +657,6 @@ impl<'m> Vm<'m> {
             bails,
             declined,
         }
-    }
-}
-
-impl VmBackend {
-    /// Like [`VmBackend::run_module_jit`] (forced tier-1, sandbox host) but returning the **bail
-    /// histogram** — the `--jit-stats` recording seam under the oracle's deterministic conditions,
-    /// so tests can pin exactly which (proto, pc) sites bail and how often.
-    #[cfg(feature = "jit")]
-    pub fn run_module_jit_bails(&self, module: &Module) -> (RunResult, Vec<JitBailSite>) {
-        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
-        let mut vm = Vm::load(
-            module,
-            Box::new(noeta_stdlib::SandboxHost::new()),
-            Box::new(noeta_stdlib::SandboxExecutor::new()),
-        );
-        vm.tier1.force_jit = true;
-        vm.init_jit();
-        vm.tier1.jit_bail_counts = Some(std::collections::HashMap::new());
-        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
-        let report = vm.take_jit_report();
-        (result, report.bails)
     }
 }
 
@@ -541,46 +728,6 @@ impl Backend for VmBackend {
         self.try_run(program)
             .expect("VmBackend::run on a program outside the VM subset; use try_run")
     }
-}
-
-/// Execute a compiled module, capturing stdout, exit code, and diagnostics. `jit` enables the
-/// hot-counter tier-1 JIT (real-host production paths); the sandbox differential passes `false`.
-fn execute(module: &Module, host: Box<dyn noeta_stdlib::Host>, jit: bool) -> RunResult {
-    execute_with_collector(
-        module,
-        host,
-        Box::new(noeta_stdlib::SandboxExecutor::new()),
-        noeta_value::CollectorMode::Trace,
-        jit,
-    )
-}
-
-/// Execute a module under an explicit cycle-collector mode (Phase 6.4). The default path uses the
-/// backup mark-sweep [`CollectorMode::Trace`]; the benchmark drives [`CollectorMode::TrialDeletion`]
-/// to compare the two. The mode is set on this isolate's release path before the first allocation
-/// and the matching collector runs at clean exit (the trace marks from the live globals *before*
-/// teardown; trial-deletion reaps its buffered candidates *after*, once every release has fed them).
-fn execute_with_collector(
-    module: &Module,
-    host: Box<dyn noeta_stdlib::Host>,
-    executor: Box<dyn noeta_stdlib::Executor>,
-    mode: noeta_value::CollectorMode,
-    jit: bool,
-) -> RunResult {
-    noeta_value::set_collector_mode(mode);
-    let mut vm = Vm::load(module, host, executor);
-    // Real-host production paths pass `jit = true` to arm the hot-counter tier-1 JIT (P-JIT). A
-    // no-op without the `jit` feature; the `jit` binding is unused there, so quiet the warning.
-    #[cfg(feature = "jit")]
-    if jit {
-        // Production hot-counter tiering compiles OFF-THREAD (P-PAR S4): the mutator never
-        // pauses for Cranelift. The compile thread outlives every `&Module` borrow, so it takes
-        // the module by `Arc` (a one-time table clone at startup).
-        vm.init_jit_service(Arc::new(module.clone()));
-    }
-    #[cfg(not(feature = "jit"))]
-    let _ = jit;
-    run_and_teardown(&mut vm, mode)
 }
 
 /// Run `main` and tear the VM down (globals, cycle collection, channel drain), returning the program's
