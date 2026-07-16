@@ -84,16 +84,6 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
     })
 }
 
-/// The root-qualified identity of the module a `use <path>.{name}` would bind: the path segments and
-/// the imported name joined with `.` — `use std.{math}` → `"std.math"`, nested `use std.http.client`
-/// → `"std.http.client"`. For a *selective function* import (`use std.math.sqrt`) the same join
-/// instead names a function, so [`find_module`] on it returns `None` and the caller falls through.
-///
-/// [find_module]: noeta_stdlib::registry::find_module
-fn qualified_module(path: &[String], name: &str) -> String {
-    format!("{}.{}", path.join("."), name)
-}
-
 /// Whether `use <path>.{name}` binds a native value (a module — `use std.{json}`, nested
 /// `use std.http.client` — or a selectively-imported member fn — `use std.math.sqrt`) rather than
 /// a sibling-module declaration. Classification is `Registry::classify_use` — the ONE source of
@@ -4473,21 +4463,25 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
 mod tests {
     use super::{compile, compile_with_sites};
 
-    /// The compiled-in ctx fast route must key on the exact module identity THIS crate emits
-    /// (`qualified_module`) — it silently rotted once when identities became root-qualified
-    /// (`"cell"` → `"std.cell"`) and every `signal(…)`/`cell(…)` fell through to the dyn table
-    /// with no behavioral difference to notice. This pins the two ends together.
+    /// The compiled-in ctx fast route must key on the exact module identity the compiler emits —
+    /// which is whatever `classify_use` returns in `UseKind::Module` (the ONE classification
+    /// source both backends now consume). It silently rotted once when identities became
+    /// root-qualified (`"cell"` → `"std.cell"`) and every `signal(…)`/`cell(…)` fell through to
+    /// the dyn table with no behavioral difference to notice. This pins the two ends together
+    /// through the real classification path.
     #[test]
     fn the_static_ctx_fast_route_keys_match_the_emitted_module_identity() {
-        let emitted = |name: &str| super::qualified_module(&["std".to_string()], name);
+        let reg = noeta_stdlib::registry::default_seeded();
+        let emitted = |name: &str| match reg.classify_use(&["std".to_string()], name) {
+            noeta_stdlib::registry::UseKind::Module(q) => q,
+            other => panic!("`use std.{name}` must classify as a module, got {other:?}"),
+        };
         assert!(noeta_stdlib::registry::has_static_ctx_route(&emitted("cell")));
         assert!(noeta_stdlib::registry::has_static_ctx_route(&emitted(
             "reactive"
         )));
         // An out-of-std module never takes std's compiled-in route, even with a matching tail.
-        assert!(!noeta_stdlib::registry::has_static_ctx_route(
-            &super::qualified_module(&["acme".to_string()], "cell")
-        ));
+        assert!(!noeta_stdlib::registry::has_static_ctx_route("acme.cell"));
     }
     use noeta_ast::AttrValue;
     use noeta_ast::reflect::AttributeRecord;

@@ -229,6 +229,27 @@ pub struct RawWorkspace {
 /// Read the entry file and its sibling `.noe` modules into labeled [`Source`]s, without lexing,
 /// parsing, or linking — the file-system front of the salsa module graph. An `io::Error` is only
 /// for a failure to read the entry itself; unreadable siblings are skipped (as in [`read_siblings`]).
+/// The exact `Source` sequence (and `SourceId` assignment) `link_with_deps` builds for a
+/// workspace: entry = 0, siblings `1..=S` (the `RawWorkspace` order), then each dependency
+/// package's modules in package order. THE one place the ordering lives — the startup cache's
+/// hit path reconstructs a `SourceMap` for span rendering without re-parsing, and it must agree
+/// with the loader's assignment or a cache HIT would attribute panic tracebacks, breakpoints,
+/// and diagnostics to the wrong files (an ordering change here is loud; a second hand-rolled
+/// copy drifting was silent).
+pub fn workspace_sources(workspace: &RawWorkspace, deps: &[DepPackage]) -> Vec<Source> {
+    let mut sources = Vec::with_capacity(1 + workspace.modules.len());
+    sources.push(workspace.entry.clone());
+    sources.extend(workspace.modules.iter().cloned());
+    let mut next_id = sources.len() as u32;
+    for dep in deps {
+        for module in &dep.modules {
+            sources.push(Source::new(SourceId(next_id), &module.name, &module.text));
+            next_id += 1;
+        }
+    }
+    sources
+}
+
 pub fn read_workspace(entry_path: &Path) -> io::Result<RawWorkspace> {
     let text = std::fs::read_to_string(entry_path)?;
     let entry = Source::new(SourceId(0), entry_path.display().to_string(), text);

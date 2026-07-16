@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use noeta_diagnostics::{Diagnostic, render, render_mapped};
 use noeta_pm::manifest;
-use noeta_span::{Source, SourceId, SourceMap};
+use noeta_span::{Source, SourceMap};
 
 /// A resolved startup-cache slot: an open cache, the content key for this program, and the workspace
 /// `SourceMap` (so a cache hit renders diagnostics against real source without re-parsing).
@@ -364,19 +364,10 @@ fn open_startup_cache(
     let key = key.finish();
 
     let cache = noeta_cache::Cache::open()?;
-    // Rebuild the exact Source sequence `load_with_deps` assigns SourceIds to, so a cached module's
-    // spans resolve. `read_workspace` gave entry (id 0) + siblings; dependency modules continue the
-    // ids in the same order the loader parses them.
-    let mut sources = Vec::with_capacity(1 + workspace.modules.len());
-    sources.push(workspace.entry);
-    sources.extend(workspace.modules);
-    let mut next_id = sources.len() as u32;
-    for dep in deps {
-        for module in &dep.modules {
-            sources.push(Source::new(SourceId(next_id), &module.name, &module.text));
-            next_id += 1;
-        }
-    }
+    // The exact Source sequence `load_with_deps` assigns SourceIds to, so a cached module's spans
+    // resolve — built by the LOADER's own `workspace_sources` (the single ordering authority; this
+    // used to be a hand-rolled copy held in lockstep by a comment).
+    let sources = noeta_loader::workspace_sources(&workspace, deps);
     Some(CacheSlot {
         cache,
         key,
