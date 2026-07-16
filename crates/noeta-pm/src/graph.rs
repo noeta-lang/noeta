@@ -314,7 +314,9 @@ fn enforce_transparency(
         let crate::manifest::GitRef::Tag(tag) = git_ref else {
             continue;
         };
-        index.verify_inclusion_at(&pkg.identity, &pkg.version.to_string(), url, tag, sha, &cp)?;
+        // `None` license: the lock doesn't carry one, so only the coordinates are checked — the
+        // record's license field is still authenticated by inclusion, just not cross-checked here.
+        index.verify_inclusion_at(&pkg.identity, &pkg.version.to_string(), url, tag, sha, None, &cp)?;
     }
     Ok(crate::lock::LogTrust {
         public_key: key,
@@ -1295,6 +1297,7 @@ mod tests {
             signature: None,
             bundle: None,
             published_at,
+            license: None,
         }
     }
 

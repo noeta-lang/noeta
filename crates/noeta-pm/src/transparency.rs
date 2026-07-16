@@ -32,7 +32,12 @@ fn node_hash(left: &Hash, right: &Hash) -> Hash {
 
 /// The canonical log record for a release — the exact bytes whose leaf the log stored, reproduced here
 /// so a client can recompute the leaf and check it against the served record. MUST match the server's
-/// `logRecord`. `provenance` is `key:{sig}`, `keyless:{sha256hex(bundle)}`, or `unsigned`.
+/// `logRecord`. `provenance` is `key:{sig}`, `keyless:{sha256hex(bundle)}`, or `unsigned`; `license`
+/// is the declared SPDX expression, or "" when the release declared none.
+///
+/// Record fields are only ever **appended** (`license` came after the original six), and verification
+/// parses length-tolerantly: a record missing trailing fields predates them and still verifies
+/// against what it does bind.
 pub fn log_record(
     name: &str,
     version: &str,
@@ -40,8 +45,9 @@ pub fn log_record(
     tag: &str,
     sha: &str,
     provenance: &str,
+    license: &str,
 ) -> String {
-    format!("noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n")
+    format!("noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n{license}\n")
 }
 
 /// Verify that `leaf` at index `m` in a tree of `size` with `root` is proven by `proof`.

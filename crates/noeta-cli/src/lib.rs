@@ -1177,6 +1177,16 @@ fn cmd_publish(
     };
     let name = format!("{}/{}", pkg.name.company, pkg.name.package);
     let version = pkg.version.clone();
+    // The declared license travels with the release into the registry's immutable record (and its
+    // transparency-log leaf). Optional — but nudge, since consumers can't legally use an unlicensed
+    // package.
+    let license = pkg.license.clone();
+    if license.is_none() {
+        eprintln!(
+            "lang: note: `[package]` declares no `license` — consider `license = \"MIT OR Apache-2.0\"` \
+             (an SPDX expression) so consumers know the terms"
+        );
+    }
 
     // A published package must depend **only via the registry** (Phase 4, follow-up #3): a path
     // dependency can't travel to a consumer, and a git dependency isn't expressible in the index's
@@ -1340,6 +1350,7 @@ fn cmd_publish(
         bundle,
         // The registry stamps the publish time server-side; the client doesn't supply it.
         published_at: None,
+        license: license.clone(),
     };
     match index.publish(&name, &release) {
         Ok(()) => {
@@ -1553,6 +1564,8 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
                 url,
                 tag,
                 sha,
+                // Resolved deps don't carry a license claim to cross-check — coordinates only.
+                None,
                 pinned.as_deref(),
             ) {
                 Ok(v) => {

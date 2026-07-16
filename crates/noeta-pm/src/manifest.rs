@@ -242,6 +242,11 @@ pub struct PackageMeta {
     /// Rust into a consumer's build, which should never be triggered by the mere presence of a
     /// directory.
     pub native: Option<String>,
+    /// The declared license as an **SPDX expression** (`license = "MIT OR Apache-2.0"`). Sent with
+    /// a publish and recorded in the registry's immutable release record (and its transparency-log
+    /// leaf). `None` when the package declares none. Shape-checked at parse time; the claim is the
+    /// publisher's — consumers can check the SHA-pinned source's LICENSE file.
+    pub license: Option<String>,
 }
 
 impl PackageMeta {
@@ -855,12 +860,34 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
             Some(validate_native_dir(dir)?)
         }
     };
+    let license = match pkg.get("license") {
+        None => None,
+        Some(v) => {
+            let expr = v.as_str().ok_or("`package.license` must be a string (an SPDX expression)")?;
+            Some(validate_license(expr)?)
+        }
+    };
     Ok(Some(PackageMeta {
         name,
         version,
         edition,
         native,
+        license,
     }))
+}
+
+/// Syntactic validation of a `package.license` value: an SPDX license expression like
+/// `MIT OR Apache-2.0`. Shape only (SPDX charset, non-empty, bounded — mirrors the registry's
+/// check), not a full SPDX parser: the goal is catching typos and garbage at `noeta check` time,
+/// not adjudicating license law.
+fn validate_license(expr: &str) -> Result<String, String> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() || expr.len() > 120 || !expr.chars().all(|c| c.is_ascii_alphanumeric() || " .+()-".contains(c)) {
+        return Err(format!(
+            "`package.license` `{expr}` is not an SPDX license expression (letters, digits, ` .+()-`, ≤ 120 chars)"
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Syntactic validation of a `package.native` value (Phase 3, N3.1): a non-empty **relative**
@@ -1326,6 +1353,33 @@ mod tests {
         )
         .expect_err("unknown edition rejected");
         assert!(err.contains("2030"), "names the offending value: {err}");
+    }
+
+    #[test]
+    fn parses_a_license_and_rejects_a_malformed_one() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n\
+             license = \"MIT OR Apache-2.0\"\n",
+        )
+        .expect("valid");
+        assert_eq!(
+            m.package().unwrap().license.as_deref(),
+            Some("MIT OR Apache-2.0")
+        );
+        // Omitted → None (a license is optional, nudged at publish).
+        let m = Manifest::parse("[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n").unwrap();
+        assert_eq!(m.package().unwrap().license, None);
+        // Not an SPDX-shaped expression → a manifest error naming the value.
+        let err = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n\
+             license = \"<script>\"\n",
+        )
+        .expect_err("malformed license rejected");
+        assert!(err.contains("SPDX"), "{err}");
     }
 
     // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------
