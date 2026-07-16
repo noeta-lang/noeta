@@ -57,6 +57,18 @@ bare `from_name` at the sites that must also see user traits (registration, boun
 
 New type: `Type::DynTrait(String)` (trait name), spelled `dyn <Trait>`; `TypeRef` parses it.
 
+## Status: UT1–UT4 DONE ✅ (UT5 deferred)
+
+- **UT1** `30a173d7` — `trait` decl + E0053. **UT2** `4b3e4070` — impl + dispatch (idempotent
+  `hoist_standalone_impl_methods` in IR lowering + VM surface pass). **UT3** `3d4317ea` — `<T: Trait>`
+  bounds (E0025/E0014), method call on bounded param. **UT4** `8a58bcf5` — `dyn Trait` objects
+  (checker+parser only; runtime dispatch already worked). Corpus 620/620, differential green.
+- **UT5 (default-method fallback) DEFERRED**: an omitted default method isn't hoisted onto the
+  implementor, so calling it fails at runtime; conformance allows omission. Do when the framework
+  needs a real default (e.g. `ServiceProvider.boot()` no-op).
+- **Gotcha:** rebuild `noeta-conformance` after any parser/checker change (it embeds them) — a stale
+  binary silently reports old behavior.
+
 ## Slices (each green + committed; differential oracle per slice)
 
 - **UT1 — declare.** `TraitKw` lexer token; `TraitDecl` AST + `Stmt::Trait`; parser (`trait Name { sigs }`,
