@@ -143,28 +143,9 @@ fn dt_error(message: impl Into<String>) -> StdError {
 }
 
 // --- Argument helpers ---------------------------------------------------------------------------
-
-fn want_arity(func: &str, args: &[NativeValue], n: usize) -> Result<(), StdError> {
-    if args.len() == n {
-        Ok(())
-    } else {
-        Err(crate::arity_error(func, n, args.len()))
-    }
-}
-
-fn want_int(func: &str, args: &[NativeValue], i: usize) -> Result<i64, StdError> {
-    match args.get(i) {
-        Some(NativeValue::Scalar(Scalar::Int(n))) => Ok(*n),
-        _ => Err(crate::type_error(func, "int")),
-    }
-}
-
-fn want_str<'a>(func: &str, args: &'a [NativeValue], i: usize) -> Result<&'a str, StdError> {
-    match args.get(i) {
-        Some(NativeValue::Str(s)) => Ok(s),
-        _ => Err(crate::type_error(func, "string")),
-    }
-}
+// The shared guards come from `noeta_native::args` (audit-2 F8); `want_extern` is the
+// datetime-specific extractor (a typed extern downcast) and stays local.
+use noeta_native::args::{want_arity, want_int, want_str};
 
 /// Downcast an extern-value argument to a concrete datetime type (`Instant`/`Duration`/…).
 fn want_extern<'a, T: 'static>(

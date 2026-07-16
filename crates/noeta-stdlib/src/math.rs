@@ -16,6 +16,7 @@
 //!   (`ln(-1.0)`, `asin(2.0)`) yield NaN, matching `sqrt(-1.0)` — no new failure mode.
 
 use crate::{Arg, Dispatch, ErrorKind, Output, StdError};
+use noeta_native::args::want_arity;
 
 /// The `math` function names, in dispatch order — for tooling that wants the surface.
 pub const FUNCTIONS: &[&str] = &[
@@ -203,14 +204,6 @@ fn pick(func: &str, args: &[Arg], which: Ordering) -> Result<Output, StdError> {
         (Number::Int(_), Number::Int(_), Number::Int(i)) => Output::Int(i),
         _ => Output::Float(chosen.as_float()),
     })
-}
-
-fn want_arity(func: &str, args: &[Arg], expected: usize) -> Result<(), StdError> {
-    if args.len() == expected {
-        Ok(())
-    } else {
-        Err(crate::arity_error(func, expected, args.len()))
-    }
 }
 
 /// Read a numeric argument as a float, accepting both int and float (ints widen, as arithmetic

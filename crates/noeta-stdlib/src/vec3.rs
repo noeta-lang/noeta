@@ -732,7 +732,16 @@ fn f32_list_out(scalars: Vec<f32>) -> Result<CtxOut, CtxError> {
 
 /// If `slot` is a packed Vec3 list, its layout + a copy of its bytes (the binary ops' left
 /// operand, which must outlive the right operand's borrow). `None` → the caller falls back.
-fn packed_vec3(ctx: &mut dyn NativeCtx, slot: Slot) -> CtxResult<Option<(bool, Vec<u8>)>> {
+///
+/// Bounded on the narrow [`noeta_native::ctx::PackedBuffers`] view rather than the full
+/// `NativeCtx` (audit-2 F9): the signature states this helper only reads packed buffers, and the
+/// `&mut dyn NativeCtx` callers pass straight through the blanket impl. The bound is
+/// path-qualified on purpose — importing the view's name file-wide would make the sibling
+/// helpers' `ctx.with_packed(…)` calls ambiguous against `NativeCtx`'s own methods.
+fn packed_vec3<C: noeta_native::ctx::PackedBuffers + ?Sized>(
+    ctx: &mut C,
+    slot: Slot,
+) -> CtxResult<Option<(bool, Vec<u8>)>> {
     let mut out = None;
     ctx.with_packed(slot, &mut |v, bytes| {
         if vec3_view(v) {
