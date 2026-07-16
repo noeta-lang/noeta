@@ -93,10 +93,11 @@ type Extra<'src> = extra::Err<Rich<'src, T, SimpleSpan>>;
 pub(crate) struct Ctx<'src> {
     source: &'src Source,
     diags: &'src RefCell<Vec<Diagnostic>>,
-    /// Byte offsets at which a newline terminates the preceding statement (see
-    /// [`noeta_lexer::newline_terminator_offsets`]). Consulted by [`stmt_terminator`] as a soft
-    /// terminator so a complete statement is newline-ended even when its last token is not one the
-    /// lexer treats as statement-ending (e.g. a generic-close `>`).
+    /// Byte offsets at which a newline terminates the preceding statement (every
+    /// [`noeta_lexer::newline_boundaries`] entry, hard or soft). Consulted by [`stmt_terminator`]
+    /// as a soft terminator so a complete statement is newline-ended even when its last token is
+    /// not statement-ending (e.g. a generic-close `>`). Hard boundaries are *additionally*
+    /// materialized as zero-width `;` in the parse input (see [`weave_hard_semicolons`]).
     soft_terminators: &'src HashSet<u32>,
     /// The language [`Edition`] the file is written against — its own package's edition when parsed
     /// through the pipeline, the default for a plain [`parse`]. A `${…}` hole is re-lexed on its own
@@ -873,9 +874,12 @@ fn parse_inner(
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Parsed {
     let diags = RefCell::new(Vec::new());
-    let soft_terminators: HashSet<u32> = noeta_lexer::newline_terminator_offsets(source, tokens)
-        .into_iter()
-        .collect();
+    // The single statement-termination scan (audit-3 Finding 7): the parser owns both halves of
+    // the decision — every boundary offset is a soft terminator ([`newline_terminator`]), and each
+    // *hard* boundary is materialized as a zero-width `;` in the parse input so no construct can
+    // extend across it (`f\n(x)` stays two statements, never a call).
+    let boundaries = noeta_lexer::newline_boundaries(source, tokens);
+    let soft_terminators: HashSet<u32> = boundaries.iter().map(|b| b.offset).collect();
     let ctx = Ctx {
         source,
         diags: &diags,
@@ -884,7 +888,7 @@ fn parse_inner(
         text_tiers,
     };
     let len = source.text().len();
-    let toks: Vec<(T, SimpleSpan)> = tokens.iter().map(|t| (t.kind, to_simple(t.span))).collect();
+    let toks = weave_hard_semicolons(tokens, &boundaries, 0);
     let eoi: SimpleSpan = (len..len).into();
     let input = toks.as_slice().map(eoi, |(t, s)| (t, s));
 
@@ -905,6 +909,41 @@ fn parse_inner(
         },
         diagnostics,
     }
+}
+
+/// Build the chumsky parse input from a lexed token stream, materializing each **hard**
+/// [`noeta_lexer::NewlineBoundary`] as a zero-width `;` just after the preceding token — the
+/// statement *barrier* half of newline termination. The lexer no longer synthesizes terminator
+/// tokens (audit-3 Finding 7); the parser applies the statement-ending gate itself, here, so the
+/// expression grammar cannot extend a construct across a hard boundary (`f\n(x)` stays two
+/// statements) while the grammar proper stays untouched. The woven `;` is byte-identical to the
+/// synthetic token the lexer used to insert: `T::Semicolon`, empty span at the previous token's
+/// end. `shift` rebases spans into the enclosing source (0 for a whole file; the hole's absolute
+/// offset for a re-lexed `${…}` hole slice, whose boundaries are hole-local).
+fn weave_hard_semicolons(
+    tokens: &[Token],
+    boundaries: &[noeta_lexer::NewlineBoundary],
+    shift: u32,
+) -> Vec<(T, SimpleSpan)> {
+    let mut hard = boundaries
+        .iter()
+        .filter(|b| b.hard)
+        .map(|b| b.offset)
+        .peekable();
+    let mut out: Vec<(T, SimpleSpan)> = Vec::with_capacity(tokens.len() + 16);
+    let mut prev_end: u32 = 0;
+    for tok in tokens {
+        // A boundary offset is the start of the token the newline precedes; there is never a
+        // boundary before the first token (a boundary needs a preceding token).
+        if hard.peek() == Some(&tok.span.start) {
+            hard.next();
+            let at = (prev_end + shift) as usize;
+            out.push((T::Semicolon, (at..at).into()));
+        }
+        out.push((tok.kind, to_simple(tok.span.shifted(shift))));
+        prev_end = tok.span.end;
+    }
+    out
 }
 
 /// Map a chumsky [`Rich`] structural error onto the central diagnostic catalog. A
@@ -2067,9 +2106,10 @@ where
         .or(just(T::Semicolon).ignored());
 
     // An empty statement — a lone `;` — produces no statement. With optional line-end semicolons
-    // (object-model slice 7) the lexer inserts a synthetic `;` after a block-bodied statement
-    // (`fn f() {}`, `if c {}`) when a newline follows, and a user may type a stray one; absorbing it
-    // here (a `None`, like a recovered token) keeps it a silent no-op rather than a parse error.
+    // (object-model slice 7) the parse input carries a woven zero-width `;` after a block-bodied
+    // statement (`fn f() {}`, `if c {}`) when a newline follows ([`weave_hard_semicolons`]), and a
+    // user may type a stray one; absorbing it here (a `None`, like a recovered token) keeps it a
+    // silent no-op rather than a parse error.
     let empty = just(T::Semicolon).to(None);
 
     choice((
@@ -2081,9 +2121,10 @@ where
     .map(|stmts| stmts.into_iter().flatten().collect())
 }
 
-/// A statement terminator (object-model slice 7): an explicit or lexer-synthesized `;`, or — making
-/// the `;` before a closing brace or end-of-input optional, Go-style — a **peeked** `}` or EOF that
-/// is left unconsumed, or a **soft** newline terminator ([`newline_terminator`]). So a one-line
+/// A statement terminator (object-model slice 7): an explicit `;` or a woven hard-boundary `;`
+/// ([`weave_hard_semicolons`]), or — making the `;` before a closing brace or end-of-input
+/// optional, Go-style — a **peeked** `}` or EOF that is left unconsumed, or a **soft** newline
+/// terminator ([`newline_terminator`]). So a one-line
 /// `{ echo 1 }` and a trailing statement with no newline both terminate, a newline reliably ends a
 /// complete statement even when its last token is not statement-ending (`x is List<int>`), while two
 /// statements with neither `;` nor a newline between them stay an error.
@@ -2101,13 +2142,12 @@ where
 
 /// A soft statement terminator: succeeds **without consuming** when the next token starts a new line
 /// (its start offset is in [`Ctx::soft_terminators`]). Because the terminator is only queried after a
-/// statement's expression has parsed to completion, this turns a newline into a terminator exactly
-/// where the lexer's synthetic `;` would have, minus the requirement that the previous token be
-/// statement-ending — the expression grammar never sees it, so operator-led continuations (`1 +\n2`)
-/// are unaffected. The offsets measure bracket depth **relative to the innermost `{`** (see
-/// [`noeta_lexer::newline_terminator_offsets`]), so statements in a closure body nested inside a call
-/// (`xs.map(fn(n) { … })`) newline-terminate like any other block. At end-of-input `any()` fails, but
-/// the `end()` branch has already matched there.
+/// statement's expression has parsed to completion, this turns a newline into a terminator without
+/// requiring the previous token to be statement-ending — the expression grammar never sees it, so
+/// operator-led continuations (`1 +\n2`) are unaffected. The offsets measure bracket depth
+/// **relative to the innermost `{`** (see [`noeta_lexer::newline_boundaries`]), so statements in a
+/// closure body nested inside a call (`xs.map(fn(n) { … })`) newline-terminate like any other block.
+/// At end-of-input `any()` fails, but the `end()` branch has already matched there.
 fn newline_terminator<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, (), Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
@@ -2347,8 +2387,8 @@ where
                 args: args.unwrap_or_default(),
                 span: ctx.to_span(e.span()),
             })
-            // A `#[...]` is a prefix of the declaration it decorates; absorb the synthetic `;` the
-            // lexer inserts when it sits on its own line above the declaration (slice 7).
+            // A `#[...]` is a prefix of the declaration it decorates; absorb the woven hard-boundary `;`
+            // when it sits on its own line above the declaration (slice 7).
             .then_ignore(just(T::Semicolon).repeated());
 
         // `#[...] fn name<T: Bound>(params): Ret { body }` — a declaration (the `name` distinguishes
@@ -2506,7 +2546,7 @@ where
             .then(
                 method
                     .clone()
-                    // Absorb the synthetic `;` the lexer inserts between members on separate lines
+                    // Absorb the woven hard-boundary `;` between members on separate lines
                     // (object-model slice 7); a type/impl body is newline-separated, not `;`-ended.
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
@@ -2539,7 +2579,7 @@ where
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(
                 enum_member
-                    // Absorb the synthetic `;` between members on separate lines (slice 7).
+                    // Absorb the woven `;` between members on separate lines (slice 7).
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
@@ -2595,7 +2635,7 @@ where
             .then(
                 method
                     .clone()
-                    // Absorb the synthetic `;` the lexer inserts between members on separate lines
+                    // Absorb the woven hard-boundary `;` between members on separate lines
                     // (object-model slice 7); a type/impl body is newline-separated, not `;`-ended.
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
@@ -2626,7 +2666,7 @@ where
                     class_impl.clone(),
                     class_field.clone(),
                 ))
-                // Absorb the synthetic `;` between members on separate lines (slice 7).
+                // Absorb the woven `;` between members on separate lines (slice 7).
                 .then_ignore(just(T::Semicolon).repeated())
                 .repeated()
                 .collect::<Vec<_>>()
@@ -2672,7 +2712,7 @@ where
             .then(type_params.clone())
             .then(
                 choice((class_method, class_impl, class_destructor, class_field))
-                    // Absorb the synthetic `;` between members on separate lines (slice 7).
+                    // Absorb the woven `;` between members on separate lines (slice 7).
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
@@ -3106,7 +3146,7 @@ where
                 args,
             })
             // A `@derive(...)`/`@attribute`/`@role`/`@semantic` directive prefixes a type decl;
-            // absorb the synthetic `;` when it sits on its own line above the decl (slice 7).
+            // absorb the woven `;` when it sits on its own line above the decl (slice 7).
             .then_ignore(just(T::Semicolon).repeated());
 
         // A `#[...]` data attribute in decorator position, wrapping the shared `attr_decl` (defined
@@ -3220,7 +3260,7 @@ where
         // A tier block's body is **either** the verbatim text of a text-tier block (`@doc` et al.)
         // — the lexer captured it as a single `DocText` token (slice 6f), which is sliced back out
         // of the source here — or a statement list for a code tier (the same recovering list a
-        // `{ }` block uses, absorbing the synthetic `;` the lexer inserts between members on
+        // `{ }` block uses, absorbing the woven hard-boundary `;` between members on
         // separate lines, slice 7). The text branch is tried first; a code body's first token is
         // never `DocText`, so it falls through. This is the one point the body text materializes,
         // so the brace escapes (`\{`/`\}`/`\\`) are undone here — every content consumer
@@ -3322,7 +3362,7 @@ where
                     .filter(|(name, _): &(String, Span)| name == "tier"),
             )
             .then(tier_args.clone())
-            // Absorb the synthetic `;` when the directive sits on its own line above the `fn`
+            // Absorb the woven `;` when the directive sits on its own line above the `fn`
             // (slice 7), exactly as `derive_directive` does.
             .then_ignore(just(T::Semicolon).repeated())
             .then(fn_decl.clone())
@@ -3502,7 +3542,7 @@ mod tests {
     #[test]
     fn newline_terminates_a_statement_ending_in_a_generic_close() {
         // A generic-close `>` is not statement-ending (indistinguishable at the token level from a
-        // dangling `>` comparison), so the lexer inserts no synthetic `;`. The parser's soft newline
+        // dangling `>` comparison), so no hard-boundary `;` is woven. The parser's soft newline
         // terminator closes that gap: these `is`-tests on consecutive lines need no `;`.
         let parsed = parse_str("echo xs is List<int>\necho xs is List<string>\necho 1\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -3522,6 +3562,38 @@ mod tests {
             "f(\n    1,\n    {\n        \"a\": fn() {\n            x = 1\n            return x\n        },\n    },\n)\n",
         );
         assert!(args.diagnostics.is_empty(), "{:?}", args.diagnostics);
+    }
+
+    #[test]
+    fn hard_boundary_is_a_barrier_not_just_a_terminator() {
+        // A hard newline boundary is woven into the parse input as a zero-width `;`
+        // (`weave_hard_semicolons`), so no construct extends across it — the behavior the lexer's
+        // synthetic `;` used to provide. A `(` or `[` opening the next line is a new statement,
+        // never a call/index on the previous line's value.
+        let call = parse_str("x = f\n(1)\n");
+        assert!(call.diagnostics.is_empty(), "{:?}", call.diagnostics);
+        assert_eq!(call.program.stmts.len(), 2, "`f\\n(1)` must not be a call");
+        let index = parse_str("x = xs\n[1]\n");
+        assert!(index.diagnostics.is_empty(), "{:?}", index.diagnostics);
+        assert_eq!(
+            index.program.stmts.len(),
+            2,
+            "`xs\\n[1]` must not be an index"
+        );
+        // An `=` starting a line cannot reach back across the barrier: `x\n= 1` stays an error.
+        assert!(!parse_str("x\n= 1\n").diagnostics.is_empty());
+        // Allman-style braces stay rejected: the barrier separates `if c` from `{ }`.
+        assert!(!parse_str("if c\n{ echo 1 }\n").diagnostics.is_empty());
+        // Inside a bracket-nested closure body the *hard* rule keeps its historical absolute-depth
+        // parameterization: `a\n(n)` there is a call, exactly as before the convergence. (The soft
+        // terminator never fires mid-expression, and no `;` is woven at absolute depth 1.)
+        let nested = parse_str("ys = xs.map(fn(n) {\n  a\n(n)\n})\n");
+        assert!(nested.diagnostics.is_empty(), "{:?}", nested.diagnostics);
+        assert!(
+            nested.program.to_pretty_string().contains("(call"),
+            "`a\\n(n)` inside a call's closure body stays a call:\n{}",
+            nested.program.to_pretty_string()
+        );
     }
 
     #[test]

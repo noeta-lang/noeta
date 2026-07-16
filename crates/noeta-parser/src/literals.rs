@@ -6,12 +6,12 @@
 
 use chumsky::prelude::*;
 use noeta_ast::{Expr, StrPart};
-use noeta_lexer::{TokenKind as T, lex_in};
+use noeta_lexer::lex_in;
 use noeta_span::{Source, SourceId, Span};
 
 // A `${…}` interpolation hole is itself an expression, so `parse_hole` re-enters the grammar.
 // `literals` is a descendant module, so it can name these otherwise-private grammar items.
-use crate::{Ctx, expr_parser, rich_to_diag, statement_parser, to_simple};
+use crate::{Ctx, expr_parser, rich_to_diag, statement_parser};
 
 /// Find the byte offset of the `}` that closes a hole opened at `start`, tracking brace
 /// depth so nested braces (e.g. a map literal inside the hole) are handled. Returns the
@@ -417,11 +417,13 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     // Re-lex the hole with the file's tier set, so a nested `@html { … }` inside the hole (an
     // inline loop body) captures its verbatim body just as it would at the top level.
     let lexed = lex_in(&temp, ctx.edition, ctx.text_tiers);
-    let toks: Vec<(T, SimpleSpan)> = lexed
-        .tokens
-        .iter()
-        .map(|t| (t.kind, to_simple(t.span.shifted(abs_offset))))
-        .collect();
+    // Materialize the hole's own hard newline boundaries as zero-width `;`, exactly as the whole-file
+    // parse does (`weave_hard_semicolons`). The hole's *soft* boundaries are hole-local and are not
+    // added to the enclosing `Ctx::soft_terminators` — statements inside a hole's closure bodies
+    // terminate via hard boundaries only, as they always have (the enclosing file's soft set never
+    // contains offsets interior to the tier body's verbatim token).
+    let boundaries = noeta_lexer::newline_boundaries(&temp, &lexed.tokens);
+    let toks = crate::weave_hard_semicolons(&lexed.tokens, &boundaries, abs_offset);
     for mut diag in lexed.diagnostics {
         // The hole was lexed on a throwaway source; rebase its offsets and re-tag them to the
         // real enclosing source so the diagnostic renders against the right file.
