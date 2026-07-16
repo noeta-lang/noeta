@@ -458,11 +458,20 @@ impl Printer<'_> {
             Stmt::Binding {
                 mut_decl,
                 name,
+                name_span,
                 ty,
                 value,
                 span,
-                ..
             } => {
+                // A compound assignment `x += v` / `x ~= v` / `x ??= v` or an index-assignment
+                // `x[k] = v` desugars to a binding whose value re-reads the target; reconstruct
+                // the surface form the author wrote (see `compound_assign_form`).
+                if !*mut_decl
+                    && let Some(doc) =
+                        self.compound_assign_form(name, *name_span, ty.as_ref(), value)?
+                {
+                    return Ok(self.leaf(doc, value.span().end, span.end));
+                }
                 let mut head = Vec::new();
                 if *mut_decl {
                     head.push(Doc::text("mut "));
@@ -1492,6 +1501,25 @@ impl Printer<'_> {
                     self.operand(right, 1, true)?,
                 ])
             }
+            // A set literal `#{a, b}` parses to the same AST as `[a, b].to_set()` (pure sugar);
+            // reconstruct and format it back to `#{…}` so `noeta fmt` round-trips the surface form
+            // the author wrote. The desugar reuses the literal's span, so the node's source begins
+            // with `#{` iff the author wrote the set literal (a hand-written `[..].to_set()` begins
+            // at `[`) — the same source-sniff `if_then_else_form` relies on, sound because fmt only
+            // ever formats freshly parsed source.
+            Expr::Call { callee, args, span }
+                if args.is_empty() && self.set_literal_items(callee, *span).is_some() =>
+            {
+                let items = self.set_literal_items(callee, *span).expect("guard checked");
+                let mut ds = Vec::new();
+                for i in items {
+                    ds.push(self.expr(i)?);
+                }
+                let broke = items
+                    .first()
+                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
+                self.delimited("#{", ds, "}", false, broke)
+            }
             Expr::Call { callee, args, .. } => Doc::concat([
                 self.receiver(callee)?,
                 self.arg_list(args, callee.span().end)?,
@@ -1645,13 +1673,22 @@ impl Printer<'_> {
             Expr::FieldSet {
                 receiver,
                 field,
+                field_span,
                 value,
                 ..
-            } => Doc::concat([
-                self.expr(receiver)?,
-                Doc::text(format!(".{field} = ")),
-                self.expr(value)?,
-            ]),
+            } => {
+                // A field compound assignment `x.f += v` / `x.f ??= v` or a field index-assignment
+                // `x.f[k] = v` desugars to a `FieldSet` whose value re-reads the field; reconstruct
+                // the surface form the author wrote (see `field_compound_form`).
+                match self.field_compound_form(receiver, field, *field_span, value)? {
+                    Some(doc) => doc,
+                    None => Doc::concat([
+                        self.expr(receiver)?,
+                        Doc::text(format!(".{field} = ")),
+                        self.expr(value)?,
+                    ]),
+                }
+            }
         })
     }
 
@@ -1855,6 +1892,137 @@ impl Printer<'_> {
                     .next()
                     .is_none_or(|c| !c.is_alphanumeric() && c != '_')
             })
+    }
+
+    /// If `callee` is the `[..].to_set` member of the set-literal desugar (`#{a, b}` →
+    /// `[a, b].to_set()`) *and* the node's source begins with `#{`, return the set elements.
+    /// The desugar reuses the literal's span, so the source check distinguishes an authored
+    /// `[..].to_set()` (which begins at `[`) from the sugar — reliable because fmt only ever
+    /// formats freshly parsed source (see [`Printer::if_then_else_form`]).
+    fn set_literal_items<'e>(&self, callee: &'e Expr, span: Span) -> Option<&'e [Expr]> {
+        if !self
+            .source
+            .get(span.start as usize..)
+            .is_some_and(|rest| rest.starts_with("#{"))
+        {
+            return None;
+        }
+        match callee {
+            Expr::Member { receiver, name, .. } if name == "to_set" => match &**receiver {
+                Expr::List { items, .. } => Some(items),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// If this binding was produced by the parser desugaring a compound assignment
+    /// (`x += v` → `x = x + v`, likewise `-= *= /= %= ~=`, and `x ??= v` → `x = x ?? v`) or an
+    /// index-assignment (`x[k] = v` → `x = x.set(k, v)`), reconstruct and format the surface form
+    /// the author wrote. The discriminator is **span identity**: the desugar builds the re-read of
+    /// `x` with the *target's* `name_span`, and two tokens can never share an offset in authored
+    /// source (in a hand-written `x = x + v` the second `x` sits after the `=`) — reliable because
+    /// fmt only ever formats freshly parsed source. Returns `None` for a hand-written binding; the
+    /// caller then formats normally.
+    fn compound_assign_form(
+        &self,
+        name: &str,
+        name_span: Span,
+        ty: Option<&TypeRef>,
+        value: &Expr,
+    ) -> Result<Option<Doc>, FmtError> {
+        let reads_target =
+            |e: &Expr| matches!(e, Expr::Ident { span, .. } if *span == name_span);
+        // `x OP= v` (the annotated `x: T OP= v` form round-trips its annotation).
+        let compound = |op: &str, rhs: &Expr| -> Result<Option<Doc>, FmtError> {
+            let mut head = vec![Doc::text(name.to_string())];
+            if let Some(ty) = ty {
+                head.push(Doc::text(": "));
+                head.push(self.type_ref(ty)?);
+            }
+            head.push(Doc::text(format!(" {op}= ")));
+            head.push(self.expr(rhs)?);
+            Ok(Some(Doc::concat(head)))
+        };
+        match value {
+            Expr::Binary { op, lhs, rhs, .. }
+                if compound_assign_op(*op) && reads_target(lhs) =>
+            {
+                compound(op.symbol(), rhs)
+            }
+            Expr::Coalesce {
+                value: read,
+                fallback,
+                ..
+            } if reads_target(read) => compound("??", fallback),
+            // `x[k] = v` — the value-semantics `set` update over the target (plain `=` only; the
+            // desugar never carries a type annotation).
+            Expr::Call { callee, args, .. } if ty.is_none() && args.len() == 2 => match &**callee {
+                Expr::Member {
+                    receiver,
+                    name: method,
+                    ..
+                } if method == "set" && reads_target(receiver) => Ok(Some(Doc::concat([
+                    Doc::text(name.to_string()),
+                    Doc::text("["),
+                    self.expr(&args[0])?,
+                    Doc::text("] = "),
+                    self.expr(&args[1])?,
+                ]))),
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// The `FieldSet` twin of [`Printer::compound_assign_form`]: if this field assignment was
+    /// produced by desugaring `x.f += v` / `x.f ??= v` (value re-reads the field) or `x.f[k] = v`
+    /// (value is `x.f.set(k, v)`), reconstruct the surface form. Same span-identity discriminator:
+    /// the desugared re-read of `x.f` carries the *target's* `field_span` as its member name span.
+    fn field_compound_form(
+        &self,
+        receiver: &Expr,
+        field: &str,
+        field_span: Span,
+        value: &Expr,
+    ) -> Result<Option<Doc>, FmtError> {
+        let reads_field =
+            |e: &Expr| matches!(e, Expr::Member { name_span, .. } if *name_span == field_span);
+        let compound = |op: &str, rhs: &Expr| -> Result<Option<Doc>, FmtError> {
+            Ok(Some(Doc::concat([
+                self.expr(receiver)?,
+                Doc::text(format!(".{field} {op}= ")),
+                self.expr(rhs)?,
+            ])))
+        };
+        match value {
+            Expr::Binary { op, lhs, rhs, .. }
+                if compound_assign_op(*op) && reads_field(lhs) =>
+            {
+                compound(op.symbol(), rhs)
+            }
+            Expr::Coalesce {
+                value: read,
+                fallback,
+                ..
+            } if reads_field(read) => compound("??", fallback),
+            // `x.f[k] = v` — the `set` update composed with the field assignment.
+            Expr::Call { callee, args, .. } if args.len() == 2 => match &**callee {
+                Expr::Member {
+                    receiver: read,
+                    name: method,
+                    ..
+                } if method == "set" && reads_field(read) => Ok(Some(Doc::concat([
+                    self.expr(receiver)?,
+                    Doc::text(format!(".{field}[")),
+                    self.expr(&args[0])?,
+                    Doc::text("] = "),
+                    self.expr(&args[1])?,
+                ]))),
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
     }
 
     /// Reconstruct an expression-tier body (`@html { … ${hole} … }`). If the tier's extension
@@ -2132,6 +2300,21 @@ fn prec(e: &Expr) -> u8 {
         // Atoms and self-delimiting forms never need parentheses as an operand.
         _ => u8::MAX,
     }
+}
+
+/// Whether `op` has a compound-assignment spelling (`x OP= v`), i.e. is one of the operators the
+/// parser's `AssignKind::Binary` desugar produces. Guards the resugaring in
+/// [`Printer::compound_assign_form`]/[`Printer::field_compound_form`] to exactly those shapes.
+fn compound_assign_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::Concat
+    )
 }
 
 /// A deterministic sort key for a `use` statement (`path`, then names) — the import-sort order.
