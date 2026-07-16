@@ -18,9 +18,6 @@ pub struct Prepared {
     pub db: LangDatabase,
     pub ws: Workspace,
     pub sources: Vec<Source>,
-    /// The root package's language edition — the entry and its siblings are one package (this path
-    /// resolves no dependencies), so every source is analyzed under it (editions arc).
-    pub edition: noeta_lexer::Edition,
 }
 
 impl Prepared {
@@ -39,7 +36,9 @@ pub fn prepare(
 ) -> Result<Prepared, rmcp::ErrorData> {
     let sources = crate::resolve_sources(source, file)?;
     let db = LangDatabase::default();
-    // The entry's package edition (from its `noeta.toml`), or the default for an inline `source`.
+    // The entry's package edition (from its `noeta.toml`), or the default for an inline `source`
+    // — the entry and its siblings are one package (this path resolves no dependencies), so every
+    // source is analyzed under it (editions arc).
     let edition = file
         .as_deref()
         .map(|f| noeta_pm::manifest::root_edition(std::path::Path::new(f)))
@@ -48,12 +47,7 @@ pub fn prepare(
         .split_first()
         .expect("resolve_sources always yields at least the entry");
     let ws = noeta_db::workspace(&db, entry, modules, edition);
-    Ok(Prepared {
-        db,
-        ws,
-        sources,
-        edition,
-    })
+    Ok(Prepared { db, ws, sources })
 }
 
 /// A resolved source location: 1-based line and column plus the raw byte offset. The column counts
@@ -169,9 +163,12 @@ pub fn locate_span(p: &Prepared, span: noeta_span::Span) -> Option<(String, Span
     Some((source.name().to_string(), index.span_loc(span)))
 }
 
-/// The entry file's [`SourceProgram`] — the salsa input the per-file `ast`/`tokens` queries take.
+/// The entry file's [`SourceProgram`] — the workspace's own first-member input (ide-workspaces:
+/// `prepare` builds the entry at index 0), so the per-file `ast`/`tokens` queries memoize against
+/// the same input the workspace query family reads. Previously this minted a fresh input per
+/// call, duplicating the entry in the database and defeating per-file memoization.
 pub fn entry_program(p: &Prepared) -> noeta_db::SourceProgram {
-    noeta_db::source_program(&p.db, &p.sources[0], p.edition)
+    noeta_db::workspace_entry(&p.db, p.ws)
 }
 
 /// Whether a span belongs to the entry file (spans from imported siblings are filtered out of

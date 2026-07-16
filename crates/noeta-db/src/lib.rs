@@ -334,42 +334,60 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
 }
 
 // ---------------------------------------------------------------------------
-// The module graph (M1.9.3)
+// The module graph (M1.9.3; entry-parametric since the ide-workspaces rework)
 // ---------------------------------------------------------------------------
 //
-// A multi-file program is a [`Workspace`]: one entry `SourceProgram` plus its sibling module
-// inputs. The [`linked`] query resolves the entry's `use` declarations against the modules'
-// declared namespaces (reusing each source's memoized [`ast`]) and merges the resolved
-// declarations into one [`Program`]; [`linked_checked`] and [`linked_bytecode`] are the
-// whole-program checker and compiler over that merge — the workspace analogues of [`checked`]
-// and [`bytecode`].
+// A multi-file program is a [`Workspace`]: a flat set of member `SourceProgram` inputs (a
+// directory's `.noe` files) plus resolved dependency modules. The [`linked_from`] query resolves
+// ONE member's — the entry's — `use` declarations against the other members' declared namespaces
+// (reusing each source's memoized [`ast_in`]) and merges the resolved declarations into one
+// [`Program`]; [`linked_checked_from`] and [`linked_bytecode_from`] are the whole-program checker
+// and compiler over that merge — the workspace analogues of [`checked`] and [`bytecode`].
 //
 // ```text
-//   Workspace (input: entry + module SourcePrograms)
+//   Workspace (input: member SourcePrograms, SHARED by every entry)
 //        │
-//        ├── ast(entry) ─────┐
-//        ├── ast(module_1) ──┤
-//        ├── ast(module_n) ──┴──►  linked  ──►  linked_checked
-//        │                            │
-//        │                            └──────►  linked_bytecode
+//        ├── ast_in(member_0) ──┐
+//        ├── ast_in(member_1) ──┤
+//        ├── ast_in(member_n) ──┴──►  linked_from(ws, entry)  ──►  linked_checked_from(ws, entry)
+//        │                                    │
+//        │                                    └──────────────────►  linked_bytecode_from(ws, entry)
 // ```
 //
-// Resolution lives in [`linked`], so it depends on every module's `ast` — editing a module
-// re-links — but the per-source `tokens`/`ast` queries stay independent: editing one module
-// never recomputes another's parse. That is the incremental boundary M2's hot reload builds on.
+// The entry is a QUERY PARAMETER, not a workspace field: salsa memoizes the link/check per
+// `(ws, entry)`, while the per-source `tokens_in`/`ast_in` memoize once per file no matter how
+// many entries link over the same workspace — the sharing that lets an editor keep one workspace
+// (one set of inputs) per directory instead of one per open document (audit-4 finding 6).
+// Resolution lives in [`linked_from`], so it depends on every member's `ast_in` — editing any
+// member re-links — but the per-source parses stay independent: editing one module never
+// recomputes another's parse. That is the incremental boundary M2's hot reload builds on.
+//
+// The classic single-entry surface ([`linked`], [`linked_checked`], [`linked_checked_ide`],
+// [`linked_bytecode`]) remains as thin wrappers that link from the workspace's FIRST member —
+// the conventional entry every [`workspace`]-constructed workspace puts at index 0 — so the
+// compile-path consumers (conformance, MCP `check`) read exactly what they always did.
 
-/// A multi-file program: the entry source plus its sibling module sources, each a memoized
-/// [`SourceProgram`] input, and — for a package (package-manager P2.1c) — its resolved dependency
-/// packages' modules. Mutating any one source invalidates exactly the queries that read it.
+/// A multi-file program: the member sources — each a memoized [`SourceProgram`] input — and, for
+/// a package (package-manager P2.1c), its resolved dependency packages' modules. Mutating any one
+/// source invalidates exactly the queries that read it. There is no distinguished entry member:
+/// the entry is a parameter of [`linked_from`] and friends, so one workspace serves every member
+/// as an entry (memoized per `(ws, entry)`).
 #[salsa::input(debug)]
 pub struct Workspace {
-    pub entry: SourceProgram,
     #[returns(ref)]
-    pub modules: Vec<SourceProgram>,
+    pub members: Vec<SourceProgram>,
     /// The resolved dependency packages' modules (empty for a lone/sibling-only workspace). Each
-    /// carries its re-root info; [`linked`] re-roots and links them as closed units.
+    /// carries its re-root info; [`linked_from`] re-roots and links them as closed units.
     #[returns(ref)]
     pub dep_modules: Vec<DepModule>,
+}
+
+/// The workspace's conventional entry: its **first member**. What the classic single-entry query
+/// surface ([`linked`], [`linked_checked`], …) links from — every [`workspace`]/
+/// [`workspace_with_deps`]-constructed workspace puts the entry at index 0, preserving their
+/// behavior exactly. Panics on an (unconstructible via the public helpers) empty workspace.
+pub fn workspace_entry(db: &dyn salsa::Database, ws: Workspace) -> SourceProgram {
+    ws.members(db)[0]
 }
 
 /// One dependency package module in a salsa [`Workspace`] (package-manager P2.1c): its source input
@@ -405,18 +423,18 @@ pub struct DepSources {
 /// Build a [`Workspace`] input from the entry [`Source`], its sibling module sources (as produced by
 /// `noeta_loader::read_workspace`), and the root package's edition. Each source becomes a
 /// [`SourceProgram`] under `root_edition`; no dependency packages (use [`workspace_with_deps`]).
+/// The entry becomes the first member, so the classic [`linked`] surface links from it.
 pub fn workspace(
     db: &LangDatabase,
     entry: &Source,
     modules: &[Source],
     root_edition: noeta_lexer::Edition,
 ) -> Workspace {
-    let entry_input = source_program(db, entry, root_edition);
-    let module_inputs = modules
-        .iter()
+    let members = std::iter::once(entry)
+        .chain(modules)
         .map(|s| source_program(db, s, root_edition))
         .collect();
-    Workspace::new(db, entry_input, module_inputs, Vec::new())
+    Workspace::new(db, members, Vec::new())
 }
 
 /// Build a [`Workspace`] that also links **dependency packages** (package-manager P2.1c): the entry
@@ -430,9 +448,8 @@ pub fn workspace_with_deps(
     deps: &[DepSources],
     root_edition: noeta_lexer::Edition,
 ) -> Workspace {
-    let entry_input = source_program(db, entry, root_edition);
-    let module_inputs = modules
-        .iter()
+    let members = std::iter::once(entry)
+        .chain(modules)
         .map(|s| source_program(db, s, root_edition))
         .collect();
     let mut dep_inputs = Vec::new();
@@ -449,7 +466,7 @@ pub fn workspace_with_deps(
             ));
         }
     }
-    Workspace::new(db, entry_input, module_inputs, dep_inputs)
+    Workspace::new(db, members, dep_inputs)
 }
 
 /// Flatten a rename map to the `[local0, global0, …]` pairs a [`DepModule`] stores.
@@ -466,18 +483,17 @@ fn reroot_map(flat: &[String]) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-/// Resolve and merge the workspace: the entry's imports against the modules' declared namespaces,
-/// producing one merged [`Program`] (or the load diagnostics). Depends on every source's [`ast`]
-/// (so editing any module re-links), but not on any cross-module edge — the per-source parse
 /// The workspace's declared text-tier names (text-tiers arc): the union of every member file's
-/// `@tier(<name>, …, text: "…")` declarations — entry, siblings, and dependency modules alike —
+/// `@tier(<name>, …, text: "…")` declarations — members and dependency modules alike —
 /// sorted and deduped. Derived from the per-file [`tokens`] scans, so an edit that adds or
 /// removes a declaration changes this value and invalidates exactly the workspace-aware lexes
 /// ([`tokens_in`]); any other edit backdates (the value compares equal) and they stay memoized.
 #[salsa::tracked(returns(ref))]
 pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<String> {
-    let mut names: Vec<String> = std::iter::once(ws.entry(db))
-        .chain(ws.modules(db).iter().copied())
+    let mut names: Vec<String> = ws
+        .members(db)
+        .iter()
+        .copied()
         .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
         .flat_map(|src| tokens(db, src).0.text_tier_decls.iter().cloned())
         .collect();
@@ -517,13 +533,17 @@ pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> As
     ))
 }
 
-/// queries remain independent. The merge means both backends run the linked program unchanged, so
-/// the differential oracle is preserved by construction.
+/// Resolve and merge the workspace **from `entry`** (any member): the entry's imports against the
+/// other members' declared namespaces, producing one merged [`Program`] (or the load diagnostics).
+/// Memoized per `(ws, entry)`; depends on every member's [`ast_in`] (so editing any module
+/// re-links), but not on any cross-module edge — the per-source parse queries remain independent
+/// and memoize once per file no matter how many entries link over the same workspace. The merge
+/// means both backends run the linked program unchanged, so the differential oracle is preserved
+/// by construction.
 #[salsa::tracked(returns(ref))]
-pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
-    let entry_src = ws.entry(db);
-    let entry_tokens = tokens_in(db, ws, entry_src);
-    let entry_ast = ast_in(db, ws, entry_src);
+pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram) -> LinkedProgram {
+    let entry_tokens = tokens_in(db, ws, entry);
+    let entry_ast = ast_in(db, ws, entry);
     // The entry must lex and parse before it can be linked; surface its load diagnostics otherwise
     // (rendered against the entry, like every import error).
     let entry_diags: Vec<Diagnostic> = entry_tokens
@@ -537,11 +557,15 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
         return LinkedProgram(Err(entry_diags));
     }
 
-    let entry_source = source_of(db, entry_src);
-    // Read each module's `ast` (this is what makes `linked` a dependent of every module). Only a
-    // cleanly-parsed module contributes; `link_parsed` keeps just the ones declaring a namespace.
+    let entry_source = source_of(db, entry);
+    // Read each other member's `ast_in` (this is what makes the link a dependent of every module).
+    // Only a cleanly-parsed module contributes; `link_parsed` keeps just the ones declaring a
+    // namespace.
     let mut module_programs: Vec<&Program> = Vec::new();
-    for &m in ws.modules(db) {
+    for &m in ws.members(db) {
+        if m == entry {
+            continue;
+        }
         let toks = tokens_in(db, ws, m);
         let parsed = ast_in(db, ws, m);
         if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
@@ -593,16 +617,26 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
     }
 }
 
+/// Classic single-entry link: [`linked_from`] the workspace's first member (the conventional
+/// entry — see [`workspace_entry`]). The compile-path surface; behavior-identical to the
+/// pre-entry-parametric query for every [`workspace`]-constructed workspace.
+pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> &LinkedProgram {
+    linked_from(db, ws, workspace_entry(db, ws))
+}
+
 /// The per-source [`EditionMap`](noeta_lexer::EditionMap) for a whole workspace — every member
-/// source (entry, siblings, dependency modules) under its own package's edition, keyed by
-/// `SourceId`. The salsa analogue of the loader's `Linked::editions`, so [`linked_checked`] applies
-/// each package's edition per declaration over the merged program. Public so a consumer that checks
-/// a *derived* program (e.g. `noeta-mcp` re-checking a tier-activated linked program) can apply the
-/// same per-source editions — the `SourceId`s survive activation, so the map stays valid.
+/// source (and dependency module) under its own package's edition, keyed by `SourceId`. The salsa
+/// analogue of the loader's `Linked::editions`, so [`linked_checked_from`] applies each package's
+/// edition per declaration over the merged program. Entry-independent: the map covers all members.
+/// Public so a consumer that checks a *derived* program (e.g. `noeta-mcp` re-checking a
+/// tier-activated linked program) can apply the same per-source editions — the `SourceId`s survive
+/// activation, so the map stays valid.
 pub fn workspace_editions(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexer::EditionMap {
     let mut map = noeta_lexer::EditionMap::new();
-    for src in std::iter::once(ws.entry(db))
-        .chain(ws.modules(db).iter().copied())
+    for src in ws
+        .members(db)
+        .iter()
+        .copied()
         .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
     {
         map.set(SourceId(src.id(db)), edition_of(db, src));
@@ -610,11 +644,16 @@ pub fn workspace_editions(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexe
     map
 }
 
-/// Type-check the linked program — the workspace analogue of [`checked`]. A load failure carries
-/// its diagnostics straight through (there is no program to check).
+/// Type-check the program linked from `entry` — the workspace analogue of [`checked`], memoized
+/// per `(ws, entry)`. A load failure carries its diagnostics straight through (there is no
+/// program to check).
 #[salsa::tracked(returns(ref))]
-pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
-    match &linked(db, ws).0 {
+pub fn linked_checked_from(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    entry: SourceProgram,
+) -> Checked {
+    match &linked_from(db, ws, entry).0 {
         // The shared helper maps every checker output field — both the LSP track's
         // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
         Ok(program) => from_check_output(noeta_check::check_all_with_editions(
@@ -631,13 +670,22 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     }
 }
 
-/// The IDE-flavored whole-workspace check: like [`linked_checked`], but the result's
+/// Classic single-entry check: [`linked_checked_from`] the workspace's first member.
+pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> &Checked {
+    linked_checked_from(db, ws, workspace_entry(db, ws))
+}
+
+/// The IDE-flavored whole-workspace check: like [`linked_checked_from`], but the result's
 /// [`Checked::expr_types`] is populated (via [`noeta_check::check_all_with_types`]) — the merged,
 /// multi-file span→type index the LSP reads for cross-module hover and member navigation. The
-/// compile path stays on [`linked_checked`] and never builds the index.
+/// compile path stays on [`linked_checked_from`] and never builds the index.
 #[salsa::tracked(returns(ref))]
-pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
-    match &linked(db, ws).0 {
+pub fn linked_checked_ide_from(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    entry: SourceProgram,
+) -> Checked {
+    match &linked_from(db, ws, entry).0 {
         Ok(program) => from_check_output(noeta_check::check_all_with(
             program,
             noeta_check::CheckOptions {
@@ -656,15 +704,24 @@ pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     }
 }
 
-/// Compile the linked program to a [`Module`] — the workspace analogue of [`bytecode`]. Callers
-/// gate on [`linked`] being `Ok` (and [`linked_checked`] being empty) before reaching a real
-/// `Module`; when the link failed there is nothing to compile, so an empty program stands in (a
-/// valid, never-observed `Module`).
+/// Classic single-entry ide check: [`linked_checked_ide_from`] the workspace's first member.
+pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> &Checked {
+    linked_checked_ide_from(db, ws, workspace_entry(db, ws))
+}
+
+/// Compile the program linked from `entry` to a [`Module`] — the workspace analogue of
+/// [`bytecode`], memoized per `(ws, entry)`. Callers gate on [`linked_from`] being `Ok` (and
+/// [`linked_checked_from`] being empty) before reaching a real `Module`; when the link failed
+/// there is nothing to compile, so an empty program stands in (a valid, never-observed `Module`).
 #[salsa::tracked(returns(ref))]
-pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
-    match &linked(db, ws).0 {
+pub fn linked_bytecode_from(
+    db: &dyn salsa::Database,
+    ws: Workspace,
+    entry: SourceProgram,
+) -> Bytecode {
+    match &linked_from(db, ws, entry).0 {
         Ok(program) => {
-            let checked = linked_checked(db, ws);
+            let checked = linked_checked_from(db, ws, entry);
             Bytecode(noeta_compiler::compile_with_sites(
                 program,
                 checked.sites.clone(),
@@ -678,6 +735,11 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
             span: Span::empty_at(0),
         })),
     }
+}
+
+/// Classic single-entry compile: [`linked_bytecode_from`] the workspace's first member.
+pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> &Bytecode {
+    linked_bytecode_from(db, ws, workspace_entry(db, ws))
 }
 
 #[cfg(test)]
@@ -699,7 +761,7 @@ mod tests {
         let mut db = LangDatabase::default();
         let source = Source::new(SourceId::FIRST, "test.noe", "echo 1;\n");
         let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, src, Vec::new(), Vec::new());
+        let ws = Workspace::new(&db, vec![src], Vec::new());
         seed_ext_env(&mut db, vec!["blueprint".to_string()]);
         assert!(
             workspace_text_tiers(&db, ws).contains(&"blueprint".to_string()),
@@ -886,7 +948,7 @@ mod tests {
         let entry_src = source_program(&db, &entry, noeta_lexer::Edition::DEFAULT);
         let a_src = source_program(&db, &a, noeta_lexer::Edition::DEFAULT);
         let b_src = source_program(&db, &b, noeta_lexer::Edition::DEFAULT);
-        let ws = Workspace::new(&db, entry_src, vec![a_src, b_src], Vec::new());
+        let ws = Workspace::new(&db, vec![entry_src, a_src, b_src], Vec::new());
 
         assert!(linked(&db, ws).0.is_ok());
         let a_ast_before = ast(&db, a_src) as *const Ast;
@@ -904,6 +966,64 @@ mod tests {
         );
         // The link itself re-runs (it depends on every module) and stays well-formed.
         assert!(linked(&db, ws).0.is_ok());
+    }
+
+    #[test]
+    fn one_workspace_serves_two_entries_and_shares_the_parses() {
+        // The entry-parametric family (ide-workspaces): TWO members of ONE workspace each link as
+        // an entry — memoized per (ws, entry) — while the per-source workspace-aware parse
+        // (`ast_in`) memoizes ONCE per file across both links. This is the sharing that lets the
+        // editor keep one workspace per directory instead of one per open document.
+        let db = LangDatabase::default();
+        let main = Source::new(
+            SourceId(0),
+            "main.noe",
+            "namespace App.Main;\nuse App.A.Foo;\nf = Foo { x: 1 };\necho f.x;\n",
+        );
+        let a = Source::new(
+            SourceId(1),
+            "a.noe",
+            "namespace App.A;\npub class Foo { pub x: int }\n",
+        );
+        let main_src = source_program(&db, &main, noeta_lexer::Edition::DEFAULT);
+        let a_src = source_program(&db, &a, noeta_lexer::Edition::DEFAULT);
+        let ws = Workspace::new(&db, vec![main_src, a_src], Vec::new());
+
+        // Link from `main` (imports the sibling), then from `a` (a library module, no imports).
+        let from_main = linked_from(&db, ws, main_src);
+        assert!(from_main.0.is_ok(), "{:?}", from_main.0);
+        let a_ast_after_first_link = ast_in(&db, ws, a_src) as *const Ast;
+        let from_a = linked_from(&db, ws, a_src);
+        assert!(from_a.0.is_ok(), "{:?}", from_a.0);
+
+        // The second entry's link did not re-parse the shared member: identical memoized value.
+        assert_eq!(
+            a_ast_after_first_link,
+            ast_in(&db, ws, a_src) as *const Ast,
+            "ast_in must memoize once per (ws, src) across entries"
+        );
+        // The two merges are per-entry: main's merge carries the qualified Foo, a's own merge is
+        // just its own declarations.
+        let main_prog = from_main.0.as_ref().unwrap();
+        assert!(
+            main_prog
+                .stmts
+                .iter()
+                .any(|s| matches!(s, noeta_ast::Stmt::Class(c) if c.name == "App.A.Foo"))
+        );
+        // Both entries check over the shared workspace.
+        assert!(
+            linked_checked_from(&db, ws, main_src)
+                .diagnostics
+                .is_empty()
+        );
+        assert!(linked_checked_from(&db, ws, a_src).diagnostics.is_empty());
+        // And the classic surface is exactly "link from the first member".
+        assert_eq!(
+            linked(&db, ws) as *const LinkedProgram,
+            linked_from(&db, ws, main_src) as *const LinkedProgram,
+            "`linked` must be the memoized first-member link"
+        );
     }
 
     #[test]

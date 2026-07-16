@@ -165,13 +165,15 @@ pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
                 });
         }
     }
+    // The workspace's own member inputs (entry + siblings, in `sources` order) — reading their
+    // memoized per-file parses instead of minting duplicate inputs per call (ide-workspaces).
+    let members = p.ws.members(&p.db);
     let modules = p
         .sources
         .iter()
         .enumerate()
         .map(|(source_idx, src)| {
-            let sp = noeta_db::source_program(&p.db, src, p.edition);
-            let parsed = noeta_db::ast(&p.db, sp);
+            let parsed = noeta_db::ast(&p.db, members[source_idx]);
             let mut namespace = String::new();
             let mut imports = Vec::new();
             for stmt in &parsed.0.program.stmts {
