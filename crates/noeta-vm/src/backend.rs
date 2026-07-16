@@ -4,7 +4,17 @@
 //! `--jit-stats` report types ([`JitStats`], [`JitReport`], [`JitBailSite`],
 //! [`JitDeclinedLoop`]).
 
-use crate::*;
+#[cfg(feature = "compile")]
+use crate::{DebugSession, Program, Unsupported, compile};
+use crate::{
+    Debugger, Frame, HotSwapMailbox, IsolateFactory, Module, ProfileHook, RetTransform, Vm, release,
+};
+#[cfg(feature = "compile")]
+use noeta_backend::Backend;
+use noeta_backend::{RunResult, TraceFrame};
+#[cfg(feature = "compile")]
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// The bytecode-VM backend.
 #[derive(Debug, Clone, Default)]
