@@ -401,7 +401,7 @@ impl Index for LocalIndex {
 
 /// Minimal TOML basic-string quoting for the values we emit.
 fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    crate::toml_quote(s)
 }
 
 /// Open the registry index a resolve/publish should use (package-manager Phase 4, S4). With the

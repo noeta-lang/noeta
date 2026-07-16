@@ -78,3 +78,11 @@ pub use git::resolve_tag_sha;
 /// compose key folds in. Re-exported for the one out-of-graph consumer (`noeta publish`'s API-docs
 /// build hands the composer a crate dir directly, with no resolved graph to copy the hash from).
 pub use store::hash_tree;
+
+/// Minimal TOML basic-string quoting for values this workspace *emits* (lockfile entries, local
+/// index records, composed-shim manifests, `noeta add` dependency lines): escapes backslashes and
+/// double quotes; the values never contain control characters. One implementation — four crates
+/// hand-rolled identical copies before.
+pub fn toml_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('\"', "\\\""))
+}

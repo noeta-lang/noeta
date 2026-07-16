@@ -384,7 +384,7 @@ pub fn write(
 /// Minimal TOML basic-string quoting for the values we emit (identities, versions, SHAs, URLs, and
 /// paths). Escapes backslashes and double quotes; the values never contain control characters.
 fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    crate::toml_quote(s)
 }
 
 #[cfg(test)]

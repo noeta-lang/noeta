@@ -288,26 +288,8 @@ pub fn commit_web_url(url: &str, sha: &str) -> Option<String> {
 /// Run `git` with `args`, returning trimmed stdout on success or a message built from stderr. A
 /// failure to even spawn `git` (not installed) is reported as such.
 fn run_git<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
-    let args: Vec<&str> = args.into_iter().collect();
-    // Prepend any token-auth `-c` config (private-registries S5) so a private github.com URL — whether
-    // a registry package or a plain private `git` dependency — authenticates; empty when no
-    // NOETA_GITHUB_TOKEN, so git falls back to ambient credentials.
-    let auth = crate::git_auth::git_auth_args();
-    let output = Command::new("git")
-        .args(auth.iter().map(String::as_str))
-        .args(&args)
-        .output()
-        .map_err(|err| format!("cannot run `git` (is it installed and on PATH?): {err}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "`git {}` failed: {}",
-            args.join(" "),
-            stderr.trim()
-        ))
-    }
+    // Delegates to the git_auth choke point (one runner, one credential-injection path).
+    crate::git_auth::run_git(args)
 }
 
 #[cfg(test)]

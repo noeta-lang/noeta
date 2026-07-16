@@ -222,17 +222,9 @@ fn path_str(p: &Path) -> Result<&str, String> {
 /// (private-registries S5) is prepended so private-repo version discovery authenticates; empty when no
 /// `NOETA_GITHUB_TOKEN`, so git uses ambient credentials.
 fn git(args: &[&str]) -> Result<String, String> {
-    let auth = crate::git_auth::git_auth_args();
-    let output = Command::new("git")
-        .args(auth.iter().map(String::as_str))
-        .args(args)
-        .output()
-        .map_err(|err| format!("cannot run `git` (is it installed and on PATH?): {err}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
+    // Delegates to the git_auth choke point (one runner, one credential-injection path); the
+    // richer error ("is it installed?", the failing argv) replaced this copy's bare stderr.
+    crate::git_auth::run_git(args.iter().copied())
 }
 
 #[cfg(test)]

@@ -1838,7 +1838,7 @@ fn scope_registry_base(scope: &str) -> Result<Option<String>, ExitCode> {
 
 /// Quote a string as a TOML basic string for a manifest value we write (`noeta add`).
 fn toml_string(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    noeta_pm::toml_quote(s)
 }
 
 /// `noeta cache <path|info|clear>` — inspect or clear the transparent startup cache.

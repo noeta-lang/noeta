@@ -882,7 +882,7 @@ fn rust_str(s: &str) -> String {
 
 /// Minimal TOML basic-string quoting (paths, names, URLs — never control characters).
 fn toml_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    noeta_pm::toml_quote(s)
 }
 
 /// Hand the invocation to the composed binary: same argv, `NOETA_COMPOSED=1`. On unix this
