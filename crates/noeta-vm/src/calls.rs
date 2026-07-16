@@ -288,11 +288,11 @@ impl<'m> Vm<'m> {
                     return Ok(Value::make_channel_send(id, args[0]));
                 }
                 "close" => {
-                    match &mut self.channels[id.index()] {
+                    match &mut self.persist.channels[id.index()] {
                         Channel::Local { closed, .. } => *closed = true,
                         Channel::Shared(core) => core.close(),
                     }
-                    self.channel_progress += 1;
+                    self.persist.channel_progress += 1;
                     return Ok(Value::unit());
                 }
                 _ => {}

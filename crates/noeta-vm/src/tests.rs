@@ -393,7 +393,7 @@ fn run_top_persists_globals_across_entries_then_one_teardown_zeroes_residency() 
     // Entry 1 binds the global `xs` (a heap list) and leaves it live between entries.
     vm.run_top();
     assert!(
-        vm.globals.iter().any(|v| !v.is_unbound()),
+        vm.persist.globals.iter().any(|v| !v.is_unbound()),
         "a global bound by the first entry survives into the next"
     );
     assert!(

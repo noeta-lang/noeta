@@ -226,10 +226,12 @@ impl<'m> Vm<'m> {
         extended.map_packed_sites = self.module.map_packed_sites.clone();
 
         // (2) Grow the derived tables from the snapshot's tails (all appends are prefix-stable).
-        for shape in &extended.shapes[self.shapes.len()..] {
-            self.shapes.push(noeta_object::intern_shape(shape.clone()));
+        for shape in &extended.shapes[self.persist.shapes.len()..] {
+            self.persist
+                .shapes
+                .push(noeta_object::intern_shape(shape.clone()));
         }
-        for def in &extended.packed_schemas[self.packed_schemas.len()..] {
+        for def in &extended.packed_schemas[self.persist.packed_schemas.len()..] {
             let fields = def
                 .fields
                 .iter()
@@ -239,20 +241,21 @@ impl<'m> Vm<'m> {
                     noeta_bytecode::PackedFieldDef::F32 => noeta_object::PackedKind::F32,
                     noeta_bytecode::PackedFieldDef::Bool => noeta_object::PackedKind::Bool,
                     noeta_bytecode::PackedFieldDef::Struct(idx) => {
-                        noeta_object::PackedKind::Struct(self.packed_schemas[*idx as usize])
+                        noeta_object::PackedKind::Struct(self.persist.packed_schemas[*idx as usize])
                     }
                 })
                 .collect();
-            self.packed_schemas
+            self.persist
+                .packed_schemas
                 .push(noeta_object::intern_schema(noeta_object::PackedSchema {
-                    shape: self.shapes[def.shape as usize],
+                    shape: self.persist.shapes[def.shape as usize],
                     fields,
                     byte_size: def.byte_size as usize,
                     column: def.column,
                 }));
         }
-        for repr in &extended.type_reprs[self.type_reprs.len()..] {
-            self.type_reprs.push(Rc::new(repr.clone()));
+        for repr in &extended.type_reprs[self.persist.type_reprs.len()..] {
+            self.persist.type_reprs.push(Rc::new(repr.clone()));
         }
         for m in &extended.methods[self.module.methods.len()..] {
             self.methods
@@ -271,7 +274,8 @@ impl<'m> Vm<'m> {
             .extend(extended.tojson_derives.iter().cloned());
         self.destruct_reachable
             .extend(extended.destruct_reachable.iter().cloned());
-        self.globals
+        self.persist
+            .globals
             .resize(extended.global_names.len(), Value::unbound());
 
         // (3) Swap to the arena'd snapshot; the dispatch loop picks it up at the next frame transfer.
@@ -588,7 +592,7 @@ impl<'m> Vm<'m> {
         else {
             return Err("internal error: fragment sentinel not bound".into());
         };
-        let closure = std::mem::replace(&mut self.globals[slot], Value::unbound());
+        let closure = std::mem::replace(&mut self.persist.globals[slot], Value::unbound());
         if closure.is_unbound() {
             return Err("the fragment did not produce a value".into());
         }

@@ -403,12 +403,15 @@ impl<'m> Vm<'m> {
             } else {
                 args.iter().map(|a| marshal_native_arg(*a)).collect()
             };
-            return match reg.dispatch(module, func, &mut *self.host, &nargs) {
+            return match reg.dispatch(module, func, &mut *self.persist.host, &nargs) {
                 // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
                 // back a leaf async-IO future `.await` later resolves — the same shape the old
                 // per-backend `fs.*_async` intercept produced, now reached by ordinary dispatch.
                 Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
-                    let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
+                    let id = self
+                        .persist
+                        .executor
+                        .spawn_ext(&mut *self.persist.host, spawn.0);
                     Ok(Value::make_async_io(id))
                 }
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
@@ -461,12 +464,13 @@ impl<'m> Vm<'m> {
         // `get()` hot loop at intercept speed.
         if let Some(retained) = fast_read
             && args.is_empty()
-            && (self.ext_closed_gates.is_empty()
+            && (self.persist.ext_closed_gates.is_empty()
                 || !self
+                    .persist
                     .ext_closed_gates
                     .contains(&ext.expect("fast read implies a type").name))
         {
-            let value = self.ext_arena[retained as usize].expect("a live arena entry");
+            let value = self.persist.ext_arena[retained as usize].expect("a live arena entry");
             retain(value);
             return Ok(value);
         }
@@ -492,7 +496,7 @@ impl<'m> Vm<'m> {
                 }
             })
             .collect();
-        let host = &mut *self.host;
+        let host = &mut *self.persist.host;
         let result = recv.with_extern_mut(|e| reg.dispatch_method(e, method, host, &nargs));
         match result {
             Ok(out) => Ok(materialize_native(out)),

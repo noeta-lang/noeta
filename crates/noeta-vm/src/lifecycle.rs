@@ -198,22 +198,6 @@ impl<'m> Vm<'m> {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
     ) -> Vm<'m> {
-        // Cached: fixed per host (see the `tel_on` field). Read before `host` moves into the Vm.
-        let tel_on = host.tel_enabled();
-        let methods = module
-            .methods
-            .iter()
-            .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
-            .collect();
-        let destructors = module.destructors.iter().cloned().collect();
-        let field_defaults = module
-            .field_defaults
-            .iter()
-            .map(|(t, f, proto)| ((t.clone(), f.clone()), *proto))
-            .collect();
-        let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
-        let comparable_derives = module.comparable_derives.iter().cloned().collect();
-        let tojson_derives = module.tojson_derives.iter().cloned().collect();
         // One shared `&'static Shape` per shape-table entry, then resolve each packed-list layout against it.
         // Schemas are interned inner-before-outer, so a nested struct's schema (a lower index) is always
         // built before the parent that references it.
@@ -223,13 +207,6 @@ impl<'m> Vm<'m> {
             .cloned()
             .map(noeta_object::intern_shape)
             .collect();
-        // P-PKEY: register each key-capable type's field names once, so a packed map key —
-        // which carries only (type name, field values) — can derive its display on demand.
-        for shape in &shapes {
-            if shape.key_capable {
-                noeta_stdlib::map_key::packed_names::register(&shape.name, shape.fields.iter());
-            }
-        }
         let mut packed_schemas: Vec<&'static noeta_object::PackedSchema> =
             Vec::with_capacity(module.packed_schemas.len());
         for def in &module.packed_schemas {
@@ -253,25 +230,80 @@ impl<'m> Vm<'m> {
                 column: def.column,
             }));
         }
-        // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).
-        let map_packed: HashMap<Span, &'static noeta_object::PackedSchema> = module
-            .map_packed_sites
-            .iter()
-            .map(|(span, idx)| (*span, packed_schemas[*idx as usize]))
-            .collect();
         // Build one shared `Rc<TypeRepr>` per interned reflected element type (R1), so each tagged
         // `MakeList` is a cheap `Rc` clone rather than a fresh `TypeRepr` allocation per execution.
         let type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>> =
             module.type_reprs.iter().cloned().map(Rc::new).collect();
+        Self::load_with(
+            module,
+            SessionState {
+                globals: vec![Value::unbound(); module.global_names.len()],
+                global_order: Vec::new(),
+                channels: Vec::new(),
+                channel_progress: 0,
+                ext_arena: Vec::new(),
+                ext_arena_free: Vec::new(),
+                embed_handles: Vec::new(),
+                embed_handles_free: Vec::new(),
+                ext_state: Vec::new(),
+                ext_closed_gates: Vec::new(),
+                shapes,
+                packed_schemas,
+                type_reprs,
+                host,
+                executor,
+                registry: None,
+            },
+        )
+    }
+
+    /// Build a VM over a **ready persistent state** (audit-1 finding 4): [`Vm::load`] hands a fresh
+    /// one, a session entry hands the session's own back in ([`Vm::load_seeded`]) — one move, so no
+    /// persistent field can be silently dropped between entries. Everything built here is per-entry
+    /// scratch or a module-derived *name* table; `persist`'s identity-carrying derived tables
+    /// (shapes / packed schemas / type reprs / globals sizing) must already cover `module`
+    /// (`SessionState::sync_to` on the seeded path, the fresh build in `load` otherwise).
+    pub(crate) fn load_with(module: &'m Module, persist: SessionState) -> Vm<'m> {
+        // Cached: fixed per host (see the `tel_on` field).
+        let tel_on = persist.host.tel_enabled();
+        let methods = module
+            .methods
+            .iter()
+            .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
+            .collect();
+        let destructors = module.destructors.iter().cloned().collect();
+        let field_defaults = module
+            .field_defaults
+            .iter()
+            .map(|(t, f, proto)| ((t.clone(), f.clone()), *proto))
+            .collect();
+        let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
+        let comparable_derives = module.comparable_derives.iter().cloned().collect();
+        let tojson_derives = module.tojson_derives.iter().cloned().collect();
+        // P-PKEY: register each key-capable type's field names once, so a packed map key —
+        // which carries only (type name, field values) — can derive its display on demand.
+        // Over `persist.shapes` (idempotent, process-global), so a session entry that introduced
+        // a new key-capable type registers it exactly like a fresh load does.
+        for shape in &persist.shapes {
+            if shape.key_capable {
+                noeta_stdlib::map_key::packed_names::register(&shape.name, shape.fields.iter());
+            }
+        }
+        // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).
+        // Against the persistent (identity-carrying) schemas, so on a seeded entry an old span
+        // still resolves to the same shared schema.
+        let map_packed: HashMap<Span, &'static noeta_object::PackedSchema> = module
+            .map_packed_sites
+            .iter()
+            .map(|(span, idx)| (*span, persist.packed_schemas[*idx as usize]))
+            .collect();
         Vm {
             module,
             debug_session: None,
             hot_mailbox: None,
             applied_swaps: 0,
             pure_eval: false,
-            shapes,
-            packed_schemas,
-            type_reprs,
+            persist,
             map_packed,
             methods,
             destructors,
@@ -279,24 +311,12 @@ impl<'m> Vm<'m> {
             destruct_reachable,
             comparable_derives,
             tojson_derives,
-            globals: vec![Value::unbound(); module.global_names.len()],
-            global_order: Vec::new(),
-            host,
-            executor,
             sched: SchedState {
                 scopes: Vec::new(),
                 ctx_current: Vec::new(),
                 tel_on,
                 traced_futures: Vec::new(),
             },
-            channels: Vec::new(),
-            channel_progress: 0,
-            ext_arena: Vec::new(),
-            ext_arena_free: Vec::new(),
-            embed_handles: Vec::new(),
-            embed_handles_free: Vec::new(),
-            ext_state: Vec::new(),
-            ext_closed_gates: Vec::new(),
             ctx_table_pool: Vec::new(),
             isolates: IsolateState {
                 parallel_isolates: false,
@@ -351,7 +371,6 @@ impl<'m> Vm<'m> {
             },
             debugger: None,
             profiler: None,
-            registry: None,
         }
     }
 
@@ -362,7 +381,8 @@ impl<'m> Vm<'m> {
     /// Returns `&'static` (the registry only ever hands out static extension data), so a caller may
     /// bind it once and use it past a later `&mut self` borrow.
     pub(crate) fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
-        self.registry
+        self.persist
+            .registry
             .unwrap_or_else(noeta_stdlib::registry::default_seeded)
     }
 }
@@ -424,6 +444,7 @@ impl<'m> Vm<'m> {
         let sweep = is_last_heap_owner();
         if sweep && mode == noeta_value::CollectorMode::Trace {
             let mut roots: Vec<Value> = self
+                .persist
                 .globals
                 .iter()
                 .copied()
@@ -433,10 +454,10 @@ impl<'m> Vm<'m> {
             // an extension owns across dispatches — the same graph treatment: feed them in as
             // roots so the sweep cannot reclaim a value the arena release below would then
             // double-free.
-            roots.extend(self.ext_arena.iter().copied().flatten());
+            roots.extend(self.persist.ext_arena.iter().copied().flatten());
             // Embed handles (server-hmr F3) hold a `+1` each — the same root treatment as the
             // arena, so a host-held value is not reclaimed out from under the host.
-            roots.extend(self.embed_handles.iter().copied().flatten());
+            roots.extend(self.persist.embed_handles.iter().copied().flatten());
             // Traced futures (native-otel T5c) hold a `+1` each — the same graph treatment.
             roots.extend(self.sched.traced_futures.iter().map(|t| t.future));
             let garbage = collect_trace(&roots);
@@ -445,7 +466,7 @@ impl<'m> Vm<'m> {
         // Release any messages still buffered in channels at program end (isolates I.1) — undrained
         // `send`s. Draining here keeps residency at zero; `release_value` runs any message destructor. A
         // `Shared` channel (I.4c) holds `Wire` copies, not heap `Value`s, so dropping it frees cleanly.
-        for chan in std::mem::take(&mut self.channels) {
+        for chan in std::mem::take(&mut self.persist.channels) {
             if let Channel::Local { buffer, .. } = chan {
                 for (msg, _) in buffer {
                     self.release_value(msg);
@@ -457,19 +478,22 @@ impl<'m> Vm<'m> {
         // undisposed `Cell`, an undisposed signal — reactivity lives here too since H5).
         // Destructor-aware, so
         // residency returns to zero — the leak oracle's proof the arena's refcounting is exact.
-        for value in std::mem::take(&mut self.ext_arena).into_iter().flatten() {
-            self.release_value(value);
-        }
-        self.ext_arena_free.clear();
-        // Release every value a host still holds a handle to (server-hmr F3): a forgotten handle
-        // reclaims here, destructor-aware, so residency returns to zero.
-        for value in std::mem::take(&mut self.embed_handles)
+        for value in std::mem::take(&mut self.persist.ext_arena)
             .into_iter()
             .flatten()
         {
             self.release_value(value);
         }
-        self.embed_handles_free.clear();
+        self.persist.ext_arena_free.clear();
+        // Release every value a host still holds a handle to (server-hmr F3): a forgotten handle
+        // reclaims here, destructor-aware, so residency returns to zero.
+        for value in std::mem::take(&mut self.persist.embed_handles)
+            .into_iter()
+            .flatten()
+        {
+            self.release_value(value);
+        }
+        self.persist.embed_handles_free.clear();
         // Release any still-traced futures (native-otel T5c) — an abandoned `with_span`-async
         // future whose span never ended. The reference releases destructor-aware (residency 0);
         // the span simply stays unended (the recorder/exporter only consume ended spans).
@@ -478,8 +502,8 @@ impl<'m> Vm<'m> {
         }
         // Destroy the globals at program end in reverse declaration order, running each
         // destructor on its last reference — the deterministic destruction the spec requires.
-        for slot in self.global_order.clone().into_iter().rev() {
-            let v = std::mem::replace(&mut self.globals[slot as usize], Value::unbound());
+        for slot in self.persist.global_order.clone().into_iter().rev() {
+            let v = std::mem::replace(&mut self.persist.globals[slot as usize], Value::unbound());
             if !v.is_unbound() {
                 self.release_value(v);
             }
@@ -563,15 +587,15 @@ pub(crate) fn run_isolate_worker(
     let mut wvm = Vm::load(module, host, executor);
     // Resolve native names against the spawner's registry (instance-registry IR3); `None` falls
     // back to the process-global default, exactly like the parent.
-    wvm.registry = registry;
+    wvm.persist.registry = registry;
     // Inherit the spawner's trace context across the thread boundary (native-otel T5d): the worker
     // has its OWN host (span handles don't transfer), so the W3C context is interned as a remote
     // seed at the worker's root — its spans then continue the spawner's trace, exactly as a
     // cooperative task inherits via its Task context (T5a). Real-path parity with the sandbox.
     if let Some(ctx) = trace
-        && wvm.host.tel_enabled()
+        && wvm.persist.host.tel_enabled()
     {
-        let seed = wvm.host.tel_intern_remote(ctx);
+        let seed = wvm.persist.host.tel_intern_remote(ctx);
         wvm.sched.ctx_current.push(seed);
     }
     wvm.isolates.parallel_isolates = true;
@@ -581,14 +605,16 @@ pub(crate) fn run_isolate_worker(
     // top-level functions (and read value-type constants). Slots match: parent and worker share the
     // same `Arc<Module>`, so a global's `GlobalId` is identical on both sides (P-VMT-GSLOT).
     for (slot, wire) in &wire_globals {
-        let value = isolate::rebuild(wire, &wvm.shapes, &mut wvm.channels);
-        wvm.globals[*slot as usize] = value;
-        wvm.global_order.push(*slot);
+        let value = isolate::rebuild(wire, &wvm.persist.shapes, &mut wvm.persist.channels);
+        wvm.persist.globals[*slot as usize] = value;
+        wvm.persist.global_order.push(*slot);
     }
     let arg_vals: Vec<Value> = iso_args
         .iter()
         .map(|a| match a {
-            isolate::IsoArg::Copied(w) => isolate::rebuild(w, &wvm.shapes, &mut wvm.channels),
+            isolate::IsoArg::Copied(w) => {
+                isolate::rebuild(w, &wvm.persist.shapes, &mut wvm.persist.channels)
+            }
             // A borrowed shared-region root (P-PAR S2): usable as-is — no rebuild, no retain.
             // The worker's ordinary retain/release discipline no-ops on it (shared tag), its
             // COW gates copy instead of mutating (`is_uniquely_owned` is false), and the
@@ -608,13 +634,14 @@ pub(crate) fn run_isolate_worker(
     release(callee);
     let message = match outcome {
         Ok(result) => {
-            let marshalled = isolate::marshal(result, &wvm.shapes, &wvm.channels).map_err(|e| {
-                // The body completed; only the result failed to ship — there is no abort stack.
-                IsolateFailure {
-                    message: format!("isolate result is not shippable: {e}"),
-                    trace: Vec::new(),
-                }
-            });
+            let marshalled = isolate::marshal(result, &wvm.persist.shapes, &wvm.persist.channels)
+                .map_err(|e| {
+                    // The body completed; only the result failed to ship — there is no abort stack.
+                    IsolateFailure {
+                        message: format!("isolate result is not shippable: {e}"),
+                        trace: Vec::new(),
+                    }
+                });
             wvm.release_value(result);
             marshalled
         }
@@ -637,13 +664,13 @@ pub(crate) fn run_isolate_worker(
     for v in std::mem::take(&mut wvm.tier1.jit_cache_pins) {
         release(v);
     }
-    for slot in wvm.global_order.clone().into_iter().rev() {
-        let value = std::mem::replace(&mut wvm.globals[slot as usize], Value::unbound());
+    for slot in wvm.persist.global_order.clone().into_iter().rev() {
+        let value = std::mem::replace(&mut wvm.persist.globals[slot as usize], Value::unbound());
         if !value.is_unbound() {
             wvm.release_value(value);
         }
     }
-    for chan in std::mem::take(&mut wvm.channels) {
+    for chan in std::mem::take(&mut wvm.persist.channels) {
         if let Channel::Local { buffer, .. } = chan {
             for (msg, _) in buffer {
                 wvm.release_value(msg);
@@ -652,7 +679,10 @@ pub(crate) fn run_isolate_worker(
     }
     // Release the worker's extension arena (per-isolate, higher-order-abi H4/H5): whatever its
     // program's extensions still held — signals, cells — drops here, destructor-aware.
-    for value in std::mem::take(&mut wvm.ext_arena).into_iter().flatten() {
+    for value in std::mem::take(&mut wvm.persist.ext_arena)
+        .into_iter()
+        .flatten()
+    {
         wvm.release_value(value);
     }
     // And its still-traced futures (native-otel T5c), same treatment.
@@ -825,14 +855,14 @@ impl<'m> Vm<'m> {
     /// (`VmSession`) mints handles, so this is `compile`-gated; the table itself stays (GC roots it).
     #[cfg(feature = "compile")]
     pub(crate) fn embed_handle_store(&mut self, value: Value) -> crate::session::EmbedHandle {
-        let idx = match self.embed_handles_free.pop() {
+        let idx = match self.persist.embed_handles_free.pop() {
             Some(idx) => {
-                self.embed_handles[idx as usize] = Some(value);
+                self.persist.embed_handles[idx as usize] = Some(value);
                 idx
             }
             None => {
-                self.embed_handles.push(Some(value));
-                (self.embed_handles.len() - 1) as u32
+                self.persist.embed_handles.push(Some(value));
+                (self.persist.embed_handles.len() - 1) as u32
             }
         };
         crate::session::EmbedHandle::from_index(idx)
@@ -842,9 +872,9 @@ impl<'m> Vm<'m> {
     #[cfg(feature = "compile")]
     pub(crate) fn embed_handle_release(&mut self, handle: crate::session::EmbedHandle) {
         let idx = handle.index();
-        if let Some(value) = self.embed_handles[idx as usize].take() {
+        if let Some(value) = self.persist.embed_handles[idx as usize].take() {
             self.release_value(value);
-            self.embed_handles_free.push(idx);
+            self.persist.embed_handles_free.push(idx);
         }
     }
 

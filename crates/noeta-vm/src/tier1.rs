@@ -68,7 +68,7 @@ pub(crate) fn jit_observe_count() -> u64 {
 #[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_note_global_bound"))]
 extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
     let vm = unsafe { &mut *(vm as *mut Vm) };
-    vm.global_order.push(g);
+    vm.persist.global_order.push(g);
 }
 
 /// Runtime helper: bump a value's refcount (heap-aware register moves, J3). No-op on an immediate.
@@ -248,7 +248,7 @@ extern "C" fn jit_call(
             args,
             span,
         } => {
-            let cv = vm.globals[global.0 as usize];
+            let cv = vm.persist.globals[global.0 as usize];
             if cv.is_unbound() {
                 let msg = format!(
                     "cannot find `{}` in this scope",
@@ -364,7 +364,7 @@ extern "C" fn jit_prepare_call(
         Op::CallGlobal {
             dst, global, args, ..
         } => {
-            let cv = vm.globals[global.0 as usize];
+            let cv = vm.persist.globals[global.0 as usize];
             if cv.is_unbound() {
                 return FALLBACK;
             }
@@ -913,7 +913,7 @@ impl<'m> Vm<'m> {
         };
         let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
         let regs_ptr = regs.as_mut_ptr();
-        let globals_ptr = self.globals.as_mut_ptr();
+        let globals_ptr = self.persist.globals.as_mut_ptr();
         let frames_ptr = frames as *mut Vec<Frame> as *mut core::ffi::c_void;
         let regs_vec_ptr = regs as *mut Vec<Value> as *mut core::ffi::c_void;
         // SAFETY: `f` is a finalized tier-1 entry point with the `CompiledFn` ABI. `regs_ptr` is the

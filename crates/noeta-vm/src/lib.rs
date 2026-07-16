@@ -402,72 +402,19 @@ struct Tier1State {
     jit_bail_counts: Option<std::collections::HashMap<(u32, u32), u64>>,
 }
 
-/// One program's worth of execution state, shared across every (possibly re-entrant) frame
-/// stack: the compiled module, the shared shape handles and instance-method table, the by-name
-/// global environment, captured stdout, and the diagnostics recorded so far.
-struct Vm<'m> {
-    /// The compiled program. On a plain run this is the caller's module for the whole run; on a
-    /// **debug run with a console session** it is swapped (through [`Vm::install_fragment`]) to
-    /// each successive extended snapshot — always a stable-prefix superset, so an index minted
-    /// under any earlier module resolves identically under every later one.
-    module: &'m Module,
-    /// See [`DebugSession`]; `None` on every non-debug run.
-    debug_session: Option<DebugSession<'m>>,
-    /// The hot-reload mailbox (server-hmr W1); `None` on every run but `noeta serve --watch`'s
-    /// in-process hot mode. A watcher thread deposits ready-to-apply [`SwapPlan`]s; the VM applies
-    /// the pending one at the scheduler tick ([`Vm::apply_pending_hotswap`] via `advance_tasks`) —
-    /// a safepoint every ctx-driven loop (the HTTP serve loop) passes through each iteration.
-    ///
-    /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
-    hot_mailbox: Option<HotSwapMailbox>,
-    /// How many swap plans this VM has applied from its [`HotChannel`] queue (server-hmr F5): the
-    /// generation index it drains from, and — via [`NativeCtx::hot_swap_count`] — how the serve
-    /// loop detects its own swaps to push `reload` to *its* clients. Per-VM, so N workers each
-    /// track their own progress against the shared broadcast queue.
-    applied_swaps: usize,
-    /// Set while a **hover** fragment runs (tooling-unification T6): a hover must stay
-    /// side-effect-free, so the dispatch loop refuses any frame push beyond the fragment wrapper's
-    /// own frame — the one chokepoint every way of running user code (a call, an object's `Index`
-    /// impl, a user ordering method) passes through. The fragment's AST is pre-gated to the
-    /// read-only surface (names / members / indexing / operators / literals); this flag is the
-    /// runtime backstop for the receiver-dependent dispatches the gate cannot decide.
-    pure_eval: bool,
-    /// One shared `&'static Shape` per shape-table entry — cloned into every value of that shape,
-    /// so equal-built aggregates point at one shape (identity is a pointer comparison).
-    shapes: Vec<&'static Shape>,
-    /// One shared `Rc<PackedSchema>` per compiled packed-list layout (P-PACK 2.4), resolved at load
-    /// from [`Module::packed_schemas`] against `shapes` — so `Op::MakePackedList` packs/materializes
-    /// elements that share shape identity with directly-constructed instances.
-    packed_schemas: Vec<&'static noeta_object::PackedSchema>,
-    /// One shared `Rc<TypeRepr>` per interned reflected element type (runtime type-argument
-    /// reflection, R1), built once at load from [`Module::type_reprs`]. `Op::MakeList` stamps a cheap
-    /// `Rc` clone of its indexed entry onto the built list, so `type_of` recovers the element type
-    /// after a `dyn` launder. Empty for a program with no tagged list literal.
-    type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>>,
-    /// `map(...)` call span → the result element's `Rc<PackedSchema>` (P-PACK 2.6 category B), resolved
-    /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
-    /// a flat result instead of N boxed objects.
-    map_packed: HashMap<Span, &'static noeta_object::PackedSchema>,
-    /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
-    methods: HashMap<(String, String), u32>,
-    /// `type_name` to its `destruct` prototype, for classes with a destructor.
-    destructors: HashMap<String, u32>,
-    /// `(type_name, field_name)` to the field's default-value thunk prototype (object-model
-    /// slice 5). `MakeStruct` runs the thunk (in global scope, empty upvalues) to fill a field the
-    /// literal omits — mirroring the tree-walker's `TypeDef` field-default fill.
-    field_defaults: HashMap<(String, String), u32>,
-    /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
-    /// transitively-owned field / variant-payload / collection element (the checker's
-    /// destruct-reachability fixpoint, threaded through the module). The container-before-contained
-    /// field-walk gate (Phase 4.3, spec §4): a value whose shape name is absent here owns no
-    /// destructor in its subtree and frees on the plain-release fast path.
-    destruct_reachable: HashSet<String>,
-    /// Type names that `@derive(Comparable)` (without a hand-written `compare`): their instances
-    /// get structural field-wise ordering for `< <= > >=`.
-    comparable_derives: HashSet<String>,
-    /// Type names that `@derive(Serialize<Json>)` (without a hand-written `to_json`): `o.to_json()` on
-    /// their instances synthesizes a structural JSON serializer.
-    tojson_derives: HashSet<String>,
+/// The persistent runtime state carried between entries of a [`VmSession`] (REPL / embed /
+/// hot-reload), embedded in the [`Vm`] as its `persist` field (audit-1 finding 4): everything a
+/// later entry inherits so an earlier entry's effects survive. A plain single-shot run simply
+/// builds a fresh one in [`Vm::load`] and tears it down at exit. Embedding it whole means session
+/// entry/exit are single moves ([`Vm::load_seeded`] / [`Vm::into_state`]) — previously 16 fields
+/// were hand-copied at four sites, and a field forgotten in one silently reset session state.
+///
+/// The `Rc`-wrapped derived tables (`shapes` / `packed_schemas` / `type_reprs`) grow by **append**
+/// (never rebuild), so an entry-1 aggregate and an entry-2 aggregate of the same type share
+/// `&'static Shape` identity — the invariant the reuse gate, packed-value ops, and inline caches
+/// assume within a single run. `SessionState::sync_to` (in `session.rs`) extends them to a grown
+/// module; the existing prefix keeps its identity.
+pub(crate) struct SessionState {
     /// The per-run global slots (P-VMT-GSLOT), indexed by [`GlobalId`] — sized to
     /// `module.global_names.len()`. A slot holds [`Value::unbound`] until first bound (a
     /// `LoadGlobal`/`TakeGlobal` of an unbound slot raises E0005); the compiler assigns a dense slot
@@ -479,19 +426,6 @@ struct Vm<'m> {
     /// are destroyed at program end in reverse binding order (the deterministic "program order" the
     /// spec requires) — the same order the pre-slot name-keyed `global_order` produced.
     global_order: Vec<u32>,
-    /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
-    /// [`noeta_stdlib::Host`] seam. The conformance harness constructs a deterministic
-    /// [`noeta_stdlib::SandboxHost`]; a real host (later M2 slices) swaps in without touching
-    /// this struct. See the eval backend's field of the same name.
-    host: Box<dyn noeta_stdlib::Host>,
-    /// The async executor (Track A.2): the clock + pending-timer set that `sleep(ms)` and
-    /// drive-to-completion `.await` consult, behind the [`noeta_stdlib::Executor`] seam. The
-    /// conformance harness keeps a deterministic [`noeta_stdlib::SandboxExecutor`] (identical to the
-    /// tree-walker's by construction, so the differential holds); the CLI swaps in a real wall-clock
-    /// executor (Track A.4). See the eval backend's field of the same name.
-    executor: Box<dyn noeta_stdlib::Executor>,
-    /// Async scheduler state — see [`SchedState`].
-    sched: SchedState,
     /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoint
     /// values (`Sender`/`Receiver`) reference one by index. A queued message is owned by the channel
     /// (retained on enqueue, transferred out on dequeue). `channel_progress` counts successful queue
@@ -523,6 +457,99 @@ struct Vm<'m> {
     /// arena read. Almost always empty (the hot check is `is_empty()`); toggled by extensions
     /// via `NativeCtx::set_read_gate` around tracking/dirty windows.
     ext_closed_gates: Vec<&'static str>,
+    /// One shared `&'static Shape` per shape-table entry — cloned into every value of that shape,
+    /// so equal-built aggregates point at one shape (identity is a pointer comparison).
+    shapes: Vec<&'static Shape>,
+    /// One shared `Rc<PackedSchema>` per compiled packed-list layout (P-PACK 2.4), resolved at load
+    /// from [`Module::packed_schemas`] against `shapes` — so `Op::MakePackedList` packs/materializes
+    /// elements that share shape identity with directly-constructed instances.
+    packed_schemas: Vec<&'static noeta_object::PackedSchema>,
+    /// One shared `Rc<TypeRepr>` per interned reflected element type (runtime type-argument
+    /// reflection, R1), built once at load from [`Module::type_reprs`]. `Op::MakeList` stamps a cheap
+    /// `Rc` clone of its indexed entry onto the built list, so `type_of` recovers the element type
+    /// after a `dyn` launder. Empty for a program with no tagged list literal.
+    type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>>,
+    /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
+    /// [`noeta_stdlib::Host`] seam. The conformance harness constructs a deterministic
+    /// [`noeta_stdlib::SandboxHost`]; a real host (later M2 slices) swaps in without touching
+    /// this struct. See the eval backend's field of the same name.
+    host: Box<dyn noeta_stdlib::Host>,
+    /// The async executor (Track A.2): the clock + pending-timer set that `sleep(ms)` and
+    /// drive-to-completion `.await` consult, behind the [`noeta_stdlib::Executor`] seam. The
+    /// conformance harness keeps a deterministic [`noeta_stdlib::SandboxExecutor`] (identical to the
+    /// tree-walker's by construction, so the differential holds); the CLI swaps in a real wall-clock
+    /// executor (Track A.4). See the eval backend's field of the same name.
+    executor: Box<dyn noeta_stdlib::Executor>,
+    /// The extension **registry** this VM resolves native names against (instance-registry IR3):
+    /// module functions, extern types, method bundles, and their dispatch all consult it through
+    /// [`Vm::reg`]. `None` — the default on every ordinary run — falls back to the process-global
+    /// default registry (`noeta_stdlib::registry::default_seeded`), so a plain run is byte-for-byte
+    /// unchanged. An embedding host that assembled its own extension set threads its `Registry` in
+    /// (the embed API / server-hmr F2), and a worker isolate inherits its parent's (a `&'static`
+    /// registry is `Send`). The std-concrete `static_dispatch_ctx*` fast paths deliberately stay on
+    /// the global — std is in every assembled registry, so monomorphizing them costs no correctness.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
+}
+
+/// One program's worth of execution state, shared across every (possibly re-entrant) frame
+/// stack: the compiled module, the shared shape handles and instance-method table, the by-name
+/// global environment, captured stdout, and the diagnostics recorded so far.
+struct Vm<'m> {
+    /// The compiled program. On a plain run this is the caller's module for the whole run; on a
+    /// **debug run with a console session** it is swapped (through [`Vm::install_fragment`]) to
+    /// each successive extended snapshot — always a stable-prefix superset, so an index minted
+    /// under any earlier module resolves identically under every later one.
+    module: &'m Module,
+    /// See [`DebugSession`]; `None` on every non-debug run.
+    debug_session: Option<DebugSession<'m>>,
+    /// The hot-reload mailbox (server-hmr W1); `None` on every run but `noeta serve --watch`'s
+    /// in-process hot mode. A watcher thread deposits ready-to-apply [`SwapPlan`]s; the VM applies
+    /// the pending one at the scheduler tick ([`Vm::apply_pending_hotswap`] via `advance_tasks`) —
+    /// a safepoint every ctx-driven loop (the HTTP serve loop) passes through each iteration.
+    ///
+    /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
+    hot_mailbox: Option<HotSwapMailbox>,
+    /// How many swap plans this VM has applied from its [`HotChannel`] queue (server-hmr F5): the
+    /// generation index it drains from, and — via [`NativeCtx::hot_swap_count`] — how the serve
+    /// loop detects its own swaps to push `reload` to *its* clients. Per-VM, so N workers each
+    /// track their own progress against the shared broadcast queue.
+    applied_swaps: usize,
+    /// Set while a **hover** fragment runs (tooling-unification T6): a hover must stay
+    /// side-effect-free, so the dispatch loop refuses any frame push beyond the fragment wrapper's
+    /// own frame — the one chokepoint every way of running user code (a call, an object's `Index`
+    /// impl, a user ordering method) passes through. The fragment's AST is pre-gated to the
+    /// read-only surface (names / members / indexing / operators / literals); this flag is the
+    /// runtime backstop for the receiver-dependent dispatches the gate cannot decide.
+    pure_eval: bool,
+    /// The session-persistent runtime — see [`SessionState`]. Everything else on `Vm` is
+    /// per-entry scratch or module-derived tables.
+    persist: SessionState,
+    /// `map(...)` call span → the result element's `Rc<PackedSchema>` (P-PACK 2.6 category B), resolved
+    /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
+    /// a flat result instead of N boxed objects.
+    map_packed: HashMap<Span, &'static noeta_object::PackedSchema>,
+    /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
+    methods: HashMap<(String, String), u32>,
+    /// `type_name` to its `destruct` prototype, for classes with a destructor.
+    destructors: HashMap<String, u32>,
+    /// `(type_name, field_name)` to the field's default-value thunk prototype (object-model
+    /// slice 5). `MakeStruct` runs the thunk (in global scope, empty upvalues) to fill a field the
+    /// literal omits — mirroring the tree-walker's `TypeDef` field-default fill.
+    field_defaults: HashMap<(String, String), u32>,
+    /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
+    /// transitively-owned field / variant-payload / collection element (the checker's
+    /// destruct-reachability fixpoint, threaded through the module). The container-before-contained
+    /// field-walk gate (Phase 4.3, spec §4): a value whose shape name is absent here owns no
+    /// destructor in its subtree and frees on the plain-release fast path.
+    destruct_reachable: HashSet<String>,
+    /// Type names that `@derive(Comparable)` (without a hand-written `compare`): their instances
+    /// get structural field-wise ordering for `< <= > >=`.
+    comparable_derives: HashSet<String>,
+    /// Type names that `@derive(Serialize<Json>)` (without a hand-written `to_json`): `o.to_json()` on
+    /// their instances synthesizes a structural JSON serializer.
+    tojson_derives: HashSet<String>,
+    /// Async scheduler state — see [`SchedState`].
+    sched: SchedState,
     /// Spare ctx slot tables (H5 perf): a ctx dispatch pops one instead of allocating, and its
     /// drop clears + returns it — a hot `set` loop then runs alloc-free. A stack, so ctx
     /// re-entrancy (a called closure re-entering a dispatch) simply pops the next one.
@@ -541,15 +568,6 @@ struct Vm<'m> {
     /// as `debugger` but without pausing. `None` on every non-profile run, where it costs one
     /// predicted branch per op. Never armed together with the JIT (a profile run pins tier-0).
     profiler: Option<Box<dyn ProfileHook>>,
-    /// The extension **registry** this VM resolves native names against (instance-registry IR3):
-    /// module functions, extern types, method bundles, and their dispatch all consult it through
-    /// [`Vm::reg`]. `None` — the default on every ordinary run — falls back to the process-global
-    /// default registry (`noeta_stdlib::registry::default_seeded`), so a plain run is byte-for-byte
-    /// unchanged. An embedding host that assembled its own extension set threads its `Registry` in
-    /// (the embed API / server-hmr F2), and a worker isolate inherits its parent's (a `&'static`
-    /// registry is `Send`). The std-concrete `static_dispatch_ctx*` fast paths deliberately stay on
-    /// the global — std is in every assembled registry, so monomorphizing them costs no correctness.
-    registry: Option<&'static noeta_stdlib::registry::Registry>,
 }
 
 /// The traceback vocabulary is shared with the tree-walker oracle through the backend contract

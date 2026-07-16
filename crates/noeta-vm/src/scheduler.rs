@@ -30,8 +30,8 @@ impl<'m> Vm<'m> {
                 self.finish_isolate(id);
                 Ok(Poll::Ready(isolate::rebuild(
                     &wire,
-                    &self.shapes,
-                    &mut self.channels,
+                    &self.persist.shapes,
+                    &mut self.persist.channels,
                 )))
             }
             Ok(Err(failure)) => {
@@ -98,6 +98,7 @@ impl<'m> Vm<'m> {
     pub(crate) fn isolate_in_flight_wait(&self, seen: u64) -> bool {
         let cross_thread_pending = self.isolates.inflight_isolates > 0
             || self
+                .persist
                 .channels
                 .iter()
                 .any(|c| matches!(c, Channel::Shared(core) if core.is_open()));
@@ -144,12 +145,12 @@ impl<'m> Vm<'m> {
                 Ok(Poll::Ready(_)) | Err(_) => {
                     let traced = self.sched.traced_futures.swap_remove(idx);
                     if polled.is_err() {
-                        self.host.tel_span_set_status(
+                        self.persist.host.tel_span_set_status(
                             traced.span,
                             noeta_stdlib::SpanStatus::Error("span body aborted".into()),
                         );
                     }
-                    self.host.tel_span_end(traced.span);
+                    self.persist.host.tel_span_end(traced.span);
                     self.release_value(traced.future);
                 }
             }
@@ -166,7 +167,7 @@ impl<'m> Vm<'m> {
             return None;
         }
         let top = *self.sched.ctx_current.last()?;
-        Some(self.host.tel_span_context(top))
+        Some(self.persist.host.tel_span_context(top))
     }
 
     /// Seed the receiving strand's context from a dequeued message's (native-otel T5d) — but only
@@ -182,7 +183,7 @@ impl<'m> Vm<'m> {
         }
         let at_top = match self.sched.ctx_current.as_slice() {
             [] => true,
-            [only] => self.host.tel_is_remote(*only),
+            [only] => self.persist.host.tel_is_remote(*only),
             _ => false,
         };
         if !at_top {
@@ -190,11 +191,11 @@ impl<'m> Vm<'m> {
         }
         if let [old] = self.sched.ctx_current.as_slice() {
             let old = *old;
-            self.host.tel_release_remote(old);
+            self.persist.host.tel_release_remote(old);
             self.sched.ctx_current.clear();
         }
         if let Some(ctx) = context {
-            let seed = self.host.tel_intern_remote(ctx);
+            let seed = self.persist.host.tel_intern_remote(ctx);
             self.sched.ctx_current.push(seed);
         }
     }
@@ -208,10 +209,10 @@ impl<'m> Vm<'m> {
             let deadline = future
                 .timer_deadline()
                 .expect("a timer carries its deadline");
-            if self.executor.now() >= deadline {
+            if self.persist.executor.now() >= deadline {
                 return Ok(Poll::Ready(Value::unit()));
             }
-            self.executor.register_timer(deadline);
+            self.persist.executor.register_timer(deadline);
             return Ok(Poll::Pending);
         }
         // A task handle (Track A.3b): ready iff its task has a stored result — polling a handle only
@@ -235,7 +236,7 @@ impl<'m> Vm<'m> {
         // aborts (E0021) at the `.await`, matching the synchronous `fs.*`; pending → `Poll::Pending`
         // (the sandbox always resolves on the first poll).
         if let Some(id) = future.async_io_id() {
-            return match self.executor.poll_ext(id) {
+            return match self.persist.executor.poll_ext(id) {
                 // Ready → materialize the descriptor's `NativeOut` exactly like a synchronous
                 // dispatch result (extern-types X5); an IO failure aborts (E0021) at the
                 // `.await`, matching the synchronous `fs.*`.
@@ -251,7 +252,7 @@ impl<'m> Vm<'m> {
         // transferred to the buffer on a push, released otherwise. Sending on a closed channel is a bug.
         if let Some((id, msg)) = future.channel_send_parts() {
             let id = id.index();
-            match &self.channels[id] {
+            match &self.persist.channels[id] {
                 Channel::Local {
                     buffer,
                     capacity,
@@ -269,11 +270,11 @@ impl<'m> Vm<'m> {
                         // The sender's trace context rides the message (T5d) — automatic
                         // propagation without touching the message type.
                         let context = self.outbound_trace_context();
-                        let Channel::Local { buffer, .. } = &mut self.channels[id] else {
+                        let Channel::Local { buffer, .. } = &mut self.persist.channels[id] else {
                             unreachable!("just matched Local");
                         };
                         buffer.push_back((msg, context)); // ownership transfers to the queue
-                        self.channel_progress += 1;
+                        self.persist.channel_progress += 1;
                         return Ok(Poll::Ready(Value::unit()));
                     }
                     release(msg);
@@ -296,7 +297,11 @@ impl<'m> Vm<'m> {
                         }
                         isolate::SendState::Full => return Ok(Poll::Pending),
                         isolate::SendState::Room => {
-                            let wire = match isolate::marshal(msg, &self.shapes, &self.channels) {
+                            let wire = match isolate::marshal(
+                                msg,
+                                &self.persist.shapes,
+                                &self.persist.channels,
+                            ) {
                                 Ok(w) => w,
                                 Err(e) => {
                                     release(msg);
@@ -311,7 +316,7 @@ impl<'m> Vm<'m> {
                             let context = self.outbound_trace_context();
                             if core.try_send(wire, context) {
                                 release(msg);
-                                self.channel_progress += 1;
+                                self.persist.channel_progress += 1;
                                 return Ok(Poll::Ready(Value::unit()));
                             }
                             // Lost the race (filled/closed between the check and the push) — retry.
@@ -326,16 +331,16 @@ impl<'m> Vm<'m> {
         // reference transfers out of the queue into the `some(..)` wrapper.
         if let Some(id) = future.channel_recv_id() {
             let id = id.index();
-            match &self.channels[id] {
+            match &self.persist.channels[id] {
                 Channel::Local { buffer, closed, .. } => {
                     if !buffer.is_empty() {
-                        let Channel::Local { buffer, .. } = &mut self.channels[id] else {
+                        let Channel::Local { buffer, .. } = &mut self.persist.channels[id] else {
                             unreachable!("just matched Local");
                         };
                         let (msg, context) = buffer.pop_front().expect("non-empty");
                         // Seed the receiving strand from the message's context (T5d).
                         self.seed_context_from_message(context);
-                        self.channel_progress += 1;
+                        self.persist.channel_progress += 1;
                         return Ok(Poll::Ready(make_some(msg)));
                     }
                     if *closed {
@@ -348,10 +353,14 @@ impl<'m> Vm<'m> {
                     let core = Arc::clone(core);
                     match core.try_recv() {
                         isolate::RecvState::Got(wire, context) => {
-                            let value = isolate::rebuild(&wire, &self.shapes, &mut self.channels);
+                            let value = isolate::rebuild(
+                                &wire,
+                                &self.persist.shapes,
+                                &mut self.persist.channels,
+                            );
                             // Seed the receiving strand from the message's context (T5d).
                             self.seed_context_from_message(context);
-                            self.channel_progress += 1;
+                            self.persist.channel_progress += 1;
                             return Ok(Poll::Ready(make_some(value)));
                         }
                         isolate::RecvState::ClosedEmpty => return Ok(Poll::Ready(make_none())),
@@ -541,7 +550,7 @@ impl<'m> Vm<'m> {
                 iso_args.push(isolate::IsoArg::Borrowed(isolate::SharedRoot::new(root)));
                 continue;
             }
-            match isolate::marshal(v, &self.shapes, &self.channels) {
+            match isolate::marshal(v, &self.persist.shapes, &self.persist.channels) {
                 Ok(w) => iso_args.push(isolate::IsoArg::Copied(w)),
                 Err(_) => return Ok(None), // unshippable arg — cooperative fallback
             }
@@ -552,9 +561,9 @@ impl<'m> Vm<'m> {
         // Ship globals by slot id (P-VMT-GSLOT): the worker shares the same `Arc<Module>`, so slots
         // line up on both sides. A `None` (unbound) or unshippable slot is skipped.
         let mut wire_globals: Vec<(u32, isolate::Wire)> = Vec::new();
-        for (slot, v) in self.globals.iter().enumerate() {
+        for (slot, v) in self.persist.globals.iter().enumerate() {
             if !v.is_unbound()
-                && let Ok(w) = isolate::marshal(*v, &self.shapes, &self.channels)
+                && let Ok(w) = isolate::marshal(*v, &self.persist.shapes, &self.persist.channels)
             {
                 wire_globals.push((slot as u32, w));
             }
@@ -579,7 +588,7 @@ impl<'m> Vm<'m> {
         // IR3): a `&'static Registry` is `Send`, so a session with its own extension set resolves
         // native names identically on its isolates. `None` (the default) keeps the worker on the
         // process-global default, exactly as the parent.
-        let registry = self.registry;
+        let registry = self.persist.registry;
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(
@@ -617,7 +626,7 @@ impl<'m> Vm<'m> {
             // Snapshot the wake generation before polling (P-PAR S3): progress a worker makes
             // *during* this round then returns the stall wait immediately instead of parking.
             let wake_gen = isolate::WAKE.generation();
-            let before = self.channel_progress;
+            let before = self.persist.channel_progress;
             let progressed = self.poll_all_scopes_round(span)?;
             if self.sched.scopes[si]
                 .iter()
@@ -627,9 +636,9 @@ impl<'m> Vm<'m> {
             }
             // A channel op (a `send` unblocked, a `recv` drained) is progress even when no task
             // completed this round — otherwise a producer/consumer pair would look deadlocked.
-            let progressed = progressed || self.channel_progress != before;
+            let progressed = progressed || self.persist.channel_progress != before;
             if !progressed
-                && self.executor.advance().is_none()
+                && self.persist.executor.advance().is_none()
                 && !self.isolate_in_flight_wait(wake_gen)
             {
                 return Err(self.error(
@@ -650,7 +659,7 @@ impl<'m> Vm<'m> {
     pub(crate) fn drive_future(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
         loop {
             let wake_gen = isolate::WAKE.generation();
-            let before = self.channel_progress;
+            let before = self.persist.channel_progress;
             if let Poll::Ready(value) = self.poll_once(future, span)? {
                 return Ok(value);
             }
@@ -660,9 +669,9 @@ impl<'m> Vm<'m> {
                 self.poll_all_scopes_round(span)?
             };
             // A channel op during any poll this iteration is progress (see `join_scope`).
-            let progressed = progressed || self.channel_progress != before;
+            let progressed = progressed || self.persist.channel_progress != before;
             if !progressed
-                && self.executor.advance().is_none()
+                && self.persist.executor.advance().is_none()
                 && !self.isolate_in_flight_wait(wake_gen)
             {
                 return Err(self.error(

@@ -334,7 +334,7 @@ impl<'m> Vm<'m> {
                     Op::LoadGlobal { dst, global, span } => {
                         // Direct slot index — no name hashing (P-VMT-GSLOT). An unbound slot holds the
                         // `Value::unbound` sentinel (P-JIT globals); every other value is a real binding.
-                        let v = self.globals[global.0 as usize];
+                        let v = self.persist.globals[global.0 as usize];
                         if v.is_unbound() {
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
@@ -356,10 +356,11 @@ impl<'m> Vm<'m> {
                         // otherwise inflate the count and hide a reassigned value's last reference,
                         // suppressing its destructor.
                         let v = std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
-                        let old = std::mem::replace(&mut self.globals[global.0 as usize], v);
+                        let old =
+                            std::mem::replace(&mut self.persist.globals[global.0 as usize], v);
                         if old.is_unbound() {
                             // First binding of this slot: record it for reverse-order destruction.
-                            self.global_order.push(global.0);
+                            self.persist.global_order.push(global.0);
                         } else {
                             // Reassigning: the previous value is dropped here, running its destructor
                             // if this was its last reference.
@@ -372,7 +373,7 @@ impl<'m> Vm<'m> {
                         // owning reference transfers and a following `ConcatInPlace` can see uniqueness.
                         // An unbound slot raises E0005 (and is left unbound); a bound slot stays bound
                         // (to `unit`), matching the pre-refactor `Option` semantics.
-                        if self.globals[global.0 as usize].is_unbound() {
+                        if self.persist.globals[global.0 as usize].is_unbound() {
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
                                 *span,
@@ -382,8 +383,10 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         }
-                        let v =
-                            std::mem::replace(&mut self.globals[global.0 as usize], Value::unit());
+                        let v = std::mem::replace(
+                            &mut self.persist.globals[global.0 as usize],
+                            Value::unit(),
+                        );
                         set_reg(regs, fbase, *dst, v);
                         pc += 1;
                     }
@@ -548,7 +551,9 @@ impl<'m> Vm<'m> {
                         // it after a `dyn` launder. A cheap `Rc` clone of the shared load-time entry; the
                         // tag lives beside the payload, invisible to value semantics.
                         if let Some(idx) = reflect {
-                            list.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                            list.set_reflect(Some(Rc::clone(
+                                &self.persist.type_reprs[*idx as usize],
+                            )));
                         }
                         set_reg(regs, fbase, *dst, list);
                         pc += 1;
@@ -562,7 +567,7 @@ impl<'m> Vm<'m> {
                     Op::PackedListNew { dst, schema } => {
                         // Allocate the empty flat buffer the following `PackedListPush` chain fills
                         // (P-PACK 2.5 streaming construction).
-                        let schema = self.packed_schemas[*schema as usize];
+                        let schema = self.persist.packed_schemas[*schema as usize];
                         let list = Value::packed_list(schema, Vec::new());
                         set_reg(regs, fbase, *dst, list);
                         pc += 1;
@@ -586,7 +591,7 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        let schema = self.packed_schemas[*schema as usize];
+                        let schema = self.persist.packed_schemas[*schema as usize];
                         if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
                             return Err(self.error(
                             DiagnosticCode::TypeMismatch,
@@ -835,7 +840,9 @@ impl<'m> Vm<'m> {
                         // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
                         // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
                         if let Some(idx) = reflect {
-                            map.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                            map.set_reflect(Some(Rc::clone(
+                                &self.persist.type_reprs[*idx as usize],
+                            )));
                         }
                         set_reg(regs, fbase, *dst, map);
                         pc += 1;
@@ -1160,11 +1167,11 @@ impl<'m> Vm<'m> {
                             let ctx_type = match route {
                                 crate::methods::ExternRoute::FastRead { type_name, project } => {
                                     if args.is_empty()
-                                        && (self.ext_closed_gates.is_empty()
-                                            || !self.ext_closed_gates.contains(&type_name))
+                                        && (self.persist.ext_closed_gates.is_empty()
+                                            || !self.persist.ext_closed_gates.contains(&type_name))
                                     {
                                         let retained = v.with_extern(|e| project(e));
-                                        let value = self.ext_arena[retained as usize]
+                                        let value = self.persist.ext_arena[retained as usize]
                                             .expect("a live arena entry");
                                         retain(value);
                                         set_reg(regs, fbase, *dst, value);
@@ -1657,7 +1664,7 @@ impl<'m> Vm<'m> {
                         reflect,
                         span,
                     } => {
-                        let shape = self.shapes[*shape as usize];
+                        let shape = self.persist.shapes[*shape as usize];
                         let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
                         // `...base` fills declared slots the base provides; named initializers then
                         // override. A slot left unset by both is a missing-field error (E0009).
@@ -1728,7 +1735,9 @@ impl<'m> Vm<'m> {
                         // its type arguments after a `dyn` launder. The object's type is invariant under
                         // field mutation, so — unlike the collection tags — it is never cleared.
                         if let Some(idx) = reflect {
-                            object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                            object.set_reflect(Some(Rc::clone(
+                                &self.persist.type_reprs[*idx as usize],
+                            )));
                         }
                         set_reg(regs, fbase, *dst, object);
                         pc += 1;
@@ -1742,7 +1751,7 @@ impl<'m> Vm<'m> {
                         reflect,
                         span,
                     } => {
-                        let shape = self.shapes[*shape as usize];
+                        let shape = self.persist.shapes[*shape as usize];
                         // The base is consumed: take its single reference out of the register without
                         // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
                         // below still counts the accumulator's reference and a `dst == base` store is
@@ -1832,8 +1841,9 @@ impl<'m> Vm<'m> {
                             release(base_val);
                             let object = Value::object(shape, slots);
                             if let Some(idx) = reflect {
-                                object
-                                    .set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                                object.set_reflect(Some(Rc::clone(
+                                    &self.persist.type_reprs[*idx as usize],
+                                )));
                             }
                             set_reg(regs, fbase, *dst, object);
                             pc += 1;
@@ -1883,7 +1893,7 @@ impl<'m> Vm<'m> {
                         args,
                         reflect,
                     } => {
-                        let shape = self.shapes[*shape as usize];
+                        let shape = self.persist.shapes[*shape as usize];
                         let mut data = Vec::with_capacity(args.len());
                         for &r in args.iter() {
                             let v = regs[fbase + r as usize];
@@ -1895,7 +1905,9 @@ impl<'m> Vm<'m> {
                         // `type_of` recovers its type arguments after a `dyn` launder. Like an object's tag,
                         // an enum value's type is invariant, so it is never cleared.
                         if let Some(idx) = reflect {
-                            value.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                            value.set_reflect(Some(Rc::clone(
+                                &self.persist.type_reprs[*idx as usize],
+                            )));
                         }
                         set_reg(regs, fbase, *dst, value);
                         pc += 1;
@@ -1929,12 +1941,12 @@ impl<'m> Vm<'m> {
                         let result = match matched {
                             Some((_, shape_idx)) => {
                                 // Build the payload-free case; its single reference transfers onward.
-                                let shape = self.shapes[*shape_idx as usize];
+                                let shape = self.persist.shapes[*shape_idx as usize];
                                 let case = Value::enum_value(shape, Vec::new());
                                 if *panic {
                                     case
                                 } else {
-                                    let some = self.shapes[*some_shape as usize];
+                                    let some = self.persist.shapes[*some_shape as usize];
                                     Value::enum_value(some, vec![case])
                                 }
                             }
@@ -1946,7 +1958,7 @@ impl<'m> Vm<'m> {
                                 ));
                             }
                             None => {
-                                let none = self.shapes[*none_shape as usize];
+                                let none = self.persist.shapes[*none_shape as usize];
                                 Value::enum_value(none, Vec::new())
                             }
                         };
@@ -2155,10 +2167,10 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *src as usize];
                         let result = if narrow_matches(self.reg(), v, target) {
                             retain(v);
-                            let shape = self.shapes[*some_shape as usize];
+                            let shape = self.persist.shapes[*some_shape as usize];
                             Value::enum_value(shape, vec![v])
                         } else {
-                            let shape = self.shapes[*none_shape as usize];
+                            let shape = self.persist.shapes[*none_shape as usize];
                             Value::enum_value(shape, Vec::new())
                         };
                         set_reg(regs, fbase, *dst, result);
@@ -2319,7 +2331,7 @@ impl<'m> Vm<'m> {
                                 format!("`channel` capacity must be non-negative, found {cap}"),
                             ));
                         }
-                        let id = ChannelId::from_index(self.channels.len());
+                        let id = ChannelId::from_index(self.persist.channels.len());
                         // In a parallel VM (real isolates, I.4c) a channel is a *shared* cross-thread queue
                         // from birth, so shipping an endpoint into a worker shares one queue; the sandbox
                         // (and any non-parallel VM) uses the cooperative in-VM `Local` FIFO, unchanged.
@@ -2332,7 +2344,7 @@ impl<'m> Vm<'m> {
                                 closed: false,
                             }
                         };
-                        self.channels.push(channel);
+                        self.persist.channels.push(channel);
                         // The two endpoints are fresh (refcount 1); `Value::tuple` takes ownership of
                         // exactly those references, so no extra retain is needed.
                         let tuple =
@@ -2451,7 +2463,7 @@ impl<'m> Vm<'m> {
                         };
                         match outcome {
                             Err(message) => {
-                                let shape = self.shapes[*err_shape as usize];
+                                let shape = self.persist.shapes[*err_shape as usize];
                                 let err = Value::enum_value(shape, vec![Value::string(&message)]);
                                 set_reg(regs, fbase, *dst, err);
                                 pc += 1;
@@ -2482,7 +2494,7 @@ impl<'m> Vm<'m> {
                                 }
                                 // The result is wrapped in `Result.Ok` as it lands in the caller, so the
                                 // invocation yields a `Result` whichever way the body returns.
-                                let ok = self.shapes[*ok_shape as usize];
+                                let ok = self.persist.shapes[*ok_shape as usize];
                                 frames[top].pc = pc + 1;
                                 frames.push(Frame {
                                     proto,
@@ -2967,7 +2979,7 @@ impl<'m> Vm<'m> {
                         // global slot. No retain — the slot owns the reference for the whole call,
                         // so there is no matching release either; net refcount-neutral, exactly as
                         // `LoadGlobal` (retain) balanced by the register overwrite (release) would be.
-                        let callee_val = self.globals[global.0 as usize];
+                        let callee_val = self.persist.globals[global.0 as usize];
                         if callee_val.is_unbound() {
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
