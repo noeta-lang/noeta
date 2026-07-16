@@ -633,21 +633,21 @@ impl NativeCtx for VmCtx<'_, '_> {
 // task-local context (native-otel T5a): thin views over `Vm::ctx_current`.
 impl noeta_stdlib::TaskContext for VmCtx<'_, '_> {
     fn top(&mut self) -> Option<u64> {
-        self.vm.ctx_current.last().copied()
+        self.vm.sched.ctx_current.last().copied()
     }
 
     fn push(&mut self, v: u64) {
-        self.vm.ctx_current.push(v);
+        self.vm.sched.ctx_current.push(v);
     }
 
     fn pop(&mut self, v: u64) {
-        if self.vm.ctx_current.last() == Some(&v) {
-            self.vm.ctx_current.pop();
+        if self.vm.sched.ctx_current.last() == Some(&v) {
+            self.vm.sched.ctx_current.pop();
         }
     }
 
     fn swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
-        std::mem::replace(&mut self.vm.ctx_current, ctx)
+        std::mem::replace(&mut self.vm.sched.ctx_current, ctx)
     }
 }
 
@@ -661,9 +661,9 @@ impl noeta_stdlib::FutureTracing for VmCtx<'_, '_> {
         }
         // The table owns one reference; identity = the NaN-box bits, stable while it is held.
         retain(value);
-        let mut context = self.vm.ctx_current.clone();
+        let mut context = self.vm.sched.ctx_current.clone();
         context.push(span);
-        self.vm.traced_futures.push(crate::TracedFuture {
+        self.vm.sched.traced_futures.push(crate::TracedFuture {
             future: value,
             context,
             span,

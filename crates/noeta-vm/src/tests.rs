@@ -70,20 +70,20 @@ fn aot_bound_dispatch_runs_native_in_process() {
         Box::new(noeta_stdlib::SandboxHost::new()),
         Box::new(noeta_stdlib::SandboxExecutor::new()),
     );
-    keep.force_jit = true;
+    keep.tier1.force_jit = true;
     keep.init_jit();
-    let n = keep.jit_entries.len();
+    let n = keep.tier1.jit_entries.len();
     assert!(
-        keep.jit_entries.iter().any(Option::is_some),
+        keep.tier1.jit_entries.iter().any(Option::is_some),
         "at least one prototype went native"
     );
     let mut table = vec![0usize; 1 + 2 * n];
     table[0] = n;
     for p in 0..n {
-        if let Some(f) = keep.jit_entries[p] {
+        if let Some(f) = keep.tier1.jit_entries[p] {
             table[1 + 2 * p] = f as usize;
         }
-        if let Some(ff) = keep.jit_fast[p] {
+        if let Some(ff) = keep.tier1.jit_fast[p] {
             table[1 + 2 * p + 1] = ff;
         }
     }
@@ -94,8 +94,8 @@ fn aot_bound_dispatch_runs_native_in_process() {
         Box::new(noeta_stdlib::SandboxHost::new()),
         Box::new(noeta_stdlib::SandboxExecutor::new()),
     );
-    vm.aot = true;
-    assert!(vm.jit.is_none(), "the AOT VM arms no compiler");
+    vm.tier1.aot = true;
+    assert!(vm.tier1.jit.is_none(), "the AOT VM arms no compiler");
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     unsafe { vm.bind_aot_dispatch(table.as_ptr()) };
     let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
@@ -204,17 +204,17 @@ fn installed_fragments_extend_a_running_debug_vm() {
          echo twice(base)\n",
     );
     vm.run_top();
-    assert_eq!(vm.stdout, "20\n");
+    assert_eq!(vm.out.stdout, "20\n");
 
     // Fragment 1: calls the program's fn + global by their original ids.
     let entry = vm
         .install_fragment(&fragment("echo twice(base + 1);"))
         .expect("fragment compiles");
     let Ok(v) = vm.run_thunk(entry, &[]) else {
-        panic!("fragment runs: {:?}", vm.diagnostics);
+        panic!("fragment runs: {:?}", vm.out.diagnostics);
     };
     release(v);
-    assert_eq!(vm.stdout, "20\n22\n");
+    assert_eq!(vm.out.stdout, "20\n22\n");
 
     // Fragment 2: constructs the program's struct; interned-shape identity makes it equal to
     // the value entry 0 built.
@@ -222,10 +222,10 @@ fn installed_fragments_extend_a_running_debug_vm() {
         .install_fragment(&fragment("echo p0 == P { x: 3 };"))
         .expect("fragment compiles");
     let Ok(v) = vm.run_thunk(entry, &[]) else {
-        panic!("fragment runs: {:?}", vm.diagnostics);
+        panic!("fragment runs: {:?}", vm.out.diagnostics);
     };
     release(v);
-    assert_eq!(vm.stdout, "20\n22\ntrue\n");
+    assert_eq!(vm.out.stdout, "20\n22\ntrue\n");
 
     // Fragment 3: ESCAPE — rebind the program's callback global to a fragment-defined closure
     // (a proto index that only exists in the extended module).
@@ -233,7 +233,7 @@ fn installed_fragments_extend_a_running_debug_vm() {
         .install_fragment(&fragment("cb = fn(n: int) => twice(n) + base;"))
         .expect("fragment compiles");
     let Ok(v) = vm.run_thunk(entry, &[]) else {
-        panic!("fragment runs: {:?}", vm.diagnostics);
+        panic!("fragment runs: {:?}", vm.out.diagnostics);
     };
     release(v);
 
@@ -243,10 +243,10 @@ fn installed_fragments_extend_a_running_debug_vm() {
         .install_fragment(&fragment("echo callcb(4);"))
         .expect("fragment compiles");
     let Ok(v) = vm.run_thunk(entry, &[]) else {
-        panic!("fragment runs: {:?}", vm.diagnostics);
+        panic!("fragment runs: {:?}", vm.out.diagnostics);
     };
     release(v);
-    assert_eq!(vm.stdout, "20\n22\ntrue\n18\n");
+    assert_eq!(vm.out.stdout, "20\n22\ntrue\n18\n");
 
     // A fragment that ABORTS unwinds cleanly through the swapped module (the release loops
     // resolve every frame's proto against the newest snapshot) and pollutes nothing.
@@ -254,8 +254,8 @@ fn installed_fragments_extend_a_running_debug_vm() {
         .install_fragment(&fragment("echo [1][5];"))
         .expect("fragment compiles");
     assert!(vm.run_thunk(entry, &[]).is_err(), "out of bounds aborts");
-    vm.diagnostics.clear();
-    vm.abort_trace.clear();
+    vm.out.diagnostics.clear();
+    vm.out.abort_trace.clear();
 
     // Teardown drains everything; residency returns to the baseline (no leaked fragment values).
     let result = vm.teardown(noeta_value::CollectorMode::Trace);

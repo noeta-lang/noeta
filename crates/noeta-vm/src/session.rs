@@ -315,9 +315,9 @@ impl VmSession {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load_seeded(module, state);
         vm.run_top();
-        let stdout = std::mem::take(&mut vm.stdout);
-        let diagnostics = std::mem::take(&mut vm.diagnostics);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let stdout = std::mem::take(&mut vm.out.stdout);
+        let diagnostics = std::mem::take(&mut vm.out.diagnostics);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         let session = VmSession {
             compiler,
             factory,
@@ -491,9 +491,9 @@ impl VmSession {
             None
         };
 
-        let stdout = std::mem::take(&mut vm.stdout);
-        let diagnostics = std::mem::take(&mut vm.diagnostics);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let stdout = std::mem::take(&mut vm.out.stdout);
+        let diagnostics = std::mem::take(&mut vm.out.diagnostics);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         self.state = Some(vm.into_state());
         SessionOutput {
             stdout,
@@ -603,10 +603,10 @@ impl VmSession {
             Err(_) => None,
         };
         let output = SessionOutput {
-            stdout: std::mem::take(&mut vm.stdout),
-            diagnostics: std::mem::take(&mut vm.diagnostics),
+            stdout: std::mem::take(&mut vm.out.stdout),
+            diagnostics: std::mem::take(&mut vm.out.diagnostics),
             value: None,
-            trace: std::mem::take(&mut vm.abort_trace),
+            trace: std::mem::take(&mut vm.out.abort_trace),
         };
         self.state = Some(vm.into_state());
         match result {
@@ -665,8 +665,8 @@ impl VmSession {
                 true
             }
         };
-        let stdout = std::mem::take(&mut vm.stdout);
-        let diagnostics = std::mem::take(&mut vm.diagnostics);
+        let stdout = std::mem::take(&mut vm.out.stdout);
+        let diagnostics = std::mem::take(&mut vm.out.diagnostics);
         self.state = Some(vm.into_state());
         (
             found,

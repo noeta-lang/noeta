@@ -227,6 +227,181 @@ impl std::fmt::Debug for DebugSession<'_> {
     }
 }
 
+/// The cooperative async-scheduler state (audit-1 finding 3): the structured-concurrency
+/// scope stack, the strand-local telemetry context, and the traced-future hook. One
+/// sub-struct so a scheduler borrow (`&mut self.sched`) is disjoint from the module tables.
+struct SchedState {
+    /// The structured-concurrency scope stack (Track A.3b): one entry per open `concurrent { }` block,
+    /// each a list of the tasks `spawn`ed in it. The scope owns one reference to each task's future (and
+    /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
+    /// `scopes`; both round-robin identically, so the differential holds by construction.
+    scopes: Vec<Vec<Task>>,
+    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
+    /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
+    /// client). This cell always belongs to whichever strand is executing — the main strand (root)
+    /// by default; the scheduler swaps a task's own saved context in around each poll of its step
+    /// (`poll_all_scopes_round`), and a `spawn` snapshots it into the child. Mirrors the
+    /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
+    /// so the differential is indifferent to it by construction.
+    ctx_current: Vec<u64>,
+    /// Whether telemetry is enabled, cached from the host at load (native-otel T5d perf): the
+    /// enabled state is fixed per host (env-derived at construction), and the channel send/recv
+    /// hot paths gate on it — a cached bool is one predictable branch instead of a virtual call.
+    tel_on: bool,
+    /// **Traced futures** (native-otel T5c) — the future-completion hook behind
+    /// `NativeCtx::trace_future`: each entry holds one retained reference to a step future whose
+    /// polls run under its saved context and whose completion (or abort) ends its telemetry span.
+    /// Almost always empty (the hot check in `poll_once` is `is_empty()`); entries leave on
+    /// completion, and teardown feeds strays into the collector roots then releases them, exactly
+    /// like `ext_arena`.
+    traced_futures: Vec<TracedFuture>,
+}
+
+/// The real-OS-thread isolate state (isolates I.4b; audit-1 finding 3): spawn plumbing,
+/// in-flight worker slots, and the borrow-share promotion region. Inert in the sandbox.
+struct IsolateState {
+    /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
+    /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
+    /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
+    /// worker thread can own the module for its lifetime; `isolate_factory` builds a fresh host +
+    /// executor per worker (injected by the CLI so `noeta-vm` needs no `noeta-runtime`/tokio dependency);
+    /// `isolates` holds each spawned worker's result channel + join handle; `inflight_isolates` counts
+    /// workers whose result has not yet been harvested (so the scheduler treats a pending isolate as
+    /// progress, not a deadlock). All inert in the sandbox (`parallel_isolates` false).
+    parallel_isolates: bool,
+    isolate_module: Option<Arc<Module>>,
+    isolate_factory: Option<IsolateFactory>,
+    isolates: Vec<IsolateSlot>,
+    inflight_isolates: usize,
+    /// The borrow-share region for real-isolate arguments (P-PAR S2): promotable argument graphs
+    /// are deep-copied into it **once** and every worker borrows zero-copy. `promote_memo` maps a
+    /// source object's bits → its promoted root across spawns (the fan-out promote-once memo);
+    /// each memoized source is retained into `promote_sources` so its address stays valid for the
+    /// memo's lifetime. All three are freed/cleared together when the last in-flight isolate is
+    /// joined (`finish_isolate`) and defensively at teardown. Always empty in the sandbox.
+    shared_region: noeta_value::SharedRegion,
+    promote_memo: HashMap<u64, Value>,
+    promote_sources: Vec<Value>,
+}
+
+/// The run's captured output (audit-1 finding 3): stdout, diagnostics, a deliberate
+/// `os.exit`, and the abort traceback. Drained into the [`RunResult`] at teardown.
+struct RunOutput {
+    stdout: String,
+    diagnostics: Vec<Diagnostic>,
+    /// A deliberate `os.exit(code)` (stdlib-gaps): the requested exit code, set when the
+    /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly
+    /// (stdout kept, nothing reported) and the run's exit code is this value.
+    requested_exit: Option<i32>,
+    /// The **abort traceback**: the call stack captured as a fatal abort unwinds, innermost frame
+    /// first. Appended by [`Vm::run`]'s error path — each (possibly re-entrant) run contributes its
+    /// own frame stack as the abort climbs — and handed out by the host-facing entry points for the
+    /// CLI / debug adapter to render. Written **only after** an abort, so it costs the hot path
+    /// nothing; empty for a run that completes.
+    abort_trace: Vec<TraceFrame>,
+}
+
+/// The tier-1 (JIT) engine state (P-JIT; audit-1 finding 3): engines, mirror tables,
+/// promotion counters, and stats. One `#[cfg(feature = "jit-rt")]` field on [`Vm`] instead
+/// of ~19 per-field gates; jit-only (Cranelift-needing) fields keep their finer gate inside.
+#[cfg(feature = "jit-rt")]
+struct Tier1State {
+    /// The tier-1 JIT engine (milestone P-JIT), present only when the `jit` feature is on *and* the
+    /// host ISA is available. `None` = interpret everything (tier 0). Never populated on a worker
+    /// isolate — Cranelift's `JITModule` is `!Send`, and the deterministic path stays tier 0.
+    #[cfg(feature = "jit")]
+    jit: Option<noeta_jit::Jit>,
+    /// When set, every eligible prototype is compiled eagerly and dispatched through tier 1 (the
+    /// `--jit-differential` / leak-under-JIT oracle's "force JIT" switch). Off = ordinary hot-counter
+    /// promotion.
+    #[cfg(feature = "jit")]
+    force_jit: bool,
+    /// Per-prototype tier-1 entry counter, indexed by prototype index; a prototype is compiled once
+    /// its count crosses [`JIT_HOT_THRESHOLD`] (or immediately under `force_jit`).
+    #[cfg(feature = "jit")]
+    jit_counters: Vec<u32>,
+    /// Prototypes whose loops native code cannot sustain (every loop bails — see
+    /// [`noeta_jit::worth_osr`]), so OSR was declined and must not be re-evaluated every back-edge.
+    /// Checked once when a proto first goes hot; keeps a heap-op-dominated loop in the interpreter
+    /// (which is faster for it than the tier-0↔tier-1 bounce) without a per-iteration re-scan.
+    #[cfg(feature = "jit")]
+    jit_declined: Vec<bool>,
+    /// The value the bottom frame produced when it returned inside native code (J3): `jit_return`
+    /// parks it here for the dispatch loop to yield as the run's result.
+    jit_ret: Value,
+    /// Closures pinned by the JIT's per-call-site inline caches (P-JSSA S4.2): `jit_prepare_call`
+    /// retains a closure when it caches it, so bits-equality at the site stays a proof of
+    /// identity (no free/reuse while cached). Only 0-upvalue closures are cacheable — they hold
+    /// nothing, so delaying their free to teardown is observably inert. Released (and the caches
+    /// with them) before the teardown collectors run, keeping residency and the anomaly
+    /// accounting exact. Bounded by call-site count: a site that sees a second distinct callee
+    /// is poisoned, never re-pinned.
+    jit_cache_pins: Vec<Value>,
+    /// The empty-`Frame` template the JIT's native frame push copies (stable address for the
+    /// `Vm`'s lifetime; the `Jit` and its generated code are dropped with the same `Vm`).
+    #[cfg(feature = "jit")]
+    jit_frame_template: Option<Box<Frame>>,
+    /// The off-thread compile service (P-PAR S4) — the production hot-counter path. Mutually
+    /// exclusive with the synchronous `jit` engine (which the `force_jit` oracle keeps).
+    #[cfg(feature = "jit")]
+    jit_service: Option<jit_service::JitService>,
+    /// Tier-1 engines **retired by a hot swap** (server-hmr H3). Their executable pages must
+    /// outlive any in-flight native frame (a frame beneath the long-running serve dispatch can
+    /// be native code), so a swap never drops an engine — it parks it here, clears the mirror
+    /// tables (no NEW dispatch can enter retired code), and re-arms fresh against the swapped
+    /// module. Dropped with the `Vm`, after the run's machine stack has fully unwound. Bounded
+    /// per-swap growth, like the arena modules — the documented retention model.
+    #[cfg(feature = "jit")]
+    jit_graveyard: Vec<noeta_jit::Jit>,
+    /// The service twin of [`Vm::jit_graveyard`]: a retired service handle keeps its compile
+    /// thread parked (blocked on an empty request channel) and its pages alive; the `Drop` at
+    /// `Vm` teardown stops and joins it.
+    #[cfg(feature = "jit")]
+    jit_service_graveyard: Vec<jit_service::JitService>,
+    /// P-AOT L3.2b: native entries were **bound ahead of time** (from a linked dispatch table),
+    /// not JIT-compiled — so `self.jit`/`jit_service` are both `None` yet the mirror tables carry
+    /// real native entry points. This makes the frame-entry dispatch consult those pre-installed
+    /// entries even with the compiler absent; an uncompiled (ineligible) prototype still falls
+    /// through to the interpreter.
+    aot: bool,
+    /// The **mirror tables** — the single tier-1 lookup source for the dispatch loop and the
+    /// native call helpers, in both modes: the sync engine fills them right after compiling,
+    /// the service via the mailbox drain. The engine's own tables are never read by the
+    /// mutator in service mode (they live on the compile thread).
+    jit_entries: Vec<Option<noeta_jit_abi::CompiledFn>>,
+    jit_fast: Vec<Option<usize>>,
+    /// Per-prototype "request sent" flag (service mode) — a hot prototype is queued exactly once.
+    #[cfg(feature = "jit")]
+    jit_requested: Vec<bool>,
+    /// Prototypes whose compile request was born at a **loop back-edge** (service mode): when the
+    /// entry lands, the next back-edge OSR-enters mid-loop instead of waiting for a frame entry
+    /// that a single long-running loop may never make.
+    #[cfg(feature = "jit")]
+    jit_osr_pending: Vec<bool>,
+    /// Requests in flight to the service (sends minus drained responses): the mailbox mutex is
+    /// only ever locked while this is non-zero, so a program that never promotes pays nothing.
+    #[cfg(feature = "jit")]
+    jit_pending: usize,
+    /// The service's final compile accounting, captured at teardown shutdown (the engine — and
+    /// its counters — live on the compile thread until then).
+    #[cfg(feature = "jit")]
+    jit_final_stats: Option<JitStats>,
+    /// Whether teardown's service shutdown **drains** (compiles) the outstanding queue rather
+    /// than abandoning it. Off in production (a process should not linger at exit for entries
+    /// nothing will run); on for the stats entry points, whose tests/benches assert
+    /// deterministic promotion counts.
+    #[cfg(feature = "jit")]
+    jit_drain_at_exit: bool,
+    /// The **bail histogram** (`--jit-stats`): how many times native code bailed back to the
+    /// interpreter, per `(proto, resume pc)`. `None` (the default) records nothing — the seam pays
+    /// one `Option` check *per bail event* (already a tier transition), never per op. Keyed by the
+    /// resume pc, which is the bailing op's own pc (bail-before-mutate), so the report resolves it
+    /// to an exact op + source line. Counts are per **native entry** (frame entries + one OSR), not
+    /// per loop iteration: once a compiled prototype bails, its frame stays tier-0 until the next
+    /// `'reload` (a declined loop produces no bails at all — the report lists those separately).
+    jit_bail_counts: Option<std::collections::HashMap<(u32, u32), u64>>,
+}
+
 /// One program's worth of execution state, shared across every (possibly re-entrant) frame
 /// stack: the compiled module, the shared shape handles and instance-method table, the by-name
 /// global environment, captured stdout, and the diagnostics recorded so far.
@@ -315,30 +490,8 @@ struct Vm<'m> {
     /// tree-walker's by construction, so the differential holds); the CLI swaps in a real wall-clock
     /// executor (Track A.4). See the eval backend's field of the same name.
     executor: Box<dyn noeta_stdlib::Executor>,
-    /// The structured-concurrency scope stack (Track A.3b): one entry per open `concurrent { }` block,
-    /// each a list of the tasks `spawn`ed in it. The scope owns one reference to each task's future (and
-    /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
-    /// `scopes`; both round-robin identically, so the differential holds by construction.
-    scopes: Vec<Vec<Task>>,
-    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
-    /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
-    /// client). This cell always belongs to whichever strand is executing — the main strand (root)
-    /// by default; the scheduler swaps a task's own saved context in around each poll of its step
-    /// (`poll_all_scopes_round`), and a `spawn` snapshots it into the child. Mirrors the
-    /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
-    /// so the differential is indifferent to it by construction.
-    ctx_current: Vec<u64>,
-    /// Whether telemetry is enabled, cached from the host at load (native-otel T5d perf): the
-    /// enabled state is fixed per host (env-derived at construction), and the channel send/recv
-    /// hot paths gate on it — a cached bool is one predictable branch instead of a virtual call.
-    tel_on: bool,
-    /// **Traced futures** (native-otel T5c) — the future-completion hook behind
-    /// `NativeCtx::trace_future`: each entry holds one retained reference to a step future whose
-    /// polls run under its saved context and whose completion (or abort) ends its telemetry span.
-    /// Almost always empty (the hot check in `poll_once` is `is_empty()`); entries leave on
-    /// completion, and teardown feeds strays into the collector roots then releases them, exactly
-    /// like `ext_arena`.
-    traced_futures: Vec<TracedFuture>,
+    /// Async scheduler state — see [`SchedState`].
+    sched: SchedState,
     /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoint
     /// values (`Sender`/`Receiver`) reference one by index. A queued message is owned by the channel
     /// (retained on enqueue, transferred out on dequeue). `channel_progress` counts successful queue
@@ -374,134 +527,13 @@ struct Vm<'m> {
     /// drop clears + returns it — a hot `set` loop then runs alloc-free. A stack, so ctx
     /// re-entrancy (a called closure re-entering a dispatch) simply pops the next one.
     ctx_table_pool: Vec<Vec<Option<Value>>>,
-    /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
-    /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
-    /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
-    /// worker thread can own the module for its lifetime; `isolate_factory` builds a fresh host +
-    /// executor per worker (injected by the CLI so `noeta-vm` needs no `noeta-runtime`/tokio dependency);
-    /// `isolates` holds each spawned worker's result channel + join handle; `inflight_isolates` counts
-    /// workers whose result has not yet been harvested (so the scheduler treats a pending isolate as
-    /// progress, not a deadlock). All inert in the sandbox (`parallel_isolates` false).
-    parallel_isolates: bool,
-    isolate_module: Option<Arc<Module>>,
-    isolate_factory: Option<IsolateFactory>,
-    isolates: Vec<IsolateSlot>,
-    inflight_isolates: usize,
-    /// The borrow-share region for real-isolate arguments (P-PAR S2): promotable argument graphs
-    /// are deep-copied into it **once** and every worker borrows zero-copy. `promote_memo` maps a
-    /// source object's bits → its promoted root across spawns (the fan-out promote-once memo);
-    /// each memoized source is retained into `promote_sources` so its address stays valid for the
-    /// memo's lifetime. All three are freed/cleared together when the last in-flight isolate is
-    /// joined (`finish_isolate`) and defensively at teardown. Always empty in the sandbox.
-    shared_region: noeta_value::SharedRegion,
-    promote_memo: HashMap<u64, Value>,
-    promote_sources: Vec<Value>,
-    stdout: String,
-    diagnostics: Vec<Diagnostic>,
-    /// A deliberate `os.exit(code)` (stdlib-gaps): the requested exit code, set when the
-    /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly
-    /// (stdout kept, nothing reported) and the run's exit code is this value.
-    requested_exit: Option<i32>,
-    /// The tier-1 JIT engine (milestone P-JIT), present only when the `jit` feature is on *and* the
-    /// host ISA is available. `None` = interpret everything (tier 0). Never populated on a worker
-    /// isolate — Cranelift's `JITModule` is `!Send`, and the deterministic path stays tier 0.
-    #[cfg(feature = "jit")]
-    jit: Option<noeta_jit::Jit>,
-    /// When set, every eligible prototype is compiled eagerly and dispatched through tier 1 (the
-    /// `--jit-differential` / leak-under-JIT oracle's "force JIT" switch). Off = ordinary hot-counter
-    /// promotion.
-    #[cfg(feature = "jit")]
-    force_jit: bool,
-    /// Per-prototype tier-1 entry counter, indexed by prototype index; a prototype is compiled once
-    /// its count crosses [`JIT_HOT_THRESHOLD`] (or immediately under `force_jit`).
-    #[cfg(feature = "jit")]
-    jit_counters: Vec<u32>,
-    /// Prototypes whose loops native code cannot sustain (every loop bails — see
-    /// [`noeta_jit::worth_osr`]), so OSR was declined and must not be re-evaluated every back-edge.
-    /// Checked once when a proto first goes hot; keeps a heap-op-dominated loop in the interpreter
-    /// (which is faster for it than the tier-0↔tier-1 bounce) without a per-iteration re-scan.
-    #[cfg(feature = "jit")]
-    jit_declined: Vec<bool>,
-    /// The value the bottom frame produced when it returned inside native code (J3): `jit_return`
-    /// parks it here for the dispatch loop to yield as the run's result.
+    /// Real-thread isolate state — see [`IsolateState`].
+    isolates: IsolateState,
+    /// Captured run output — see [`RunOutput`].
+    out: RunOutput,
+    /// Tier-1 JIT state — see [`Tier1State`]. The one runtime-support gate on `Vm`.
     #[cfg(feature = "jit-rt")]
-    jit_ret: Value,
-    /// Closures pinned by the JIT's per-call-site inline caches (P-JSSA S4.2): `jit_prepare_call`
-    /// retains a closure when it caches it, so bits-equality at the site stays a proof of
-    /// identity (no free/reuse while cached). Only 0-upvalue closures are cacheable — they hold
-    /// nothing, so delaying their free to teardown is observably inert. Released (and the caches
-    /// with them) before the teardown collectors run, keeping residency and the anomaly
-    /// accounting exact. Bounded by call-site count: a site that sees a second distinct callee
-    /// is poisoned, never re-pinned.
-    #[cfg(feature = "jit-rt")]
-    jit_cache_pins: Vec<Value>,
-    /// The empty-`Frame` template the JIT's native frame push copies (stable address for the
-    /// `Vm`'s lifetime; the `Jit` and its generated code are dropped with the same `Vm`).
-    #[cfg(feature = "jit")]
-    jit_frame_template: Option<Box<Frame>>,
-    /// The off-thread compile service (P-PAR S4) — the production hot-counter path. Mutually
-    /// exclusive with the synchronous `jit` engine (which the `force_jit` oracle keeps).
-    #[cfg(feature = "jit")]
-    jit_service: Option<jit_service::JitService>,
-    /// Tier-1 engines **retired by a hot swap** (server-hmr H3). Their executable pages must
-    /// outlive any in-flight native frame (a frame beneath the long-running serve dispatch can
-    /// be native code), so a swap never drops an engine — it parks it here, clears the mirror
-    /// tables (no NEW dispatch can enter retired code), and re-arms fresh against the swapped
-    /// module. Dropped with the `Vm`, after the run's machine stack has fully unwound. Bounded
-    /// per-swap growth, like the arena modules — the documented retention model.
-    #[cfg(feature = "jit")]
-    jit_graveyard: Vec<noeta_jit::Jit>,
-    /// The service twin of [`Vm::jit_graveyard`]: a retired service handle keeps its compile
-    /// thread parked (blocked on an empty request channel) and its pages alive; the `Drop` at
-    /// `Vm` teardown stops and joins it.
-    #[cfg(feature = "jit")]
-    jit_service_graveyard: Vec<jit_service::JitService>,
-    /// P-AOT L3.2b: native entries were **bound ahead of time** (from a linked dispatch table),
-    /// not JIT-compiled — so `self.jit`/`jit_service` are both `None` yet the mirror tables carry
-    /// real native entry points. This makes the frame-entry dispatch consult those pre-installed
-    /// entries even with the compiler absent; an uncompiled (ineligible) prototype still falls
-    /// through to the interpreter.
-    #[cfg(feature = "jit-rt")]
-    aot: bool,
-    /// The **mirror tables** — the single tier-1 lookup source for the dispatch loop and the
-    /// native call helpers, in both modes: the sync engine fills them right after compiling,
-    /// the service via the mailbox drain. The engine's own tables are never read by the
-    /// mutator in service mode (they live on the compile thread).
-    #[cfg(feature = "jit-rt")]
-    jit_entries: Vec<Option<noeta_jit_abi::CompiledFn>>,
-    #[cfg(feature = "jit-rt")]
-    jit_fast: Vec<Option<usize>>,
-    /// Per-prototype "request sent" flag (service mode) — a hot prototype is queued exactly once.
-    #[cfg(feature = "jit")]
-    jit_requested: Vec<bool>,
-    /// Prototypes whose compile request was born at a **loop back-edge** (service mode): when the
-    /// entry lands, the next back-edge OSR-enters mid-loop instead of waiting for a frame entry
-    /// that a single long-running loop may never make.
-    #[cfg(feature = "jit")]
-    jit_osr_pending: Vec<bool>,
-    /// Requests in flight to the service (sends minus drained responses): the mailbox mutex is
-    /// only ever locked while this is non-zero, so a program that never promotes pays nothing.
-    #[cfg(feature = "jit")]
-    jit_pending: usize,
-    /// The service's final compile accounting, captured at teardown shutdown (the engine — and
-    /// its counters — live on the compile thread until then).
-    #[cfg(feature = "jit")]
-    jit_final_stats: Option<JitStats>,
-    /// Whether teardown's service shutdown **drains** (compiles) the outstanding queue rather
-    /// than abandoning it. Off in production (a process should not linger at exit for entries
-    /// nothing will run); on for the stats entry points, whose tests/benches assert
-    /// deterministic promotion counts.
-    #[cfg(feature = "jit")]
-    jit_drain_at_exit: bool,
-    /// The **bail histogram** (`--jit-stats`): how many times native code bailed back to the
-    /// interpreter, per `(proto, resume pc)`. `None` (the default) records nothing — the seam pays
-    /// one `Option` check *per bail event* (already a tier transition), never per op. Keyed by the
-    /// resume pc, which is the bailing op's own pc (bail-before-mutate), so the report resolves it
-    /// to an exact op + source line. Counts are per **native entry** (frame entries + one OSR), not
-    /// per loop iteration: once a compiled prototype bails, its frame stays tier-0 until the next
-    /// `'reload` (a declined loop produces no bails at all — the report lists those separately).
-    #[cfg(feature = "jit-rt")]
-    jit_bail_counts: Option<std::collections::HashMap<(u32, u32), u64>>,
+    tier1: Tier1State,
     /// The attached debugger (`noeta dap`), consulted before every instruction. `None` on every
     /// non-debug run (production, differential, salsa), where it costs one predicted branch per op.
     debugger: Option<Box<dyn Debugger>>,
@@ -509,12 +541,6 @@ struct Vm<'m> {
     /// as `debugger` but without pausing. `None` on every non-profile run, where it costs one
     /// predicted branch per op. Never armed together with the JIT (a profile run pins tier-0).
     profiler: Option<Box<dyn ProfileHook>>,
-    /// The **abort traceback**: the call stack captured as a fatal abort unwinds, innermost frame
-    /// first. Appended by [`Vm::run`]'s error path — each (possibly re-entrant) run contributes its
-    /// own frame stack as the abort climbs — and handed out by the host-facing entry points for the
-    /// CLI / debug adapter to render. Written **only after** an abort, so it costs the hot path
-    /// nothing; empty for a run that completes.
-    abort_trace: Vec<TraceFrame>,
     /// The extension **registry** this VM resolves native names against (instance-registry IR3):
     /// module functions, extern types, method bundles, and their dispatch all consult it through
     /// [`Vm::reg`]. `None` — the default on every ordinary run — falls back to the process-global

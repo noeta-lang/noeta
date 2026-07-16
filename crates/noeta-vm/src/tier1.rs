@@ -310,7 +310,7 @@ extern "C" fn jit_return(
     let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
     match vm.do_return_masked(frames, regs, Value::from_bits(raw), release_mask) {
         Some(v) => {
-            vm.jit_ret = v;
+            vm.tier1.jit_ret = v;
             noeta_jit_abi::OUTCOME_HALTED
         }
         None => noeta_jit_abi::OUTCOME_RETURNED,
@@ -392,7 +392,13 @@ extern "C" fn jit_prepare_call(
     // from the caller's still-live registers). Bit 0 of the returned pointer tags the convention.
     // Lookups go through the VM's mirror tables (P-PAR S4) — empty when the JIT is off, and the
     // only tier-1 tables the mutator may read in service mode.
-    if let Some(ff) = vm.jit_fast.get(callee_proto as usize).copied().flatten() {
+    if let Some(ff) = vm
+        .tier1
+        .jit_fast
+        .get(callee_proto as usize)
+        .copied()
+        .flatten()
+    {
         // S4.2: fill this call site's inline cache so the next call with the same callee pushes
         // the frame natively, without this helper. The cached closure is **pinned** (retained +
         // held on `jit_cache_pins` until teardown) so its bits can never be reused by another
@@ -402,7 +408,7 @@ extern "C" fn jit_prepare_call(
             let slot = unsafe { &mut *site };
             if slot[0] == noeta_jit_abi::SITE_EMPTY {
                 retain(callee_val);
-                vm.jit_cache_pins.push(callee_val);
+                vm.tier1.jit_cache_pins.push(callee_val);
                 slot[1] = ff as u64;
                 slot[2] = num_regs as u64;
                 slot[3] = callee_proto as u64;
@@ -748,12 +754,13 @@ impl<'m> Vm<'m> {
     pub(crate) fn init_jit(&mut self) {
         let helpers = jit_helpers();
         let template = self
+            .tier1
             .jit_frame_template
             .get_or_insert_with(fresh_frame_template);
         let template_ptr = template.as_ref() as *const Frame as *const u8;
         match noeta_jit::Jit::new(&helpers, frame_layout(), template_ptr) {
             Ok(mut jit) => {
-                if self.force_jit {
+                if self.tier1.force_jit {
                     for p in 0..self.module.protos.len() {
                         if let Ok(f) = jit.compile(self.module, p) {
                             let fast = jit.get_fast(p);
@@ -761,9 +768,9 @@ impl<'m> Vm<'m> {
                         }
                     }
                 }
-                self.jit = Some(jit);
+                self.tier1.jit = Some(jit);
             }
-            Err(_) => self.jit = None,
+            Err(_) => self.tier1.jit = None,
         }
     }
 
@@ -780,10 +787,11 @@ impl<'m> Vm<'m> {
             .map(|(name, ptr)| (name, ptr as usize))
             .collect();
         let template = self
+            .tier1
             .jit_frame_template
             .get_or_insert_with(fresh_frame_template);
         let template_addr = template.as_ref() as *const Frame as usize;
-        self.jit_service =
+        self.tier1.jit_service =
             jit_service::JitService::spawn(module, helpers, frame_layout(), template_addr);
     }
 
@@ -821,18 +829,18 @@ impl<'m> Vm<'m> {
     /// dispatch loop and the native call helpers, in both sync and service modes.
     #[cfg(feature = "jit-rt")]
     fn jit_install(&mut self, proto: usize, entry: noeta_jit_abi::CompiledFn, fast: Option<usize>) {
-        if proto >= self.jit_entries.len() {
-            self.jit_entries.resize(proto + 1, None);
-            self.jit_fast.resize(proto + 1, None);
+        if proto >= self.tier1.jit_entries.len() {
+            self.tier1.jit_entries.resize(proto + 1, None);
+            self.tier1.jit_fast.resize(proto + 1, None);
         }
-        self.jit_entries[proto] = Some(entry);
-        self.jit_fast[proto] = fast;
+        self.tier1.jit_entries[proto] = Some(entry);
+        self.tier1.jit_fast[proto] = fast;
     }
 
     /// The mirrored tier-1 entry point for `proto`, if compiled.
     #[cfg(feature = "jit-rt")]
     fn jit_entry(&self, proto: usize) -> Option<noeta_jit_abi::CompiledFn> {
-        self.jit_entries.get(proto).copied().flatten()
+        self.tier1.jit_entries.get(proto).copied().flatten()
     }
 
     /// Whether the frame-entry loop should consult the native mirror tables. Armed when the sync
@@ -843,11 +851,11 @@ impl<'m> Vm<'m> {
     pub(crate) fn native_dispatch_armed(&self) -> bool {
         #[cfg(feature = "jit")]
         {
-            self.jit.is_some() || self.jit_service.is_some() || self.aot
+            self.tier1.jit.is_some() || self.tier1.jit_service.is_some() || self.tier1.aot
         }
         #[cfg(not(feature = "jit"))]
         {
-            self.aot
+            self.tier1.aot
         }
     }
 
@@ -857,22 +865,22 @@ impl<'m> Vm<'m> {
     /// returns to zero.
     #[cfg(feature = "jit")]
     fn jit_drain_service(&mut self) {
-        if self.jit_pending == 0 {
+        if self.tier1.jit_pending == 0 {
             return;
         }
-        let Some(service) = self.jit_service.as_ref() else {
-            self.jit_pending = 0;
+        let Some(service) = self.tier1.jit_service.as_ref() else {
+            self.tier1.jit_pending = 0;
             return;
         };
         for done in service.drain() {
-            self.jit_pending = self.jit_pending.saturating_sub(1);
+            self.tier1.jit_pending = self.tier1.jit_pending.saturating_sub(1);
             match done.entry {
                 Some(entry) => self.jit_install(done.proto, entry, done.fast),
                 None => {
-                    if done.proto >= self.jit_declined.len() {
-                        self.jit_declined.resize(done.proto + 1, false);
+                    if done.proto >= self.tier1.jit_declined.len() {
+                        self.tier1.jit_declined.resize(done.proto + 1, false);
                     }
-                    self.jit_declined[done.proto] = true;
+                    self.tier1.jit_declined[done.proto] = true;
                 }
             }
         }
@@ -941,7 +949,7 @@ impl<'m> Vm<'m> {
     /// `None` while still cold, queued, or when the JIT is unavailable.
     #[cfg(feature = "jit")]
     fn jit_maybe_compile(&mut self, proto: usize) -> Option<noeta_jit_abi::CompiledFn> {
-        if self.jit.is_none() && self.jit_service.is_none() {
+        if self.tier1.jit.is_none() && self.tier1.jit_service.is_none() {
             return None;
         }
         // Harvest any compiles that landed since the last checkpoint (no-op at zero pending),
@@ -951,32 +959,32 @@ impl<'m> Vm<'m> {
             return Some(f);
         }
         // Already found not worth compiling (a prototype whose only loops bail) → keep interpreting.
-        if self.jit_declined.get(proto).copied().unwrap_or(false) {
+        if self.tier1.jit_declined.get(proto).copied().unwrap_or(false) {
             return None;
         }
-        if proto >= self.jit_counters.len() {
-            self.jit_counters.resize(proto + 1, 0);
+        if proto >= self.tier1.jit_counters.len() {
+            self.tier1.jit_counters.resize(proto + 1, 0);
         }
-        self.jit_counters[proto] = self.jit_counters[proto].saturating_add(1);
-        let hot = self.force_jit || self.jit_counters[proto] >= JIT_HOT_THRESHOLD;
+        self.tier1.jit_counters[proto] = self.tier1.jit_counters[proto].saturating_add(1);
+        let hot = self.tier1.force_jit || self.tier1.jit_counters[proto] >= JIT_HOT_THRESHOLD;
         if !hot {
             return None;
         }
         // A prototype dominated by a bailing loop bounces tier-0↔tier-1 every iteration, slower than
         // the interpreter — decline it once (the oracle's `force_jit` compiles everything anyway).
-        if !self.force_jit && !noeta_jit::worth_compiling(&self.module.protos[proto]) {
-            if proto >= self.jit_declined.len() {
-                self.jit_declined.resize(proto + 1, false);
+        if !self.tier1.force_jit && !noeta_jit::worth_compiling(&self.module.protos[proto]) {
+            if proto >= self.tier1.jit_declined.len() {
+                self.tier1.jit_declined.resize(proto + 1, false);
             }
-            self.jit_declined[proto] = true;
+            self.tier1.jit_declined[proto] = true;
             return None;
         }
-        if self.jit_service.is_some() {
+        if self.tier1.jit_service.is_some() {
             self.jit_request(proto, false);
             return None;
         }
         let module = self.module;
-        let jit = self.jit.as_mut()?;
+        let jit = self.tier1.jit.as_mut()?;
         let f = jit.compile(module, proto).ok()?;
         let fast = jit.get_fast(proto);
         self.jit_install(proto, f, fast);
@@ -987,31 +995,38 @@ impl<'m> Vm<'m> {
     /// request born at a loop back-edge, so the landing entry OSR-enters mid-loop.
     #[cfg(feature = "jit")]
     fn jit_request(&mut self, proto: usize, osr: bool) {
-        if self.jit_requested.get(proto).copied().unwrap_or(false) {
+        if self
+            .tier1
+            .jit_requested
+            .get(proto)
+            .copied()
+            .unwrap_or(false)
+        {
             return;
         }
-        if proto >= self.jit_requested.len() {
-            self.jit_requested.resize(proto + 1, false);
+        if proto >= self.tier1.jit_requested.len() {
+            self.tier1.jit_requested.resize(proto + 1, false);
         }
-        self.jit_requested[proto] = true;
+        self.tier1.jit_requested[proto] = true;
         if osr {
-            if proto >= self.jit_osr_pending.len() {
-                self.jit_osr_pending.resize(proto + 1, false);
+            if proto >= self.tier1.jit_osr_pending.len() {
+                self.tier1.jit_osr_pending.resize(proto + 1, false);
             }
-            self.jit_osr_pending[proto] = true;
+            self.tier1.jit_osr_pending[proto] = true;
         }
         let sent = self
+            .tier1
             .jit_service
             .as_ref()
             .is_some_and(|service| service.request(proto));
         if sent {
-            self.jit_pending += 1;
+            self.tier1.jit_pending += 1;
         } else {
             // The service thread is gone: decline so no caller waits on a response forever.
-            if proto >= self.jit_declined.len() {
-                self.jit_declined.resize(proto + 1, false);
+            if proto >= self.tier1.jit_declined.len() {
+                self.tier1.jit_declined.resize(proto + 1, false);
             }
-            self.jit_declined[proto] = true;
+            self.tier1.jit_declined[proto] = true;
         }
     }
 
@@ -1036,51 +1051,68 @@ impl<'m> Vm<'m> {
             // pending OSR entry now (a single long-running loop gets no other chance to go
             // native mid-flight). A prototype compiled via the call-entry path has no pending
             // OSR and keeps the one-OSR-per-prototype rule: it goes native at its next `'reload`.
-            if self.jit_osr_pending.get(proto).copied().unwrap_or(false) {
-                self.jit_osr_pending[proto] = false;
+            if self
+                .tier1
+                .jit_osr_pending
+                .get(proto)
+                .copied()
+                .unwrap_or(false)
+            {
+                self.tier1.jit_osr_pending[proto] = false;
                 return true;
             }
             return false;
         }
         // Already found un-sustainable (all loops bail) → keep interpreting, no per-iteration re-scan.
-        if self.jit_declined.get(proto).copied().unwrap_or(false) {
+        if self.tier1.jit_declined.get(proto).copied().unwrap_or(false) {
             return false;
         }
         // A back-edge-born request is in flight: harvest the mailbox; enter the moment it lands.
-        if self.jit_requested.get(proto).copied().unwrap_or(false) {
+        if self
+            .tier1
+            .jit_requested
+            .get(proto)
+            .copied()
+            .unwrap_or(false)
+        {
             self.jit_drain_service();
             if self.jit_entry(proto).is_some()
-                && self.jit_osr_pending.get(proto).copied().unwrap_or(false)
+                && self
+                    .tier1
+                    .jit_osr_pending
+                    .get(proto)
+                    .copied()
+                    .unwrap_or(false)
             {
-                self.jit_osr_pending[proto] = false;
+                self.tier1.jit_osr_pending[proto] = false;
                 return true;
             }
             return false;
         }
         // Bump the back-edge counter; only decide once the prototype is hot. `force_jit` (the oracle)
         // compiles everything for full coverage, so it skips the worthiness gate.
-        if proto >= self.jit_counters.len() {
-            self.jit_counters.resize(proto + 1, 0);
+        if proto >= self.tier1.jit_counters.len() {
+            self.tier1.jit_counters.resize(proto + 1, 0);
         }
-        self.jit_counters[proto] = self.jit_counters[proto].saturating_add(1);
-        if !(self.force_jit || self.jit_counters[proto] >= JIT_HOT_THRESHOLD) {
+        self.tier1.jit_counters[proto] = self.tier1.jit_counters[proto].saturating_add(1);
+        if !(self.tier1.force_jit || self.tier1.jit_counters[proto] >= JIT_HOT_THRESHOLD) {
             return false;
         }
-        if !self.force_jit && !noeta_jit::worth_osr(&self.module.protos[proto]) {
+        if !self.tier1.force_jit && !noeta_jit::worth_osr(&self.module.protos[proto]) {
             // A heap-op-dominated loop: native would bounce tier-0↔tier-1 every iteration, slower than
             // the interpreter. Decline OSR for this prototype, once and for good.
-            if proto >= self.jit_declined.len() {
-                self.jit_declined.resize(proto + 1, false);
+            if proto >= self.tier1.jit_declined.len() {
+                self.tier1.jit_declined.resize(proto + 1, false);
             }
-            self.jit_declined[proto] = true;
+            self.tier1.jit_declined[proto] = true;
             return false;
         }
-        if self.jit_service.is_some() {
+        if self.tier1.jit_service.is_some() {
             self.jit_request(proto, true);
             return false;
         }
         let module = self.module;
-        let jit = match self.jit.as_mut() {
+        let jit = match self.tier1.jit.as_mut() {
             Some(j) => j,
             None => return false,
         };

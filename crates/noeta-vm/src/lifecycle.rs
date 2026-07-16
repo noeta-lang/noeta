@@ -283,10 +283,12 @@ impl<'m> Vm<'m> {
             global_order: Vec::new(),
             host,
             executor,
-            scopes: Vec::new(),
-            ctx_current: Vec::new(),
-            tel_on,
-            traced_futures: Vec::new(),
+            sched: SchedState {
+                scopes: Vec::new(),
+                ctx_current: Vec::new(),
+                tel_on,
+                traced_futures: Vec::new(),
+            },
             channels: Vec::new(),
             channel_progress: 0,
             ext_arena: Vec::new(),
@@ -296,58 +298,59 @@ impl<'m> Vm<'m> {
             ext_state: Vec::new(),
             ext_closed_gates: Vec::new(),
             ctx_table_pool: Vec::new(),
-            parallel_isolates: false,
-            isolate_module: None,
-            isolate_factory: None,
-            isolates: Vec::new(),
-            inflight_isolates: 0,
-            shared_region: noeta_value::SharedRegion::new(),
-            promote_memo: HashMap::new(),
-            promote_sources: Vec::new(),
-            stdout: String::new(),
-            diagnostics: Vec::new(),
-            requested_exit: None,
-            #[cfg(feature = "jit")]
-            jit: None,
-            #[cfg(feature = "jit")]
-            force_jit: false,
-            #[cfg(feature = "jit")]
-            jit_counters: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_declined: Vec::new(),
+            isolates: IsolateState {
+                parallel_isolates: false,
+                isolate_module: None,
+                isolate_factory: None,
+                isolates: Vec::new(),
+                inflight_isolates: 0,
+                shared_region: noeta_value::SharedRegion::new(),
+                promote_memo: HashMap::new(),
+                promote_sources: Vec::new(),
+            },
+            out: RunOutput {
+                stdout: String::new(),
+                diagnostics: Vec::new(),
+                requested_exit: None,
+                abort_trace: Vec::new(),
+            },
             #[cfg(feature = "jit-rt")]
-            jit_ret: Value::unit(),
-            #[cfg(feature = "jit-rt")]
-            jit_cache_pins: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_frame_template: None,
-            #[cfg(feature = "jit")]
-            jit_service: None,
-            #[cfg(feature = "jit")]
-            jit_graveyard: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_service_graveyard: Vec::new(),
-            #[cfg(feature = "jit-rt")]
-            aot: false,
-            #[cfg(feature = "jit-rt")]
-            jit_entries: Vec::new(),
-            #[cfg(feature = "jit-rt")]
-            jit_fast: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_requested: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_osr_pending: Vec::new(),
-            #[cfg(feature = "jit")]
-            jit_pending: 0,
-            #[cfg(feature = "jit")]
-            jit_final_stats: None,
-            #[cfg(feature = "jit")]
-            jit_drain_at_exit: false,
-            #[cfg(feature = "jit-rt")]
-            jit_bail_counts: None,
+            tier1: Tier1State {
+                #[cfg(feature = "jit")]
+                jit: None,
+                #[cfg(feature = "jit")]
+                force_jit: false,
+                #[cfg(feature = "jit")]
+                jit_counters: Vec::new(),
+                #[cfg(feature = "jit")]
+                jit_declined: Vec::new(),
+                jit_ret: Value::unit(),
+                jit_cache_pins: Vec::new(),
+                #[cfg(feature = "jit")]
+                jit_frame_template: None,
+                #[cfg(feature = "jit")]
+                jit_service: None,
+                #[cfg(feature = "jit")]
+                jit_graveyard: Vec::new(),
+                #[cfg(feature = "jit")]
+                jit_service_graveyard: Vec::new(),
+                aot: false,
+                jit_entries: Vec::new(),
+                jit_fast: Vec::new(),
+                #[cfg(feature = "jit")]
+                jit_requested: Vec::new(),
+                #[cfg(feature = "jit")]
+                jit_osr_pending: Vec::new(),
+                #[cfg(feature = "jit")]
+                jit_pending: 0,
+                #[cfg(feature = "jit")]
+                jit_final_stats: None,
+                #[cfg(feature = "jit")]
+                jit_drain_at_exit: false,
+                jit_bail_counts: None,
+            },
             debugger: None,
             profiler: None,
-            abort_trace: Vec::new(),
             registry: None,
         }
     }
@@ -435,7 +438,7 @@ impl<'m> Vm<'m> {
             // arena, so a host-held value is not reclaimed out from under the host.
             roots.extend(self.embed_handles.iter().copied().flatten());
             // Traced futures (native-otel T5c) hold a `+1` each — the same graph treatment.
-            roots.extend(self.traced_futures.iter().map(|t| t.future));
+            roots.extend(self.sched.traced_futures.iter().map(|t| t.future));
             let garbage = collect_trace(&roots);
             self.reclaim_cycle_garbage(garbage);
         }
@@ -470,7 +473,7 @@ impl<'m> Vm<'m> {
         // Release any still-traced futures (native-otel T5c) — an abandoned `with_span`-async
         // future whose span never ended. The reference releases destructor-aware (residency 0);
         // the span simply stays unended (the recorder/exporter only consume ended spans).
-        for traced in std::mem::take(&mut self.traced_futures) {
+        for traced in std::mem::take(&mut self.sched.traced_futures) {
             self.release_value(traced.future);
         }
         // Destroy the globals at program end in reverse declaration order, running each
@@ -498,7 +501,7 @@ impl<'m> Vm<'m> {
 
         // Join any isolate worker threads not already harvested (a structured scope harvests + joins its
         // isolates at `}`, so this is normally empty — defensive against an early exit).
-        for slot in std::mem::take(&mut self.isolates) {
+        for slot in std::mem::take(&mut self.isolates.isolates) {
             if let Some(h) = slot.handle {
                 let _ = h.join();
             }
@@ -514,21 +517,26 @@ impl<'m> Vm<'m> {
         // mirrors are cleared first so no stale entry can outlive its pages; the service's final
         // compile accounting parks on the VM for the stats entry points.
         #[cfg(feature = "jit")]
-        if let Some(service) = self.jit_service.take() {
-            self.jit_entries.clear();
-            self.jit_fast.clear();
-            self.jit_final_stats = service.shutdown(self.jit_drain_at_exit);
+        if let Some(service) = self.tier1.jit_service.take() {
+            self.tier1.jit_entries.clear();
+            self.tier1.jit_fast.clear();
+            self.tier1.jit_final_stats = service.shutdown(self.tier1.jit_drain_at_exit);
         }
 
         // A deliberate `os.exit(code)` wins over the diagnostic-derived code (there are no
         // diagnostics on that path — the halt is clean).
         let exit_code = self
+            .out
             .requested_exit
-            .unwrap_or(if self.diagnostics.is_empty() { 0 } else { 1 });
+            .unwrap_or(if self.out.diagnostics.is_empty() {
+                0
+            } else {
+                1
+            });
         RunResult {
-            stdout: std::mem::take(&mut self.stdout),
+            stdout: std::mem::take(&mut self.out.stdout),
             exit_code,
-            diagnostics: std::mem::take(&mut self.diagnostics),
+            diagnostics: std::mem::take(&mut self.out.diagnostics),
         }
     }
 }
@@ -564,11 +572,11 @@ pub(crate) fn run_isolate_worker(
         && wvm.host.tel_enabled()
     {
         let seed = wvm.host.tel_intern_remote(ctx);
-        wvm.ctx_current.push(seed);
+        wvm.sched.ctx_current.push(seed);
     }
-    wvm.parallel_isolates = true;
-    wvm.isolate_module = Some(Arc::clone(module));
-    wvm.isolate_factory = Some(factory.clone());
+    wvm.isolates.parallel_isolates = true;
+    wvm.isolates.isolate_module = Some(Arc::clone(module));
+    wvm.isolates.isolate_factory = Some(factory.clone());
     // Seed the worker's globals from the parent's snapshot so the isolate body can call other
     // top-level functions (and read value-type constants). Slots match: parent and worker share the
     // same `Arc<Module>`, so a global's `GlobalId` is identical on both sides (P-VMT-GSLOT).
@@ -614,18 +622,19 @@ pub(crate) fn run_isolate_worker(
         // boundary like any `Wire`), so the parent's rendered trace includes the worker's frames.
         Err(_abort) => Err(IsolateFailure {
             message: wvm
+                .out
                 .diagnostics
                 .last()
                 .map(|d| d.message.clone())
                 .unwrap_or_else(|| "isolate aborted".to_string()),
-            trace: std::mem::take(&mut wvm.abort_trace),
+            trace: std::mem::take(&mut wvm.out.abort_trace),
         }),
     };
     // Tear the worker down so its thread-local heap returns to zero residency: release the JIT
     // inline caches' closure pins (S4.2), destroy globals in reverse declaration order, then
     // drain any channel buffers.
     #[cfg(feature = "jit")]
-    for v in std::mem::take(&mut wvm.jit_cache_pins) {
+    for v in std::mem::take(&mut wvm.tier1.jit_cache_pins) {
         release(v);
     }
     for slot in wvm.global_order.clone().into_iter().rev() {
@@ -647,7 +656,7 @@ pub(crate) fn run_isolate_worker(
         wvm.release_value(value);
     }
     // And its still-traced futures (native-otel T5c), same treatment.
-    for traced in std::mem::take(&mut wvm.traced_futures) {
+    for traced in std::mem::take(&mut wvm.sched.traced_futures) {
         wvm.release_value(traced.future);
     }
     message
@@ -724,7 +733,8 @@ impl<'m> Vm<'m> {
 
     /// Record a runtime diagnostic and produce the unwind token.
     pub(crate) fn error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Abort {
-        self.diagnostics
+        self.out
+            .diagnostics
             .push(Diagnostic::error(code, span, message));
         Abort
     }
@@ -739,7 +749,7 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Abort {
         if let noeta_stdlib::ErrorKind::Exit(code) = error.kind {
-            self.requested_exit = Some(code);
+            self.out.requested_exit = Some(code);
             return Abort;
         }
         self.error(stdlib_error_code(error.kind), span, error.message)

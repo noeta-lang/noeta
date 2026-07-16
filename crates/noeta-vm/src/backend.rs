@@ -50,7 +50,7 @@ impl VmBackend {
             Box::new(noeta_stdlib::SandboxExecutor::new()),
         );
         let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         (result, trace)
     }
 
@@ -117,7 +117,7 @@ impl VmBackend {
         let mut vm = Vm::load(module, host, executor);
         vm.debugger = debugger;
         let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         (result, trace)
     }
 
@@ -148,7 +148,7 @@ impl VmBackend {
             memo: HashMap::new(),
         });
         let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         (result, trace)
     }
 
@@ -185,7 +185,7 @@ impl VmBackend {
         #[cfg(feature = "jit")]
         vm.init_jit_service(Arc::new(module.clone()));
         let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         (result, trace)
     }
 
@@ -213,10 +213,10 @@ impl VmBackend {
             memo: HashMap::new(),
         });
         vm.hot_mailbox = Some(mailbox);
-        vm.force_jit = true;
+        vm.tier1.force_jit = true;
         vm.init_jit();
         let result = run_and_teardown(&mut vm, mode);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         (result, trace)
     }
 
@@ -241,7 +241,7 @@ impl VmBackend {
             .profiler
             .take()
             .expect("the profiler stays attached for the whole run");
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         (result, profiler, trace)
     }
 
@@ -261,9 +261,9 @@ impl VmBackend {
     ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load(&module, host, executor);
-        vm.parallel_isolates = true;
-        vm.isolate_module = Some(Arc::clone(&module));
-        vm.isolate_factory = Some(factory);
+        vm.isolates.parallel_isolates = true;
+        vm.isolates.isolate_module = Some(Arc::clone(&module));
+        vm.isolates.isolate_factory = Some(factory);
         // The main isolate is a real-host production run: enable the hot-counter JIT (P-JIT),
         // compiling off-thread (P-PAR S4). Worker isolates load through `Vm::load` and stay
         // tier-0 (the engine lives on the compile-service thread).
@@ -273,7 +273,7 @@ impl VmBackend {
         // bail *event* (a tier transition), so it observes without perturbing what it measures.
         #[cfg(feature = "jit")]
         if jit_report {
-            vm.jit_bail_counts = Some(std::collections::HashMap::new());
+            vm.tier1.jit_bail_counts = Some(std::collections::HashMap::new());
         }
         #[cfg(not(feature = "jit"))]
         let _ = jit_report;
@@ -281,7 +281,7 @@ impl VmBackend {
         // The abort traceback (empty for a clean run) rides beside the result — `RunResult` itself
         // stays the differential's compared unit, which the trace is deliberately not part of (yet):
         // the oracle grows its own traceback first.
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         #[cfg(feature = "jit")]
         let report = jit_report.then(|| vm.take_jit_report());
         #[cfg(not(feature = "jit"))]
@@ -312,14 +312,14 @@ impl VmBackend {
     ) -> (RunResult, Vec<TraceFrame>) {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load(&module, host, executor);
-        vm.parallel_isolates = true;
-        vm.isolate_module = Some(Arc::clone(&module));
-        vm.isolate_factory = Some(factory);
-        vm.aot = true;
+        vm.isolates.parallel_isolates = true;
+        vm.isolates.isolate_module = Some(Arc::clone(&module));
+        vm.isolates.isolate_factory = Some(factory);
+        vm.tier1.aot = true;
         // SAFETY: the caller guarantees `dispatch` is a valid, live dispatch table (contract above).
         unsafe { vm.bind_aot_dispatch(dispatch) };
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         (result, trace)
     }
 
@@ -359,10 +359,11 @@ impl VmBackend {
             Box::new(noeta_stdlib::SandboxHost::new()),
             Box::new(noeta_stdlib::SandboxExecutor::new()),
         );
-        vm.force_jit = true;
+        vm.tier1.force_jit = true;
         vm.init_jit();
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
         let stats = vm
+            .tier1
             .jit
             .as_ref()
             .map(|j| JitStats {
@@ -399,10 +400,10 @@ impl VmBackend {
         vm.init_jit_service(Arc::new(module.clone()));
         // Stats determinism: compile the outstanding queue at exit so promotion counts don't
         // race the program's runtime (the OSR tests assert them exactly).
-        vm.jit_drain_at_exit = true;
+        vm.tier1.jit_drain_at_exit = true;
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
         // Teardown shut the service down and parked its final accounting.
-        let stats = vm.jit_final_stats.take().unwrap_or_default();
+        let stats = vm.tier1.jit_final_stats.take().unwrap_or_default();
         (result, stats)
     }
 }
@@ -413,8 +414,9 @@ impl<'m> Vm<'m> {
     /// deterministic report), and the OSR-declined prototypes. Consumes both parked pieces.
     #[cfg(feature = "jit")]
     fn take_jit_report(&mut self) -> JitReport {
-        let stats = self.jit_final_stats.take().unwrap_or_default();
+        let stats = self.tier1.jit_final_stats.take().unwrap_or_default();
         let mut bails: Vec<JitBailSite> = self
+            .tier1
             .jit_bail_counts
             .take()
             .unwrap_or_default()
@@ -427,6 +429,7 @@ impl<'m> Vm<'m> {
                 .then_with(|| (a.proto, a.pc).cmp(&(b.proto, b.pc)))
         });
         let declined = self
+            .tier1
             .jit_declined
             .iter()
             .enumerate()
@@ -461,9 +464,9 @@ impl VmBackend {
             Box::new(noeta_stdlib::SandboxHost::new()),
             Box::new(noeta_stdlib::SandboxExecutor::new()),
         );
-        vm.force_jit = true;
+        vm.tier1.force_jit = true;
         vm.init_jit();
-        vm.jit_bail_counts = Some(std::collections::HashMap::new());
+        vm.tier1.jit_bail_counts = Some(std::collections::HashMap::new());
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
         let report = vm.take_jit_report();
         (result, report.bails)
@@ -615,7 +618,7 @@ impl<'m> Vm<'m> {
         // were never joined — each scope still owns its tasks' futures (and any parked results).
         // Release them exactly as `ScopeEnd` would, so an aborted program's teardown stays
         // refcount-exact (the anomaly oracle checks) and destructors on captured locals still run.
-        for scope in std::mem::take(&mut self.scopes) {
+        for scope in std::mem::take(&mut self.sched.scopes) {
             for task in scope {
                 self.release_value(task.future);
                 if let Some(result) = task.result {
@@ -627,7 +630,7 @@ impl<'m> Vm<'m> {
         // pinned closure the program itself dropped must read as garbage now, not as an anomaly.
         // Native code can no longer run (the run above is over), so the caches are dead.
         #[cfg(feature = "jit")]
-        for v in std::mem::take(&mut self.jit_cache_pins) {
+        for v in std::mem::take(&mut self.tier1.jit_cache_pins) {
             release(v);
         }
     }

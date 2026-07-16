@@ -292,23 +292,26 @@ impl<'m> Vm<'m> {
     /// after the module is swapped).
     #[cfg(feature = "jit")]
     fn hotswap_retire_tier1(&mut self) -> bool {
-        let was_armed = self.jit.is_some() || self.jit_service.is_some();
-        if let Some(engine) = self.jit.take() {
-            self.jit_graveyard.push(engine);
+        let was_armed = self.tier1.jit.is_some() || self.tier1.jit_service.is_some();
+        if let Some(engine) = self.tier1.jit.take() {
+            self.tier1.jit_graveyard.push(engine);
         }
-        if let Some(service) = self.jit_service.take() {
+        if let Some(service) = self.tier1.jit_service.take() {
             // Parked, not shut down: shutdown joins the thread and frees the pages. Stale ready
             // responses die with the handle at teardown — `jit_pending` resets below, so the
             // drain never looks for them.
-            self.jit_service_graveyard.push(service);
+            self.tier1.jit_service_graveyard.push(service);
         }
-        self.jit_entries.iter_mut().for_each(|e| *e = None);
-        self.jit_fast.iter_mut().for_each(|f| *f = None);
-        self.jit_counters.iter_mut().for_each(|c| *c = 0);
-        self.jit_declined.iter_mut().for_each(|d| *d = false);
-        self.jit_requested.iter_mut().for_each(|r| *r = false);
-        self.jit_osr_pending.iter_mut().for_each(|o| *o = false);
-        self.jit_pending = 0;
+        self.tier1.jit_entries.iter_mut().for_each(|e| *e = None);
+        self.tier1.jit_fast.iter_mut().for_each(|f| *f = None);
+        self.tier1.jit_counters.iter_mut().for_each(|c| *c = 0);
+        self.tier1.jit_declined.iter_mut().for_each(|d| *d = false);
+        self.tier1.jit_requested.iter_mut().for_each(|r| *r = false);
+        self.tier1
+            .jit_osr_pending
+            .iter_mut()
+            .for_each(|o| *o = false);
+        self.tier1.jit_pending = 0;
         // `jit_cache_pins` stay: retired code's call-site caches still guard on those closures'
         // bits, and in-flight old frames may consult them. Released at teardown, as always.
         was_armed
@@ -320,7 +323,7 @@ impl<'m> Vm<'m> {
     /// module — hot-counter promotion re-warms exactly what the program still runs.
     #[cfg(feature = "jit")]
     fn hotswap_rearm_tier1(&mut self) {
-        if self.force_jit {
+        if self.tier1.force_jit {
             self.init_jit();
         } else {
             self.init_jit_service(Arc::new(self.module.clone()));
@@ -432,14 +435,14 @@ impl<'m> Vm<'m> {
         } else {
             self.compile_fragment_entry(program, pure, &params, memo_key, span)?
         };
-        let diag_mark = self.diagnostics.len();
-        let trace_mark = self.abort_trace.len();
+        let diag_mark = self.out.diagnostics.len();
+        let trace_mark = self.out.abort_trace.len();
         self.pure_eval = pure;
         let outcome = self.run_installed_fragment(entry, args, span);
         self.pure_eval = false;
         // A console entry is a side query — its errors must not leak into the run being debugged.
-        self.diagnostics.truncate(diag_mark);
-        self.abort_trace.truncate(trace_mark);
+        self.out.diagnostics.truncate(diag_mark);
+        self.out.abort_trace.truncate(trace_mark);
         outcome
     }
 
@@ -656,7 +659,8 @@ impl<'m> Vm<'m> {
 
     /// The message of the most recently recorded diagnostic, to surface a watch call's abort as text.
     fn last_diag_message(&self) -> String {
-        self.diagnostics
+        self.out
+            .diagnostics
             .last()
             .map(|d| d.message.clone())
             .unwrap_or_else(|| "the call could not be evaluated".to_string())

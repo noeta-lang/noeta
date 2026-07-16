@@ -35,18 +35,18 @@ impl<'m> Vm<'m> {
             // segment: when the abort climbs out of a re-entrant run (a closure called from inside a
             // builtin), the outer segment's top frame has no known abort site, and a stale line would
             // mislead; it gets `None` (name only).
-            let first_segment = self.abort_trace.is_empty();
+            let first_segment = self.out.abort_trace.is_empty();
             for (fi, frame) in frames.iter().enumerate().rev() {
                 let chunk = &self.module.protos[frame.proto as usize];
                 let innermost = fi + 1 == frames.len();
                 let span = if innermost {
                     first_segment
-                        .then(|| self.diagnostics.last().map(|d| d.span))
+                        .then(|| self.out.diagnostics.last().map(|d| d.span))
                         .flatten()
                 } else {
                     chunk.line_span(frame.pc.saturating_sub(1))
                 };
-                self.abort_trace.push(TraceFrame {
+                self.out.abort_trace.push(TraceFrame {
                     name: chunk.name.clone(),
                     span,
                 });
@@ -170,7 +170,7 @@ impl<'m> Vm<'m> {
                     Some(JitOutcome::Bail(resume)) => {
                         // Bail histogram (`--jit-stats`): count the site. Off (`None`) on every
                         // ordinary run — one predicted branch per bail event.
-                        if let Some(counts) = self.jit_bail_counts.as_mut() {
+                        if let Some(counts) = self.tier1.jit_bail_counts.as_mut() {
                             *counts.entry((proto as u32, resume as u32)).or_insert(0) += 1;
                         }
                         pc = resume;
@@ -182,7 +182,7 @@ impl<'m> Vm<'m> {
                     Some(JitOutcome::Returned) => continue 'reload,
                     // The bottom frame returned natively — yield its value.
                     Some(JitOutcome::Halted) => {
-                        return Ok(std::mem::replace(&mut self.jit_ret, Value::unit()));
+                        return Ok(std::mem::replace(&mut self.tier1.jit_ret, Value::unit()));
                     }
                     // The frame aborted inside native code (a diagnostic is recorded).
                     Some(JitOutcome::Abort) => return Err(Abort),
@@ -200,7 +200,7 @@ impl<'m> Vm<'m> {
                     {
                         let _osr_t = $target as usize;
                         if _osr_t <= pc
-                            && (self.jit.is_some() || self.jit_service.is_some())
+                            && (self.tier1.jit.is_some() || self.tier1.jit_service.is_some())
                             && self.jit_osr_backedge(proto)
                         {
                             frames[top].pc = _osr_t;
@@ -2226,7 +2226,7 @@ impl<'m> Vm<'m> {
                     }
                     Op::ScopeBegin => {
                         // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
-                        self.scopes.push(Vec::new());
+                        self.sched.scopes.push(Vec::new());
                         pc += 1;
                     }
                     Op::Spawn { dst, src, .. } => {
@@ -2234,17 +2234,17 @@ impl<'m> Vm<'m> {
                         // reference), yielding a handle that references it by `(scope, task)`. A `spawn`
                         // outside any scope is E0041 at check, so `self.scopes` is non-empty here.
                         let future = regs[fbase + *src as usize];
-                        let handle = if self.scopes.is_empty() {
+                        let handle = if self.sched.scopes.is_empty() {
                             retain(future);
                             future
                         } else {
                             retain(future);
-                            let scope_idx = self.scopes.len() - 1;
-                            let task_idx = self.scopes[scope_idx].len();
+                            let scope_idx = self.sched.scopes.len() - 1;
+                            let task_idx = self.sched.scopes[scope_idx].len();
                             // The child inherits a snapshot of the spawner's task-local context
                             // (T5a): a task spawned inside `with_span` parents its spans there.
-                            let context = self.ctx_current.clone();
-                            self.scopes[scope_idx].push(Task {
+                            let context = self.sched.ctx_current.clone();
+                            self.sched.scopes[scope_idx].push(Task {
                                 future,
                                 result: None,
                                 cancelled: false,
@@ -2280,7 +2280,7 @@ impl<'m> Vm<'m> {
                         // Join the scope (drive every task to completion), then pop it and release the
                         // tasks' owned futures and results.
                         self.join_scope(*span)?;
-                        if let Some(scope) = self.scopes.pop() {
+                        if let Some(scope) = self.sched.scopes.pop() {
                             for task in scope {
                                 // Destructor-aware: a task's future holds the async body's captured
                                 // locals in its state-machine cells. A completed task's cells are spent,
@@ -2323,7 +2323,7 @@ impl<'m> Vm<'m> {
                         // In a parallel VM (real isolates, I.4c) a channel is a *shared* cross-thread queue
                         // from birth, so shipping an endpoint into a worker shares one queue; the sandbox
                         // (and any non-parallel VM) uses the cooperative in-VM `Local` FIFO, unchanged.
-                        let channel = if self.parallel_isolates {
+                        let channel = if self.isolates.parallel_isolates {
                             Channel::Shared(isolate::ChannelCore::new(cap as usize))
                         } else {
                             Channel::Local {
@@ -2841,8 +2841,8 @@ impl<'m> Vm<'m> {
                     }
                     Op::Echo { reg } => {
                         let text = regs[fbase + *reg as usize].display();
-                        self.stdout.push_str(&text);
-                        self.stdout.push('\n');
+                        self.out.stdout.push_str(&text);
+                        self.out.stdout.push('\n');
                         pc += 1;
                     }
                     Op::Stringify { dst, src, span } => {
@@ -2927,7 +2927,8 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::Raise { idx } => {
-                        self.diagnostics
+                        self.out
+                            .diagnostics
                             .push(chunk.diagnostics[*idx as usize].clone());
                         return Err(Abort);
                     }
