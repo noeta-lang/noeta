@@ -1,0 +1,145 @@
+// para.aether — a first-party web framework for Noeta.
+//
+// Controllers are classes whose methods are tagged `#[Get("/path")]` / `#[Post("/path")]`. The `App`
+// autodiscovers those routes by reflection (`attributes_of`), and for each request it reflects the
+// handler's parameters (`params_of`) and INJECTS each one by its declared type — a request body
+// materialized into a typed struct (`json.decode_typed`, backed by `@derive(Deserialize<Json>)`) —
+// then dispatches by name (`invoke`). Laravel-style method injection, zero per-handler glue.
+//
+// This module is the routing + dependency-injection core. Middleware, service providers, the config
+// registry, and the background-task scope layer on top of it.
+
+namespace para.aether
+
+use std.http.server
+use std.http.{Request, Response}
+use std.json
+
+// --- Route attributes: users tag controller methods with these. -------------------------------
+
+@attribute(Method)
+pub struct Get {
+    path: string
+}
+
+@attribute(Method)
+pub struct Post {
+    path: string
+}
+
+// --- A resolved route in the table. -----------------------------------------------------------
+
+struct Route {
+    method: string // "GET" / "POST"
+    path: string // "/users"
+    controller: string // "UsersController"
+    action: string // "create"
+}
+
+// The controller + action a `"Controller.action"` target names.
+fn split_target(target: string): Route {
+    parts = target.split(".")
+    controller = if parts.len() > 0 then parts[0] else ""
+    action = if parts.len() > 1 then parts[1] else ""
+    return Route { method: "", path: "", controller: controller, action: action }
+}
+
+// --- Dependency injection: build a handler's argument list by reflecting its parameters. -------
+
+// Materialize the argument list for the handler named `target` by injecting each declared parameter
+// by its reflected type. A request-body struct (deriving `Deserialize<Json>`) is materialized from
+// `body`.
+fn inject(target: string, body: string): List<dyn> {
+    return params_of(target).map(fn(p) => arg_for(p, body))
+}
+
+fn arg_for(p: ParamInfo, body: string): dyn {
+    name = match p.type {
+        Struct(n, _) => n,
+        Named(n, _) => n,
+        Class(n, _) => n,
+        _ => "",
+    }
+    return match json.decode_typed(name, body) {
+        Ok(v) => v,
+        Err(e) => panic("400 ${e}"),
+    }
+}
+
+// Invoke a controller action with its injected arguments; render the string result.
+fn invoke_action(ctrl: dyn, r: Route, body: string): string {
+    target = "${r.controller}.${r.action}"
+    args = inject(target, body)
+    return match invoke(ctrl, r.action, args) {
+        Ok(result) => result.as<string>() ?? "200 OK",
+        Err(e) => "500 ${e}",
+    }
+}
+
+// --- The application. -------------------------------------------------------------------------
+
+pub class App {
+    mut routes: List<Route>
+    mut controllers: Map<string, dyn>
+
+    fn new(): App {
+        return App { routes: [], controllers: {} }
+    }
+
+    // Register a controller instance under its type name (the leading segment of its route targets).
+    fn register(name: string, controller: dyn): void {
+        self.controllers = self.controllers.set(name, controller)
+    }
+
+    // Build the route table from every `#[Get]` / `#[Post]` in the program.
+    fn discover(): void {
+        mut table: List<Route> = self.routes
+        for a in attributes_of::<Get>() {
+            t = split_target(a.target)
+            table = table ~ [Route { method: "GET", path: a.value.path, controller: t.controller, action: t.action }]
+        }
+        for a in attributes_of::<Post>() {
+            t = split_target(a.target)
+            table = table ~ [Route { method: "POST", path: a.value.path, controller: t.controller, action: t.action }]
+        }
+        self.routes = table
+    }
+
+    // Find the route serving `method` + `path`, if any.
+    fn match_route(method: string, path: string): ?Route {
+        for r in self.routes {
+            if r.method == method && r.path == path {
+                return some(r)
+            }
+        }
+        return none
+    }
+
+    // The testable dispatch core: resolve a route, inject its handler's parameters by reflected
+    // type, invoke, and return the response body. `body` is the raw request body (JSON).
+    fn handle(method: string, path: string, body: string): string {
+        return match self.match_route(method, path) {
+            some(r) => self.dispatch(r, body),
+            none => "404 Not Found",
+        }
+    }
+
+    // Dispatch a matched route: look up its controller instance and invoke the action.
+    fn dispatch(r: Route, body: string): string {
+        if self.controllers.has(r.controller) {
+            return invoke_action(self.controllers[r.controller], r, body)
+        }
+        return "500 no controller ${r.controller}"
+    }
+
+    // The HTTP adapter: extract method/path/body from a real request, dispatch, and reply.
+    fn route(req: Request): Response {
+        result = self.handle(req.method(), req.path(), req.body())
+        return server.response(200, result)
+    }
+
+    // Run the app on `port`, dispatching each request through the router.
+    fn serve(port: int): void {
+        server.serve(port, self.route)
+    }
+}

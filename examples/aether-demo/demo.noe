@@ -1,0 +1,33 @@
+// A minimal noeta-aether app: an attribute-routed controller with a dependency-injected typed body.
+use para.aether.{App, Get, Post}
+use std.json
+
+@derive(Deserialize<Json>)
+struct CreateUser {
+    name: string
+    age: int
+}
+
+class UsersController {
+    fn new(): UsersController {
+        return UsersController {}
+    }
+
+    #[Post("/users")]
+    fn create(body: CreateUser): string {
+        return "created ${body.name} (${body.age})"
+    }
+
+    #[Get("/health")]
+    fn health(): string {
+        return "ok"
+    }
+}
+
+app = App.new()
+app.register("UsersController", UsersController.new())
+app.discover()
+
+echo app.handle("POST", "/users", "{\"name\":\"Ada\",\"age\":36}")
+echo app.handle("GET", "/health", "")
+echo app.handle("GET", "/missing", "")
