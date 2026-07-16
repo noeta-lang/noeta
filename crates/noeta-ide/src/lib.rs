@@ -2,11 +2,15 @@
 //!
 //! Every editor-facing language feature over the compiler's salsa query graph (`noeta-db`), with
 //! **no wire protocol**: the [`DocumentStore`] owns a [`LangDatabase`], the open buffers, and one
-//! [`Workspace`] per open document — its entry plus the sibling `.noe` modules in its directory
-//! (open buffers overlaying disk) plus resolved dependency packages. Every language feature is
-//! then a *read* of a memoized query; editing a document calls the salsa `set_text` setter, and
-//! salsa recomputes only the queries that edit invalidated. That incremental spine is inherited
-//! wholesale from M1, not built here.
+//! [`Workspace`] per **directory** with an open document — the directory's `.noe` members (open
+//! buffers overlaying disk) plus resolved dependency packages, SHARED by every open document in
+//! it. Each document reads its own merged program through the entry-parametric
+//! [`linked_from`](noeta_db::linked_from) query family (memoized per `(workspace, document)`),
+//! so the per-file lex/parse work memoizes once per file no matter how many documents are open
+//! (audit-4 finding 6). Every language feature is then a *read* of a memoized query; editing a
+//! document calls the salsa `set_text` setter on its ONE input, and salsa recomputes only the
+//! queries that edit invalidated. That incremental spine is inherited wholesale from M1, not
+//! built here.
 //!
 //! Features: **live diagnostics** over the whole-workspace `linked_checked_ide` query — the same
 //! single checker run every other feature reads, so one edit checks once (an imported
@@ -148,34 +152,34 @@ pub struct TestItem {
     pub range: Range,
 }
 
-/// One open document's workspace: the salsa [`Workspace`] input (its entry plus the sibling `.noe`
-/// modules discovered in the entry's directory) and, per [`SourceId`], the module's URI and salsa
-/// input. The entry is always [`SourceId::FIRST`] (index 0). Rebuilt when the file *set* changes;
-/// otherwise member texts are updated in place so `linked` recomputes incrementally.
+/// One **directory's** workspace, shared by every open document in that directory (audit-4
+/// finding 6): the salsa [`Workspace`] input over the directory's `.noe` members — sorted by
+/// path, which is the stable [`SourceId`] assignment every document in the directory agrees on —
+/// and, per `SourceId`, the member's URI and salsa input. Open buffers overlay disk. Each open
+/// document reads its own merged program through the entry-parametric
+/// [`linked_from`](noeta_db::linked_from) family, so two open files hold ONE set of inputs and
+/// the per-file parses memoize once. Member texts are updated in place on every change; a file-
+/// *set* change **reuses** the existing inputs by URI (text/id updated, only genuinely new files
+/// get new inputs — the finding-9 input-growth fix).
 #[derive(Debug)]
 struct WorkspaceCache {
     workspace: Workspace,
-    /// Per `SourceId`: the source's URI (index 0 = the entry). Maps a merged-program span back to
-    /// the file it belongs to, for cross-file diagnostics and navigation. Entry + siblings only —
-    /// the reuse fast-path compares this against a fresh sibling scan; dependency modules (which
-    /// don't change during editing) live in `dep_uris`/`dep_programs`.
+    /// Per `SourceId`: the member's URI, sorted by path. Maps a merged-program span back to the
+    /// file it belongs to, for cross-file diagnostics and navigation. Members only — the reuse
+    /// fast-path compares this against a fresh directory scan; dependency modules live in
+    /// `dep_uris`/`dep_programs`.
     source_uris: Vec<String>,
     /// Per `SourceId`: the salsa input, for in-place text updates.
     programs: Vec<SourceProgram>,
     /// Dependency-package modules (package-manager P2.1c), indexed by `SourceId - programs.len()`
-    /// (their ids continue past the siblings). Kept apart from `source_uris`/`programs` so the
-    /// per-keystroke reuse check and text-update loop stay over entry+siblings only, while
-    /// cross-package navigation still maps a dependency span back to its file.
+    /// (their ids continue past the members). Kept apart from `source_uris`/`programs` so the
+    /// per-keystroke reuse check and text-update loop stay over members only, while cross-package
+    /// navigation still maps a dependency span back to its file.
     dep_uris: Vec<String>,
     dep_programs: Vec<SourceProgram>,
-}
-
-impl WorkspaceCache {
-    /// The entry source's salsa input ([`SourceId::FIRST`]) — what the single-file hover and
-    /// within-file navigation queries read.
-    fn entry(&self) -> SourceProgram {
-        self.programs[0]
-    }
+    /// The [`DepModule`] inputs backing `workspace.dep_modules`, kept so a file-set rescan can
+    /// reuse them by URI instead of abandoning them (finding 9).
+    dep_modules: Vec<DepModule>,
 }
 
 /// The resolved dependency modules for a workspace (package-manager P2.1c): the salsa [`DepModule`]
@@ -189,9 +193,9 @@ struct ResolvedDeps {
 }
 
 /// The server's document state: the salsa database, the open editor buffers, and one cached
-/// [`WorkspaceCache`] per open document (treated as its own workspace entry). Kept behind a
-/// [`Mutex`] on the [`Backend`]; the request handlers lock it, do their (synchronous, fast) salsa
-/// work, and release it before awaiting any client I/O.
+/// [`WorkspaceCache`] per **directory** with an open document (every open document in a directory
+/// shares it). Kept behind a [`Mutex`] on the [`Backend`]; the request handlers lock it, do their
+/// (synchronous, fast) salsa work, and release it before awaiting any client I/O.
 ///
 /// Split out from [`Backend`] so it can be unit-tested without a live [`Client`].
 #[derive(Default)]
@@ -199,7 +203,7 @@ pub struct DocumentStore {
     db: LangDatabase,
     /// Open documents: URI → current buffer text (the authoritative content, possibly unsaved).
     buffers: HashMap<String, String>,
-    /// One workspace per open document, keyed by the document's URI (its entry).
+    /// One workspace per directory with an open document, keyed by [`workspace_key`].
     workspaces: HashMap<String, WorkspaceCache>,
 }
 
@@ -212,59 +216,64 @@ impl std::fmt::Debug for DocumentStore {
 }
 
 impl DocumentStore {
-    /// Register or replace an open document's buffer, then refresh every open document's workspace
-    /// (an edit to one file can change what its importers see).
+    /// Register or replace an open document's buffer, then refresh its directory's shared
+    /// workspace (creating it if this is the directory's first open document). Other directories'
+    /// workspaces are untouched — their inputs cannot have changed.
     pub fn open(&mut self, uri: &str, text: String) {
         self.buffers.insert(uri.to_string(), text);
-        self.refresh_all();
+        self.refresh_workspace(&workspace_key(uri));
     }
 
-    /// Apply a full-document change: replace the buffer and push the new text into the salsa inputs.
-    /// Returns the entry input of the changed document's workspace (for callers/tests that re-query
-    /// it).
+    /// Apply a full-document change: replace the buffer and push the new text into the salsa
+    /// input. Returns the changed document's input (for callers/tests that re-query it).
     ///
     /// The hot path (every keystroke). A buffer edit cannot change the file *set* or any sibling's
     /// on-disk content, so — unlike open/close — there is nothing to re-discover: the new text is
-    /// pushed straight into the changed document's input wherever it appears (its own workspace and
-    /// any importer's), with **no directory scan and no disk reads**. Only a change to a document with
-    /// no workspace yet (an editor that skipped `didOpen`) falls back to a full build.
+    /// pushed straight into the document's ONE shared input (every open document in the directory
+    /// reads it), with **no directory scan and no disk reads**. Only a change to a document with no
+    /// workspace yet (an editor that skipped `didOpen`) falls back to a full build.
     pub fn change(&mut self, uri: &str, text: String) -> SourceProgram {
         self.buffers.insert(uri.to_string(), text);
-        if self.workspaces.contains_key(uri) {
+        let known = self
+            .workspaces
+            .get(&workspace_key(uri))
+            .is_some_and(|cache| cache.source_uris.iter().any(|u| u == uri));
+        if known {
             self.propagate(uri);
         } else {
-            self.refresh_all();
+            self.refresh_workspace(&workspace_key(uri));
         }
-        self.workspaces[uri].entry()
+        self.doc_cache(uri)
+            .expect("refresh registered the changed document")
+            .1
     }
 
-    /// Push the changed document's current buffer text into every salsa input that represents it —
-    /// its own workspace entry and the sibling slot of any other open document that imports it —
-    /// without re-reading the directory or any file. Salsa backdates the untouched inputs, so only
-    /// queries that actually depend on the edited text recompute.
+    /// Push the changed document's current buffer text into the salsa input that represents it —
+    /// there is exactly one, in its directory's shared workspace — without re-reading the
+    /// directory or any file. Every open document of the directory (importers included) reads the
+    /// same input, so the edit is visible to all of them by construction.
     fn propagate(&mut self, changed_uri: &str) {
         let Some(text) = self.buffers.get(changed_uri).cloned() else {
             return;
         };
-        // Collect the input handles first (`SourceProgram` is `Copy`), then set their text — the two
-        // steps borrow `self.workspaces` and `self.db` respectively.
-        let targets: Vec<SourceProgram> = self
-            .workspaces
-            .values()
-            .flat_map(|cache| cache.source_uris.iter().zip(&cache.programs))
-            .filter(|(source_uri, _)| source_uri.as_str() == changed_uri)
-            .map(|(_, program)| *program)
-            .collect();
-        for program in targets {
-            program.set_text(&mut self.db).to(text.clone());
+        let target = self.doc_cache(changed_uri).map(|(_, program, _)| program);
+        if let Some(program) = target {
+            program.set_text(&mut self.db).to(text);
         }
     }
 
-    /// Drop a closed document (its buffer and workspace), then refresh the rest.
+    /// Drop a closed document's buffer. While other documents in its directory stay open, the
+    /// shared workspace is refreshed instead of dropped — the closed member reverts to its on-disk
+    /// content (or leaves the member set if it was never saved). The last close drops the
+    /// directory's workspace.
     pub fn close(&mut self, uri: &str) {
         self.buffers.remove(uri);
-        self.workspaces.remove(uri);
-        self.refresh_all();
+        let key = workspace_key(uri);
+        if self.buffers.keys().any(|open| workspace_key(open) == key) {
+            self.refresh_workspace(&key);
+        } else {
+            self.workspaces.remove(&key);
+        }
     }
 
     /// The URIs of the open documents.
@@ -277,7 +286,7 @@ impl DocumentStore {
     /// document with no workspace falls back to the default set (same-file declarations are
     /// discovered by the lexer itself).
     fn text_tiers_of(&self, uri: &str) -> noeta_lexer::TextTiers {
-        match self.workspaces.get(uri) {
+        match self.workspaces.get(&workspace_key(uri)) {
             Some(cache) => noeta_lexer::TextTiers::with(
                 noeta_db::workspace_text_tiers(&self.db, cache.workspace)
                     .iter()
@@ -369,26 +378,24 @@ impl DocumentStore {
         )
     }
 
-    /// Rebuild or update the workspace of every open document. Each open document is the entry of
-    /// its own workspace; its modules are the sibling `.noe` files in the entry's directory, with
-    /// open files taking their (unsaved) buffer content over disk.
-    fn refresh_all(&mut self) {
-        for uri in self.open_uris() {
-            self.refresh_workspace(&uri);
+    /// (Re)build or update the shared workspace keyed `key` (see [`workspace_key`]). Discovers the
+    /// directory's `.noe` members, overlays open buffers, and either updates the cached inputs'
+    /// text in place (file set unchanged) or **reuses the inputs by URI** across the new file set
+    /// (finding 9: an input is never abandoned just because a sibling appeared or vanished — its
+    /// id/text are updated in place, and only genuinely new files get new inputs). The
+    /// [`Workspace`] input itself is likewise updated in place once created.
+    fn refresh_workspace(&mut self, key: &str) {
+        let sources = self.discover_sources(key);
+        if sources.is_empty() {
+            self.workspaces.remove(key);
+            return;
         }
-    }
-
-    /// (Re)build the workspace for entry `uri`. Discovers the entry's sibling `.noe` files, overlays
-    /// open buffers, and either updates the cached inputs' text in place (file set unchanged) or
-    /// builds a fresh workspace (file set changed).
-    fn refresh_workspace(&mut self, uri: &str) {
-        let sources = self.discover_sources(uri);
         let uris: Vec<String> = sources.iter().map(|(u, _)| u.clone()).collect();
 
         // File set unchanged → update each member's text in place (salsa backdates unchanged ones).
         let reuse = self
             .workspaces
-            .get(uri)
+            .get(key)
             .filter(|cache| cache.source_uris == uris)
             .map(|cache| cache.programs.clone());
         if let Some(programs) = reuse {
@@ -398,85 +405,159 @@ impl DocumentStore {
             return;
         }
 
-        // File set changed (or first build) → fresh inputs and a fresh workspace.
+        // File set changed (or first build) → reuse existing inputs by URI, create only new ones.
+        let mut old_by_uri: HashMap<String, SourceProgram> = match self.workspaces.get(key) {
+            Some(cache) => cache
+                .source_uris
+                .iter()
+                .cloned()
+                .zip(cache.programs.iter().copied())
+                .collect(),
+            None => HashMap::new(),
+        };
         let programs: Vec<SourceProgram> = sources
             .iter()
             .enumerate()
-            .map(|(id, (u, text))| {
-                SourceProgram::new(
+            .map(|(id, (u, text))| match old_by_uri.remove(u) {
+                Some(program) => {
+                    // The member moved in the sorted order (or kept its slot): re-point its id and
+                    // text; name and edition are functions of the URI and cannot have changed.
+                    program.set_id(&mut self.db).to(id as u32);
+                    program.set_text(&mut self.db).to(text.clone());
+                    program
+                }
+                None => SourceProgram::new(
                     &self.db,
                     id as u32,
                     u.clone(),
                     text.clone(),
                     edition_of_uri(u).as_str().to_string(),
-                )
+                ),
             })
             .collect();
-        // Dependency packages (package-manager P2.1c): resolve the entry's deps and add each dep
-        // module as a `DepModule` input (SourceIds continue past the siblings), so cross-package
-        // `use <dep-key>.…` resolves in hover/goto/completion exactly as the CLI resolves it.
-        let deps = self.resolve_dep_modules(uri, programs.len() as u32);
-        let workspace = Workspace::new(&self.db, programs.clone(), deps.modules);
-        self.workspaces.insert(
-            uri.to_string(),
-            WorkspaceCache {
-                workspace,
-                source_uris: uris,
-                programs,
-                dep_uris: deps.uris,
-                dep_programs: deps.programs,
-            },
-        );
-    }
-
-    /// The ordered `(uri, text)` sources of entry `uri`'s workspace: the entry first, then its
-    /// sibling `.noe` files sorted by path (matching the loader's `SourceId` convention). A sibling
-    /// that is open uses its editor buffer; otherwise its on-disk content. A non-`file:` entry (or
-    /// one with no directory) is a lone workspace.
-    fn discover_sources(&self, uri: &str) -> Vec<(String, String)> {
-        let entry_text = self.buffers.get(uri).cloned().unwrap_or_default();
-        let mut sources = vec![(uri.to_string(), entry_text)];
-
-        if let Some(entry_path) = uri_to_path(uri)
-            && let Some(dir) = entry_path.parent()
-            && let Ok(read_dir) = std::fs::read_dir(dir)
-        {
-            let mut siblings: Vec<PathBuf> = read_dir
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "noe"))
-                .filter(|p| *p != entry_path)
-                .collect();
-            siblings.sort();
-            for path in siblings {
-                let sib_uri = path_to_uri(&path);
-                let text = self
-                    .buffers
-                    .get(&sib_uri)
-                    .cloned()
-                    .or_else(|| std::fs::read_to_string(&path).ok())
-                    .unwrap_or_default();
-                sources.push((sib_uri, text));
+        // Dependency packages (package-manager P2.1c): resolve the directory's deps and add each
+        // dep module as a `DepModule` input (SourceIds continue past the members), so
+        // cross-package `use <dep-key>.…` resolves in hover/goto/completion exactly as the CLI
+        // resolves it. Every member of one directory shares one manifest, so one resolution
+        // serves them all.
+        let deps = self.resolve_dep_modules(key, &uris, programs.len() as u32);
+        match self.workspaces.get_mut(key) {
+            Some(cache) => {
+                cache
+                    .workspace
+                    .set_members(&mut self.db)
+                    .to(programs.clone());
+                cache
+                    .workspace
+                    .set_dep_modules(&mut self.db)
+                    .to(deps.modules.clone());
+                cache.source_uris = uris;
+                cache.programs = programs;
+                cache.dep_uris = deps.uris;
+                cache.dep_programs = deps.programs;
+                cache.dep_modules = deps.modules;
+            }
+            None => {
+                let workspace = Workspace::new(&self.db, programs.clone(), deps.modules.clone());
+                self.workspaces.insert(
+                    key.to_string(),
+                    WorkspaceCache {
+                        workspace,
+                        source_uris: uris,
+                        programs,
+                        dep_uris: deps.uris,
+                        dep_programs: deps.programs,
+                        dep_modules: deps.modules,
+                    },
+                );
             }
         }
-        sources
     }
 
-    /// Resolve the entry `uri`'s dependency packages into salsa [`DepModule`] inputs (package-manager
-    /// P2.1c), each source given a [`SourceId`] continuing from `first_id` (past entry + siblings) so
-    /// its spans stay distinct and map back to its file for cross-package navigation. Resolution
-    /// reuses the CLI's `noeta-pm` walk — path deps read locally, git deps served from the package
-    /// store (materialized by a prior CLI run) — so the editor sees the same cross-package program.
-    /// A resolution failure (a registry dep, an unfetched git dep) degrades to no dependencies rather
-    /// than breaking the workspace; the user still gets the entry's own analysis.
-    fn resolve_dep_modules(&self, uri: &str, first_id: u32) -> ResolvedDeps {
+    /// The ordered `(uri, text)` members of the workspace keyed `key`: every on-disk `.noe` file
+    /// in the directory plus every open buffer that lives there (a new unsaved file is a member
+    /// before it ever hits disk), sorted by URI — the stable [`SourceId`] order every open
+    /// document in the directory shares (path order, matching the loader's convention). An open
+    /// member uses its editor buffer; the rest read disk. A directory-less key (`lone:`) is a
+    /// single-member workspace of just that document's buffer.
+    fn discover_sources(&self, key: &str) -> Vec<(String, String)> {
+        let mut uris: Vec<String> = Vec::new();
+        if let Some(dir) = key.strip_prefix("dir:") {
+            if let Ok(read_dir) = std::fs::read_dir(dir) {
+                uris.extend(
+                    read_dir
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "noe"))
+                        .map(|p| path_to_uri(&p)),
+                );
+            }
+            // Open buffers in this directory that are not (yet) on disk are members too.
+            uris.extend(
+                self.buffers
+                    .keys()
+                    .filter(|uri| workspace_key(uri) == key)
+                    .cloned(),
+            );
+        } else if let Some(uri) = key.strip_prefix("lone:") {
+            uris.push(uri.to_string());
+        }
+        uris.sort();
+        uris.dedup();
+        uris.into_iter()
+            .map(|uri| {
+                let text = self
+                    .buffers
+                    .get(&uri)
+                    .cloned()
+                    .or_else(|| {
+                        uri_to_path(&uri).and_then(|path| std::fs::read_to_string(path).ok())
+                    })
+                    .unwrap_or_default();
+                (uri, text)
+            })
+            .collect()
+    }
+
+    /// Resolve the directory's dependency packages into salsa [`DepModule`] inputs
+    /// (package-manager P2.1c), each source given a [`SourceId`] continuing from `first_id` (past
+    /// the members) so its spans stay distinct and map back to its file for cross-package
+    /// navigation. Resolution reuses the CLI's `noeta-pm` walk — path deps read locally, git deps
+    /// served from the package store (materialized by a prior CLI run) — so the editor sees the
+    /// same cross-package program. A resolution failure (a registry dep, an unfetched git dep)
+    /// degrades to no dependencies rather than breaking the workspace; the user still gets the
+    /// members' own analysis. Existing dep inputs (from a previous rescan of this directory) are
+    /// reused by URI — updated in place, never abandoned (finding 9).
+    fn resolve_dep_modules(
+        &mut self,
+        key: &str,
+        member_uris: &[String],
+        first_id: u32,
+    ) -> ResolvedDeps {
         let mut deps = ResolvedDeps::default();
-        let Some(entry_path) = uri_to_path(uri) else {
+        let Some(entry_path) = member_uris.first().and_then(|uri| uri_to_path(uri)) else {
             return deps;
         };
         let Ok(packages) = noeta_pm::manifest::dependency_packages_query(&entry_path) else {
             return deps;
         };
+        // Previous dep inputs by URI, for reuse.
+        let mut old_by_uri: HashMap<String, (DepModule, SourceProgram)> =
+            match self.workspaces.get(key) {
+                Some(cache) => cache
+                    .dep_uris
+                    .iter()
+                    .cloned()
+                    .zip(
+                        cache
+                            .dep_modules
+                            .iter()
+                            .copied()
+                            .zip(cache.dep_programs.iter().copied()),
+                    )
+                    .collect(),
+                None => HashMap::new(),
+            };
         let mut next_id = first_id;
         for package in &packages {
             let renames: Vec<String> = package
@@ -485,50 +566,76 @@ impl DocumentStore {
                 .flat_map(|(local, global)| [local.clone(), global.clone()])
                 .collect();
             for module in &package.modules {
-                let src = SourceProgram::new(
-                    &self.db,
-                    next_id,
-                    module.name.clone(),
-                    module.text.clone(),
-                    // The dependency package's own edition (typed on `DepPackage`; the salsa
-                    // input stores the canonical string).
-                    package.edition.as_str().to_string(),
-                );
+                let uri = path_to_uri(Path::new(&module.name));
+                let (dep, src) = match old_by_uri.remove(&uri) {
+                    Some((dep, src)) => {
+                        src.set_id(&mut self.db).to(next_id);
+                        src.set_text(&mut self.db).to(module.text.clone());
+                        src.set_edition(&mut self.db)
+                            .to(package.edition.as_str().to_string());
+                        dep.set_root(&mut self.db).to(package.root.clone());
+                        dep.set_key(&mut self.db).to(package.key.clone());
+                        dep.set_renames(&mut self.db).to(renames.clone());
+                        (dep, src)
+                    }
+                    None => {
+                        let src = SourceProgram::new(
+                            &self.db,
+                            next_id,
+                            module.name.clone(),
+                            module.text.clone(),
+                            // The dependency package's own edition (typed on `DepPackage`; the
+                            // salsa input stores the canonical string).
+                            package.edition.as_str().to_string(),
+                        );
+                        let dep = DepModule::new(
+                            &self.db,
+                            src,
+                            package.root.clone(),
+                            package.key.clone(),
+                            renames.clone(),
+                        );
+                        (dep, src)
+                    }
+                };
                 next_id += 1;
-                deps.modules.push(DepModule::new(
-                    &self.db,
-                    src,
-                    package.root.clone(),
-                    package.key.clone(),
-                    renames.clone(),
-                ));
-                deps.uris.push(path_to_uri(Path::new(&module.name)));
+                deps.modules.push(dep);
+                deps.uris.push(uri);
                 deps.programs.push(src);
             }
         }
         deps
     }
 
-    /// The `uri`'s own diagnostics (cross-module resolution, but only the entry file's own
-    /// diagnostics — each open module reports its own through its own workspace) together with the
-    /// entry text for position mapping. `None` if the document is not open.
+    /// The workspace serving the document `uri` as a **member** — open, or discovered on disk in
+    /// an open directory — together with its salsa input and the [`SourceId`] it carries in the
+    /// shared per-directory workspace. What every document-addressed feature resolves through.
+    fn doc_cache(&self, uri: &str) -> Option<(&WorkspaceCache, SourceProgram, SourceId)> {
+        let cache = self.workspaces.get(&workspace_key(uri))?;
+        let idx = cache.source_uris.iter().position(|u| u == uri)?;
+        Some((cache, cache.programs[idx], SourceId(idx as u32)))
+    }
+
+    /// The `uri`'s own diagnostics (cross-module resolution, but only this file's own diagnostics
+    /// — each open module reports its own through its own merged program) together with the
+    /// document text for position mapping. `None` if the document is in no open workspace.
     ///
-    /// Runs over the whole-workspace [`linked_checked_ide`](noeta_db::linked_checked_ide) query —
-    /// the SAME query hover/inlay/completions read — so one edit runs the checker **once** per
-    /// document version (diagnostics are identical to `linked_checked`'s by construction; the ide
-    /// flavor only additionally records `expr_types`, which the other features need anyway). A name
-    /// imported from a sibling module resolves and no longer reports a false "unknown name". A load
-    /// or parse failure carries its diagnostics through the same query.
+    /// Runs over the whole-workspace [`linked_checked_ide_from`](noeta_db::linked_checked_ide_from)
+    /// query — the SAME query hover/inlay/completions read — so one edit runs the checker **once**
+    /// per document version (diagnostics are identical to `linked_checked_from`'s by construction;
+    /// the ide flavor only additionally records `expr_types`, which the other features need
+    /// anyway). A name imported from a sibling module resolves and no longer reports a false
+    /// "unknown name". A load or parse failure carries its diagnostics through the same query.
     pub fn diagnostics(&self, uri: &str) -> Option<(Vec<noeta_diagnostics::Diagnostic>, String)> {
-        let cache = self.workspaces.get(uri)?;
+        let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let diags = noeta_db::linked_checked_ide(db, cache.workspace)
+        let diags = noeta_db::linked_checked_ide_from(db, cache.workspace, doc)
             .diagnostics
             .iter()
-            .filter(|d| d.span.source == SourceId::FIRST)
+            .filter(|d| d.span.source == source)
             .cloned()
             .collect();
-        Some((diags, cache.entry().text(db).clone()))
+        Some((diags, doc.text(db).clone()))
     }
 
     /// Inlay **type hints** for the visible `range` of `uri`: the inferred type of every
@@ -542,31 +649,25 @@ impl DocumentStore {
         range: Range,
         encoding: Encoding,
     ) -> Option<Vec<(Position, String, inlay::HintKind)>> {
-        let cache = self.workspaces.get(uri)?;
+        let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let entry = cache.entry();
-        let index = LineIndex::new(entry.text(db));
+        let index = LineIndex::new(doc.text(db));
         let start = index.offset(range.start, encoding);
         let end = index.offset(range.end, encoding);
 
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, entry);
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
-        let ide = noeta_db::linked_checked_ide(db, cache.workspace);
+        let ide = noeta_db::linked_checked_ide_from(db, cache.workspace, doc);
         Some(
-            inlay::type_hints(
-                program,
-                &ide.expr_types,
-                &ide.packed_layouts,
-                SourceId::FIRST,
-            )
-            .into_iter()
-            .filter(|hint| start <= hint.offset && hint.offset <= end)
-            .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
-            .collect(),
+            inlay::type_hints(program, &ide.expr_types, &ide.packed_layouts, source)
+                .into_iter()
+                .filter(|hint| start <= hint.offset && hint.offset <= end)
+                .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
+                .collect(),
         )
     }
 
@@ -582,17 +683,17 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<(TypeRepr, Option<String>, Range)> {
-        let cache = self.workspaces.get(uri)?;
+        let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let index = LineIndex::new(cache.entry().text(db));
+        let index = LineIndex::new(doc.text(db));
         let offset = index.offset(position, encoding);
-        let checked = noeta_db::linked_checked_ide(db, cache.workspace);
+        let checked = noeta_db::linked_checked_ide_from(db, cache.workspace, doc);
         let (span, repr) = checked
             .expr_types
             .iter()
-            // Non-empty spans in the entry file that cover the cursor; pick the tightest.
+            // Non-empty spans in this file that cover the cursor; pick the tightest.
             .filter(|(span, _)| {
-                span.source == SourceId::FIRST
+                span.source == source
                     && span.end > span.start
                     && span.start <= offset
                     && offset <= span.end
@@ -614,17 +715,16 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<(String, Range)> {
-        let cache = self.workspaces.get(uri)?;
+        let (_cache, doc, _source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let entry = cache.entry();
-        let entry_text = entry.text(db);
+        let entry_text = doc.text(db);
         let index = LineIndex::new(entry_text);
         let offset = index.offset(position, encoding);
-        let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|t| {
+        let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|t| {
             t.kind == TokenKind::Ident && t.span.start <= offset && offset <= t.span.end
         })?;
         let name = &entry_text[token.span.range()];
-        let entry_ast = noeta_db::ast(db, entry);
+        let entry_ast = noeta_db::ast(db, doc);
         let prefix = completion::namespace_bindings(&entry_ast.0.program).remove(name)?;
         let members = noeta_stdlib::registry::default_seeded().namespace_children(&prefix);
         let members = if members.is_empty() {
@@ -651,21 +751,22 @@ impl DocumentStore {
     /// value index first (a call site or the declaration itself), then the top-level definitions
     /// by the identifier token's text (type references, constructors). Shared by [`Self::hover_doc`]
     /// and [`Self::doc_for_symbol`] so hover prose and the docs-browser jump agree on "what symbol
-    /// is under the cursor". Returns a span in the entry source (`SourceId::FIRST`).
+    /// is under the cursor". `doc`/`cursor` are the document's input and [`SourceId`] within
+    /// `cache` (see [`Self::doc_cache`]).
     fn definition_name_span(
         &self,
         cache: &WorkspaceCache,
+        doc: SourceProgram,
+        cursor: SourceId,
         position: Position,
         encoding: Encoding,
     ) -> Option<Span> {
         let db = &self.db;
-        let entry = cache.entry();
-        let entry_text = entry.text(db);
+        let entry_text = doc.text(db);
         let offset = LineIndex::new(entry_text).offset(position, encoding);
-        let cursor = SourceId::FIRST;
 
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, entry);
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -674,7 +775,7 @@ impl DocumentStore {
         resolve::DefUse::build(program)
             .definition_at(offset, cursor)
             .or_else(|| {
-                let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|token| {
+                let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|token| {
                     token.kind == TokenKind::Ident
                         && token.span.start <= offset
                         && offset <= token.span.end
@@ -684,12 +785,12 @@ impl DocumentStore {
     }
 
     pub fn hover_doc(&self, uri: &str, position: Position, encoding: Encoding) -> Option<String> {
-        let cache = self.workspaces.get(uri)?;
+        let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let def_span = self.definition_name_span(cache, position, encoding)?;
+        let def_span = self.definition_name_span(cache, doc, source, position, encoding)?;
 
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, cache.entry());
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -718,23 +819,22 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<(String, Range)> {
-        let cache = self.workspaces.get(uri)?;
+        let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let entry = cache.entry();
-        let index = LineIndex::new(entry.text(db));
+        let index = LineIndex::new(doc.text(db));
         let offset = index.offset(position, encoding);
 
-        // The tier at the cursor: the entry file's parse, scanned for a `@<name> { … }` whose tier
+        // The tier at the cursor: this file's parse, scanned for a `@<name> { … }` whose tier
         // name covers the offset. Uses the **workspace-aware** parse (`ast_in`), so a native
         // tier's `@json { … }` body is captured verbatim (the ext-tier lexer seed) and shows up as
         // a `TierExpr` rather than being mis-lexed as code.
-        let ast = noeta_db::ast_in(db, cache.workspace, entry);
-        let (tier, tier_span) = tier_name_at(&ast.0.program, offset, SourceId::FIRST)?;
+        let ast = noeta_db::ast_in(db, cache.workspace, doc);
+        let (tier, tier_span) = tier_name_at(&ast.0.program, offset, source)?;
 
         // The tier's declaration, from the workspace-merged program's registry (imports + this
         // file). A built-in `doc` has no declaration but a known language.
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, entry);
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -768,18 +868,16 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<(String, Range)> {
-        let cache = self.workspaces.get(uri)?;
+        let (cache, doc, cursor) = self.doc_cache(uri)?;
         let db = &self.db;
-        let entry = cache.entry();
-        let entry_text = entry.text(db);
+        let entry_text = doc.text(db);
         let entry_index = LineIndex::new(entry_text);
         let offset = entry_index.offset(position, encoding);
-        let cursor = SourceId::FIRST;
 
-        // The merged program when the link succeeded, else the entry's own AST (so within-file
+        // The merged program when the link succeeded, else the document's own AST (so within-file
         // navigation still works while a sibling is broken).
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, entry);
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -795,7 +893,7 @@ impl DocumentStore {
         // 2. Member access `receiver.member`: resolve the receiver's type from the workspace type
         //    index, then look the member up among that type's declared fields/variants/methods.
         if let Some((receiver_span, member)) = def_use.member_at(offset, cursor)
-            && let Some(receiver_ty) = noeta_db::linked_checked_ide(db, cache.workspace)
+            && let Some(receiver_ty) = noeta_db::linked_checked_ide_from(db, cache.workspace, doc)
                 .expr_types
                 .get(&receiver_span)
             && let Some(type_name) = nominal_name(receiver_ty)
@@ -804,9 +902,9 @@ impl DocumentStore {
             return self.locate(cache, def, encoding);
         }
 
-        // 3. Fallback: the identifier token under the cursor (from the entry's tokens) resolved by
-        //    name against the top-level definitions. Covers type references and constructors.
-        let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|token| {
+        // 3. Fallback: the identifier token under the cursor (from the document's tokens) resolved
+        //    by name against the top-level definitions. Covers type references and constructors.
+        let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|token| {
             token.kind == TokenKind::Ident && token.span.start <= offset && offset <= token.span.end
         })?;
         let name = &entry_text[token.span.range()];
@@ -836,9 +934,9 @@ impl DocumentStore {
         encoding: Encoding,
         include_declaration: bool,
     ) -> Option<Vec<(String, Range)>> {
-        let cache = self.workspaces.get(uri)?;
-        let offset = LineIndex::new(cache.entry().text(&self.db)).offset(position, encoding);
-        let spans = self.symbol_occurrences(cache, offset, include_declaration)?;
+        let (cache, doc, cursor) = self.doc_cache(uri)?;
+        let offset = LineIndex::new(doc.text(&self.db)).offset(position, encoding);
+        let spans = self.symbol_occurrences(cache, doc, cursor, offset, include_declaration)?;
 
         let mut locations: Vec<(String, Range)> = spans
             .into_iter()
@@ -863,13 +961,14 @@ impl DocumentStore {
     fn symbol_occurrences(
         &self,
         cache: &WorkspaceCache,
+        doc: SourceProgram,
+        cursor: SourceId,
         offset: u32,
         include_declaration: bool,
     ) -> Option<Vec<Span>> {
         let db = &self.db;
-        let cursor = SourceId::FIRST;
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, cache.entry());
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -889,7 +988,7 @@ impl DocumentStore {
         //    from the `.member` access under the cursor (receiver type from the workspace index) or
         //    from the member declaration the cursor is on.
         let members = resolve::MemberTable::collect(program);
-        let ide = noeta_db::linked_checked_ide(db, cache.workspace);
+        let ide = noeta_db::linked_checked_ide_from(db, cache.workspace, doc);
         let expr_types = &ide.expr_types;
         let (type_name, member_name) = match def_use.member_at(offset, cursor) {
             Some((receiver_span, name)) => {
@@ -951,16 +1050,14 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<Range> {
-        let cache = self.workspaces.get(uri)?;
-        let index = LineIndex::new(cache.entry().text(&self.db));
+        let (cache, doc, cursor) = self.doc_cache(uri)?;
+        let index = LineIndex::new(doc.text(&self.db));
         let offset = index.offset(position, encoding);
         // The occurrences include the one under the cursor (a use or the declaration); return it.
         let here = self
-            .symbol_occurrences(cache, offset, true)?
+            .symbol_occurrences(cache, doc, cursor, offset, true)?
             .into_iter()
-            .find(|span| {
-                span.source == SourceId::FIRST && span.start <= offset && offset <= span.end
-            })?;
+            .find(|span| span.source == cursor && span.start <= offset && offset <= span.end)?;
         Some(index.range(here, encoding))
     }
 
@@ -976,15 +1073,14 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<signature::SignatureData> {
-        let cache = self.workspaces.get(uri)?;
+        let (cache, doc, _source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let entry = cache.entry();
-        let text = entry.text(db);
+        let text = doc.text(db);
         let offset = LineIndex::new(text).offset(position, encoding);
-        let tokens = &noeta_db::tokens(db, entry).0.tokens;
+        let tokens = &noeta_db::tokens(db, doc).0.tokens;
 
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, entry);
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -1024,18 +1120,16 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<Vec<completion::Candidate>> {
-        let cache = self.workspaces.get(uri)?;
+        let (cache, doc, cursor) = self.doc_cache(uri)?;
         let db = &self.db;
-        let entry = cache.entry();
-        let entry_text = entry.text(db);
+        let entry_text = doc.text(db);
         let index = LineIndex::new(entry_text);
         let offset = index.offset(position, encoding);
-        let cursor = SourceId::FIRST;
 
         // Prefer the merged workspace program (so an imported type's members resolve); fall back to
-        // the entry's own AST while a sibling is unparseable.
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, entry);
+        // the document's own AST while a sibling is unparseable.
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -1050,7 +1144,7 @@ impl DocumentStore {
             if let Some(prefix) = namespaces.get(&entry_text[receiver_span.range()]) {
                 return Some(completion::namespace_members(prefix));
             }
-            let checked = noeta_db::linked_checked_ide(db, cache.workspace);
+            let checked = noeta_db::linked_checked_ide_from(db, cache.workspace, doc);
             let mut members = checked
                 .expr_types
                 .get(&receiver_span)
@@ -1088,10 +1182,9 @@ impl DocumentStore {
     /// single-file overlay over the entry document's own AST — the client keeps its static grammar for
     /// everything else. `None` if the document is not open.
     pub fn semantic_tokens(&self, uri: &str, encoding: Encoding) -> Option<Vec<SemanticToken>> {
-        let cache = self.workspaces.get(uri)?;
-        let entry = cache.entry();
-        let index = LineIndex::new(entry.text(&self.db));
-        let program = &noeta_db::ast(&self.db, entry).0.program;
+        let (_cache, doc, _source) = self.doc_cache(uri)?;
+        let index = LineIndex::new(doc.text(&self.db));
+        let program = &noeta_db::ast(&self.db, doc).0.program;
 
         let mut data = Vec::new();
         let (mut prev_line, mut prev_char) = (0u32, 0u32);
@@ -1123,10 +1216,9 @@ impl DocumentStore {
     /// unparseable document yields whatever the recovering parser produced. `None` if the document is
     /// not open.
     pub fn document_symbols(&self, uri: &str, encoding: Encoding) -> Option<Vec<DocumentSymbol>> {
-        let cache = self.workspaces.get(uri)?;
-        let entry = cache.entry();
-        let index = LineIndex::new(entry.text(&self.db));
-        let program = &noeta_db::ast(&self.db, entry).0.program;
+        let (_cache, doc, _source) = self.doc_cache(uri)?;
+        let index = LineIndex::new(doc.text(&self.db));
+        let program = &noeta_db::ast(&self.db, doc).0.program;
         Some(
             symbols::outline(program)
                 .iter()
@@ -1135,29 +1227,40 @@ impl DocumentStore {
         )
     }
 
-    /// The workspace serving `uri` and the [`SourceId`] `uri` carries within it: an open document
-    /// is its own workspace's entry; otherwise any open workspace that discovered `uri` as a
-    /// sibling or dependency module answers for it (same merged program either way). This is what
+    /// The workspace serving `uri`, the **entry** whose merged program answers for it, and the
+    /// [`SourceId`] `uri` carries within the workspace. An open document is its own entry; an
+    /// unopened member or dependency module is answered through the workspace's first open
+    /// document (the importer's view — there is always one while the cache exists). This is what
     /// lets call-hierarchy expansion continue from an item in a file the user never opened — the
     /// hierarchy requests address items by `(uri, selection range)`, not by the entry document.
-    fn workspace_of(&self, uri: &str) -> Option<(&WorkspaceCache, SourceId)> {
-        if let Some(cache) = self.workspaces.get(uri) {
-            return Some((cache, SourceId::FIRST));
+    fn workspace_of(&self, uri: &str) -> Option<(&WorkspaceCache, SourceProgram, SourceId)> {
+        if let Some((cache, program, source)) = self.doc_cache(uri) {
+            let entry = if self.buffers.contains_key(uri) {
+                program
+            } else {
+                self.entry_for(cache, program)
+            };
+            return Some((cache, entry, source));
         }
+        // A dependency module discovered by some open workspace (ids continue past the members).
         self.workspaces.values().find_map(|cache| {
-            let idx = cache
-                .source_uris
-                .iter()
-                .position(|u| u == uri)
-                .or_else(|| {
-                    cache
-                        .dep_uris
-                        .iter()
-                        .position(|u| u == uri)
-                        .map(|i| i + cache.programs.len())
-                })?;
-            Some((cache, SourceId(idx as u32)))
+            let idx = cache.dep_uris.iter().position(|u| u == uri)?;
+            let entry = self.entry_for(cache, cache.programs[0]);
+            Some((cache, entry, SourceId((idx + cache.programs.len()) as u32)))
         })
+    }
+
+    /// The link-driving entry for requests about a file that is not itself open: the first open
+    /// member of `cache` (in sorted member order, so the choice is deterministic), or `fallback`
+    /// if none is — unreachable in practice, since a cache exists only while a member is open.
+    fn entry_for(&self, cache: &WorkspaceCache, fallback: SourceProgram) -> SourceProgram {
+        cache
+            .source_uris
+            .iter()
+            .zip(&cache.programs)
+            .find(|(u, _)| self.buffers.contains_key(*u))
+            .map(|(_, program)| *program)
+            .unwrap_or(fallback)
     }
 
     /// The source text of `source` within `cache` (entry + siblings, then dependency modules —
@@ -1184,9 +1287,9 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<HierarchyItem> {
-        let (cache, source) = self.workspace_of(uri)?;
+        let (cache, entry, source) = self.workspace_of(uri)?;
         let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
-        let (graph, info) = self.call_graph(cache);
+        let (graph, info) = self.call_graph(cache, entry);
         let roles = trace::roles_by_target(&info);
         let idx = graph.function_at(offset, source)?;
         self.hierarchy_item(cache, &graph, &roles, idx, encoding)
@@ -1202,9 +1305,9 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<Vec<HierarchyCall>> {
-        let (cache, source) = self.workspace_of(uri)?;
+        let (cache, entry, source) = self.workspace_of(uri)?;
         let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
-        let (graph, info) = self.call_graph(cache);
+        let (graph, info) = self.call_graph(cache, entry);
         let roles = trace::roles_by_target(&info);
         let caller = graph.function_at(offset, source)?;
 
@@ -1243,9 +1346,9 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<Vec<HierarchyCall>> {
-        let (cache, source) = self.workspace_of(uri)?;
+        let (cache, entry, source) = self.workspace_of(uri)?;
         let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
-        let (graph, info) = self.call_graph(cache);
+        let (graph, info) = self.call_graph(cache, entry);
         let roles = trace::roles_by_target(&info);
         let target = graph.function_at(offset, source)?;
 
@@ -1290,8 +1393,8 @@ impl DocumentStore {
     /// indexed over the **merged** program (the `@attribute` struct conferring a role may live in
     /// a sibling), then filtered to bindings whose target is declared in this file.
     pub fn role_lenses(&self, uri: &str, encoding: Encoding) -> Option<Vec<RoleLens>> {
-        let (cache, source) = self.workspace_of(uri)?;
-        let (graph, info) = self.call_graph(cache);
+        let (cache, entry, source) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache, entry);
         let index = LineIndex::new(self.source_text(cache, source)?);
         let mut lenses: Vec<RoleLens> = info
             .roles
@@ -1322,8 +1425,8 @@ impl DocumentStore {
     /// only when no open workspace covers `uri`; an unmatched `from` renders an explanatory
     /// document (the user clicked something — answer in the document, not with silence).
     pub fn trace_document(&self, uri: &str, from: Option<&str>) -> Option<String> {
-        let (cache, _) = self.workspace_of(uri)?;
-        let (graph, info) = self.call_graph(cache);
+        let (cache, entry, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache, entry);
         let roots = match trace::resolve_roots(&graph, &info, from) {
             trace::Roots::Functions(roots) => roots,
             trace::Roots::AllRoleBearers(all) if !all.is_empty() => all,
@@ -1467,8 +1570,8 @@ impl DocumentStore {
     /// [`architecture_children`](Self::architecture_children)); a role on a non-function
     /// declaration is a located, non-expandable entry.
     pub fn architecture(&self, uri: &str, encoding: Encoding) -> Option<Vec<ArchRole>> {
-        let (cache, _) = self.workspace_of(uri)?;
-        let (graph, info) = self.call_graph(cache);
+        let (cache, entry, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache, entry);
         let roles_map = trace::roles_by_target(&info);
         let mut groups: Vec<ArchRole> = Vec::new();
         for r in &info.roles {
@@ -1515,8 +1618,8 @@ impl DocumentStore {
         function: &str,
         encoding: Encoding,
     ) -> Option<Vec<ArchNode>> {
-        let (cache, _) = self.workspace_of(uri)?;
-        let (graph, info) = self.call_graph(cache);
+        let (cache, entry, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache, entry);
         let Some(idx) = graph.function_named(function) else {
             return Some(Vec::new());
         };
@@ -1579,10 +1682,10 @@ impl DocumentStore {
         f: impl FnOnce(&docs::DocCtx) -> R,
     ) -> R {
         match self.workspace_of(uri) {
-            Some((cache, _)) => {
+            Some((cache, entry, _)) => {
                 let db = &self.db;
-                let linked = noeta_db::linked(db, cache.workspace);
-                let entry_ast = noeta_db::ast(db, cache.entry());
+                let linked = noeta_db::linked_from(db, cache.workspace, entry);
+                let entry_ast = noeta_db::ast(db, entry);
                 let program = match &linked.0 {
                     Ok(program) => program,
                     Err(_) => &entry_ast.0.program,
@@ -1636,11 +1739,11 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<docs::DocId> {
-        let cache = self.workspaces.get(uri)?;
-        let def_span = self.definition_name_span(cache, position, encoding)?;
+        let (cache, doc, source) = self.doc_cache(uri)?;
+        let def_span = self.definition_name_span(cache, doc, source, position, encoding)?;
         let db = &self.db;
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, cache.entry());
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -1658,10 +1761,10 @@ impl DocumentStore {
     /// [`activate_tiers`](noeta_check::activate_tiers) walk over the merged program, filtered to
     /// this file, so the explorer and `noeta test` can never disagree about what a test is.
     pub fn tests(&self, uri: &str, encoding: Encoding) -> Option<Vec<TestItem>> {
-        let (cache, source) = self.workspace_of(uri)?;
+        let (cache, entry, source) = self.workspace_of(uri)?;
         let db = &self.db;
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, cache.entry());
+        let linked = noeta_db::linked_from(db, cache.workspace, entry);
+        let entry_ast = noeta_db::ast(db, entry);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
@@ -1692,16 +1795,17 @@ impl DocumentStore {
     fn call_graph(
         &self,
         cache: &WorkspaceCache,
+        entry: SourceProgram,
     ) -> (callgraph::CallGraph, noeta_ast::reflect::ReflectionInfo) {
         let db = &self.db;
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, cache.entry());
+        let linked = noeta_db::linked_from(db, cache.workspace, entry);
+        let entry_ast = noeta_db::ast(db, entry);
         let program = match &linked.0 {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
-        let ide = noeta_db::linked_checked_ide(db, cache.workspace);
-        // Texts by SourceId index: entry + siblings, then dependency modules (ids continue past).
+        let ide = noeta_db::linked_checked_ide_from(db, cache.workspace, entry);
+        // Texts by SourceId index: members, then dependency modules (ids continue past).
         let texts: Vec<&str> = cache
             .programs
             .iter()
@@ -1811,6 +1915,16 @@ fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     // `file:///abs` → `/abs`; a leading host (`file://host/p`) is not expected for local files.
     Some(PathBuf::from(rest))
+}
+
+/// The shared-workspace key of a document: its **directory** (`dir:<path>`) for a `file:` URI —
+/// every document in one directory shares one [`WorkspaceCache`] — or the URI itself
+/// (`lone:<uri>`) for a directory-less document (`untitled:` …), which forms a lone workspace.
+fn workspace_key(uri: &str) -> String {
+    match uri_to_path(uri).and_then(|p| p.parent().map(Path::to_path_buf)) {
+        Some(dir) => format!("dir:{}", dir.display()),
+        None => format!("lone:{uri}"),
+    }
 }
 
 /// The language edition the document at `uri` is written against — its package's `edition`, read
@@ -2088,7 +2202,10 @@ fn type_method<'a>(
 /// call is closed in a copy that is re-checked off the salsa graph. At an argument boundary (right
 /// after `(` or `,`) a synthetic argument is inserted before the `)` so no dangling comma trips the
 /// parser (which would leave the receiver untyped); mid-argument, a bare `)` suffices. The receiver
-/// precedes the insertion, so its span is unchanged. `None` if its type is not a nominal.
+/// precedes the insertion, so its span is unchanged. The munged copy is parsed under the
+/// receiver span's own [`SourceId`] (the document's id in its shared directory workspace), so the
+/// standalone check's `expr_types` keys match the span being looked up. `None` if its type is not
+/// a nominal.
 fn receiver_type_at(text: &str, offset: u32, receiver_span: Span) -> Option<String> {
     let o = offset as usize;
     let at_arg_boundary = {
@@ -2097,7 +2214,7 @@ fn receiver_type_at(text: &str, offset: u32, receiver_span: Span) -> Option<Stri
     };
     let closer = if at_arg_boundary { "x)" } else { ")" };
     let munged = format!("{}{closer}{}", &text[..o], &text[o..]);
-    let source = noeta_span::Source::new(SourceId::FIRST, "<signature>", &munged);
+    let source = noeta_span::Source::new(receiver_span.source, "<signature>", &munged);
     let lexed = noeta_lexer::lex(&source);
     let parsed = noeta_parser::parse(&source, &lexed.tokens);
     let checked = noeta_check::check_all_with_types(&parsed.program);
@@ -2191,12 +2308,21 @@ fn splices_a_type(insert: &str, text: &str, offset: u32) -> bool {
 mod tests {
     use super::*;
 
+    /// The salsa input serving `uri` in its directory's shared workspace — the test-side view of
+    /// [`DocumentStore::doc_cache`].
+    fn doc_program(store: &DocumentStore, uri: &str) -> SourceProgram {
+        store
+            .doc_cache(uri)
+            .expect("document is a member of an open workspace")
+            .1
+    }
+
     #[test]
     fn open_registers_a_document() {
         let mut store = DocumentStore::default();
         store.open("file:///a.noe", "let x = 1".to_string());
         assert_eq!(store.buffers.len(), 1);
-        let program = store.workspaces["file:///a.noe"].entry();
+        let program = doc_program(&store, "file:///a.noe");
         assert_eq!(program.text(&store.db), "let x = 1");
     }
 
@@ -2431,7 +2557,7 @@ mod tests {
     fn change_mutates_the_same_input_in_place() {
         let mut store = DocumentStore::default();
         store.open("file:///a.noe", "old".to_string());
-        let before = store.workspaces["file:///a.noe"].entry();
+        let before = doc_program(&store, "file:///a.noe");
 
         let after = store.change("file:///a.noe", "new".to_string());
 
@@ -2727,26 +2853,131 @@ mod tests {
             "use App.Models.User;\nu = User { id: 1 }".to_string(),
         );
         // Capture the input handles, then edit — the fast path must set text in place, not rebuild.
-        let before = store.workspaces[&entry_uri].programs.clone();
+        let key = workspace_key(&entry_uri);
+        let before = store.workspaces[&key].programs.clone();
 
         store.change(
             &entry_uri,
             "use App.Models.User;\nu = User { id: 2 }".to_string(),
         );
 
-        let after = &store.workspaces[&entry_uri].programs;
+        let after = &store.workspaces[&key].programs;
         assert_eq!(
             &before, after,
             "change must reuse the same salsa inputs (no rebuild/rescan)"
         );
         assert_eq!(
-            store.workspaces[&entry_uri]
-                .entry()
+            doc_program(&store, &entry_uri)
                 .text(&store.db)
                 .lines()
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn two_open_documents_in_one_directory_share_one_workspace_and_inputs() {
+        // Audit-4 finding 6: two open files in one directory used to hold two independent salsa
+        // input copies of every file in it. Now they share ONE per-directory workspace — the same
+        // `SourceProgram` input serves a file no matter which document's view reads it — and an
+        // edit to one document neither creates inputs nor re-parses the other member.
+        let dir = temp_workspace(
+            "shared_dir",
+            &[
+                (
+                    "alpha.noe",
+                    "namespace App.Alpha;\npub fn one(): int { return 1 }\n",
+                ),
+                ("beta.noe", "use App.Alpha.one;\necho one()\n"),
+            ],
+        );
+        let alpha_uri = path_to_uri(&dir.join("alpha.noe"));
+        let beta_uri = path_to_uri(&dir.join("beta.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &alpha_uri,
+            "namespace App.Alpha;\npub fn one(): int { return 1 }\n".to_string(),
+        );
+        store.open(&beta_uri, "use App.Alpha.one;\necho one()\n".to_string());
+
+        // ONE workspace for the directory, not one per open document.
+        assert_eq!(store.workspaces.len(), 1, "one workspace per directory");
+        let (cache_a, alpha, alpha_id) = store.doc_cache(&alpha_uri).expect("alpha resolves");
+        let (cache_b, beta, beta_id) = store.doc_cache(&beta_uri).expect("beta resolves");
+        assert!(std::ptr::eq(cache_a, cache_b), "same shared cache");
+        assert_ne!(alpha_id, beta_id, "distinct stable SourceIds");
+        // The input representing alpha inside beta's view IS alpha's own input (no copy).
+        assert_eq!(
+            cache_b.programs[alpha_id.0 as usize], alpha,
+            "one SourceProgram input per file, shared across documents"
+        );
+
+        // Both documents diagnose cleanly over their own merged programs.
+        assert!(store.diagnostics(&alpha_uri).unwrap().0.is_empty());
+        assert!(store.diagnostics(&beta_uri).unwrap().0.is_empty());
+
+        // Editing beta: no inputs are created or replaced, and alpha's workspace-aware parse is
+        // untouched (the memoized value is identical) — the per-file work is shared, not copied.
+        let workspace = cache_a.workspace;
+        let programs_before = cache_a.programs.clone();
+        let alpha_ast_before =
+            noeta_db::ast_in(&store.db, workspace, alpha) as *const noeta_db::Ast;
+        store.change(
+            &beta_uri,
+            "use App.Alpha.one;\necho one() + 1\n".to_string(),
+        );
+        let (cache_after, _, _) = store.doc_cache(&alpha_uri).expect("alpha still resolves");
+        assert_eq!(
+            cache_after.programs, programs_before,
+            "an edit must not create or duplicate inputs"
+        );
+        assert_eq!(
+            alpha_ast_before,
+            noeta_db::ast_in(&store.db, workspace, alpha) as *const noeta_db::Ast,
+            "editing beta must not recompute alpha's parse"
+        );
+        // And beta's edit is live in both views (shared input): its own diagnostics still clean.
+        assert!(store.diagnostics(&beta_uri).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn file_set_change_reuses_inputs_by_uri() {
+        // Audit-4 finding 9 (the cheap half): a file-set change used to abandon every
+        // `SourceProgram` and build fresh ones — salsa inputs are never collected, so a long
+        // session grew the database without bound. Now a rescan reuses the existing inputs by URI
+        // (id/text updated in place) and only a genuinely new file gets a new input.
+        let dir = temp_workspace("set_change_reuse", &[("main.noe", "echo 1\n")]);
+        let main_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = DocumentStore::default();
+        store.open(&main_uri, "echo 1\n".to_string());
+        let before = doc_program(&store, &main_uri);
+        let workspace_before = store.doc_cache(&main_uri).unwrap().0.workspace;
+
+        // A new sibling appears on disk — sorted BEFORE main.noe, so main's SourceId shifts.
+        std::fs::write(
+            dir.join("aaa.noe"),
+            "namespace App.Aaa;\npub fn a(): int { return 1 }\n",
+        )
+        .unwrap();
+        let aaa_uri = path_to_uri(&dir.join("aaa.noe"));
+        store.open(
+            &aaa_uri,
+            "namespace App.Aaa;\npub fn a(): int { return 1 }\n".to_string(),
+        );
+
+        let (cache, after, after_id) = store.doc_cache(&main_uri).expect("main still resolves");
+        assert_eq!(
+            before, after,
+            "the existing member's input must be reused, not abandoned"
+        );
+        assert_eq!(after_id, SourceId(1), "main re-slots after the new sibling");
+        assert_eq!(after.id(&store.db), 1, "the input's id field follows");
+        assert_eq!(
+            cache.workspace, workspace_before,
+            "the Workspace input itself is updated in place, not replaced"
+        );
+        assert!(store.diagnostics(&main_uri).unwrap().0.is_empty());
+        assert!(store.diagnostics(&aaa_uri).unwrap().0.is_empty());
     }
 
     #[test]
