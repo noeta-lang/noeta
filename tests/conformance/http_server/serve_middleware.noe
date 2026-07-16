@@ -1,0 +1,63 @@
+// A middleware pipeline over `serve` (L1 `dyn Trait`): each middleware's `before(req)` runs ahead of
+// the handler and may short-circuit with `some(response)`. A logger observes every request; a guard
+// blocks `/echo` with 403. `dyn Middleware` dispatches dynamically on each middleware's concrete
+// type. The sandbox drives serve with its fixed request script (paths /, /health, /echo, /users/42,
+// /users/42, /ws). Both backends agree.
+// expect: stdout "log /"
+// expect: stdout "log /health"
+// expect: stdout "log /echo"
+// expect: stdout "BLOCKED /echo"
+// expect: stdout "log /users/42"
+// expect: stdout "log /users/42"
+// expect: stdout "log /ws"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+
+trait Middleware {
+    fn before(req: Request): ?Response
+}
+
+class Logger {
+    fn new(): Logger { return Logger {} }
+    impl Middleware {
+        fn before(req: Request): ?Response {
+            echo "log ${req.path()}"
+            return none
+        }
+    }
+}
+
+class Guard {
+    fn new(): Guard { return Guard {} }
+    impl Middleware {
+        fn before(req: Request): ?Response {
+            if req.path() == "/echo" {
+                echo "BLOCKED ${req.path()}"
+                return some(server.response(403, "forbidden"))
+            }
+            return none
+        }
+    }
+}
+
+pipeline: List<dyn Middleware> = [Logger.new(), Guard.new()]
+
+fn run_before(mws: List<dyn Middleware>, req: Request): ?Response {
+    for mw in mws {
+        short = mw.before(req)
+        if short != none {
+            return short
+        }
+    }
+    return none
+}
+
+fn handle(req: Request): Response {
+    return match run_before(pipeline, req) {
+        some(resp) => resp,
+        none => server.response(200, "ok"),
+    }
+}
+
+server.serve(8080, handle)

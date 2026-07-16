@@ -115,14 +115,44 @@ pub async fn every(ms: int, action: () -> void): void {
     }
 }
 
+// --- Middleware. -------------------------------------------------------------------------------
+//
+// A middleware runs before the route handler and may short-circuit the request. `before` returns
+// `some(response)` to stop the pipeline and reply immediately (auth reject, cached hit, CORS
+// preflight), or `none` to let the request continue to the next middleware / the handler. This is
+// the L1 `dyn Trait` machinery: middlewares are `dyn Middleware` in a pipeline, dispatched
+// dynamically on their concrete type.
+
+pub trait Middleware {
+    fn before(req: Request): ?Response
+}
+
+// Run the before-pipeline: the first middleware that returns a response short-circuits; otherwise
+// `none` lets the request proceed to the route handler.
+fn run_before(pipeline: List<dyn Middleware>, req: Request): ?Response {
+    for mw in pipeline {
+        short = mw.before(req)
+        if short != none {
+            return short
+        }
+    }
+    return none
+}
+
 // --- The application. -------------------------------------------------------------------------
 
 pub class App {
     mut routes: List<Route>
     mut controllers: Map<string, dyn>
+    mut middleware: List<dyn Middleware>
 
     fn new(): App {
-        return App { routes: [], controllers: {} }
+        return App { routes: [], controllers: {}, middleware: [] }
+    }
+
+    // Add a middleware to the pipeline (run in registration order before every handler).
+    fn use_middleware(mw: dyn Middleware): void {
+        self.middleware = self.middleware ~ [mw]
     }
 
     // Register a controller instance under its type name (the leading segment of its route targets).
@@ -171,10 +201,13 @@ pub class App {
         return "500 no controller ${r.controller}"
     }
 
-    // The HTTP adapter: extract method/path/body from a real request, dispatch, and reply.
+    // The HTTP adapter: run the middleware pipeline (short-circuit if any responds), then extract
+    // method/path/body from the request, dispatch to the routed handler, and reply.
     fn route(req: Request): Response {
-        result = self.handle(req.method(), req.path(), req.body())
-        return server.response(200, result)
+        return match run_before(self.middleware, req) {
+            some(resp) => resp,
+            none => server.response(200, self.handle(req.method(), req.path(), req.body())),
+        }
     }
 
     // Run the app on `port`, dispatching each request through the router.
