@@ -821,6 +821,11 @@ fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
         Stmt::Struct(decl) => Some(&decl.name),
         Stmt::Enum(decl) => Some(&decl.name),
         Stmt::Fn(decl) => Some(&decl.name),
+        // A user-defined trait is a qualifiable declaration (L1): a `dyn Trait` type, a `<T: Trait>`
+        // bound, or an `impl Trait for T` referencing a module-local trait drags its declaration into
+        // the merged program via the cross-module closure — without this a package-local trait
+        // (e.g. aether's `Middleware`) is "unknown" once the package is linked as a dependency.
+        Stmt::Trait(decl) => Some(&decl.name),
         _ => None,
     }
 }
