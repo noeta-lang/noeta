@@ -673,6 +673,118 @@ enum Color { Red; Green }
         assert!(none.note.unwrap().contains("symbol"));
     }
 
+    /// Pins the `symbols` tool's exact wire JSON over every node kind — names, kind strings,
+    /// detail conventions (param-names-only fn details, `null` elsewhere), 1-based locations, and
+    /// nesting — so rebasing the walk onto the shared `noeta_ide::symbols::outline` engine
+    /// (audit-4 finding 8) is provably behavior-preserving for agents.
+    #[test]
+    fn symbols_wire_json_is_pinned_across_all_node_kinds() {
+        let src = "\
+fn add(a: int, b: int): int { return a + b }
+
+struct Point {
+  x: int
+  fn norm(): int { return self.x }
+}
+
+enum Shape {
+  Dot
+  Circle(radius: int)
+  fn area(): int { return 0 }
+}
+
+impl Show for Point {
+  fn show(): int { return 1 }
+}
+";
+        let p = prepare(&Some(src.to_string()), &None).unwrap();
+        let out = serde_json::to_value(symbols(&p)).unwrap();
+        let loc = |sl: u32, sc: u32, so: u32, el: u32, ec: u32, eo: u32| {
+            serde_json::json!({
+                "start": {"line": sl, "column": sc, "offset": so},
+                "end": {"line": el, "column": ec, "offset": eo},
+            })
+        };
+        let expected = serde_json::json!({
+            "symbols": [
+                {
+                    "name": "add", "kind": "function", "detail": "fn add(a, b)",
+                    "location": loc(1, 1, 0, 1, 45, 44), "roles": [], "children": [],
+                },
+                {
+                    "name": "Point", "kind": "struct", "detail": null,
+                    "location": loc(3, 1, 46, 6, 2, 106), "roles": [],
+                    "children": [
+                        {
+                            "name": "x", "kind": "field", "detail": null,
+                            "location": loc(4, 3, 63, 4, 9, 69), "roles": [], "children": [],
+                        },
+                        {
+                            "name": "norm", "kind": "method", "detail": "fn norm()",
+                            "location": loc(5, 3, 72, 5, 35, 104), "roles": [], "children": [],
+                        },
+                    ],
+                },
+                {
+                    "name": "Shape", "kind": "enum", "detail": null,
+                    "location": loc(8, 1, 108, 12, 2, 180), "roles": [],
+                    "children": [
+                        {
+                            "name": "Dot", "kind": "variant", "detail": null,
+                            "location": loc(9, 3, 123, 9, 6, 126), "roles": [], "children": [],
+                        },
+                        {
+                            "name": "Circle", "kind": "variant", "detail": null,
+                            "location": loc(10, 3, 129, 10, 22, 148), "roles": [], "children": [],
+                        },
+                        {
+                            "name": "area", "kind": "method", "detail": "fn area()",
+                            "location": loc(11, 3, 151, 11, 30, 178), "roles": [], "children": [],
+                        },
+                    ],
+                },
+                {
+                    "name": "Show for Point", "kind": "impl", "detail": null,
+                    "location": loc(14, 1, 182, 16, 2, 235), "roles": [],
+                    "children": [
+                        {
+                            "name": "show", "kind": "method", "detail": "fn show()",
+                            "location": loc(15, 3, 206, 15, 30, 233), "roles": [], "children": [],
+                        },
+                    ],
+                },
+            ],
+        });
+        assert_eq!(out, expected);
+    }
+
+    /// Pins `type_at`'s exact wire locations (1-based line, 1-based UTF-8 byte column, byte
+    /// offset) ahead of the finding-8 LineIndex rebase — the span math must survive verbatim.
+    #[test]
+    fn type_at_wire_locations_are_pinned() {
+        let p = prep();
+        // The symbol-named lookup resolves `xs` to its typed *use site* — the `xs.len()` receiver
+        // on line 3 (byte offset 56) — since declaration targets are not expressions.
+        let xs = type_at(&p, Some("xs"), None, None);
+        let out = serde_json::to_value(&xs).unwrap();
+        assert_eq!(out["found"], serde_json::json!(true));
+        assert_eq!(out["type"], serde_json::json!("List<int>"));
+        assert_eq!(
+            out["location"],
+            serde_json::json!({
+                "start": {"line": 3, "column": 14, "offset": 56},
+                "end": {"line": 3, "column": 16, "offset": 58},
+            })
+        );
+        assert_eq!(out["resolved_offset"], serde_json::json!(56));
+
+        // Position-addressed: line 3 column 10 sits on `n` inside `return n + xs.len()`.
+        let at = type_at(&p, None, Some(3), Some(10));
+        assert!(at.found);
+        assert_eq!(at.r#type, "int");
+        assert_eq!(at.resolved_offset, Some(52));
+    }
+
     #[test]
     fn symbols_outlines_declarations_and_members() {
         let p = prep();
