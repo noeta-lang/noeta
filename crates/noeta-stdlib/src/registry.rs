@@ -3966,13 +3966,30 @@ pub fn static_dispatch_ctx<C: crate::NativeCtx + ?Sized>(
     ctx: &mut C,
     args: &[crate::Slot],
 ) -> Option<Result<crate::CtxOut, crate::CtxError>> {
-    match module {
+    if !has_static_ctx_route(module) {
+        // `para.synced` is out-of-`std` (noeta-para-p2p) — it has no compiled-in fast route here
+        // and dispatches through the registered ExtModule's dyn `ctx_dispatch` instead. Nor does
+        // an out-of-std module that merely *ends* in `.cell`/`.reactive` (a session extension):
+        // only std's own identities take the compiled-in route.
+        return None;
+    }
+    match module_name(module) {
         "cell" => Some(crate::cell::cell_ctx_dispatch(func, ctx, args)),
         "reactive" => Some(crate::reactive::reactive_ctx_dispatch(func, ctx, args)),
-        // `para.synced` is out-of-`std` (noeta-para-p2p) — it has no compiled-in fast route here
-        // and dispatches through the registered ExtModule's dyn `ctx_dispatch` instead.
         _ => None,
     }
+}
+
+/// Whether `module` names a compiled-in ctx fast route ([`static_dispatch_ctx`]) — split out so
+/// the route keys are testable against the exact identity the compiler emits. Module identities
+/// are **root-qualified** end to end since the namespaced-types arc (`use std.cell` compiles to
+/// the constant `"std.cell"`), which is what this matches; the bare spellings are kept for any
+/// pre-qualification caller. This predicate rotted silently once before: the match keyed on the
+/// bare names after identities became qualified, so the monomorphized H5 route never fired and
+/// everything fell through to the dyn table with no behavioral difference to notice.
+#[inline]
+pub fn has_static_ctx_route(module: &str) -> bool {
+    matches!(module, "std.cell" | "std.reactive" | "cell" | "reactive")
 }
 
 /// Compiled-in fast route for ctx **type methods** (H5 perf) — the type-method twin of

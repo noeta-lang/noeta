@@ -4491,6 +4491,23 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
 #[cfg(test)]
 mod tests {
     use super::{compile, compile_with_sites};
+
+    /// The compiled-in ctx fast route must key on the exact module identity THIS crate emits
+    /// (`qualified_module`) — it silently rotted once when identities became root-qualified
+    /// (`"cell"` → `"std.cell"`) and every `signal(…)`/`cell(…)` fell through to the dyn table
+    /// with no behavioral difference to notice. This pins the two ends together.
+    #[test]
+    fn the_static_ctx_fast_route_keys_match_the_emitted_module_identity() {
+        let emitted = |name: &str| super::qualified_module(&["std".to_string()], name);
+        assert!(noeta_stdlib::registry::has_static_ctx_route(&emitted("cell")));
+        assert!(noeta_stdlib::registry::has_static_ctx_route(&emitted(
+            "reactive"
+        )));
+        // An out-of-std module never takes std's compiled-in route, even with a matching tail.
+        assert!(!noeta_stdlib::registry::has_static_ctx_route(
+            &super::qualified_module(&["acme".to_string()], "cell")
+        ));
+    }
     use noeta_ast::AttrValue;
     use noeta_ast::reflect::AttributeRecord;
     use noeta_bytecode::Module;
