@@ -135,18 +135,24 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
 
         // An extension command drives a program run; a native-dep app delegates to its composed
         // toolchain like every other verb (composition failure is fatal, never a stock fallback).
-        if compose::maybe_delegate(file).is_some() {
-            return 1;
-        }
+        let resolved = match compose::maybe_delegate(file) {
+            Err(_) => return 1,
+            Ok(resolved) => resolved,
+        };
 
-        // Resolve dependency packages so `noeta serve` (and any entry-call command) sees the same
-        // cross-package `use <dep-key>.…` the plain `run` path does (package-manager P2.1c).
-        let deps = match graph::resolve_graph(file) {
-            Ok(graph) => graph.packages,
-            Err(err) => {
-                eprintln!("noeta: {err}");
-                return 2;
-            }
+        // Dependency packages so `noeta serve` (and any entry-call command) sees the same
+        // cross-package `use <dep-key>.…` the plain `run` path does (package-manager P2.1c) —
+        // the compose probe's graph when it resolved (audit-5 F2), else resolved here so the
+        // error renders on this path.
+        let deps = match resolved {
+            Some(graph) => graph.packages,
+            None => match graph::resolve_graph(file) {
+                Ok(graph) => graph.packages,
+                Err(err) => {
+                    eprintln!("noeta: {err}");
+                    return 2;
+                }
+            },
         };
         let linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
             Err(err) => {
@@ -270,15 +276,21 @@ pub(crate) fn serve_parallel_impl(
     use noeta_ast::{Expr, Stmt};
     use noeta_span::Span;
 
-    if compose::maybe_delegate(file).is_some() {
-        return 1;
-    }
-    let deps = match graph::resolve_graph(file) {
-        Ok(graph) => graph.packages,
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            return 2;
-        }
+    let resolved = match compose::maybe_delegate(file) {
+        Err(_) => return 1,
+        Ok(resolved) => resolved,
+    };
+    // The compose probe's graph when it resolved (audit-5 F2), else resolved here so the error
+    // renders on this path.
+    let deps = match resolved {
+        Some(graph) => graph.packages,
+        None => match graph::resolve_graph(file) {
+            Ok(graph) => graph.packages,
+            Err(err) => {
+                eprintln!("noeta: {err}");
+                return 2;
+            }
+        },
     };
     let linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
         Err(err) => {

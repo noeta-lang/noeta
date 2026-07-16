@@ -190,9 +190,12 @@ pub(crate) fn cmd_doc(
         return ExitCode::from(2);
     };
     let file = file.as_path();
-    if let Some(code) = compose::maybe_delegate(file) {
-        return code;
-    }
+    // The compose probe hands back the graph it resolved (default selection) for the load below
+    // (audit-5 F2); the `--out` generator path never links, so it simply drops it.
+    let resolved = match compose::maybe_delegate(file) {
+        Err(code) => return code,
+        Ok(resolved) => resolved,
+    };
     if let Some(code) = target_gate(file, target, "doc") {
         return code;
     }
@@ -220,7 +223,7 @@ pub(crate) fn cmd_doc(
             }
         };
     }
-    let linked = match load_linked(file) {
+    let linked = match load_linked(file, resolved) {
         Ok(linked) => linked,
         Err(code) => return code,
     };

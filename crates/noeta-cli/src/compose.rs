@@ -73,15 +73,18 @@ impl ShimKind {
 
 /// Delegate to the app's composed toolchain if its dependency graph carries native crates.
 ///
-/// Returns `None` when the stock binary should just proceed (no manifest, no native deps, we ARE
-/// the composed binary, or the graph fails to resolve — the normal command path re-resolves and
-/// surfaces the identical error with its usual rendering). Returns `Some(code)` only when
-/// composition was needed and **failed** — declared native capability must never silently degrade
-/// to a stock run, which would surface later as baffling unknown-module errors. On success the
-/// delegation `exec`s and never returns (non-unix: waits and exits with the child's code).
-pub fn maybe_delegate(entry: &Path) -> Option<ExitCode> {
+/// Returns `Ok(_)` when the stock binary should just proceed: `Ok(Some(graph))` hands back the
+/// dependency graph this probe resolved (the **default** selection — no `--target`), so the same
+/// invocation's command path can reuse it instead of resolving again (audit-5 F2); `Ok(None)`
+/// means no graph is available (we ARE the composed binary, or the graph fails to resolve — the
+/// normal command path re-resolves and surfaces the identical error with its usual rendering).
+/// Returns `Err(code)` only when composition was needed and **failed** — declared native
+/// capability must never silently degrade to a stock run, which would surface later as baffling
+/// unknown-module errors. On success the delegation `exec`s and never returns (non-unix: waits
+/// and exits with the child's code).
+pub fn maybe_delegate(entry: &Path) -> Result<Option<graph::ResolvedGraph>, ExitCode> {
     if std::env::var_os(COMPOSED_GUARD).is_some() {
-        return None;
+        return Ok(None);
     }
     // `noeta check` accepts a directory — the manifest is discovered from the directory itself,
     // so probe with a synthetic child (resolve_graph only uses the entry's parent).
@@ -93,17 +96,17 @@ pub fn maybe_delegate(entry: &Path) -> Option<ExitCode> {
         entry
     };
     let Ok(resolved) = graph::resolve_graph(entry) else {
-        return None; // the command path re-resolves and renders the error
+        return Ok(None); // the command path re-resolves and renders the error
     };
     if resolved.native_crates.is_empty() {
-        return None;
+        return Ok(Some(resolved));
     }
     match delegate(&resolved.native_crates, &resolved.trusted_command_roots) {
         Ok(never) => match never {},
         Err(err) => {
             eprintln!("noeta: cannot compose the toolchain for this app's native dependencies:");
             eprintln!("{err}");
-            Some(ExitCode::from(1))
+            Err(ExitCode::from(1))
         }
     }
 }
@@ -111,10 +114,11 @@ pub fn maybe_delegate(entry: &Path) -> Option<ExitCode> {
 /// [`maybe_delegate`] keyed on the **current directory**'s manifest — for invocations that carry
 /// no file argument but may only make sense inside a composed toolchain (an unknown subcommand
 /// that is really a native dependency's `ExtCommand`). Returns `None` when there is nothing to
-/// compose, exactly like the entry-file form.
+/// compose, exactly like the entry-file form's `Ok` (the resolved graph has no consumer here —
+/// the unknown-subcommand chain never loads a program).
 pub fn maybe_delegate_cwd() -> Option<ExitCode> {
     let cwd = std::env::current_dir().ok()?;
-    maybe_delegate(&cwd)
+    maybe_delegate(&cwd).err()
 }
 
 /// The uninhabited "success" of [`delegate`] — on unix `exec` replaces the process; elsewhere we

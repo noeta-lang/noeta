@@ -6,7 +6,8 @@ use std::process::ExitCode;
 
 use noeta_pm::manifest;
 use noeta_runner::compile::Loaded;
-use noeta_runner::{compile_real, compile_whole_file};
+use noeta_runner::compile::compile_whole_file_with;
+use noeta_runner::compile_real;
 use noeta_span::SourceMap;
 
 use crate::compose;
@@ -134,9 +135,12 @@ pub(crate) fn cmd_run(
     jit_stats: bool,
     args: &[String],
 ) -> ExitCode {
-    if let Some(code) = compose::maybe_delegate(file) {
-        return code;
-    }
+    // The compose probe hands back the graph it resolved (default selection) so the compile
+    // below doesn't resolve it again (audit-5 F2).
+    let resolved = match compose::maybe_delegate(file) {
+        Err(code) => return code,
+        Ok(resolved) => resolved,
+    };
     // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
     // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
     // *build*-time concern (they are already baked into the bundle), so `--tier`/`--target` on a
@@ -156,7 +160,7 @@ pub(crate) fn cmd_run(
     // Everything else — resolve tiers, consult the startup cache, and (on a miss) load → check →
     // compile — is the shared whole-file pipeline. On success run the module with the program's
     // pass-through args; on failure report it.
-    match compile_whole_file(file, tiers, target, no_cache) {
+    match compile_whole_file_with(file, tiers, target, no_cache, resolved.map(|g| g.packages)) {
         Ok(compiled) => run_compiled_module(
             compiled.module,
             &compiled.sources,

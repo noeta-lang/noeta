@@ -48,10 +48,15 @@ pub(crate) fn real_repl_env() -> noeta_vm::HostFactory {
 pub(crate) fn repl_bootstrap(
     path: &std::path::Path,
     checker: &mut Option<noeta_check::SessionChecker>,
+    resolved: Option<noeta_pm::graph::ResolvedGraph>,
 ) -> Result<(VmSession, Vec<Source>), ExitCode> {
     // The shared front half (drift firewall): `repl --load` sees the same dependency packages and
-    // editions `noeta run` resolves — a program that runs must also load at the prompt.
-    let loaded = match noeta_runner::compile::load_default_project(path) {
+    // editions `noeta run` resolves — a program that runs must also load at the prompt. The
+    // compose probe's graph (default selection) is reused rather than resolved again (audit-5 F2).
+    let loaded = match noeta_runner::compile::load_default_project_with(
+        path,
+        resolved.map(|g| g.packages),
+    ) {
         Ok(loaded) => loaded,
         Err(failure) => return Err(failure.report()),
     };
@@ -97,10 +102,13 @@ pub(crate) fn repl_bootstrap(
 
 pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
     // A `--load` bootstrap is a program run — a native-dep app's REPL must be the composed one.
-    if let Some(file) = &load
-        && let Some(code) = compose::maybe_delegate(file)
-    {
-        return code;
+    // The probe's resolved graph (default selection) feeds the bootstrap load (audit-5 F2).
+    let mut resolved = None;
+    if let Some(file) = &load {
+        match compose::maybe_delegate(file) {
+            Err(code) => return code,
+            Ok(graph) => resolved = graph,
+        }
     }
     let stdin = io::stdin();
     // The edition prompt entries lex/parse under (editions arc): the `--load` file's package
@@ -126,7 +134,7 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
     // against its real text).
     let (mut session, preloaded_sources) = match &load {
         None => (VmSession::new(real_repl_env()), Vec::new()),
-        Some(path) => match repl_bootstrap(path, &mut checker) {
+        Some(path) => match repl_bootstrap(path, &mut checker, resolved) {
             Ok(booted) => booted,
             Err(code) => return code,
         },

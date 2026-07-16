@@ -66,11 +66,18 @@ pub(crate) fn target_gate(
 /// Load and link `file` **with its dependency packages resolved** — the same dep-aware path
 /// `run`/`check` use — rendering any failure. The tier runners (`test`/`bench`/`doc`) share this:
 /// a program whose tier content imports from a dependency (a test exercising `use fuzzkit.…`, a
-/// declared tier's runner) must link exactly as it does for a run.
-pub(crate) fn load_linked(file: &std::path::Path) -> Result<noeta_loader::Linked, ExitCode> {
+/// declared tier's runner) must link exactly as it does for a run. `resolved` is the graph the
+/// caller's compose probe already resolved, reused here — the tier verbs always load under the
+/// default selection, so it always matches (audit-5 F2).
+pub(crate) fn load_linked(
+    file: &std::path::Path,
+    resolved: Option<noeta_pm::graph::ResolvedGraph>,
+) -> Result<noeta_loader::Linked, ExitCode> {
     // The shared front half (drift firewall): deps + edition resolve exactly as `noeta run`'s
     // pipeline resolves them; the verbs stage tier activation themselves.
-    let facts = noeta_runner::compile::resolve_front(file, &[], &None).map_err(|f| f.report())?;
+    let facts =
+        noeta_runner::compile::resolve_front_with(file, &[], &None, resolved.map(|g| g.packages))
+            .map_err(|f| f.report())?;
     noeta_runner::compile::load_linked(file, &facts).map_err(|f| f.report())
 }
 
@@ -147,13 +154,16 @@ pub(crate) fn tier_prologue(
     tier: &str,
     target: &Option<String>,
 ) -> Prologue {
-    if let Some(code) = compose::maybe_delegate(file) {
-        return Prologue::Ran(code);
-    }
+    // The compose probe hands back the graph it resolved (default selection) for the load below
+    // — the tier verbs always load under the default selection (audit-5 F2).
+    let resolved = match compose::maybe_delegate(file) {
+        Err(code) => return Prologue::Ran(code),
+        Ok(resolved) => resolved,
+    };
     if let Some(code) = target_gate(file, target, tier) {
         return Prologue::Ran(code);
     }
-    let linked = match load_linked(file) {
+    let linked = match load_linked(file, resolved) {
         Ok(linked) => linked,
         Err(code) => return Prologue::Ran(code),
     };

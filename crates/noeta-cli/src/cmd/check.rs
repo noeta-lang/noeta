@@ -48,9 +48,12 @@ pub(crate) fn cmd_check(
     target: &Option<String>,
     format: OutputFormat,
 ) -> ExitCode {
-    if let Some(code) = compose::maybe_delegate(path) {
-        return code;
-    }
+    // The compose probe hands back the graph it resolved — reused below for the directory whose
+    // manifest the probe resolved against (audit-5 F2).
+    let mut resolved = match compose::maybe_delegate(path) {
+        Err(code) => return code,
+        Ok(resolved) => resolved,
+    };
     use noeta_diagnostics::Severity;
 
     // The active tier set — resolved once and applied to every file — is the union of a `--target`'s
@@ -135,21 +138,40 @@ pub(crate) fn cmd_check(
         by_dir.entry(dir).or_default().push(entry);
     }
 
+    // The directory the compose probe's graph belongs to: the checked path itself when it is a
+    // directory, else the checked file's parent. Only that group may reuse it — another
+    // directory could resolve a different (nested) manifest.
+    let probe_dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .to_path_buf()
+    };
     let mut unreadable = false;
     for (dir, dir_entries) in &by_dir {
         // Resolve the directory's dependency packages so a cross-package `use <dep-key>.…`
         // type-checks accurately under `noeta check`, matching `run` (package-manager P2.1c).
-        // One resolve serves every entry in the directory (they share the manifest); a failure
-        // is still reported per entry — like an unreadable file, it doesn't abort the check.
-        let deps = match graph::resolve_graph(dir_entries[0]) {
-            Ok(graph) => graph.packages,
-            Err(err) => {
-                for entry in dir_entries {
-                    eprintln!("noeta: {}: {err}", entry.display());
+        // One resolve serves every entry in the directory (they share the manifest) — the compose
+        // probe's graph for the probed directory itself (audit-5 F2); a failure is still reported
+        // per entry — like an unreadable file, it doesn't abort the check.
+        let reusable = if *dir == probe_dir {
+            resolved.take()
+        } else {
+            None
+        };
+        let deps = match reusable {
+            Some(graph) => graph.packages,
+            None => match graph::resolve_graph(dir_entries[0]) {
+                Ok(graph) => graph.packages,
+                Err(err) => {
+                    for entry in dir_entries {
+                        eprintln!("noeta: {}: {err}", entry.display());
+                    }
+                    unreadable = true;
+                    continue;
                 }
-                unreadable = true;
-                continue;
-            }
+            },
         };
         // Read + lex + parse the directory once; all entries share the parsed pool and one
         // SourceMap (ids are directory-stable, and the dedup key never uses them).

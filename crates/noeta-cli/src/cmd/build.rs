@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use noeta_runner::compile_whole_file;
+use noeta_runner::compile::compile_whole_file_with;
 
 use crate::cmd::native::{emit_native, resolve_serve_component, resolve_wasm_runner, runner_base};
 use crate::compose;
@@ -19,12 +19,15 @@ pub(crate) fn cmd_dump(
     tiers: &[String],
     target: &Option<String>,
 ) -> ExitCode {
-    if let Some(code) = compose::maybe_delegate(file) {
-        return code;
-    }
+    // The compose probe hands back the graph it resolved (default selection) so the compile
+    // below doesn't resolve it again (audit-5 F2).
+    let resolved = match compose::maybe_delegate(file) {
+        Err(code) => return code,
+        Ok(resolved) => resolved,
+    };
     // Same whole-file compile as `run` (so the disassembly is exactly what the VM runs), and a cache
     // participant — a cached module is byte-identical to a fresh compile, so the disassembly matches.
-    match compile_whole_file(file, tiers, target, false) {
+    match compile_whole_file_with(file, tiers, target, false, resolved.map(|g| g.packages)) {
         Ok(compiled) => {
             print!("{}", compiled.module.disassemble());
             let _ = io::stdout().flush();
@@ -51,19 +54,23 @@ pub(crate) fn cmd_build(
     tiers: &[String],
     target: &Option<String>,
 ) -> ExitCode {
-    if let Some(code) = compose::maybe_delegate(file) {
-        return code;
-    }
+    // The compose probe hands back the graph it resolved (default selection) so the compile
+    // below doesn't resolve it again (audit-5 F2).
+    let resolved = match compose::maybe_delegate(file) {
+        Err(code) => return code,
+        Ok(resolved) => resolved,
+    };
     if usize::from(exe) + usize::from(native) + usize::from(wasm) + usize::from(serve) > 1 {
         eprintln!("noeta: --exe, --native, --wasm, and --serve are mutually exclusive");
         return ExitCode::from(2);
     }
     // Same whole-file compile + startup cache as `run`/`dump`. The emit format doesn't affect the
     // module, so a `build` shares cache entries with a `run` of the same source — each warms the other.
-    let module = match compile_whole_file(file, tiers, target, false) {
-        Ok(compiled) => compiled.module,
-        Err(failure) => return failure.report(),
-    };
+    let module =
+        match compile_whole_file_with(file, tiers, target, false, resolved.map(|g| g.packages)) {
+            Ok(compiled) => compiled.module,
+            Err(failure) => return failure.report(),
+        };
     let module = module.as_ref();
     if native {
         emit_native(file, out, module)
