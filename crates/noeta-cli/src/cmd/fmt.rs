@@ -154,8 +154,8 @@ pub(crate) fn cmd_fmt(
 ///
 /// These were two mirrored scans, each re-reading the directory and each resolving the
 /// dependency graph, held identical by a comment; one scan resolves the graph once and cannot
-/// drift. (Each file still lexes twice — `text_tier_decls` and `declared_tier_languages` are
-/// separate lexer entry points; folding them needs a lexer seam, a follow-up.)
+/// drift. Each file is lexed **once**: the same [`noeta_lexer::Lexed`] yields `text_tier_decls`
+/// and feeds [`noeta_lexer::declared_tier_languages_in`].
 fn fmt_dir_tiers(
     dir: &std::path::Path,
     entry: &std::path::Path,
@@ -165,12 +165,13 @@ fn fmt_dir_tiers(
     let mut map = noeta_fmt::TierBodyFormatters::new();
     let mut scan = |name: &str, text: &str| {
         let source = Source::new(SourceId(0), name, text);
-        names.extend(noeta_lexer::lex(&source).text_tier_decls);
-        for (tier, lang) in noeta_lexer::declared_tier_languages(&source) {
+        let lexed = noeta_lexer::lex(&source);
+        for (tier, lang) in noeta_lexer::declared_tier_languages_in(&source, &lexed.tokens) {
             if let Some(&f) = lang_formatters.get(lang.as_str()) {
                 map.insert(tier, f);
             }
         }
+        names.extend(lexed.text_tier_decls);
     };
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {

@@ -879,10 +879,20 @@ fn declared_text_tiers(text: &str, tokens: &[Token]) -> Vec<String> {
 /// `source` — the program-tier analogue of an extension's `ExtTier { name, text }`. `noeta fmt` uses
 /// it to resolve a program tier's body language and thence its registered formatter. Only tiers with
 /// an explicit `text:` string are returned (an `expr:`-only tier declares no body-language name).
+///
+/// Convenience over [`declared_tier_languages_in`], lexing `source` itself. A caller that has
+/// already lexed the file (`noeta fmt`'s per-directory scan reads [`Lexed::text_tier_decls`] from
+/// the same lex) should pass its tokens to the `_in` variant instead of paying a second lex.
 pub fn declared_tier_languages(source: &Source) -> Vec<(String, String)> {
-    let lexed = lex(source);
+    declared_tier_languages_in(source, &lex(source).tokens)
+}
+
+/// [`declared_tier_languages`] over an already-lexed token stream — the seam that lets one lex
+/// serve both this scan and [`Lexed::text_tier_decls`]. `tokens` must come from lexing `source`
+/// (any text-tier set: a `@tier(…)` declaration head never sits inside a verbatim body, so the
+/// windows this scans are identical either way).
+pub fn declared_tier_languages_in(source: &Source, tokens: &[Token]) -> Vec<(String, String)> {
     let text = source.text();
-    let tokens = &lexed.tokens;
     let ident = |t: &Token| -> Option<&str> {
         (t.kind == TokenKind::Ident).then(|| &text[t.span.start as usize..t.span.end as usize])
     };
