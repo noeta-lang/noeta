@@ -68,6 +68,11 @@ pub struct Release {
     /// than the window is not newly selected. `None` for sources without a timestamp (the local index,
     /// path/git), which are never subject to cooldown.
     pub published_at: Option<i64>,
+    /// The declared license (SPDX expression, `[package] license`). Part of the immutable release
+    /// record — the registry binds it into the release's transparency-log leaf — but
+    /// publisher-asserted: the SHA-pinned source's LICENSE file is the ground truth. `None` when
+    /// the release declared none.
+    pub license: Option<String>,
 }
 
 impl Release {
@@ -284,6 +289,7 @@ impl Index for LocalIndex {
                     bundle: get("bundle").map(str::to_string),
                     // The local (offline) index carries no publish time — never subject to cooldown.
                     published_at: None,
+                    license: get("license").map(str::to_string),
                 });
             }
         }
@@ -325,6 +331,9 @@ impl Index for LocalIndex {
             text.push_str(&format!("url = {}\n", quote(&r.coords.url)));
             text.push_str(&format!("tag = {}\n", quote(&r.coords.tag)));
             text.push_str(&format!("sha = {}\n", quote(&r.coords.sha)));
+            if let Some(license) = &r.license {
+                text.push_str(&format!("license = {}\n", quote(license)));
+            }
             if let Some(sig) = &r.signature {
                 text.push_str(&format!("sig = {}\n", quote(sig)));
             }
@@ -471,6 +480,9 @@ struct WireVersion {
     /// the field or can't parse its own timestamp → treated as undateable (never in cooldown).
     #[serde(default)]
     published_at_unix: Option<i64>,
+    /// The declared SPDX license expression. Absent for releases (or registries) that predate it.
+    #[serde(default)]
+    license: Option<String>,
 }
 
 #[cfg(feature = "registry-http")]
@@ -760,6 +772,7 @@ impl HttpIndex {
         url: &str,
         tag: &str,
         sha: &str,
+        license: Option<&str>,
         pinned_key: Option<&str>,
     ) -> Result<VerifiedLog, String> {
         use crate::transparency;
@@ -777,7 +790,7 @@ impl HttpIndex {
                     .to_string(),
             );
         }
-        self.verify_inclusion_at(name, version, url, tag, sha, &cp)?;
+        self.verify_inclusion_at(name, version, url, tag, sha, license, &cp)?;
         Ok(VerifiedLog {
             tree_size: cp.tree_size,
             root_hex: cp.root_hash,
@@ -797,6 +810,7 @@ impl HttpIndex {
         url: &str,
         tag: &str,
         sha: &str,
+        license: Option<&str>,
         cp: &LogCheckpoint,
     ) -> Result<(), String> {
         use crate::transparency;
@@ -826,6 +840,23 @@ impl HttpIndex {
             return Err(format!(
                 "the transparency-log record for `{name}`@{version} does not match the resolved \
                  release (coordinates differ)"
+            ));
+        }
+        // The license field was appended after the original six + provenance (fields are only ever
+        // appended; the record ends in `\n`, so a post-license record splits into ≥ 9 parts, a
+        // pre-license one into 8 with `fields[7]` being the trailing empty). When the caller knows
+        // the release's license (`Some`; "" = declared none) and the record binds one, they must
+        // match — otherwise the registry told this resolver something different from what it logged.
+        // `None` skips the check (e.g. lockfile-driven verification, where the lock carries no
+        // license); a pre-license record binds nothing, so nothing is checked against it.
+        if let Some(expected) = license
+            && fields.len() >= 9
+            && fields[7] != expected
+        {
+            return Err(format!(
+                "the transparency-log record for `{name}`@{version} binds license `{}` but the \
+                 index serves `{expected}` — the registry may be equivocating",
+                fields[7],
             ));
         }
         let root = transparency::hex_to_array::<32>(&cp.root_hash)
@@ -1216,6 +1247,7 @@ impl Index for HttpIndex {
                 signature: v.signature,
                 bundle: v.bundle,
                 published_at: v.published_at_unix,
+                license: v.license,
             });
         }
         Ok(out)
@@ -1259,6 +1291,7 @@ impl Index for HttpIndex {
             "tag": release.coords.tag,
             "sha": release.coords.sha,
             "deps": deps,
+            "license": release.license,
             "signature": release.signature,
             "bundle": release.bundle,
         });
@@ -1396,6 +1429,7 @@ mod tests {
             signature: None,
             bundle: None,
             published_at: None,
+            license: None,
         }
     }
 
@@ -1462,6 +1496,20 @@ mod tests {
         // Another version's docs are independent.
         let v2 = Version::parse("2.0.0").unwrap();
         assert_eq!(index.docs("acme/pkg", &v2).unwrap(), None);
+    }
+
+    #[test]
+    fn license_round_trips_through_the_local_index() {
+        let index = mem("license_round_trip");
+        let mut rel = release(1, 0, 0, "v1.0.0");
+        rel.license = Some("MIT OR Apache-2.0".to_string());
+        index.publish("acme/pkg", &rel).expect("publish");
+        let got = index.releases("acme/pkg").unwrap();
+        assert_eq!(got[0].license.as_deref(), Some("MIT OR Apache-2.0"));
+        // A license-less release stays None (absent from the TOML entirely).
+        index.publish("acme/pkg", &release(2, 0, 0, "v2.0.0")).expect("publish");
+        let got = index.releases("acme/pkg").unwrap();
+        assert_eq!(got[1].license, None);
     }
 
     #[test]
@@ -1670,6 +1718,7 @@ mod http_tests {
                     signature: Some("deadbeef".to_string()),
                     bundle: None,
                     published_at: None,
+                    license: Some("MIT".to_string()),
                 },
             )
             .unwrap();
@@ -1687,6 +1736,11 @@ mod http_tests {
         assert!(
             body.contains("\"signature\":\"deadbeef\""),
             "signature in body: {body}"
+        );
+        // The declared license rides along into the immutable release record.
+        assert!(
+            body.contains("\"license\":\"MIT\""),
+            "license in body: {body}"
         );
     }
 
@@ -1728,6 +1782,7 @@ mod http_tests {
             signature: None,
             bundle: Some(r#"{"mediaType":"m"}"#.to_string()),
             published_at: None,
+            license: None,
         };
         index.publish("a/b", &rel).unwrap();
         let body = rx.recv().unwrap();
@@ -1763,6 +1818,7 @@ mod http_tests {
                     signature: None,
                     bundle: None,
                     published_at: None,
+                    license: None,
                 },
             )
             .unwrap_err();
@@ -1909,7 +1965,7 @@ mod http_tests {
 
         let sk = SigningKey::from_bytes(&[9u8; 32]);
         let pub_hex = hex(&sk.verifying_key().to_bytes());
-        let record = transparency::log_record("acme/imgfx", "1.0.0", "u", "t", "abc", "unsigned");
+        let record = transparency::log_record("acme/imgfx", "1.0.0", "u", "t", "abc", "unsigned", "MIT");
         let root_hex = hex(&transparency::leaf_hash(record.as_bytes())); // size-1 tree: root == leaf
         let sig_hex = hex(&sk
             .sign(format!("noeta-log-checkpoint-v1\n1\n{root_hex}\n").as_bytes())
@@ -1935,11 +1991,22 @@ mod http_tests {
 
         // First use (no pinned key) adopts the served key and verifies the whole chain.
         let verified = index
-            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", None)
+            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", Some("MIT"), None)
             .unwrap();
         assert_eq!(verified.tree_size, 1);
         assert_eq!(verified.public_key, pub_hex);
         assert_eq!(verified.root_hex, root_hex);
+        // A caller that doesn't know the license (lockfile-driven verification) skips that check.
+        index
+            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", None, None)
+            .unwrap();
+
+        // The record binds the license: an index serving a *different* license than it logged is
+        // caught as equivocation.
+        let err = index
+            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", Some("GPL-3.0-only"), None)
+            .unwrap_err();
+        assert!(err.contains("license"), "{err}");
 
         // A wrong pinned log key is rejected — the checkpoint signature won't verify against it.
         let err = index
@@ -1949,6 +2016,7 @@ mod http_tests {
                 "u",
                 "t",
                 "abc",
+                Some("MIT"),
                 Some(&"00".repeat(32)),
             )
             .unwrap_err();

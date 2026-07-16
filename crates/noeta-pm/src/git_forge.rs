@@ -165,6 +165,8 @@ impl Index for GitForgeIndex {
                 // A git-forge release carries no publish timestamp, so it is never subject to the
                 // consumer's publish cooldown (namespace-protection #1) — same as any git/path source.
                 published_at: None,
+                // No registry record to declare one in — the tag's own manifest/LICENSE is right there.
+                license: None,
             });
         }
         Ok(releases)
@@ -365,6 +367,7 @@ mod tests {
             signature: None,
             bundle: None,
             published_at: None,
+            license: None,
         };
         assert!(
             idx.publish("acme/thing", &r)
