@@ -35,10 +35,11 @@
 use std::any::Any;
 use std::cmp::Ordering;
 
+use noeta_native::args::{want_arity, want_str};
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
     AttrValue, CtxError, CtxOut, CtxResult, ExternBox, ExternValue, Host, NativeCtx, NativeValue,
-    Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext, arity_error, ctx_arity,
+    Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext, ctx_arity,
     no_function_error, no_method_error, type_error,
 };
 
@@ -299,21 +300,6 @@ fn slot_str<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> CtxResult<String>
 
 fn span_value(id: SpanId) -> NativeOut {
     NativeOut::Extern(ExternBox::new(Span { id }))
-}
-
-fn want_arity(method: &str, args: &[NativeValue], expected: usize) -> Result<(), StdError> {
-    if args.len() == expected {
-        Ok(())
-    } else {
-        Err(arity_error(method, expected, args.len()))
-    }
-}
-
-fn want_str<'a>(method: &str, args: &'a [NativeValue], index: usize) -> Result<&'a str, StdError> {
-    match &args[index] {
-        NativeValue::Str(s) => Ok(s),
-        _ => Err(type_error(method, "string")),
-    }
 }
 
 /// Project an attribute-value argument (str/int/float/bool) into an [`AttrValue`]. The checker

@@ -13,7 +13,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ErrorKind, StdError, arity_error, type_error};
+use crate::args::{opt_int, opt_str, want_arity, want_arity_range, want_int, want_str};
+use crate::{ErrorKind, StdError, type_error};
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
 /// stdlib introspects. Each backend cheaply projects its own `Value` onto this; anything
@@ -296,58 +297,6 @@ fn split(recv: &str, sep: &str, limit: Option<i64>) -> Vec<String> {
     match limit {
         Some(n) if n > 0 => recv.splitn(n as usize, sep).map(str::to_string).collect(),
         _ => recv.split(sep).map(str::to_string).collect(),
-    }
-}
-
-fn want_arity(method: &str, args: &[Arg], expected: usize) -> Result<(), StdError> {
-    if args.len() == expected {
-        Ok(())
-    } else {
-        Err(arity_error(method, expected, args.len()))
-    }
-}
-
-/// Accept `min..=max` arguments — a built-in method with a trailing-optional parameter (the core
-/// analogue of a Ring 2 function's `SigType::Optional`). The checker already gates the range, so
-/// this is the defensive twin of [`want_arity`]; on violation it reports `max` as the expected.
-fn want_arity_range(method: &str, args: &[Arg], min: usize, max: usize) -> Result<(), StdError> {
-    if (min..=max).contains(&args.len()) {
-        Ok(())
-    } else {
-        Err(arity_error(method, max, args.len()))
-    }
-}
-
-fn want_str<'a>(method: &str, args: &[Arg<'a>], index: usize) -> Result<&'a str, StdError> {
-    match args[index] {
-        Arg::Str(value) => Ok(value),
-        _ => Err(type_error(method, "string")),
-    }
-}
-
-fn want_int(method: &str, args: &[Arg], index: usize) -> Result<i64, StdError> {
-    match args[index] {
-        Arg::Int(value) => Ok(value),
-        _ => Err(type_error(method, "int")),
-    }
-}
-
-/// An **optional** int argument at `index`: `None` when absent, the value when present, a type
-/// error when present-but-not-an-int. The reader for a trailing-optional parameter.
-fn opt_int(method: &str, args: &[Arg], index: usize) -> Result<Option<i64>, StdError> {
-    match args.get(index) {
-        None => Ok(None),
-        Some(Arg::Int(value)) => Ok(Some(*value)),
-        Some(_) => Err(type_error(method, "int")),
-    }
-}
-
-/// An **optional** string argument at `index` — the string twin of [`opt_int`].
-fn opt_str<'a>(method: &str, args: &[Arg<'a>], index: usize) -> Result<Option<&'a str>, StdError> {
-    match args.get(index) {
-        None => Ok(None),
-        Some(Arg::Str(value)) => Ok(Some(value)),
-        Some(_) => Err(type_error(method, "string")),
     }
 }
 
@@ -1317,17 +1266,5 @@ mod tests {
         );
         assert_eq!(NumConvert::from_name("count_ones"), None);
         assert_eq!(NumConvert::from_name("upper"), None);
-    }
-
-    #[test]
-    fn error_builders_render_canonically() {
-        assert_eq!(
-            arity_error("reverse", 0, 2).message,
-            "method `reverse` takes 0 argument(s) but 2 were supplied"
-        );
-        assert_eq!(
-            type_error("has", "string").message,
-            "method `has` expects a string argument"
-        );
     }
 }

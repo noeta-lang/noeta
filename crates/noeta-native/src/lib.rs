@@ -16,6 +16,7 @@
 /// instead of undefined behavior through a stale `TypeId`/layout (audit-2 F10).
 pub const ABI_VERSION: u32 = 1;
 
+pub mod args;
 pub mod command;
 pub mod ctx;
 pub mod executor;
@@ -44,13 +45,15 @@ pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use os::{ExecIo, ExecResult, Process};
 pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
-// The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
-// (`noeta_native::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged.
 pub use registry::{
     ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
     ExtBundle, ExtCapability, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
     NativeValue, PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
 };
+// The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
+// (`noeta_native::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared
+// argument guards stay namespaced (`noeta_native::args::want_str`) — dispatch modules import
+// them explicitly, so a module-local extractor never shadows silently.
 pub use ring1::*;
 pub use telemetry::{
     AttrValue, DEFAULT_HISTOGRAM_BOUNDS, HistogramPoint, InstrumentId, InstrumentKind, LogRecord,
@@ -199,4 +202,21 @@ fn an(noun: &str) -> String {
         _ => "a",
     };
     format!("{article} {noun}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_builders_render_canonically() {
+        assert_eq!(
+            arity_error("reverse", 0, 2).message,
+            "method `reverse` takes 0 argument(s) but 2 were supplied"
+        );
+        assert_eq!(
+            type_error("has", "string").message,
+            "method `has` expects a string argument"
+        );
+    }
 }

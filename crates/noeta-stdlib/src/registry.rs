@@ -743,44 +743,9 @@ pub fn dispatch(
 }
 
 // --- argument helpers (shared by the module dispatch functions) ---------------------------------
-
-fn want_arity(func: &str, args: &[NativeValue], expected: usize) -> Result<(), StdError> {
-    if args.len() == expected {
-        Ok(())
-    } else {
-        Err(arity_error(func, expected, args.len()))
-    }
-}
-
-/// Accept `min..=max` arguments (http arc H4) — for a dispatch with trailing-optional params. The
-/// checker already gates the arity, so this is the defensive twin of [`want_arity`]; on violation
-/// it reports the maximum as the "expected" count.
-fn want_arity_range(
-    func: &str,
-    args: &[NativeValue],
-    min: usize,
-    max: usize,
-) -> Result<(), StdError> {
-    if (min..=max).contains(&args.len()) {
-        Ok(())
-    } else {
-        Err(arity_error(func, max, args.len()))
-    }
-}
-
-fn want_int(func: &str, args: &[NativeValue], index: usize) -> Result<i64, StdError> {
-    match args.get(index) {
-        Some(NativeValue::Scalar(Scalar::Int(n))) => Ok(*n),
-        _ => Err(type_error(func, "int")),
-    }
-}
-
-fn want_str<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a str, StdError> {
-    match args.get(index) {
-        Some(NativeValue::Str(s)) => Ok(s),
-        _ => Err(type_error(func, "string")),
-    }
-}
+// The exact-duplicate guard family lives once in `noeta_native::args` (audit-2 F8); only the
+// module-specific extractors (`want_data`/`want_tag`/`want_headers`/`want_argv`) stay here.
+use noeta_native::args::{want_arity, want_arity_range, want_int, want_str};
 
 fn str_list(items: impl IntoIterator<Item = String>) -> NativeOut {
     NativeOut::List(items.into_iter().map(NativeOut::Str).collect())
