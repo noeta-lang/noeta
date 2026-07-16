@@ -14,9 +14,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use noeta_native::registry::{
-    ExtFn, NativeOut, NativeValue, RetTy, Scalar, SigType, TypeDispatch,
-};
+use noeta_native::registry::{ExtFn, NativeOut, NativeValue, RetTy, Scalar, SigType, TypeDispatch};
 use noeta_native::{
     ErrorKind, ExternBox, ExternValue, Host, StdError, arity_error, no_function_error, type_error,
 };
@@ -103,40 +101,59 @@ pub fn db_dispatch(
     }
 }
 
-/// Parse a dsn and build the driver its **scheme** selects — the one place a new backend is wired
-/// in (`postgres:` → a future `PgDriver`). DB0 ships only SQLite:
-/// `sqlite::memory:` / `:memory:` → in-memory; `sqlite:PATH` or a bare path → a file.
-#[cfg(feature = "ring-sqlite")]
+/// Parse a dsn and build the driver its **scheme** selects — the one place a new backend is wired in
+/// (the swappable-driver seam, DB0). `postgres://…` / `postgresql://…` → the PostgreSQL driver
+/// (`ring-postgres`); `sqlite::memory:` / `:memory:` → in-memory SQLite; `sqlite:PATH` or a bare path
+/// → a SQLite file (`ring-sqlite`). A scheme whose driver feature is off is a clear error.
 fn open_driver(dsn: &str) -> Result<Box<dyn SqlDriver>, String> {
-    use crate::sqlite::SqliteDriver;
-
+    if dsn.starts_with("postgres://") || dsn.starts_with("postgresql://") {
+        return open_postgres(dsn);
+    }
     if let Some(rest) = dsn.strip_prefix("sqlite:") {
         // "sqlite::memory:" → rest == ":memory:"; "sqlite:app.db" → rest == "app.db".
-        if rest == ":memory:" || rest.is_empty() {
-            SqliteDriver::open_in_memory().map(boxed)
-        } else {
-            SqliteDriver::open_path(rest).map(boxed)
-        }
-    } else if dsn == ":memory:" {
-        SqliteDriver::open_in_memory().map(boxed)
-    } else if let Some((scheme, _)) = dsn.split_once("://") {
-        Err(format!(
-            "para.db: unsupported driver scheme `{scheme}` in dsn `{dsn}` (DB0 ships SQLite only)"
-        ))
-    } else {
-        // A bare relative/absolute path is a SQLite file.
-        SqliteDriver::open_path(dsn).map(boxed)
+        let path = (rest != ":memory:" && !rest.is_empty()).then_some(rest);
+        return open_sqlite(path);
     }
+    if dsn == ":memory:" {
+        return open_sqlite(None);
+    }
+    if let Some((scheme, _)) = dsn.split_once("://") {
+        return Err(format!(
+            "para.db: unsupported driver scheme `{scheme}` in dsn `{dsn}`"
+        ));
+    }
+    // A bare relative/absolute path is a SQLite file.
+    open_sqlite(Some(dsn))
+}
+
+/// Open a SQLite driver: `None` → in-memory, `Some(path)` → a file.
+#[cfg(feature = "ring-sqlite")]
+fn open_sqlite(path: Option<&str>) -> Result<Box<dyn SqlDriver>, String> {
+    use crate::sqlite::SqliteDriver;
+    let driver = match path {
+        None => SqliteDriver::open_in_memory()?,
+        Some(p) => SqliteDriver::open_path(p)?,
+    };
+    Ok(Box::new(driver))
 }
 
 #[cfg(not(feature = "ring-sqlite"))]
-fn open_driver(_dsn: &str) -> Result<Box<dyn SqlDriver>, String> {
-    Err("para.db: built without the `ring-sqlite` driver".to_string())
+fn open_sqlite(_path: Option<&str>) -> Result<Box<dyn SqlDriver>, String> {
+    Err("para.db: this build has no SQLite driver (the `ring-sqlite` feature is off)".to_string())
 }
 
-#[cfg(feature = "ring-sqlite")]
-fn boxed(driver: crate::sqlite::SqliteDriver) -> Box<dyn SqlDriver> {
-    Box::new(driver)
+/// Connect a PostgreSQL driver to `dsn` (a `postgres://` / `postgresql://` URL).
+#[cfg(feature = "ring-postgres")]
+fn open_postgres(dsn: &str) -> Result<Box<dyn SqlDriver>, String> {
+    Ok(Box::new(crate::pg::PostgresDriver::connect(dsn)?))
+}
+
+#[cfg(not(feature = "ring-postgres"))]
+fn open_postgres(dsn: &str) -> Result<Box<dyn SqlDriver>, String> {
+    Err(format!(
+        "para.db: a `postgres://` dsn needs the `ring-postgres` driver, which this build does not \
+         include (dsn `{dsn}`)"
+    ))
 }
 
 // --- The `Connection` extern type: execute / query / close --------------------------------------
@@ -153,7 +170,10 @@ pub const CONNECTION_METHODS: &[ExtFn] = &[
     ExtFn {
         name: "query",
         params: &[SigType::String, SigType::List(&SigType::Dyn)],
-        ret: RetTy::Concrete(SigType::List(&SigType::Map(&SigType::String, &SigType::Dyn))),
+        ret: RetTy::Concrete(SigType::List(&SigType::Map(
+            &SigType::String,
+            &SigType::Dyn,
+        ))),
     },
     ExtFn {
         name: "close",
@@ -177,7 +197,10 @@ fn connection_method_dispatch(
             let sql = want_str(method, args, 0)?.to_string();
             let params = want_params(method, args, 1)?;
             let conn = conn_of(recv)?;
-            let mut driver = conn.0.lock().map_err(|_| io_error("connection lock poisoned"))?;
+            let mut driver = conn
+                .0
+                .lock()
+                .map_err(|_| io_error("connection lock poisoned"))?;
             let affected = driver.execute(&sql, &params).map_err(io_error)?;
             Ok(NativeOut::Scalar(Scalar::Int(affected)))
         }
@@ -186,7 +209,10 @@ fn connection_method_dispatch(
             let sql = want_str(method, args, 0)?.to_string();
             let params = want_params(method, args, 1)?;
             let conn = conn_of(recv)?;
-            let mut driver = conn.0.lock().map_err(|_| io_error("connection lock poisoned"))?;
+            let mut driver = conn
+                .0
+                .lock()
+                .map_err(|_| io_error("connection lock poisoned"))?;
             let rows = driver.query(&sql, &params).map_err(io_error)?;
             Ok(NativeOut::List(rows.into_iter().map(row_to_out).collect()))
         }
@@ -212,7 +238,11 @@ fn conn_of(recv: &mut dyn ExternValue) -> Result<&ConnectionBox, StdError> {
 
 /// Marshal a `List<dyn>` argument into bound [`SqlValue`]s. Requires the type's `deep_marshal`
 /// (else the list projects to an `Opaque` the driver cannot read).
-fn want_params(method: &str, args: &[NativeValue], index: usize) -> Result<Vec<SqlValue>, StdError> {
+fn want_params(
+    method: &str,
+    args: &[NativeValue],
+    index: usize,
+) -> Result<Vec<SqlValue>, StdError> {
     match args.get(index) {
         Some(NativeValue::List(elems)) => elems.iter().map(sql_value_of).collect(),
         _ => Err(type_error(method, "List<dyn>")),
@@ -229,7 +259,10 @@ fn sql_value_of(value: &NativeValue) -> Result<SqlValue, StdError> {
         NativeValue::Scalar(Scalar::Bool(b)) => Ok(SqlValue::Bool(*b)),
         NativeValue::Str(s) => Ok(SqlValue::Text(s.clone())),
         NativeValue::Unit => Ok(SqlValue::Null),
-        _ => Err(type_error("execute", "a scalar, string, or null bind parameter")),
+        _ => Err(type_error(
+            "execute",
+            "a scalar, string, or null bind parameter",
+        )),
     }
 }
 

@@ -14,6 +14,14 @@ noeta-native = { workspace = true }
 # libsqlite3-sys build). Optional + gated exactly like para-p2p's `ring-p2p`: a pure/loopback build
 # that never touches `para.db` links no SQLite.
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# The PostgreSQL driver, behind the `ring-postgres` ring. The synchronous `postgres` client (blocking,
+# its own runtime) fits the sync `SqlDriver` trait exactly like `rusqlite`. Optional + off by default:
+# a build that never connects to Postgres links no PG client. A second driver behind the SAME seam —
+# the whole point of the swappable-driver design (DB0).
+postgres = { version = "0.19", optional = true }
+# `BytesMut` — the wire buffer the `ToSql` trait writes into. Named only by the PG param adapter, so
+# it rides the same `ring-postgres` gate.
+bytes = { version = "1", optional = true }
 
 [features]
 # Default-on for local dev (so `cargo build`/`noeta run` get a working SQLite driver out of the box);
@@ -21,6 +29,9 @@ rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 # program never imports `para.db`. Mirrors the para-p2p `ring-p2p` gate.
 default = ["ring-sqlite"]
 ring-sqlite = ["dep:rusqlite"]
+# Opt-in: a build wanting a `postgres://` connection turns this on (e.g. `[targets]`/manifest feature
+# forwarding, or `--features`). SQLite-only builds never pull the PG client.
+ring-postgres = ["dep:postgres", "dep:bytes"]
 
 [lints]
 workspace = true

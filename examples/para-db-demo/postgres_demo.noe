@@ -1,0 +1,26 @@
+// The SAME `para.db` surface over PostgreSQL instead of SQLite — only the dsn scheme changes (aether
+// DB0 swappable driver). The query builder / repository / `@sql` tier above it are untouched: the
+// driver rewrites the neutral `?` placeholders to Postgres's `$1, $2, …` and binds each value to its
+// column type. Bring up a throwaway server, then run:
+//
+//   docker run -d --rm -e POSTGRES_PASSWORD=test -e POSTGRES_DB=testdb -p 5433:5432 postgres:16-alpine
+//   noeta run examples/para-db-demo/postgres_demo.noe
+//
+// (The composed toolchain auto-enables para/db's `ring-postgres` driver ring — no flags needed.)
+use para.db
+
+conn = db.connect("postgres://postgres:test@127.0.0.1:5433/testdb")
+
+conn.execute("DROP TABLE IF EXISTS noeta_demo", [])
+conn.execute("CREATE TABLE noeta_demo (id INT PRIMARY KEY, name TEXT, age INT)", [])
+conn.execute("INSERT INTO noeta_demo (id, name, age) VALUES (?, ?, ?)", [1, "Ada", 36])
+conn.execute("INSERT INTO noeta_demo (id, name, age) VALUES (?, ?, ?)", [2, "Bob", 41])
+
+rows = conn.query("SELECT name, age FROM noeta_demo WHERE age > ? ORDER BY age", [30])
+for r in rows {
+    name = r["name"]
+    age = r["age"]
+    echo "${name} is ${age}"
+}
+
+conn.close()

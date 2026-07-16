@@ -16,10 +16,14 @@ doctest = false
 # `[patch]`, exactly like `para-p2p-native` (see `packages/README.md`).
 noeta-para-db = { path = "../../../crates/noeta-para-db", default-features = false }
 
-# The SQLite driver ring, forwarded to the impl crate. Enabled by default so `noeta run` gets a
-# working driver; the composed toolchain forwards it, mirroring `para-p2p-native`'s `ring-p2p`.
+# The driver rings, each forwarded to the impl crate. `ring-sqlite` is on by default so `noeta run`
+# gets a working driver with no PG deps; `ring-postgres` is off by default (it pulls tokio + the PG
+# client) but is a declared `ring-*` feature, so the composed toolchain auto-enables it for full
+# runtime capability — a `noeta run` app can `db.connect("postgres://…")` with no flags — while a
+# `--native` footprint scan can still shed it. Mirrors `para-p2p-native`'s `ring-p2p`.
 [features]
 default = ["ring-sqlite"]
 ring-sqlite = ["noeta-para-db/ring-sqlite"]
+ring-postgres = ["noeta-para-db/ring-postgres"]
 
 [workspace]

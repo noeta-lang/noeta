@@ -6,14 +6,18 @@
 //!   * `Connection` — `execute(sql, params) -> int`, `query(sql, params) -> List<Map<string, dyn>>`,
 //!     `close()`; a shared handle over a boxed [`driver::SqlDriver`].
 //!
-//! The **swappable-driver seam** is [`driver::SqlDriver`]: SQLite ([`sqlite::SqliteDriver`]) is the
-//! first impl, behind the `ring-sqlite` feature; Postgres/MySQL arrive as further impls with no
-//! change to the Noeta surface. Like `para-p2p`, this crate is compiled and linked only when a
+//! The **swappable-driver seam** is [`driver::SqlDriver`]: SQLite ([`sqlite::SqliteDriver`], behind
+//! `ring-sqlite`) and PostgreSQL ([`pg::PostgresDriver`], behind `ring-postgres`) are the two impls;
+//! the dsn scheme selects between them and further backends arrive the same way — no change to the
+//! Noeta surface, the query builder, the repository, or the `@sql` tier. Like `para-p2p`, this crate
+//! is compiled and linked only when a
 //! program depends on the `para/db` package, and registered through the fixed native-extension
 //! convention ([`NOETA_EXTENSIONS`], re-exported by the package's `native` entry crate).
 
 pub mod conn;
 pub mod driver;
+#[cfg(feature = "ring-postgres")]
+pub mod pg;
 #[cfg(feature = "ring-sqlite")]
 pub mod sqlite;
 
@@ -69,7 +73,8 @@ const PARA_DB_TYPES: &[ExtType] = &[ExtType {
 const DB_DOCS: &[(&str, &str)] = &[(
     "connect",
     "Open a database connection from a dsn — the scheme selects the driver: `sqlite::memory:` (or \
-     `:memory:`) for an in-memory database, `sqlite:PATH` (or a bare path) for a file. Returns a \
+     `:memory:`) for an in-memory database, `sqlite:PATH` (or a bare path) for a SQLite file, or \
+     `postgres://user:pass@host:5432/db` (`postgresql://` too) for a PostgreSQL server. Returns a \
      `Connection`.",
 )];
 
