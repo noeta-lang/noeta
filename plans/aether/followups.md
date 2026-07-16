@@ -60,3 +60,14 @@ namespaced-types work, extended to native externs. Surfaced during DB1.
 `fn new(table: string) { Q { table: table } }` with a top-level `fn table(...)` in scope resolved the
 RHS `table` to the FREE FUNCTION, not the parameter (E0007). Renamed the field/param to avoid it.
 A local/param should shadow a same-named global in value position. Surfaced during DB1.
+
+## F7 (BLOCKER for DB3) — an app can't use two packages that share a scope
+`para/aether` and `para/db` both have root scope `para`, but a consumer dep key maps to exactly one
+package (`para = {path=...}`), and two `para = ...` entries are a TOML duplicate key. So an app
+CANNOT depend on both `para.aether` AND `para.db` via local path deps — which blocks DB3 (a handler
+using a repository). This is the multi-package-per-scope gap = the deferred **hosted-registry (F4)**
+work from the para-namespace arc: a `para = { registry = ... }` (or a scope→multiple-packages path
+form) that resolves several `para.*` packages under one scope. DB3 (DatabaseProvider + route-model
+binding + end-of-request flush) is READY to build the moment this lands; the whole DB stack
+(DB0-DB4) works standalone today. **Follow-up / decision:** build multi-package-per-scope resolution
+(unblocks the entire para-family vision), then DB3.
