@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 
 use noeta_ast::Pretty;
-use noeta_eval::{Backend, RunResult, IrRefBackend};
+use noeta_eval::{Backend, IrRefBackend, RunResult};
 use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId};

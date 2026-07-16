@@ -1625,37 +1625,34 @@ impl Interpreter {
         // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; a selective
         // member import (`use std.math.sqrt`) binds each member to a `(module, func)` module-function
         // value; other imports (and unrecognized `std` names) fall back to the opaque-stub binding.
+        // Classification is `Registry::classify_use` — the ONE source of truth the checker, IDE,
+        // and bytecode compiler consume (this used to be a third hand-rolled copy of the rules).
         let reg = self.reg();
-        let rooted = !path.is_empty() && reg.is_extension_root(&path[0]);
-        let selective_module = (path.len() >= 2 && rooted)
-            .then(|| path.join("."))
-            .filter(|m| reg.find_module(m).is_some());
         for imported in names {
-            // A plain (`use std.{json}`) or nested (`use std.http.client`) module import: the module
-            // *value* carries the root-qualified identity; the bound name stays the last segment.
-            let qualified = format!("{}.{}", path.join("."), imported.name);
-            let value = if rooted && reg.find_module(&qualified).is_some() {
-                Value::NativeModule(qualified)
-            } else if let Some(module) = &selective_module
-                && reg.is_module_function(module, &imported.name)
-            {
-                Value::ModuleFn(module.clone(), imported.name.clone())
-            } else {
-                Value::Type(Rc::new(TypeDef {
-                    name: imported.name.clone(),
-                    fields: Vec::new(),
-                    methods: HashMap::new(),
-                    destructor: None,
-                    is_struct: false,
-                    // An opaque import has no known fields; treat `==` structurally (matches the
-                    // VM's `ShapeKind::Opaque` default), not as class identity.
-                    structural_eq: true,
-                    key_capable: std::cell::Cell::new(false),
-                    derives_comparable: false,
-                    derives_tojson: false,
-                    opaque: true,
-                    field_defaults: Vec::new(),
-                }))
+            use noeta_stdlib::registry::UseKind;
+            let value = match reg.classify_use(path, &imported.name) {
+                // A plain (`use std.{json}`) or nested (`use std.http.client`) module import: the
+                // module *value* carries the root-qualified identity; the bound name stays the
+                // last segment.
+                UseKind::Module(qualified) => Value::NativeModule(qualified),
+                UseKind::MemberFn { module, func } => Value::ModuleFn(module, func),
+                _ => {
+                    Value::Type(Rc::new(TypeDef {
+                        name: imported.name.clone(),
+                        fields: Vec::new(),
+                        methods: HashMap::new(),
+                        destructor: None,
+                        is_struct: false,
+                        // An opaque import has no known fields; treat `==` structurally (matches the
+                        // VM's `ShapeKind::Opaque` default), not as class identity.
+                        structural_eq: true,
+                        key_capable: std::cell::Cell::new(false),
+                        derives_comparable: false,
+                        derives_tojson: false,
+                        opaque: true,
+                        field_defaults: Vec::new(),
+                    }))
+                }
             };
             self.scope.declare(imported.name.clone(), value, false);
         }

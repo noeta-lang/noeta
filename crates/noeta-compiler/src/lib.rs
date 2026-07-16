@@ -94,32 +94,21 @@ fn qualified_module(path: &[String], name: &str) -> String {
     format!("{}.{}", path.join("."), name)
 }
 
-/// Whether `use <path>.{name}` imports a native module (`use std.{json}`, nested `use std.http.client`)
-/// rather than a sibling-module declaration. Such names are bound as global values, not opaque types.
-/// The module's identity is the full root-qualified path (so `std.http` ≠ a third-party `guzzle.http`).
-fn is_native_module(reg: &noeta_stdlib::registry::Registry, path: &[String], name: &str) -> bool {
-    !path.is_empty()
-        && reg.is_extension_root(&path[0])
-        && reg.find_module(&qualified_module(path, name)).is_some()
-}
-
-/// For a selective member import `use <root>.<mod>.<name>` — a two-segment path under an extension
-/// root whose second segment is a native module — the module's **root-qualified** identity
-/// (`"std.math"`). Each imported `<name>` then binds as a bare global holding a [`Const::ModuleFn`],
-/// called through the same `call_native_module` path as `<mod>.<name>(...)`. `None` for a plain or
-/// nested module import, or a non-extension path.
-fn selective_import_module(
+/// Whether `use <path>.{name}` binds a native value (a module — `use std.{json}`, nested
+/// `use std.http.client` — or a selectively-imported member fn — `use std.math.sqrt`) rather than
+/// a sibling-module declaration. Classification is `Registry::classify_use` — the ONE source of
+/// truth the checker and IDE already consume (this crate used to re-derive it with private
+/// helpers, the third copy of the rules; a new import shape then had to be taught to three
+/// matchers, and a miss diverged checker-accepted programs from backend binding).
+fn binds_native_value(
     reg: &noeta_stdlib::registry::Registry,
     path: &[String],
-) -> Option<String> {
-    if path.len() >= 2
-        && reg.is_extension_root(&path[0])
-        && reg.find_module(&path.join(".")).is_some()
-    {
-        Some(path.join("."))
-    } else {
-        None
-    }
+    name: &str,
+) -> bool {
+    matches!(
+        reg.classify_use(path, name),
+        noeta_stdlib::registry::UseKind::Module(_) | noeta_stdlib::registry::UseKind::MemberFn { .. }
+    )
 }
 
 /// Compile a whole program to a [`Module`], or report the first unsupported construct.
@@ -842,9 +831,8 @@ impl ModuleCompiler {
                 noeta_ast::Stmt::Use { path, names, .. } => {
                     // A plain module import (`use std.{math}`) binds the module name; a selective
                     // member import (`use std.math.sqrt`) binds each member as a bare global.
-                    let selective = selective_import_module(self.registry, path).is_some();
                     for imported in names {
-                        if is_native_module(self.registry, path, &imported.name) || selective {
+                        if binds_native_value(self.registry, path, &imported.name) {
                             self.module_globals.insert(imported.name.clone(), false);
                         }
                     }
@@ -1015,9 +1003,8 @@ impl ModuleCompiler {
                     // A `use std.{json}` native module — or a selective member import
                     // (`use std.math.sqrt`) — resolves as a global value bound at the `use` site,
                     // not an opaque type, so neither is registered here.
-                    let selective = selective_import_module(self.registry, path).is_some();
                     for imported in names {
-                        if is_native_module(self.registry, path, &imported.name) || selective {
+                        if binds_native_value(self.registry, path, &imported.name) {
                             continue;
                         }
                         self.types.insert(imported.name.clone(), TypeInfo::Opaque);
@@ -1951,35 +1938,33 @@ impl<'m> FnCompiler<'m> {
             Decl::Fn { name, func, .. } => self.declare_fn(name, func),
             Decl::Class(_) | Decl::Enum(_) | Decl::Struct(_) => Ok(()),
             Decl::Use { path, names, .. } => {
-                let selective = selective_import_module(self.module.registry, path);
                 for imported in names {
-                    if is_native_module(self.module.registry, path, &imported.name) {
-                        // The bound global keeps the imported name (the last segment); the module
-                        // *value* carries the root-qualified identity so its member calls dispatch
-                        // to the right module (`std.http.client` ≠ a third-party `guzzle.http.client`).
-                        let value = self.alloc_reg();
-                        let k = self
-                            .add_const(Const::NativeModule(qualified_module(path, &imported.name)));
-                        self.code.push(Op::LoadConst { dst: value, k });
-                        let global = self.module.intern_global(&imported.name);
-                        self.code.push(Op::StoreGlobal { global, src: value });
-                    } else if let Some(module) = &selective
-                        && self
-                            .module
-                            .registry
-                            .is_module_function(module, &imported.name)
-                    {
-                        // `use std.math.sqrt` — bind `sqrt` to a `(std.math, sqrt)` module-function
-                        // value. An unknown member is left unbound (the checker reports it); a bare
-                        // call then raises E0005 like any missing name.
-                        let value = self.alloc_reg();
-                        let k = self.add_const(Const::ModuleFn {
-                            module: module.clone(),
-                            func: imported.name.clone(),
-                        });
-                        self.code.push(Op::LoadConst { dst: value, k });
-                        let global = self.module.intern_global(&imported.name);
-                        self.code.push(Op::StoreGlobal { global, src: value });
+                    // Classification is `classify_use` — the same source of truth the checker
+                    // resolved this import against, so binding can never diverge from checking.
+                    match self.module.registry.classify_use(path, &imported.name) {
+                        noeta_stdlib::registry::UseKind::Module(qualified) => {
+                            // The bound global keeps the imported name (the last segment); the
+                            // module *value* carries the root-qualified identity so its member
+                            // calls dispatch to the right module (`std.http.client` ≠ a
+                            // third-party `guzzle.http.client`).
+                            let value = self.alloc_reg();
+                            let k = self.add_const(Const::NativeModule(qualified));
+                            self.code.push(Op::LoadConst { dst: value, k });
+                            let global = self.module.intern_global(&imported.name);
+                            self.code.push(Op::StoreGlobal { global, src: value });
+                        }
+                        noeta_stdlib::registry::UseKind::MemberFn { module, func } => {
+                            // `use std.math.sqrt` — bind `sqrt` to a `(std.math, sqrt)`
+                            // module-function value. An unknown member is left unbound (the
+                            // checker reports it); a bare call then raises E0005 like any
+                            // missing name.
+                            let value = self.alloc_reg();
+                            let k = self.add_const(Const::ModuleFn { module, func });
+                            self.code.push(Op::LoadConst { dst: value, k });
+                            let global = self.module.intern_global(&imported.name);
+                            self.code.push(Op::StoreGlobal { global, src: value });
+                        }
+                        _ => {}
                     }
                 }
                 Ok(())

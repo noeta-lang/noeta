@@ -33,8 +33,8 @@ use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
 use crate::{
-    ChannelId, Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, IterState, ListRepr,
-    PackedList, RunResult, ScopeId, TaskId, IrRefBackend, TypeDef, Unwind, Value, VariantInfo,
+    ChannelId, Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, IrRefBackend, IterState,
+    ListRepr, PackedList, RunResult, ScopeId, TaskId, TypeDef, Unwind, Value, VariantInfo,
     compare_primitive,
 };
 
