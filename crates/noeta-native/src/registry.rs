@@ -569,6 +569,17 @@ impl ExtType {
     pub fn qualified(&self) -> String {
         format!("{}.{}", self.namespace, self.name)
     }
+
+    /// Whether `q` **is** this type's qualified identity — [`ExtType::qualified`] equality without
+    /// building the `String`. Registry lookups run this per candidate type per probe, and the
+    /// checker probes per imported-type annotation/member on the per-keystroke LSP path, so the
+    /// comparison must not allocate (audit-3 Finding 12).
+    pub fn is_qualified(&self, q: &str) -> bool {
+        q.len() == self.namespace.len() + 1 + self.name.len()
+            && q.as_bytes()[self.namespace.len()] == b'.'
+            && q.starts_with(self.namespace)
+            && q.ends_with(self.name)
+    }
 }
 
 // --- Method bundles (kernel-methods K0) ----------------------------------------------------------
@@ -1270,12 +1281,14 @@ impl Registry {
             .find(|t| t.name == name)
     }
 
-    /// Find a registered extern type by its **qualified identity** (`std.id.Uuid`).
+    /// Find a registered extern type by its **qualified identity** (`std.id.Uuid`). Probes with
+    /// the allocation-free [`ExtType::is_qualified`] — this runs per candidate type, and the
+    /// checker calls it per imported-type resolution (hot under the LSP).
     pub fn find_type_qualified(&self, qualified: &str) -> Option<&'static ExtType> {
         self.units
             .iter()
             .flat_map(|e| e.types())
-            .find(|t| t.qualified() == qualified)
+            .find(|t| t.is_qualified(qualified))
     }
 
     /// Resolve an extern type from **either** a qualified identity or a bare short name.
