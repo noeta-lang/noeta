@@ -225,6 +225,8 @@ fn resolve_graph_impl(
         solution: BTreeMap::new(),
         scope_trust: BTreeMap::new(),
         registry_ids: std::collections::BTreeSet::new(),
+        candidates: BTreeMap::new(),
+        mat_memo: std::collections::HashMap::new(),
     };
     // Phase 4, S5b: first *select versions* — gather the candidate graph (materialize the path/git
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
@@ -406,6 +408,15 @@ struct Walker<'a> {
     /// The identities materialized via a **registry** dependency (not a direct git/path source) —
     /// what transparency-log enforcement applies to (namespace-protection #1, TLog).
     registry_ids: std::collections::BTreeSet<String>,
+    /// The registry candidate sets `solve` loaded from the index, kept so `materialize` reads the
+    /// solved version's release from here instead of re-querying the index — the audit found every
+    /// release list fetched twice per resolve (and a git-forge scope re-`git fetch`ing per query).
+    candidates: BTreeMap<String, Vec<crate::registry::Release>>,
+    /// Materialization memo: dependency source key → the materialized result. `gather` (the solve's
+    /// path/git spine walk) and `walk` each materialize the same dependency once per resolve, and a
+    /// tree hash is a full-tree SHA-256 — this halves both. Keyed by the *source* (path or
+    /// url+ref), not identity, since gather learns the identity only after materializing.
+    mat_memo: std::collections::HashMap<String, (PathBuf, ResolvedSource, Option<String>)>,
 }
 
 impl Walker<'_> {
@@ -420,7 +431,7 @@ impl Walker<'_> {
         edges: &mut BTreeMap<String, String>,
     ) -> Result<(), String> {
         for (key, dep) in deps {
-            let (dir, source) = self.materialize(key, dep, base_dir)?;
+            let (dir, source, fetched_hash) = self.materialize(key, dep, base_dir)?;
             let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
                 .map_err(|err| format!("dependency `{key}`: {err}"))?;
             let pkg = child_manifest.package().ok_or_else(|| {
@@ -465,8 +476,14 @@ impl Walker<'_> {
                 validate_native_crate(&dir, native)
                     .map_err(|err| format!("dependency `{key}` (`{identity}`): {err}"))?;
             }
-            let content_hash = hash_tree(&dir)
-                .map_err(|err| format!("dependency `{key}`: hashing `{}`: {err}", dir.display()))?;
+            // A git fetch already hashed its (immutable, store-materialized) tree — reuse it; a
+            // path tree is mutable, so it hashes fresh.
+            let content_hash = match fetched_hash {
+                Some(hash) => hash,
+                None => hash_tree(&dir).map_err(|err| {
+                    format!("dependency `{key}`: hashing `{}`: {err}", dir.display())
+                })?,
+            };
             // A git source is immutable, so a lock-recorded hash must match — a mismatch means the
             // stored tree drifted from what the lock pinned. A path source is a mutable local tree,
             // so its hash legitimately changes as the developer edits it; it is not verified.
@@ -512,14 +529,44 @@ impl Walker<'_> {
 
     /// Materialize one dependency to an on-disk directory (package-manager P2.4): a path dep is its
     /// local tree (relative to `base_dir`); a git dep is fetched into the store (its tag resolved to a
-    /// commit SHA); a registry dep errors, pending the registry index (P2.5). Returns the directory
-    /// and its pinned source coordinates.
+    /// commit SHA); a registry dep materializes its solved release. Returns the directory, the pinned
+    /// source coordinates, and — when the fetch already computed it — the tree content hash.
+    ///
+    /// Memoized per resolve: `gather` (the solve's path/git spine) and `walk` each reach every
+    /// dependency once, so without the memo every tree was materialized (and, for git sources,
+    /// full-tree-hashed) twice per resolve.
     fn materialize(
         &mut self,
         key: &str,
         dep: &Dependency,
         base_dir: &Path,
-    ) -> Result<(PathBuf, ResolvedSource), String> {
+    ) -> Result<(PathBuf, ResolvedSource, Option<String>), String> {
+        let memo_key = match dep {
+            Dependency::Path { path } => format!("path:{}", base_dir.join(path).display()),
+            Dependency::Git { url, git_ref } => format!("git:{url}@{}", git_ref.lock_key()),
+            Dependency::Registry {
+                package: Some(p), ..
+            } => format!("reg:{}/{}", p.company, p.package),
+            Dependency::Registry { package: None, .. } => String::new(), // errors below anyway
+        };
+        if !memo_key.is_empty()
+            && let Some(hit) = self.mat_memo.get(&memo_key)
+        {
+            return Ok(hit.clone());
+        }
+        let out = self.materialize_uncached(key, dep, base_dir)?;
+        if !memo_key.is_empty() {
+            self.mat_memo.insert(memo_key, out.clone());
+        }
+        Ok(out)
+    }
+
+    fn materialize_uncached(
+        &mut self,
+        key: &str,
+        dep: &Dependency,
+        base_dir: &Path,
+    ) -> Result<(PathBuf, ResolvedSource, Option<String>), String> {
         match dep {
             Dependency::Path { path } => {
                 // Canonicalize the joined directory so module names/spans (and the editor URIs built
@@ -527,7 +574,9 @@ impl Walker<'_> {
                 // `path` is kept verbatim in the lock entry.
                 let joined = base_dir.join(path);
                 let dir = joined.canonicalize().unwrap_or(joined);
-                Ok((dir, ResolvedSource::Path { path: path.clone() }))
+                // No precomputed hash: a path tree is the developer's mutable working copy, so the
+                // walk hashes it fresh each resolve.
+                Ok((dir, ResolvedSource::Path { path: path.clone() }, None))
             }
             Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None, None),
             Dependency::Registry { package, .. } => {
@@ -579,15 +628,27 @@ impl Walker<'_> {
                     .index_for(&scope)?
                     .scope_key(&scope)
                     .map_err(|err| format!("dependency `{key}`: {err}"))?;
-                let release = self
-                    .index_for(&scope)?
-                    .releases(&name)
-                    .map_err(|err| format!("dependency `{key}`: {err}"))?
-                    .into_iter()
-                    .find(|r| r.version == version)
-                    .ok_or_else(|| {
-                        format!("dependency `{key}` (`{name}`): resolved version {version} is not in the index")
-                    })?;
+                // The solved release comes from the candidate set `solve` already loaded — the
+                // index is only re-queried if this identity wasn't in it (a walk without a solve,
+                // e.g. a caller-driven partial resolve).
+                let from_candidates = self
+                    .candidates
+                    .get(&name)
+                    .and_then(|rs| rs.iter().find(|r| r.version == version).cloned());
+                let release = match from_candidates {
+                    Some(release) => release,
+                    None => self
+                        .index_for(&scope)?
+                        .releases(&name)
+                        .map_err(|err| format!("dependency `{key}`: {err}"))?
+                        .into_iter()
+                        .find(|r| r.version == version)
+                        .ok_or_else(|| {
+                            format!(
+                                "dependency `{key}` (`{name}`): resolved version {version} is not in the index"
+                            )
+                        })?,
+                };
                 // Provenance (Phase 4 #2 / Phase 5): pin the scope's trust root on first use,
                 // reject a changed key / changed identity / downgraded root, and verify the
                 // signature or keyless bundle (under the `provenance`/`keyless` features).
@@ -629,7 +690,7 @@ impl Walker<'_> {
         git_ref: &crate::manifest::GitRef,
         registry_sha: Option<&str>,
         local_repo: Option<&Path>,
-    ) -> Result<(PathBuf, ResolvedSource), String> {
+    ) -> Result<(PathBuf, ResolvedSource, Option<String>), String> {
         let pin = self
             .lock
             .git_pin(url, git_ref)
@@ -650,6 +711,9 @@ impl Walker<'_> {
                 git_ref: git_ref.clone(),
                 sha: fetched.sha,
             },
+            // The fetch already hashed the tree (`materialize_sha` does, store hit or miss) —
+            // hand it up so the walk doesn't SHA-256 the whole tree a second time.
+            Some(fetched.content_hash),
         ))
     }
 
@@ -894,6 +958,9 @@ impl Walker<'_> {
         // The synthetic root identity can't collide with a real `company/package` (no slash).
         self.solution =
             crate::resolve::resolve(&candidates, "\u{0}root", &Version::new(0, 0, 0), &root_deps)?;
+        // Keep the loaded candidate sets: `materialize` reads the solved release from here rather
+        // than re-querying the index (which for a git-forge scope means another `git fetch`).
+        self.candidates = registry;
         Ok(())
     }
 
@@ -912,7 +979,7 @@ impl Walker<'_> {
         for (key, dep) in deps {
             match dep {
                 Dependency::Path { .. } | Dependency::Git { .. } => {
-                    let (dir, _source) = self.materialize(key, dep, base_dir)?;
+                    let (dir, _source, _hash) = self.materialize(key, dep, base_dir)?;
                     let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
                         .map_err(|err| format!("dependency `{key}`: {err}"))?;
                     let pkg = child_manifest.package().ok_or_else(|| {
