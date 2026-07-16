@@ -101,7 +101,7 @@ pub fn maybe_delegate(entry: &Path) -> Option<ExitCode> {
     match delegate(&resolved.native_crates, &resolved.trusted_command_roots) {
         Ok(never) => match never {},
         Err(err) => {
-            eprintln!("lang: cannot compose the toolchain for this app's native dependencies:");
+            eprintln!("noeta: cannot compose the toolchain for this app's native dependencies:");
             eprintln!("{err}");
             Some(ExitCode::from(1))
         }

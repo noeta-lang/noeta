@@ -769,11 +769,11 @@ fn cmd_scope_require_provenance(scope: &str, root: Option<&str>, off: bool) -> E
         && root != "key"
         && root != "keyless"
     {
-        eprintln!("lang: `--root` must be `key` or `keyless`");
+        eprintln!("noeta: `--root` must be `key` or `keyless`");
         return ExitCode::from(2);
     }
     if off && root.is_some() {
-        eprintln!("lang: `--root` doesn't apply with `--off` (you're lifting the requirement)");
+        eprintln!("noeta: `--root` doesn't apply with `--off` (you're lifting the requirement)");
         return ExitCode::from(2);
     }
     // Route through the project's `[registries]` mapping for this scope (like resolve/publish);
@@ -782,7 +782,7 @@ fn cmd_scope_require_provenance(scope: &str, root: Option<&str>, off: bool) -> E
         Ok(Some(base)) => base,
         Ok(None) => {
             eprintln!(
-                "lang: setting a scope policy needs the hosted registry — set `NOETA_REGISTRY_URL` \
+                "noeta: setting a scope policy needs the hosted registry — set `NOETA_REGISTRY_URL` \
                  or map the scope under `[registries]`"
             );
             return ExitCode::from(2);
@@ -792,7 +792,7 @@ fn cmd_scope_require_provenance(scope: &str, root: Option<&str>, off: bool) -> E
     let index = match registry::HttpIndex::new(base) {
         Ok(index) => index,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
@@ -809,7 +809,7 @@ fn cmd_scope_require_provenance(scope: &str, root: Option<&str>, off: bool) -> E
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             ExitCode::from(1)
         }
     }
@@ -829,7 +829,7 @@ fn cmd_claim(
         Ok(Some(base)) => base,
         Ok(None) => {
             eprintln!(
-                "lang: `noeta claim` needs the hosted registry — set `NOETA_REGISTRY_URL` to the \
+                "noeta: `noeta claim` needs the hosted registry — set `NOETA_REGISTRY_URL` to the \
                  registry you are claiming a scope on, or map the scope under `[registries]`"
             );
             return ExitCode::from(2);
@@ -849,7 +849,7 @@ fn cmd_claim(
         None => match acquire_claim_proof(&audience) {
             Ok(proof) => proof,
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(1);
             }
         },
@@ -861,7 +861,7 @@ fn cmd_claim(
         None => match registry::generate_publish_token() {
             Ok(t) => (t, true),
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(1);
             }
         },
@@ -870,7 +870,7 @@ fn cmd_claim(
     let index = match registry::HttpIndex::new(base) {
         Ok(index) => index,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
@@ -887,7 +887,7 @@ fn cmd_claim(
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             ExitCode::from(1)
         }
     }
@@ -939,7 +939,7 @@ fn cmd_add(
     // `--package` names a registry identity, so it applies only to a `--version` dependency.
     if package.is_some() && version.is_none() {
         eprintln!(
-            "lang: `--package` names a registry identity (`company/package`) — it applies only to a \
+            "noeta: `--package` names a registry identity (`company/package`) — it applies only to a \
              `--version` dependency"
         );
         return ExitCode::from(2);
@@ -949,7 +949,7 @@ fn cmd_add(
         Some(s) => match manifest::PackageName::parse(s) {
             Ok(p) => Some(p),
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(2);
             }
         },
@@ -962,7 +962,7 @@ fn cmd_add(
         (None, Some(url), None) => {
             let Some(tag) = tag else {
                 eprintln!(
-                    "lang: `--git` requires `--tag` (sources are git + tagged releases only)"
+                    "noeta: `--git` requires `--tag` (sources are git + tagged releases only)"
                 );
                 return ExitCode::from(2);
             };
@@ -983,16 +983,16 @@ fn cmd_add(
             None => toml_string(req),
         },
         (None, None, None) => {
-            eprintln!("lang: give a source — `--path`, `--git` (+ `--tag`), or `--version`");
+            eprintln!("noeta: give a source — `--path`, `--git` (+ `--tag`), or `--version`");
             return ExitCode::from(2);
         }
         _ => {
-            eprintln!("lang: give exactly one source — `--path`, `--git`, or `--version`");
+            eprintln!("noeta: give exactly one source — `--path`, `--git`, or `--version`");
             return ExitCode::from(2);
         }
     };
     if git.is_none() && tag.is_some() {
-        eprintln!("lang: `--tag` only applies to a `--git` dependency");
+        eprintln!("noeta: `--tag` only applies to a `--git` dependency");
         return ExitCode::from(2);
     }
 
@@ -1029,7 +1029,7 @@ fn cmd_add(
             }
             None => {
                 eprintln!(
-                    "lang: give an import-root key — `noeta add <key> …` (it can't be derived for \
+                    "noeta: give an import-root key — `noeta add <key> …` (it can't be derived for \
                      this source; pass `--package company/pkg` for a registry dependency, or name \
                      the key explicitly)"
                 );
@@ -1042,7 +1042,7 @@ fn cmd_add(
     // it with a direct message (the manifest parser enforces the same invariant defensively).
     if reserved::is_builtin(&binding_key) {
         eprintln!(
-            "lang: `{binding_key}` is a built-in import root (the compiler's own `{binding_key}` \
+            "noeta: `{binding_key}` is a built-in import root (the compiler's own `{binding_key}` \
              namespace) and cannot be bound to a dependency — choose another key"
         );
         return ExitCode::from(2);
@@ -1052,7 +1052,7 @@ fn cmd_add(
     // committer (the committer signal). `add_dependency` only edits the manifest, not the lock.
     let old_lock = lock::Lock::read(manifest_dir);
     if let Err(err) = manifest::add_dependency(&manifest_path, &binding_key, &value_toml) {
-        eprintln!("lang: {err}");
+        eprintln!("noeta: {err}");
         return ExitCode::from(1);
     }
     // Resolve so the new dependency is fetched and the lock is refreshed; a bad URL/tag/path fails
@@ -1076,7 +1076,7 @@ fn cmd_add(
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: added `{binding_key}`, but resolving it failed: {err}");
+            eprintln!("noeta: added `{binding_key}`, but resolving it failed: {err}");
             ExitCode::from(1)
         }
     }
@@ -1111,7 +1111,7 @@ fn cmd_update() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             ExitCode::from(1)
         }
     }
@@ -1174,13 +1174,13 @@ fn cmd_publish(
     let manifest = match manifest::load(&manifest_path) {
         Ok(manifest) => manifest,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
     let Some(pkg) = manifest.package() else {
         eprintln!(
-            "lang: `{}` has no `[package]` table — only a package (with a name + version) can be \
+            "noeta: `{}` has no `[package]` table — only a package (with a name + version) can be \
              published",
             manifest_path.display()
         );
@@ -1194,7 +1194,7 @@ fn cmd_publish(
     let license = pkg.license.clone();
     if license.is_none() {
         eprintln!(
-            "lang: note: `[package]` declares no `license` — consider `license = \"MIT OR Apache-2.0\"` \
+            "noeta: note: `[package]` declares no `license` — consider `license = \"MIT OR Apache-2.0\"` \
              (an SPDX expression) so consumers know the terms"
         );
     }
@@ -1215,7 +1215,7 @@ fn cmd_publish(
             }),
             manifest::Dependency::Registry { package: None, .. } => {
                 eprintln!(
-                    "lang: dependency `{key}` is a registry dependency but names no `package = \
+                    "noeta: dependency `{key}` is a registry dependency but names no `package = \
                      \"company/pkg\"` — a published package's dependencies must each name their \
                      registry identity."
                 );
@@ -1223,7 +1223,7 @@ fn cmd_publish(
             }
             manifest::Dependency::Path { .. } | manifest::Dependency::Git { .. } => {
                 eprintln!(
-                    "lang: dependency `{key}` is a path/git dependency — a published package must \
+                    "noeta: dependency `{key}` is a path/git dependency — a published package must \
                      depend only via the registry (`{key} = {{ version = \"…\", package = \
                      \"company/pkg\" }}`), so consumers can resolve it. Publish aborted."
                 );
@@ -1259,7 +1259,7 @@ fn cmd_publish(
                     ))
                 }
                 Err(err) => {
-                    eprintln!("lang: native package build failed — not publishing.\n{err}");
+                    eprintln!("noeta: native package build failed — not publishing.\n{err}");
                     return ExitCode::from(1);
                 }
             }
@@ -1286,7 +1286,7 @@ fn cmd_publish(
     let index = match registry::open_source(scope_source) {
         Ok(index) => index,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
@@ -1296,7 +1296,7 @@ fn cmd_publish(
     let sha = match noeta_pm::resolve_tag_sha(git, &tag) {
         Ok(sha) => sha,
         Err(err) => {
-            eprintln!("lang: cannot resolve `{git}`@`{tag}` to a commit to pin: {err}");
+            eprintln!("noeta: cannot resolve `{git}`@`{tag}` to a commit to pin: {err}");
             return ExitCode::from(1);
         }
     };
@@ -1325,7 +1325,7 @@ fn cmd_publish(
         match noeta_pm::keyless::interactive_identity(oob) {
             Ok(identity) => Some(identity),
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(1);
             }
         }
@@ -1333,7 +1333,7 @@ fn cmd_publish(
         match noeta_pm::keyless::ambient_identity() {
             Ok(identity) => identity,
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(1);
             }
         }
@@ -1344,7 +1344,7 @@ fn cmd_publish(
         let bundle = match noeta_pm::keyless::publish_bundle(statement.as_bytes(), identity) {
             Ok(bundle) => bundle,
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(1);
             }
         };
@@ -1352,7 +1352,7 @@ fn cmd_publish(
         // consumers will reject (a broken CA response, a log that didn't include us, …).
         let digest = noeta_pm::keyless::attested_digest(&attestation);
         if let Err(err) = noeta_pm::keyless::verify_bundle(&bundle, &digest, None) {
-            eprintln!("lang: the freshly signed bundle does not verify — not publishing: {err}");
+            eprintln!("noeta: the freshly signed bundle does not verify — not publishing: {err}");
             return ExitCode::from(1);
         }
         (None, Some(bundle), format!("keyless: {who}"))
@@ -1361,7 +1361,7 @@ fn cmd_publish(
             Ok(Some(sig)) => (Some(sig), None, "signed".to_string()),
             Ok(None) => (None, None, "UNSIGNED".to_string()),
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(1);
             }
         }
@@ -1423,9 +1423,9 @@ fn cmd_publish(
                                 plural(decls)
                             );
                         }
-                        Err(err) => eprintln!("lang: warning: docs not uploaded: {err}"),
+                        Err(err) => eprintln!("noeta: warning: docs not uploaded: {err}"),
                     },
-                    Err(err) => eprintln!("lang: warning: docs not generated: {err}"),
+                    Err(err) => eprintln!("noeta: warning: docs not generated: {err}"),
                 }
             }
             // The README rides along too (rendered on the registry's package page — the registry
@@ -1436,7 +1436,7 @@ fn cmd_publish(
                     Ok(readme) if !readme.trim().is_empty() => {
                         match index.put_readme(&name, &version, &readme) {
                             Ok(()) => println!("README uploaded"),
-                            Err(err) => eprintln!("lang: warning: README not uploaded: {err}"),
+                            Err(err) => eprintln!("noeta: warning: README not uploaded: {err}"),
                         }
                     }
                     _ => {} // no README.md (or an empty one) — nothing to upload
@@ -1445,7 +1445,7 @@ fn cmd_publish(
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             ExitCode::from(1)
         }
     }
@@ -1465,7 +1465,7 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
     };
     let Some(manifest_path) = manifest::find(&start) else {
         eprintln!(
-            "lang: no `{}` found at or above `{}`",
+            "noeta: no `{}` found at or above `{}`",
             manifest::MANIFEST_NAME,
             start.display()
         );
@@ -1479,14 +1479,14 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
     let graph = match graph::resolve_graph(&manifest_dir.join("_.noe")) {
         Ok(graph) => graph,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
     let manifest = match manifest::load(&manifest_path) {
         Ok(manifest) => manifest,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
@@ -1734,7 +1734,7 @@ fn provenance_sign(
         .unwrap_or_else(|| PathBuf::from("noeta-signing.key"));
     if !key_path.is_file() {
         eprintln!(
-            "lang: no signing key at `{}` — publishing UNSIGNED (consumers can't verify provenance). \
+            "noeta: no signing key at `{}` — publishing UNSIGNED (consumers can't verify provenance). \
              Sign keyless with `noeta publish --interactive` (browser login), or run \
              `noeta key new` and set NOETA_SIGNING_KEY.",
             key_path.display()
@@ -1764,12 +1764,12 @@ fn cmd_key(action: &KeyAction) -> ExitCode {
     let keypair = match noeta_pm::provenance::generate_keypair() {
         Ok(keypair) => keypair,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
     if let Err(err) = write_private_key(out, &keypair.private_hex) {
-        eprintln!("lang: cannot write `{}`: {err}", out.display());
+        eprintln!("noeta: cannot write `{}`: {err}", out.display());
         return ExitCode::from(1);
     }
     println!(
@@ -1802,7 +1802,7 @@ fn locate_manifest() -> Result<PathBuf, ExitCode> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     manifest::find(&cwd).ok_or_else(|| {
         eprintln!(
-            "lang: no `{}` found at or above `{}`",
+            "noeta: no `{}` found at or above `{}`",
             manifest::MANIFEST_NAME,
             cwd.display()
         );
@@ -1824,7 +1824,7 @@ fn scope_registry_base(scope: &str) -> Result<Option<String>, ExitCode> {
             Some(manifest::RegistrySource::Hosted(url)) => return Ok(Some(url.clone())),
             Some(manifest::RegistrySource::GitForge(base)) => {
                 eprintln!(
-                    "lang: `{}` routes `{scope}` to the git forge `{base}` — a forge scope is \
+                    "noeta: `{}` routes `{scope}` to the git forge `{base}` — a forge scope is \
                      claimed by owning the org/user there, and has no registry policy endpoint",
                     path.display()
                 );
@@ -1844,7 +1844,7 @@ fn toml_string(s: &str) -> String {
 /// `noeta cache <path|info|clear>` — inspect or clear the transparent startup cache.
 fn cmd_cache(action: &CacheAction) -> ExitCode {
     let Some(dir) = noeta_cache::Cache::locate() else {
-        eprintln!("lang: no cache directory could be resolved (set HOME or NOETA_CACHE_DIR)");
+        eprintln!("noeta: no cache directory could be resolved (set HOME or NOETA_CACHE_DIR)");
         return ExitCode::from(1);
     };
     match action {
@@ -1874,7 +1874,7 @@ fn cmd_cache(action: &CacheAction) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(err) => {
-                    eprintln!("lang: cannot read cache at {}: {err}", dir.display());
+                    eprintln!("noeta: cannot read cache at {}: {err}", dir.display());
                     ExitCode::from(1)
                 }
             }
@@ -1894,7 +1894,7 @@ fn cmd_cache(action: &CacheAction) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(err) => {
-                    eprintln!("lang: cannot clear cache at {}: {err}", dir.display());
+                    eprintln!("noeta: cannot clear cache at {}: {err}", dir.display());
                     ExitCode::from(1)
                 }
             }
@@ -1969,7 +1969,7 @@ fn cmd_profile(
             Some(f) => Some(f),
             None => {
                 eprintln!(
-                    "lang: unknown --format '{s}' (expected folded, svg, speedscope, table, or json)"
+                    "noeta: unknown --format '{s}' (expected folded, svg, speedscope, table, or json)"
                 );
                 return ExitCode::from(2);
             }
@@ -2332,7 +2332,7 @@ fn run_program(
             result.exit_code
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             1
         }
     }
@@ -2453,7 +2453,7 @@ fn cmd_run(
         && noeta_bundle::is_bundle(&bytes)
     {
         if !tiers.is_empty() || target.is_some() {
-            eprintln!("lang: --tier/--target apply at build time; a .noeb bundle is already built");
+            eprintln!("noeta: --tier/--target apply at build time; a .noeb bundle is already built");
             return ExitCode::from(2);
         }
         return cmd_run_bundle(file, &bytes, program_args(file, args), jit_stats);
@@ -2519,7 +2519,7 @@ fn cmd_check(
         Some(name) => match manifest::resolve_active_tiers(path, name) {
             Ok(tiers) => tiers,
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(1);
             }
         },
@@ -2535,7 +2535,7 @@ fn cmd_check(
     let providers = match resolve_providers(path, target) {
         Ok(map) => map,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
@@ -2548,7 +2548,7 @@ fn cmd_check(
         vec![path.to_path_buf()]
     };
     if entries.is_empty() {
-        eprintln!("lang: no `.noe` files found under `{}`", path.display());
+        eprintln!("noeta: no `.noe` files found under `{}`", path.display());
         return ExitCode::from(2);
     }
 
@@ -2581,7 +2581,7 @@ fn cmd_check(
         let deps = match graph::resolve_graph(entry) {
             Ok(graph) => graph.packages,
             Err(err) => {
-                eprintln!("lang: {}: {err}", entry.display());
+                eprintln!("noeta: {}: {err}", entry.display());
                 unreadable = true;
                 continue;
             }
@@ -2590,7 +2590,7 @@ fn cmd_check(
             Err(err) => {
                 // One unreadable file does not abort the whole run — record it and keep checking the
                 // rest, so `check` reports as much as it can in a single pass.
-                eprintln!("lang: cannot read {}: {err}", entry.display());
+                eprintln!("noeta: cannot read {}: {err}", entry.display());
                 unreadable = true;
             }
             Ok(Err(load_diagnostics)) => {
@@ -2669,7 +2669,7 @@ fn cmd_check(
             };
             match serde_json::to_string_pretty(&report) {
                 Ok(json) => println!("{json}"),
-                Err(err) => eprintln!("lang: cannot serialize check report: {err}"),
+                Err(err) => eprintln!("noeta: cannot serialize check report: {err}"),
             }
         }
     }
@@ -2787,7 +2787,7 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     let providers = match resolve_providers(&file, &target) {
         Ok(map) => map,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return Some(ExitCode::from(2));
         }
     };
@@ -2808,7 +2808,7 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
             // The name is tier-shaped (the target maps it) but the provider doesn't resolve —
             // that is a real user error, not fall-through material.
             if providers.contains_key(name.as_str()) {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return Some(ExitCode::from(2));
             }
             return None;
@@ -2877,7 +2877,7 @@ fn run_declared_tier(
     if !declares_root_ty {
         let fragment = parse_fragment(SourceId(u32::MAX), "<tier-dispatch>", root_decl);
         if !fragment.diagnostics.is_empty() {
-            eprintln!("lang: internal error synthesizing the `{name}` dispatch");
+            eprintln!("noeta: internal error synthesizing the `{name}` dispatch");
             return ExitCode::from(2);
         }
         program.stmts.extend(fragment.program.stmts);
@@ -2963,7 +2963,7 @@ fn run_declared_tier(
             ExitCode::from(result.exit_code.clamp(0, 255) as u8)
         }
         Err(msg) => {
-            eprintln!("lang: {msg}");
+            eprintln!("noeta: {msg}");
             ExitCode::from(1)
         }
     }
@@ -2990,7 +2990,7 @@ fn external_command_fallback(err: &clap::Error) -> Option<ExitCode> {
     let status = std::process::Command::new(&found)
         .args(&args)
         .status()
-        .map_err(|e| eprintln!("lang: running `{}` failed: {e}", found.display()))
+        .map_err(|e| eprintln!("noeta: running `{}` failed: {e}", found.display()))
         .ok()?;
     Some(ExitCode::from(status.code().unwrap_or(1) as u8))
 }
@@ -3136,14 +3136,14 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         let deps = match graph::resolve_graph(file) {
             Ok(graph) => graph.packages,
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return 2;
             }
         };
         let mut linked =
             match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
                 Err(err) => {
-                    eprintln!("lang: cannot read {}: {err}", file.display());
+                    eprintln!("noeta: cannot read {}: {err}", file.display());
                     return 2;
                 }
                 Ok(Err(load_diagnostics)) => {
@@ -3267,13 +3267,13 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
     let deps = match graph::resolve_graph(file) {
         Ok(graph) => graph.packages,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return 2;
         }
     };
     let mut linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
         Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
+            eprintln!("noeta: cannot read {}: {err}", file.display());
             return 2;
         }
         Ok(Err(load_diagnostics)) => {
@@ -3352,7 +3352,7 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
     let base = match std::net::TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("lang: cannot bind `{addr}`: {e}");
+            eprintln!("noeta: cannot bind `{addr}`: {e}");
             return 1;
         }
     };
@@ -3378,7 +3378,7 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
     let module = match compile_real(&linked.program, &checked) {
         Ok(m) => std::sync::Arc::new(m),
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return 1;
         }
     };
@@ -3388,7 +3388,7 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
         let listener = match base.try_clone() {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("lang: cannot clone the listener for worker {worker}: {e}");
+                eprintln!("noeta: cannot clone the listener for worker {worker}: {e}");
                 return 1;
             }
         };
@@ -3426,14 +3426,14 @@ fn run_worker(
                 .with_prebound_listener(listener),
         ),
         Err(e) => {
-            eprintln!("lang: cannot start a worker runtime: {e}");
+            eprintln!("noeta: cannot start a worker runtime: {e}");
             return 1;
         }
     };
     let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
         Ok(ex) => Box::new(ex),
         Err(e) => {
-            eprintln!("lang: cannot start a worker executor: {e}");
+            eprintln!("noeta: cannot start a worker executor: {e}");
             return 1;
         }
     };
@@ -3494,7 +3494,7 @@ fn serve_parallel_hot(
         let listener = match base.try_clone() {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("lang: cannot clone the listener for worker {worker}: {e}");
+                eprintln!("noeta: cannot clone the listener for worker {worker}: {e}");
                 return 1;
             }
         };
@@ -3534,7 +3534,7 @@ fn run_worker_hot(
         match noeta_compiler::compile_with_sites_session(&program, sites, false, false) {
             Ok(pair) => pair,
             Err(u) => {
-                eprintln!("lang: cannot compile a hot worker: {}", u.reason);
+                eprintln!("noeta: cannot compile a hot worker: {}", u.reason);
                 return 1;
             }
         };
@@ -3545,7 +3545,7 @@ fn run_worker_hot(
                 .with_prebound_listener(listener),
         ),
         Err(e) => {
-            eprintln!("lang: cannot start a hot worker runtime: {e}");
+            eprintln!("noeta: cannot start a hot worker runtime: {e}");
             return 1;
         }
     };
@@ -3555,7 +3555,7 @@ fn run_worker_hot(
             Box::new(ex)
         }
         Err(e) => {
-            eprintln!("lang: cannot start a hot worker executor: {e}");
+            eprintln!("noeta: cannot start a hot worker executor: {e}");
             return 1;
         }
     };
@@ -3596,7 +3596,7 @@ fn run_program_hot(
         Ok(pair) => pair,
         Err(u) => {
             eprintln!(
-                "lang: internal error: cannot compile for hot reload: {}",
+                "noeta: internal error: cannot compile for hot reload: {}",
                 u.reason
             );
             return 1;
@@ -3618,7 +3618,7 @@ fn run_program_hot(
     let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
         Ok(host) => Box::new(host.with_args(args).with_p2p_app(app_id)),
         Err(e) => {
-            eprintln!("lang: cannot start the runtime: {e}");
+            eprintln!("noeta: cannot start the runtime: {e}");
             return 1;
         }
     };
@@ -3628,7 +3628,7 @@ fn run_program_hot(
             Box::new(executor)
         }
         Err(e) => {
-            eprintln!("lang: cannot start the async executor: {e}");
+            eprintln!("noeta: cannot start the async executor: {e}");
             return 1;
         }
     };
@@ -3713,7 +3713,7 @@ fn cmd_build(
         return code;
     }
     if usize::from(exe) + usize::from(native) + usize::from(wasm) + usize::from(serve) > 1 {
-        eprintln!("lang: --exe, --native, --wasm, and --serve are mutually exclusive");
+        eprintln!("noeta: --exe, --native, --wasm, and --serve are mutually exclusive");
         return ExitCode::from(2);
     }
     // Same whole-file compile + startup cache as `run`/`dump`. The emit format doesn't affect the
@@ -3753,7 +3753,7 @@ fn emit_bundle(
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: cannot write {}: {err}", out_path.display());
+            eprintln!("noeta: cannot write {}: {err}", out_path.display());
             ExitCode::from(2)
         }
     }
@@ -3778,7 +3778,7 @@ fn emit_exe(
     let runner_path = match runner_base(file) {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     };
@@ -3786,7 +3786,7 @@ fn emit_exe(
         Ok(bytes) => bytes,
         Err(err) => {
             eprintln!(
-                "lang: cannot read the lean runtime {}: {err}",
+                "noeta: cannot read the lean runtime {}: {err}",
                 runner_path.display()
             );
             return ExitCode::from(2);
@@ -3804,13 +3804,13 @@ fn emit_exe(
     // Never clobber the source with the artifact (e.g. an extension-less entry building to itself).
     if out_path == file {
         eprintln!(
-            "lang: refusing to overwrite the source file {}; pass -o <path>",
+            "noeta: refusing to overwrite the source file {}; pass -o <path>",
             file.display()
         );
         return ExitCode::from(2);
     }
     if let Err(err) = std::fs::write(&out_path, &image) {
-        eprintln!("lang: cannot write {}: {err}", out_path.display());
+        eprintln!("noeta: cannot write {}: {err}", out_path.display());
         return ExitCode::from(2);
     }
     // Make the artifact runnable (Unix): rwxr-xr-x.
@@ -3820,7 +3820,7 @@ fn emit_exe(
         if let Err(err) =
             std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755))
         {
-            eprintln!("lang: cannot mark {} executable: {err}", out_path.display());
+            eprintln!("noeta: cannot mark {} executable: {err}", out_path.display());
             return ExitCode::from(2);
         }
     }
@@ -3845,7 +3845,7 @@ fn emit_wasm(
     let runner_path = match resolve_wasm_runner() {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     };
@@ -3853,7 +3853,7 @@ fn emit_wasm(
         Ok(bytes) => bytes,
         Err(err) => {
             eprintln!(
-                "lang: cannot read the wasm runner {}: {err}",
+                "noeta: cannot read the wasm runner {}: {err}",
                 runner_path.display()
             );
             return ExitCode::from(2);
@@ -3863,7 +3863,7 @@ fn emit_wasm(
     let image = match noeta_bundle::staple_wasm(&runner, &blob) {
         Ok(image) => image,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     };
@@ -3880,7 +3880,7 @@ fn emit_wasm(
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: cannot write {}: {err}", out_path.display());
+            eprintln!("noeta: cannot write {}: {err}", out_path.display());
             ExitCode::from(2)
         }
     }
@@ -3899,7 +3899,7 @@ fn emit_serve(
     let component_path = match resolve_serve_component() {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     };
@@ -3907,7 +3907,7 @@ fn emit_serve(
         Ok(bytes) => bytes,
         Err(err) => {
             eprintln!(
-                "lang: cannot read the serve component {}: {err}",
+                "noeta: cannot read the serve component {}: {err}",
                 component_path.display()
             );
             return ExitCode::from(2);
@@ -3917,7 +3917,7 @@ fn emit_serve(
     let image = match noeta_bundle::staple_wasm(&component, &blob) {
         Ok(image) => image,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     };
@@ -3937,7 +3937,7 @@ fn emit_serve(
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: cannot write {}: {err}", out_path.display());
+            eprintln!("noeta: cannot write {}: {err}", out_path.display());
             ExitCode::from(2)
         }
     }
@@ -4127,7 +4127,7 @@ fn emit_native(
     let out_path = out.map(std::path::Path::to_path_buf).unwrap_or(default_out);
     if out_path == file {
         eprintln!(
-            "lang: refusing to overwrite the source file {}; pass -o <path>",
+            "noeta: refusing to overwrite the source file {}; pass -o <path>",
             file.display()
         );
         return ExitCode::from(2);
@@ -4137,7 +4137,7 @@ fn emit_native(
     let object = match noeta_vm::compile_module_aot(module) {
         Ok(bytes) => bytes,
         Err(err) => {
-            eprintln!("lang: AOT compile failed: {err}");
+            eprintln!("noeta: AOT compile failed: {err}");
             return ExitCode::from(1);
         }
     };
@@ -4145,7 +4145,7 @@ fn emit_native(
     // A per-invocation scratch dir for the object + the pre-staple linked binary.
     let work = std::env::temp_dir().join(format!("noeta-aot-{}", std::process::id()));
     if let Err(err) = std::fs::create_dir_all(&work) {
-        eprintln!("lang: cannot create a build directory: {err}");
+        eprintln!("noeta: cannot create a build directory: {err}");
         return ExitCode::from(2);
     }
     let cleanup = |code: ExitCode| -> ExitCode {
@@ -4154,7 +4154,7 @@ fn emit_native(
     };
     let obj_path = work.join("program.o");
     if let Err(err) = std::fs::write(&obj_path, &object) {
-        eprintln!("lang: cannot write the AOT object: {err}");
+        eprintln!("noeta: cannot write the AOT object: {err}");
         return cleanup(ExitCode::from(2));
     }
 
@@ -4166,13 +4166,13 @@ fn emit_native(
     let (archive, libs) = match aot_runtime_base(file, &rings) {
         Ok(pair) => pair,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return cleanup(ExitCode::from(1));
         }
     };
     let linked = work.join("linked");
     if let Err(err) = link_native(&obj_path, &archive, &libs, &linked) {
-        eprintln!("lang: link failed: {err}");
+        eprintln!("noeta: link failed: {err}");
         return cleanup(ExitCode::from(1));
     }
 
@@ -4180,14 +4180,14 @@ fn emit_native(
     let runtime = match std::fs::read(&linked) {
         Ok(bytes) => bytes,
         Err(err) => {
-            eprintln!("lang: cannot read the linked binary: {err}");
+            eprintln!("noeta: cannot read the linked binary: {err}");
             return cleanup(ExitCode::from(2));
         }
     };
     let blob = noeta_bundle::write(module);
     let image = noeta_bundle::staple(&runtime, &blob);
     if let Err(err) = std::fs::write(&out_path, &image) {
-        eprintln!("lang: cannot write {}: {err}", out_path.display());
+        eprintln!("noeta: cannot write {}: {err}", out_path.display());
         return cleanup(ExitCode::from(2));
     }
     #[cfg(unix)]
@@ -4196,7 +4196,7 @@ fn emit_native(
         if let Err(err) =
             std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755))
         {
-            eprintln!("lang: cannot mark {} executable: {err}", out_path.display());
+            eprintln!("noeta: cannot mark {} executable: {err}", out_path.display());
             return cleanup(ExitCode::from(2));
         }
     }
@@ -4216,7 +4216,7 @@ fn emit_native(
     _out: Option<&std::path::Path>,
     _module: &noeta_bytecode::Module,
 ) -> ExitCode {
-    eprintln!("lang: native AOT (`--native`) requires the JIT-enabled build (default features)");
+    eprintln!("noeta: native AOT (`--native`) requires the JIT-enabled build (default features)");
     ExitCode::from(2)
 }
 
@@ -4473,7 +4473,7 @@ fn target_gate(entry: &std::path::Path, target: &Option<String>, tier: &str) -> 
             Some(ExitCode::SUCCESS)
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             Some(ExitCode::from(1))
         }
     }
@@ -4532,7 +4532,7 @@ fn cmd_test(
     let providers = match resolve_providers(file, target) {
         Ok(map) => map,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     };
@@ -4544,7 +4544,7 @@ fn cmd_test(
             return run_declared_tier("test", &linked, activated, tier);
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     }
@@ -5096,7 +5096,7 @@ fn cmd_bench(
     let providers = match resolve_providers(file, target) {
         Ok(map) => map,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     };
@@ -5108,7 +5108,7 @@ fn cmd_bench(
             return run_declared_tier("bench", &linked, activated, tier);
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     }
@@ -5157,7 +5157,7 @@ fn cmd_bench(
         Some(name) => match load_bench_baseline(file, name) {
             Ok(map) => Some(map),
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(2);
             }
         },
@@ -5211,7 +5211,7 @@ fn cmd_bench(
     if let Some(name) = save_baseline
         && let Err(err) = save_bench_baseline(file, name, &outcomes)
     {
-        eprintln!("lang: cannot save baseline `{name}`: {err}");
+        eprintln!("noeta: cannot save baseline `{name}`: {err}");
         return ExitCode::from(2);
     }
 
@@ -5246,7 +5246,7 @@ fn cmd_bench(
     }
     for o in &regressed {
         eprintln!(
-            "lang: `{}` regressed {:+.1}% (limit {:+.1}%)",
+            "noeta: `{}` regressed {:+.1}% (limit {:+.1}%)",
             o.name,
             o.baseline_delta_pct.unwrap_or_default(),
             max_regress.unwrap_or_default(),
@@ -5502,7 +5502,7 @@ fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
         Some((n, v)) => match semver::Version::parse(v) {
             Ok(version) => (n.to_string(), Some(version)),
             Err(err) => {
-                eprintln!("lang: `{v}` is not a version: {err}");
+                eprintln!("noeta: `{v}` is not a version: {err}");
                 return ExitCode::from(2);
             }
         },
@@ -5511,7 +5511,7 @@ fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
     let index = match registry::open_default() {
         Ok(index) => index,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
@@ -5522,7 +5522,7 @@ fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
             let mut releases = match index.releases(&name) {
                 Ok(r) => r,
                 Err(err) => {
-                    eprintln!("lang: {err}");
+                    eprintln!("noeta: {err}");
                     return ExitCode::from(1);
                 }
             };
@@ -5530,7 +5530,7 @@ fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
             match releases.first() {
                 Some(r) => r.version.clone(),
                 None => {
-                    eprintln!("lang: registry has no package `{name}`");
+                    eprintln!("noeta: registry has no package `{name}`");
                     return ExitCode::from(1);
                 }
             }
@@ -5539,11 +5539,11 @@ fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
     let docs = match index.docs(&name, &version) {
         Ok(Some(docs)) => docs,
         Ok(None) => {
-            eprintln!("lang: no docs stored for `{name}@{version}`");
+            eprintln!("noeta: no docs stored for `{name}@{version}`");
             return ExitCode::from(1);
         }
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(1);
         }
     };
@@ -5566,7 +5566,7 @@ fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 ExitCode::from(1)
             }
         },
@@ -5603,7 +5603,7 @@ fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>, lint: bool) -> ExitCod
         let violations = noeta_ide::api::namespace_violations(root);
         if !violations.is_empty() {
             eprintln!(
-                "lang: package `{root}` registers surface outside its own namespace ({} \
+                "noeta: package `{root}` registers surface outside its own namespace ({} \
                  violation{}):",
                 violations.len(),
                 plural(violations.len()),
@@ -5629,7 +5629,7 @@ fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>, lint: bool) -> ExitCod
                 ExitCode::SUCCESS
             }
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 ExitCode::from(2)
             }
         },
@@ -5661,7 +5661,7 @@ fn cmd_doc(
     }
     let Some(file) = file else {
         eprintln!(
-            "lang: `noeta doc` needs a `.noe` file (or `--package <NAME>` for published docs)"
+            "noeta: `noeta doc` needs a `.noe` file (or `--package <NAME>` for published docs)"
         );
         return ExitCode::from(2);
     };
@@ -5678,7 +5678,7 @@ fn cmd_doc(
         return match docgen::generate(file, out_dir) {
             Ok(done) => {
                 for skipped in &done.skipped {
-                    eprintln!("lang: skipped `{skipped}` (does not parse)");
+                    eprintln!("noeta: skipped `{skipped}` (does not parse)");
                 }
                 println!(
                     "documented {} module{} ({} declaration{}) → {}",
@@ -5691,7 +5691,7 @@ fn cmd_doc(
                 ExitCode::SUCCESS
             }
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 ExitCode::from(2)
             }
         };
@@ -5708,7 +5708,7 @@ fn cmd_doc(
     let providers = match resolve_providers(file, target) {
         Ok(map) => map,
         Err(err) => {
-            eprintln!("lang: {err}");
+            eprintln!("noeta: {err}");
             return ExitCode::from(2);
         }
     };
@@ -5721,7 +5721,7 @@ fn cmd_doc(
             }
             Ok(noeta_check::ResolvedProvider::Extension) => {}
             Err(err) => {
-                eprintln!("lang: {err}");
+                eprintln!("noeta: {err}");
                 return ExitCode::from(2);
             }
         }
@@ -5729,7 +5729,7 @@ fn cmd_doc(
 
     let docs = noeta_check::resolve_docs(&linked.program);
     if docs.is_empty() {
-        eprintln!("lang: no `@doc` blocks found");
+        eprintln!("noeta: no `@doc` blocks found");
         return ExitCode::SUCCESS;
     }
 

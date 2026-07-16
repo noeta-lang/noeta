@@ -520,6 +520,17 @@ pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>
     Ok(crate::graph::resolve_graph(entry)?.packages)
 }
 
+/// As [`dependency_packages`], but resolving for a build **target** (dev-deps D2): the root's
+/// dependency set is [`Manifest::active_dependencies`] — the global `[dependencies]` plus the
+/// target's own and inherited `[targets.<name>.dependencies]`. This is what makes a declared
+/// dev-only dependency actually LINK under `--target dev`; `None` is the global set.
+pub fn dependency_packages_for(
+    entry: &Path,
+    target: Option<&str>,
+) -> Result<Vec<noeta_loader::DepPackage>, String> {
+    Ok(crate::graph::resolve_graph_for(entry, target)?.packages)
+}
+
 /// As [`dependency_packages`], but a pure **query** ([`crate::graph::resolve_graph_query`]): no
 /// lockfile refresh. What the IDE calls — opening a file in the editor must not rewrite
 /// `noeta.lock` (or silently re-pin versions) as a side effect of making hover/completions work.

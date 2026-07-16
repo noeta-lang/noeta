@@ -312,6 +312,25 @@ impl Index for LocalIndex {
     fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
         release.check_provenance_shape()?;
         let mut releases = self.releases(name)?;
+        // The rewrite below regenerates the WHOLE file from what `releases()` parsed — and that
+        // parse is deliberately lossy (an entry with a shape this toolchain half-understands is
+        // skipped, so resolution degrades gracefully). Writing over a lossy parse would silently
+        // DELETE the skipped entries; refuse instead (a publish must never destroy records it
+        // didn't understand — likely a newer toolchain's entry, or hand-corruption).
+        if let Ok(text) = std::fs::read_to_string(self.file_for(name)) {
+            let on_disk = text
+                .parse::<toml::Table>()
+                .ok()
+                .and_then(|t| t.get("version").and_then(|v| v.as_array()).map(|a| a.len()))
+                .unwrap_or(0);
+            if on_disk != releases.len() {
+                return Err(format!(
+                    "registry entry for `{name}` records {on_disk} version(s) but only {} parse                      with this toolchain — refusing to rewrite the entry (it would silently drop                      the rest). It may be written by a newer toolchain, or corrupted: fix or                      remove `{}` first",
+                    releases.len(),
+                    self.file_for(name).display()
+                ));
+            }
+        }
         if let Some(existing) = releases.iter().find(|r| r.version == release.version) {
             if existing == release {
                 return Ok(()); // idempotent re-publish
@@ -1410,6 +1429,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("noeta_registry_test_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         LocalIndex::open_at(dir).unwrap()
+    }
+
+    #[test]
+    fn publish_refuses_to_rewrite_over_entries_it_cannot_parse() {
+        // The local index's read is lossy by design (an unknown shape degrades resolution
+        // gracefully) — but publish's read-modify-REWRITE must never silently delete what the
+        // parse skipped (e.g. an entry written by a newer toolchain).
+        let dir = std::env::temp_dir().join("noeta_registry_lossy_rewrite");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = LocalIndex::open_at(&dir).unwrap();
+        index
+            .publish("acme/lib", &release(1, 0, 0, "v1.0.0"))
+            .expect("first publish");
+        // Corrupt-append an entry this toolchain can't fully parse (no `sha`).
+        let file = index.file_for("acme/lib");
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str("\n[[version]]\nversion = \"9.0.0\"\nurl = \"u\"\ntag = \"v9.0.0\"\nfuture_shape = \"x\"\n");
+        std::fs::write(&file, &text).unwrap();
+        let err = index
+            .publish("acme/lib", &release(2, 0, 0, "v2.0.0"))
+            .expect_err("must refuse the lossy rewrite");
+        assert!(err.contains("refusing to rewrite"), "{err}");
+        // The half-understood entry is still on disk, untouched.
+        assert!(std::fs::read_to_string(&file).unwrap().contains("future_shape"));
     }
 
     fn coords(tag: &str) -> GitCoords {

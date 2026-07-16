@@ -50,8 +50,8 @@ impl CompileFailure {
     /// failures over a wire (the DAP's `output` events, MCP tool results) instead of printing.
     pub fn to_text(&self) -> (String, u8) {
         match self {
-            CompileFailure::Message(msg) => (format!("lang: {msg}\n"), 1),
-            CompileFailure::Unreadable(msg) => (format!("lang: {msg}\n"), 2),
+            CompileFailure::Message(msg) => (format!("noeta: {msg}\n"), 1),
+            CompileFailure::Unreadable(msg) => (format!("noeta: {msg}\n"), 2),
             CompileFailure::Load(diagnostics) => {
                 let mut text = String::new();
                 for ld in diagnostics {
@@ -147,9 +147,13 @@ pub fn resolve_front(
     // The target's tier → provider map (provider dispatch): decides which declaration's config
     // attribute activation stamps, so it is part of the compiled program — and of the cache key.
     let providers = resolve_providers(file, target).map_err(CompileFailure::Message)?;
-    // The entry's dependency packages (package-manager P2.1): their sources feed both the cache key
-    // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
-    let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
+    // The entry's dependency packages (package-manager P2.1), resolved for the selected target
+    // (dev-deps D2: `[targets.<name>.dependencies]` layer onto the globals). Their sources feed
+    // both the cache key (so a dep or target-dep change never serves stale bytecode — the dep
+    // fold covers the content, so the target name itself needs no extra key material) and the
+    // loader (so `use <dep-key>.…` resolves).
+    let deps = manifest::dependency_packages_for(file, target.as_deref())
+        .map_err(CompileFailure::Message)?;
     // The entry's effective language edition (follow-on F1) — part of the compilation identity.
     let edition = manifest::root_edition(file);
     Ok(FrontFacts {

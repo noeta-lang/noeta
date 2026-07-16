@@ -88,7 +88,7 @@ pub fn run_compiled_module(
     match report {
         Some(report) => eprint!("{}", render_jit_report(&report, &module, sources)),
         None if jit_stats => {
-            eprintln!("lang: --jit-stats: this binary was built without the JIT (no report)");
+            eprintln!("noeta: --jit-stats: this binary was built without the JIT (no report)");
         }
         None => {}
     }
@@ -114,7 +114,7 @@ pub fn run_bundle_bytes(
     let module = match noeta_bundle::read(bytes) {
         Ok(module) => module,
         Err(err) => {
-            eprintln!("lang: cannot load {}: {err}", file.display());
+            eprintln!("noeta: cannot load {}: {err}", file.display());
             return ExitCode::from(2);
         }
     };

@@ -7,6 +7,16 @@
 //! crate, while `noeta-stdlib` re-exports it (`pub use noeta_native::*`) and adds the concrete
 //! `std` modules on top (the `core`/`std` relationship). See `plans/native-abi/README.md`.
 
+/// The extension **ABI version** — bumped on any change to the registration/dispatch contract
+/// (`Extension`, `ExtModule`/`ExtType`/`ExtFn` shapes, `NativeValue`/`NativeOut` marshalling,
+/// `NativeCtx`, the `NOETA_EXTENSIONS` symbol convention). Today every extension is compiled
+/// from source against the exact toolchain (the composed build's `[patch]` unification), so an
+/// ABI break is a compile error and this constant is *recorded*, not yet *checked* — it exists
+/// so the future dynamically-loaded-extension path has a handshake to refuse a mismatch with,
+/// instead of undefined behavior through a stale `TypeId`/layout (audit-2 F10).
+pub const ABI_VERSION: u32 = 1;
+
+
 use serde::{Deserialize, Serialize};
 
 pub mod command;

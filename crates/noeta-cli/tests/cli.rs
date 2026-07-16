@@ -3889,6 +3889,55 @@ fn publishing_a_package_with_a_path_dependency_is_rejected() {
 }
 
 #[test]
+fn a_target_scoped_dependency_links_only_under_its_target() {
+    // dev-deps D2, finally wired (audit-5 F3): `[targets.<name>.dependencies]` was parsed,
+    // validated, and documented — but no production path resolved it, so a declared dev-only
+    // dependency silently did nothing. Now: the dep links under `--target dev` and stays out of
+    // the default build.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("target_scoped_deps");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("devlib");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/devlib\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("api.noe"),
+        "namespace devlib.api;\npub fn marker(): string { return \"dev tooling linked\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [targets.dev.dependencies]\ndevtools = { path = \"../devlib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use devtools.api.marker;\necho marker();\n",
+    )
+    .unwrap();
+
+    // Under the target, the dep resolves and runs.
+    lang()
+        .args(["run", "--target", "dev"])
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dev tooling linked"));
+    // Without it, the dependency is absent — the import can't bind, so the run fails.
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure();
+}
+
+#[test]
 fn publish_routes_through_the_manifest_registries_scope_map() {
     // Private-registries follow-up: `noeta publish` must open the registry the manifest's
     // `[registries]` map routes the package's OWN scope to — the same routing resolution uses —

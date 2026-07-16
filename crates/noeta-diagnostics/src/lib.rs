@@ -490,3 +490,41 @@ mod json;
 mod render;
 pub use json::{JsonDiagnostic, JsonLabel, JsonSpan, to_json};
 pub use render::{render, render_mapped};
+
+#[cfg(test)]
+mod all_list_guard {
+    use super::*;
+
+    /// `ALL` is the one hand-maintained list (`#[non_exhaustive]` + the `code()` match keep the
+    /// enum and codes in sync via compile error, but a variant missing from `ALL` silently breaks
+    /// `from_code` — which validates the conformance corpus's `// expect:` headers, so a mistyped
+    /// expectation would stop being caught). Count the enum variants straight out of the source.
+    #[test]
+    fn all_lists_every_variant() {
+        let src = include_str!("lib.rs");
+        let enum_start = src.find("pub enum DiagnosticCode").expect("enum present");
+        let body = &src[enum_start..];
+        let body = &body[body.find('{').unwrap() + 1..body.find("\n}").unwrap()];
+        // A variant line is `    Name,` at one indent level — doc lines start with `///`.
+        let variants = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| {
+                !l.is_empty()
+                    && !l.starts_with("//")
+                    && !l.starts_with('#')
+                    && l.ends_with(',')
+                    && l.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            })
+            .count();
+        assert_eq!(
+            DiagnosticCode::ALL.len(),
+            variants,
+            "a DiagnosticCode variant is missing from ALL (or ALL has an extra)"
+        );
+        // And every ALL entry round-trips through its stable code.
+        for c in DiagnosticCode::ALL {
+            assert_eq!(DiagnosticCode::from_code(c.code()), Some(*c), "{}", c.code());
+        }
+    }
+}
