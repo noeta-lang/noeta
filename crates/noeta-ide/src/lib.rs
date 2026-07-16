@@ -490,8 +490,9 @@ impl DocumentStore {
                     next_id,
                     module.name.clone(),
                     module.text.clone(),
-                    // The dependency package's own edition (already canonical on `DepPackage`).
-                    package.edition.clone(),
+                    // The dependency package's own edition (typed on `DepPackage`; the salsa
+                    // input stores the canonical string).
+                    package.edition.as_str().to_string(),
                 );
                 next_id += 1;
                 deps.modules.push(DepModule::new(

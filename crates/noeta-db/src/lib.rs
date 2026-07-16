@@ -396,9 +396,10 @@ pub struct DepSources {
     pub key: String,
     pub renames: Vec<(String, String)>,
     pub modules: Vec<Source>,
-    /// This package's language edition (canonical string, e.g. `"2026"`) — its modules are parsed
-    /// and checked under it, exactly as the CLI's `load_with_deps` does (editions arc).
-    pub edition: String,
+    /// This package's language edition — its modules are parsed and checked under it, exactly as
+    /// the CLI's `load_with_deps` does (editions arc). Typed: a value resolution never produced is
+    /// unrepresentable, instead of a free string silently degrading to the default.
+    pub edition: noeta_lexer::Edition,
 }
 
 /// Build a [`Workspace`] input from the entry [`Source`], its sibling module sources (as produced by
@@ -437,9 +438,8 @@ pub fn workspace_with_deps(
     let mut dep_inputs = Vec::new();
     for dep in deps {
         let renames = flatten_renames(&dep.renames);
-        let dep_edition = noeta_lexer::Edition::parse(&dep.edition).unwrap_or_default();
         for src in &dep.modules {
-            let sp = source_program(db, src, dep_edition);
+            let sp = source_program(db, src, dep.edition);
             dep_inputs.push(DepModule::new(
                 db,
                 sp,
@@ -925,7 +925,7 @@ mod tests {
                 "hello.noe",
                 "namespace greet.hello;\npub fn greeting(): string { return \"hi\"; }\n",
             )],
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let ws = workspace_with_deps(
             &db,

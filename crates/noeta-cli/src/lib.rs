@@ -5845,6 +5845,16 @@ fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
         return code;
     }
     let stdin = io::stdin();
+    // The edition prompt entries lex/parse under (editions arc): the `--load` file's package
+    // edition when bootstrapped, else the enclosing project's (a bare prompt in a package dir
+    // tinkers in that package's dialect); a manifest-less cwd is the default edition.
+    let edition = load
+        .as_deref()
+        .map(manifest::root_edition)
+        .unwrap_or_else(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            manifest::root_edition(&cwd.join("_.noe"))
+        });
     // The optional per-entry type checker (session-checker C2): `Some` = every entry is checked
     // against the accumulated session before it runs; an erroring entry prints diagnostics and is
     // skipped (and commits nothing — `check_entry` is transactional). Toggleable at the prompt.
@@ -5916,6 +5926,7 @@ fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
             precise_codegen,
             &buffer,
             &mut sources,
+            edition,
         ) {
             ReplStep::Consumed => {
                 buffer.clear();
@@ -6120,12 +6131,21 @@ fn repl_step(
     precise_codegen: bool,
     buffer: &str,
     sources: &mut Vec<Source>,
+    edition: noeta_lexer::Edition,
 ) -> ReplStep {
     // The next evaluated entry's `SourceId` is its index in the persistent `sources` vector.
     let id = SourceId(sources.len() as u32);
     let source = Source::new(id, format!("<repl:{}>", sources.len()), buffer.to_string());
-    let lexed = lex(&source);
-    let parsed = parse(&source, &lexed.tokens);
+    // Prompt entries lex/parse under the enclosing package's edition (editions arc) — the same
+    // edition a `--load` bootstrap checked and compiled under, so an entry can't parse under
+    // different rules than the program it extends.
+    let lexed = noeta_lexer::lex_in(&source, edition, &noeta_lexer::TextTiers::default());
+    let parsed = noeta_parser::parse_in(
+        &source,
+        &lexed.tokens,
+        edition,
+        &noeta_lexer::TextTiers::default(),
+    );
     let diags: Vec<Diagnostic> = lexed
         .diagnostics
         .iter()

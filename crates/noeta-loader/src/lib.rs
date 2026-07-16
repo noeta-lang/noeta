@@ -26,7 +26,6 @@ use std::path::Path;
 
 use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
-use noeta_lexer::lex;
 use noeta_span::{Source, SourceId, SourceMap};
 
 /// A loaded, linked program ready to type-check and run.
@@ -160,12 +159,13 @@ pub struct DepPackage {
     /// its key; the composed checker validates the members. A pure-Noeta package has all its modules
     /// in the link pool, so a `use` under its key that resolves to nothing is a genuine typo.
     pub native: bool,
-    /// The package's language **edition** in canonical string form (`"2026"`) — the semantics its
-    /// source is written against (editions arc). Carried per package from resolution so a later
-    /// compiler pass can apply *each* package's edition to *its own* declarations; today the merged
-    /// program still compiles under the root's edition, so this is recorded, not yet acted on. A
-    /// string (not the `Edition` enum) because the loader sits below the manifest layer that owns it.
-    pub edition: String,
+    /// The package's language **edition** — the semantics its source is written against (editions
+    /// arc), carried per package from resolution and applied per source (each dependency's modules
+    /// lex/parse/check under *its* edition; the entry and siblings under the root's). Typed — the
+    /// validated enum, not a free string — so a value that resolution never produced is
+    /// unrepresentable here rather than silently degrading to the default. (`noeta-edition` is the
+    /// bottom-of-DAG vocabulary crate, so depending on the type costs the loader nothing.)
+    pub edition: noeta_lexer::Edition,
 }
 
 /// Re-root a namespace/use path in place: replace its leading segment per the rules
@@ -290,7 +290,7 @@ pub fn link(
         sources.push(Source::new(id, raw.name.as_str(), raw.text.as_str()));
         editions.set(id, root_edition);
     }
-    let (lexeds, text_tiers) = lex_program(&sources);
+    let (lexeds, text_tiers) = lex_program(&sources, &editions);
 
     // Entry + siblings parse under the root package's edition (deps-free: no dependency packages,
     // so no other editions are in play). `link_with_deps` is the twin that also links dependencies,
@@ -368,26 +368,18 @@ pub fn link_with_deps(
         next_id += 1;
     }
     let sibling_end = sources.len();
-    // A dependency's edition is a `String` on `DepPackage` (the loader is below the manifest layer);
-    // resolution already validated it against the closed set, so reconstruct the enum and fall back
-    // to the default on the impossible parse failure rather than propagate an error the walker ruled
-    // out. Recorded per module so the map keys by `SourceId`.
-    let dep_editions: Vec<noeta_lexer::Edition> = deps
-        .iter()
-        .map(|dep| noeta_lexer::Edition::parse(&dep.edition).unwrap_or_default())
-        .collect();
-    for (dep, &dep_edition) in deps.iter().zip(&dep_editions) {
+    for dep in deps {
         for raw in &dep.modules {
             sources.push(Source::new(
                 SourceId(next_id),
                 raw.name.as_str(),
                 raw.text.as_str(),
             ));
-            editions.set(SourceId(next_id), dep_edition);
+            editions.set(SourceId(next_id), dep.edition);
             next_id += 1;
         }
     }
-    let (lexeds, text_tiers) = lex_program(&sources);
+    let (lexeds, text_tiers) = lex_program(&sources, &editions);
 
     // The entry parses under the root package's edition.
     let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
@@ -419,12 +411,12 @@ pub fn link_with_deps(
     // continue past the siblings in the same package order they were assembled above).
     let mut dep_programs: Vec<Program> = Vec::new();
     let mut dep_idx = sibling_end;
-    for (dep, &dep_edition) in deps.iter().zip(&dep_editions) {
+    for dep in deps {
         for _ in &dep.modules {
             if let Some(mut program) = parse_clean(
                 &sources[dep_idx],
                 &lexeds[dep_idx],
-                dep_edition,
+                dep.edition,
                 &text_tiers,
             ) {
                 reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
@@ -463,8 +455,21 @@ pub fn link_with_deps(
 /// all declarations is applied and every file re-lexes with it — so a tier declared in one file
 /// (or one dependency package) captures `@x { … }` bodies verbatim in every other. Only programs
 /// declaring text tiers pay the second pass.
-fn lex_program(sources: &[Source]) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::TextTiers) {
-    let lexeds: Vec<_> = sources.iter().map(lex).collect();
+fn lex_program(
+    sources: &[Source],
+    editions: &noeta_lexer::EditionMap,
+) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::TextTiers) {
+    // Each source lexes under ITS OWN package's edition (editions arc): the map was built in
+    // lock-step with the sources, so a future edition that changes tokenization (a promoted
+    // keyword, a new literal syntax) applies per package — the multi-package leg the arc's
+    // "already at the point that would consult it" claim depends on.
+    let edition_of = |source: &Source| editions.source_edition(source.id());
+    let lexeds: Vec<_> = sources
+        .iter()
+        .map(|source| {
+            noeta_lexer::lex_in(source, edition_of(source), &noeta_lexer::TextTiers::default())
+        })
+        .collect();
     // Verbatim-body tiers come from two sources: a program's own `@tier(…, text/expr)` (found by
     // the lexer's per-file token scan) and the installed extensions' declarations (`doc`, and any
     // native `@json`/`@sql` — no `.noe` file declares these).
@@ -484,7 +489,7 @@ fn lex_program(sources: &[Source]) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::Tex
     }
     let relexed = sources
         .iter()
-        .map(|source| noeta_lexer::lex_in(source, noeta_lexer::Edition::DEFAULT, &set))
+        .map(|source| noeta_lexer::lex_in(source, edition_of(source), &set))
         .collect();
     (relexed, set)
 }
@@ -1144,7 +1149,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let dep_b = DepPackage {
             key: "b".to_string(),
@@ -1155,7 +1160,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         // The entry need not import the deps: their sources are assembled (and thus keyed in the
         // editions map) whether or not a declaration is pulled into the merge.
@@ -1209,7 +1214,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use webclient.client.Client;\nc = Client { base: \"x\" };\n";
         let linked = link_with_deps(
@@ -1246,7 +1251,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use webclient.clientt.Client;\nc = Client { base: \"x\" };\n";
         let errors = link_with_deps(
@@ -1277,7 +1282,7 @@ mod tests {
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use imgfx.fx;\necho fx.double(21);\n";
         let linked = link_with_deps(
@@ -1310,7 +1315,7 @@ mod tests {
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use imgtx.fx;\necho fx.double(21);\n";
         let errors = link_with_deps(
@@ -1352,7 +1357,7 @@ mod tests {
             ],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
         let linked = link_with_deps(
@@ -1383,7 +1388,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let b = DepPackage {
             key: "beta".to_string(),
@@ -1394,7 +1399,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry =
             "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
@@ -1427,7 +1432,7 @@ mod tests {
             )],
             dep_renames: app_renames,
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let json = DepPackage {
             key: "pkg_json".to_string(),
@@ -1438,7 +1443,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use app.core.Widget;\nw = Widget { v: Value { n: 1 } };\n";
         let linked = link_with_deps(
@@ -1469,7 +1474,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use geo.circle.area;\necho area(2.0);\n";
         let linked = link_with_deps(
@@ -1819,7 +1824,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use mathx.lib.twice;\necho twice(21);\n";
         let linked = link_with_deps(
@@ -1852,7 +1857,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use widgets.lib.origin;\np = origin();\necho p.x;\n";
         let linked = link_with_deps(
@@ -1886,7 +1891,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
-            edition: "2026".to_string(),
+            edition: noeta_lexer::Edition::DEFAULT,
         };
         let entry = "use chain.lib.go;\ni = go(3);\necho i.v;\n";
         let linked = link_with_deps(

@@ -400,7 +400,10 @@ fn source_key_name(source: &Source) -> &str {
 fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]) {
     for dep in deps {
         key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
-        key.source(format!("<dep-edition {}>", dep.key), dep.edition.as_bytes());
+        key.source(
+            format!("<dep-edition {}>", dep.key),
+            dep.edition.as_str().as_bytes(),
+        );
         for (local, global) in &dep.dep_renames {
             key.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
         }
@@ -414,7 +417,7 @@ fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]
 mod tests {
     use super::*;
 
-    fn dep_at_edition(edition: &str) -> noeta_loader::DepPackage {
+    fn a_dep() -> noeta_loader::DepPackage {
         noeta_loader::DepPackage {
             key: "lib".to_string(),
             root: "lib".to_string(),
@@ -424,7 +427,7 @@ mod tests {
             }],
             dep_renames: Default::default(),
             native: false,
-            edition: edition.to_string(),
+            edition: noeta_edition::Edition::DEFAULT,
         }
     }
 
@@ -436,21 +439,26 @@ mod tests {
 
     #[test]
     fn a_dependencys_edition_is_part_of_the_cache_key() {
-        // Two dependency sets with byte-identical sources, differing only in the dependency's edition,
-        // must produce different cache keys — otherwise a dep-edition bump would serve stale bytecode
-        // (editions arc S2). Uses raw edition strings, so it does not depend on which editions the
-        // toolchain currently accepts.
-        let key_2026 = key_of(std::slice::from_ref(&dep_at_edition("2026")));
-        let key_other = key_of(std::slice::from_ref(&dep_at_edition("2099")));
+        // A dep-edition bump must invalidate cached bytecode (editions arc S2). With the edition
+        // now TYPED end to end, a divergent value is unrepresentable until a second edition ships
+        // — so this pins the mechanism instead: `key_deps` folds the edition tag, i.e. a key built
+        // by the same recipe minus the edition line differs. (When Edition grows a second variant,
+        // strengthen this back to two real editions.)
+        let dep = a_dep();
+        let with_edition = key_of(std::slice::from_ref(&dep));
+        let mut without = noeta_cache::KeyBuilder::new();
+        // The key_deps recipe, minus the `<dep-edition>` fold — must NOT collide.
+        without.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
+        for (local, global) in &dep.dep_renames {
+            without.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
+        }
+        for module in &dep.modules {
+            without.source(&module.name, module.text.as_bytes());
+        }
         assert_ne!(
-            key_2026, key_other,
-            "a dependency's edition change must change the cache key"
-        );
-
-        // And identical inputs still produce the same key (the change above is the edition, nothing else).
-        assert_eq!(
-            key_2026,
-            key_of(std::slice::from_ref(&dep_at_edition("2026")))
+            with_edition,
+            without.finish().as_hex().to_string(),
+            "key_deps must fold the dependency's edition into the cache key"
         );
     }
 }

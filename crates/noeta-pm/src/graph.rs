@@ -1317,9 +1317,10 @@ fn assemble(
             // A native package's modules live in its Rust extension (composed in downstream), not the
             // link pool — so the loader retains, rather than flags, a `use` under its key.
             native: inst.native.is_some(),
-            // The package's own edition, carried to the loader (editions arc) so a future compiler pass
-            // can apply it per-package; the merged program still compiles under the root's today.
-            edition: inst.edition.as_str().to_string(),
+            // The package's own edition, carried to the loader (editions arc): each dependency's
+            // modules lex/parse/check under it. Typed end to end — `noeta_pm::edition` and the
+            // loader's `noeta_lexer::Edition` are the same `noeta-edition` type.
+            edition: inst.edition,
         });
         locked.push(LockedPackage {
             identity: identity.clone(),
@@ -1688,7 +1689,7 @@ mod tests {
             .iter()
             .find(|p| p.root == "dep")
             .expect("dep package");
-        assert_eq!(dep_pkg.edition, "2026");
+        assert_eq!(dep_pkg.edition.as_str(), "2026");
     }
 
     #[test]
