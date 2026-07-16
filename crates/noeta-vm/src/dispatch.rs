@@ -913,37 +913,34 @@ impl<'m> Vm<'m> {
                         // its `iter` method returns. The method runs bytecode, so it is pushed as a
                         // call frame; its returned value becomes the snapshot (the following `ListLen`
                         // raises E0007 if it was not a list). Matches the tree-walker's `exec_for`.
-                        if v.is_object() {
-                            let type_name = v.shape().unwrap().name.clone();
-                            if let Some(&proto) =
-                                self.methods.get(&(type_name.clone(), "iter".to_string()))
-                            {
-                                let callee_chunk = &module.protos[proto as usize];
-                                if callee_chunk.num_params != 1 {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!(
-                                            "this method takes {} argument(s) but 0 were supplied",
-                                            callee_chunk.num_params - 1
-                                        ),
-                                    ));
-                                }
-                                let new_base =
-                                    reserve_window(regs, callee_chunk.num_registers as usize);
-                                retain(v);
-                                regs[new_base] = v;
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
-                                    proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues: Vec::new(),
-                                });
-                                continue 'reload;
+                        if v.is_object()
+                            && let Some(proto) = self.method_proto(&v.shape().unwrap().name, "iter")
+                        {
+                            let callee_chunk = &module.protos[proto as usize];
+                            if callee_chunk.num_params != 1 {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "this method takes {} argument(s) but 0 were supplied",
+                                        callee_chunk.num_params - 1
+                                    ),
+                                ));
                             }
+                            let new_base =
+                                reserve_window(regs, callee_chunk.num_registers as usize);
+                            retain(v);
+                            regs[new_base] = v;
+                            frames[top].pc = pc + 1;
+                            frames.push(Frame {
+                                proto,
+                                base: new_base,
+                                pc: 0,
+                                ret_dst: *dst,
+                                ret_transform: RetTransform::None,
+                                upvalues: Vec::new(),
+                            });
+                            continue 'reload;
                         }
                         // A packed list (P-PACK 2.4) materializes directly into an owned boxed snapshot
                         // (a fresh list owning each element) — the loop then indexes that boxed snapshot,
@@ -1044,14 +1041,13 @@ impl<'m> Vm<'m> {
                         // `Builtin::Len` object case.)
                         if *builtin == Builtin::Len && args.len() == 1 {
                             let recv = regs[fbase + args[0] as usize];
-                            if recv.is_object() {
-                                let type_name = recv.shape().unwrap().name.clone();
-                                if let Some(&proto) =
-                                    self.methods.get(&(type_name.clone(), "len".to_string()))
-                                {
-                                    let callee_chunk = &module.protos[proto as usize];
-                                    if callee_chunk.num_params != 1 {
-                                        return Err(self.error(
+                            if recv.is_object()
+                                && let Some(proto) =
+                                    self.method_proto(&recv.shape().unwrap().name, "len")
+                            {
+                                let callee_chunk = &module.protos[proto as usize];
+                                if callee_chunk.num_params != 1 {
+                                    return Err(self.error(
                                         DiagnosticCode::TypeMismatch,
                                         *span,
                                         format!(
@@ -1059,22 +1055,21 @@ impl<'m> Vm<'m> {
                                             callee_chunk.num_params - 1
                                         ),
                                     ));
-                                    }
-                                    let new_base =
-                                        reserve_window(regs, callee_chunk.num_registers as usize);
-                                    retain(recv);
-                                    regs[new_base] = recv;
-                                    frames[top].pc = pc + 1;
-                                    frames.push(Frame {
-                                        proto,
-                                        base: new_base,
-                                        pc: 0,
-                                        ret_dst: *dst,
-                                        ret_transform: RetTransform::None,
-                                        upvalues: Vec::new(),
-                                    });
-                                    continue 'reload;
                                 }
+                                let new_base =
+                                    reserve_window(regs, callee_chunk.num_registers as usize);
+                                retain(recv);
+                                regs[new_base] = recv;
+                                frames[top].pc = pc + 1;
+                                frames.push(Frame {
+                                    proto,
+                                    base: new_base,
+                                    pc: 0,
+                                    ret_dst: *dst,
+                                    ret_transform: RetTransform::None,
+                                    upvalues: Vec::new(),
+                                });
+                                continue 'reload;
                             }
                         }
                         // Builtins borrow their arguments (the registers keep ownership); the
@@ -1275,9 +1270,7 @@ impl<'m> Vm<'m> {
                                 Some(proto) => proto,
                                 None => {
                                     let shape = v.shape().unwrap();
-                                    let Some(&proto) =
-                                        self.methods.get(&(shape.name.clone(), method.to_string()))
-                                    else {
+                                    let Some(proto) = self.method_proto(&shape.name, method) else {
                                         return Err(self.error(
                                             DiagnosticCode::UnknownName,
                                             *span,
@@ -1339,25 +1332,43 @@ impl<'m> Vm<'m> {
                             continue 'reload;
                         }
                         // An enum value dispatches to a user method (the unified body, object-model
-                        // slice 3) through the same `(type, method)` table as an object. Enums carry no
-                        // inline-cache shape pointer, so this is a direct table lookup. An unknown method
-                        // falls through to the built-in paths below.
+                        // slice 3) through the same type→method table as an object — and, audit-1
+                        // finding 7, through the same per-site inline cache: an enum's `&'static
+                        // Shape` handle is as stable an identity as an object's, so a hit resolves
+                        // the prototype with one pointer compare (the object arm's exact hit test;
+                        // the two kinds share the slot safely because their shapes are distinct).
+                        // An unknown method falls through to the built-in paths below — never
+                        // cached, so the fall-through re-probes exactly as before.
                         if hk == Some(HeapKind::Enum) {
-                            let type_name = v.shape().unwrap().name.clone();
+                            let shape = v.shape().unwrap();
                             // `e.to_json()` on an enum that `@derive(Serialize<Json>)`s (and has no
                             // hand-written `to_json`): the variant rendering, exactly what
                             // `json.stringify` produces — the enum twin of the object arm above.
                             if method == "to_json"
                                 && args.is_empty()
-                                && self.tojson_derives.contains(&type_name)
+                                && self.tojson_derives.contains(&shape.name)
                             {
                                 let json = Value::string(&v.to_json());
                                 set_reg(regs, fbase, *dst, json);
                                 pc += 1;
                                 continue;
                             }
-                            if let Some(&proto) = self.methods.get(&(type_name, method.to_string()))
-                            {
+                            let ci = *cache as usize;
+                            let hit = match &caches[ci] {
+                                Some((cs, p)) if std::ptr::eq::<Shape>(*cs, shape) => Some(*p),
+                                _ => None,
+                            };
+                            let proto = match hit {
+                                Some(proto) => Some(proto),
+                                None => {
+                                    let resolved = self.method_proto(&shape.name, method);
+                                    if let Some(proto) = resolved {
+                                        caches[ci] = Some((shape, proto));
+                                    }
+                                    resolved
+                                }
+                            };
+                            if let Some(proto) = proto {
                                 let callee_chunk = &module.protos[proto as usize];
                                 let total = callee_chunk.num_params as usize - 1;
                                 let required = total - callee_chunk.defaults.len();
@@ -1426,10 +1437,8 @@ impl<'m> Vm<'m> {
                         // without an `Index` impl has no `get` method, so this reports the missing
                         // method — matching the tree-walker's `eval_index`.
                         if v.is_object() {
-                            let type_name = v.shape().unwrap().name.clone();
-                            let Some(&proto) =
-                                self.methods.get(&(type_name.clone(), "get".to_string()))
-                            else {
+                            let type_name = &v.shape().unwrap().name;
+                            let Some(proto) = self.method_proto(type_name, "get") else {
                                 return Err(self.error(
                                     DiagnosticCode::UnknownName,
                                     *span,
@@ -2479,9 +2488,7 @@ impl<'m> Vm<'m> {
                             } else {
                                 "method"
                             };
-                            let Some(&proto) =
-                                self.methods.get(&(type_name.clone(), method.clone()))
-                            else {
+                            let Some(proto) = self.method_proto(&type_name, &method) else {
                                 break 'resolve Err(format!(
                                     "type `{type_name}` has no {kind} `{method}`"
                                 ));
@@ -2689,24 +2696,21 @@ impl<'m> Vm<'m> {
                         // is keyed by the value's shape name, identical for objects and enums. Built-in
                         // semantics apply otherwise; the checker guarantees a dispatched method's arity.
                         let dispatch = if left.is_object() || left.is_enum() {
-                            let type_name = left.shape().unwrap().name.clone();
+                            let type_name = &left.shape().unwrap().name;
                             if let Some(method_name) = op.overload_method() {
-                                self.methods
-                                    .get(&(type_name, method_name.to_string()))
-                                    .map(|&proto| (proto, RetTransform::None))
+                                self.method_proto(type_name, method_name)
+                                    .map(|proto| (proto, RetTransform::None))
                             } else if let Some(negate) = op.equatable_negation() {
                                 let transform = if negate {
                                     RetTransform::Negate
                                 } else {
                                     RetTransform::None
                                 };
-                                self.methods
-                                    .get(&(type_name, "eq".to_string()))
-                                    .map(|&proto| (proto, transform))
+                                self.method_proto(type_name, "eq")
+                                    .map(|proto| (proto, transform))
                             } else if let Some(method_name) = op.comparable_method() {
-                                self.methods
-                                    .get(&(type_name, method_name.to_string()))
-                                    .map(|&proto| (proto, RetTransform::Ordering(*op)))
+                                self.method_proto(type_name, method_name)
+                                    .map(|proto| (proto, RetTransform::Ordering(*op)))
                             } else {
                                 None
                             }
@@ -2904,38 +2908,35 @@ impl<'m> Vm<'m> {
                         // `to_string` method (which runs bytecode, so it is pushed as a call frame). The
                         // method table is keyed by the value's shape name, identical for both kinds
                         // (object-model slice 3). Matches the tree-walker's `display_value`.
-                        if v.is_object() || v.is_enum() {
-                            let type_name = v.shape().unwrap().name.clone();
-                            if let Some(&proto) = self
-                                .methods
-                                .get(&(type_name.clone(), "to_string".to_string()))
-                            {
-                                let callee_chunk = &module.protos[proto as usize];
-                                if callee_chunk.num_params != 1 {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!(
-                                            "this method takes {} argument(s) but 0 were supplied",
-                                            callee_chunk.num_params - 1
-                                        ),
-                                    ));
-                                }
-                                let new_base =
-                                    reserve_window(regs, callee_chunk.num_registers as usize);
-                                retain(v);
-                                regs[new_base] = v;
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
-                                    proto,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues: Vec::new(),
-                                });
-                                continue 'reload;
+                        if (v.is_object() || v.is_enum())
+                            && let Some(proto) =
+                                self.method_proto(&v.shape().unwrap().name, "to_string")
+                        {
+                            let callee_chunk = &module.protos[proto as usize];
+                            if callee_chunk.num_params != 1 {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "this method takes {} argument(s) but 0 were supplied",
+                                        callee_chunk.num_params - 1
+                                    ),
+                                ));
                             }
+                            let new_base =
+                                reserve_window(regs, callee_chunk.num_registers as usize);
+                            retain(v);
+                            regs[new_base] = v;
+                            frames[top].pc = pc + 1;
+                            frames.push(Frame {
+                                proto,
+                                base: new_base,
+                                pc: 0,
+                                ret_dst: *dst,
+                                ret_transform: RetTransform::None,
+                                upvalues: Vec::new(),
+                            });
+                            continue 'reload;
                         }
                         // Identity for every other value: the consuming `Echo`/`Concat` stringifies
                         // it via `display`.

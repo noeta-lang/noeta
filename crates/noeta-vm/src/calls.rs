@@ -24,6 +24,18 @@ impl<'m> Vm<'m> {
         (frames, regs)
     }
 
+    /// Resolve `type_name.method` in the instance-method table with **borrowed** keys
+    /// (audit-1 finding 7): two `&str` probes of the two-level map replace the flat
+    /// `(String, String)`-key lookup that heap-allocated both names per dynamic dispatch
+    /// (enum methods, operator overloads, `Op::Invoke`, and every cache miss).
+    #[inline]
+    pub(crate) fn method_proto(&self, type_name: &str, method: &str) -> Option<u32> {
+        self.methods
+            .get(type_name)
+            .and_then(|methods| methods.get(method))
+            .copied()
+    }
+
     /// Call a value with already-owned arguments (each carrying one reference transferred to
     /// the callee), re-entering the VM on a fresh frame stack. Only closures are callable in
     /// this slice — builtins are never first-class values. Used by `map`/`filter`.
@@ -485,7 +497,7 @@ impl<'m> Vm<'m> {
         // directly — no receiver; the prototype's register 0 (`self`) stays unit, exactly as the
         // opcode's associated dispatch leaves it.
         if associated {
-            let Some(&proto) = self.methods.get(&(ty.to_string(), method.to_string())) else {
+            let Some(proto) = self.method_proto(ty, method) else {
                 for a in args {
                     release(a);
                 }
@@ -548,7 +560,7 @@ impl<'m> Vm<'m> {
                 ));
             }
         };
-        let Some(&proto) = self.methods.get(&(type_name.clone(), method.to_string())) else {
+        let Some(proto) = self.method_proto(&type_name, method) else {
             // Not a user method — a **built-in** receiver (`list.len`, `string.upper`, MH.2):
             // dispatch through the same `call_builtin_method` the `Op::CallMethod` opcode uses, so a
             // handle call and a direct call agree by construction (this mirrors the tree-walker,
@@ -846,8 +858,7 @@ impl<'m> Vm<'m> {
     ) -> Result<Value, Abort> {
         if func == Builtin::Len && args.len() == 1 && args[0].is_object() {
             let recv = args[0];
-            let type_name = recv.shape().unwrap().name.clone();
-            if let Some(&proto) = self.methods.get(&(type_name, "len".to_string())) {
+            if let Some(proto) = self.method_proto(&recv.shape().unwrap().name, "len") {
                 let chunk = &self.module.protos[proto as usize];
                 if chunk.num_params != 1 {
                     return Err(self.error(

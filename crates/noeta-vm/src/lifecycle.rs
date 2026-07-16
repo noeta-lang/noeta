@@ -266,11 +266,13 @@ impl<'m> Vm<'m> {
     pub(crate) fn load_with(module: &'m Module, persist: SessionState) -> Vm<'m> {
         // Cached: fixed per host (see the `tel_on` field).
         let tel_on = persist.host.tel_enabled();
-        let methods = module
-            .methods
-            .iter()
-            .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
-            .collect();
+        let mut methods: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        for m in &module.methods {
+            methods
+                .entry(m.type_name.clone())
+                .or_default()
+                .insert(m.method.clone(), m.proto);
+        }
         let destructors = module.destructors.iter().cloned().collect();
         let field_defaults = module
             .field_defaults

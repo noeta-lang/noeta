@@ -537,8 +537,12 @@ struct Vm<'m> {
     /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
     /// a flat result instead of N boxed objects.
     map_packed: HashMap<Span, &'static noeta_object::PackedSchema>,
-    /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
-    methods: HashMap<(String, String), u32>,
+    /// Instance-method dispatch: type name → (method name → prototype index). Two-level
+    /// (audit-1 finding 7) so every lookup probes with **borrowed** `&str` keys via
+    /// [`Vm::method_proto`] — the previous flat `(String, String)` key forced two heap
+    /// allocations per uncached dynamic dispatch (enum methods, operator overloads,
+    /// `Op::Invoke`).
+    methods: HashMap<String, HashMap<String, u32>>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
     destructors: HashMap<String, u32>,
     /// `(type_name, field_name)` to the field's default-value thunk prototype (object-model
