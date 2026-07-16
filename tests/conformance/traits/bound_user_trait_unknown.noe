@@ -1,0 +1,6 @@
+// A type-parameter bound naming neither a built-in trait nor a declared `trait` is unknown (L1,
+// UT3). E0014.
+// expect: error E0014 at 5:6
+// expect: exit 1
+fn f<T: Nonexistent>(x: T): int { return 1 }
+echo f(3)

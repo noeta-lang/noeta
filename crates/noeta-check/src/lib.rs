@@ -3347,7 +3347,9 @@ impl Checker {
     fn check_type_param_bounds(&mut self, params: &[TypeParam]) {
         for p in params {
             for bound in &p.bounds {
-                if BuiltinTrait::from_name(bound).is_none() {
+                // A bound may name a built-in trait or a user-defined one (L1, UT3).
+                if BuiltinTrait::from_name(bound).is_none() && !self.user_traits.contains_key(bound)
+                {
                     self.error(
                         DiagnosticCode::UnknownTrait,
                         p.span,
@@ -3357,8 +3359,8 @@ impl Checker {
                         ),
                     )
                     .help(
-                        "a bound must name a built-in trait, e.g. `Comparable`, `Equatable`, \
-                             or `Display`",
+                        "a bound must name a built-in trait (e.g. `Comparable`, `Equatable`, \
+                             `Display`) or a `trait` you declare",
                     );
                 }
             }
@@ -6770,8 +6772,24 @@ impl Checker {
                 continue; // unconstrained by the arguments — nothing concrete to check against
             };
             for bound in bounds {
+                // A user-defined trait bound (L1, UT3): satisfied iff `concrete` has a recorded
+                // `impl` of it.
+                if self.user_traits.contains_key(bound) {
+                    if !self.satisfies_user_trait(concrete, bound) {
+                        self.error(
+                            DiagnosticCode::TraitBoundNotSatisfied,
+                            span,
+                            format!(
+                                "type `{concrete}` does not satisfy the bound `{bound}` on type \
+                                 parameter `{pname}` of `{name}`"
+                            ),
+                        )
+                        .help(format!("`{concrete}` must `impl {bound}` to be used here"));
+                    }
+                    continue;
+                }
                 // Bounds on a collected signature are validated trait names (E0014 otherwise); a
-                // non-built-in name is unreachable here, so skip rather than falsely report.
+                // non-built-in, non-user name is unreachable here, so skip rather than falsely report.
                 let Some(t) = BuiltinTrait::from_name(bound) else {
                     continue;
                 };
@@ -6828,6 +6846,20 @@ impl Checker {
             return true;
         }
         builtin_satisfies(ty, t)
+    }
+
+    /// Whether `ty` implements the user trait named `bound` (L1, UT3). Only a named user type can —
+    /// via a recorded in-body or standalone `impl` (`user_trait_impls`). A `dyn`/inference-hole
+    /// defers to runtime (never a false negative); a built-in/primitive type never implements a
+    /// user trait.
+    fn satisfies_user_trait(&self, ty: &Type, bound: &str) -> bool {
+        if ty.defers_to_runtime() {
+            return true;
+        }
+        match ty {
+            Type::Named(n, _) => self.user_trait_impls.get(n).is_some_and(|s| s.contains(bound)),
+            _ => false,
+        }
     }
 
     /// Enforce the **trait bounds** on a registry function's bounded type variables (p2p P2): each

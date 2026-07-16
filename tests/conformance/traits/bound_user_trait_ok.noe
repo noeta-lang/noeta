@@ -1,0 +1,22 @@
+// A generic bound `<G: UserTrait>` (L1, UT3): a function is polymorphic over any implementor, the
+// checker enforces the bound, and the trait method is callable on the bounded parameter — erased at
+// runtime, so `g.greet(...)` dispatches on the value's concrete type. Runs on both backends.
+// expect: stdout "Dear Ada"
+// expect: exit 0
+trait Greeter {
+    fn greet(who: string): string
+}
+
+class Formal {
+    fn new(): Formal { return Formal {} }
+}
+
+impl Greeter for Formal {
+    fn greet(who: string): string { return "Dear " ~ who }
+}
+
+fn welcome<G: Greeter>(g: G): string {
+    return g.greet("Ada")
+}
+
+echo welcome(Formal.new())
