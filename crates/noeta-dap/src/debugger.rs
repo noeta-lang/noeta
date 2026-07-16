@@ -190,10 +190,15 @@ impl DapDebugger {
                         let _ = reply.send(DebugEvalOutcome::Error(message));
                         continue;
                     }
+                    // The frame's in-scope names, resolved with the source map (line-granular), so
+                    // the VM binds exactly these as the wrapper's parameters — see
+                    // `DebugEvalRequest::scope`. A hover (no check above) still needs them.
+                    let scope = frame_param_names(view, frame, &self.sources).unwrap_or_default();
                     return DebugAction::Evaluate(DebugEvalRequest {
                         program,
                         text,
                         frame,
+                        scope,
                         allow_calls,
                         reply,
                     });
@@ -210,10 +215,12 @@ impl DapDebugger {
                         let _ = reply.send(DebugEvalOutcome::Error(message));
                         continue;
                     }
+                    let scope = frame_param_names(view, frame, &self.sources).unwrap_or_default();
                     return DebugAction::SetVariable(DebugSetRequest {
                         name,
                         value,
                         frame,
+                        scope,
                         reply,
                     });
                 }
@@ -234,7 +241,7 @@ impl DapDebugger {
         frame: usize,
         view: &DebugView,
     ) -> Result<(), String> {
-        let params = frame_param_names(view, frame)?;
+        let params = frame_param_names(view, frame, &self.sources)?;
         let errors: Vec<String> = self
             .checker
             .check_closure_fragment(program, &params)

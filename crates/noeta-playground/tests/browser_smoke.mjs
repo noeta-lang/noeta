@@ -230,6 +230,19 @@ assert.deepEqual(debugPauses[1].eval, { ok: true, value: '3', ty: 'int' });
 assert.deepEqual(debugPauses[2].eval, { ok: true, value: '30', ty: 'int' });
 assert.equal(debugPauses[2].frames[0].name, 'add', 'still paused at the breakpoint');
 
+// Scope precision: the breakpoint is on line 2 (`c = a + b`), which we stop *before* executing,
+// so `c` is not yet stored — it must not appear as a local, and evaluating it is a clean
+// undefined-name error, NOT "cannot apply `+` to int and unit" (the byte-offset scope bug).
+debugPauses.length = 0;
+debugCommands.push({ action: 'eval', expr: 'c', frame: 0 }, { action: 'continue' });
+const scopeRun = call(noeta_debug_run, JSON.stringify({ source: debugSource, breakpoints: [2] }));
+assert.equal(scopeRun.exit_code, 0);
+const localNames = debugPauses[0].frames[0].locals.map((l) => l.name);
+assert.ok(localNames.includes('a') && localNames.includes('b'), `params in scope: ${localNames}`);
+assert.ok(!localNames.includes('c'), `c is not stored yet: ${localNames}`);
+assert.equal(debugPauses[1].eval.ok, false, JSON.stringify(debugPauses[1].eval));
+assert.match(debugPauses[1].eval.error, /cannot find `c`/);
+
 // The JSPI pump (W3.1): two async fetches must genuinely OVERLAP — both start before either
 // settles — and the run entry suspends/resumes through WebAssembly.promising.
 if (JSPI) {

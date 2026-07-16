@@ -292,7 +292,7 @@ impl BrowserDebugger {
         // Session-checker C3: the frame's in-scope local names become the wrapper closure's
         // parameters, and the fragment checks as one entry — an ill-typed fragment answers with
         // its E0xxx right here and the VM never sees it.
-        let params = frame_param_names(view, frame)?;
+        let params = frame_param_names(view, frame, &self.sources)?;
         let errors: Vec<String> = self
             .checker
             .check_closure_fragment(&fragment.program, &params)
@@ -309,6 +309,10 @@ impl BrowserDebugger {
             program: fragment.program,
             text: expr.to_string(),
             frame,
+            // The same in-scope names the checker gate used, so the VM binds exactly these as the
+            // wrapper's parameters (see `DebugEvalRequest::scope`) — no not-yet-stored current-line
+            // local leaks in as its pre-store `unit`.
+            scope: params,
             allow_calls: true,
             reply,
         })
@@ -479,6 +483,51 @@ mod tests {
         assert_eq!(result["stdout"], "3\n");
         assert_eq!(result["terminated"], false);
         assert!(pauses.is_empty(), "pauses: {pauses:?}");
+    }
+
+    #[test]
+    fn a_local_declared_on_the_paused_line_is_not_yet_in_scope() {
+        // Break on line 3 (`b = a + 10`), which we stop *before* executing. `a` (line 2) is
+        // assigned and in scope; `b` is declared here but not yet stored, so it must NOT appear —
+        // and evaluating it is a plain undefined-name error, not an `int`-and-`unit` confusion
+        // (the bug: `b`'s name sits at an earlier byte offset than the `a + 10` the pause resolves
+        // to, so a byte-offset scope test wrongly surfaced `b` as its pre-store `unit`).
+        let program = "fn f(): int {\n  a = 1\n  b = a + 10\n  return b\n}\necho f()\n";
+        let (result, pauses) = debug_with(
+            program,
+            &[3],
+            false,
+            &[
+                r#"{"action":"eval","expr":"a","frame":0}"#,
+                r#"{"action":"eval","expr":"a + b","frame":0}"#,
+                r#"{"action":"continue"}"#,
+            ],
+        );
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["stdout"], "11\n");
+        let names: Vec<&str> = pauses[0]["frames"][0]["locals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"a"), "`a` should be in scope: {names:?}");
+        assert!(!names.contains(&"b"), "`b` is not stored yet: {names:?}");
+        // `a` evaluates; `a + b` fails because `b` is undefined here — not "int and unit".
+        assert_eq!(pauses[1]["eval"]["ok"], true, "{}", pauses[1]);
+        assert_eq!(pauses[1]["eval"]["value"], "1");
+        assert_eq!(pauses[2]["eval"]["ok"], false, "{}", pauses[2]);
+        let error = pauses[2]["eval"]["error"].as_str().unwrap();
+        // A clear undefined-name error — `b` is genuinely not available at this pause point — and
+        // NOT the confusing "cannot apply `+` to int and unit" the byte-offset scope bug produced.
+        assert!(
+            error.contains("cannot find `b`"),
+            "want undefined-name error, got: {error}"
+        );
+        assert!(
+            !error.contains("unit"),
+            "confusing unit error leaked back in: {error}"
+        );
     }
 
     #[test]
