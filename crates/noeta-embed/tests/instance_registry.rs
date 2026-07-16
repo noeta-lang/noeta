@@ -197,6 +197,26 @@ fn two_sessions_one_process_run_disjoint_extension_sets() {
 const USES_AUDIT_TIER: &str = "@audit {\n  fn probe(): int { return 1; }\n}\n";
 
 #[test]
+fn hot_swap_checks_against_the_session_registry() {
+    // The swap's checker must see the SESSION's registry, not the process-global default: the
+    // plugin's `@audit` tier is a known tier only in the session's own registry (the test above
+    // proves the default rejects it with E0036). A session that loaded fine must therefore be
+    // able to hot-swap an edit to the same program — a swap wrongly checked against the default
+    // registry fails with the unknown-tier error even though nothing about the tier changed.
+    let v = |n: u8| {
+        format!("@audit {{\n  fn probe(): int {{ return 1; }}\n}}\nfn version(): int {{ return {n}; }}\n")
+    };
+    let mut s = Session::builder()
+        .with_extensions(vec![&PLUGIN])
+        .load(&v(1))
+        .expect("the plugin session accepts its own `@audit` tier at load");
+    match s.hot_swap(&v(2)) {
+        Ok(_) => {} // Swapped/NeedsRestart both prove the check ran under the session's registry.
+        Err(e) => panic!("hot_swap must check under the session's registry, got {e:?}"),
+    }
+}
+
+#[test]
 fn the_checker_scopes_the_tier_namespace_to_the_session_registry() {
     // The plugin session's registry declares `@audit`, so the block checks clean.
     assert!(

@@ -391,6 +391,7 @@ impl Builder {
             session,
             source: source.to_string(),
             stdout: out.stdout,
+            registry,
         })
     }
 }
@@ -404,6 +405,11 @@ pub struct Session {
     source: String,
     /// Output the program printed and the host has not yet drained ([`Session::take_stdout`]).
     stdout: String,
+    /// This session's private registry (instance-registry IR5), when it was built with
+    /// [`Builder::with_extensions`] — [`Session::hot_swap`] must check edits against the same
+    /// registry the session type-checked and runs under, not the process-global default.
+    /// `None` ⇒ the default registry.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
 }
 
 impl Session {
@@ -466,7 +472,12 @@ impl Session {
     pub fn hot_swap(&mut self, new_source: &str) -> Result<SwapOutcome, Error> {
         let old_program = parse(&self.source)?;
         let new_program = parse(new_source)?;
-        let checked = noeta_check::check_all(&new_program);
+        // Check against the SAME registry the session was loaded under (IR5): a session-private
+        // native module/type must resolve during a swap exactly as it did at load.
+        let checked = match self.registry {
+            Some(reg) => noeta_check::check_all_with_registry(&new_program, reg),
+            None => noeta_check::check_all(&new_program),
+        };
         if !checked.diagnostics.is_empty() {
             return Err(Error::Check(render_all(new_source, &checked.diagnostics)));
         }
