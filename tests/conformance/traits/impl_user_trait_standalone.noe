@@ -1,0 +1,20 @@
+// A standalone `impl UserTrait for T { ... }` with a method body (L1 user traits, UT2). Its methods
+// are hoisted onto the target type by the loader, so both backends' `(type, method)` dispatch
+// resolves `g.greet(...)`. The whole path runs identically on the tree-walker and the bytecode VM.
+// expect: stdout "Dear Ada"
+// expect: exit 0
+trait Greeter {
+    fn greet(who: string): string
+}
+
+class Formal {
+    prefix: string
+    fn new(p: string): Formal { return Formal { prefix: p } }
+}
+
+impl Greeter for Formal {
+    fn greet(who: string): string { return self.prefix ~ " " ~ who }
+}
+
+g = Formal.new("Dear")
+echo g.greet("Ada")

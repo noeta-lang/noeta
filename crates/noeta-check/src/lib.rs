@@ -979,6 +979,10 @@ struct Checker {
     /// `<T: UserTrait>` generic bounds (UT3), and `dyn UserTrait` trait-object dispatch (UT4). A name
     /// here is a legal trait in an `impl`/bound alongside the closed [`BuiltinTrait`] set.
     user_traits: HashMap<String, noeta_ast::TraitDecl>,
+    /// Which user traits each type implements: type name → set of user-trait names it `impl`s
+    /// (in-body or standalone). The user-trait analogue of [`Self::trait_impls`]; the basis for
+    /// UT3 generic-bound satisfaction and UT4 `dyn Trait` coercion. Populated in pass 1.
+    user_trait_impls: HashMap<String, HashSet<String>>,
     /// The subset of [`Self::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
@@ -2125,6 +2129,32 @@ impl Checker {
                     self.user_traits.entry(t.name.clone()).or_insert_with(|| t.clone());
                 }
                 _ => {}
+            }
+        }
+        // Record which user traits each type implements (L1, UT2), from both standalone and in-body
+        // `impl`s. Done after the main walk so every `trait` is registered regardless of source
+        // order. The basis for UT3 bound satisfaction and UT4 `dyn Trait` coercion.
+        for stmt in &program.stmts {
+            let (type_name, impls): (&str, &[noeta_ast::ImplBlock]) = match stmt {
+                Stmt::Impl(decl) if self.user_traits.contains_key(&decl.trait_name) => {
+                    self.user_trait_impls
+                        .entry(decl.target.clone())
+                        .or_default()
+                        .insert(decl.trait_name.clone());
+                    continue;
+                }
+                Stmt::Struct(d) => (&d.name, &d.impls),
+                Stmt::Class(d) => (&d.name, &d.impls),
+                Stmt::Enum(d) => (&d.name, &d.impls),
+                _ => continue,
+            };
+            for b in impls {
+                if self.user_traits.contains_key(&b.trait_name) {
+                    self.user_trait_impls
+                        .entry(type_name.to_string())
+                        .or_default()
+                        .insert(b.trait_name.clone());
+                }
             }
         }
         // Method-bundle bindings (kernel-methods K1) resolve after the whole collect walk, so a
@@ -3493,6 +3523,12 @@ impl Checker {
     /// required method with the right arity. (The orphan rule and the standalone-only body
     /// restriction are enforced by the caller, [`Self::check_standalone_impl`].)
     fn check_trait_impl(&mut self, trait_name: &str, trait_span: Span, methods: &[FnDecl]) {
+        // A user-defined trait (L1, UT2): validate conformance against its declared contract, then
+        // return before the built-in resolution below (which would otherwise report E0014).
+        if let Some(decl) = self.user_traits.get(trait_name).cloned() {
+            self.check_user_trait_impl(&decl, trait_span, methods);
+            return;
+        }
         let Some(t) = BuiltinTrait::from_name(trait_name) else {
             // A dotted path in an in-body impl is a method-bundle reference (kernel-methods K1)
             // used in the wrong position — bundles bind through the standalone form only.
@@ -3556,6 +3592,85 @@ impl Checker {
         }
     }
 
+    /// Validate that an `impl` of a user trait provides its contract (L1, UT2): every **required**
+    /// (non-default) trait method must be present with matching arity and — when both sides annotate
+    /// them — matching parameter and return types. Default methods may be omitted (their fallback
+    /// body lands in UT5). Extra methods beyond the trait are allowed (inherent methods). Shares the
+    /// E0015 `InvalidImpl` code with the built-in path.
+    fn check_user_trait_impl(
+        &mut self,
+        decl: &noeta_ast::TraitDecl,
+        trait_span: Span,
+        methods: &[FnDecl],
+    ) {
+        for tm in &decl.methods {
+            if tm.has_default {
+                continue; // a default method is optional for an implementor
+            }
+            let req_name = &tm.sig.name;
+            let Some(m) = methods.iter().find(|m| &m.name == req_name) else {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    trait_span,
+                    format!("`impl {}` must define `fn {}`", decl.name, req_name),
+                )
+                .help(format!("the `{}` trait requires `fn {}`", decl.name, req_name));
+                continue;
+            };
+            if m.params.len() != tm.sig.params.len() {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`{}` must take {} parameter(s) to satisfy trait `{}`, found {}",
+                        req_name,
+                        tm.sig.params.len(),
+                        decl.name,
+                        m.params.len()
+                    ),
+                );
+                continue;
+            }
+            for (i, (tp, ip)) in tm.sig.params.iter().zip(&m.params).enumerate() {
+                let want = field_type(&tp.ty, &self.extern_types);
+                let got = field_type(&ip.ty, &self.extern_types);
+                if !Self::sig_types_compatible(&want, &got) {
+                    self.error(
+                        DiagnosticCode::InvalidImpl,
+                        ip.name_span,
+                        format!(
+                            "parameter {} of `{}` is `{got}`, but trait `{}` declares `{want}`",
+                            i + 1,
+                            req_name,
+                            decl.name,
+                        ),
+                    );
+                }
+            }
+            let want_ret = field_type(&tm.sig.ret, &self.extern_types);
+            let got_ret = field_type(&m.ret, &self.extern_types);
+            if !Self::sig_types_compatible(&want_ret, &got_ret) {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`{}` returns `{got_ret}`, but trait `{}` declares `{want_ret}`",
+                        req_name, decl.name,
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Two signature types conform if either side is unannotated (`Unknown`) or `dyn` — those defer
+    /// — or they are equal. Deliberately structural-equality, not subtyping: a trait method's
+    /// contract is its exact signature (UT2).
+    fn sig_types_compatible(want: &Type, got: &Type) -> bool {
+        matches!(want, Type::Unknown | Type::Dyn)
+            || matches!(got, Type::Unknown | Type::Dyn)
+            || want == got
+    }
+
     /// Validate a standalone `impl Trait for T {}` declaration. Two checks beyond the shared
     /// trait-side validation ([`Self::check_trait_impl`], also run): the **orphan rule** — `T` must
     /// be a struct/class/enum declared in this module, not a built-in or a `use`-imported name
@@ -3585,11 +3700,14 @@ impl Checker {
                      where the type is defined",
             );
         }
-        if !decl.methods.is_empty() {
+        // A standalone `impl` with a method body is supported for **user traits** (L1, UT2 — its
+        // methods are hoisted onto the target type by the loader). A built-in trait's standalone
+        // impl is still marker-only: its operator/protocol methods live in the type's own body.
+        if !decl.methods.is_empty() && !self.user_traits.contains_key(&decl.trait_name) {
             self.error(
                 DiagnosticCode::InvalidImpl,
                 decl.span,
-                "a standalone `impl` with methods is not yet supported",
+                "a standalone `impl` with methods is not yet supported for a built-in trait",
             )
             .help(
                 "only an empty-body capability impl (e.g. `impl Serialize for X {}`) is \

@@ -23,9 +23,11 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use std::collections::HashMap as StdHashMap;
+
 use noeta_ast::{
-    BinaryOp, Expr, ForPattern as AstForPattern, Param, Program as AstProgram, Stmt as AstStmt,
-    StrPart, TypeRef,
+    BinaryOp, Expr, FnDecl, ForPattern as AstForPattern, Param, Program as AstProgram,
+    Stmt as AstStmt, StrPart, TypeRef,
 };
 use noeta_span::Span;
 
@@ -170,6 +172,53 @@ pub fn lower_with_sites(
 /// REPL), it lowers to a plain [`Rvalue::Spawn`] of the pre-built future, exactly as `spawn f(args)`,
 /// so the sandbox and the whole differential corpus are byte-identical and never see the new op. Only
 /// the CLI's real (VM) execution path passes `true`.
+/// Copy a standalone `impl Trait for T { methods }`'s method bodies onto the target type `T`'s own
+/// method table (L1 user traits, UT2), so both backends' `(type, method)` dispatch resolves them —
+/// the same flattening the parser already performs for in-body `impl` blocks. Returns a modified
+/// clone only when at least one standalone impl contributes a method the target does not already
+/// carry; otherwise `None` (use the original by reference — zero cost for the common case).
+///
+/// **Idempotent**: a method whose name already exists on the target is skipped, so applying this to
+/// an already-hoisted program is a no-op. That lets the VM compiler hoist the AST `entry` for its
+/// surface-reading pass-1 (`register_types`) while the shared lowering below hoists again for the
+/// IR — both converge without duplicating a method. The IR interpreter (reference/eval) has no such
+/// split, so the lowering call alone covers it.
+pub fn hoist_standalone_impl_methods(program: &AstProgram) -> Option<AstProgram> {
+    let mut additions: StdHashMap<String, Vec<FnDecl>> = StdHashMap::new();
+    for stmt in &program.stmts {
+        if let AstStmt::Impl(decl) = stmt
+            && !decl.methods.is_empty()
+        {
+            additions
+                .entry(decl.target.clone())
+                .or_default()
+                .extend(decl.methods.iter().cloned());
+        }
+    }
+    if additions.is_empty() {
+        return None;
+    }
+    let mut changed = false;
+    let mut cloned = program.clone();
+    for stmt in &mut cloned.stmts {
+        let (name, methods) = match stmt {
+            AstStmt::Struct(d) => (&d.name, &mut d.methods),
+            AstStmt::Class(d) => (&d.name, &mut d.methods),
+            AstStmt::Enum(d) => (&d.name, &mut d.methods),
+            _ => continue,
+        };
+        if let Some(add) = additions.get(name) {
+            for m in add {
+                if !methods.iter().any(|existing| existing.name == m.name) {
+                    methods.push(m.clone());
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed.then_some(cloned)
+}
+
 pub fn lower_with_sites_opts(
     program: &AstProgram,
     sites: LoweringSites,
@@ -180,6 +229,10 @@ pub fn lower_with_sites_opts(
     // embed session threads its own assembled set, so a session's compile honors its extensions.
     registry: &'static noeta_stdlib::registry::Registry,
 ) -> Result<Program, Unsupported> {
+    // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) before lowering,
+    // so `(type, method)` dispatch resolves them. Only rebinds when such an impl exists.
+    let hoisted = hoist_standalone_impl_methods(program);
+    let program: &AstProgram = hoisted.as_ref().unwrap_or(program);
     let mut lowerer = Lowerer {
         temps: 0,
         sites,

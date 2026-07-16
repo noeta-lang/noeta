@@ -1,0 +1,19 @@
+// A trait's DEFAULT method (one with a body) is optional for an implementor (L1, UT2): an `impl`
+// may provide only the required methods and still check clean. (Falling back to the default body
+// when omitted lands in a later slice; here the point is that omitting it is not an error.)
+// expect: stdout "hi Ada"
+// expect: exit 0
+trait Greeter {
+    fn greet(who: string): string
+    fn shout(): string { return "HELLO" }
+}
+
+class Casual {
+    fn new(): Casual { return Casual {} }
+}
+
+impl Greeter for Casual {
+    fn greet(who: string): string { return "hi " ~ who }
+}
+
+echo Casual.new().greet("Ada")

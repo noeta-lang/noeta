@@ -320,6 +320,12 @@ fn compile_to_mc(
         namespace_module_sites,
         destructor_relevance: _,
     } = sites;
+    // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so the surface
+    // pass-1 (`register_types`) and the IR pass-2 (`compile_methods`) agree on the method set. The
+    // helper is idempotent, so the lowering below re-hoisting is a no-op; rebinds only when such an
+    // impl exists.
+    let hoisted = noeta_ir::hoist_standalone_impl_methods(program);
+    let program: &Program = hoisted.as_ref().unwrap_or(program);
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
     // precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use death
@@ -518,6 +524,10 @@ impl SessionCompiler {
         entry: &Program,
         sites: Option<&Sites>,
     ) -> Result<Module, Unsupported> {
+        // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so surface
+        // registration and IR compilation agree; idempotent, so lowering re-hoisting is a no-op.
+        let hoisted = noeta_ir::hoist_standalone_impl_methods(entry);
+        let entry: &Program = hoisted.as_ref().unwrap_or(entry);
         // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
         // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The
         // conservative path's `insert_drops(_, None)` marks every value destructor-relevant;
