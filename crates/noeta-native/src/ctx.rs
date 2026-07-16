@@ -248,6 +248,7 @@ pub trait NativeCtx {
     ) -> CtxResult<()>;
 
     // ----- Class 3: per-run extension state + the retained-value arena (H4) -----
+    // (The arena group also exists as the narrow consumer view [`RetainedArena`].)
 
     /// The dispatching extension's **per-run Rust state**, created by `init` on first access and
     /// living until program teardown. `key` namespaces it (one per extension module/family —
@@ -301,6 +302,7 @@ pub trait NativeCtx {
     fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()>;
 
     // ----- The raw-buffer ABI (package-manager N3.4): packed lists + structural objects -----
+    // (This group also exists as the narrow consumer view [`PackedBuffers`].)
 
     /// Read a packed list's element layout and raw byte buffer through a borrow — the
     /// [`NativeCtx::with_extern`] twin for `List<packed>`, and the capability that lets a native
@@ -376,6 +378,133 @@ pub trait NativeCtx {
 
     /// The **hot-reload** observation channel ([`HotReload`], server-hmr L3).
     fn hot_reload(&mut self) -> &mut dyn HotReload;
+}
+
+// ----- focused consumer views over NativeCtx (audit-2 F9) ----------------------------------------
+//
+// `NativeCtx` is the BACKEND-implementation surface: one wide trait each backend implements once
+// (~39 methods), spanning slot/call orchestration, the retained arena, and the raw-buffer packed
+// ABI. A *reader* of `&mut dyn NativeCtx` gets no signal about which of those a dispatch actually
+// touches — a pure `cell.get` helper and a full serve loop take the same capability. The two
+// self-contained method groups therefore also exist as narrow traits, blanket-implemented for
+// every `NativeCtx` by delegation: an extension helper that only reads packed buffers bounds on
+// `PackedBuffers` (`fn kernel<C: PackedBuffers + ?Sized>(ctx: &mut C, …)`) and callers pass their
+// `&mut dyn NativeCtx` straight in — zero cost (the blanket impl inlines to the same virtual
+// call), no backend change, and the signature now states what the helper can do.
+//
+// Deliberately NOT re-exported at the crate root: the method names mirror `NativeCtx`'s, so a
+// file that imported both traits (e.g. via a glob) would make every existing `ctx.retain(…)`
+// call ambiguous. Consumers name them explicitly (`noeta_native::ctx::PackedBuffers`) or
+// path-qualify the bound. The slot/call core is not split — that *is* NativeCtx.
+
+/// The **retained-arena** view of a [`NativeCtx`] (Class 3, H4/H5): cross-dispatch value
+/// ownership plus the fused thunk operations and the read-gate control that operate on it. See
+/// the same-named [`NativeCtx`] methods for the full semantics.
+pub trait RetainedArena {
+    /// [`NativeCtx::retain`].
+    fn retain(&mut self, slot: Slot) -> CtxResult<Retained>;
+    /// [`NativeCtx::retained_get`].
+    fn retained_get(&mut self, retained: Retained) -> CtxResult<Slot>;
+    /// [`NativeCtx::retained_set`].
+    fn retained_set(&mut self, retained: Retained, slot: Slot) -> CtxResult<()>;
+    /// [`NativeCtx::release_retained`].
+    fn release_retained(&mut self, retained: Retained);
+    /// [`NativeCtx::set_read_gate`].
+    fn set_read_gate(&mut self, type_name: &'static str, open: bool);
+    /// [`NativeCtx::run_thunk`].
+    fn run_thunk(&mut self, body: Retained) -> CtxResult<()>;
+    /// [`NativeCtx::call_thunk_into`].
+    fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()>;
+}
+
+impl<C: NativeCtx + ?Sized> RetainedArena for C {
+    fn retain(&mut self, slot: Slot) -> CtxResult<Retained> {
+        NativeCtx::retain(self, slot)
+    }
+    fn retained_get(&mut self, retained: Retained) -> CtxResult<Slot> {
+        NativeCtx::retained_get(self, retained)
+    }
+    fn retained_set(&mut self, retained: Retained, slot: Slot) -> CtxResult<()> {
+        NativeCtx::retained_set(self, retained, slot)
+    }
+    fn release_retained(&mut self, retained: Retained) {
+        NativeCtx::release_retained(self, retained)
+    }
+    fn set_read_gate(&mut self, type_name: &'static str, open: bool) {
+        NativeCtx::set_read_gate(self, type_name, open)
+    }
+    fn run_thunk(&mut self, body: Retained) -> CtxResult<()> {
+        NativeCtx::run_thunk(self, body)
+    }
+    fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()> {
+        NativeCtx::call_thunk_into(self, body, dest)
+    }
+}
+
+/// The **raw-buffer packed ABI** view of a [`NativeCtx`] (package-manager N3.4): what a bulk
+/// kernel needs and nothing else. See the same-named [`NativeCtx`] methods for full semantics.
+pub trait PackedBuffers {
+    /// [`NativeCtx::with_packed`].
+    fn with_packed(&mut self, slot: Slot, f: &mut dyn FnMut(&PackedView, &[u8]))
+    -> CtxResult<bool>;
+    /// [`NativeCtx::with_packed_mut`].
+    fn with_packed_mut(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&PackedView, &mut [u8]),
+    ) -> CtxResult<Option<Slot>>;
+    /// [`NativeCtx::make_packed_like`].
+    fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot>;
+    /// [`NativeCtx::object_scalars_at`].
+    fn object_scalars_at(
+        &mut self,
+        list: Slot,
+        index: usize,
+        out: &mut Vec<Scalar>,
+    ) -> CtxResult<bool>;
+    /// [`NativeCtx::make_object_like_element`].
+    fn make_object_like_element(
+        &mut self,
+        list: Slot,
+        index: usize,
+        fields: &[Scalar],
+    ) -> CtxResult<Slot>;
+}
+
+impl<C: NativeCtx + ?Sized> PackedBuffers for C {
+    fn with_packed(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&PackedView, &[u8]),
+    ) -> CtxResult<bool> {
+        NativeCtx::with_packed(self, slot, f)
+    }
+    fn with_packed_mut(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&PackedView, &mut [u8]),
+    ) -> CtxResult<Option<Slot>> {
+        NativeCtx::with_packed_mut(self, slot, f)
+    }
+    fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot> {
+        NativeCtx::make_packed_like(self, like, bytes)
+    }
+    fn object_scalars_at(
+        &mut self,
+        list: Slot,
+        index: usize,
+        out: &mut Vec<Scalar>,
+    ) -> CtxResult<bool> {
+        NativeCtx::object_scalars_at(self, list, index, out)
+    }
+    fn make_object_like_element(
+        &mut self,
+        list: Slot,
+        index: usize,
+        fields: &[Scalar],
+    ) -> CtxResult<Slot> {
+        NativeCtx::make_object_like_element(self, list, index, fields)
+    }
 }
 
 /// The per-execution **task-local context**: a per-task stack of opaque `u64`s the backend carries
