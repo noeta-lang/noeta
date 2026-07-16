@@ -378,7 +378,10 @@ impl Checker {
                     }
                 }
             }
+            // The one lookup site that needs an *owned* type (synthesis returns `Type` by value),
+            // so it clones here rather than in `lookup` (audit-3 Finding 12).
             Expr::Ident { name, span } => match lookup(env, name)
+                .cloned()
                 // A bare user-function reference is a first-class value of its **full** signature
                 // type — parameters included, so passing it where a `Fn(A) -> B` is declared
                 // (`map_bounded(items, n, dbl)`, `xs.map(inc)`) checks like the equivalent

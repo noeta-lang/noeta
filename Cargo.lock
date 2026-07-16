@@ -3996,6 +3996,7 @@ dependencies = [
 name = "noeta-check"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "insta",
  "noeta-ast",
  "noeta-diagnostics",

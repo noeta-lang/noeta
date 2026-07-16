@@ -57,10 +57,15 @@ pub(crate) struct VarBinding {
 /// A lexical scope stack: each frame maps a name to its binding. Inner frames shadow.
 pub(crate) type Env = Vec<HashMap<String, VarBinding>>;
 
-pub(crate) fn lookup(env: &Env, name: &str) -> Option<Type> {
+/// Resolve `name` to its nearest in-scope binding's type. Returns a **borrow** into the
+/// environment (audit-3 Finding 12): most callers only test resolution or read through the type,
+/// and the few that need ownership (the `Ident` synthesis returning an owned `Type`, the
+/// reassignment diagnostics) clone at their own site — so the common lookup stops paying a full
+/// `Type`-tree clone per identifier reference on the per-keystroke LSP path.
+pub(crate) fn lookup<'e>(env: &'e Env, name: &str) -> Option<&'e Type> {
     env.iter()
         .rev()
-        .find_map(|frame| frame.get(name).map(|b| b.ty.clone()))
+        .find_map(|frame| frame.get(name).map(|b| &b.ty))
 }
 
 /// The reserved prelude names (`Ok`/`Err`/`some`/`none`/`panic`/`assert`) — always resolvable,
