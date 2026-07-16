@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use noeta_ast::{ClassDecl, EnumDecl, FnDecl, Program, Stmt, StructDecl};
+use noeta_ast::{ClassDecl, EnumDecl, FnDecl, Program, Stmt, StructDecl, TraitDecl};
 use noeta_check::{DocTarget, dedent_doc, resolve_docs};
 use noeta_ide::symbols::render_type_ref;
 use noeta_span::{Source, SourceId};
@@ -233,6 +233,7 @@ pub fn render_json_to(out: &Path, docs_json_text: &str) -> Result<Generated, Str
                         "struct" => "struct",
                         "class" => "class",
                         "enum" => "enum",
+                        "trait" => "trait",
                         _ => return None,
                     },
                     name: item.get("name")?.as_str()?.to_string(),
@@ -372,6 +373,7 @@ fn module_docs(source: &Source) -> Option<ModuleDocs> {
             Stmt::Struct(s) => (s.span.start, struct_docs(s, &decl_docs)),
             Stmt::Class(c) => (c.span.start, class_docs(c, &decl_docs)),
             Stmt::Enum(e) => (e.span.start, enum_docs(e, &decl_docs)),
+            Stmt::Trait(t) => (t.span.start, trait_docs(t, &decl_docs)),
             _ => continue,
         };
         if public_only && !decl.public {
@@ -509,6 +511,42 @@ fn enum_docs(e: &EnumDecl, docs: &std::collections::HashMap<String, String>) -> 
         signature: sig,
         doc: docs.get(&e.name).cloned(),
         public: e.is_public,
+    }
+}
+
+fn trait_docs(t: &TraitDecl, docs: &std::collections::HashMap<String, String>) -> DeclDocs {
+    let mut sig = String::new();
+    for a in &t.attrs {
+        sig.push_str(&format!("#[{}]\n", a.name));
+    }
+    if t.is_public {
+        sig.push_str("pub ");
+    }
+    sig.push_str(&format!("trait {} {{\n", t.name));
+    for m in &t.methods {
+        let params: Vec<String> = m
+            .sig
+            .params
+            .iter()
+            .map(|p| match &p.ty {
+                Some(ty) => format!("{}: {}", p.name, render_type_ref(ty)),
+                None => p.name.clone(),
+            })
+            .collect();
+        sig.push_str(&format!("    fn {}({})", m.sig.name, params.join(", ")));
+        if let Some(ret) = &m.sig.ret {
+            sig.push_str(&format!(": {}", render_type_ref(ret)));
+        }
+        // A default method shows a `{ … }` marker; a required one is bodiless.
+        sig.push_str(if m.has_default { " { … }\n" } else { "\n" });
+    }
+    sig.push('}');
+    DeclDocs {
+        kind: "trait",
+        name: t.name.clone(),
+        signature: sig,
+        doc: docs.get(&t.name).cloned(),
+        public: t.is_public,
     }
 }
 

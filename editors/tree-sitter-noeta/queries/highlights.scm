@@ -28,6 +28,8 @@
 (struct_declaration name: (identifier) @type)
 (class_declaration name: (identifier) @type)
 (enum_declaration name: (identifier) @type)
+(trait_declaration name: (identifier) @type)
+(trait_object_type trait: (identifier) @type)
 (type_parameter name: (identifier) @type)
 (impl_block trait: (identifier) @type)
 (enum_variant name: (identifier) @constructor)
@@ -61,7 +63,7 @@
 
 ; --------------------------------------------------------------------- keywords
 [
-  "fn" "mut" "struct" "class" "enum" "impl" "destruct"
+  "fn" "mut" "struct" "class" "enum" "impl" "trait" "destruct"
   "namespace" "use" "pub"
 ] @keyword
 

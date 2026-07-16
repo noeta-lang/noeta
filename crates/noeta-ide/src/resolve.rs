@@ -60,6 +60,14 @@ impl Definitions {
                         .entry(decl.name.clone())
                         .or_insert(decl.name_span);
                 }
+                // A user trait's name resolves like a type name (L1) — so goto-def / hover on a
+                // `dyn Trait` annotation or a `<T: Trait>` bound lands on the declaration, and it is
+                // emitted as a `Type` semantic token.
+                Stmt::Trait(decl) => {
+                    defs.types
+                        .entry(decl.name.clone())
+                        .or_insert(decl.name_span);
+                }
                 _ => {}
             }
         }
@@ -159,6 +167,12 @@ impl MemberTable {
                         decl.variants.iter().map(|v| (&v.name, v.name_span)),
                     );
                     table.add_methods(&decl.name, &decl.methods);
+                }
+                // A trait's method signatures register under the trait name (L1) — so member
+                // resolution on a `dyn Trait` receiver's `.method` resolves to the contract.
+                Stmt::Trait(decl) => {
+                    let sigs: Vec<FnDecl> = decl.methods.iter().map(|m| m.sig.clone()).collect();
+                    table.add_methods(&decl.name, &sigs);
                 }
                 _ => {}
             }
@@ -638,10 +652,15 @@ impl Resolver {
                     self.walk_stmt(item);
                 }
             }
-            // Control-flow leaves and module statements bind and reference nothing. (A `trait`'s
-            // default-method bodies are not yet walked — resolved once defaults type-check, UT5.)
+            // A trait's default-method bodies reference declarations — walk them for goto/refs
+            // inside a default body (L1). Required (bodiless) sigs have empty bodies, so this is a
+            // no-op for them.
+            Stmt::Trait(decl) => {
+                let sigs: Vec<FnDecl> = decl.methods.iter().map(|m| m.sig.clone()).collect();
+                self.walk_methods(&sigs);
+            }
+            // Control-flow leaves and module statements bind and reference nothing.
             Stmt::Impl(_)
-            | Stmt::Trait(_)
             | Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }

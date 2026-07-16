@@ -76,6 +76,8 @@ pub enum DocKind {
     Field,
     Method,
     Interface,
+    /// A user-defined `trait` (L1 user traits).
+    Trait,
     /// Free-floating section prose between declarations (an unattached `@doc` block).
     Section,
     /// A language-guide page (a `docs/*.md` wiki page).
@@ -96,6 +98,7 @@ impl DocKind {
             DocKind::Field => "field",
             DocKind::Method => "method",
             DocKind::Interface => "interface",
+            DocKind::Trait => "trait",
             DocKind::Section => "section",
             DocKind::Guide => "guide",
         }
@@ -111,6 +114,7 @@ impl DocKind {
             SymbolKind::Field => DocKind::Field,
             SymbolKind::Method => DocKind::Method,
             SymbolKind::Interface => DocKind::Interface,
+            SymbolKind::Trait => DocKind::Trait,
         }
     }
 }

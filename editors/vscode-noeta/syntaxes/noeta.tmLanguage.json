@@ -297,7 +297,7 @@
         },
         {
           "comment": "Type declaration: bind the name that follows a type-introducing keyword.",
-          "match": "\\b(struct|class|enum|type|impl)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(struct|class|enum|type|impl|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "storage.type.noeta keyword.declaration.type.noeta" },
             "2": { "name": "entity.name.type.noeta" }
@@ -305,7 +305,7 @@
         },
         {
           "name": "storage.type.noeta",
-          "match": "\\b(fn|mut|struct|class|enum|type|impl|destruct)\\b"
+          "match": "\\b(fn|mut|struct|class|enum|type|impl|trait|destruct)\\b"
         }
       ]
     },

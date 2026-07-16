@@ -477,6 +477,15 @@ fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
             roles: Vec::new(),
             children: d.methods.iter().map(|m| method_node(m, index)).collect(),
         },
+        // A user-defined `trait` (L1) — its method signatures as children.
+        Stmt::Trait(d) => SymbolNode {
+            name: d.name.clone(),
+            kind: "trait".to_string(),
+            detail: None,
+            location: index.span_loc(d.span),
+            roles: Vec::new(),
+            children: d.methods.iter().map(|m| method_node(&m.sig, index)).collect(),
+        },
         _ => return None,
     };
     Some(node)

@@ -41,6 +41,8 @@ pub enum CandidateKind {
     EnumMember,
     /// A built-in type name (`int`, `List`, …) offered in a type-annotation position.
     Type,
+    /// A user-defined `trait` (L1) — offered as a bound and after `dyn`.
+    Trait,
     /// A native module or namespace-group member (`http.client`, member completion on a group).
     Module,
 }
@@ -82,6 +84,7 @@ const KEYWORDS: &[&str] = &[
     "spawn",
     "struct",
     "then",
+    "trait",
     "true",
     "type",
     "use",
@@ -105,6 +108,7 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
             Stmt::Struct(decl) => (&decl.name, CandidateKind::Struct),
             Stmt::Class(decl) => (&decl.name, CandidateKind::Class),
             Stmt::Enum(decl) => (&decl.name, CandidateKind::Enum),
+            Stmt::Trait(decl) => (&decl.name, CandidateKind::Trait),
             _ => continue,
         };
         candidates.push(Candidate {
@@ -275,7 +279,7 @@ fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
 /// The built-in type names offered in type-annotation position — the primitives, the container
 /// generics, and the fixed-width integers.
 const BUILTIN_TYPES: &[&str] = &[
-    "int", "float", "f32", "bool", "string", "bytes", "unit", "List", "Map", "Set", "Option",
+    "int", "float", "f32", "bool", "string", "bytes", "unit", "dyn", "List", "Map", "Set", "Option",
     "Result", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
 ];
 
@@ -289,6 +293,8 @@ pub fn type_names(program: &Program) -> Vec<Candidate> {
             Stmt::Struct(decl) => (&decl.name, CandidateKind::Struct),
             Stmt::Class(decl) => (&decl.name, CandidateKind::Class),
             Stmt::Enum(decl) => (&decl.name, CandidateKind::Enum),
+            // A trait is valid in type position after `dyn` and as a `<T: …>` bound.
+            Stmt::Trait(decl) => (&decl.name, CandidateKind::Trait),
             _ => continue,
         };
         candidates.push(Candidate {
