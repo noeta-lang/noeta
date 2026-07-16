@@ -16,14 +16,20 @@ impl<'m> Vm<'m> {
         mut frames: Vec<Frame>,
         mut regs: Vec<Value>,
     ) -> Result<Value, Abort> {
+        self.run_depth += 1;
         // Give the register stack generous headroom up front (P-JIT J3): a native direct call only
         // fires when the callee window fits without reallocating (so the caller's register pointer
         // stays valid), so a pre-reserved buffer keeps common recursion on the fast path. A deeper
         // stack simply reallocates once and the direct-call check re-passes at the new capacity, so
         // this only affects performance, never correctness — and is a no-op without the `jit` feature.
+        // Outermost run only (audit-1 finding 5): a re-entrant entry — a closure applied per mapped
+        // element — must not pay a 64 KB reserve per call; its pooled stack grows once and stays.
         #[cfg(feature = "jit")]
-        regs.reserve(8192usize.saturating_sub(regs.len()));
+        if self.run_depth == 1 {
+            regs.reserve(8192usize.saturating_sub(regs.len()));
+        }
         let result = self.dispatch(&mut frames, &mut regs);
+        self.run_depth -= 1;
         if result.is_err() {
             // Capture this stack segment for the abort traceback, innermost frame first, before the
             // teardown below reclaims anything. Costs nothing until an abort actually happens.
@@ -81,26 +87,61 @@ impl<'m> Vm<'m> {
                 }
             }
         }
+        // Return the (now fully released) stacks to the re-entrant pool (finding 5) so the next
+        // re-entry pops them instead of allocating. On the `Ok` path both are already empty (the
+        // bottom frame's return truncated to base 0); on abort the teardown above released every
+        // value, so clearing loses nothing. Capacity caps keep a one-off deep run (or the
+        // JIT-reserved outermost stack) from pinning memory, exactly like `ctx_table_pool`.
+        if self.reentry_pool.len() < 8 && regs.capacity() <= 16384 && frames.capacity() <= 1024 {
+            frames.clear();
+            regs.clear();
+            self.reentry_pool.push((frames, regs));
+        }
         result
     }
 
-    /// The dispatch loop. Returns `Ok(value)` once the bottom frame returns (the stack is
-    /// then empty), or `Err(Abort)` with the stack left intact for [`Vm::run`] to release.
+    /// The dispatch loop's entry: stage the per-run inline-cache tables (from the pool — audit-1
+    /// finding 5) around [`Vm::dispatch_inner`]. Returns `Ok(value)` once the bottom frame returns
+    /// (the stack is then empty), or `Err(Abort)` with the stack left intact for [`Vm::run`] to
+    /// release.
     fn dispatch(&mut self, frames: &mut Vec<Frame>, regs: &mut Vec<Value>) -> Result<Value, Abort> {
         // Per-run inline caches, one slot per cacheable call site (`LoadField`/`CallMethod`),
         // indexed by the op's `cache` field. Each entry memoizes the last receiver shape and the
         // resolved field-slot / method prototype; a hit is a pointer compare against the cached
         // shape, skipping the field-name scan / `(type, method)` hashmap lookup. A local (not a
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
-        // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed shape.
-        let mut caches: Vec<Option<(&'static Shape, u32)>> =
-            vec![None; self.module.cache_slots as usize];
+        // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed
+        // shape. Pooled (finding 5): a re-entrant entry pops the spare pair instead of allocating
+        // two vectors sized to the whole module's cache-slot count; the entries were cleared on the
+        // previous exit, so a run still starts cold — the same fresh-per-run semantics as before.
+        let (mut caches, mut extern_caches) = self.cache_pool.pop().unwrap_or_default();
+        caches.resize(self.module.cache_slots as usize, None);
         // Extern-method route cache (H5 perf): per `CallMethod` site, the resolved routing for an
         // extern receiver, keyed by the extern type's name pointer (a registry `&'static str`, a
         // stable identity). A hit is one heap probe + one pointer compare — no registry scans on
         // the `signal.get()`/`.set()` hot paths.
-        let mut extern_caches: Vec<Option<(*const u8, crate::methods::ExternRoute)>> =
-            vec![None; self.module.cache_slots as usize];
+        extern_caches.resize(self.module.cache_slots as usize, None);
+        let result = self.dispatch_inner(frames, regs, &mut caches, &mut extern_caches);
+        // Cleared before pooling — a resolution must never carry across runs (a hot-swap or
+        // fragment install between entries can rebind a method).
+        caches.clear();
+        extern_caches.clear();
+        if self.cache_pool.len() < 8 {
+            self.cache_pool.push((caches, extern_caches));
+        }
+        result
+    }
+
+    /// The dispatch loop proper — deliberately ONE function containing the whole op match (see
+    /// the module header). `caches`/`extern_caches` are this entry's inline-cache tables, staged
+    /// by [`Vm::dispatch`].
+    fn dispatch_inner(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        caches: &mut Vec<MethodCacheEntry>,
+        extern_caches: &mut [ExternCacheEntry],
+    ) -> Result<Value, Abort> {
         // S3 dispatch window (P-VMT-DISP). The interpreter is two nested loops. The OUTER `'reload`
         // loop re-derives the active frame's register window — its base, prototype (`chunk`), and
         // starting `pc` — and is re-entered ONLY when control transfers to a *different* frame: a

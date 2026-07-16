@@ -491,6 +491,15 @@ pub(crate) struct SessionState {
     registry: Option<&'static noeta_stdlib::registry::Registry>,
 }
 
+/// One dispatch-loop inline-cache slot (`LoadField`/`CallMethod`, indexed by the op's `cache`
+/// field): the last receiver shape seen at the site and its resolved field-slot / method
+/// prototype. See [`Vm::dispatch`].
+pub(crate) type MethodCacheEntry = Option<(&'static Shape, u32)>;
+
+/// One extern-method route-cache slot (H5 perf): the extern type-name pointer (a registry
+/// `&'static str`, a stable identity) and the site's resolved routing. See [`Vm::dispatch`].
+pub(crate) type ExternCacheEntry = Option<(*const u8, crate::methods::ExternRoute)>;
+
 /// One program's worth of execution state, shared across every (possibly re-entrant) frame
 /// stack: the compiled module, the shared shape handles and instance-method table, the by-name
 /// global environment, captured stdout, and the diagnostics recorded so far.
@@ -554,6 +563,23 @@ struct Vm<'m> {
     /// drop clears + returns it — a hot `set` loop then runs alloc-free. A stack, so ctx
     /// re-entrancy (a called closure re-entering a dispatch) simply pops the next one.
     ctx_table_pool: Vec<Vec<Option<Value>>>,
+    /// Spare re-entrant run contexts (audit-1 finding 5, the `ctx_table_pool` pattern): a
+    /// re-entrant [`Vm::run`] entry — a closure applied per element by `map`/`filter`/the
+    /// iterator drains, a default thunk, a method handle, a destructor — pops a spare
+    /// frame + register stack instead of allocating both, and [`Vm::run`] clears + returns
+    /// them on exit. A stack, because re-entrancy nests.
+    reentry_pool: Vec<(Vec<Frame>, Vec<Value>)>,
+    /// Spare per-entry inline-cache tables for the dispatch loop (same finding): `dispatch`
+    /// pops a spare pair instead of allocating two vectors sized to the whole module's
+    /// `cache_slots` per entry. Cleared before returning to the pool — a resolution must
+    /// never carry across runs (a hot-swap between entries rebinds methods), exactly the
+    /// fresh-per-run semantics the previous locals had.
+    cache_pool: Vec<(Vec<MethodCacheEntry>, Vec<ExternCacheEntry>)>,
+    /// The current [`Vm::run`] nesting depth, maintained across re-entrant entries so the
+    /// JIT's generous register-stack reserve fires only on the outermost run (finding 5's
+    /// per-element 64 KB reserve gate).
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    run_depth: usize,
     /// Real-thread isolate state — see [`IsolateState`].
     isolates: IsolateState,
     /// Captured run output — see [`RunOutput`].

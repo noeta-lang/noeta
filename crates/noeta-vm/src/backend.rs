@@ -600,18 +600,18 @@ impl<'m> Vm<'m> {
     /// collector: those are [`Vm::teardown`]'s job, deferred so a session can run many entries between
     /// one load and one teardown (REPL-on-VM R0).
     pub(crate) fn run_top(&mut self) {
-        let regs = vec![Value::unit(); self.module.main().num_registers as usize];
-        let top = Frame {
+        let (mut frames, regs) = self.pooled_run_stacks(self.module.main().num_registers as usize);
+        frames.push(Frame {
             proto: 0,
             base: 0,
             pc: 0,
             ret_dst: 0,
             ret_transform: RetTransform::None,
             upvalues: Vec::new(),
-        };
+        });
         // The top-level frame's `Return`/`Halt` yields the program's (discarded) value; release
         // it. On abort `run` has already released every frame register.
-        if let Ok(v) = self.run(vec![top], regs) {
+        if let Ok(v) = self.run(frames, regs) {
             release(v);
         }
         // An abort (e.g. a detected deadlock, E0010) can leave open `concurrent` scopes whose tasks

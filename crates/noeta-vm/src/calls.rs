@@ -8,6 +8,22 @@
 use crate::*;
 
 impl<'m> Vm<'m> {
+    /// Pop a pooled re-entrant run context (audit-1 finding 5): an empty frame stack plus a
+    /// register stack sized to `num_registers` (unit-filled). The caller fills the argument
+    /// registers, pushes its entry frame, and hands both to [`Vm::run`], which clears and
+    /// returns them to the pool on exit — so a per-element re-entry (`xs.map(f)`) allocates
+    /// nothing once the pool is warm.
+    #[inline]
+    pub(crate) fn pooled_run_stacks(&mut self, num_registers: usize) -> (Vec<Frame>, Vec<Value>) {
+        let (frames, mut regs) = self.reentry_pool.pop().unwrap_or_default();
+        debug_assert!(
+            frames.is_empty() && regs.is_empty(),
+            "pooled stacks are clean"
+        );
+        regs.resize(num_registers, Value::unit());
+        (frames, regs)
+    }
+
     /// Call a value with already-owned arguments (each carrying one reference transferred to
     /// the callee), re-entering the VM on a fresh frame stack. Only closures are callable in
     /// this slice — builtins are never first-class values. Used by `map`/`filter`.
@@ -36,7 +52,7 @@ impl<'m> Vm<'m> {
                     ));
                 }
                 let filled = args.len();
-                let mut regs = vec![Value::unit(); num_registers];
+                let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
                 for (i, v) in args.into_iter().enumerate() {
                     regs[i] = v;
                 }
@@ -57,17 +73,15 @@ impl<'m> Vm<'m> {
                     retain(cell);
                     upvalues.push(cell);
                 }
-                self.run(
-                    vec![Frame {
-                        proto,
-                        base: 0,
-                        pc: 0,
-                        ret_dst: 0,
-                        ret_transform: RetTransform::None,
-                        upvalues,
-                    }],
-                    regs,
-                )
+                frames.push(Frame {
+                    proto,
+                    base: 0,
+                    pc: 0,
+                    ret_dst: 0,
+                    ret_transform: RetTransform::None,
+                    upvalues,
+                });
+                self.run(frames, regs)
             }
             None => match callee.as_native_fn() {
                 // A first-class builtin passed as the callee (e.g. `map(xs, len)`). The args are
@@ -499,7 +513,7 @@ impl<'m> Vm<'m> {
             let filled = args.len() + 1;
             let num_registers = chunk.num_registers as usize;
             let defaults = chunk.defaults.clone();
-            let mut regs = vec![Value::unit(); num_registers];
+            let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
             for (i, v) in args.into_iter().enumerate() {
                 regs[i + 1] = v;
             }
@@ -509,17 +523,15 @@ impl<'m> Vm<'m> {
                     regs[*reg as usize] = value;
                 }
             }
-            return self.run(
-                vec![Frame {
-                    proto,
-                    base: 0,
-                    pc: 0,
-                    ret_dst: 0,
-                    ret_transform: RetTransform::None,
-                    upvalues: Vec::new(),
-                }],
-                regs,
-            );
+            frames.push(Frame {
+                proto,
+                base: 0,
+                pc: 0,
+                ret_dst: 0,
+                ret_transform: RetTransform::None,
+                upvalues: Vec::new(),
+            });
+            return self.run(frames, regs);
         }
         // The receiver's runtime type names the method table entry, so a subtype dispatches to its
         // own method; fall back to the handle's declared type if the receiver has no shape.
@@ -567,7 +579,7 @@ impl<'m> Vm<'m> {
         }
         let filled = args.len();
         let defaults = chunk.defaults.clone();
-        let mut regs = vec![Value::unit(); num_registers];
+        let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
         for (i, v) in args.into_iter().enumerate() {
             regs[i] = v;
         }
@@ -578,17 +590,15 @@ impl<'m> Vm<'m> {
                 regs[*reg as usize] = value;
             }
         }
-        self.run(
-            vec![Frame {
-                proto,
-                base: 0,
-                pc: 0,
-                ret_dst: 0,
-                ret_transform: RetTransform::None,
-                upvalues: Vec::new(),
-            }],
-            regs,
-        )
+        frames.push(Frame {
+            proto,
+            base: 0,
+            pc: 0,
+            ret_dst: 0,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        });
+        self.run(frames, regs)
     }
 
     /// Run a defaulted parameter's zero-argument thunk prototype to its value, on a fresh frame
@@ -604,18 +614,16 @@ impl<'m> Vm<'m> {
             retain(cell);
             ups.push(cell);
         }
-        let regs = vec![Value::unit(); num_registers];
-        self.run(
-            vec![Frame {
-                proto,
-                base: 0,
-                pc: 0,
-                ret_dst: 0,
-                ret_transform: RetTransform::None,
-                upvalues: ups,
-            }],
-            regs,
-        )
+        let (mut frames, regs) = self.pooled_run_stacks(num_registers);
+        frames.push(Frame {
+            proto,
+            base: 0,
+            pc: 0,
+            ret_dst: 0,
+            ret_transform: RetTransform::None,
+            upvalues: ups,
+        });
+        self.run(frames, regs)
     }
 
     /// Set up a call to `callee_val` on the shared frame/register stacks — the closure-call machinery
@@ -851,20 +859,18 @@ impl<'m> Vm<'m> {
                         ),
                     ));
                 }
-                let mut regs = vec![Value::unit(); chunk.num_registers as usize];
+                let (mut frames, mut regs) = self.pooled_run_stacks(chunk.num_registers as usize);
                 retain(recv);
                 regs[0] = recv;
-                return self.run(
-                    vec![Frame {
-                        proto,
-                        base: 0,
-                        pc: 0,
-                        ret_dst: 0,
-                        ret_transform: RetTransform::None,
-                        upvalues: Vec::new(),
-                    }],
-                    regs,
-                );
+                frames.push(Frame {
+                    proto,
+                    base: 0,
+                    pc: 0,
+                    ret_dst: 0,
+                    ret_transform: RetTransform::None,
+                    upvalues: Vec::new(),
+                });
+                return self.run(frames, regs);
             }
         }
         self.call_builtin(func, args, span)
