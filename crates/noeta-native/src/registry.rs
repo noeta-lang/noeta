@@ -123,7 +123,14 @@ pub struct SpawnBox(pub Box<dyn crate::ExternIo>);
 
 impl Clone for SpawnBox {
     fn clone(&self) -> SpawnBox {
-        unreachable!("a Spawn result is one-shot — ticketed at the dispatch return, never cloned")
+        // Reaching this is a dispatch-author bug, not a user error: `NativeOut` derives `Clone`
+        // for its VALUE variants, but a `Spawn` is one-shot WORK the backend tickets on the
+        // executor at the dispatch return. Name the fix rather than aborting opaquely (F4).
+        unreachable!(
+            "a NativeOut::Spawn is one-shot async work, not a value — it is ticketed on the \
+             executor at the dispatch return and must never be cloned (return it directly from \
+             the dispatch; don't store or duplicate a Spawn result)"
+        )
     }
 }
 
@@ -1185,7 +1192,14 @@ impl Registry {
         args: &[crate::Slot],
     ) -> Result<crate::CtxOut, crate::CtxError> {
         match self.find_module(module).and_then(|m| m.ctx_dispatch) {
-            Some(d) => d(func, ctx, args),
+            Some(d) => {
+                let result = d(func, ctx, args);
+                #[cfg(debug_assertions)]
+                if let Ok(crate::CtxOut::Out(out)) = &result {
+                    self.debug_verify_out(module, func, out);
+                }
+                result
+            }
             None => Err(crate::no_function_error(module, func).into()),
         }
     }
@@ -1302,7 +1316,14 @@ impl Registry {
         args: &[crate::Slot],
     ) -> Result<crate::CtxOut, crate::CtxError> {
         match self.resolve_type(type_name).and_then(|t| t.ctx_dispatch) {
-            Some(d) => d(method, ctx, recv, args),
+            Some(d) => {
+                let result = d(method, ctx, recv, args);
+                #[cfg(debug_assertions)]
+                if let Ok(crate::CtxOut::Out(out)) = &result {
+                    self.debug_verify_out(type_name, method, out);
+                }
+                result
+            }
             None => Err(crate::no_method_error(type_name, method).into()),
         }
     }
@@ -1322,7 +1343,12 @@ impl Registry {
                 message: format!("`{type_name}` is not a registered type"),
             });
         };
-        (ext.dispatch)(recv, method, host, args)
+        let result = (ext.dispatch)(recv, method, host, args);
+        #[cfg(debug_assertions)]
+        if let Ok(out) = &result {
+            self.debug_verify_out(type_name, method, out);
+        }
+        result
     }
 
     /// Dispatch a registered module function.
@@ -1334,9 +1360,111 @@ impl Registry {
         args: &[crate::NativeValue],
     ) -> Result<crate::NativeOut, StdError> {
         match self.find_module(module) {
-            Some(m) => (m.dispatch)(func, host, args),
+            Some(m) => {
+                let result = (m.dispatch)(func, host, args);
+                #[cfg(debug_assertions)]
+                if let Ok(out) = &result {
+                    self.debug_verify_out(module, func, out);
+                }
+                result
+            }
             None => Err(crate::no_function_error(module, func)),
         }
+    }
+
+    // ----- debug-mode author-contract verification (audit-2 F4) ---------------------------------
+    //
+    // Contracts the ABI documents but the types cannot enforce, checked where a wrong extension
+    // would otherwise corrupt quietly: at the dispatch return, the one seam every produced value
+    // crosses. `debug_assertions`-gated — release dispatch is byte-identical, and the checks are
+    // per-value walks over already-cold IO/orchestration paths in dev builds only.
+
+    /// Walk a dispatch result for extern values and verify each against its registration —
+    /// `type_name()` must resolve (a typo'd name otherwise errors at *first method call*, per
+    /// value), and a `key_capable` type gets a one-shot equality/order/hash spot check.
+    #[cfg(debug_assertions)]
+    fn debug_verify_out(&self, owner: &str, func: &str, out: &crate::NativeOut) {
+        use crate::NativeOut as O;
+        match out {
+            O::Extern(e) => self.debug_verify_extern(owner, func, &**e),
+            O::Some(inner) => self.debug_verify_out(owner, func, inner),
+            O::List(items) => {
+                for item in items {
+                    self.debug_verify_out(owner, func, item);
+                }
+            }
+            O::Struct { fields, .. } => {
+                for (_, value) in fields {
+                    self.debug_verify_out(owner, func, value);
+                }
+            }
+            O::Map(entries) => {
+                for (_, value) in entries {
+                    self.debug_verify_out(owner, func, value);
+                }
+            }
+            O::Scalar(_)
+            | O::Str(_)
+            | O::Bytes(_)
+            | O::Unit
+            | O::Object(_)
+            | O::Scalars(_)
+            | O::None
+            | O::Spawn(_) => {}
+        }
+    }
+
+    /// The per-extern half of [`Registry::debug_verify_out`].
+    #[cfg(debug_assertions)]
+    fn debug_verify_extern(&self, owner: &str, func: &str, value: &dyn crate::ExternValue) {
+        let name = value.type_name();
+        let Some(ext) = self.resolve_type(name) else {
+            panic!(
+                "extension author contract violated: `{owner}.{func}` returned an extern value \
+                 whose type_name() is `{name}`, which is not a registered type in this registry — \
+                 ExternValue::type_name must equal the ExtType::name the value belongs to"
+            );
+        };
+        if !ext.key_capable {
+            return;
+        }
+        // One spot check per key-capable type per process (debug builds): `key_capable` promises
+        // a total order and a stable, content-derived hash. A broken promise corrupts BTreeMap
+        // invariants / set canonicalization silently — wrong answers, never an error.
+        use std::sync::{Mutex, OnceLock};
+        static CHECKED: OnceLock<Mutex<std::collections::HashSet<&'static str>>> = OnceLock::new();
+        let mut checked = CHECKED
+            .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+            .lock()
+            .expect("key-contract check set poisoned");
+        if !checked.insert(name) {
+            return;
+        }
+        drop(checked);
+        let clone = value.clone_box();
+        let contract = |what: &str| {
+            format!(
+                "extension author contract violated for key_capable type `{name}` (returned by \
+                 `{owner}.{func}`): {what} — key_capable promises content-derived equality, a \
+                 total order, and a stable hash (see ExtType::key_capable)"
+            )
+        };
+        assert!(
+            value.eq_value(&*clone) && clone.eq_value(value),
+            "{}",
+            contract("a value must equal its own clone under eq_value, both ways")
+        );
+        assert!(
+            value.cmp_value(&*clone) == Some(std::cmp::Ordering::Equal)
+                && clone.cmp_value(value) == Some(std::cmp::Ordering::Equal),
+            "{}",
+            contract("cmp_value over a value and its clone must be Some(Equal), both ways")
+        );
+        assert!(
+            value.hash_value() == clone.hash_value(),
+            "{}",
+            contract("hash_value must be content-derived (a clone must hash identically)")
+        );
     }
 }
 
@@ -1527,6 +1655,97 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     }
                 }
             }
+        }
+    }
+    // Author contracts the ABI states in prose but the types cannot enforce (audit-2 F4). Each of
+    // these misuses used to compile clean and fail deep at first call — a runtime "unknown name",
+    // a routing miss, or silent checker/dispatch disagreement. Assembly is the one point every
+    // path (CLI, composed shim, embed session, lazy default) passes through, so they refuse here,
+    // naming the offending declaration.
+    for unit in units {
+        for module in unit.modules() {
+            // A name must live in exactly one dispatch table — routing checks the plain table
+            // first, so a doubly-declared name would silently never reach its ctx dispatch.
+            for f in module.functions {
+                if module.ctx_functions.iter().any(|c| c.name == f.name) {
+                    return Err(format!(
+                        "function `{}` of module `{}` (unit `{}`) is declared in both `functions` \
+                         and `ctx_functions` — a name must live in exactly one dispatch table",
+                        f.name,
+                        module.name,
+                        unit.name()
+                    ));
+                }
+            }
+            // A declared higher-order surface with no dispatch to route it to would type-check
+            // calls that then fail as "no function" at runtime.
+            if !module.ctx_functions.is_empty() && module.ctx_dispatch.is_none() {
+                return Err(format!(
+                    "module `{}` (unit `{}`) declares ctx_functions but no ctx_dispatch",
+                    module.name,
+                    unit.name()
+                ));
+            }
+            for f in module.functions.iter().chain(module.ctx_functions) {
+                validate_optional_tail(f, &format!("module `{}`", module.name), unit.name())?;
+            }
+        }
+        for t in unit.types() {
+            for m in t.methods {
+                if t.ctx_methods.iter().any(|c| c.name == m.name) {
+                    return Err(format!(
+                        "method `{}` of type `{}` (unit `{}`) is declared in both `methods` and \
+                         `ctx_methods` — a name must live in exactly one dispatch table",
+                        m.name,
+                        t.name,
+                        unit.name()
+                    ));
+                }
+            }
+            if !t.ctx_methods.is_empty() && t.ctx_dispatch.is_none() {
+                return Err(format!(
+                    "type `{}` (unit `{}`) declares ctx_methods but no ctx_dispatch",
+                    t.name,
+                    unit.name()
+                ));
+            }
+            // `arena_getter` marks one of the *ctx* methods as an inlineable arena read; a name
+            // outside that table would make the backend's fast path and the declared surface
+            // disagree (the read would inline for a method the type never dispatches).
+            if let Some((getter, _)) = t.arena_getter
+                && !t.ctx_methods.iter().any(|m| m.name == getter)
+            {
+                return Err(format!(
+                    "type `{}` (unit `{}`) declares arena_getter `{getter}`, which is not one of \
+                     its ctx_methods",
+                    t.name,
+                    unit.name()
+                ));
+            }
+            for m in t.methods.iter().chain(t.ctx_methods) {
+                validate_optional_tail(m, &format!("type `{}`", t.name), unit.name())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enforce the documented [`SigType::Optional`] convention — "once a parameter is `Optional`,
+/// every following parameter is too". The checker derives the required-argument count from the
+/// *first* optional, so a required parameter after an optional one would be silently uncheckable.
+fn validate_optional_tail(f: &ExtFn, owner: &str, unit: &str) -> Result<(), String> {
+    let mut seen_optional = false;
+    for p in f.params {
+        match p {
+            SigType::Optional(_) => seen_optional = true,
+            _ if seen_optional => {
+                return Err(format!(
+                    "`{}` of {owner} (unit `{unit}`) declares a required parameter after an \
+                     Optional one — optional parameters must form the trailing tail",
+                    f.name
+                ));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -2124,6 +2343,196 @@ mod runtime_registry_tests {
     fn shared_root_across_units_is_fine() {
         // The std pattern: six units all rooted `std`. Distinct names, distinct modules.
         validate(&[&A, &A2]).expect("shared roots across distinctly-named units are valid");
+    }
+
+    // --- author-contract checks (audit-2 F4) ---
+
+    #[test]
+    fn an_arena_getter_outside_the_ctx_methods_is_rejected() {
+        // `arena_getter` marks one of the CTX methods as an inlineable read; a name outside that
+        // table would make the backend's fast route and the dispatch surface disagree.
+        const T_BAD_GETTER: ExtType = ExtType {
+            name: "Cellish",
+            namespace: "k",
+            ctx_methods: &[ExtFn {
+                name: "get",
+                ..ExtFn::DEFAULTS
+            }],
+            ctx_dispatch: Some(|_, _, _, _| Err(crate::panic_error("unused").into())),
+            arena_getter: Some(("peek", |_| 0)),
+            ..ExtType::DEFAULTS
+        };
+        static K: TypedUnit = TypedUnit("k.core", "k", &[T_BAD_GETTER]);
+        assert!(
+            validate(&[&K]).is_err(),
+            "an arena_getter naming a non-ctx method must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_ctx_table_without_a_ctx_dispatch_is_rejected() {
+        const M_NO_DISPATCH: ExtModule = ExtModule {
+            name: "orphan",
+            ctx_functions: &[ExtFn {
+                name: "go",
+                ..ExtFn::DEFAULTS
+            }],
+            // ctx_dispatch stays the DEFAULTS `None` — declared surface, nothing to route to.
+            ..ExtModule::DEFAULTS
+        };
+        static L: Unit = Unit("l.core", "l", &[M_NO_DISPATCH]);
+        assert!(
+            validate(&[&L]).is_err(),
+            "ctx_functions with no ctx_dispatch must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_name_in_both_dispatch_tables_is_rejected() {
+        // Routing consults the plain table first, so a doubly-declared name would silently never
+        // reach its ctx dispatch.
+        const F_GO: ExtFn = ExtFn {
+            name: "go",
+            ..ExtFn::DEFAULTS
+        };
+        const M_DOUBLE: ExtModule = ExtModule {
+            name: "both",
+            functions: &[F_GO],
+            ctx_functions: &[F_GO],
+            ctx_dispatch: Some(|_, _, _| Err(crate::panic_error("unused").into())),
+            ..ExtModule::DEFAULTS
+        };
+        static M: Unit = Unit("m.core", "m", &[M_DOUBLE]);
+        assert!(
+            validate(&[&M]).is_err(),
+            "a name in both functions and ctx_functions must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn a_required_param_after_an_optional_one_is_rejected() {
+        // The checker derives the required-arg count from the FIRST Optional, so a required
+        // parameter after it would be silently uncheckable.
+        const M_BAD_TAIL: ExtModule = ExtModule {
+            name: "tail",
+            functions: &[ExtFn {
+                name: "f",
+                params: &[SigType::Optional(&SigType::Int), SigType::String],
+                ..ExtFn::DEFAULTS
+            }],
+            ..ExtModule::DEFAULTS
+        };
+        static N: Unit = Unit("n.core", "n", &[M_BAD_TAIL]);
+        assert!(
+            validate(&[&N]).is_err(),
+            "a required parameter after an Optional must refuse to assemble"
+        );
+    }
+
+    /// A minimal extern value whose key contract is deliberately broken: `cmp_value` answers
+    /// `None` (no total order) even though its type registers `key_capable`.
+    #[cfg(debug_assertions)]
+    #[derive(Debug, Clone)]
+    struct BadKey;
+
+    #[cfg(debug_assertions)]
+    impl crate::ExternValue for BadKey {
+        fn type_name(&self) -> &'static str {
+            "BadKey"
+        }
+        fn eq_value(&self, other: &dyn crate::ExternValue) -> bool {
+            other.as_any().downcast_ref::<BadKey>().is_some()
+        }
+        fn cmp_value(&self, _other: &dyn crate::ExternValue) -> Option<std::cmp::Ordering> {
+            None // the broken promise
+        }
+        fn hash_value(&self) -> u64 {
+            0
+        }
+        fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+            write!(out, "badkey")
+        }
+        fn clone_box(&self) -> Box<dyn crate::ExternValue> {
+            Box::new(self.clone())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    // Debug builds only — the verifier is compiled out of release dispatch entirely.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_verifier_catches_the_broken_author_contracts() {
+        const T_BADKEY: ExtType = ExtType {
+            name: "BadKey",
+            namespace: "q",
+            key_capable: true,
+            ..ExtType::DEFAULTS
+        };
+        static Q: TypedUnit = TypedUnit("q.core", "q", &[T_BADKEY]);
+        let reg = Registry::new(vec![&Q]);
+
+        // A dispatch result whose extern type_name resolves nowhere: the typo'd-name contract
+        // (`ExternValue::type_name` must equal the `ExtType::name`) fails at the dispatch return
+        // with a message naming the origin, not at first method call per value.
+        /// The typo case: `type_name()` answers a name no ExtType registers.
+        #[derive(Debug, Clone)]
+        struct Typo;
+        impl crate::ExternValue for Typo {
+            fn type_name(&self) -> &'static str {
+                "BadKye" // sic
+            }
+            fn eq_value(&self, other: &dyn crate::ExternValue) -> bool {
+                other.as_any().downcast_ref::<Typo>().is_some()
+            }
+            fn cmp_value(&self, _other: &dyn crate::ExternValue) -> Option<std::cmp::Ordering> {
+                None
+            }
+            fn hash_value(&self) -> u64 {
+                0
+            }
+            fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+                write!(out, "typo")
+            }
+            fn clone_box(&self) -> Box<dyn crate::ExternValue> {
+                Box::new(self.clone())
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        // `catch_unwind` requires unwind-safe captures; the registry and outs hold trait objects,
+        // so move each into its closure via AssertUnwindSafe (the closures only read them, and
+        // nothing observes them after the panic).
+        use std::panic::AssertUnwindSafe;
+        let unregistered = crate::NativeOut::Extern(crate::ExternBox::new(Typo));
+        let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            reg.debug_verify_out("q.mod", "make", &unregistered)
+        }));
+        assert!(
+            caught.is_err(),
+            "an unregistered type_name must panic in debug"
+        );
+
+        // A key_capable type whose cmp_value is not a total order fails the one-shot spot check —
+        // wrapped in Some/List to prove the walk recurses into containers.
+        let nested = crate::NativeOut::Some(Box::new(crate::NativeOut::List(vec![
+            crate::NativeOut::Extern(crate::ExternBox::new(BadKey)),
+        ])));
+        let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            reg.debug_verify_out("q.mod", "key", &nested)
+        }));
+        assert!(
+            caught.is_err(),
+            "a broken key_capable contract must panic in debug"
+        );
     }
 
     // One test drives the whole process-global lifecycle (the `OnceLock` is per-process, so

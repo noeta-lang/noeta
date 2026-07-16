@@ -49,31 +49,65 @@ impl ParsedArgs {
     pub fn push_str(&mut self, name: &'static str, value: String) {
         self.strs.push((name, value));
     }
+    /// The parsed [`ArgKind::Str`] argument `name`, or `None` when no string argument of that
+    /// name was declared/parsed — the honest probe behind [`ParsedArgs::str`].
+    pub fn get_str(&self, name: &str) -> Option<&str> {
+        self.strs
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.as_str())
+    }
+    /// The parsed [`ArgKind::Path`] argument `name`, or `None` — see [`ParsedArgs::get_str`].
+    pub fn get_path(&self, name: &str) -> Option<&Path> {
+        self.paths
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.as_path())
+    }
+    /// The parsed [`ArgKind::Int`] argument `name`, or `None` — see [`ParsedArgs::get_str`].
+    pub fn get_int(&self, name: &str) -> Option<i64> {
+        self.ints.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+    }
+
+    // The panicking accessors below are the ergonomic form for a command body reading its OWN
+    // declared args (the CLI parses every declared arg, defaults included, before `run`). Asking
+    // for an undeclared name is an author bug, not user input — `#[track_caller]` points the
+    // panic at the command body's line and the message names the missing declaration, instead of
+    // the bare `Option::expect` that used to abort the CLI opaquely (audit-2 F4).
+
     /// The declared [`ArgKind::Str`] argument `name` (defaulted by the CLI when absent).
+    /// Panics when `name` was never declared as a string arg — declare it in the command's
+    /// [`ArgSpec`]s, or probe with [`ParsedArgs::get_str`].
+    #[track_caller]
     pub fn str(&self, name: &str) -> &str {
-        &self
-            .strs
-            .iter()
-            .find(|(n, _)| *n == name)
-            .expect("a declared string argument is always parsed")
-            .1
+        self.get_str(name).unwrap_or_else(|| {
+            panic!(
+                "command argument `{name}` was not declared as a string arg (ArgKind::Str) — \
+                 add it to the ExtCommand's ArgSpecs, or use ParsedArgs::get_str"
+            )
+        })
     }
-    /// The declared [`ArgKind::Path`] argument `name` (the CLI guarantees presence).
+    /// The declared [`ArgKind::Path`] argument `name` (the CLI guarantees presence). Panics when
+    /// `name` was never declared as a path arg — see [`ParsedArgs::str`].
+    #[track_caller]
     pub fn path(&self, name: &str) -> &Path {
-        &self
-            .paths
-            .iter()
-            .find(|(n, _)| *n == name)
-            .expect("a declared path argument is always parsed")
-            .1
+        self.get_path(name).unwrap_or_else(|| {
+            panic!(
+                "command argument `{name}` was not declared as a path arg (ArgKind::Path) — \
+                 add it to the ExtCommand's ArgSpecs, or use ParsedArgs::get_path"
+            )
+        })
     }
-    /// The declared [`ArgKind::Int`] argument `name` (defaulted by the CLI when absent).
+    /// The declared [`ArgKind::Int`] argument `name` (defaulted by the CLI when absent). Panics
+    /// when `name` was never declared as an int arg — see [`ParsedArgs::str`].
+    #[track_caller]
     pub fn int(&self, name: &str) -> i64 {
-        self.ints
-            .iter()
-            .find(|(n, _)| *n == name)
-            .expect("a declared int argument is always parsed")
-            .1
+        self.get_int(name).unwrap_or_else(|| {
+            panic!(
+                "command argument `{name}` was not declared as an int arg (ArgKind::Int) — \
+                 add it to the ExtCommand's ArgSpecs, or use ParsedArgs::get_int"
+            )
+        })
     }
 }
 
