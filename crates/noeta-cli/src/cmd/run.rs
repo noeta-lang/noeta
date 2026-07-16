@@ -5,39 +5,37 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use noeta_pm::manifest;
+use noeta_runner::compile::Loaded;
 use noeta_runner::{compile_real, compile_whole_file};
 use noeta_span::SourceMap;
 
 use crate::compose;
 use crate::output::emit_diagnostics_mapped;
 
-/// Type-check and run a program, writing stdout to the real stdout and rendering any diagnostics to
-/// stderr — each against the source its span belongs to (via the `SourceMap`). Returns the process
-/// exit code. `program` is the loaded program, possibly after dev-tier activation (`cmd_run`).
-pub(crate) fn run_program(
-    program: &noeta_ast::Program,
-    editions: &noeta_lexer::EditionMap,
-    sources: &SourceMap,
-    args: Vec<String>,
-) -> i32 {
+/// Type-check and run a loaded program, writing stdout to the real stdout and rendering any
+/// diagnostics to stderr — each against the source its span belongs to (via the `SourceMap`).
+/// Returns the process exit code. `loaded.program` is the linked program, possibly after
+/// dev-tier activation or an entry-call synthesis (extension commands).
+pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
-    // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
-    // needs, so the checker runs exactly once (it previously ran again inside the backend).
-    let checked = noeta_check::check_all_with_editions(program, editions.clone());
+    // One `Loaded::check` (editions threaded structurally) produces both the gate diagnostics and
+    // the `type_of` site map the backend needs, so the checker runs exactly once (it previously
+    // ran again inside the backend).
+    let checked = loaded.check();
     if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(sources, checked.diagnostics.iter());
+        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
         return 1;
     }
 
-    match execute_real_host(program, &checked, args) {
+    match execute_real_host(&loaded.program, &checked, args) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
-            emit_diagnostics_mapped(sources, result.diagnostics.iter());
+            emit_diagnostics_mapped(&loaded.sources, result.diagnostics.iter());
             // An abort's stack trace, after the diagnostic it belongs to. Only when there is a call
             // chain to show — a single-frame trace repeats what the diagnostic's span already says.
             if trace.len() >= 2 {
-                eprint!("{}", noeta_vm::render_trace(&trace, sources));
+                eprint!("{}", noeta_vm::render_trace(&trace, &loaded.sources));
             }
             result.exit_code
         }

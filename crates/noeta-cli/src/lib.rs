@@ -39,6 +39,7 @@ use noeta_runner::resolve_providers;
 
 mod cmd;
 mod compose;
+mod context;
 mod docgen;
 mod output;
 mod watch;
@@ -770,62 +771,6 @@ pub fn run_cli(
     }
 }
 
-/// For a tier runner: whether its `tier` is live under `--target`. `Ok(true)` when no target was
-/// given (the runner always runs); `Ok(false)` when a target was given but does not make `tier`
-/// live (the runner should no-op); `Err` on a target-resolution failure (a fatal error the caller
-/// prints).
-/// The active tier → provider map for `--target` (empty with no target — default resolution:
-/// extension declarations first). The tier-execution layer dispatches on this: `"std"` runs the
-/// native built-in runner, a dependency key runs that package's `@tier` runner.
-fn tier_active_in_target(
-    entry: &std::path::Path,
-    target: &Option<String>,
-    tier: &str,
-) -> Result<bool, String> {
-    match target {
-        None => Ok(true),
-        Some(name) => Ok(manifest::resolve_active_tiers(entry, name)?
-            .iter()
-            .any(|t| t == tier)),
-    }
-}
-
-/// Gate a tier runner on `--target`: if a target was given and does not make `tier` live, print a
-/// note and return the success exit code (the runner no-ops); on a resolution failure, print it and
-/// return the error code. `None` means "proceed" (no target gate). The caller runs its body only
-/// when this returns `None`.
-pub(crate) fn target_gate(
-    entry: &std::path::Path,
-    target: &Option<String>,
-    tier: &str,
-) -> Option<ExitCode> {
-    match tier_active_in_target(entry, target, tier) {
-        Ok(true) => None,
-        Ok(false) => {
-            println!(
-                "tier `{tier}` is not active in target `{}`",
-                target.as_deref().unwrap_or_default()
-            );
-            Some(ExitCode::SUCCESS)
-        }
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            Some(ExitCode::from(1))
-        }
-    }
-}
-
-/// Load and link `file` **with its dependency packages resolved** — the same dep-aware path
-/// `run`/`check` use — rendering any failure. The tier runners (`test`/`bench`/`doc`) share this:
-/// a program whose tier content imports from a dependency (a test exercising `use fuzzkit.…`, a
-/// declared tier's runner) must link exactly as it does for a run.
-pub(crate) fn load_linked(file: &std::path::Path) -> Result<noeta_loader::Linked, ExitCode> {
-    // The shared front half (drift firewall): deps + edition resolve exactly as `noeta run`'s
-    // pipeline resolves them; the verbs stage tier activation themselves.
-    let facts = noeta_runner::compile::resolve_front(file, &[], &None).map_err(|f| f.report())?;
-    noeta_runner::compile::load_linked(file, &facts).map_err(|f| f.report())
-}
-
 /// Build the clap subcommand for an extension-contributed command (higher-order-abi H6) from
 /// its declared [`noeta_stdlib::ArgSpec`]s — real help text and validation, same as a core verb.
 /// The external-binary command form (package-manager Phase 3, N3.7 — the `cargo-<name>` model):
@@ -1063,7 +1008,7 @@ pub(crate) fn run_declared_tier(
     // One check over the whole dispatch program: the user's code, the stamped attributes, the
     // runner's signature, and the synthesized call all validate together — under the project's
     // per-package editions (the user code keeps its source ids; the synthesized nodes are default).
-    let checked = noeta_check::check_all_with_editions(&program, linked.editions.clone());
+    let checked = context::check_under(&program, &linked.editions);
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return ExitCode::from(1);

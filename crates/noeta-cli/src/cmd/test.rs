@@ -9,12 +9,11 @@ use std::thread;
 
 use noeta_ast::{AttrValue, Expr, Program, Stmt};
 use noeta_check::TierFn;
-use noeta_runner::resolve_providers;
 use noeta_span::Span;
 
 use crate::cmd::run::execute_real_host;
-use crate::output::{emit_diagnostics_mapped, plural};
-use crate::{compose, load_linked, run_declared_tier, target_gate};
+use crate::context::{Prologue, check_under, tier_prologue};
+use crate::output::plural;
 
 /// The outcome of running one `@test` fn: whether it passed, the failure message (the first
 /// diagnostic, typically the assertion/panic), and anything it wrote to stdout (shown on failure).
@@ -39,53 +38,14 @@ pub(crate) fn cmd_test(
     json: bool,
     target: &Option<String>,
 ) -> ExitCode {
-    if let Some(code) = compose::maybe_delegate(file) {
-        return code;
-    }
-    if let Some(code) = target_gate(file, target, "test") {
-        return code;
-    }
-    let linked = match load_linked(file) {
-        Ok(linked) => linked,
-        Err(code) => return code,
+    // The shared tier prologue: compose delegation, the `--target` gate, the dep-aware load,
+    // provider dispatch (a `test = "<pkg>"` target hands the tier to that package's runner),
+    // activation diagnostics, and the whole-program type check.
+    let run = match tier_prologue(file, "test", target) {
+        Prologue::Ran(code) => return code,
+        Prologue::Ready(run) => *run,
     };
-
-    // Activate the `test` tier: inline its `@test` blocks as ordinary top-level declarations and
-    // collect the test fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
-    // The target's provider selection (provider dispatch): `test = "<pkg>"` in the target's
-    // tiers map hands this tier to that package's `@tier(test)` runner instead of the native
-    // one. Default (no target, or `"std"`) keeps the native path below.
-    let providers = match resolve_providers(file, target) {
-        Ok(map) => map,
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            return ExitCode::from(2);
-        }
-    };
-    let activated = noeta_check::activate_tiers_with(&linked.program, &["test"], &providers);
-    match activated.registry.resolve_provider("test", &providers) {
-        Ok(noeta_check::ResolvedProvider::Extension) => {}
-        Ok(noeta_check::ResolvedProvider::Declared(d)) => {
-            let tier = d.clone();
-            return run_declared_tier("test", &linked, activated, tier);
-        }
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            return ExitCode::from(2);
-        }
-    }
-    if !activated.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-        return ExitCode::from(1);
-    }
-
-    // Type-check the activated program once, so a broken test is a compile error reported a single
-    // time here rather than redundantly inside every per-test run.
-    let checked = noeta_check::check_all_with_editions(&activated.program, linked.editions.clone());
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
-        return ExitCode::from(1);
-    }
+    let activated = &run.activated;
 
     if activated.tests.is_empty() {
         if json {
@@ -167,7 +127,7 @@ pub(crate) fn cmd_test(
 
     let outcomes = run_tests(
         &setup,
-        &linked.editions,
+        &run.editions,
         &cases,
         activated.program.span,
         jobs,
@@ -437,7 +397,7 @@ pub(crate) fn run_one_test(
     stmts.push(call_stmt(&case.fn_name, args, case.span));
     let program = Program { stmts, span };
 
-    let checked = noeta_check::check_all_with_editions(&program, editions.clone());
+    let checked = check_under(&program, editions);
     if !checked.diagnostics.is_empty() {
         return TestOutcome {
             name: display,

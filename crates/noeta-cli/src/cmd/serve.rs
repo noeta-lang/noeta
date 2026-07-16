@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use noeta_diagnostics::render;
 use noeta_pm::{graph, manifest};
+use noeta_runner::compile::Loaded;
 use noeta_runner::compile_real;
 use noeta_span::SourceMap;
 use noeta_vm::VmBackend;
@@ -147,21 +148,23 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 return 2;
             }
         };
-        let mut linked =
-            match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
-                Err(err) => {
-                    eprintln!("noeta: cannot read {}: {err}", file.display());
-                    return 2;
+        let linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
+            Err(err) => {
+                eprintln!("noeta: cannot read {}: {err}", file.display());
+                return 2;
+            }
+            Ok(Err(load_diagnostics)) => {
+                let mut stderr = io::stderr();
+                for ld in &load_diagnostics {
+                    let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
                 }
-                Ok(Err(load_diagnostics)) => {
-                    let mut stderr = io::stderr();
-                    for ld in &load_diagnostics {
-                        let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-                    }
-                    return 1;
-                }
-                Ok(Ok(linked)) => linked,
-            };
+                return 1;
+            }
+            Ok(Ok(linked)) => linked,
+        };
+        // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
+        // editions-threading choke point (audit-3 F8).
+        let mut loaded = crate::context::loaded(linked);
 
         // Synthesize `<module>.<func>(<args>)` as a trailing top-level statement. The program
         // supplies any identifiers the call names (`fetch`); a missing one surfaces as an
@@ -220,7 +223,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 args,
                 span: sp,
             };
-            linked.program.stmts.push(Stmt::Expr {
+            loaded.program.stmts.push(Stmt::Expr {
                 expr: call,
                 span: sp,
             });
@@ -232,20 +235,14 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         // Hot mode (server-hmr W1, armed by the `--watch` wrapper for `serve`): run through the
         // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.
         if std::env::var_os("NOETA_HOT").is_some() {
-            return run_program_hot(file, &linked.program, &linked.editions, &linked.sources);
+            return run_program_hot(file, &loaded);
         }
         // An entry call injected before compiling means the module differs from `run`'s for the
         // same source — a command run must never share the startup cache's `(source+tiers)` key,
         // and stays on the uncached `run_program` path (commands like `serve` are also
         // long-lived, so they would barely benefit). Commands take no program pass-through args;
         // the program sees the real process argv.
-        u8::try_from(run_program(
-            &linked.program,
-            &linked.editions,
-            &linked.sources,
-            std::env::args().collect(),
-        ))
-        .unwrap_or(1)
+        u8::try_from(run_program(&loaded, std::env::args().collect())).unwrap_or(1)
     }
 
     fn serve_parallel(
@@ -283,7 +280,7 @@ pub(crate) fn serve_parallel_impl(
             return 2;
         }
     };
-    let mut linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
+    let linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
         Err(err) => {
             eprintln!("noeta: cannot read {}: {err}", file.display());
             return 2;
@@ -297,6 +294,9 @@ pub(crate) fn serve_parallel_impl(
         }
         Ok(Ok(linked)) => linked,
     };
+    // Rewrap as the runner's `Loaded` so the type check below rides `Loaded::check` — the
+    // editions-threading choke point (audit-3 F8).
+    let mut loaded = crate::context::loaded(linked);
 
     // In hot mode (`--parallel --watch`, server-hmr F5) the handler is a TRAMPOLINE
     // `fn(req) => fetch(req)`, so the serve loop's one-shot handler capture late-binds `fetch`
@@ -348,14 +348,14 @@ pub(crate) fn serve_parallel_impl(
         ],
         span: sp,
     };
-    linked.program.stmts.push(Stmt::Expr {
+    loaded.program.stmts.push(Stmt::Expr {
         expr: call,
         span: sp,
     });
 
-    let checked = noeta_check::check_all_with_editions(&linked.program, linked.editions.clone());
+    let checked = loaded.check();
     if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
         return 1;
     }
 
@@ -376,9 +376,9 @@ pub(crate) fn serve_parallel_impl(
     if hot {
         return serve_parallel_hot(
             file,
-            &linked.program,
+            &loaded.program,
             &checked,
-            &linked.sources,
+            &loaded.sources,
             base,
             workers,
             args,
@@ -387,7 +387,7 @@ pub(crate) fn serve_parallel_impl(
         );
     }
 
-    let module = match compile_real(&linked.program, &checked) {
+    let module = match compile_real(&loaded.program, &checked) {
         Ok(m) => std::sync::Arc::new(m),
         Err(err) => {
             eprintln!("noeta: {err}");
@@ -587,19 +587,15 @@ pub(crate) fn run_worker_hot(
 /// watcher thread ([`watch::spawn_hot_watcher`]) parses/checks/diffs each edit of the entry file
 /// and deposits swappable plans (blockers or non-entry edits exit with the restart sentinel the
 /// `--watch` wrapper honors). JIT stays unarmed on this path (H3 lifts).
-pub(crate) fn run_program_hot(
-    entry_path: &std::path::Path,
-    program: &noeta_ast::Program,
-    editions: &noeta_lexer::EditionMap,
-    sources: &SourceMap,
-) -> u8 {
-    let checked = noeta_check::check_all_with_editions(program, editions.clone());
+pub(crate) fn run_program_hot(entry_path: &std::path::Path, loaded: &Loaded) -> u8 {
+    // `Loaded::check`: the editions ride structurally with the program they govern.
+    let checked = loaded.check();
     if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(sources, checked.diagnostics.iter());
+        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
         return 1;
     }
     let (module, compiler) = match noeta_compiler::compile_with_sites_session(
-        program,
+        &loaded.program,
         checked.sites.clone(),
         // Cooperative isolates: the hot path is the debug-session path (single OS thread).
         false,
@@ -648,9 +644,9 @@ pub(crate) fn run_program_hot(
         VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
-    emit_diagnostics_mapped(sources, result.diagnostics.iter());
+    emit_diagnostics_mapped(&loaded.sources, result.diagnostics.iter());
     if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, sources));
+        eprint!("{}", noeta_vm::render_trace(&trace, &loaded.sources));
     }
     u8::try_from(result.exit_code).unwrap_or(1)
 }

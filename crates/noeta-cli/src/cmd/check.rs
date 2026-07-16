@@ -144,24 +144,22 @@ pub(crate) fn cmd_check(
             Ok(Ok(linked)) => {
                 // Activate the resolved dev-tiers before checking, as `run`/`build`/`dump` do; with no
                 // active tiers the program is checked as-is. Tier-activation diagnostics resolve
-                // against the same workspace sources.
-                let sources = std::rc::Rc::new(linked.sources);
+                // against the same workspace sources. Checking rides `Loaded::check`/`check_under`
+                // so the per-source editions travel structurally (audit-3 F8).
+                let loaded = crate::context::loaded(linked);
                 let program_diags = if active_refs.is_empty() {
-                    noeta_check::check_all_with_editions(&linked.program, linked.editions.clone())
-                        .diagnostics
+                    loaded.check().diagnostics
                 } else {
                     let activated =
-                        noeta_check::activate_tiers_with(&linked.program, &active_refs, &providers);
+                        noeta_check::activate_tiers_with(&loaded.program, &active_refs, &providers);
                     let mut ds = activated.diagnostics;
                     ds.extend(
-                        noeta_check::check_all_with_editions(
-                            &activated.program,
-                            linked.editions.clone(),
-                        )
-                        .diagnostics,
+                        crate::context::check_under(&activated.program, &loaded.editions)
+                            .diagnostics,
                     );
                     ds
                 };
+                let sources = std::rc::Rc::new(loaded.sources);
                 for d in &program_diags {
                     fold(&sources, d);
                 }

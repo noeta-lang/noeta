@@ -8,8 +8,9 @@ use std::process::ExitCode;
 use noeta_pm::registry;
 use noeta_runner::resolve_providers;
 
+use crate::context::{load_linked, provider_escape, target_gate};
 use crate::output::plural;
-use crate::{compose, docgen, load_linked, run_declared_tier, target_gate};
+use crate::{compose, docgen};
 
 /// `noeta doc <FILE>` — extract the program's `@doc { … }` text blocks (object-model slice 6f) to
 /// stdout, in source order. Each block's verbatim body is dedented (the common leading indentation
@@ -237,16 +238,11 @@ pub(crate) fn cmd_doc(
     };
     if providers.get("doc").is_some_and(|p| p != "std") {
         let activated = noeta_check::activate_tiers_with(&linked.program, &["doc"], &providers);
-        match activated.registry.resolve_provider("doc", &providers) {
-            Ok(noeta_check::ResolvedProvider::Declared(d)) => {
-                let tier = d.clone();
-                return run_declared_tier("doc", &linked, activated, tier);
-            }
-            Ok(noeta_check::ResolvedProvider::Extension) => {}
-            Err(err) => {
-                eprintln!("noeta: {err}");
-                return ExitCode::from(2);
-            }
+        // The shared declared-provider dispatch (context): a package's `@tier(doc)` runner owns
+        // the invocation; an Extension resolution falls through to the native extractor below —
+        // which reads the *unactivated* program, so the activation is discarded here.
+        if let Err(code) = provider_escape("doc", &linked, activated, &providers) {
+            return code;
         }
     }
 

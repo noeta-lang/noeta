@@ -8,12 +8,12 @@ use std::time::Instant;
 
 use noeta_ast::{AttrValue, Expr, Program, Stmt};
 use noeta_check::TierFn;
-use noeta_runner::{compile_real, resolve_providers};
+use noeta_runner::compile_real;
 use noeta_vm::VmBackend;
 
 use crate::cmd::test::{call_stmt, is_tier_setup};
-use crate::output::{emit_diagnostics_mapped, plural};
-use crate::{compose, load_linked, run_declared_tier, target_gate};
+use crate::context::{Prologue, check_under, tier_prologue};
+use crate::output::plural;
 
 /// The fallback iteration count when calibration cannot estimate per-iteration cost (a probe too
 /// noisy to subtract). Small, because the runner executes *interpreted* code and measures at both
@@ -62,53 +62,14 @@ pub(crate) fn cmd_bench(
     max_regress: Option<f64>,
     target: &Option<String>,
 ) -> ExitCode {
-    if let Some(code) = compose::maybe_delegate(file) {
-        return code;
-    }
-    if let Some(code) = target_gate(file, target, "bench") {
-        return code;
-    }
-    let linked = match load_linked(file) {
-        Ok(linked) => linked,
-        Err(code) => return code,
+    // The shared tier prologue: compose delegation, the `--target` gate, the dep-aware load,
+    // provider dispatch (a `bench = "<pkg>"` target hands the tier to that package's runner),
+    // activation diagnostics, and the whole-program type check.
+    let run = match tier_prologue(file, "bench", target) {
+        Prologue::Ran(code) => return code,
+        Prologue::Ready(run) => *run,
     };
-
-    // Activate the `bench` tier: inline its `@bench` blocks as ordinary top-level declarations and
-    // collect the bench fns. An unknown-tier block is an E0036.
-    // The target's provider selection (provider dispatch): `bench = "<pkg>"` in the target's
-    // tiers map hands this tier to that package's `@tier(bench)` runner instead of the native
-    // one. Default (no target, or `"std"`) keeps the native path below.
-    let providers = match resolve_providers(file, target) {
-        Ok(map) => map,
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            return ExitCode::from(2);
-        }
-    };
-    let activated = noeta_check::activate_tiers_with(&linked.program, &["bench"], &providers);
-    match activated.registry.resolve_provider("bench", &providers) {
-        Ok(noeta_check::ResolvedProvider::Extension) => {}
-        Ok(noeta_check::ResolvedProvider::Declared(d)) => {
-            let tier = d.clone();
-            return run_declared_tier("bench", &linked, activated, tier);
-        }
-        Err(err) => {
-            eprintln!("noeta: {err}");
-            return ExitCode::from(2);
-        }
-    }
-    if !activated.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-        return ExitCode::from(1);
-    }
-
-    // Type-check once, so a broken benchmark is a compile error reported here rather than inside
-    // every per-bench run.
-    let checked = noeta_check::check_all_with_editions(&activated.program, linked.editions.clone());
-    if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
-        return ExitCode::from(1);
-    }
+    let activated = &run.activated;
 
     // `--name` keeps only exact fn-name matches — the single-benchmark seam editors use, and the
     // impact-filtered `--watch` consumer (server-hmr W3).
@@ -159,10 +120,10 @@ pub(crate) fn cmd_bench(
         let n = iterations_override
             .or_else(|| iterations_arg(bench))
             .map(|n| n.max(1))
-            .unwrap_or_else(|| calibrate_iterations(&setup, &linked.editions, bench));
+            .unwrap_or_else(|| calibrate_iterations(&setup, &run.editions, bench));
         let mut outcome = match (
-            measure_iterations(&setup, &linked.editions, bench, n, 3),
-            measure_iterations(&setup, &linked.editions, bench, n.saturating_mul(2), 3),
+            measure_iterations(&setup, &run.editions, bench, n, 3),
+            measure_iterations(&setup, &run.editions, bench, n.saturating_mul(2), 3),
         ) {
             (Ok(t1), Ok(t2)) => BenchOutcome {
                 name: bench.name.clone(),
@@ -423,7 +384,7 @@ pub(crate) fn measure_iterations(
         span: bench.span,
     };
 
-    let checked = noeta_check::check_all_with_editions(&program, editions.clone());
+    let checked = check_under(&program, editions);
     if !checked.diagnostics.is_empty() {
         return Err(checked.diagnostics[0].message.clone());
     }

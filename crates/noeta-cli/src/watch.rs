@@ -418,7 +418,7 @@ fn hot_watcher(
             noeta_span::SourceId::FIRST,
             noeta_pm::manifest::root_edition(&entry),
         );
-        let checked = noeta_check::check_all_with_editions(&new_program, editions);
+        let checked = crate::context::check_under(&new_program, &editions);
         if !checked.diagnostics.is_empty() {
             let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<entry>", &new_src);
             let mut rendered = String::new();
