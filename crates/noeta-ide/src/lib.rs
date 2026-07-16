@@ -8,7 +8,8 @@
 //! salsa recomputes only the queries that edit invalidated. That incremental spine is inherited
 //! wholesale from M1, not built here.
 //!
-//! Features: **live diagnostics** over the whole-workspace `linked_checked` query (an imported
+//! Features: **live diagnostics** over the whole-workspace `linked_checked_ide` query — the same
+//! single checker run every other feature reads, so one edit checks once (an imported
 //! name resolves across siblings); **hover types** (the tightest enclosing `expr_types` span,
 //! rendered to surface syntax); **go-to-definition** — a scope-aware value index for locals,
 //! parameters, and functions (shadowing-correct), member accesses `x.member` via the receiver's
@@ -511,13 +512,16 @@ impl DocumentStore {
     /// diagnostics — each open module reports its own through its own workspace) together with the
     /// entry text for position mapping. `None` if the document is not open.
     ///
-    /// Runs over the whole-workspace [`linked_checked`](noeta_db::linked_checked) query, so a name
+    /// Runs over the whole-workspace [`linked_checked_ide`](noeta_db::linked_checked_ide) query —
+    /// the SAME query hover/inlay/completions read — so one edit runs the checker **once** per
+    /// document version (diagnostics are identical to `linked_checked`'s by construction; the ide
+    /// flavor only additionally records `expr_types`, which the other features need anyway). A name
     /// imported from a sibling module resolves and no longer reports a false "unknown name". A load
     /// or parse failure carries its diagnostics through the same query.
     pub fn diagnostics(&self, uri: &str) -> Option<(Vec<noeta_diagnostics::Diagnostic>, String)> {
         let cache = self.workspaces.get(uri)?;
         let db = &self.db;
-        let diags = noeta_db::linked_checked(db, cache.workspace)
+        let diags = noeta_db::linked_checked_ide(db, cache.workspace)
             .diagnostics
             .iter()
             .filter(|d| d.span.source == SourceId::FIRST)
