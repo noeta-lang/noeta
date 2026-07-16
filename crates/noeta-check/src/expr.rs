@@ -3,5 +3,6 @@
 //! operators, calls, member access, and patterns are its sibling rule modules. All methods moved
 //! verbatim out of the crate root; one `struct Checker`, no signature changes.
 
+pub(crate) mod calls;
 pub(crate) mod core;
 pub(crate) mod ops;
