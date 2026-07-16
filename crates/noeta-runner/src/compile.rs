@@ -46,34 +46,31 @@ pub enum CompileFailure {
 }
 
 impl CompileFailure {
-    /// Print the failure to stderr and return the process exit code.
-    pub fn report(&self) -> std::process::ExitCode {
-        use std::process::ExitCode;
+    /// The failure as renderable text plus its process exit code — for front-ends that replay
+    /// failures over a wire (the DAP's `output` events, MCP tool results) instead of printing.
+    pub fn to_text(&self) -> (String, u8) {
         match self {
-            CompileFailure::Message(msg) => {
-                eprintln!("lang: {msg}");
-                ExitCode::from(1)
-            }
-            CompileFailure::Unreadable(msg) => {
-                eprintln!("lang: {msg}");
-                ExitCode::from(2)
-            }
+            CompileFailure::Message(msg) => (format!("lang: {msg}\n"), 1),
+            CompileFailure::Unreadable(msg) => (format!("lang: {msg}\n"), 2),
             CompileFailure::Load(diagnostics) => {
-                let mut stderr = std::io::stderr();
+                let mut text = String::new();
                 for ld in diagnostics {
-                    let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+                    text.push_str(&render(&ld.source, &ld.diagnostic));
                 }
-                ExitCode::from(1)
+                (text, 1)
             }
             CompileFailure::Diagnostics {
                 sources,
                 diagnostics,
-            } => {
-                let _ = std::io::stderr()
-                    .write_all(render_mapped(sources, diagnostics.iter()).as_bytes());
-                ExitCode::from(1)
-            }
+            } => (render_mapped(sources, diagnostics.iter()), 1),
         }
+    }
+
+    /// Print the failure to stderr and return the process exit code.
+    pub fn report(&self) -> std::process::ExitCode {
+        let (text, code) = self.to_text();
+        let _ = std::io::stderr().write_all(text.as_bytes());
+        std::process::ExitCode::from(code)
     }
 }
 
@@ -115,6 +112,137 @@ pub fn compile_real(
     })
 }
 
+/// The resolved **selection facts** for an entry — everything the front-end decides from manifests
+/// alone, before any source is lexed: the active tier set (target ∪ explicit tiers), the target's
+/// tier → provider map, the dependency packages, and the root package's edition. Resolved ONCE and
+/// shared by the cache key and the loader, so no consumer can pick a divergent subset (the drift
+/// that left the debugger/profiler unable to see dependency packages).
+pub struct FrontFacts {
+    pub active: Vec<String>,
+    pub providers: BTreeMap<String, String>,
+    pub deps: Vec<noeta_loader::DepPackage>,
+    pub edition: noeta_pm::edition::Edition,
+}
+
+/// Resolve the selection facts for `file` (see [`FrontFacts`]). A bad target fails fast, before
+/// anything loads.
+pub fn resolve_front(
+    file: &Path,
+    tiers: &[String],
+    target: &Option<String>,
+) -> Result<FrontFacts, CompileFailure> {
+    // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
+    // explicit `--tier` flags.
+    let mut active: Vec<String> = match target {
+        Some(name) => {
+            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
+        }
+        None => Vec::new(),
+    };
+    for tier in tiers {
+        if !active.contains(tier) {
+            active.push(tier.clone());
+        }
+    }
+    // The target's tier → provider map (provider dispatch): decides which declaration's config
+    // attribute activation stamps, so it is part of the compiled program — and of the cache key.
+    let providers = resolve_providers(file, target).map_err(CompileFailure::Message)?;
+    // The entry's dependency packages (package-manager P2.1): their sources feed both the cache key
+    // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
+    let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
+    // The entry's effective language edition (follow-on F1) — part of the compilation identity.
+    let edition = manifest::root_edition(file);
+    Ok(FrontFacts {
+        active,
+        providers,
+        deps,
+        edition,
+    })
+}
+
+/// A loaded, linked, tier-activated program, ready to type-check — the shared *front half* every
+/// program-taking tool goes through (run/dump/build via [`compile_whole_file`]; the debugger,
+/// profiler, agent debug tools, and REPL bootstrap via [`load_default_project`]), so they all see
+/// the same dependency packages, tier activation, and per-source editions as `noeta run`.
+pub struct Loaded {
+    pub program: noeta_ast::Program,
+    pub sources: SourceMap,
+    /// Which edition governs each source (entry/siblings = root package's; each dependency's own),
+    /// keyed by `SourceId`. SourceIds survive tier activation, so the map stays valid against the
+    /// activated program.
+    pub editions: noeta_edition::EditionMap,
+}
+
+impl Loaded {
+    /// Type-check the loaded program under its per-source editions — the one blessed way, so no
+    /// caller can forget to thread the edition map (`check_all` alone would silently drop it).
+    pub fn check(&self) -> noeta_check::Checked {
+        noeta_check::check_all_with_editions(&self.program, self.editions.clone())
+    }
+
+    /// As [`Loaded::check`], but the session flavor: keeps the [`noeta_check::SessionChecker`]
+    /// alive so REPL/debug-console fragments extend the whole-program typing environment.
+    pub fn check_session(&self) -> (noeta_check::Checked, noeta_check::SessionChecker) {
+        noeta_check::check_all_session_with(&self.program, self.editions.clone())
+    }
+}
+
+/// Load + link `file` (sibling `.noe` modules the entry `use`s resolved and merged; a lone file
+/// links to itself; dependency packages re-rooted under their keys) and activate the selected
+/// tiers. The back half of the pipeline behind [`compile_whole_file`]'s cache probe.
+pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFailure> {
+    let linked = load_linked(file, facts)?;
+    let sources = linked.sources;
+    let editions = linked.editions;
+    // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
+    // every tier block is stripped at lowering (the default). Activation is only done when needed.
+    let program = if facts.active.is_empty() {
+        linked.program
+    } else {
+        let active_refs: Vec<&str> = facts.active.iter().map(String::as_str).collect();
+        let activated =
+            noeta_check::activate_tiers_with(&linked.program, &active_refs, &facts.providers);
+        if !activated.diagnostics.is_empty() {
+            return Err(CompileFailure::Diagnostics {
+                sources,
+                diagnostics: activated.diagnostics,
+            });
+        }
+        activated.program
+    };
+    Ok(Loaded {
+        program,
+        sources,
+        editions,
+    })
+}
+
+/// The raw load + link step under `facts` — [`load_project`] without tier activation, for callers
+/// that stage activation themselves (the CLI's test/bench/doc prologue resolves providers per
+/// verb before activating).
+pub fn load_linked(
+    file: &Path,
+    facts: &FrontFacts,
+) -> Result<noeta_loader::Linked, CompileFailure> {
+    match noeta_loader::load_with_deps(file, facts.edition, &facts.deps) {
+        Err(err) => Err(CompileFailure::Unreadable(format!(
+            "cannot read {}: {err}",
+            file.display()
+        ))),
+        Ok(Err(load_diagnostics)) => Err(CompileFailure::Load(load_diagnostics)),
+        Ok(Ok(linked)) => Ok(linked),
+    }
+}
+
+/// [`load_project`] under the **default selection** (no `--target`/`--tier`): what the debugger,
+/// profiler, agent debug tools, and REPL bootstrap call — dependency packages and the package
+/// edition resolve exactly as `noeta run`'s pipeline resolves them (the drift firewall), with no
+/// startup cache (their compiles are bespoke: debug info, session compilers).
+pub fn load_default_project(file: &Path) -> Result<Loaded, CompileFailure> {
+    let facts = resolve_front(file, &[], &None)?;
+    load_project(file, &facts)
+}
+
 /// The whole-file compile pipeline, shared by `run`/`dump`/`build` and cache-aware in one place: any
 /// command (or the standalone runner) that wants "a source file → its runnable [`Module`]" goes
 /// through here, so the startup cache is applied exactly once.
@@ -128,34 +256,17 @@ pub fn compile_whole_file(
     target: &Option<String>,
     no_cache: bool,
 ) -> Result<Compiled, CompileFailure> {
-    // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
-    // explicit `--tier` flags, resolved before loading so a bad target fails fast.
-    let mut active: Vec<String> = match target {
-        Some(name) => {
-            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
-        }
-        None => Vec::new(),
-    };
-    for tier in tiers {
-        if !active.contains(tier) {
-            active.push(tier.clone());
-        }
-    }
-
-    // The target's tier → provider map (provider dispatch): decides which declaration's config
-    // attribute activation stamps, so it is part of the compiled program — and of the cache key.
-    let providers = resolve_providers(file, target).map_err(CompileFailure::Message)?;
-
-    // The entry's dependency packages (package-manager P2.1): their sources feed both the cache key
-    // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
-    let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
-
-    // The entry's effective language edition (follow-on F1) — part of the compilation identity, so it
-    // is folded into the cache key below.
-    let edition = manifest::root_edition(file);
+    let facts = resolve_front(file, tiers, target)?;
 
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
-    let cache = open_startup_cache(file, &active, &providers, &deps, edition, no_cache);
+    let cache = open_startup_cache(
+        file,
+        &facts.active,
+        &facts.providers,
+        &facts.deps,
+        facts.edition,
+        no_cache,
+    );
     if let Some(slot) = &cache
         && let Some(blob) = slot.cache.load(&slot.key)
         && let Ok(module) = noeta_bundle::read(&blob)
@@ -166,51 +277,20 @@ pub fn compile_whole_file(
         });
     }
 
-    // Miss: load + link (sibling `.noe` modules the entry `use`s are resolved and merged; a lone file
-    // links to itself; dependency packages re-rooted under their keys), activate any dev-tiers,
-    // type-check, and compile to bytecode.
-    let linked = match noeta_loader::load_with_deps(file, edition, &deps) {
-        Err(err) => {
-            return Err(CompileFailure::Unreadable(format!(
-                "cannot read {}: {err}",
-                file.display()
-            )));
-        }
-        Ok(Err(load_diagnostics)) => return Err(CompileFailure::Load(load_diagnostics)),
-        Ok(Ok(linked)) => linked,
-    };
-    let sources = linked.sources;
-    // Which edition governs each source (entry/siblings = root package's; each dependency's own),
-    // keyed by `SourceId` — the checker recovers a declaration's edition from its span. Captured
-    // before `linked.program` is moved below; SourceIds survive tier activation, so the map stays
-    // valid against the activated program.
-    let editions = linked.editions;
-    // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
-    // every tier block is stripped at lowering (the default). Activation is only done when needed.
-    let program = if active.is_empty() {
-        linked.program
-    } else {
-        let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-        let activated = noeta_check::activate_tiers_with(&linked.program, &active_refs, &providers);
-        if !activated.diagnostics.is_empty() {
-            return Err(CompileFailure::Diagnostics {
-                sources,
-                diagnostics: activated.diagnostics,
-            });
-        }
-        activated.program
-    };
-    let checked = noeta_check::check_all_with_editions(&program, editions);
+    // Miss: load → link → activate → check → compile.
+    let loaded = load_project(file, &facts)?;
+    let checked = loaded.check();
     if !checked.diagnostics.is_empty() {
         return Err(CompileFailure::Diagnostics {
-            sources,
+            sources: loaded.sources,
             diagnostics: checked.diagnostics,
         });
     }
-    let module = match compile_real(&program, &checked) {
+    let module = match compile_real(&loaded.program, &checked) {
         Ok(module) => Arc::new(module),
         Err(err) => return Err(CompileFailure::Message(err)),
     };
+    let sources = loaded.sources;
 
     // Populate the cache, best-effort, then bound its size (oldest-first eviction). Both run only on
     // this already-slow miss path. Panic-isolated: a cache write must never abort an otherwise-

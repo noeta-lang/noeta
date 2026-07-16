@@ -4484,27 +4484,10 @@ fn target_gate(entry: &std::path::Path, target: &Option<String>, tier: &str) -> 
 /// a program whose tier content imports from a dependency (a test exercising `use fuzzkit.…`, a
 /// declared tier's runner) must link exactly as it does for a run.
 fn load_linked(file: &std::path::Path) -> Result<noeta_loader::Linked, ExitCode> {
-    let deps = match graph::resolve_graph(file) {
-        Ok(graph) => graph.packages,
-        Err(err) => {
-            eprintln!("lang: {err}");
-            return Err(ExitCode::from(2));
-        }
-    };
-    match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
-        Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
-            Err(ExitCode::from(2))
-        }
-        Ok(Ok(linked)) => Ok(linked),
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-            }
-            Err(ExitCode::from(1))
-        }
-    }
+    // The shared front half (drift firewall): deps + edition resolve exactly as `noeta run`'s
+    // pipeline resolves them; the verbs stage tier activation themselves.
+    let facts = noeta_runner::compile::resolve_front(file, &[], &None).map_err(|f| f.report())?;
+    noeta_runner::compile::load_linked(file, &facts).map_err(|f| f.report())
 }
 
 /// The outcome of running one `@test` fn: whether it passed, the failure message (the first
@@ -5808,25 +5791,17 @@ fn repl_bootstrap(
     path: &std::path::Path,
     checker: &mut Option<noeta_check::SessionChecker>,
 ) -> Result<(VmSession, Vec<Source>), ExitCode> {
-    let linked = match noeta_loader::load(path, manifest::root_edition(path)) {
-        Err(err) => {
-            eprintln!("noeta: cannot read {}: {err}", path.display());
-            return Err(ExitCode::from(2));
-        }
-        Ok(Err(load_diagnostics)) => {
-            for ld in &load_diagnostics {
-                eprint!("{}", render(&ld.source, &ld.diagnostic));
-            }
-            return Err(ExitCode::FAILURE);
-        }
-        Ok(Ok(linked)) => linked,
+    // The shared front half (drift firewall): `repl --load` sees the same dependency packages and
+    // editions `noeta run` resolves — a program that runs must also load at the prompt.
+    let loaded = match noeta_runner::compile::load_default_project(path) {
+        Ok(loaded) => loaded,
+        Err(failure) => return Err(failure.report()),
     };
 
     // Always checked (it is a file); the session flavor keeps the checker when the prompt wants it.
-    let (checked, session_checker) =
-        noeta_check::check_all_session_with(&linked.program, linked.editions.clone());
+    let (checked, session_checker) = loaded.check_session();
     if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+        emit_diagnostics_mapped(&loaded.sources, checked.diagnostics.iter());
         return Err(ExitCode::FAILURE);
     }
     if checker.is_some() {
@@ -5835,7 +5810,7 @@ fn repl_bootstrap(
 
     // Cooperative isolates + no debug info: the prompt's own execution model.
     let (module, compiler) = match noeta_compiler::compile_with_sites_session(
-        &linked.program,
+        &loaded.program,
         checked.sites,
         false,
         false,
@@ -5854,12 +5829,12 @@ fn repl_bootstrap(
     let _ = io::stdout().flush();
     if !out.diagnostics.is_empty() {
         // A bootstrap that aborts is a broken app context — fail fast, exactly like `noeta run`.
-        emit_diagnostics_mapped(&linked.sources, out.diagnostics.iter());
-        emit_trace(&out.trace, &linked.sources);
+        emit_diagnostics_mapped(&loaded.sources, out.diagnostics.iter());
+        emit_trace(&out.trace, &loaded.sources);
         return Err(ExitCode::FAILURE);
     }
     eprintln!("(loaded {})", path.display());
-    Ok((session, linked.sources.into_sources()))
+    Ok((session, loaded.sources.into_sources()))
 }
 
 fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {

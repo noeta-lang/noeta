@@ -591,3 +591,42 @@ fn top_functions_ranks_the_hot_leaf_with_its_percentage() {
         "sorted by samples desc"
     );
 }
+
+
+/// The one-pipeline slice: the profiler resolves dependency packages exactly as `noeta run` does.
+/// Before the fix its loader saw siblings only, so a program with a path dependency profiled to an
+/// unresolved-import panic while running fine under `noeta run`.
+#[test]
+fn profiles_a_program_with_a_path_dependency() {
+    let base = std::env::temp_dir().join("noeta_prof_test_path_dep");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nhi = { path = \"../lib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use hi.api.answer;\necho \"got=\" ~ answer();\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("api.noe"),
+        "namespace lib.api;\npub fn answer(): int { return 42; }\n",
+    )
+    .unwrap();
+
+    let report = noeta_prof::profile(&app.join("main.noe"), noeta_prof::Mode::Summary);
+    assert_eq!(report.exit_code, 0, "dep resolves under the profiler: {}", report.stderr);
+    assert_eq!(report.stdout, "got=42\n");
+}

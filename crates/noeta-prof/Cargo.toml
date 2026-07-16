@@ -16,6 +16,8 @@ noeta-span = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-loader = { workspace = true }
+# The shared compile front half (deps + tiers + editions resolve exactly as `noeta run`).
+noeta-runner = { workspace = true }
 noeta-pm = { workspace = true }
 noeta-check = { workspace = true }
 noeta-compiler = { workspace = true }

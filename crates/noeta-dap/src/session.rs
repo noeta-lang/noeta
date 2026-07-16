@@ -1,7 +1,8 @@
 //! The debug session's compile + run path: load → check → compile (debug, JIT-off) → execute.
 //!
-//! This is the *same* production pipeline `noeta run` drives (`noeta_loader::load` →
-//! `noeta_check::check_all` → compile → VM), with two debug-specific choices: the program is compiled
+//! This is the *same* production pipeline `noeta run` drives — the shared front half
+//! (`noeta_runner::compile::load_default_project`: dependency packages, tier machinery, per-source
+//! editions) then check → compile → VM — with two debug-specific choices: the program is compiled
 //! **with debug info** (`compile_with_sites(..., debug = true)` — reg→name locals, proto names/spans)
 //! and run with the **JIT unarmed** and a [`Debugger`] attached, so every frame stays tier-0 and
 //! inspectable. Its stdout is captured (already the VM's behavior) and returned rather than printed —
@@ -13,7 +14,7 @@
 use std::path::Path;
 
 use noeta_bytecode::Module;
-use noeta_diagnostics::{render, render_mapped};
+use noeta_diagnostics::render_mapped;
 use noeta_span::SourceMap;
 use noeta_vm::{Debugger, VmBackend};
 
@@ -62,38 +63,30 @@ impl RunOutput {
 /// unreadable file, parse/check diagnostics, or a compile error — returns the failure already shaped
 /// as a [`RunOutput`] (a `stderr` chunk + non-zero exit) for the adapter to replay.
 pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
-    let linked = match noeta_loader::load(path, noeta_pm::manifest::root_edition(path)) {
-        Err(err) => {
-            return Err(RunOutput::failed(
-                format!("noeta: cannot read {}: {err}\n", path.display()),
-                2,
-            ));
+    // The shared front half (drift firewall): the debugger sees the same dependency packages and
+    // editions `noeta run` resolves — a program that runs must also be debuggable.
+    let loaded = match noeta_runner::compile::load_default_project(path) {
+        Ok(loaded) => loaded,
+        Err(failure) => {
+            let (text, code) = failure.to_text();
+            return Err(RunOutput::failed(text, i32::from(code)));
         }
-        Ok(Err(load_diagnostics)) => {
-            let mut text = String::new();
-            for ld in &load_diagnostics {
-                text.push_str(&render(&ld.source, &ld.diagnostic));
-            }
-            return Err(RunOutput::failed(text, 1));
-        }
-        Ok(Ok(linked)) => linked,
     };
 
     // The session flavor keeps the checker alive (C3): console fragments will check against the
     // typing environment this whole-program check accumulates.
-    let (checked, checker) =
-        noeta_check::check_all_session_with(&linked.program, linked.editions.clone());
+    let (checked, checker) = loaded.check_session();
     if !checked.diagnostics.is_empty() {
         return Err(RunOutput::failed(
-            render_mapped(&linked.sources, checked.diagnostics.iter()),
+            render_mapped(&loaded.sources, checked.diagnostics.iter()),
             1,
         ));
     }
 
-    match compile_checked(&linked.program, &checked) {
+    match compile_checked(&loaded.program, &checked) {
         Ok((module, session)) => Ok(Compiled {
             module,
-            sources: linked.sources,
+            sources: loaded.sources,
             session,
             checker,
         }),

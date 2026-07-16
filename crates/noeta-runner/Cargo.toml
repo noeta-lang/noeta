@@ -37,6 +37,8 @@ noeta-runtime = { workspace = true }
 # target/tier resolution but none of the publish/network/crypto surface.
 noeta-ast = { workspace = true }
 noeta-loader = { workspace = true }
+# The shared `Loaded.editions` map (per-source editions the check applies).
+noeta-edition = { workspace = true }
 noeta-check = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-cache = { workspace = true }

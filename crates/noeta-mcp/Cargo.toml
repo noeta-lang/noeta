@@ -19,6 +19,8 @@ noeta-ast = { workspace = true }
 noeta-diagnostics = { workspace = true, features = ["schema"] }
 noeta-db = { workspace = true }
 noeta-loader = { workspace = true }
+# The shared compile front half (deps + tiers + editions resolve exactly as `noeta run`).
+noeta-runner = { workspace = true }
 noeta-pm = { workspace = true }
 # The native-extension registry (M2 `stdlib_api`): enumerate every registered module/function/type +
 # its `SigType` signatures, rendered into agent-readable Noeta signatures. Re-exports `noeta-native`'s

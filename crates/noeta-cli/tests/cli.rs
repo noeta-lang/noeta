@@ -2104,6 +2104,21 @@ fn repl_persists_state_and_prints_trailing_expressions() {
 }
 
 #[test]
+fn repl_load_resolves_dependency_packages() {
+    // `repl --load` goes through the same front half as `noeta run` (the one-pipeline slice):
+    // a program with a path dependency must bootstrap at the prompt exactly as it runs — before
+    // the fix it loaded siblings only and the dep import left `greeting` unresolvable.
+    let entry = path_dep_project("repl_load_deps");
+    lang()
+        .arg("repl")
+        .args(["--load", entry.to_str().unwrap()])
+        .write_stdin("greeting()\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hi from the dependency"));
+}
+
+#[test]
 fn repl_supports_multiline_blocks() {
     lang()
         .arg("repl")

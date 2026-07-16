@@ -469,16 +469,11 @@ fn compile_debug(entry: &Entry, real_isolates: bool) -> Result<Compiled, String>
             )
         }
         Entry::File(path) => {
-            match noeta_loader::load(path, noeta_pm::manifest::root_edition(path)) {
-                Err(err) => return Err(format!("noeta: cannot read {}: {err}\n", path.display())),
-                Ok(Err(load_diagnostics)) => {
-                    let mut text = String::new();
-                    for ld in &load_diagnostics {
-                        text.push_str(&render(&ld.source, &ld.diagnostic));
-                    }
-                    return Err(text);
-                }
-                Ok(Ok(linked)) => (linked.program, linked.sources, linked.editions),
+            // The shared front half (drift firewall): the agent's debug tools see the same
+            // dependency packages and editions `noeta run` (and the MCP `run` tool) resolve.
+            match noeta_runner::compile::load_default_project(path) {
+                Ok(loaded) => (loaded.program, loaded.sources, loaded.editions),
+                Err(failure) => return Err(failure.to_text().0),
             }
         }
     };

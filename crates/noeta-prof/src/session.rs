@@ -1,7 +1,8 @@
 //! The profile session's compile + run path: load → check → compile (tier-0, JIT-off) → execute.
 //!
-//! This is the *same* production pipeline `noeta run` drives (`noeta_loader::load` →
-//! `noeta_check::check_all` → compile → VM), with one profiler-specific choice: the program runs
+//! This is the *same* production pipeline `noeta run` drives — the shared front half
+//! (`noeta_runner::compile::load_default_project`: dependency packages, tier machinery, per-source
+//! editions) then check → compile → VM — with one profiler-specific choice: the program runs
 //! with the **JIT unarmed** ([`VmBackend::run_module_debug`] with no debugger — the tier-0 run path),
 //! so every frame is interpreter-executed and there is a real pc + an op boundary at each step for a
 //! later collector to observe. Unlike `noeta dap` it compiles **without** debug info: the profiler
@@ -15,7 +16,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use noeta_bytecode::Module;
-use noeta_diagnostics::{render, render_mapped};
+use noeta_diagnostics::render_mapped;
 use noeta_span::SourceMap;
 use noeta_vm::{ProfileHook, VmBackend};
 
@@ -62,33 +63,26 @@ impl RunOutput {
 /// failure — unreadable file, parse/check diagnostics, or a compile error — returns the failure
 /// already shaped as a [`RunOutput`] (a `stderr` chunk + non-zero exit) for the caller to replay.
 pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
-    let linked = match noeta_loader::load(path, noeta_pm::manifest::root_edition(path)) {
-        Err(err) => {
-            return Err(RunOutput::failed(
-                format!("noeta: cannot read {}: {err}\n", path.display()),
-                2,
-            ));
+    // The shared front half (drift firewall): the profiler sees the same dependency packages and
+    // editions `noeta run` resolves — a program that runs must also be profilable.
+    let loaded = match noeta_runner::compile::load_default_project(path) {
+        Ok(loaded) => loaded,
+        Err(failure) => {
+            let (text, code) = failure.to_text();
+            return Err(RunOutput::failed(text, i32::from(code)));
         }
-        Ok(Err(load_diagnostics)) => {
-            let mut text = String::new();
-            for ld in &load_diagnostics {
-                text.push_str(&render(&ld.source, &ld.diagnostic));
-            }
-            return Err(RunOutput::failed(text, 1));
-        }
-        Ok(Ok(linked)) => linked,
     };
 
-    let checked = noeta_check::check_all_with_editions(&linked.program, linked.editions.clone());
+    let checked = loaded.check();
     if !checked.diagnostics.is_empty() {
         return Err(RunOutput::failed(
-            render_mapped(&linked.sources, checked.diagnostics.iter()),
+            render_mapped(&loaded.sources, checked.diagnostics.iter()),
             1,
         ));
     }
 
     match noeta_compiler::compile_with_sites(
-        &linked.program,
+        &loaded.program,
         checked.sites.clone(),
         // Real execution lowers `isolate f(args)` to real OS-thread spawns, as `noeta run` does; the
         // tier-0 run path with no isolate factory falls back to cooperative in-thread tasks, which is
@@ -99,7 +93,7 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     ) {
         Ok(module) => Ok(Compiled {
             module,
-            sources: linked.sources,
+            sources: loaded.sources,
         }),
         Err(u) => Err(RunOutput::failed(
             format!(
