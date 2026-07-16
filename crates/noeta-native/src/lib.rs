@@ -19,6 +19,7 @@ pub const ABI_VERSION: u32 = 1;
 pub mod args;
 pub mod command;
 pub mod ctx;
+pub mod delegate;
 pub mod executor;
 pub mod extern_value;
 pub mod host;
@@ -61,6 +62,14 @@ pub use telemetry::{
     SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, SpanTracker, Temporality, TraceContext,
     Tracing,
 };
+
+/// Macro-expansion support — types the [`delegate_host!`] arms must name from the caller's crate
+/// without the caller depending on our private deps (`compact_str` in the telemetry signatures).
+/// Not API; never use directly.
+#[doc(hidden)]
+pub mod __private {
+    pub use compact_str::CompactString;
+}
 
 /// The category of a stdlib misuse, mapped by each backend onto a `DiagnosticCode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

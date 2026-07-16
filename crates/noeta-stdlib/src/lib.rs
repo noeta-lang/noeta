@@ -65,6 +65,6 @@ pub mod vec3;
 
 // The stdlib-only surface (the ABI items above arrive via the `noeta_native::*` glob).
 pub use handle::{FileHandle, FileMode, Flush};
-pub use host::SandboxHost;
+pub use host::{CounterIds, DeterministicClock, DeterministicEntropy, SandboxHost, SeededRng};
 pub use iter::IterMethod;
 pub use registry::{CoreExtension, CryptoExtension, HttpExtension, IdExtension, VecExtension};

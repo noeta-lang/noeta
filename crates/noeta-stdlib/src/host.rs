@@ -32,6 +32,131 @@ pub const SANDBOX_EPOCH_MS: u64 = 1_767_225_600_000;
 /// [`random::DEFAULT_SEED`] so the entropy and user-`random` streams never coincide.
 pub const SANDBOX_ENTROPY_SEED: u64 = 0xA076_1D64_78BD_642F;
 
+// --- embeddable deterministic capability components (audit-6 F9) --------------------------------
+//
+// The `Rng`/`Clock`/`Entropy`/`Ids` impls of the deterministic hosts (Sandbox here, Wasi, Browser)
+// were line-identical state-threading around the shared pure kernels (`random::*`) — 3x per
+// capability, with each host's real differences (e.g. its `clock_unix_ms` reading) hiding among
+// identical-looking blocks. Each capability now lives ONCE as an embeddable component struct; a
+// host embeds the components it wants and forwards with `noeta_native::delegate_host!`, keeping
+// hand-written impls only where it genuinely differs. `SandboxHost` below is the in-tree proof;
+// the Wasi/browser hosts can adopt the same components without behavior change.
+
+/// The user-facing **seeded PRNG** state ([`Rng`]): a SplitMix64 word threaded through the pure
+/// steppers in [`random`]. `random.seed` rewinds exactly this stream and nothing else.
+#[derive(Debug, Clone)]
+pub struct SeededRng {
+    state: u64,
+}
+
+impl SeededRng {
+    /// A stream starting at `state` (a raw SplitMix64 word, e.g. [`random::DEFAULT_SEED`]).
+    pub fn new(state: u64) -> SeededRng {
+        SeededRng { state }
+    }
+}
+
+impl Rng for SeededRng {
+    fn rng_seed(&mut self, seed: i64) {
+        self.state = random::seed_state(seed);
+    }
+
+    fn rng_int(&mut self, lo: i64, hi: i64) -> Result<i64, StdError> {
+        let (next_state, value) = random::int(self.state, lo, hi)?;
+        self.state = next_state;
+        Ok(value)
+    }
+
+    fn rng_float(&mut self) -> f64 {
+        let (next_state, value) = random::float(self.state);
+        self.state = next_state;
+        value
+    }
+}
+
+/// A **deterministic entropy** stream ([`Entropy`]): an independent fixed-seed SplitMix64 word,
+/// deliberately separate from [`SeededRng`] so drawing ids never perturbs the user's `random`
+/// sequence (and `random.seed` never rewinds ids).
+#[derive(Debug, Clone)]
+pub struct DeterministicEntropy {
+    state: u64,
+}
+
+impl DeterministicEntropy {
+    pub fn new(state: u64) -> DeterministicEntropy {
+        DeterministicEntropy { state }
+    }
+}
+
+impl Entropy for DeterministicEntropy {
+    fn entropy_u64(&mut self) -> u64 {
+        let (next_state, value) = random::next(self.state);
+        self.state = next_state;
+        value
+    }
+}
+
+/// The **sequential-id** counter ([`Ids`]): 1, 2, 3, ... — deterministic on every host (ids are
+/// an ordering device, not entropy).
+#[derive(Debug, Clone, Default)]
+pub struct CounterIds {
+    handed_out: u64,
+}
+
+impl CounterIds {
+    /// A counter whose first `id_next` answers 1.
+    pub fn new() -> CounterIds {
+        CounterIds::default()
+    }
+}
+
+impl Ids for CounterIds {
+    fn id_next(&mut self) -> u64 {
+        self.handed_out += 1;
+        self.handed_out
+    }
+}
+
+/// The **logical clock** ([`Clock`]): `monotonic` reads-then-advances, `sleep` advances without
+/// blocking, and `clock_unix_ms` is a **derived read** of the counter against a fixed epoch — it
+/// must not advance (a derived reading like a v7 UUID must not perturb the user's observable
+/// `monotonic` stream), but it moves under `sleep` like everything else, so time-ordered ids
+/// still order deterministically.
+#[derive(Debug, Clone)]
+pub struct DeterministicClock {
+    epoch_ms: u64,
+    ms: u64,
+}
+
+impl DeterministicClock {
+    /// A clock at zero whose wall-time view starts at `epoch_ms`.
+    pub fn new(epoch_ms: u64) -> DeterministicClock {
+        DeterministicClock { epoch_ms, ms: 0 }
+    }
+
+    /// The current wall-time view WITHOUT the `&mut` a capability call needs — for host-internal
+    /// reads while something else is borrowed (the sandbox's teardown metric collection).
+    pub fn unix_ms(&self) -> u64 {
+        self.epoch_ms + self.ms
+    }
+}
+
+impl Clock for DeterministicClock {
+    fn clock_monotonic(&mut self) -> u64 {
+        let now = self.ms;
+        self.ms += 1;
+        now
+    }
+
+    fn clock_sleep(&mut self, ms: i64) {
+        self.ms = self.ms.saturating_add(ms.max(0) as u64);
+    }
+
+    fn clock_unix_ms(&mut self) -> u64 {
+        self.unix_ms()
+    }
+}
+
 /// The deterministic sandbox: in-memory VFS, seeded SplitMix64 state, and a logical
 /// clock — fresh per run, identical across backends by construction. This is what
 /// the conformance harness gives both backends, so `--differential` stays
@@ -39,12 +164,12 @@ pub const SANDBOX_ENTROPY_SEED: u64 = 0xA076_1D64_78BD_642F;
 #[derive(Debug, Clone)]
 pub struct SandboxHost {
     fs: Vfs,
-    rng: u64,
-    /// The entropy stream's SplitMix64 state — independent of `rng` (see [`Entropy`]).
-    entropy: u64,
-    /// The next sequential id `id_next` hands out (see [`Ids`]).
-    ids: u64,
-    clock: u64,
+    // The deterministic quartet, as embedded components (audit-6 F9): `delegate_host!` below
+    // forwards each capability to its field, so the state-threading lives once in the component.
+    rng: SeededRng,
+    entropy: DeterministicEntropy,
+    ids: CounterIds,
+    clock: DeterministicClock,
     env: BTreeMap<String, String>,
     args: Vec<String>,
     /// Scripted spawned processes (process-handle arc): id → the pre-computed instant-complete
@@ -162,10 +287,10 @@ impl SandboxHost {
     pub fn new() -> SandboxHost {
         SandboxHost {
             fs: Vfs::new(),
-            rng: random::DEFAULT_SEED,
-            entropy: SANDBOX_ENTROPY_SEED,
-            ids: 1,
-            clock: 0,
+            rng: SeededRng::new(random::DEFAULT_SEED),
+            entropy: DeterministicEntropy::new(SANDBOX_ENTROPY_SEED),
+            ids: CounterIds::new(),
+            clock: DeterministicClock::new(SANDBOX_EPOCH_MS),
             env: env::sandbox_vars(),
             args: env::sandbox_args(),
             procs: BTreeMap::new(),
@@ -228,7 +353,7 @@ impl SandboxHost {
 impl Drop for SandboxHost {
     fn drop(&mut self) {
         if let Some(sink) = &self.tel.metric_sink {
-            let now = SANDBOX_EPOCH_MS + self.clock;
+            let now = self.clock.unix_ms();
             let data = self.tel.metrics.collect(now);
             sink.lock().expect("metric sink not poisoned").extend(data);
         }
@@ -304,56 +429,12 @@ impl FileSystem for SandboxHost {
     }
 }
 
-impl Rng for SandboxHost {
-    fn rng_seed(&mut self, seed: i64) {
-        self.rng = random::seed_state(seed);
-    }
-
-    fn rng_int(&mut self, lo: i64, hi: i64) -> Result<i64, StdError> {
-        let (next_state, value) = random::int(self.rng, lo, hi)?;
-        self.rng = next_state;
-        Ok(value)
-    }
-
-    fn rng_float(&mut self) -> f64 {
-        let (next_state, value) = random::float(self.rng);
-        self.rng = next_state;
-        value
-    }
-}
-
-impl Clock for SandboxHost {
-    fn clock_monotonic(&mut self) -> u64 {
-        let now = self.clock;
-        self.clock += 1;
-        now
-    }
-
-    fn clock_sleep(&mut self, ms: i64) {
-        self.clock = self.clock.saturating_add(ms.max(0) as u64);
-    }
-
-    fn clock_unix_ms(&mut self) -> u64 {
-        // A derived READ (no advance) — see the trait doc for why.
-        SANDBOX_EPOCH_MS + self.clock
-    }
-}
-
-impl Entropy for SandboxHost {
-    fn entropy_u64(&mut self) -> u64 {
-        let (next_state, value) = random::next(self.entropy);
-        self.entropy = next_state;
-        value
-    }
-}
-
-impl Ids for SandboxHost {
-    fn id_next(&mut self) -> u64 {
-        let id = self.ids;
-        self.ids += 1;
-        id
-    }
-}
+// The deterministic quartet forwards to the embedded components — the capability semantics
+// (including `clock_unix_ms`'s derived-read subtlety) live on the component types above.
+noeta_native::delegate_host!(SandboxHost => rng : Rng);
+noeta_native::delegate_host!(SandboxHost => clock : Clock);
+noeta_native::delegate_host!(SandboxHost => entropy : Entropy);
+noeta_native::delegate_host!(SandboxHost => ids : Ids);
 
 impl Network for SandboxHost {
     /// The whole outbound network is the pure sandbox responder — deterministic, so both backends
@@ -819,12 +900,12 @@ impl Metrics for SandboxHost {
         value: MetricValue,
         attrs: Vec<(compact_str::CompactString, AttrValue)>,
     ) {
-        let now = SANDBOX_EPOCH_MS + self.clock;
+        let now = self.clock.unix_ms();
         self.tel.metrics.observe(inst, value, attrs, now);
     }
 
     fn metric_collect(&mut self) -> Vec<MetricData> {
-        let now = SANDBOX_EPOCH_MS + self.clock;
+        let now = self.clock.unix_ms();
         self.tel.metrics.collect(now)
     }
 }
@@ -832,6 +913,59 @@ impl Metrics for SandboxHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The overlay pattern (audit-2 F7): a custom host overrides ONE capability by hand and
+    /// forwards the rest to a wrapped base with `delegate_host!` — instead of ~70 hand-written
+    /// forwarding methods. This is the seam the embed docs advertise ("or a custom Host
+    /// implementation"); the test pins that the result is a full `Box<dyn Host>`, the override
+    /// is observed, and everything else genuinely reaches the base.
+    #[test]
+    fn a_delegating_overlay_overrides_one_capability_and_forwards_the_rest() {
+        struct EngineHost {
+            base: SandboxHost,
+        }
+
+        // The override: the "engine" exposes its own environment view.
+        impl Env for EngineHost {
+            fn env_get(&self, key: &str) -> Option<String> {
+                (key == "WORLD").then(|| "engine".to_string())
+            }
+            fn env_set(&mut self, _key: &str, _value: &str) {}
+            fn env_keys(&self) -> Vec<String> {
+                vec!["WORLD".to_string()]
+            }
+            fn args(&self) -> Vec<String> {
+                self.base.args()
+            }
+        }
+
+        // Everything else forwards — one line per capability, provided methods included.
+        noeta_native::delegate_host!(EngineHost => base :
+            FileReader, FileSystem, Rng, Clock, Os, Entropy, Ids, Network, P2pProvider,
+            Tracing, Metrics, Logging);
+
+        // The blanket impl makes the overlay a full Host — the boxed form every backend holds.
+        let mut host: Box<dyn Host> = Box::new(EngineHost {
+            base: SandboxHost::new(),
+        });
+
+        // The override is live…
+        assert_eq!(host.env_get("WORLD"), Some("engine".to_string()));
+        assert_eq!(
+            host.env_get("HOME"),
+            None,
+            "the sandbox fixture is shadowed"
+        );
+
+        // …and the forwarded capabilities reach the base: same first draws as a bare sandbox.
+        let mut bare = SandboxHost::new();
+        assert_eq!(host.rng_float(), bare.rng_float());
+        assert_eq!(host.entropy_u64(), bare.entropy_u64());
+        assert_eq!(host.id_next(), 1);
+        assert_eq!(host.clock_unix_ms(), SANDBOX_EPOCH_MS);
+        host.fs_write("/f", "x").unwrap();
+        assert_eq!(host.fs_read("/f").unwrap(), "x");
+    }
 
     #[test]
     fn entropy_is_deterministic_and_independent_of_the_user_rng() {
