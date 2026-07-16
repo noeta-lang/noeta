@@ -61,13 +61,26 @@ namespaced-types work, extended to native externs. Surfaced during DB1.
 RHS `table` to the FREE FUNCTION, not the parameter (E0007). Renamed the field/param to avoid it.
 A local/param should shadow a same-named global in value position. Surfaced during DB1.
 
-## F7 (BLOCKER for DB3) — an app can't use two packages that share a scope
-`para/aether` and `para/db` both have root scope `para`, but a consumer dep key maps to exactly one
-package (`para = {path=...}`), and two `para = ...` entries are a TOML duplicate key. So an app
-CANNOT depend on both `para.aether` AND `para.db` via local path deps — which blocks DB3 (a handler
-using a repository). This is the multi-package-per-scope gap = the deferred **hosted-registry (F4)**
-work from the para-namespace arc: a `para = { registry = ... }` (or a scope→multiple-packages path
-form) that resolves several `para.*` packages under one scope. DB3 (DatabaseProvider + route-model
-binding + end-of-request flush) is READY to build the moment this lands; the whole DB stack
-(DB0-DB4) works standalone today. **Follow-up / decision:** build multi-package-per-scope resolution
-(unblocks the entire para-family vision), then DB3.
+## F7 — an app can't use two packages that share a scope — ✅ RESOLVED (scope dependencies)
+`para/aether` and `para/db` both have root scope `para`, but a consumer dep key maps to one package
+and two `para = ...` entries are a TOML duplicate key — so an app could not depend on both. **Fixed**
+with **scope dependencies**: `para = [ { path = … }, { path = … } ]` — an array value binds several
+member packages (all sharing one `company` segment) under one import-root key, sharing one global
+segment so their literal `para.<pkg>.*` namespaces co-locate in the flat pool (a native member's
+`use para.db` retains because the key is the scope). This is the local, forward-compatible form of
+the multi-package-per-scope resolution the hosted registry (F4) will later serve. DB3 built on top.
+
+## DB3 — DONE ✅ (route-model binding + service injection + unit-of-work)
+Built on F7. aether stays driver-agnostic (its own `Store` interface); the app backs it with para.db
+and depends on both via a scope dependency. Two language gaps surfaced and were fixed along the way:
+`dyn Trait` reflection (`Type.DynTrait(name)`, for service injection by interface) and cross-module
+**standalone** `impl Trait for T {}` linking (a dependency's standalone impl was silently dropped;
+only inline impls survived). Both fixed + covered by conformance tests.
+
+## F8 (minor) — para.db silently swallows an unbindable bind parameter
+`"7".to_int()` correctly returns `?int` (`some(7)`); passing that Option straight to a query binds an
+unbindable value — the driver's `sql_value_of` errors, but `run`/`exec` swallow it and return an
+empty result, so a query silently finds nothing instead of surfacing the type error. The demo unwraps
+(`id.to_int() ?? -1`); **follow-up:** either bind `some(x)` as `x` / `none` as `NULL` in
+`sql_value_of`, or propagate the bind error out of `run`/`exec` so a mis-bound param fails loudly.
+Surfaced during DB3.
