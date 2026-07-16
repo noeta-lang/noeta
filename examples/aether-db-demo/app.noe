@@ -47,10 +47,10 @@ class SqlStore {
 
     impl Store {
         // Route-model binding: load a `User` by its route id. The path id is a string; `to_int`
-        // returns `?int` (a parse can fail), so unwrap it to the integer primary key before querying.
+        // returns `?int`, which binds faithfully — `some(n)` as the integer key, `none` as NULL (so a
+        // non-numeric id simply matches nothing). No manual unwrap needed.
         fn load(model: string, id: string): dyn {
-            key = id.to_int() ?? -1
-            return match self.repo.find(self.conn, key) {
+            return match self.repo.find(self.conn, id.to_int()) {
                 some(u) => u,
                 none => panic("404 no ${model} ${id}"),
             }

@@ -1,0 +1,13 @@
+// An `Option` marshals **through** its payload for any native "deep" consumer (`json.stringify`, and a
+// `para.db` SQL bind parameter): `some(x)` serializes as `x`, `none` as JSON `null` — NOT as the
+// variant name `"some"`. Without this an optional value flattens to its tag and binds/serializes
+// silently wrong (the aether F8 fix). Both backends marshal identically, so the differential agrees.
+// expect: stdout "42"
+// expect: stdout "null"
+// expect: stdout "[1,null,3]"
+// expect: exit 0
+use std.json
+
+echo json.stringify(some(42))
+echo json.stringify(none)
+echo json.stringify([some(1), none, some(3)])

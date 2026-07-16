@@ -5032,6 +5032,19 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
                     .collect(),
             )
         }
+        // An `Option` marshals **through** its payload (mirrors the VM's `to_native_deep`): the
+        // JSON-null convention and what a native consumer (a SQL bind parameter, `json.stringify`)
+        // means by an optional — `some(x)` is `x`, `none` is null/unit. Otherwise an `Option` would
+        // flatten to its variant *name* (`"some"`), a silently wrong bound value / serialization.
+        Value::Enum(e) if e.enum_name == "Option" => match e.variant.as_str() {
+            "some" => e
+                .data
+                .first()
+                .map(value_to_native_deep)
+                .unwrap_or(NativeValue::Unit),
+            _ => NativeValue::Unit,
+        },
+        // Any other enum marshals to its variant name (the tag).
         Value::Enum(e) => NativeValue::Str(e.variant.clone()),
         Value::Function(_)
         | Value::Builtin(_)
