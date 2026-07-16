@@ -1510,7 +1510,9 @@ impl Printer<'_> {
             Expr::Call { callee, args, span }
                 if args.is_empty() && self.set_literal_items(callee, *span).is_some() =>
             {
-                let items = self.set_literal_items(callee, *span).expect("guard checked");
+                let items = self
+                    .set_literal_items(callee, *span)
+                    .expect("guard checked");
                 let mut ds = Vec::new();
                 for i in items {
                     ds.push(self.expr(i)?);
@@ -1931,8 +1933,7 @@ impl Printer<'_> {
         ty: Option<&TypeRef>,
         value: &Expr,
     ) -> Result<Option<Doc>, FmtError> {
-        let reads_target =
-            |e: &Expr| matches!(e, Expr::Ident { span, .. } if *span == name_span);
+        let reads_target = |e: &Expr| matches!(e, Expr::Ident { span, .. } if *span == name_span);
         // `x OP= v` (the annotated `x: T OP= v` form round-trips its annotation).
         let compound = |op: &str, rhs: &Expr| -> Result<Option<Doc>, FmtError> {
             let mut head = vec![Doc::text(name.to_string())];
@@ -1945,9 +1946,7 @@ impl Printer<'_> {
             Ok(Some(Doc::concat(head)))
         };
         match value {
-            Expr::Binary { op, lhs, rhs, .. }
-                if compound_assign_op(*op) && reads_target(lhs) =>
-            {
+            Expr::Binary { op, lhs, rhs, .. } if compound_assign_op(*op) && reads_target(lhs) => {
                 compound(op.symbol(), rhs)
             }
             Expr::Coalesce {
@@ -1996,9 +1995,7 @@ impl Printer<'_> {
             ])))
         };
         match value {
-            Expr::Binary { op, lhs, rhs, .. }
-                if compound_assign_op(*op) && reads_field(lhs) =>
-            {
+            Expr::Binary { op, lhs, rhs, .. } if compound_assign_op(*op) && reads_field(lhs) => {
                 compound(op.symbol(), rhs)
             }
             Expr::Coalesce {

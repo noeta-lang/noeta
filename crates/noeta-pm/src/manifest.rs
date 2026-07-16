@@ -636,6 +636,25 @@ pub fn resolve_fmt_config(file: &Path) -> Result<FmtConfig, PmError> {
     Ok(config)
 }
 
+/// As [`resolve_fmt_config`], but **lenient** — the editor path (cross-cutting #14: this crate
+/// owns the one manifest-discovery walk; `noeta-fmt` used to duplicate it because the optional
+/// `noeta-pm → noeta-fmt` edge forbids the reverse dependency). A missing manifest, an unreadable
+/// file, or a malformed `[fmt]` table all yield what could be resolved so far (defaults +
+/// `.editorconfig`): formatting in an editor must never fail on a config problem. The CLI uses
+/// [`resolve_fmt_config`] so it can report the error instead.
+#[cfg(feature = "fmt-config")]
+pub fn resolve_fmt_config_lenient(file: &Path) -> FmtConfig {
+    let mut config = FmtConfig::default();
+    config.overlay_editorconfig(file);
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    if let Some(path) = find(dir)
+        && let Ok(text) = std::fs::read_to_string(&path)
+    {
+        let _ = config.overlay_toml(&text);
+    }
+    config
+}
+
 impl Manifest {
     /// Parse a `noeta.toml`'s text into a [`Manifest`], validating every tier name (a built-in tier)
     /// and provider (only `"std"` for now). Unknown keys outside `[targets]` and unknown

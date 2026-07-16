@@ -366,7 +366,7 @@ impl DocumentStore {
     pub fn format_document(&self, uri: &str, encoding: Encoding) -> Option<Vec<TextEdit>> {
         let text = self.buffers.get(uri)?;
         let config = uri_to_path(uri)
-            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .map(|p| noeta_pm::manifest::resolve_fmt_config_lenient(&p))
             .unwrap_or_default();
         let tiers = self.text_tiers_of(uri);
         let edition = edition_of_uri(uri);
@@ -393,7 +393,7 @@ impl DocumentStore {
     ) -> Option<Vec<TextEdit>> {
         let text = self.buffers.get(uri)?;
         let config = uri_to_path(uri)
-            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .map(|p| noeta_pm::manifest::resolve_fmt_config_lenient(&p))
             .unwrap_or_default();
         let index = LineIndex::new(text);
         let offset = index.offset(position, encoding);
@@ -421,7 +421,7 @@ impl DocumentStore {
     ) -> Option<Vec<TextEdit>> {
         let text = self.buffers.get(uri)?;
         let config = uri_to_path(uri)
-            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .map(|p| noeta_pm::manifest::resolve_fmt_config_lenient(&p))
             .unwrap_or_default();
         let index = LineIndex::new(text);
         let start = index.offset(range.start, encoding);
