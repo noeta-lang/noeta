@@ -7,3 +7,4 @@ pub(crate) mod calls;
 pub(crate) mod core;
 pub(crate) mod member;
 pub(crate) mod ops;
+pub(crate) mod patterns;
