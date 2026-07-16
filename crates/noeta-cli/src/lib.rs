@@ -776,13 +776,20 @@ fn cmd_scope_require_provenance(scope: &str, root: Option<&str>, off: bool) -> E
         eprintln!("lang: `--root` doesn't apply with `--off` (you're lifting the requirement)");
         return ExitCode::from(2);
     }
-    let Some(base) = std::env::var_os("NOETA_REGISTRY_URL") else {
-        eprintln!(
-            "lang: setting a scope policy needs the hosted registry — set `NOETA_REGISTRY_URL`"
-        );
-        return ExitCode::from(2);
+    // Route through the project's `[registries]` mapping for this scope (like resolve/publish);
+    // env default otherwise.
+    let base = match scope_registry_base(scope) {
+        Ok(Some(base)) => base,
+        Ok(None) => {
+            eprintln!(
+                "lang: setting a scope policy needs the hosted registry — set `NOETA_REGISTRY_URL` \
+                 or map the scope under `[registries]`"
+            );
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
     };
-    let index = match registry::HttpIndex::new(base.to_string_lossy().into_owned()) {
+    let index = match registry::HttpIndex::new(base) {
         Ok(index) => index,
         Err(err) => {
             eprintln!("lang: {err}");
@@ -816,15 +823,19 @@ fn cmd_claim(
     audience: Option<&str>,
     domain: Option<&str>,
 ) -> ExitCode {
-    // Claiming talks to the hosted registry over HTTP.
-    let Some(base) = std::env::var_os("NOETA_REGISTRY_URL") else {
-        eprintln!(
-            "lang: `noeta claim` needs the hosted registry — set `NOETA_REGISTRY_URL` to the \
-             registry you are claiming a scope on"
-        );
-        return ExitCode::from(2);
+    // Claiming talks to the hosted registry over HTTP — the one the project's `[registries]`
+    // routes this scope to (like resolve/publish), else the environment default.
+    let base = match scope_registry_base(scope) {
+        Ok(Some(base)) => base,
+        Ok(None) => {
+            eprintln!(
+                "lang: `noeta claim` needs the hosted registry — set `NOETA_REGISTRY_URL` to the \
+                 registry you are claiming a scope on, or map the scope under `[registries]`"
+            );
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
     };
-    let base = base.to_string_lossy().into_owned();
     let audience = audience
         .map(str::to_string)
         .or_else(|| std::env::var("NOETA_REGISTRY_AUDIENCE").ok())
@@ -1259,7 +1270,20 @@ fn cmd_publish(
     let tag = tag
         .map(str::to_string)
         .unwrap_or_else(|| format!("v{version}"));
-    let index = match registry::open_default() {
+    // Publish to the registry that OWNS this package's scope: route through the manifest's
+    // `[registries]` map exactly like resolution does (private-registries arc), falling back to
+    // the environment default only for an unmapped scope. Without this, a project that resolves
+    // `acme/*` from a private registry would publish `acme/pkg` to whatever NOETA_REGISTRY_URL
+    // points at — leaking a private package to the public registry. A `github:` forge source gets
+    // the forge's intentional "publish = push a tag" error instead of a silent mis-publish.
+    let scope_source = manifest.registries().source_for(&pkg.name.company);
+    if scope_source.is_some() {
+        println!(
+            "publishing `{name}` via the `[registries]` source for `{}`",
+            pkg.name.company
+        );
+    }
+    let index = match registry::open_source(scope_source) {
         Ok(index) => index,
         Err(err) => {
             eprintln!("lang: {err}");
@@ -1784,6 +1808,32 @@ fn locate_manifest() -> Result<PathBuf, ExitCode> {
         );
         ExitCode::from(1)
     })
+}
+
+/// The hosted-registry base URL a scope-management command (`claim`, `scope require-provenance`)
+/// should talk to for `scope`: the enclosing project's `[registries]` mapping when it routes the
+/// scope to a hosted URL — the same routing resolution and publish follow — else the
+/// `NOETA_REGISTRY_URL` environment default. A scope mapped to a git forge is a hard error (a
+/// forge has no claim/policy endpoints), not a silent fall-through to the wrong registry.
+fn scope_registry_base(scope: &str) -> Result<Option<String>, ExitCode> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(path) = manifest::find(&cwd)
+        && let Ok(manifest) = manifest::load(&path)
+    {
+        match manifest.registries().source_for(scope) {
+            Some(manifest::RegistrySource::Hosted(url)) => return Ok(Some(url.clone())),
+            Some(manifest::RegistrySource::GitForge(base)) => {
+                eprintln!(
+                    "lang: `{}` routes `{scope}` to the git forge `{base}` — a forge scope is \
+                     claimed by owning the org/user there, and has no registry policy endpoint",
+                    path.display()
+                );
+                return Err(ExitCode::from(2));
+            }
+            None => {}
+        }
+    }
+    Ok(std::env::var_os("NOETA_REGISTRY_URL").map(|v| v.to_string_lossy().into_owned()))
 }
 
 /// Quote a string as a TOML basic string for a manifest value we write (`noeta add`).

@@ -3747,6 +3747,51 @@ fn publishing_a_package_with_a_path_dependency_is_rejected() {
         .stderr(predicate::str::contains("helper"));
 }
 
+#[test]
+fn publish_routes_through_the_manifest_registries_scope_map() {
+    // Private-registries follow-up: `noeta publish` must open the registry the manifest's
+    // `[registries]` map routes the package's OWN scope to — the same routing resolution uses —
+    // not the environment default. Routing `acme` to a git forge makes the outcome observable
+    // without a network: the forge index's publish() is a hard "no publish endpoint" error, and
+    // the default local index (which would silently accept the release) must NOT be written.
+    if !git_available() {
+        eprintln!("skipping: git not available");
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_publish_routing");
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("lib");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_in(&["init", "-q"], &repo);
+    commit_version(
+        &repo,
+        "v1.0.0",
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+         [registries]\nacme = \"github:acme\"\n",
+    );
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", base.join("registry"))
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "via the `[registries]` source for `acme`",
+        ))
+        .stderr(predicate::str::contains("no publish endpoint"));
+    // The environment-default local index was never touched.
+    assert!(
+        !base.join("registry").exists(),
+        "publish must not fall through to the default registry when the scope is routed"
+    );
+}
+
 // --- package manager: git-tag dependencies (P2.3) -----------------------------------------------
 
 /// Run a `git` command in `cwd`, asserting success (identity env set so commits work in CI).
