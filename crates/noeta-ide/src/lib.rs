@@ -193,6 +193,13 @@ struct WorkspaceCache {
     /// The [`DepModule`] inputs backing `workspace.dep_modules`, kept so a file-set rescan can
     /// reuse them by URI instead of abandoning them (finding 9).
     dep_modules: Vec<DepModule>,
+    /// A **surfaced** dependency-resolution failure (audit-5 #7): a hard `noeta-pm` failure —
+    /// a trust refusal, a version conflict, a broken manifest, a lockfile drift — recorded here
+    /// so [`DocumentStore::diagnostics`] reports the real cause instead of silently degrading to
+    /// "no dependencies" (which showed up only as inexplicable unknown-import errors). `None`
+    /// when resolution succeeded or failed for a routine reason (no manifest, network/IO), where
+    /// the quiet degrade is the right editor behavior.
+    dep_error: Option<noeta_pm::PmError>,
 }
 
 /// The resolved dependency modules for a workspace (package-manager P2.1c): the salsa [`DepModule`]
@@ -203,6 +210,8 @@ struct ResolvedDeps {
     modules: Vec<DepModule>,
     uris: Vec<String>,
     programs: Vec<SourceProgram>,
+    /// A hard resolution failure worth the user's attention (see `WorkspaceCache::dep_error`).
+    error: Option<noeta_pm::PmError>,
 }
 
 /// The server's document state: the salsa database, the open editor buffers, and one cached
@@ -509,6 +518,7 @@ impl DocumentStore {
                 cache.dep_uris = deps.uris;
                 cache.dep_programs = deps.programs;
                 cache.dep_modules = deps.modules;
+                cache.dep_error = deps.error;
             }
             None => {
                 let workspace = Workspace::new(&self.db, programs.clone(), deps.modules.clone());
@@ -521,6 +531,7 @@ impl DocumentStore {
                         dep_uris: deps.uris,
                         dep_programs: deps.programs,
                         dep_modules: deps.modules,
+                        dep_error: deps.error,
                     },
                 );
             }
@@ -577,10 +588,14 @@ impl DocumentStore {
     /// the members) so its spans stay distinct and map back to its file for cross-package
     /// navigation. Resolution reuses the CLI's `noeta-pm` walk — path deps read locally, git deps
     /// served from the package store (materialized by a prior CLI run) — so the editor sees the
-    /// same cross-package program. A resolution failure (a registry dep, an unfetched git dep)
-    /// degrades to no dependencies rather than breaking the workspace; the user still gets the
-    /// members' own analysis. Existing dep inputs (from a previous rescan of this directory) are
-    /// reused by URI — updated in place, never abandoned (finding 9).
+    /// same cross-package program. A **routine** resolution failure (not a project, an offline
+    /// registry/network, a filesystem hiccup) degrades to no dependencies rather than breaking
+    /// the workspace; the user still gets the members' own analysis. A **hard** failure — a trust
+    /// refusal, a version conflict, a broken manifest, a lockfile drift — is recorded on the
+    /// returned deps so `diagnostics` surfaces the real cause (audit-5 #7: these used to be
+    /// silently swallowed and showed up only as spurious unknown-import errors). Existing dep
+    /// inputs (from a previous rescan of this directory) are reused by URI — updated in place,
+    /// never abandoned (finding 9).
     fn resolve_dep_modules(
         &mut self,
         key: &str,
@@ -591,8 +606,20 @@ impl DocumentStore {
         let Some(entry_path) = member_uris.first().and_then(|uri| uri_to_path(uri)) else {
             return deps;
         };
-        let Ok(packages) = noeta_pm::manifest::dependency_packages_query(&entry_path) else {
-            return deps;
+        let packages = match noeta_pm::manifest::dependency_packages_query(&entry_path) {
+            Ok(packages) => packages,
+            // Not a project / environmental: the quiet degrade IS the right editor behavior
+            // (formatting and single-file analysis must not nag about a flaky network).
+            Err(
+                noeta_pm::PmError::NoManifest(_)
+                | noeta_pm::PmError::Network(_)
+                | noeta_pm::PmError::Io(_),
+            ) => return deps,
+            // A hard failure the user must see: trust/conflict/manifest/lock/auth/native-build.
+            Err(err) => {
+                deps.error = Some(err);
+                return deps;
+            }
         };
         // Previous dep inputs by URI, for reuse.
         let mut old_by_uri: HashMap<String, (DepModule, SourceProgram)> =
@@ -682,12 +709,27 @@ impl DocumentStore {
     pub fn diagnostics(&self, uri: &str) -> Option<(Vec<noeta_diagnostics::Diagnostic>, String)> {
         let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let diags = noeta_db::linked_checked_ide_from(db, cache.workspace, doc)
-            .diagnostics
-            .iter()
-            .filter(|d| d.span.source == source)
-            .cloned()
-            .collect();
+        let mut diags: Vec<noeta_diagnostics::Diagnostic> =
+            noeta_db::linked_checked_ide_from(db, cache.workspace, doc)
+                .diagnostics
+                .iter()
+                .filter(|d| d.span.source == source)
+                .cloned()
+                .collect();
+        // A hard dependency-resolution failure (audit-5 #7): surface the real cause — a trust
+        // refusal, a version conflict, a broken manifest — at the top of the file instead of
+        // leaving only the spurious unknown-import errors it causes downstream. Reported under
+        // E0019 (unresolved import): the imports genuinely cannot resolve, and this names why.
+        if let Some(err) = &cache.dep_error {
+            diags.insert(
+                0,
+                noeta_diagnostics::Diagnostic::error(
+                    noeta_diagnostics::DiagnosticCode::UnresolvedImport,
+                    noeta_span::Span::new_in(source, 0, 0),
+                    format!("dependency resolution failed: {err}"),
+                ),
+            );
+        }
         Some((diags, doc.text(db).clone()))
     }
 
@@ -3432,6 +3474,55 @@ mod tests {
             )
             .expect("cross-package type resolves to its dependency source");
         assert_eq!(target_uri, hello_uri);
+    }
+
+    #[test]
+    fn a_hard_dependency_resolution_failure_is_surfaced_as_a_diagnostic() {
+        // audit-5 #7: a broken manifest (or a trust refusal / version conflict) used to degrade
+        // silently to "no dependencies", leaving the user with inexplicable unknown-import
+        // errors. The typed pm error now reaches diagnostics with the real cause.
+        let base = std::env::temp_dir().join("noeta_lsp_dep_error");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        // `dep = 5` is not a valid dependency source — a Manifest-kind resolution failure.
+        std::fs::write(app.join("noeta.toml"), "[dependencies]\ndep = 5\n").unwrap();
+
+        let entry_uri = path_to_uri(&app.join("main.noe"));
+        let mut store = DocumentStore::default();
+        store.open(&entry_uri, "use dep.thing;\n".to_string());
+
+        let (diags, _text) = store.diagnostics(&entry_uri).unwrap();
+        let surfaced = diags
+            .iter()
+            .find(|d| d.message.starts_with("dependency resolution failed:"))
+            .expect("the pm failure is surfaced, not swallowed");
+        assert_eq!(
+            surfaced.code,
+            noeta_diagnostics::DiagnosticCode::UnresolvedImport
+        );
+        assert!(
+            surfaced.message.contains("dep"),
+            "names the offending entry: {}",
+            surfaced.message
+        );
+        // It is reported at the top of the entry document (span 0..0 of this source).
+        assert_eq!(surfaced.span.start, 0);
+        assert_eq!(surfaced.span.end, 0);
+
+        // A workspace that is simply NOT a project (no manifest) stays quiet — the routine
+        // degrade is unchanged.
+        let bare = base.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let bare_uri = path_to_uri(&bare.join("lone.noe"));
+        store.open(&bare_uri, "x = 1\n".to_string());
+        let (diags, _) = store.diagnostics(&bare_uri).unwrap();
+        assert!(
+            diags
+                .iter()
+                .all(|d| !d.message.starts_with("dependency resolution failed:")),
+            "no manifest is not an error: {diags:?}"
+        );
     }
 
     #[test]
