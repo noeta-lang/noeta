@@ -117,6 +117,7 @@ pub fn compile_real(
 /// tier → provider map, the dependency packages, and the root package's edition. Resolved ONCE and
 /// shared by the cache key and the loader, so no consumer can pick a divergent subset (the drift
 /// that left the debugger/profiler unable to see dependency packages).
+#[derive(Debug)]
 pub struct FrontFacts {
     pub active: Vec<String>,
     pub providers: BTreeMap<String, String>,
@@ -189,6 +190,7 @@ pub fn resolve_front_with(
 /// program-taking tool goes through (run/dump/build via [`compile_whole_file`]; the debugger,
 /// profiler, agent debug tools, and REPL bootstrap via [`load_default_project`]), so they all see
 /// the same dependency packages, tier activation, and per-source editions as `noeta run`.
+#[derive(Debug)]
 pub struct Loaded {
     pub program: noeta_ast::Program,
     pub sources: SourceMap,

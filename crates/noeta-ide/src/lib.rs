@@ -2956,7 +2956,7 @@ mod tests {
         // ONE workspace for the directory, not one per open document.
         assert_eq!(store.workspaces.len(), 1, "one workspace per directory");
         let (cache_a, alpha, alpha_id) = store.doc_cache(&alpha_uri).expect("alpha resolves");
-        let (cache_b, beta, beta_id) = store.doc_cache(&beta_uri).expect("beta resolves");
+        let (cache_b, _beta, beta_id) = store.doc_cache(&beta_uri).expect("beta resolves");
         assert!(std::ptr::eq(cache_a, cache_b), "same shared cache");
         assert_ne!(alpha_id, beta_id, "distinct stable SourceIds");
         // The input representing alpha inside beta's view IS alpha's own input (no copy).

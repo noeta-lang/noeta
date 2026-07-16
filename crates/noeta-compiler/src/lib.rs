@@ -90,15 +90,55 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
 /// truth the checker and IDE already consume (this crate used to re-derive it with private
 /// helpers, the third copy of the rules; a new import shape then had to be taught to three
 /// matchers, and a miss diverged checker-accepted programs from backend binding).
-fn binds_native_value(
-    reg: &noeta_stdlib::registry::Registry,
-    path: &[String],
-    name: &str,
-) -> bool {
+fn binds_native_value(reg: &noeta_stdlib::registry::Registry, path: &[String], name: &str) -> bool {
     matches!(
         reg.classify_use(path, name),
-        noeta_stdlib::registry::UseKind::Module(_) | noeta_stdlib::registry::UseKind::MemberFn { .. }
+        noeta_stdlib::registry::UseKind::Module(_)
+            | noeta_stdlib::registry::UseKind::MemberFn { .. }
     )
+}
+
+/// Everything that varies a checked compile, so callers configure one entry point
+/// ([`compile_with`] / [`compile_session_with`]) instead of this family growing a
+/// `_with_isolates_and_debug_and_registry` combinatorial tail (audit-3 finding 9 — the
+/// checker's own [`CheckOptions`] lesson, propagated). `Default` is the CLI/salsa/differential
+/// path: cooperative isolates, no debug info, process-global registry.
+///
+/// [`CheckOptions`]: noeta_check::CheckOptions
+pub struct CompileOptions {
+    /// Whether `isolate f(args)` lowers to `Rvalue::SpawnIsolate` (real OS-thread path, I.4b).
+    /// Only the CLI's real (VM) execution passes true; the differential/salsa keep false
+    /// (byte-identical sandbox).
+    pub real_isolates: bool,
+    /// Emit per-prototype debug info (reg→name locals, function names, defining spans) and pin
+    /// named locals through coalescing so the map stays 1:1. Only `noeta dap` passes true; the
+    /// CLI, salsa, and the differential pass false (no debug info, unconstrained coalescing —
+    /// goldens unchanged).
+    pub debug: bool,
+    /// The extension registry `use`-import lowering and native-type narrowing resolve against
+    /// (instance-registry IR5). The production/CLI path keeps the process-global default; an
+    /// embed session threads its own assembled set.
+    pub registry: &'static noeta_stdlib::registry::Registry,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        CompileOptions {
+            real_isolates: false,
+            debug: false,
+            registry: noeta_stdlib::registry::default_seeded(),
+        }
+    }
+}
+
+impl std::fmt::Debug for CompileOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompileOptions")
+            .field("real_isolates", &self.real_isolates)
+            .field("debug", &self.debug)
+            // The registry is a `&'static` handle whose contents aren't `Debug`.
+            .finish_non_exhaustive()
+    }
 }
 
 /// Compile a whole program to a [`Module`], or report the first unsupported construct.
@@ -109,7 +149,7 @@ fn binds_native_value(
 /// the tree-walker, whose type declarations are all evaluated before the driver code runs.
 pub fn compile(program: &Program) -> Result<Module, Unsupported> {
     let checked = noeta_check::check_all(program);
-    compile_with_sites(program, checked.sites, false, false)
+    compile_with(program, checked.sites, CompileOptions::default())
 }
 
 /// Convert the checker's destructor-relevance into the drop pass's form (identical sets; the two
@@ -134,10 +174,26 @@ pub fn compile_with_sites(
     program: &Program,
     sites: noeta_check::Sites,
     real_isolates: bool,
-    // Emit per-prototype debug info (reg→name locals, function names, defining spans) and pin named
-    // locals through coalescing so the map stays 1:1. Only `noeta dap` passes true; the CLI, salsa,
-    // and the differential pass false (no debug info, unconstrained coalescing — goldens unchanged).
     debug: bool,
+) -> Result<Module, Unsupported> {
+    // The CLI/salsa/differential compile path is single-registry — the default registry.
+    compile_with(
+        program,
+        sites,
+        CompileOptions {
+            real_isolates,
+            debug,
+            ..CompileOptions::default()
+        },
+    )
+}
+
+/// As [`compile_with_sites`], but against explicit [`CompileOptions`] — the single configurable
+/// batch-compile entry the positional-flag functions are thin presets of.
+pub fn compile_with(
+    program: &Program,
+    sites: noeta_check::Sites,
+    opts: CompileOptions,
 ) -> Result<Module, Unsupported> {
     let relevance = Some(passes_relevance(&sites.destructor_relevance));
     let destruct_reachable = sites
@@ -146,16 +202,7 @@ pub fn compile_with_sites(
         .iter()
         .cloned()
         .collect();
-    compile_inner(
-        program,
-        sites,
-        relevance,
-        destruct_reachable,
-        real_isolates,
-        debug,
-        // The CLI/salsa/differential compile path is single-registry — the process-global default.
-        noeta_stdlib::registry::default_seeded(),
-    )
+    compile_inner(program, sites, relevance, destruct_reachable, opts)
 }
 
 // Threads the checker's site bundle plus the pre-converted relevance through to the IR lowering,
@@ -167,17 +214,14 @@ fn compile_inner(
     sites: noeta_check::Sites,
     relevance: Option<noeta_ir_passes::Relevance>,
     destruct_reachable: Vec<String>,
-    real_isolates: bool,
-    debug: bool,
-    registry: &'static noeta_stdlib::registry::Registry,
+    opts: CompileOptions,
 ) -> Result<Module, Unsupported> {
     let mut reflection = noeta_ast::reflect::build(program);
     // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
     noeta_check::extend_reflection(&mut reflection);
-    let (module, map_packed_sites) =
-        compile_to_mc(program, sites, relevance, real_isolates, debug, registry)?;
+    let (module, map_packed_sites) = compile_to_mc(program, sites, relevance, opts)?;
     Ok(Module {
         protos: module.protos,
         shapes: module.shapes,
@@ -212,13 +256,15 @@ pub fn compile_with_sites_session(
     real_isolates: bool,
     debug: bool,
 ) -> Result<(Module, SessionCompiler), Unsupported> {
-    // The default (CLI/REPL/dap) session compile is single-registry — the process-global default.
-    compile_with_sites_session_with_registry(
+    // The default (CLI/REPL/dap) session compile is single-registry — the default registry.
+    compile_session_with(
         program,
         sites,
-        real_isolates,
-        debug,
-        noeta_stdlib::registry::default_seeded(),
+        CompileOptions {
+            real_isolates,
+            debug,
+            ..CompileOptions::default()
+        },
     )
 }
 
@@ -234,6 +280,24 @@ pub fn compile_with_sites_session_with_registry(
     debug: bool,
     registry: &'static noeta_stdlib::registry::Registry,
 ) -> Result<(Module, SessionCompiler), Unsupported> {
+    compile_session_with(
+        program,
+        sites,
+        CompileOptions {
+            real_isolates,
+            debug,
+            registry,
+        },
+    )
+}
+
+/// As [`compile_with_sites_session`], but against explicit [`CompileOptions`] — the single
+/// configurable session-compile entry the positional-flag functions are thin presets of.
+pub fn compile_session_with(
+    program: &Program,
+    sites: noeta_check::Sites,
+    opts: CompileOptions,
+) -> Result<(Module, SessionCompiler), Unsupported> {
     let relevance = Some(passes_relevance(&sites.destructor_relevance));
     let destruct_reachable: Vec<String> = sites
         .destructor_relevance
@@ -246,8 +310,7 @@ pub fn compile_with_sites_session_with_registry(
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
     noeta_check::extend_reflection(&mut reflection);
-    let (mc, map_packed_sites) =
-        compile_to_mc(program, sites, relevance, real_isolates, debug, registry)?;
+    let (mc, map_packed_sites) = compile_to_mc(program, sites, relevance, opts)?;
     let session = SessionCompiler {
         mc,
         // The launch compile's own map-packed pairs join the session accumulation: a program
@@ -268,17 +331,16 @@ fn compile_to_mc(
     program: &Program,
     sites: noeta_check::Sites,
     relevance: Option<noeta_ir_passes::Relevance>,
-    // Whether `isolate f(args)` lowers to `Rvalue::SpawnIsolate` (real OS-thread path, I.4b). Only the
-    // CLI's real (VM) execution passes true; the differential/salsa keep false (byte-identical sandbox).
-    real_isolates: bool,
-    // Whether to emit per-prototype debug info + pin named locals through coalescing (see the public
-    // `compile_with_sites` doc). Threaded onto `ModuleCompiler` and read at `into_chunk`/`declare_local`.
-    debug: bool,
-    // The extension registry `use`-import lowering and native-type narrowing resolve against
-    // (instance-registry IR5). The production/CLI path passes the process-global default; an embed
-    // session threads its own assembled set. Stored on the `ModuleCompiler` and passed to lowering.
-    registry: &'static noeta_stdlib::registry::Registry,
+    // What varies the compile (isolate lowering, debug info, extension registry) — see the field
+    // docs on [`CompileOptions`]. `debug` is threaded onto `ModuleCompiler` and read at
+    // `into_chunk`/`declare_local`; the registry is stored there too and passed to lowering.
+    opts: CompileOptions,
 ) -> Result<(ModuleCompiler, Vec<(Span, u32)>), Unsupported> {
+    let CompileOptions {
+        real_isolates,
+        debug,
+        registry,
+    } = opts;
     // `sites` stays whole through lowering (`lowering_sites!` is THE one projection); the owned
     // maps the compiler keeps (`type_of`, `map_packed`) move out afterwards.
 
@@ -294,8 +356,10 @@ fn compile_to_mc(
     let ir = noeta_ir::lower_with_sites_opts(
         program,
         noeta_ir::lowering_sites!(sites),
-        real_isolates,
-        registry,
+        noeta_ir::LowerOptions {
+            real_isolates,
+            registry,
+        },
     )
     .map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
@@ -349,8 +413,11 @@ fn compile_to_mc(
     // span the VM's `map` builtin keys on. Sorted by span first so schema interning order — and thus
     // the `packed_schemas` table — is deterministic regardless of the `HashMap`'s iteration order.
     let map_packed_sites = {
-        let mut entries: Vec<(Span, &noeta_ast::reflect::PackedLayout)> =
-            sites.map_packed_sites.iter().map(|(s, l)| (*s, l)).collect();
+        let mut entries: Vec<(Span, &noeta_ast::reflect::PackedLayout)> = sites
+            .map_packed_sites
+            .iter()
+            .map(|(s, l)| (*s, l))
+            .collect();
         entries.sort_by_key(|(s, _)| (s.source, s.start, s.end));
         entries
             .into_iter()
@@ -477,11 +544,13 @@ impl SessionCompiler {
             Some(sites) => noeta_ir::lower_with_sites_opts(
                 entry,
                 noeta_ir::lowering_sites!(sites),
-                // The REPL keeps cooperative isolates, exactly like the checkerless path.
-                false,
-                // The session's own registry (instance-registry IR5) — the default for a REPL
-                // session, an embed session's own set when it installed one.
-                self.mc.registry,
+                noeta_ir::LowerOptions {
+                    // The REPL keeps cooperative isolates, exactly like the checkerless path.
+                    real_isolates: false,
+                    // The session's own registry (instance-registry IR5) — the default for a REPL
+                    // session, an embed session's own set when it installed one.
+                    registry: self.mc.registry,
+                },
             ),
         }
         .map_err(|u| Unsupported {
@@ -4439,7 +4508,9 @@ mod tests {
             noeta_stdlib::registry::UseKind::Module(q) => q,
             other => panic!("`use std.{name}` must classify as a module, got {other:?}"),
         };
-        assert!(noeta_stdlib::registry::has_static_ctx_route(&emitted("cell")));
+        assert!(noeta_stdlib::registry::has_static_ctx_route(&emitted(
+            "cell"
+        )));
         assert!(noeta_stdlib::registry::has_static_ctx_route(&emitted(
             "reactive"
         )));

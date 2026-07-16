@@ -274,9 +274,25 @@ pub fn check_all_session_with(
     program: &Program,
     editions: EditionMap,
 ) -> (Checked, SessionChecker) {
+    check_all_session_opts(
+        program,
+        CheckOptions {
+            editions,
+            ..CheckOptions::default()
+        },
+    )
+}
+
+/// [`check_all_session`] against explicit [`CheckOptions`] — the session-mode counterpart of
+/// [`check_all_with`], so the session path can express everything the batch path can (editions,
+/// per-session registry, the IDE type index) without a bespoke constructor per combination
+/// (audit-3 finding 9).
+pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked, SessionChecker) {
     let mut checker = Checker {
         config: Config {
-            editions,
+            record_expr_types: opts.record_expr_types,
+            registry: opts.registry,
+            editions: opts.editions,
             ..Config::default()
         },
         ..Checker::default()
@@ -350,7 +366,7 @@ impl std::fmt::Debug for SessionChecker {
 impl SessionChecker {
     /// A fresh session: prelude registered, empty registries, an empty persistent global scope.
     pub fn new() -> SessionChecker {
-        Self::with_registry_opt(None)
+        Self::with_options(CheckOptions::default())
     }
 
     /// A fresh session bound to an explicit per-session extension [`Registry`] (instance-registry
@@ -358,16 +374,22 @@ impl SessionChecker {
     /// than the process-global default — the session-mode counterpart of [`check_all_with_registry`],
     /// so an embedding host's REPL/debug console sees exactly the host's extension set.
     pub fn with_registry(registry: &'static noeta_stdlib::registry::Registry) -> SessionChecker {
-        Self::with_registry_opt(Some(registry))
+        Self::with_options(CheckOptions {
+            registry: Some(registry),
+            ..CheckOptions::default()
+        })
     }
 
-    fn with_registry_opt(
-        registry: Option<&'static noeta_stdlib::registry::Registry>,
-    ) -> SessionChecker {
+    /// A fresh session against explicit [`CheckOptions`] — the constructor the presets above are
+    /// thin forms of, so a session can carry editions or the IDE type index without a bespoke
+    /// constructor per combination (audit-3 finding 9).
+    pub fn with_options(opts: CheckOptions) -> SessionChecker {
         let mut checker = Checker {
             config: Config {
                 session_mode: true,
-                registry,
+                record_expr_types: opts.record_expr_types,
+                registry: opts.registry,
+                editions: opts.editions,
                 ..Config::default()
             },
             ..Checker::default()

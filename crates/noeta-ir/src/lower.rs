@@ -174,41 +174,70 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
     lower_with_sites(program, LoweringSites::empty())
 }
 
+/// Everything that varies a lowering, so callers configure one entry point
+/// ([`lower_with_sites_opts`]) instead of this family growing a positional-flag parameter per
+/// concern (audit-3 finding 9 — the checker's [`CheckOptions`] pattern applied here). `Default`
+/// is every in-oracle path: cooperative isolates, process-global registry — identical to
+/// [`lower_with_sites`].
+///
+/// [`CheckOptions`]: noeta_check::CheckOptions
+pub struct LowerOptions {
+    /// Selects the isolate lowering (isolates I.4b): when **true**, `isolate f(args)` lowers to
+    /// [`Rvalue::SpawnIsolate`] (callee + unbuilt args, for the real OS-thread path); when
+    /// **false** (every in-oracle path — the differential, the salsa graph, the REPL), it lowers
+    /// to a plain [`Rvalue::Spawn`] of the pre-built future, exactly as `spawn f(args)`, so the
+    /// sandbox and the whole differential corpus are byte-identical and never see the new op.
+    /// Only the CLI's real (VM) execution path passes `true`.
+    pub real_isolates: bool,
+    /// The extension registry native-type import narrowing resolves against (instance-registry
+    /// IR5): `collect_type_aliases` reads it so `is`/`as`/`type_of` on an imported extern type
+    /// lower to the right qualified identity. The production/CLI path keeps the process-global
+    /// default; an embed session threads its own assembled set, so a session's compile honors
+    /// its extensions.
+    pub registry: &'static noeta_stdlib::registry::Registry,
+}
+
+impl Default for LowerOptions {
+    fn default() -> Self {
+        LowerOptions {
+            real_isolates: false,
+            registry: noeta_stdlib::registry::default_seeded(),
+        }
+    }
+}
+
+impl std::fmt::Debug for LowerOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LowerOptions")
+            .field("real_isolates", &self.real_isolates)
+            // The registry is a `&'static` handle whose contents aren't `Debug`.
+            .finish_non_exhaustive()
+    }
+}
+
 /// As [`lower`], but driven by the checker's [`LoweringSites`] (all pure functions of the program, so
 /// the optimizations they enable stay invisible to `RunResult`). The production execution paths
 /// (`lang run`, the conformance reference, the bytecode compiler) pass real maps; the REPL and IR
-/// corpus pass empty ones and stay on the boxed/unfused path.
+/// corpus pass empty ones and stay on the boxed/unfused path. Single-registry, cooperative isolates
+/// ([`LowerOptions::default`]).
 pub fn lower_with_sites(
     program: &AstProgram,
     sites: LoweringSites,
 ) -> Result<Program, Unsupported> {
-    // Resolve native names against the process-global default registry (instance-registry IR5) —
-    // the reference/REPL/conformance paths that call this are single-registry. An embedding host
-    // with its own extension set lowers through `lower_with_sites_opts` with its registry.
-    lower_with_sites_opts(
-        program,
-        sites,
-        false,
-        noeta_stdlib::registry::default_seeded(),
-    )
+    lower_with_sites_opts(program, sites, LowerOptions::default())
 }
 
-/// As [`lower_with_sites`], but with `real_isolates` selecting the isolate lowering (isolates I.4b):
-/// when **true**, `isolate f(args)` lowers to [`Rvalue::SpawnIsolate`] (callee + unbuilt args, for the
-/// real OS-thread path); when **false** (every in-oracle path — the differential, the salsa graph, the
-/// REPL), it lowers to a plain [`Rvalue::Spawn`] of the pre-built future, exactly as `spawn f(args)`,
-/// so the sandbox and the whole differential corpus are byte-identical and never see the new op. Only
-/// the CLI's real (VM) execution path passes `true`.
+/// As [`lower_with_sites`], but against explicit [`LowerOptions`] — the single configurable entry
+/// the other `lower*` functions are thin presets of.
 pub fn lower_with_sites_opts(
     program: &AstProgram,
     sites: LoweringSites,
-    real_isolates: bool,
-    // The extension registry native-type import narrowing resolves against (instance-registry IR5):
-    // `collect_type_aliases` reads it so `is`/`as`/`type_of` on an imported extern type lower to the
-    // right qualified identity. The production/CLI path passes the process-global default; an
-    // embed session threads its own assembled set, so a session's compile honors its extensions.
-    registry: &'static noeta_stdlib::registry::Registry,
+    opts: LowerOptions,
 ) -> Result<Program, Unsupported> {
+    let LowerOptions {
+        real_isolates,
+        registry,
+    } = opts;
     let mut lowerer = Lowerer {
         temps: 0,
         sites,
