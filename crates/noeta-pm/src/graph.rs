@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 
 use semver::{Version, VersionReq};
 
+use crate::error::PmError;
 use crate::manifest::{Dependency, Manifest};
 use crate::store::{Store, hash_tree};
 
@@ -136,7 +137,7 @@ struct Instance {
 /// empty graph when there is no manifest or no `[dependencies]` (a bare script). Every failure — an
 /// unreadable/invalid manifest, a git fetch error, a registry dependency (pending P2.5), or a version
 /// conflict — is a human-readable `Err`.
-pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
+pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, PmError> {
     resolve_graph_for(entry, None)
 }
 
@@ -146,7 +147,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
 /// formatter scans it for text tiers: a query API must not mutate project state on disk (or
 /// silently re-pin versions) because a file was opened or formatted. Same selection, same trust
 /// enforcement; only the write is skipped.
-pub fn resolve_graph_query(entry: &Path) -> Result<ResolvedGraph, String> {
+pub fn resolve_graph_query(entry: &Path) -> Result<ResolvedGraph, PmError> {
     resolve_graph_impl(entry, None, LockRefresh::Skip)
 }
 
@@ -155,7 +156,7 @@ pub fn resolve_graph_query(entry: &Path) -> Result<ResolvedGraph, String> {
 /// `[dependencies]` plus that target's own and inherited `[targets.<name>.dependencies]`. `None`
 /// (the [`resolve_graph`] default) is the global set, so every existing caller is unchanged. A
 /// dependency's *own* target-scoped deps never apply — a dep contributes only its `[dependencies]`.
-pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedGraph, String> {
+pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedGraph, PmError> {
     resolve_graph_impl(entry, target, LockRefresh::Refresh)
 }
 
@@ -180,7 +181,7 @@ fn resolve_graph_impl(
     entry: &Path,
     target: Option<&str>,
     refresh: LockRefresh,
-) -> Result<ResolvedGraph, String> {
+) -> Result<ResolvedGraph, PmError> {
     let dir = entry.parent().unwrap_or_else(|| Path::new("."));
     let Some(manifest_path) = crate::manifest::find(dir) else {
         return Ok(ResolvedGraph {
@@ -297,45 +298,48 @@ fn resolve_graph_impl(
 fn enforce_transparency(
     graph: &ResolvedGraph,
     pinned: Option<&crate::lock::LogTrust>,
-) -> Result<crate::lock::LogTrust, String> {
+) -> Result<crate::lock::LogTrust, PmError> {
     use crate::transparency;
-    let index = crate::registry::open_http()?.ok_or(
-        "`[trust].require_transparency` needs the hosted registry — set `NOETA_REGISTRY_URL`",
-    )?;
+    let index = crate::registry::open_http()?.ok_or_else(|| {
+        PmError::Trust(
+            "`[trust].require_transparency` needs the hosted registry — set `NOETA_REGISTRY_URL`"
+                .to_string(),
+        )
+    })?;
     // The log key: the one pinned in the lock, or the served key on first use (TOFU).
     let key = match pinned {
         Some(p) => p.public_key.clone(),
-        None => index
-            .log_public_key()?
-            .ok_or("the registry serves no transparency-log public key")?,
+        None => index.log_public_key()?.ok_or_else(|| {
+            PmError::Trust("the registry serves no transparency-log public key".to_string())
+        })?,
     };
     let cp = index.log_checkpoint()?;
     if !transparency::verify_checkpoint(&key, cp.tree_size, &cp.root_hash, &cp.signature)? {
-        return Err(
+        return Err(PmError::Trust(
             "the transparency-log checkpoint does not verify against the pinned log key — the \
              registry changed keys or is equivocating (reconcile, then `noeta update` to re-pin)"
                 .to_string(),
-        );
+        ));
     }
     // Append-only: the current checkpoint must be a consistent extension of the pinned one.
     if let Some(p) = pinned {
         if cp.tree_size < p.tree_size {
-            return Err(
+            return Err(PmError::Trust(
                 "the transparency log shrank since it was pinned — the registry rewrote history"
                     .to_string(),
-            );
+            ));
         }
         let cons = index.log_consistency(p.tree_size, cp.tree_size)?;
-        let root_from =
-            transparency::hex_to_array::<32>(&p.root_hash).ok_or("malformed pinned root hash")?;
-        let root_to =
-            transparency::hex_to_array::<32>(&cp.root_hash).ok_or("malformed checkpoint root")?;
+        let root_from = transparency::hex_to_array::<32>(&p.root_hash)
+            .ok_or_else(|| PmError::Trust("malformed pinned root hash".to_string()))?;
+        let root_to = transparency::hex_to_array::<32>(&cp.root_hash)
+            .ok_or_else(|| PmError::Trust("malformed checkpoint root".to_string()))?;
         let proof = cons
             .proof
             .iter()
             .map(|h| transparency::hex_to_array::<32>(h))
             .collect::<Option<Vec<_>>>()
-            .ok_or("malformed consistency proof")?;
+            .ok_or_else(|| PmError::Trust("malformed consistency proof".to_string()))?;
         if !transparency::verify_consistency(
             p.tree_size as usize,
             cp.tree_size as usize,
@@ -343,11 +347,11 @@ fn enforce_transparency(
             &root_from,
             &root_to,
         ) {
-            return Err(
+            return Err(PmError::Trust(
                 "the transparency log is not an append-only extension of the pinned checkpoint — \
                  history was rewritten or the registry is equivocating"
                     .to_string(),
-            );
+            ));
         }
     }
     // Every registry-resolved release must be included at this verified checkpoint.
@@ -437,28 +441,28 @@ impl Walker<'_> {
         deps: &BTreeMap<String, Dependency>,
         base_dir: &Path,
         edges: &mut BTreeMap<String, String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PmError> {
         for (key, dep) in deps {
             let (dir, source, fetched_hash) = self.materialize(key, dep, base_dir)?;
             let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
-                .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                .map_err(|err| err.map_msg(|m| format!("dependency `{key}`: {m}")))?;
             let pkg = child_manifest.package().ok_or_else(|| {
-                format!(
+                PmError::Manifest(format!(
                     "dependency `{key}` at `{}` has no `[package]` table (needed for its identity \
                      and namespace root)",
                     dir.display()
-                )
+                ))
             })?;
             let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
             edges.insert(key.clone(), identity.clone());
 
             if let Some(existing) = self.instances.get(&identity) {
                 if existing.version != pkg.version {
-                    return Err(format!(
+                    return Err(PmError::Conflict(format!(
                         "dependency conflict: `{identity}` is required at both {} and {} — a \
                          package may appear at only one version (they share one flat namespace)",
                         existing.version, pkg.version
-                    ));
+                    )));
                 }
                 continue; // already materialized and its subtree walked
             }
@@ -473,23 +477,27 @@ impl Walker<'_> {
                 // never inherited from a dependency, so a package can't smuggle native code in
                 // through its own sub-dependencies; the human sees the whole native footprint.
                 if !self.native_trust.contains(&identity) {
-                    return Err(format!(
+                    return Err(PmError::Trust(format!(
                         "dependency `{key}` (`{identity}`) ships native code (`native = \
                          \"{native}\"`), which runs arbitrary Rust at build + run time. It is not \
                          authorized: add `{identity}` to the `[trust].native` list in your \
                          `noeta.toml` to allow it (this grant is deliberately explicit — a \
                          dependency, even a transitive one, can never authorize its own native code)."
-                    ));
+                    )));
                 }
-                validate_native_crate(&dir, native)
-                    .map_err(|err| format!("dependency `{key}` (`{identity}`): {err}"))?;
+                validate_native_crate(&dir, native).map_err(|err| {
+                    err.map_msg(|m| format!("dependency `{key}` (`{identity}`): {m}"))
+                })?;
             }
             // A git fetch already hashed its (immutable, store-materialized) tree — reuse it; a
             // path tree is mutable, so it hashes fresh.
             let content_hash = match fetched_hash {
                 Some(hash) => hash,
                 None => hash_tree(&dir).map_err(|err| {
-                    format!("dependency `{key}`: hashing `{}`: {err}", dir.display())
+                    PmError::Io(format!(
+                        "dependency `{key}`: hashing `{}`: {err}",
+                        dir.display()
+                    ))
                 })?,
             };
             // A git source is immutable, so a lock-recorded hash must match — a mismatch means the
@@ -504,11 +512,11 @@ impl Walker<'_> {
                 && let Some(locked) = self.lock.content_hash(&identity)
                 && locked != content_hash
             {
-                return Err(format!(
+                return Err(PmError::Lock(format!(
                     "dependency `{key}` (`{identity}`) content hash does not match `{}` — the \
                      stored source drifted from the lock; run `noeta update` to re-pin",
                     crate::lock::LOCK_NAME
-                ));
+                )));
             }
             // Insert before recursing so a dependency cycle terminates (a back-edge sees the
             // in-progress instance and dedups).
@@ -548,7 +556,7 @@ impl Walker<'_> {
         key: &str,
         dep: &Dependency,
         base_dir: &Path,
-    ) -> Result<(PathBuf, ResolvedSource, Option<String>), String> {
+    ) -> Result<(PathBuf, ResolvedSource, Option<String>), PmError> {
         let memo_key = match dep {
             Dependency::Path { path } => format!("path:{}", base_dir.join(path).display()),
             Dependency::Git { url, git_ref } => format!("git:{url}@{}", git_ref.lock_key()),
@@ -574,7 +582,7 @@ impl Walker<'_> {
         key: &str,
         dep: &Dependency,
         base_dir: &Path,
-    ) -> Result<(PathBuf, ResolvedSource, Option<String>), String> {
+    ) -> Result<(PathBuf, ResolvedSource, Option<String>), PmError> {
         match dep {
             Dependency::Path { path } => {
                 // Canonicalize the joined directory so module names/spans (and the editor URIs built
@@ -592,11 +600,11 @@ impl Walker<'_> {
                 // already chose one compatible version per identity, so look up the coordinates of
                 // `solution[identity]` in the index rather than greedily re-picking the highest.
                 let package = package.as_ref().ok_or_else(|| {
-                    format!(
+                    PmError::Manifest(format!(
                         "dependency `{key}` is a registry dependency but names no package — add \
                          `package = \"company/pkg\"` (the registry identity, decoupled from the \
                          import-root key)"
-                    )
+                    ))
                 })?;
                 let name = format!("{}/{}", package.company, package.package);
                 // This identity came from a registry dependency — transparency enforcement applies to
@@ -606,13 +614,15 @@ impl Walker<'_> {
                 // candidate graph, so a solved version can't name one — but the walk is a public entry
                 // too, so keep the invariant local rather than assume the solve ran.
                 if crate::reserved::is_builtin(&package.company) {
-                    return Err(format!(
+                    return Err(PmError::Trust(format!(
                         "dependency `{key}`: {}",
                         crate::reserved::builtin_registry_refusal(&package.company, &name)
-                    ));
+                    )));
                 }
                 let version = self.solution.get(&name).cloned().ok_or_else(|| {
-                    format!("dependency `{key}` (`{name}`) is not in the resolved version set")
+                    PmError::Conflict(format!(
+                        "dependency `{key}` (`{name}`) is not in the resolved version set"
+                    ))
                 })?;
                 let scope = package.company.clone();
                 // Lock fast path: the solved version IS the locked version → materialize from the
@@ -635,7 +645,7 @@ impl Walker<'_> {
                 let scope_key = self
                     .index_for(&scope)?
                     .scope_key(&scope)
-                    .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                    .map_err(|err| err.map_msg(|m| format!("dependency `{key}`: {m}")))?;
                 // The solved release comes from the candidate set `solve` already loaded — the
                 // index is only re-queried if this identity wasn't in it (a walk without a solve,
                 // e.g. a caller-driven partial resolve).
@@ -648,13 +658,13 @@ impl Walker<'_> {
                     None => self
                         .index_for(&scope)?
                         .releases(&name)
-                        .map_err(|err| format!("dependency `{key}`: {err}"))?
+                        .map_err(|err| err.map_msg(|m| format!("dependency `{key}`: {m}")))?
                         .into_iter()
                         .find(|r| r.version == version)
                         .ok_or_else(|| {
-                            format!(
+                            PmError::Network(format!(
                                 "dependency `{key}` (`{name}`): resolved version {version} is not in the index"
-                            )
+                            ))
                         })?,
                 };
                 // Provenance (Phase 4 #2 / Phase 5): pin the scope's trust root on first use,
@@ -698,7 +708,7 @@ impl Walker<'_> {
         git_ref: &crate::manifest::GitRef,
         registry_sha: Option<&str>,
         local_repo: Option<&Path>,
-    ) -> Result<(PathBuf, ResolvedSource, Option<String>), String> {
+    ) -> Result<(PathBuf, ResolvedSource, Option<String>), PmError> {
         let pin = self
             .lock
             .git_pin(url, git_ref)
@@ -711,7 +721,7 @@ impl Walker<'_> {
             Some(sha) => crate::git::fetch_pinned(source, git_ref, sha, store),
             None => crate::git::fetch(source, git_ref, store),
         }
-        .map_err(|err| format!("dependency `{key}`: {err}"))?;
+        .map_err(|err| err.map_msg(|m| format!("dependency `{key}`: {m}")))?;
         Ok((
             fetched.path,
             ResolvedSource::Git {
@@ -745,7 +755,7 @@ impl Walker<'_> {
         name: &str,
         release: &crate::registry::Release,
         served_key: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PmError> {
         let scope = name.split('/').next().unwrap_or(name);
         // Consumer require-provenance (namespace-protection #1): if this project demands `scope`
         // carry provenance, an unsigned release is refused outright — the guarantee holds even if the
@@ -754,11 +764,11 @@ impl Walker<'_> {
             && release.signature.is_none()
             && release.bundle.is_none()
         {
-            return Err(format!(
+            return Err(PmError::Trust(format!(
                 "dependency `{key}` (`{name}`): `[trust].require_provenance` demands verified \
                  provenance from scope `{scope}`, but this release is unsigned — refusing to resolve \
                  an unattested release"
-            ));
+            )));
         }
         let action = provenance_decision(
             self.lock.scope_trust(scope),
@@ -766,7 +776,7 @@ impl Walker<'_> {
             release.bundle.as_deref(),
             served_key,
         )
-        .map_err(|reason| format!("dependency `{key}` (`{name}`): {reason}"))?;
+        .map_err(|reason| PmError::Trust(format!("dependency `{key}` (`{name}`): {reason}")))?;
         #[cfg(any(feature = "provenance", feature = "keyless"))]
         let (version, sha) = (&release.version, release.coords.sha.as_str());
         match action {
@@ -779,7 +789,7 @@ impl Walker<'_> {
                 if let Some(sig) = &signature {
                     let attestation = crate::provenance::Attestation { name, version, sha };
                     crate::provenance::verify(&attestation, sig, &public_key).map_err(|err| {
-                        format!("dependency `{key}` (`{name}`): provenance {err}")
+                        err.map_msg(|m| format!("dependency `{key}` (`{name}`): provenance {m}"))
                     })?;
                 }
                 #[cfg(not(feature = "provenance"))]
@@ -802,7 +812,9 @@ impl Walker<'_> {
                                 identity: identity.clone(),
                             });
                     let verified = crate::keyless::verify_bundle(&bundle, &digest, policy.as_ref())
-                        .map_err(|err| format!("dependency `{key}` (`{name}`): {err}"))?;
+                        .map_err(|err| {
+                            err.map_msg(|m| format!("dependency `{key}` (`{name}`): {m}"))
+                        })?;
                     // Pin what verification *proved* (== the pin when one existed, since the
                     // policy enforced it); on first use this is the TOFU identity pin.
                     self.scope_trust.insert(
@@ -832,12 +844,14 @@ impl Walker<'_> {
     }
 
     /// The package store, opened on first use (only a git dependency needs it).
-    fn store(&mut self) -> Result<&Store, String> {
+    fn store(&mut self) -> Result<&Store, PmError> {
         if self.store.is_none() {
             self.store = Some(Store::open().ok_or_else(|| {
-                "cannot open the package store (no writable cache directory) — needed for git \
-                 dependencies"
-                    .to_string()
+                PmError::Io(
+                    "cannot open the package store (no writable cache directory) — needed for git \
+                     dependencies"
+                        .to_string(),
+                )
             })?);
         }
         Ok(self.store.as_ref().expect("just opened"))
@@ -847,7 +861,7 @@ impl Walker<'_> {
     /// arc). The `[registries]` map routes the scope to its source — a specific hosted registry, a
     /// GitHub org, or (unmapped) the environment default (`NOETA_REGISTRY_URL` + `registry-http`, else
     /// the local index). Two scopes on the same source share one client.
-    fn index_for(&mut self, company: &str) -> Result<&dyn crate::registry::Index, String> {
+    fn index_for(&mut self, company: &str) -> Result<&dyn crate::registry::Index, PmError> {
         let source = self.registries.source_for(company);
         let key = registry_cache_key(source);
         if !self.indexes.contains_key(&key) {
@@ -868,7 +882,7 @@ impl Walker<'_> {
         root_manifest_deps: &BTreeMap<String, crate::manifest::Dependency>,
         manifest_dir: &Path,
         lock_pins: LockPins,
-    ) -> Result<(), String> {
+    ) -> Result<(), PmError> {
         let mut path_git: BTreeMap<String, PathGitCandidate> = BTreeMap::new();
         let mut registry: BTreeMap<String, Vec<crate::registry::Release>> = BTreeMap::new();
         let mut registry_queue: Vec<String> = Vec::new();
@@ -941,13 +955,15 @@ impl Walker<'_> {
             // so a compromised registry can't drag a forged `std/*` in behind a legitimate package.
             let scope = identity.split('/').next().unwrap_or(&identity);
             if crate::reserved::is_builtin(scope) {
-                return Err(crate::reserved::builtin_registry_refusal(scope, &identity));
+                return Err(PmError::Trust(crate::reserved::builtin_registry_refusal(
+                    scope, &identity,
+                )));
             }
             let company = scope.to_string();
             let releases = self
                 .index_for(&company)?
                 .releases(&identity)
-                .map_err(|err| format!("registry package `{identity}`: {err}"))?;
+                .map_err(|err| err.map_msg(|m| format!("registry package `{identity}`: {m}")))?;
             let releases = self.apply_cooldown(&identity, releases, &exact_pins)?;
             for release in &releases {
                 for dep in &release.deps {
@@ -982,19 +998,20 @@ impl Walker<'_> {
         base_dir: &Path,
         path_git: &mut BTreeMap<String, PathGitCandidate>,
         registry_queue: &mut Vec<String>,
-    ) -> Result<Vec<(String, VersionReq)>, String> {
+    ) -> Result<Vec<(String, VersionReq)>, PmError> {
         let mut reqs = Vec::new();
         for (key, dep) in deps {
             match dep {
                 Dependency::Path { .. } | Dependency::Git { .. } => {
                     let (dir, _source, _hash) = self.materialize(key, dep, base_dir)?;
-                    let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
-                        .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                    let child_manifest =
+                        read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
+                            .map_err(|err| err.map_msg(|m| format!("dependency `{key}`: {m}")))?;
                     let pkg = child_manifest.package().ok_or_else(|| {
-                        format!(
+                        PmError::Manifest(format!(
                             "dependency `{key}` at `{}` has no `[package]` table",
                             dir.display()
-                        )
+                        ))
                     })?;
                     let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
                     reqs.push((identity.clone(), exact_req(&pkg.version)));
@@ -1018,20 +1035,20 @@ impl Walker<'_> {
                 }
                 Dependency::Registry { package, req } => {
                     let package = package.as_ref().ok_or_else(|| {
-                        format!(
+                        PmError::Manifest(format!(
                             "dependency `{key}` is a registry dependency but names no package — add \
                              `package = \"company/pkg\"`"
-                        )
+                        ))
                     })?;
                     let identity = format!("{}/{}", package.company, package.package);
                     // Supply-chain invariant (namespace-protection #2): a built-in scope
                     // (`std`/`noeta`/`core`) is served by the compiler, never a registry — refuse it
                     // here, before it can enter the candidate graph, so no registry can shadow core.
                     if crate::reserved::is_builtin(&package.company) {
-                        return Err(format!(
+                        return Err(PmError::Trust(format!(
                             "dependency `{key}`: {}",
                             crate::reserved::builtin_registry_refusal(&package.company, &identity)
-                        ));
+                        )));
                     }
                     reqs.push((identity.clone(), req.clone()));
                     registry_queue.push(identity);
@@ -1053,7 +1070,7 @@ impl Walker<'_> {
         identity: &str,
         releases: Vec<crate::registry::Release>,
         exact_pins: &std::collections::BTreeSet<(String, Version)>,
-    ) -> Result<Vec<crate::registry::Release>, String> {
+    ) -> Result<Vec<crate::registry::Release>, PmError> {
         let Some(cooldown_secs) = self.publish_cooldown else {
             return Ok(releases);
         };
@@ -1069,12 +1086,12 @@ impl Walker<'_> {
         let had = releases.len();
         let kept = cooldown_kept(releases, cooldown_secs, now_unix_ms(), &exempt);
         if kept.is_empty() && had > 0 {
-            return Err(format!(
+            return Err(PmError::Conflict(format!(
                 "every published version of `{identity}` is within the {} publish cooldown \
                  (`[trust].publish_cooldown`) — wait for a version to age out, lower the cooldown, or \
                  remove the setting",
                 human_secs(cooldown_secs)
-            ));
+            )));
         }
         Ok(kept)
     }
@@ -1436,13 +1453,13 @@ fn assemble(
 
 /// Check a declared native entry crate exists: `<package root>/<native>/Cargo.toml` must be a
 /// file (Phase 3, N3.1). The manifest parser already rejected absolute/`..` values.
-fn validate_native_crate(package_dir: &Path, native: &str) -> Result<(), String> {
+fn validate_native_crate(package_dir: &Path, native: &str) -> Result<(), PmError> {
     let crate_dir = package_dir.join(native);
     if !crate_dir.join("Cargo.toml").is_file() {
-        return Err(format!(
+        return Err(PmError::NativeBuild(format!(
             "`package.native = \"{native}\"` names no Rust crate — expected `{}`",
             crate_dir.join("Cargo.toml").display()
-        ));
+        )));
     }
     Ok(())
 }
@@ -1464,10 +1481,11 @@ fn unique_segment(base: &str, used: &mut HashSet<String>) -> String {
 }
 
 /// Read and parse a manifest at `path`, tagging IO/parse errors with the path.
-fn read_manifest(path: &Path) -> Result<Manifest, String> {
+fn read_manifest(path: &Path) -> Result<Manifest, PmError> {
     let text = std::fs::read_to_string(path)
-        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
-    Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", path.display())))?;
+    Manifest::parse(&text)
+        .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", path.display())))
 }
 
 #[cfg(test)]
@@ -1791,9 +1809,18 @@ mod tests {
         )
         .unwrap();
         let err = resolve_graph(&app.join("main.noe")).expect_err("future edition must fail");
-        assert!(err.contains("futuredep"), "names the dependency: {err}");
-        assert!(err.contains("2099"), "names the offending edition: {err}");
-        assert!(err.contains("2026"), "enumerates the known editions: {err}");
+        assert!(
+            err.message().contains("futuredep"),
+            "names the dependency: {err}"
+        );
+        assert!(
+            err.message().contains("2099"),
+            "names the offending edition: {err}"
+        );
+        assert!(
+            err.message().contains("2026"),
+            "enumerates the known editions: {err}"
+        );
     }
 
     #[test]
@@ -1824,8 +1851,8 @@ mod tests {
         // Trusted, so it clears the authority gate and reaches the crate-existence check.
         let entry = native_dep_project("native_missing", false, true);
         let err = resolve_graph(&entry).expect_err("must fail");
-        assert!(err.contains("acme/imgfx"), "{err}");
-        assert!(err.contains("Cargo.toml"), "{err}");
+        assert!(err.message().contains("acme/imgfx"), "{err}");
+        assert!(err.message().contains("Cargo.toml"), "{err}");
     }
 
     #[test]
@@ -1885,9 +1912,12 @@ mod tests {
         // refused — the mere presence of native code no longer runs arbitrary Rust.
         let entry = native_dep_project("native_untrusted", true, false);
         let err = resolve_graph(&entry).expect_err("must be refused");
-        assert!(err.contains("acme/imgfx"), "{err}");
-        assert!(err.contains("[trust].native"), "points at the fix: {err}");
-        assert!(err.contains("native code"), "{err}");
+        assert!(err.message().contains("acme/imgfx"), "{err}");
+        assert!(
+            err.message().contains("[trust].native"),
+            "points at the fix: {err}"
+        );
+        assert!(err.message().contains("native code"), "{err}");
     }
 
     #[test]
@@ -1941,8 +1971,8 @@ mod tests {
         .unwrap();
 
         let err = resolve_graph(&app.join("main.noe")).expect_err("root must authorize native");
-        assert!(err.contains("acme/imgfx"), "{err}");
-        assert!(err.contains("[trust].native"), "{err}");
+        assert!(err.message().contains("acme/imgfx"), "{err}");
+        assert!(err.message().contains("[trust].native"), "{err}");
     }
 
     #[test]
@@ -1963,9 +1993,12 @@ mod tests {
         .unwrap();
         std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
         let err = resolve_graph(&app.join("main.noe")).expect_err("built-in scope must be refused");
-        assert!(err.contains("std/extra"), "{err}");
-        assert!(err.contains("supply-chain"), "names the threat: {err}");
-        assert!(err.contains("built into"), "{err}");
+        assert!(err.message().contains("std/extra"), "{err}");
+        assert!(
+            err.message().contains("supply-chain"),
+            "names the threat: {err}"
+        );
+        assert!(err.message().contains("built into"), "{err}");
     }
 
     #[test]

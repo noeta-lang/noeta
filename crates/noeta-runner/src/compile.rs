@@ -172,7 +172,7 @@ pub fn resolve_front_with(
         // *different* selection than the compose probe's default resolve, so the target path
         // re-resolves rather than contorting the probe to anticipate every target (audit-5 F2).
         _ => manifest::dependency_packages_for(file, target.as_deref())
-            .map_err(CompileFailure::Message)?,
+            .map_err(|err| CompileFailure::Message(err.to_string()))?,
     };
     // The entry's effective language edition (follow-on F1) — part of the compilation identity.
     let edition = manifest::root_edition(file);

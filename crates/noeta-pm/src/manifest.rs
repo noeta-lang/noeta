@@ -530,7 +530,7 @@ pub fn resolve_active_tier_providers(
 /// walk ([`crate::graph`]) materializes each package (a `path` tree, a fetched `git` tag; a `registry`
 /// dependency errors pending P2.5), dedups by identity, and assigns global segments so transitive
 /// `use`s link without key collision.
-pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, String> {
+pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, PmError> {
     Ok(crate::graph::resolve_graph(entry)?.packages)
 }
 
@@ -541,14 +541,14 @@ pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>
 pub fn dependency_packages_for(
     entry: &Path,
     target: Option<&str>,
-) -> Result<Vec<noeta_loader::DepPackage>, String> {
+) -> Result<Vec<noeta_loader::DepPackage>, PmError> {
     Ok(crate::graph::resolve_graph_for(entry, target)?.packages)
 }
 
 /// As [`dependency_packages`], but a pure **query** ([`crate::graph::resolve_graph_query`]): no
 /// lockfile refresh. What the IDE calls — opening a file in the editor must not rewrite
 /// `noeta.lock` (or silently re-pin versions) as a side effect of making hover/completions work.
-pub fn dependency_packages_query(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, String> {
+pub fn dependency_packages_query(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, PmError> {
     Ok(crate::graph::resolve_graph_query(entry)?.packages)
 }
 
