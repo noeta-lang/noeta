@@ -734,11 +734,14 @@ mod tests {
         };
         let err =
             keyless::verify_bundle_with_root(&bundle, &digest, Some(&wrong), &root).unwrap_err();
-        assert!(err.contains("identity mismatch"), "{err}");
+        assert!(err.message().contains("identity mismatch"), "{err}");
 
         // And the production trust root rejects it (the fixture CA is NOT sigstore.dev).
         let err = keyless::verify_bundle(&bundle, &digest, None).unwrap_err();
-        assert!(err.contains("keyless verification failed"), "{err}");
+        assert!(
+            err.message().contains("keyless verification failed"),
+            "{err}"
+        );
     }
 
     /// A programmatic [`AuthCallback`]: "the user" fetches the auth URL itself (hitting the
