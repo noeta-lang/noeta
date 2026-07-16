@@ -1,0 +1,604 @@
+//! Namespace-protection arc: reserved scopes, claim flow (OIDC/OAuth/domain), provenance,
+//! transparency log, advisory feed, publish cooldown — against a mock registry.
+
+use crate::support::*;
+
+// ===== namespace-protection arc tests (merged) =====
+
+/// A tiny in-process HTTP/1.1 server for the CLI e2e: `handler(method, path, body) -> (status, json)`.
+/// Handles connections sequentially on a background thread; returns the base URL.
+fn mock_http(handler: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let method = parts.next().unwrap_or("").to_string();
+            let path = parts.next().unwrap_or("").to_string();
+            let mut content_length = 0usize;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+                if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                reader.read_exact(&mut body).unwrap();
+            }
+            let (status, json) = handler(&method, &path, &String::from_utf8_lossy(&body));
+            let response = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                json.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn noeta_add_derives_the_import_root() {
+    // namespace-protection #3: with no key given, `add` derives the import root from the dependency's
+    // own `[package]` name — and because the derived key then *matches* the package's root, there is
+    // no mismatch warning.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_derive");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("widgets");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("m.noe"),
+        "namespace widgets.core;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
+
+    // No positional key — derived from `acme/widgets` → `widgets`.
+    lang()
+        .current_dir(&app)
+        .args(["add", "--path", "../widgets"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("using import root `widgets`")
+                .and(predicate::str::contains("added `widgets`")),
+        )
+        // Derived key == the package root, so there is no rename warning.
+        .stderr(predicate::str::contains("module root is").not());
+
+    let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
+    assert!(
+        manifest.contains("widgets = { path = \"../widgets\" }"),
+        "derived key used as the dep key: {manifest}"
+    );
+}
+
+#[test]
+fn noeta_add_refuses_a_builtin_import_root() {
+    // namespace-protection #2/#3: binding a dependency under `std` would shadow the compiler's own
+    // `use std.…` namespace — refused before the manifest is touched.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_reserved");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    let manifest = "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n";
+    std::fs::write(app.join("noeta.toml"), manifest).unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib.join("m.noe"), "namespace lib.core;\n").unwrap();
+
+    lang()
+        .current_dir(&app)
+        .args(["add", "std", "--path", "../lib"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("built-in import root"));
+    // The manifest is untouched — the guard runs before the edit.
+    assert_eq!(
+        std::fs::read_to_string(app.join("noeta.toml")).unwrap(),
+        manifest,
+        "a refused add must not modify the manifest"
+    );
+}
+
+#[test]
+fn noeta_add_warns_when_a_release_introduces_a_new_committer() {
+    // namespace-protection committer signal: adding a git dependency whose release commit was authored
+    // by someone with no prior history in an established repo surfaces a soft warning (with a link to
+    // the commit), so the user can review before trusting it. The add itself still succeeds.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_committer_signal");
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("greetlib");
+    let app = base.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    let commit = |file: &str, contents: &str, name: &str, email: &str| {
+        std::fs::write(repo.join(file), contents).unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-q", "-m", file]] {
+            let ok = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", name)
+                .env("GIT_AUTHOR_EMAIL", email)
+                .env("GIT_COMMITTER_NAME", name)
+                .env("GIT_COMMITTER_EMAIL", email)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} failed");
+        }
+    };
+    git_in(&["init", "-q"], &repo);
+    // Alice ships v0.9.0; the v1.0.0 release *range* (v0.9.0..v1.0.0) then contains a first-time
+    // committer, Bob. The signal must span that range, not just look at the tip commit.
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greetlib\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    commit(
+        "g.noe",
+        "namespace greetlib.g;\npub fn hi(): int { return 1; }\n",
+        "Alice Maintainer",
+        "alice@example.com",
+    );
+    git_in(&["tag", "v0.9.0"], &repo);
+    commit(
+        "CHANGELOG.md",
+        "# 1.0.0\n",
+        "Bob Newcomer",
+        "bob@example.com",
+    );
+    git_in(&["tag", "v1.0.0"], &repo);
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+
+    lang()
+        .current_dir(&app)
+        .args([
+            "add",
+            "greet",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added `greet`"))
+        .stderr(
+            predicate::str::contains("committer(s) new to this repo")
+                .and(predicate::str::contains("Bob Newcomer")),
+        );
+}
+
+#[test]
+fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
+    // End-to-end (namespace-protection #1, advisory feed): a mock registry serves a *signed* advisory
+    // for the resolved dependency `acme/greet@1.0.0`. `noeta audit` fetches the feed, verifies every
+    // signature against the served (then pinned) advisory key, matches the version against the
+    // advisory's range, prints the hit, and exits non-zero so CI catches it.
+    use ed25519_dalek::{Signer, SigningKey};
+    use noeta_pm::advisory::{self, Advisory};
+
+    let to_hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let sk = SigningKey::from_bytes(&[3u8; 32]);
+    let pub_hex = to_hex(sk.verifying_key().as_bytes());
+
+    // Build the advisory, sign its canonical bytes exactly as the registry would.
+    let mut adv = Advisory {
+        id: "NOETA-2026-0007".to_string(),
+        package: "acme/greet".to_string(),
+        ranges: ">=1.0.0, <2.0.0".to_string(),
+        patched: Some("2.0.0".to_string()),
+        severity: "high".to_string(),
+        summary: "greeting injection via unescaped punctuation".to_string(),
+        details: String::new(),
+        url: "https://example.com/advisories/7".to_string(),
+        withdrawn: false,
+        seq: 0,
+        signature: String::new(),
+        log_index: Some(0),
+    };
+    adv.signature = to_hex(&sk.sign(&adv.canonical_bytes()).to_bytes());
+    let digest = advisory::feed_digest(std::slice::from_ref(&adv));
+    let head_sig = to_hex(&sk.sign(&advisory::feed_head_bytes(1, &digest)).to_bytes());
+
+    // Bind the advisory into a single-leaf transparency log so the audit can verify its inclusion. The
+    // leaf record is the advisory's canonical bytes; a one-leaf tree's root *is* that leaf.
+    let record = String::from_utf8(adv.canonical_bytes()).unwrap();
+    let leaf = noeta_pm::transparency::leaf_hash(record.as_bytes());
+    let root_hex = to_hex(&leaf);
+    let log_sk = SigningKey::from_bytes(&[5u8; 32]);
+    let log_pub_hex = to_hex(log_sk.verifying_key().as_bytes());
+    let cp_msg = format!("noeta-log-checkpoint-v1\n1\n{root_hex}\n");
+    let log_cp_sig = to_hex(&log_sk.sign(cp_msg.as_bytes()).to_bytes());
+    let record_json = record.replace('\n', "\\n"); // canonical bytes contain only newlines to escape
+
+    let advisory_json = format!(
+        r#"{{"id":"{}","package":"{}","ranges":"{}","patched":"2.0.0","severity":"{}","summary":"{}","details":"","url":"{}","withdrawn":false,"seq":0,"signature":"{}","log_index":0}}"#,
+        adv.id, adv.package, adv.ranges, adv.severity, adv.summary, adv.url, adv.signature,
+    );
+    let feed = format!(r#"{{"advisories":[{advisory_json}]}}"#);
+    let key_json = format!(r#"{{"public_key":"{pub_hex}"}}"#);
+    let checkpoint = format!(r#"{{"count":1,"digest":"{digest}","signature":"{head_sig}"}}"#);
+    let log_key_json = format!(r#"{{"public_key":"{log_pub_hex}"}}"#);
+    let log_cp_json =
+        format!(r#"{{"tree_size":1,"root_hash":"{root_hex}","signature":"{log_cp_sig}"}}"#);
+    let log_incl_json = format!(
+        r#"{{"index":0,"tree_size":1,"root_hash":"{root_hex}","record":"{record_json}","proof":[]}}"#
+    );
+
+    let base = mock_http(move |_method, path, _body| match path {
+        "/v1/advisories" => (200, feed.clone()),
+        "/v1/advisories/key" => (200, key_json.clone()),
+        "/v1/advisories/checkpoint" => (200, checkpoint.clone()),
+        "/v1/log/key" => (200, log_key_json.clone()),
+        "/v1/log/checkpoint" => (200, log_cp_json.clone()),
+        p if p.starts_with("/v1/log/advisory/") => (200, log_incl_json.clone()),
+        // Path deps aren't logged, so the release transparency section makes no proof calls; anything
+        // else the audit probes is a 404 it tolerates.
+        _ => (404, r#"{"error":"not found"}"#.to_string()),
+    });
+
+    let entry = path_dep_project("pm_audit_advisory");
+    let app_dir = entry.parent().unwrap();
+    lang()
+        .arg("audit")
+        .arg(app_dir)
+        .env("NOETA_REGISTRY_URL", &base)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Security advisories:"))
+        .stdout(predicate::str::contains("NOETA-2026-0007"))
+        .stdout(predicate::str::contains("greeting injection"))
+        // The advisory is verified as included in the transparency log (log-binding).
+        .stdout(predicate::str::contains("included in the transparency log"));
+
+    // The advisory-feed head is now pinned in the lockfile (trust-on-first-use).
+    let lock = std::fs::read_to_string(app_dir.join("noeta.lock")).unwrap();
+    assert!(
+        lock.contains("[advisory]"),
+        "lock should pin the advisory head:\n{lock}"
+    );
+    assert!(lock.contains(&pub_hex), "lock should pin the advisory key");
+}
+
+#[test]
+fn noeta_claim_by_domain_posts_the_domain_proof() {
+    // namespace-protection #1 (domain proof): `noeta claim <scope> --domain <domain>` skips the GitHub
+    // path and posts a `domain` proof to the registry (which then verifies the well-known file server
+    // side). The mock registry captures the body and confirms the proof shape.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |method, path, body| {
+        tx.send((method.to_string(), path.to_string(), body.to_string()))
+            .unwrap();
+        (
+            201,
+            r#"{"status":"scope claimed","owner":"acme.dev"}"#.to_string(),
+        )
+    });
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .args([
+            "claim",
+            "acme",
+            "--domain",
+            "acme.dev",
+            "--token",
+            "domain-publish-token-123456",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("scope claimed"));
+
+    let (method, path, body) = rx.recv().unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(path, "/v1/scopes/claim");
+    assert!(
+        body.contains(r#""domain":"acme.dev""#),
+        "body carries the domain proof: {body}"
+    );
+    assert!(body.contains(r#""scope":"acme""#), "body: {body}");
+    // The GitHub proofs must not appear on the domain path.
+    assert!(
+        !body.contains("github_token") && !body.contains("\"oidc\""),
+        "body: {body}"
+    );
+}
+
+#[test]
+fn noeta_claim_guides_when_not_in_ci_and_device_flow_unconfigured() {
+    // With a registry URL but no GitHub Actions OIDC environment and no configured device-flow client
+    // id, `noeta claim` can't prove ownership — it points at both paths (set NOETA_GITHUB_CLIENT_ID,
+    // or run from a workflow) and exits 1 without contacting the registry.
+    lang()
+        .env("NOETA_REGISTRY_URL", "https://registry.invalid")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .env_remove("NOETA_GITHUB_CLIENT_ID")
+        .args(["claim", "acme"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NOETA_GITHUB_CLIENT_ID"));
+}
+
+#[test]
+fn noeta_claim_requires_the_hosted_registry() {
+    // namespace-protection #1: claiming a scope talks to the hosted registry — without a configured
+    // URL, `noeta claim` explains that rather than failing opaquely.
+    lang()
+        .env_remove("NOETA_REGISTRY_URL")
+        .args(["claim", "acme"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs the hosted registry"));
+}
+
+#[test]
+fn noeta_claim_uses_the_github_device_flow_off_ci() {
+    // The full laptop path (namespace-protection #1): with no CI OIDC, `noeta claim` runs the GitHub
+    // OAuth device flow (mocked), then POSTs the resulting access token to the registry claim endpoint
+    // (mocked). Both endpoints live on one mock server, dispatched by path.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |_method, path, body| {
+        match path {
+        "/login/device/code" => (
+            200,
+            r#"{"device_code":"DC","user_code":"WDJB-MJHT","verification_uri":"https://github.test/device","expires_in":900,"interval":0}"#
+                .to_string(),
+        ),
+        "/login/oauth/access_token" => (200, r#"{"access_token":"gho_laptop"}"#.to_string()),
+        "/v1/scopes/claim" => {
+            tx.send(body.to_string()).unwrap();
+            (201, r#"{"status":"scope claimed","scope":"lapco","owner":"lapco"}"#.to_string())
+        }
+        _ => (404, "{}".to_string()),
+    }
+    });
+
+    lang()
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .env("NOETA_REGISTRY_URL", &base)
+        .env("NOETA_GITHUB_OAUTH_URL", &base)
+        .env("NOETA_GITHUB_CLIENT_ID", "test-client-id")
+        .args(["claim", "lapco"])
+        .assert()
+        .success()
+        // The device code is shown to the user, and the generated publish token is printed to save.
+        .stdout(
+            predicate::str::contains("WDJB-MJHT")
+                .and(predicate::str::contains("scope claimed"))
+                .and(predicate::str::contains("NOETA_REGISTRY_TOKEN")),
+        );
+
+    // The claim POST carried the device-flow access token as `github_token`.
+    let claim_body = rx.recv().unwrap();
+    assert!(
+        claim_body.contains("\"github_token\":\"gho_laptop\""),
+        "claim sent the device-flow token: {claim_body}"
+    );
+    assert!(claim_body.contains("\"scope\":\"lapco\""), "{claim_body}");
+}
+
+#[test]
+fn noeta_scope_require_provenance_validates_and_needs_a_registry() {
+    // namespace-protection #1 Phase 1: the CLI validates `--root` and requires a registry URL before
+    // it would ever contact the network.
+    lang()
+        .env_remove("NOETA_REGISTRY_URL")
+        .args(["scope", "require-provenance", "para", "--root", "nonsense"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`--root` must be `key` or `keyless`",
+        ));
+    lang()
+        .env_remove("NOETA_REGISTRY_URL")
+        .args(["scope", "require-provenance", "para"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs the hosted registry"));
+}
+
+#[test]
+fn publish_cooldown_holds_back_a_freshly_published_registry_version() {
+    // namespace-protection #1 (publish cooldown): `[trust].publish_cooldown` makes the resolver skip a
+    // registry release published within the window, so an advisory/yank can catch a compromised release
+    // before it auto-propagates. Here the mock registry serves only a *just-published* version, so with
+    // a 1-day cooldown resolution fails closed (nothing old enough) — proving the filter is wired
+    // through the HTTP index and the trust policy. The failure happens during version selection, before
+    // any git materialization, so the test needs no real repo.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let feed = format!(
+        r#"{{"name":"acme/imgfx","versions":[{{"version":"1.0.0","url":"https://x/acme/imgfx","tag":"v1.0.0","sha":"abc","yanked":false,"published_at_unix":{now_ms}}}]}}"#
+    );
+    let base = mock_http(move |_method, path, _body| {
+        if path == "/v1/packages/acme/imgfx" {
+            (200, feed.clone())
+        } else {
+            (404, r#"{"error":"not found"}"#.to_string())
+        }
+    });
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_cooldown_e2e");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfx = { version = \"^1.0\", package = \"acme/imgfx\" }\n\
+         [trust]\npublish_cooldown = \"1d\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.noe"), "use fx.core.go;\necho go();\n").unwrap();
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("publish cooldown"));
+
+    // The same project without the cooldown gets past selection (it then fails later trying to fetch
+    // the mock's bogus git coordinates — a *different* error, proving cooldown was the gate above).
+    std::fs::write(
+        dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfx = { version = \"^1.0\", package = \"acme/imgfx\" }\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("publish cooldown").not());
+
+    // With the cooldown *and* an exact pin on the fresh version, the consumer's deliberate choice
+    // bypasses the window — selection succeeds (again failing later on the bogus git coords, not on
+    // the cooldown).
+    std::fs::write(
+        dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfx = { version = \"=1.0.0\", package = \"acme/imgfx\" }\n\
+         [trust]\npublish_cooldown = \"1d\"\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("publish cooldown").not());
+}
+
+#[test]
+fn require_provenance_refuses_an_unsigned_registry_dependency() {
+    // namespace-protection #1, Phase 1 (consumer side): `[trust].require_provenance` demands a scope's
+    // releases carry verified provenance. The published `acme/greet` is unsigned, so a consumer that
+    // requires provenance for `acme` refuses to resolve it — while an unconstrained consumer still can.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_require_prov_e2e");
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hi\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "release"], &repo);
+    git_in(&["tag", "v1.2.0"], &repo);
+
+    // Publish it UNSIGNED (no key, no ambient identity) to the local index.
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.2.0",
+        ])
+        .assert()
+        .success();
+
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
+
+    // A consumer that requires provenance for `acme` refuses the unsigned release.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [trust]\nrequire_provenance = [\"acme\"]\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("require_provenance")
+                .and(predicate::str::contains("unattested")),
+        );
+
+    // Without the policy, the same unsigned dependency still resolves (gradual-adoption default).
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hi"));
+}

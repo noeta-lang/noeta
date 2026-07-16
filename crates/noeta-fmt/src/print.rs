@@ -207,8 +207,8 @@ struct Printer<'a> {
 }
 
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
-/// [`Printer::layout_terminates`]. Synthetic and explicit `;` are dropped so a search finds the next
-/// *content* token, and the natural token order keeps the vec sorted by `start` for a partition search.
+/// [`Printer::layout_terminates`]. Explicit `;` are dropped so a search finds the next *content*
+/// token, and the natural token order keeps the vec sorted by `start` for a partition search.
 fn code_tokens(
     source: &str,
     edition: noeta_lexer::Edition,
