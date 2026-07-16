@@ -3630,7 +3630,13 @@ fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
     lang()
         .current_dir(&repo)
         .env("NOETA_REGISTRY_DIR", &reg)
-        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.0.0"])
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+        ])
         .assert()
         .success();
 
@@ -3657,7 +3663,10 @@ fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
         .assert()
         .success()
         .stdout(predicate::str::contains("one point oh"));
-    assert!(app.join("noeta.lock").exists(), "the resolve pinned the lock");
+    assert!(
+        app.join("noeta.lock").exists(),
+        "the resolve pinned the lock"
+    );
 
     // Upstream publishes v1.1.0 (still within ^1.0).
     std::fs::write(
@@ -3676,7 +3685,13 @@ fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
     lang()
         .current_dir(&repo)
         .env("NOETA_REGISTRY_DIR", &reg)
-        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.1.0"])
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.1.0",
+        ])
         .assert()
         .success();
 

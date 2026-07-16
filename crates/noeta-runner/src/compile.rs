@@ -131,6 +131,19 @@ pub fn resolve_front(
     tiers: &[String],
     target: &Option<String>,
 ) -> Result<FrontFacts, CompileFailure> {
+    resolve_front_with(file, tiers, target, None)
+}
+
+/// As [`resolve_front`], optionally reusing a dependency graph the **same invocation** already
+/// resolved under the default selection (audit-5 F2): the CLI's `compose::maybe_delegate` fully
+/// resolves the graph to decide whether to delegate to a composed toolchain, and hands it back
+/// when it doesn't — the command path must not resolve the identical graph a second time.
+pub fn resolve_front_with(
+    file: &Path,
+    tiers: &[String],
+    target: &Option<String>,
+    resolved_deps: Option<Vec<noeta_loader::DepPackage>>,
+) -> Result<FrontFacts, CompileFailure> {
     // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags.
     let mut active: Vec<String> = match target {
@@ -152,8 +165,16 @@ pub fn resolve_front(
     // both the cache key (so a dep or target-dep change never serves stale bytecode — the dep
     // fold covers the content, so the target name itself needs no extra key material) and the
     // loader (so `use <dep-key>.…` resolves).
-    let deps = manifest::dependency_packages_for(file, target.as_deref())
-        .map_err(CompileFailure::Message)?;
+    let deps = match (target, resolved_deps) {
+        // The caller's pre-resolved graph IS this selection (both are the default,
+        // lock-refreshing resolve) — reuse it rather than resolving the same graph twice.
+        (None, Some(deps)) => deps,
+        // A `--target` layers `[targets.<name>.dependencies]` onto the globals — a legitimately
+        // *different* selection than the compose probe's default resolve, so the target path
+        // re-resolves rather than contorting the probe to anticipate every target (audit-5 F2).
+        _ => manifest::dependency_packages_for(file, target.as_deref())
+            .map_err(CompileFailure::Message)?,
+    };
     // The entry's effective language edition (follow-on F1) — part of the compilation identity.
     let edition = manifest::root_edition(file);
     Ok(FrontFacts {
@@ -243,7 +264,17 @@ pub fn load_linked(
 /// edition resolve exactly as `noeta run`'s pipeline resolves them (the drift firewall), with no
 /// startup cache (their compiles are bespoke: debug info, session compilers).
 pub fn load_default_project(file: &Path) -> Result<Loaded, CompileFailure> {
-    let facts = resolve_front(file, &[], &None)?;
+    load_default_project_with(file, None)
+}
+
+/// As [`load_default_project`], optionally reusing an already-resolved default-selection
+/// dependency graph (see [`resolve_front_with`]) — the REPL bootstrap's compose probe resolves
+/// the same graph moments earlier.
+pub fn load_default_project_with(
+    file: &Path,
+    resolved_deps: Option<Vec<noeta_loader::DepPackage>>,
+) -> Result<Loaded, CompileFailure> {
+    let facts = resolve_front_with(file, &[], &None, resolved_deps)?;
     load_project(file, &facts)
 }
 
@@ -260,7 +291,20 @@ pub fn compile_whole_file(
     target: &Option<String>,
     no_cache: bool,
 ) -> Result<Compiled, CompileFailure> {
-    let facts = resolve_front(file, tiers, target)?;
+    compile_whole_file_with(file, tiers, target, no_cache, None)
+}
+
+/// As [`compile_whole_file`], optionally reusing an already-resolved default-selection
+/// dependency graph (see [`resolve_front_with`]) — how `run`/`dump`/`build` avoid resolving the
+/// graph twice per invocation after their compose probe (audit-5 F2).
+pub fn compile_whole_file_with(
+    file: &Path,
+    tiers: &[String],
+    target: &Option<String>,
+    no_cache: bool,
+    resolved_deps: Option<Vec<noeta_loader::DepPackage>>,
+) -> Result<Compiled, CompileFailure> {
+    let facts = resolve_front_with(file, tiers, target, resolved_deps)?;
 
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
     let cache = open_startup_cache(
@@ -430,6 +474,35 @@ mod tests {
         let mut key = noeta_cache::KeyBuilder::new();
         key_deps(&mut key, deps);
         key.finish().as_hex().to_string()
+    }
+
+    #[test]
+    fn resolve_front_reuses_a_default_selection_graph_and_reresolves_for_a_target() {
+        // audit-5 F2: a caller (compose::maybe_delegate) that already resolved the DEFAULT
+        // selection hands its deps in; resolve_front_with must adopt them verbatim instead of
+        // resolving again…
+        let dir = std::env::temp_dir().join(format!("noeta-resolve-once-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.noe");
+        std::fs::write(&entry, "echo 1\n").unwrap();
+        let facts = resolve_front_with(&entry, &[], &None, Some(vec![a_dep()]))
+            .expect("default selection resolves");
+        assert_eq!(
+            facts.deps.len(),
+            1,
+            "the pre-resolved default-selection deps must be adopted, not re-resolved"
+        );
+        assert_eq!(facts.deps[0].key, "lib");
+        // …but a `--target` is a legitimately different selection ([targets.<name>.dependencies]
+        // layer onto the globals), so the pre-resolved deps are ignored and the target selection
+        // resolves fresh — here the manifest-less entry's target fails to resolve, proving the
+        // handed-in deps were NOT silently used for it.
+        let target = Some("dev".to_string());
+        assert!(
+            resolve_front_with(&entry, &[], &target, Some(vec![a_dep()])).is_err(),
+            "a --target selection must re-resolve (and here fail: no manifest declares `dev`)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
