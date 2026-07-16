@@ -5,8 +5,14 @@
 //! A git package additionally pins the **commit SHA** its tag resolved to. On a later build the lock
 //! is read back so a git dependency is fetched **by its pinned SHA** ([`crate::git::fetch_pinned`]) —
 //! which, if the tree is already in the store, touches the network *not at all* (offline), and
-//! otherwise verifies the tag still points at the pinned commit (reproducibility). The lock is a
-//! generated file, meant to be committed; the walk remains the source of truth and refreshes it.
+//! otherwise verifies the tag still points at the pinned commit (reproducibility). Registry
+//! **selection** is pinned too: when every requirement the local manifests declare is satisfied
+//! by the locked versions, the resolver adopts them and never queries the index (the lock fast
+//! path in [`crate::graph`]) — so a committed lock reproduces the same versions on any machine,
+//! an upstream publish/yank/cooldown can't change an existing build, and a locked build with a
+//! warm store is fully offline. The lock is a generated file, meant to be committed; a live
+//! resolve (`noeta update`, a new/changed requirement) remains the source of truth and refreshes
+//! it.
 //!
 //! The format is TOML, Cargo-like:
 //! ```toml
@@ -85,6 +91,17 @@ pub struct AdvisoryTrust {
 pub struct Lock {
     /// `(git url, tag)` → pinned commit SHA.
     git_pins: BTreeMap<(String, String), String>,
+    /// package identity → its pinned **version** — what makes the lock an actual pin for registry
+    /// selection: when every requirement the local manifests declare is satisfied by these
+    /// versions, the resolver adopts them and never queries the index (audit: `noeta run` was
+    /// effectively `cargo update` on every invocation). Registry releases are immutable at
+    /// `(identity, version)`, so a set that was mutually consistent when locked stays consistent.
+    versions: BTreeMap<String, semver::Version>,
+    /// package identity → its pinned `(url, tag, sha)` — a registry-resolved release's git
+    /// coordinates, so a lock-hit build **materializes without the index** (offline when the
+    /// store already holds the tree). Only tag-shaped entries qualify (a published release is
+    /// always a tag; branch/HEAD entries are direct git deps).
+    coords: BTreeMap<String, (String, String, String)>,
     /// package identity → content hash (integrity check for immutable git sources).
     hashes: BTreeMap<String, String>,
     /// package identity → its pinned commit SHA (git sources) — the *previous* commit, so `noeta
@@ -131,6 +148,19 @@ impl Lock {
                     continue;
                 };
                 lock.hashes.insert(name.to_string(), hash.to_string());
+                // The pinned version (always written; parsed since the lock fast path). An entry
+                // whose version doesn't parse simply doesn't pin selection for that package.
+                if let Some(v) = get("version").and_then(|v| semver::Version::parse(v).ok()) {
+                    lock.versions.insert(name.to_string(), v);
+                }
+                // Tag-shaped git coordinates double as registry-release coordinates (fast-path
+                // materialization without the index).
+                if let (Some(url), Some(tag), Some(sha)) = (get("url"), get("tag"), get("sha")) {
+                    lock.coords.insert(
+                        name.to_string(),
+                        (url.to_string(), tag.to_string(), sha.to_string()),
+                    );
+                }
                 // A git package pins its SHA under the ref it was resolved from: a `tag`, a `branch`,
                 // or — with neither recorded — the default-branch `HEAD`. The key is rebuilt with the
                 // same `GitRef::lock_key` the resolve-time lookup uses, so the pin is found again.
@@ -205,6 +235,27 @@ impl Lock {
     /// The recorded content hash for a package identity, if any.
     pub fn content_hash(&self, identity: &str) -> Option<&str> {
         self.hashes.get(identity).map(String::as_str)
+    }
+
+    /// The pinned version for a package identity, if the lock records one — what the resolver's
+    /// lock fast path adopts instead of querying the index.
+    pub fn locked_version(&self, identity: &str) -> Option<&semver::Version> {
+        self.versions.get(identity)
+    }
+
+    /// Every pinned `identity → version` (the lock fast path adopts the whole set; the walk only
+    /// materializes what the manifests actually reference, so a stale extra entry is inert and
+    /// drops out on the next lock rewrite).
+    pub fn locked_versions(&self) -> impl Iterator<Item = (&String, &semver::Version)> {
+        self.versions.iter()
+    }
+
+    /// The pinned `(url, tag, sha)` coordinates for a package identity, if the lock records them —
+    /// how a lock-hit registry dependency materializes without the index.
+    pub fn registry_coords(&self, identity: &str) -> Option<(&str, &str, &str)> {
+        self.coords
+            .get(identity)
+            .map(|(u, t, s)| (u.as_str(), t.as_str(), s.as_str()))
     }
 
     /// The previously-pinned commit SHA for a package identity (git sources), if the lock records one
@@ -389,6 +440,25 @@ mod tests {
         );
         assert_eq!(lock.content_hash("acme/greet"), Some("deadbeef"));
         assert_eq!(lock.content_hash("acme/local"), Some("cafe"));
+        // The selection pin (lock fast path): version + registry coordinates read back.
+        assert_eq!(
+            lock.locked_version("acme/greet"),
+            Some(&Version::new(1, 0, 0))
+        );
+        assert_eq!(
+            lock.registry_coords("acme/greet"),
+            Some((
+                "https://example.com/acme/greet",
+                "v1.0.0",
+                "a".repeat(40).as_str()
+            ))
+        );
+        // A path package pins a version but no git coordinates.
+        assert_eq!(
+            lock.locked_version("acme/local"),
+            Some(&Version::new(0, 2, 0))
+        );
+        assert_eq!(lock.registry_coords("acme/local"), None);
         // A path package records no git pin.
         assert_eq!(
             lock.git_pin("../local", &crate::manifest::GitRef::Head),

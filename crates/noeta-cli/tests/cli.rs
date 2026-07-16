@@ -3582,6 +3582,132 @@ fn a_published_package_resolves_as_a_registry_dependency() {
 }
 
 #[test]
+fn the_lockfile_pins_registry_selection_and_bypasses_the_index() {
+    // The lock fast path (audit F1): once `noeta.lock` pins a registry version, later builds
+    // adopt the pin — an upstream publish must not float the selection, and the index must not
+    // even be consulted (offline builds). `noeta update` (or a changed requirement) re-solves.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_lock_pins");
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    // v1.0.0: the version the app will lock.
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"one point oh\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "v1.0.0"], &repo);
+    git_in(&["tag", "v1.0.0"], &repo);
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.0.0"])
+        .assert()
+        .success();
+
+    // The consumer resolves ^1.0 → 1.0.0 and writes the lock.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
+    let run = |dir: &std::path::Path| {
+        let mut cmd = lang();
+        cmd.env("NOETA_REGISTRY_DIR", &reg)
+            .arg("run")
+            .arg(dir.join("main.noe"));
+        cmd
+    };
+    run(&app)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one point oh"));
+    assert!(app.join("noeta.lock").exists(), "the resolve pinned the lock");
+
+    // Upstream publishes v1.1.0 (still within ^1.0).
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"one point one\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.1.0\"\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "v1.1.0"], &repo);
+    git_in(&["tag", "v1.1.0"], &repo);
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.1.0"])
+        .assert()
+        .success();
+
+    // The locked build DOES NOT float to 1.1.0.
+    run(&app)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one point oh"));
+
+    // …and does not consult the index at all: with the registry gone, the build still resolves
+    // (lock + store). This is the offline guarantee the lock's own docs promise.
+    let hidden = base.join("registry_hidden");
+    std::fs::rename(&reg, &hidden).unwrap();
+    run(&app)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one point oh"));
+    std::fs::rename(&hidden, &reg).unwrap();
+
+    // A changed requirement is frontier drift → live re-solve picks 1.1.0.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.1\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    run(&app)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one point one"));
+
+    // Back on ^1.0 the fresh lock (now pinning 1.1.0, which satisfies ^1.0) keeps 1.1.0 — and
+    // `noeta update` keeps it too (highest compatible). The pin, not the range, decides.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    run(&app)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one point one"));
+}
+
+#[test]
 fn a_git_forge_registry_resolves_and_runs_a_package() {
     // private-registries (end-to-end): a consumer maps a scope to a git forge via `[registries]` and
     // resolves a package from that forge's repos + tags. Hermetic — a local directory is the forge (a
@@ -3911,15 +4037,30 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
     assert!(lock.contains("[[scope]]"), "scope key pinned: {lock}");
     assert!(lock.contains("acme"), "scope name pinned: {lock}");
 
-    // TOFU: replace the registry's scope key with a *different* one — a later resolve must reject it.
+    // TOFU: replace the registry's scope key with a *different* one. The LOCKED build is
+    // unaffected — its release was verified at first resolve and the lock pins the exact content
+    // (SHA + tree hash), so the lock fast path never re-consults the registry. That bypass is the
+    // pin's offline/reproducibility guarantee: a registry gone rogue *after* first use can't
+    // reach a pinned build at all.
     std::fs::write(reg.join("scope__acme.pub"), format!("{}\n", "c".repeat(64))).unwrap();
     lang()
         .env("NOETA_REGISTRY_DIR", &reg)
         .arg("run")
         .arg(app.join("main.noe"))
         .assert()
+        .success()
+        .stdout("42\n");
+    // …but any resolve that DOES consult the index rejects: a fresh consumer (no lock — the
+    // classic key-swap-then-forge scenario) verifies the release's signature against the served
+    // key, and the release was signed under the original one.
+    std::fs::remove_file(app.join("noeta.lock")).unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
         .failure()
-        .stderr(predicate::str::contains("changed"));
+        .stderr(predicate::str::contains("provenance"));
 }
 
 #[test]
@@ -4312,11 +4453,15 @@ fn keyless_publish_verifies_pins_and_defends_end_to_end() {
         .stdout(predicate::str::contains("keyless").and(predicate::str::contains(IDENTITY)));
 
     // TOFU holds: a release later signed by a DIFFERENT identity (the registry re-serving a
-    // forged bundle) is rejected against the pin.
-    let pinned_elsewhere = lock.replace(
-        "acme/greet/.github/workflows/release.yaml",
-        "mallory/greet/.github/workflows/release.yaml",
-    );
+    // forged bundle) is rejected against the pin. The scope pin is checked wherever the index is
+    // actually consulted, so force a LIVE resolve by dropping the package's version pin (a fully
+    // locked build never re-fetches the bundle — its content is already SHA + hash pinned).
+    let pinned_elsewhere = lock
+        .replace(
+            "acme/greet/.github/workflows/release.yaml",
+            "mallory/greet/.github/workflows/release.yaml",
+        )
+        .replace("version = \"1.0.0\"\n", "");
     std::fs::write(app.join("noeta.lock"), pinned_elsewhere).unwrap();
     lang()
         .env("NOETA_REGISTRY_DIR", &reg)

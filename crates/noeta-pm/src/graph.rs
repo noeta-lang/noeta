@@ -166,6 +166,16 @@ enum LockRefresh {
     Skip,
 }
 
+/// Whether the solve may adopt `noeta.lock`'s pinned versions without querying the index
+/// (the lock fast path). [`LockPins::Ignore`] forces a live solve — used when
+/// `[trust].require_transparency` is on, since transparency enforcement is by definition a
+/// live check against the registry's log on every resolve.
+#[derive(Clone, Copy, PartialEq)]
+enum LockPins {
+    Honor,
+    Ignore,
+}
+
 fn resolve_graph_impl(
     entry: &Path,
     target: Option<&str>,
@@ -220,7 +230,14 @@ fn resolve_graph_impl(
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
     // over version ranges, so a solvable diamond resolves to a compatible set instead of a greedy
     // false conflict. The walk then materializes exactly the solved versions.
-    walker.solve(&root_deps, &manifest_dir)?;
+    // Transparency enforcement (below) is a live check against the registry's log by design, so
+    // it forgoes the lock fast path; everything else honors the pin.
+    let lock_pins = if manifest.trust().require_transparency {
+        LockPins::Ignore
+    } else {
+        LockPins::Honor
+    };
+    walker.solve(&root_deps, &manifest_dir, lock_pins)?;
     let mut root_edges = BTreeMap::new();
     walker.walk(&root_deps, &manifest_dir, &mut root_edges)?;
 
@@ -453,7 +470,12 @@ impl Walker<'_> {
             // A git source is immutable, so a lock-recorded hash must match — a mismatch means the
             // stored tree drifted from what the lock pinned. A path source is a mutable local tree,
             // so its hash legitimately changes as the developer edits it; it is not verified.
+            // The pin is per **version**: when a live re-solve deliberately selected a different
+            // version (a changed requirement, `noeta update`), the old version's hash doesn't
+            // apply — comparing it anyway turned every legitimate upgrade into a false "drifted"
+            // error the moment an upstream published.
             if matches!(source, ResolvedSource::Git { .. })
+                && self.lock.locked_version(&identity) == Some(&pkg.version)
                 && let Some(locked) = self.lock.content_hash(&identity)
                 && locked != content_hash
             {
@@ -536,6 +558,23 @@ impl Walker<'_> {
                     format!("dependency `{key}` (`{name}`) is not in the resolved version set")
                 })?;
                 let scope = package.company.clone();
+                // Lock fast path: the solved version IS the locked version → materialize from the
+                // lock's pinned coordinates, no index round-trip (offline when the store holds the
+                // tree). Trust holds without re-checking provenance here: the release was verified
+                // when first resolved, the SHA pin + the walk's content-hash check guarantee the
+                // tree is byte-identical to what was verified, and the TOFU scope pin is carried
+                // forward from the lock so the rewrite can't drop it. A miss (no coords in the
+                // lock, or a live solve picked a different version) falls through to the index.
+                if let Some((url, tag, sha)) = self.lock.registry_coords(&name)
+                    && self.lock.locked_version(&name) == Some(&version)
+                {
+                    if let Some(pin) = self.lock.scope_trust(&scope) {
+                        self.scope_trust.insert(scope.clone(), pin.clone());
+                    }
+                    let (url, tag, sha) = (url.to_string(), tag.to_string(), sha.to_string());
+                    let git_ref = crate::manifest::GitRef::Tag(tag);
+                    return self.fetch_git(key, &url, &git_ref, Some(&sha), None);
+                }
                 let scope_key = self
                     .index_for(&scope)?
                     .scope_key(&scope)
@@ -756,6 +795,7 @@ impl Walker<'_> {
         &mut self,
         root_manifest_deps: &BTreeMap<String, crate::manifest::Dependency>,
         manifest_dir: &Path,
+        lock_pins: LockPins,
     ) -> Result<(), String> {
         let mut path_git: BTreeMap<String, PathGitCandidate> = BTreeMap::new();
         let mut registry: BTreeMap<String, Vec<crate::registry::Release>> = BTreeMap::new();
@@ -769,6 +809,47 @@ impl Walker<'_> {
             &mut path_git,
             &mut registry_queue,
         )?;
+
+        // The **lockfile fast path**: when every registry requirement the local manifests declare —
+        // the root's direct deps plus the freshly re-gathered path/git spine's edges — is satisfied
+        // by the version `noeta.lock` pins, adopt the locked selection and never query the index.
+        // This is what makes the lock an actual *pin*: a committed `noeta.lock` reproduces the same
+        // versions on every machine, offline once the store holds the trees, and an upstream publish
+        // (or yank, or cooldown window) cannot silently change an existing build — exactly the
+        // documented "an existing lockfile pin bypasses the index entirely" semantics. Sound because
+        // a registry release is immutable at `(identity, version)`: its declared dep ranges can't
+        // change after publish, so a set that was mutually consistent when locked stays consistent —
+        // only the local requirement frontier can drift, and that is exactly what is re-checked
+        // here. Any miss (new dep, changed range, no lock, `noeta update` deleted it) falls through
+        // to the live solve. Adopting the *whole* locked set is deliberate: the walk materializes
+        // only what the manifests reference, so a stale extra pin is inert and drops out on rewrite.
+        if lock_pins == LockPins::Honor {
+            let mut frontier: Vec<(&String, &VersionReq)> = root_deps
+                .iter()
+                .filter(|(id, _)| !path_git.contains_key(id.as_str()))
+                .map(|(id, req)| (id, req))
+                .collect();
+            for cand in path_git.values() {
+                for (id, req) in &cand.deps {
+                    if !path_git.contains_key(id) {
+                        frontier.push((id, req));
+                    }
+                }
+            }
+            let lock = self.lock;
+            if !frontier.is_empty()
+                && frontier.iter().all(|(id, req)| {
+                    lock.locked_version(id).is_some_and(|v| req.matches(v))
+                })
+            {
+                self.solution = lock
+                    .locked_versions()
+                    .filter(|(id, _)| !path_git.contains_key(id.as_str()))
+                    .map(|(id, v)| (id.clone(), v.clone()))
+                    .collect();
+                return Ok(());
+            }
+        }
 
         // Versions the **root consumer** exact-pins (`dep = "=1.5.0"`) — a deliberate choice that
         // bypasses their own publish cooldown (namespace-protection #1). Only the root's *direct* deps
