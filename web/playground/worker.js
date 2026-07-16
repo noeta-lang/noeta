@@ -39,6 +39,13 @@ function rotateWake() {
 function hostImports() {
   return {
     noeta_host: {
+      // The debug pause seam (W2.4): the engine imports it unconditionally, but this reference
+      // page has no debug UI and never calls `noeta_debug_run` — a reached stub answers
+      // terminate (fail-stop) rather than wedging the worker. The full experience (the
+      // Atomics.wait pause protocol, breakpoints, stepping) lives in the play.noeta.dev site.
+      js_debug_pause() {
+        return pack('{"action":"terminate"}');
+      },
       // Real entropy for uuids and span ids: an i64 import, so a BigInt from getRandomValues.
       js_entropy_u64() {
         const word = new BigUint64Array(1);

@@ -36,8 +36,19 @@ const events = [];
 let settledSinceWait = false;
 let wakeResolve = () => {};
 let wakePromise = new Promise((resolve) => { wakeResolve = resolve; });
+// The debug pause seam (W2.4), scripted: node has no paused UI, so resume commands come from a
+// queue (empty queue = terminate, the engine's own fail-stop default). Every pause payload is
+// recorded for the assertions; in the real worker this import parks on Atomics.wait instead.
+const debugPauses = [];
+const debugCommands = [];
 const imports = {
   noeta_host: {
+    js_debug_pause(ptr, len) {
+      const payload = JSON.parse(new TextDecoder().decode(new Uint8Array(engine.memory.buffer, ptr, len)));
+      debugPauses.push(payload);
+      const command = debugCommands.length > 0 ? debugCommands.shift() : { action: 'terminate' };
+      return packReply(JSON.stringify(command));
+    },
     js_entropy_u64() {
       const word = new BigUint64Array(1);
       crypto.getRandomValues(word);
@@ -94,7 +105,7 @@ const { instance } = await WebAssembly.instantiate(bytes, imports);
 engine = instance.exports;
 const {
   memory, noeta_alloc, noeta_check, noeta_run, noeta_run_browser, noeta_fmt, noeta_free_result,
-  noeta_hover, noeta_definition, noeta_complete, noeta_signature,
+  noeta_hover, noeta_definition, noeta_complete, noeta_signature, noeta_debug_run,
 } = instance.exports;
 
 function call(entry, source, ...extra) {
@@ -172,6 +183,35 @@ assert.notEqual(a, b);
 const sandboxUuids = call(noeta_run, 'use std.id;\necho id.uuid();\necho id.uuid();');
 const again = call(noeta_run, 'use std.id;\necho id.uuid();\necho id.uuid();');
 assert.equal(sandboxUuids.stdout, again.stdout);
+
+// The debug run (W2.4): a breakpoint inside `add` pauses with the captured stack + locals, a
+// stepOver lands on the next line, and continue finishes the run — the browser debugger's whole
+// command loop over the scripted embedder.
+const debugSource = 'fn add(a: int, b: int): int {\n  c = a + b;\n  return c;\n}\n\necho add(1, 2);';
+debugCommands.push({ action: 'stepOver' }, { action: 'continue' });
+const debugRun = call(noeta_debug_run, JSON.stringify({
+  source: debugSource,
+  breakpoints: [2],
+  stop_on_entry: false,
+}));
+assert.equal(debugRun.compiled, true, JSON.stringify(debugRun));
+assert.equal(debugRun.exit_code, 0);
+assert.equal(debugRun.stdout, '3\n');
+assert.equal(debugRun.terminated, false);
+assert.equal(debugPauses.length, 2, JSON.stringify(debugPauses));
+assert.equal(debugPauses[0].reason, 'breakpoint');
+assert.equal(debugPauses[0].frames[0].name, 'add');
+assert.equal(debugPauses[0].frames[0].line, 2);
+assert.ok(debugPauses[0].frames[0].locals.some((l) => l.name === 'a' && l.value === '1' && l.ty === 'int'),
+  JSON.stringify(debugPauses[0].frames[0].locals));
+assert.equal(debugPauses[0].frames.at(-1).name, 'main');
+assert.equal(debugPauses[1].reason, 'step');
+assert.equal(debugPauses[1].frames[0].line, 3);
+// A terminate from a pause stops the run and marks it.
+debugPauses.length = 0;
+const stopped = call(noeta_debug_run, JSON.stringify({ source: debugSource, breakpoints: [2] }));
+assert.equal(stopped.terminated, true);
+assert.equal(stopped.stdout, '');
 
 // The JSPI pump (W3.1): two async fetches must genuinely OVERLAP — both start before either
 // settles — and the run entry suspends/resumes through WebAssembly.promising.

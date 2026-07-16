@@ -13,6 +13,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 noeta-db = { workspace = true }
+# The debug run's direct compile (W2.4): the salsa `bytecode` query compiles without debug info,
+# so `debug_source` calls `compile_with_sites(…, debug = true)` itself for the reg→name locals
+# the Variables panel reads. Already in the tree via noeta-db — no new dependency weight.
+noeta-compiler = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-fmt = { workspace = true }
 # The IDE engine (W2.3): hover/completion/definition/signature — the same DocumentStore the LSP

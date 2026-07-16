@@ -4439,6 +4439,7 @@ version = "0.1.0"
 dependencies = [
  "compact_str",
  "getrandom 0.3.4",
+ "noeta-compiler",
  "noeta-db",
  "noeta-diagnostics",
  "noeta-fmt",
