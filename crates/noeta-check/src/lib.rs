@@ -1205,16 +1205,14 @@ impl Checker {
     /// E0020 ([`Self::check_extern_import_collision`]).
     fn check_reserved_type_name(&mut self, name: &str, span: Span) {
         if stdlib::NATIVE_TYPE_NAMES.contains(&name) {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::ReservedTypeName,
-                    span,
-                    format!("cannot declare `{name}`: it is a reserved language type name"),
-                )
-                .with_help(
-                    "rename the type — the built-in `Iterator`/`Future`/`Sender`/`Receiver` cannot \
-                     be shadowed",
-                ),
+            self.error(
+                DiagnosticCode::ReservedTypeName,
+                span,
+                format!("cannot declare `{name}`: it is a reserved language type name"),
+            )
+            .help(
+                "rename the type — the built-in `Iterator`/`Future`/`Sender`/`Receiver` cannot \
+                 be shadowed",
             );
         }
         self.check_extern_import_collision(name, span);
@@ -1246,16 +1244,14 @@ impl Checker {
 
     fn check_reserved_name(&mut self, name: &str, span: Span) {
         if RESERVED_PRELUDE.contains(&name) {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::ReservedName,
-                    span,
-                    format!("cannot bind `{name}`: it is a reserved prelude name"),
-                )
-                .with_help(
-                    "rename the binding — the prelude's `Ok`/`Err`/`some`/`none`/`panic`/`assert` \
-                     cannot be shadowed",
-                ),
+            self.error(
+                DiagnosticCode::ReservedName,
+                span,
+                format!("cannot bind `{name}`: it is a reserved prelude name"),
+            )
+            .help(
+                "rename the binding — the prelude's `Ok`/`Err`/`some`/`none`/`panic`/`assert` \
+                 cannot be shadowed",
             );
         }
     }
@@ -4409,25 +4405,23 @@ impl Checker {
                             .get(&ct)
                             .is_some_and(|fs| fs.iter().any(|(f, _)| f == name))
                     {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!("cannot find `{name}` in this scope"),
-                            )
-                            .with_help(format!(
-                                "member access is explicit — the field is `self.{name}`"
-                            )),
-                        );
+                        self.error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!("cannot find `{name}` in this scope"),
+                        )
+                        .help(format!(
+                            "member access is explicit — the field is `self.{name}`"
+                        ));
                     } else if !self.session_mode && !self.is_known_name(name, env) {
                         // A bare reference to a name that resolves to nothing — a genuinely
                         // undefined value (F1), the same static `E0005` as an unknown callee. A
                         // session defers (a later entry may define it).
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::UnknownName,
                             *span,
                             format!("cannot find `{name}` in this scope"),
-                        ));
+                        );
                     }
                     Type::Unknown
                 }
@@ -5200,24 +5194,23 @@ impl Checker {
                 .is_some_and(|fs| fs.iter().any(|(n, _)| n == field));
             // Both `struct` (value) and `class` (reference) fields are immutable unless declared
             // `mut`; the unified body grammar gives them the same rule and the same diagnostic.
-            let diag = if !exists {
-                Diagnostic::error(
+            if !exists {
+                self.error(
                     DiagnosticCode::ImmutableField,
                     field_span,
                     format!("type `{name}` has no field `{field}`"),
-                )
+                );
             } else {
-                Diagnostic::error(
+                self.error(
                     DiagnosticCode::ImmutableField,
                     field_span,
                     format!("field `{field}` of `{name}` is not declared `mut`"),
                 )
-                .with_help(format!(
+                .help(format!(
                     "declare it `mut {field}: ...` to allow `x.{field} = ...`, or build a new value \
                      with `{name} {{ ...x, {field}: ... }}`"
-                ))
-            };
-            self.diags.push(diag);
+                ));
+            }
             return recv;
         }
         // The field is `mut`; check the new value against its declared type, substituting the
@@ -5655,11 +5648,11 @@ impl Checker {
                 // check time instead of failing at runtime. A session defers (a later entry may
                 // define it).
                 if !self.session_mode && !self.is_known_name(name, env) {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::UnknownName,
                         span,
                         format!("cannot find `{name}` in this scope"),
-                    ));
+                    );
                 }
                 Type::Unknown
             }
@@ -5746,17 +5739,15 @@ impl Checker {
                         .copied()
                         .unwrap_or(false)
                     {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::InvalidReceiver,
-                                span,
-                                format!("`{name}` is an instance method of `{tn}`"),
-                            )
-                            .with_help(format!(
-                                "call it on a value (`x.{name}(...)`), or pass `{tn}.{name}` \
-                                 as a handle"
-                            )),
-                        );
+                        self.error(
+                            DiagnosticCode::InvalidReceiver,
+                            span,
+                            format!("`{name}` is an instance method of `{tn}`"),
+                        )
+                        .help(format!(
+                            "call it on a value (`x.{name}(...)`), or pass `{tn}.{name}` \
+                             as a handle"
+                        ));
                         return sig.ret.clone();
                     }
                     // A static call: the type arguments are not known from a bare type name, so the
@@ -5781,14 +5772,12 @@ impl Checker {
                         .copied()
                         .unwrap_or(true)
                     {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::InvalidReceiver,
-                                span,
-                                format!("`{name}` is an associated function of `{n}`"),
-                            )
-                            .with_help(format!("call it on the type: `{n}.{name}(...)`")),
-                        );
+                        self.error(
+                            DiagnosticCode::InvalidReceiver,
+                            span,
+                            format!("`{name}` is an associated function of `{n}`"),
+                        )
+                        .help(format!("call it on the type: `{n}.{name}(...)`"));
                         return sig.ret.clone();
                     }
                     return self
@@ -6975,6 +6964,8 @@ impl Checker {
         if let Type::Named(n, _) = &recv
             && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
         {
+            let params = sig.params.clone();
+            let ret = sig.ret.clone();
             let instance = self
                 .method_instance
                 .get(&(n.clone(), name.to_string()))
@@ -6983,19 +6974,15 @@ impl Checker {
             // Binding an ASSOCIATED function through a value is the wrong-way shape (E0047) —
             // there is no receiver to capture; bind it off the type instead.
             if !instance {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::InvalidReceiver,
-                        member_span,
-                        format!("`{name}` is an associated function of `{n}`"),
-                    )
-                    .with_help(format!("bind it off the type: `{n}.{name}`")),
-                );
+                self.error(
+                    DiagnosticCode::InvalidReceiver,
+                    member_span,
+                    format!("`{name}` is an associated function of `{n}`"),
+                )
+                .help(format!("bind it off the type: `{n}.{name}`"));
             } else {
                 self.sites.bound_handle_sites.insert(member_span);
             }
-            let params = sig.params.clone();
-            let ret = sig.ret.clone();
             return Type::Fn {
                 params,
                 ret: Box::new(ret),
