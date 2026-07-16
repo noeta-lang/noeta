@@ -59,6 +59,11 @@ pub struct SymbolNode {
     pub full_span: Span,
     /// The span of the declared name — the selection range, always contained by `full_span`.
     pub name_span: Span,
+    /// A function's or method's declared parameter **names**, in order (empty for every other
+    /// kind). The LSP renders the typed [`fn_signature`] carried in `detail`; the MCP `symbols`
+    /// tool's convention omits types (`fn add(a, b)` — precise types come from its `type_at`), so
+    /// the one shared walk carries the names and each adapter renders its own detail.
+    pub param_names: Vec<String>,
     pub children: Vec<SymbolNode>,
 }
 
@@ -75,6 +80,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
                 kind: SymbolKind::Struct,
                 full_span: decl.span,
                 name_span: decl.name_span,
+                param_names: Vec::new(),
                 children: type_members(&decl.fields, &decl.methods),
             }),
             Stmt::Class(decl) => symbols.push(SymbolNode {
@@ -83,6 +89,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
                 kind: SymbolKind::Class,
                 full_span: decl.span,
                 name_span: decl.name_span,
+                param_names: Vec::new(),
                 children: type_members(&decl.fields, &decl.methods),
             }),
             Stmt::Enum(decl) => symbols.push(enum_symbol(decl)),
@@ -101,6 +108,7 @@ fn fn_symbol(decl: &FnDecl, kind: SymbolKind) -> SymbolNode {
         kind,
         full_span: decl.span,
         name_span: decl.name_span,
+        param_names: decl.params.iter().map(|p| p.name.clone()).collect(),
         children: Vec::new(),
     }
 }
@@ -116,6 +124,7 @@ fn type_members(fields: &[FieldDecl], methods: &[FnDecl]) -> Vec<SymbolNode> {
             kind: SymbolKind::Field,
             full_span: field.span,
             name_span: field.name_span,
+            param_names: Vec::new(),
             children: Vec::new(),
         });
     }
@@ -136,6 +145,7 @@ fn enum_symbol(decl: &EnumDecl) -> SymbolNode {
             kind: SymbolKind::EnumMember,
             full_span: variant.span,
             name_span: variant.name_span,
+            param_names: Vec::new(),
             children: Vec::new(),
         });
     }
@@ -148,6 +158,7 @@ fn enum_symbol(decl: &EnumDecl) -> SymbolNode {
         kind: SymbolKind::Enum,
         full_span: decl.span,
         name_span: decl.name_span,
+        param_names: Vec::new(),
         children,
     }
 }
@@ -161,6 +172,7 @@ fn impl_symbol(decl: &ImplDecl) -> SymbolNode {
         kind: SymbolKind::Interface,
         full_span: decl.span,
         name_span: decl.trait_span,
+        param_names: Vec::new(),
         children: decl
             .methods
             .iter()
@@ -264,6 +276,16 @@ mod tests {
         // The selection range is the name, contained by the whole-declaration range.
         assert!(syms[0].name_span.start >= syms[0].full_span.start);
         assert!(syms[0].name_span.end <= syms[0].full_span.end);
+    }
+
+    #[test]
+    fn param_names_ride_along_for_types_omitted_adapters() {
+        // The MCP `symbols` adapter renders `fn add(a, b)` from these — one walk, two detail
+        // conventions (audit-4 finding 8).
+        let syms = outline_of("fn add(a: int, b: int): int { return a + b }");
+        assert_eq!(syms[0].param_names, vec!["a", "b"]);
+        let syms = outline_of("struct P { x: int }");
+        assert!(syms[0].children[0].param_names.is_empty());
     }
 
     #[test]

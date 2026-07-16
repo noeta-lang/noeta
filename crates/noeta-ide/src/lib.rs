@@ -59,6 +59,19 @@ pub use offsets::{Encoding, LineIndex, Position, Range};
 pub use semtokens::SemanticToken;
 pub use symbols::{DocumentSymbol, SymbolKind};
 
+/// Run one read over a [`DocumentStore::snapshot`], absorbing salsa **cancellation**: `None` when
+/// a concurrent input write unwound the read mid-query (`salsa::Cancelled` — the result would have
+/// been stale anyway), `Some` otherwise. Any *other* panic propagates unchanged — cancellation is
+/// control flow, a checker bug is still a bug. Owned here so adapters (`noeta-lsp`) need no salsa
+/// dependency to speak the contract.
+///
+/// `AssertUnwindSafe` is sound: on unwind the closure's captures (the snapshot) are dropped, and
+/// the shared salsa storage is designed to be left consistent by a `Cancelled` unwind — that is
+/// the mechanism's whole point.
+pub fn catch_cancelled<T>(f: impl FnOnce() -> T) -> Option<T> {
+    salsa::Cancelled::catch(std::panic::AssertUnwindSafe(f)).ok()
+}
+
 /// One replacement edit: substitute `new_text` for the text at `range`. Field-compatible with the
 /// LSP wire `TextEdit`, owned here so the engine stays wire-protocol-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +174,7 @@ pub struct TestItem {
 /// the per-file parses memoize once. Member texts are updated in place on every change; a file-
 /// *set* change **reuses** the existing inputs by URI (text/id updated, only genuinely new files
 /// get new inputs — the finding-9 input-growth fix).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WorkspaceCache {
     workspace: Workspace,
     /// Per `SourceId`: the member's URI, sorted by path. Maps a merged-program span back to the
@@ -205,6 +218,11 @@ pub struct DocumentStore {
     buffers: HashMap<String, String>,
     /// One workspace per directory with an open document, keyed by [`workspace_key`].
     workspaces: HashMap<String, WorkspaceCache>,
+    /// Bumped by every document mutation ([`open`](Self::open) / [`change`](Self::change) /
+    /// [`close`](Self::close)) — the supersede check for reads that ran off the lock on a
+    /// [`snapshot`](Self::snapshot): a result computed at revision *r* is stale (and must not be
+    /// delivered) unless the store still reads *r* afterwards (audit-4 finding 9).
+    revision: u64,
 }
 
 impl std::fmt::Debug for DocumentStore {
@@ -220,6 +238,7 @@ impl DocumentStore {
     /// workspace (creating it if this is the directory's first open document). Other directories'
     /// workspaces are untouched — their inputs cannot have changed.
     pub fn open(&mut self, uri: &str, text: String) {
+        self.revision += 1;
         self.buffers.insert(uri.to_string(), text);
         self.refresh_workspace(&workspace_key(uri));
     }
@@ -233,6 +252,7 @@ impl DocumentStore {
     /// reads it), with **no directory scan and no disk reads**. Only a change to a document with no
     /// workspace yet (an editor that skipped `didOpen`) falls back to a full build.
     pub fn change(&mut self, uri: &str, text: String) -> SourceProgram {
+        self.revision += 1;
         self.buffers.insert(uri.to_string(), text);
         let known = self
             .workspaces
@@ -267,6 +287,7 @@ impl DocumentStore {
     /// content (or leaves the member set if it was never saved). The last close drops the
     /// directory's workspace.
     pub fn close(&mut self, uri: &str) {
+        self.revision += 1;
         self.buffers.remove(uri);
         let key = workspace_key(uri);
         if self.buffers.keys().any(|open| workspace_key(open) == key) {
@@ -279,6 +300,38 @@ impl DocumentStore {
     /// The URIs of the open documents.
     pub fn open_uris(&self) -> Vec<String> {
         self.buffers.keys().cloned().collect()
+    }
+
+    /// The store's current mutation revision — see the field docs. Capture it together with a
+    /// [`snapshot`](Self::snapshot); compare after the off-lock read to detect a superseded result.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// A read view for running one expensive feature **off the store's lock**, so a newer edit can
+    /// cancel it instead of queueing behind it (audit-4 finding 9). The snapshot shares the salsa
+    /// storage — its queries read (and memoize into) the same graph — plus copies of the
+    /// buffer/workspace tables, so every [`DocumentStore`] read method works on it unchanged.
+    ///
+    /// The cancellation contract (salsa 0.27): while any snapshot is alive, an input write on the
+    /// primary store (`open`/`change`/`close`) first flags cancellation — the snapshot's in-flight
+    /// queries unwind with `salsa::Cancelled` (run reads under [`catch_cancelled`]) — and then
+    /// **blocks until every snapshot handle is dropped**. So a holder must:
+    /// - drop the snapshot promptly after one read (never park it),
+    /// - never wait for the primary store's lock while still holding a snapshot (deadlock: the
+    ///   writer holds the lock and waits for the snapshot), and
+    /// - never take a snapshot and mutate the primary store from the same thread concurrently.
+    ///
+    /// This is deliberately **not** a frozen version: the snapshot reads whatever revision the
+    /// storage is at. A result is only revision-consistent if [`revision`](Self::revision) is
+    /// unchanged across the read — otherwise discard it (the write that bumped it re-publishes).
+    pub fn snapshot(&self) -> DocumentStore {
+        DocumentStore {
+            db: self.db.clone(),
+            buffers: self.buffers.clone(),
+            workspaces: self.workspaces.clone(),
+            revision: self.revision,
+        }
     }
 
     /// The document's workspace-wide text-tier set (text-tiers arc) — what keeps a `@<name> { … }`
@@ -4399,6 +4452,103 @@ echo handle(1)
         assert_eq!(tests[1].name, "slow");
         assert!(tests[1].skipped);
         assert_eq!(tests[1].display.as_deref(), Some("slow one"));
+    }
+
+    // ----- cancellation seam (audit-4 finding 9) -----
+
+    #[test]
+    fn revision_bumps_on_every_document_mutation() {
+        let mut store = DocumentStore::default();
+        let r0 = store.revision();
+        store.open("file:///r.noe", "echo 1\n".to_string());
+        let r1 = store.revision();
+        assert!(r1 > r0, "open must bump");
+        store.change("file:///r.noe", "echo 2\n".to_string());
+        let r2 = store.revision();
+        assert!(r2 > r1, "change must bump");
+        store.close("file:///r.noe");
+        assert!(store.revision() > r2, "close must bump");
+    }
+
+    #[test]
+    fn catch_cancelled_passes_values_and_absorbs_cancellation_only() {
+        assert_eq!(catch_cancelled(|| 7), Some(7));
+        // A salsa cancellation unwind (the exact payload `Cancelled::throw` resumes with) maps to
+        // `None` — the read was superseded, not broken.
+        let cancelled = catch_cancelled(|| -> i32 {
+            std::panic::resume_unwind(Box::new(salsa::Cancelled::PendingWrite))
+        });
+        assert_eq!(cancelled, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "a real bug")]
+    fn catch_cancelled_propagates_genuine_panics() {
+        // Cancellation is control flow; any other panic must stay a panic (a checker bug should
+        // crash loudly, exactly as before the seam existed).
+        let _ = catch_cancelled(|| -> i32 { panic!("a real bug") });
+    }
+
+    #[test]
+    fn snapshot_serves_the_same_reads_as_the_primary() {
+        let mut store = DocumentStore::default();
+        store.open("file:///s.noe", "count: int = \"lots\"\n".to_string());
+        let snap = store.snapshot();
+        let (primary, _) = store.diagnostics("file:///s.noe").unwrap();
+        let (snapped, _) = snap.diagnostics("file:///s.noe").unwrap();
+        assert_eq!(primary.len(), 1);
+        assert_eq!(
+            primary[0].code, snapped[0].code,
+            "shared storage, same answer"
+        );
+        assert_eq!(snap.revision(), store.revision());
+    }
+
+    /// The liveness half of the cancellation contract: a writer issuing edits while a reader loops
+    /// expensive whole-workspace reads over snapshots must never deadlock — each write cancels (or
+    /// waits out) the in-flight read because the reader drops its snapshot after every read. This
+    /// is the exact shape the LSP uses (mutate under a lock; read off it on another thread).
+    #[test]
+    fn concurrent_edits_and_snapshot_reads_make_progress() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let mut store = DocumentStore::default();
+        store.open("file:///c.noe", "x = 0\necho x\n".to_string());
+        let store = Arc::new(Mutex::new(store));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let reader_store = Arc::clone(&store);
+        let reader_done = Arc::clone(&done);
+        let reader = std::thread::spawn(move || {
+            let mut served = 0usize;
+            while !reader_done.load(Ordering::Relaxed) {
+                // Snapshot under the lock, read off it — and drop the snapshot before looping
+                // back to the lock (holding it across the lock wait would deadlock the writer).
+                let snap = reader_store.lock().unwrap().snapshot();
+                if let Some(Some((diags, _))) =
+                    catch_cancelled(|| snap.diagnostics("file:///c.noe"))
+                {
+                    // Every intermediate text is well-typed, so any *delivered* answer is clean.
+                    assert!(diags.is_empty(), "{diags:?}");
+                    served += 1;
+                }
+            }
+            served
+        });
+
+        for i in 1..=50 {
+            let mut guard = store.lock().unwrap();
+            // This set_text cancels any in-flight snapshot read and blocks until the reader's
+            // snapshot drops — the property under test is that it always does (no deadlock).
+            guard.change("file:///c.noe", format!("x = {i}\necho x\n"));
+        }
+        done.store(true, Ordering::Relaxed);
+        let served = reader.join().unwrap();
+        // Liveness: the writer finished all 50 edits and the reader kept the loop turning. The
+        // reader may have been cancelled any number of times; `served` counts delivered reads.
+        assert!(store.lock().unwrap().revision() >= 51, "all edits applied");
+        let _ = served;
     }
 
     #[test]

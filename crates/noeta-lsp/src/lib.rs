@@ -8,13 +8,17 @@
 //! position-encoding negotiation, and the mechanical conversions between the engine's positional
 //! types and their `ls_types` wire counterparts (field-compatible by construction).
 //!
-//! The [`Backend`] holds the store behind a `Mutex`; request handlers lock it, do their
-//! (synchronous, fast) salsa work, and release it before awaiting any client I/O.
+//! The [`Backend`] holds the store behind a `Mutex`; most request handlers lock it, do their
+//! (synchronous, fast) salsa work, and release it before awaiting any client I/O. The three
+//! *expensive* paths — the diagnostics publish, semantic tokens, completion — instead run over a
+//! [`DocumentStore::snapshot`] on a blocking thread ([`Backend::read_latest`]), so a newer edit
+//! **cancels** an in-flight run (salsa unwinds it) rather than queueing behind it, and a
+//! superseded result is never delivered (audit-4 finding 9).
 
 use std::sync::Mutex;
 
 use noeta_ide::{DocumentStore, Encoding, LineIndex, TOP_LEVEL, completion, inlay, semtokens};
-use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::jsonrpc::{Error, ErrorCode, Result};
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
@@ -544,6 +548,38 @@ impl Backend {
         *self.encoding.lock().expect("encoding lock poisoned")
     }
 
+    /// Run one **expensive** read over a [`DocumentStore::snapshot`] on a blocking thread — off
+    /// the message loop and off the store lock — so a newer `didChange` is not queued behind it
+    /// but *cancels* it: the edit's salsa input write unwinds the in-flight snapshot read
+    /// (audit-4 finding 9; contract on [`DocumentStore::snapshot`]). `None` means the result was
+    /// **superseded** — the read was cancelled mid-query, or an edit landed while it ran (the
+    /// revision check; a snapshot is not a frozen version, so a spanning result could mix two
+    /// document versions and must not be delivered). A request path answers `ContentModified`
+    /// (the client re-requests against the new content); the publish path simply stops (the
+    /// superseding edit's own publish covers every open document).
+    async fn read_latest<T, F>(&self, f: F) -> Option<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&DocumentStore) -> T + Send + 'static,
+    {
+        let (snapshot, revision) = {
+            let store = self.store.lock().expect("document store poisoned");
+            (store.snapshot(), store.revision())
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            // The snapshot drops inside this closure — strictly before the handler re-locks the
+            // store below — so a writer blocked in its input write is always released (holding a
+            // snapshot while waiting on the store lock would deadlock the writer).
+            noeta_ide::catch_cancelled(move || f(&snapshot))
+        })
+        .await
+        // A genuine engine panic stays a crash, exactly as it was under the lock — cancellation
+        // is the only unwind absorbed (inside `catch_cancelled`), never a silently-empty answer.
+        .expect("feature computation panicked")?;
+        let store = self.store.lock().expect("document store poisoned");
+        (store.revision() == revision).then_some(result)
+    }
+
     /// The `noeta/trace` custom request (ide-ui U2): render the role-aware static trace as a
     /// plain-text document for the editor's `noeta-trace:` virtual-document view. The same
     /// [`noeta_ide::trace`] walk the MCP `trace` tool serves. `content: null` when no open
@@ -679,16 +715,21 @@ impl Backend {
         })
     }
 
-    /// Type-check `uri`'s current text and push its diagnostics to the client. A no-op for a URI
-    /// that is not open. Runs the salsa work under the store lock, then releases it before the
-    /// awaited client I/O.
-    async fn publish(&self, uri: Uri) {
-        let collected = {
-            let store = self.store.lock().expect("document store poisoned");
-            store.diagnostics(uri.as_str())
+    /// Type-check `uri`'s current text and push its diagnostics to the client. The checker run —
+    /// the most expensive query in the graph — goes through [`Self::read_latest`], so a newer
+    /// edit cancels it instead of queueing behind it. Returns `false` when the run was superseded
+    /// (nothing was published — the superseding edit republishes); `true` otherwise, including
+    /// the no-op for a URI that is not open.
+    async fn publish(&self, uri: Uri) -> bool {
+        let uri_string = uri.as_str().to_string();
+        let Some(collected) = self
+            .read_latest(move |store| store.diagnostics(&uri_string))
+            .await
+        else {
+            return false;
         };
         let Some((diags, text)) = collected else {
-            return;
+            return true;
         };
         let encoding = self.encoding();
         let index = LineIndex::new(&text);
@@ -697,19 +738,23 @@ impl Backend {
             .map(|diag| to_lsp_diagnostic(&index, &uri, diag, encoding))
             .collect();
         self.client.publish_diagnostics(uri, lsp_diags, None).await;
+        true
     }
 
     /// Republish diagnostics for every open document. Editing one file can change what a sibling
     /// that imports it sees, so a change re-publishes the whole open set (bounded by the number of
-    /// open documents).
+    /// open documents). A sweep superseded mid-way stops: the newer mutation runs its own full
+    /// sweep, and finishing this one would interleave two document versions.
     async fn publish_all(&self) {
         let uris = {
             let store = self.store.lock().expect("document store poisoned");
             store.open_uris()
         };
         for uri in uris {
-            if let Ok(uri) = uri.parse::<Uri>() {
-                self.publish(uri).await;
+            if let Ok(uri) = uri.parse::<Uri>()
+                && !self.publish(uri).await
+            {
+                return;
             }
         }
     }
@@ -1074,15 +1119,19 @@ impl LanguageServer for Backend {
         Ok(range.map(|range| PrepareRenameResponse::Range(wire_range(range))))
     }
 
+    /// Re-requested by the editor after every edit, so it is a prime stale-work source: computed
+    /// off the lock via [`Self::read_latest`]; a superseded run answers `ContentModified` and the
+    /// client re-requests against the new content (keeping its previous tokens meanwhile).
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        let uri = params.text_document.uri;
-        let data = {
-            let store = self.store.lock().expect("document store poisoned");
-            store.semantic_tokens(uri.as_str(), self.encoding())
-        };
+        let uri = params.text_document.uri.as_str().to_string();
+        let encoding = self.encoding();
+        let data = self
+            .read_latest(move |store| store.semantic_tokens(&uri, encoding))
+            .await
+            .ok_or(Error::new(ErrorCode::ContentModified))?;
         Ok(data.map(|data| {
             SemanticTokensResult::Tokens(SemanticTokens {
                 result_id: None,
@@ -1114,17 +1163,18 @@ impl LanguageServer for Backend {
         }))
     }
 
+    /// Completion can re-check a munged buffer copy (the bare-dot form), making it expensive
+    /// enough to cancel: computed off the lock via [`Self::read_latest`]; a superseded run
+    /// answers `ContentModified` (the client's next keystroke re-triggers anyway).
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let position_params = params.text_document_position;
-        let uri = position_params.text_document.uri;
-        let candidates = {
-            let store = self.store.lock().expect("document store poisoned");
-            store.completions(
-                uri.as_str(),
-                ide_position(position_params.position),
-                self.encoding(),
-            )
-        };
+        let uri = position_params.text_document.uri.as_str().to_string();
+        let position = ide_position(position_params.position);
+        let encoding = self.encoding();
+        let candidates = self
+            .read_latest(move |store| store.completions(&uri, position, encoding))
+            .await
+            .ok_or(Error::new(ErrorCode::ContentModified))?;
         Ok(candidates.map(|candidates| {
             CompletionResponse::Array(candidates.iter().map(to_completion_item).collect())
         }))
@@ -1149,6 +1199,9 @@ impl LanguageServer for Backend {
         };
         {
             let mut store = self.store.lock().expect("document store poisoned");
+            // The salsa input write inside `change` is also the cancellation trigger: any
+            // in-flight snapshot read (a previous publish sweep, semantic tokens, completion)
+            // unwinds at its next query boundary and this write proceeds.
             store.change(uri.as_str(), change.text);
         }
         self.publish_all().await;

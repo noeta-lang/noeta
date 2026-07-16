@@ -3,7 +3,7 @@
 //! `noeta-ide` extraction at M5, which unlocks `definition`/`references`/`completions`/`signature`).
 
 use crate::analyze::{self, LineIndex, Prepared, SpanLoc};
-use noeta_ast::{Program, Stmt};
+use noeta_ast::Program;
 use noeta_ide::docs as model;
 use rmcp::schemars;
 use serde::Serialize;
@@ -367,14 +367,18 @@ pub fn doc_page(p: &Prepared, id: &str) -> DocPageOutput {
 /// Build the entry file's outline: top-level `fn`/`struct`/`class`/`enum`/`impl`, with fields,
 /// variants, and methods as one level of children, in source order. Walks the parsed AST (available
 /// even when the program has type errors), not the merged workspace, so it describes *this file*.
+///
+/// The walk itself is the shared [`noeta_ide::symbols::outline`] — the same engine the LSP's
+/// document-symbols serves — so the agent's outline and the editor's outline can never drift
+/// (audit-4 finding 8). This adapter only reshapes onto the MCP wire: kind strings, the
+/// types-omitted `fn name(a, b)` detail convention, 1-based locations, and the `@role` post-pass.
 pub fn symbols(p: &Prepared) -> SymbolsOutput {
     let parsed = noeta_db::ast(&p.db, analyze::entry_program(p));
     let program: &Program = &parsed.0.program;
     let index = LineIndex::new(p.entry_text());
-    let mut symbols: Vec<SymbolNode> = program
-        .stmts
+    let mut symbols: Vec<SymbolNode> = noeta_ide::symbols::outline(program)
         .iter()
-        .filter_map(|stmt| symbol_node(stmt, &index))
+        .map(|node| from_outline(node, &index))
         .collect();
 
     // Annotate the outline with the `@role` index (over the merged program, so a role conferred by
@@ -420,109 +424,36 @@ fn annotate_roles(
     }
 }
 
-fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
-    let node = match stmt {
-        Stmt::Fn(f) => SymbolNode {
-            name: f.name.clone(),
-            kind: "function".to_string(),
-            detail: Some(fn_detail(f)),
-            location: index.span_loc(f.span),
-            roles: Vec::new(),
-            children: Vec::new(),
-        },
-        Stmt::Struct(d) => SymbolNode {
-            name: d.name.clone(),
-            kind: "struct".to_string(),
-            detail: None,
-            location: index.span_loc(d.span),
-            roles: Vec::new(),
-            children: fields_and_methods(&d.fields, &d.methods, index),
-        },
-        Stmt::Class(d) => SymbolNode {
-            name: d.name.clone(),
-            kind: "class".to_string(),
-            detail: None,
-            location: index.span_loc(d.span),
-            roles: Vec::new(),
-            children: fields_and_methods(&d.fields, &d.methods, index),
-        },
-        Stmt::Enum(d) => {
-            let mut children: Vec<SymbolNode> = d
-                .variants
-                .iter()
-                .map(|v| SymbolNode {
-                    name: v.name.clone(),
-                    kind: "variant".to_string(),
-                    detail: None,
-                    location: index.span_loc(v.span),
-                    roles: Vec::new(),
-                    children: Vec::new(),
-                })
-                .collect();
-            children.extend(d.methods.iter().map(|m| method_node(m, index)));
-            SymbolNode {
-                name: d.name.clone(),
-                kind: "enum".to_string(),
-                detail: None,
-                location: index.span_loc(d.span),
-                roles: Vec::new(),
-                children,
-            }
-        }
-        Stmt::Impl(d) => SymbolNode {
-            name: format!("{} for {}", d.trait_name, d.target),
-            kind: "impl".to_string(),
-            detail: None,
-            location: index.span_loc(d.span),
-            roles: Vec::new(),
-            children: d.methods.iter().map(|m| method_node(m, index)).collect(),
-        },
-        _ => return None,
+/// Reshape one shared-outline node onto the MCP wire. The location is the whole declaration's
+/// span (the shared walk's `full_span`); the detail keeps this tool's convention — `fn name(p0,
+/// p1)` for callables (parameter names only; precise types come from `type_at` / `ast`), nothing
+/// for the other kinds (whose LSP-facing detail carries types the tool deliberately omits).
+fn from_outline(node: &noeta_ide::symbols::SymbolNode, index: &LineIndex) -> SymbolNode {
+    use noeta_ide::symbols::SymbolKind as K;
+    let kind = match node.kind {
+        K::Function => "function",
+        K::Struct => "struct",
+        K::Class => "class",
+        K::Enum => "enum",
+        K::EnumMember => "variant",
+        K::Field => "field",
+        K::Method => "method",
+        K::Interface => "impl",
     };
-    Some(node)
-}
-
-fn fields_and_methods(
-    fields: &[noeta_ast::FieldDecl],
-    methods: &[noeta_ast::FnDecl],
-    index: &LineIndex,
-) -> Vec<SymbolNode> {
-    let mut children: Vec<SymbolNode> = fields
-        .iter()
-        .map(|f| SymbolNode {
-            name: f.name.clone(),
-            kind: "field".to_string(),
-            detail: None,
-            location: index.span_loc(f.span),
-            roles: Vec::new(),
-            children: Vec::new(),
-        })
-        .collect();
-    children.extend(methods.iter().map(|m| method_node(m, index)));
-    children
-}
-
-fn method_node(f: &noeta_ast::FnDecl, index: &LineIndex) -> SymbolNode {
+    let detail = matches!(node.kind, K::Function | K::Method)
+        .then(|| format!("fn {}({})", node.name, node.param_names.join(", ")));
     SymbolNode {
-        name: f.name.clone(),
-        kind: "method".to_string(),
-        detail: Some(fn_detail(f)),
-        location: index.span_loc(f.span),
+        name: node.name.clone(),
+        kind: kind.to_string(),
+        detail,
+        location: index.span_loc(node.full_span),
         roles: Vec::new(),
-        children: Vec::new(),
+        children: node
+            .children
+            .iter()
+            .map(|child| from_outline(child, index))
+            .collect(),
     }
-}
-
-/// A function's short detail: `fn name(p0, p1)` — parameter names only (the AST pretty-printer's
-/// own convention). Precise parameter/return types come from `type_at` / `ast`.
-fn fn_detail(f: &noeta_ast::FnDecl) -> String {
-    let params = f
-        .params
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("fn {}({params})", f.name)
 }
 
 #[cfg(test)]
@@ -671,6 +602,118 @@ enum Color { Red; Green }
         let none = type_at(&p, None, None, None);
         assert!(!none.found);
         assert!(none.note.unwrap().contains("symbol"));
+    }
+
+    /// Pins the `symbols` tool's exact wire JSON over every node kind — names, kind strings,
+    /// detail conventions (param-names-only fn details, `null` elsewhere), 1-based locations, and
+    /// nesting — so rebasing the walk onto the shared `noeta_ide::symbols::outline` engine
+    /// (audit-4 finding 8) is provably behavior-preserving for agents.
+    #[test]
+    fn symbols_wire_json_is_pinned_across_all_node_kinds() {
+        let src = "\
+fn add(a: int, b: int): int { return a + b }
+
+struct Point {
+  x: int
+  fn norm(): int { return self.x }
+}
+
+enum Shape {
+  Dot
+  Circle(radius: int)
+  fn area(): int { return 0 }
+}
+
+impl Show for Point {
+  fn show(): int { return 1 }
+}
+";
+        let p = prepare(&Some(src.to_string()), &None).unwrap();
+        let out = serde_json::to_value(symbols(&p)).unwrap();
+        let loc = |sl: u32, sc: u32, so: u32, el: u32, ec: u32, eo: u32| {
+            serde_json::json!({
+                "start": {"line": sl, "column": sc, "offset": so},
+                "end": {"line": el, "column": ec, "offset": eo},
+            })
+        };
+        let expected = serde_json::json!({
+            "symbols": [
+                {
+                    "name": "add", "kind": "function", "detail": "fn add(a, b)",
+                    "location": loc(1, 1, 0, 1, 45, 44), "roles": [], "children": [],
+                },
+                {
+                    "name": "Point", "kind": "struct", "detail": null,
+                    "location": loc(3, 1, 46, 6, 2, 106), "roles": [],
+                    "children": [
+                        {
+                            "name": "x", "kind": "field", "detail": null,
+                            "location": loc(4, 3, 63, 4, 9, 69), "roles": [], "children": [],
+                        },
+                        {
+                            "name": "norm", "kind": "method", "detail": "fn norm()",
+                            "location": loc(5, 3, 72, 5, 35, 104), "roles": [], "children": [],
+                        },
+                    ],
+                },
+                {
+                    "name": "Shape", "kind": "enum", "detail": null,
+                    "location": loc(8, 1, 108, 12, 2, 180), "roles": [],
+                    "children": [
+                        {
+                            "name": "Dot", "kind": "variant", "detail": null,
+                            "location": loc(9, 3, 123, 9, 6, 126), "roles": [], "children": [],
+                        },
+                        {
+                            "name": "Circle", "kind": "variant", "detail": null,
+                            "location": loc(10, 3, 129, 10, 22, 148), "roles": [], "children": [],
+                        },
+                        {
+                            "name": "area", "kind": "method", "detail": "fn area()",
+                            "location": loc(11, 3, 151, 11, 30, 178), "roles": [], "children": [],
+                        },
+                    ],
+                },
+                {
+                    "name": "Show for Point", "kind": "impl", "detail": null,
+                    "location": loc(14, 1, 182, 16, 2, 235), "roles": [],
+                    "children": [
+                        {
+                            "name": "show", "kind": "method", "detail": "fn show()",
+                            "location": loc(15, 3, 206, 15, 30, 233), "roles": [], "children": [],
+                        },
+                    ],
+                },
+            ],
+        });
+        assert_eq!(out, expected);
+    }
+
+    /// Pins `type_at`'s exact wire locations (1-based line, 1-based UTF-8 byte column, byte
+    /// offset) ahead of the finding-8 LineIndex rebase — the span math must survive verbatim.
+    #[test]
+    fn type_at_wire_locations_are_pinned() {
+        let p = prep();
+        // The symbol-named lookup resolves `xs` to its typed *use site* — the `xs.len()` receiver
+        // on line 3 (byte offset 56) — since declaration targets are not expressions.
+        let xs = type_at(&p, Some("xs"), None, None);
+        let out = serde_json::to_value(&xs).unwrap();
+        assert_eq!(out["found"], serde_json::json!(true));
+        assert_eq!(out["type"], serde_json::json!("List<int>"));
+        assert_eq!(
+            out["location"],
+            serde_json::json!({
+                "start": {"line": 3, "column": 14, "offset": 56},
+                "end": {"line": 3, "column": 16, "offset": 58},
+            })
+        );
+        assert_eq!(out["resolved_offset"], serde_json::json!(56));
+
+        // Position-addressed: line 3 column 10 sits on `n` inside `return n + xs.len()`.
+        let at = type_at(&p, None, Some(3), Some(10));
+        assert!(at.found);
+        assert_eq!(at.r#type, "int");
+        assert_eq!(at.resolved_offset, Some(52));
     }
 
     #[test]
