@@ -389,8 +389,7 @@ impl Walker<'_> {
                 Dependency::Scope(members) => {
                     let mut scope_company: Option<String> = None;
                     for member in members {
-                        let identity =
-                            self.walk_one(key, member, base_dir, ScopeRoot::Scope)?;
+                        let identity = self.walk_one(key, member, base_dir, ScopeRoot::Scope)?;
                         let company = identity.split('/').next().unwrap_or(&identity).to_string();
                         match &scope_company {
                             None => scope_company = Some(company),
@@ -911,8 +910,12 @@ impl Walker<'_> {
                             deps: Vec::new(),
                         },
                     );
-                    let child_reqs =
-                        self.gather(child_manifest.dependencies(), &dir, path_git, registry_queue)?;
+                    let child_reqs = self.gather(
+                        child_manifest.dependencies(),
+                        &dir,
+                        path_git,
+                        registry_queue,
+                    )?;
                     path_git.get_mut(&identity).expect("just inserted").deps = child_reqs;
                 }
                 Ok((identity, exact_req(&pkg.version)))
@@ -1262,7 +1265,9 @@ fn assemble(
         // shares that one key, so they all land under the scope root in the flat pool. First root key
         // wins if an identity is aliased under several keys.
         for identity in identities {
-            global.entry(identity.clone()).or_insert_with(|| key.clone());
+            global
+                .entry(identity.clone())
+                .or_insert_with(|| key.clone());
         }
         used.insert(key.clone());
     }
@@ -1619,10 +1624,20 @@ mod tests {
             let p = graph
                 .packages
                 .iter()
-                .find(|p| p.modules.iter().any(|m| m.name.contains(&format!("para-{pkg}"))))
+                .find(|p| {
+                    p.modules
+                        .iter()
+                        .any(|m| m.name.contains(&format!("para-{pkg}")))
+                })
                 .unwrap_or_else(|| panic!("package para/{pkg} missing from the link set"));
-            assert_eq!(p.key, "para", "scope member para/{pkg} must key on the scope");
-            assert_eq!(p.root, "para", "scope member para/{pkg} re-roots from its scope");
+            assert_eq!(
+                p.key, "para",
+                "scope member para/{pkg} must key on the scope"
+            );
+            assert_eq!(
+                p.root, "para",
+                "scope member para/{pkg} re-roots from its scope"
+            );
         }
     }
 
@@ -1632,7 +1647,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let app = base.join("app");
         std::fs::create_dir_all(&app).unwrap();
-        for (dir, ident) in [("para-aether", "para/aether"), ("other-thing", "other/thing")] {
+        for (dir, ident) in [
+            ("para-aether", "para/aether"),
+            ("other-thing", "other/thing"),
+        ] {
             let d = base.join(dir);
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(
