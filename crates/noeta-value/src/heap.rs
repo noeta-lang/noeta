@@ -19,7 +19,7 @@ use noeta_bytecode::Builtin;
 use noeta_object::{PackedSchema, Shape};
 
 use crate::Value;
-use noeta_stdlib::MapKey;
+use noeta_native::MapKey;
 
 // --- Live-heap accounting (the leak oracle, architecture §0/§5) ---
 //
@@ -272,7 +272,7 @@ pub(crate) enum Payload {
     /// `Value`s), so freeing just drops the box. The payload is RC-shared like any other, so a
     /// mutating method (through [`with_extern_mut`]) has reference semantics — the FileHandle
     /// discipline, generalized.
-    Extern(noeta_stdlib::ExternBox),
+    Extern(noeta_native::ExternBox),
     Int(i64),
     /// A function value: a prototype index plus the captured upvalue cells (empty for a
     /// top-level `fn`/closure, which captures only globals). The closure **owns one reference
@@ -364,7 +364,7 @@ pub(crate) enum Payload {
     /// A **leaf timer future** (Track A.2): `sleep(ms)` produces one, carrying the absolute logical
     /// deadline (ms) at which it becomes ready. It holds no heap children — the deadline is a plain
     /// integer — so it needs no `release`/`children` handling beyond freeing its own node. Polling it
-    /// consults the injected [`noeta_stdlib::SandboxExecutor`]'s clock; it reports `Pending` until the
+    /// consults the injected [`noeta_native::SandboxExecutor`]'s clock; it reports `Pending` until the
     /// clock reaches the deadline. This is the first future that can actually suspend.
     Timer(u64),
     /// A **task handle** (Track A.3b): the `Future<T>` `spawn e` returns. It references a task by its
@@ -373,7 +373,7 @@ pub(crate) enum Payload {
     /// integers; the task's future/result are owned by the scope, not the handle.
     Handle(crate::ScopeId, crate::TaskId),
     /// A **leaf async-read future** (Track A.4c): the `Future<string>` `fs.read_async(path)` returns.
-    /// It carries an id ticketing the read in the injected [`noeta_stdlib::Executor`] (the sandbox
+    /// It carries an id ticketing the read in the injected [`noeta_native::Executor`] (the sandbox
     /// executor resolves it synchronously; the real executor spawns it on tokio and harvests it in
     /// `advance`). A GC leaf — the id is a plain integer; the pending read lives in the executor.
     AsyncIo(u64),
@@ -952,7 +952,7 @@ pub(crate) fn free_shallow(value: Value) {
 /// value is an `Extern`.
 pub(crate) fn with_extern<R>(
     value: Value,
-    f: impl FnOnce(&dyn noeta_stdlib::ExternValue) -> R,
+    f: impl FnOnce(&dyn noeta_native::ExternValue) -> R,
 ) -> R {
     // SAFETY: live object this module allocated (doc contract: caller checked Extern);
     // single-threaded read.
@@ -968,7 +968,7 @@ pub(crate) fn with_extern<R>(
 /// a GC leaf (no child `Value`s), so no retain/release bookkeeping is needed.
 pub(crate) fn with_extern_mut<R>(
     value: Value,
-    f: impl FnOnce(&mut dyn noeta_stdlib::ExternValue) -> R,
+    f: impl FnOnce(&mut dyn noeta_native::ExternValue) -> R,
 ) -> R {
     // SAFETY: live object this module allocated (doc contract: caller checked Extern);
     // single-threaded interior mutation with no other borrow live across `f`.

@@ -68,7 +68,7 @@ impl Value {
     }
 
     /// A **leaf async-read future** (Track A.4c): `fs.read_async(path)` produces one, carrying the id
-    /// that tickets the pending read in the injected [`noeta_stdlib::Executor`]. Polled by consulting
+    /// that tickets the pending read in the injected [`noeta_native::Executor`]. Polled by consulting
     /// the executor (see [`Self::async_io_id`]); it wraps no closure.
     pub fn make_async_io(id: u64) -> Value {
         heap::alloc(Payload::AsyncIo(id))

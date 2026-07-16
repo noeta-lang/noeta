@@ -4602,8 +4602,8 @@ dependencies = [
  "noeta-ast",
  "noeta-bytecode",
  "noeta-diagnostics",
+ "noeta-native",
  "noeta-object",
- "noeta-stdlib",
  "proptest",
 ]
 

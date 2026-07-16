@@ -23,6 +23,7 @@ pub mod delegate;
 pub mod executor;
 pub mod extern_value;
 pub mod host;
+pub mod json_text;
 pub mod map_key;
 pub mod net;
 pub mod os;

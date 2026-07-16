@@ -108,7 +108,7 @@ pub fn apply_binary_wide(
             ((a as u64) >> n) as i64
         }));
     }
-    let mask = |v: i64| Value::int(noeta_stdlib::mask_to_width(v, signed, bits));
+    let mask = |v: i64| Value::int(noeta_native::mask_to_width(v, signed, bits));
     if signed {
         match op {
             BinaryOp::Div if b == 0 => Err(div_by_zero()),
@@ -294,7 +294,7 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
 
 /// The content order of two **key-capable `@packed` struct** values (P-PKEY): type name first,
 /// then the slots in declaration order — bools `false < true`, ints numerically, nested capable
-/// structs recursively. Exactly [`noeta_stdlib::MapKey`]'s packed order, so every order-observing
+/// structs recursively. Exactly [`noeta_native::MapKey`]'s packed order, so every order-observing
 /// surface agrees. `None` unless both sides are key-capable objects (the caller falls through).
 fn packed_primitive_cmp(a: Value, b: Value) -> Option<Ordering> {
     let sa = a.shape()?;
