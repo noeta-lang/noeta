@@ -1,0 +1,92 @@
+//! `para.db` — the database layer's **native driver** (aether DB0), the only native piece of the
+//! DB stack (the query builder, repository/unit-of-work, and `@sql` tier above it are pure Noeta).
+//!
+//! One module and one extern type, rooted at `para`:
+//!   * `db`         — `db.connect(dsn) -> Connection`; the dsn scheme selects the driver.
+//!   * `Connection` — `execute(sql, params) -> int`, `query(sql, params) -> List<Map<string, dyn>>`,
+//!     `close()`; a shared handle over a boxed [`driver::SqlDriver`].
+//!
+//! The **swappable-driver seam** is [`driver::SqlDriver`]: SQLite ([`sqlite::SqliteDriver`]) is the
+//! first impl, behind the `ring-sqlite` feature; Postgres/MySQL arrive as further impls with no
+//! change to the Noeta surface. Like `para-p2p`, this crate is compiled and linked only when a
+//! program depends on the `para/db` package, and registered through the fixed native-extension
+//! convention ([`NOETA_EXTENSIONS`], re-exported by the package's `native` entry crate).
+
+pub mod conn;
+pub mod driver;
+#[cfg(feature = "ring-sqlite")]
+pub mod sqlite;
+
+use noeta_native::registry::{ExtModule, ExtType, Extension};
+
+/// The `para.db` extension unit — the `db` module and the `Connection` extern type. `root() ==
+/// "para"`, so the module resolves as `para.db` and the type as `para.db.Connection`.
+#[derive(Debug, Clone, Copy)]
+pub struct ParaDbExtension;
+
+impl Extension for ParaDbExtension {
+    fn name(&self) -> &'static str {
+        "para.db"
+    }
+    fn root(&self) -> &'static str {
+        "para"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        PARA_DB_MODULES
+    }
+    fn types(&self) -> &'static [ExtType] {
+        PARA_DB_TYPES
+    }
+}
+
+/// The fixed native-extension export convention (package-manager Phase 3): the package's native
+/// entry crate re-exports this slice; the composed toolchain aggregates every dependency's slice and
+/// installs the union into the runtime registry.
+pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ParaDbExtension];
+
+/// The `para.db` modules — just `db` (the connection factory). No ring here: the driver selection
+/// is pure Rust, and SQLite itself rides the crate's own `ring-sqlite` feature, not a runtime ring.
+const PARA_DB_MODULES: &[ExtModule] = &[ExtModule {
+    name: "db",
+    functions: crate::conn::DB_FNS,
+    dispatch: crate::conn::db_dispatch,
+    docs: DB_DOCS,
+    ..ExtModule::DEFAULTS
+}];
+
+/// The `para.db` extern types — the `Connection` handle. `deep_marshal` so its `List<dyn>` params
+/// and future container arguments project to a full `NativeValue` tree the driver can read.
+const PARA_DB_TYPES: &[ExtType] = &[ExtType {
+    name: crate::conn::CONNECTION_TYPE_NAME,
+    namespace: "para.db",
+    methods: crate::conn::CONNECTION_METHODS,
+    dispatch: crate::conn::CONNECTION_DISPATCH,
+    deep_marshal: true,
+    docs: CONNECTION_DOCS,
+    ..ExtType::DEFAULTS
+}];
+
+const DB_DOCS: &[(&str, &str)] = &[(
+    "connect",
+    "Open a database connection from a dsn — the scheme selects the driver: `sqlite::memory:` (or \
+     `:memory:`) for an in-memory database, `sqlite:PATH` (or a bare path) for a file. Returns a \
+     `Connection`.",
+)];
+
+const CONNECTION_DOCS: &[(&str, &str)] = &[
+    (
+        "execute",
+        "Run a non-query statement (`INSERT`/`UPDATE`/`DELETE`/DDL, or `BEGIN`/`COMMIT`/`ROLLBACK`) \
+         with positional `?` bind parameters; returns the number of rows affected.",
+    ),
+    (
+        "query",
+        "Run a query with positional `?` bind parameters; returns each result row as a \
+         `Map<string, dyn>` of column name to value.",
+    ),
+    (
+        "close",
+        "Release the connection. The handle is also freed automatically when the last reference to \
+         it drops.",
+    ),
+];

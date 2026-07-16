@@ -49,6 +49,28 @@ pattern with a unit-of-work, over a general-purpose query builder, over a **swap
   request flush hook; route-model binding (`fn show(user: User)` loads by id via the repo).
 - **DB4 — `@sql` tier**: typed SQL statement values with param holes; `conn.run(@sql{...})`.
 
+## Blueprint confirmations (from the native-ABI audit)
+- **Extern box = Pattern A**: `ConnectionBox(Arc<Mutex<Box<dyn SqlDriver>>>)` — `clone_box` = cheap Arc
+  clone (solves the non-cloneable `rusqlite::Connection`); plain `ModuleDispatch`/`TypeDispatch`, NO
+  `NativeCtx`/ExtState needed. `SqlDriver` trait (the swap seam) lives INSIDE the box.
+- **Crate name = `noeta-para-db`** (mirrors `noeta-para-p2p`). NOT `noeta-db` — that's the taken salsa
+  pipeline crate. Package `para/db`, ns `para.db`, module `db`, extern type `Connection`.
+- **rusqlite + `bundled` builds offline** (verified, ~8s; compiles SQLite C). Gate behind a
+  `ring-sqlite` feature (like para-p2p's `ring-p2p`) so an AOT binary sheds it when unused.
+- **Transactions**: SQL statements (`BEGIN`/`COMMIT`/`ROLLBACK`) + a flag inside the driver — NOT a
+  `rusqlite::Transaction` (borrows the connection; can't live in an extern box). Unit-of-work is pure
+  Noeta on top.
+- **`@sql` tier = pure Noeta** (option 1): copy `examples/sql_tier.noe` — `@tier(sql, text: "sql",
+  expr: Sql) fn sql(statics: List<string>, holes: List<() -> dyn>): Sql`. Confirmed: a `text:` verbatim
+  body AND `${}` holes work together; a hole is a bound `?` param (injection-safe by construction). No
+  native tier work needed.
+- **Local build+test works**: `examples/para-db-demo/` with a path dep + `[trust] native = ["para/db"]`,
+  run via `noeta run` (composes the toolchain in-repo, no publish). Native pkgs are NOT conformance-
+  differential tested (they need the composed toolchain) — test via example runs + Rust integration
+  tests (mirror `crates/noeta-para-p2p/tests/`).
+- **Row→struct**: reuse the `TypeRecipe` decode machinery (feed a row Map through it) OR map in Noeta
+  via reflection (the aether `json.decode_typed`/`params_of` pattern). Decide in DB2.
+
 ## Open questions / risks
 - Native package local build+test without publishing (trust gate `[trust] native`) — confirm the
   composed-toolchain path works in-repo (mirror para/p2p's test setup).

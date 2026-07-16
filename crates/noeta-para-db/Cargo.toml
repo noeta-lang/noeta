@@ -1,0 +1,26 @@
+[package]
+name = "noeta-para-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The extension ABI (the module/type registry, ExternValue contract, error constructors).
+noeta-native = { workspace = true }
+# The SQLite driver, behind the `ring-sqlite` ring. `bundled` compiles SQLite from source, so a
+# consumer needs no system libsqlite3 (the amalgamation reuses the workspace's existing
+# libsqlite3-sys build). Optional + gated exactly like para-p2p's `ring-p2p`: a pure/loopback build
+# that never touches `para.db` links no SQLite.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+[features]
+# Default-on for local dev (so `cargo build`/`noeta run` get a working SQLite driver out of the box);
+# the composed toolchain forwards it, and a future `--native` footprint scan can shed it when the
+# program never imports `para.db`. Mirrors the para-p2p `ring-p2p` gate.
+default = ["ring-sqlite"]
+ring-sqlite = ["dep:rusqlite"]
+
+[lints]
+workspace = true
