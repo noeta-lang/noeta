@@ -279,22 +279,9 @@ fn compile_to_mc(
     // session threads its own assembled set. Stored on the `ModuleCompiler` and passed to lowering.
     registry: &'static noeta_stdlib::registry::Registry,
 ) -> Result<(ModuleCompiler, Vec<(Span, u32)>), Unsupported> {
-    let noeta_check::Sites {
-        type_of_sites,
-        construction_sites,
-        packed_list_sites,
-        typed_module_call_sites,
-        map_packed_sites,
-        index_field_sites,
-        for_stream_sites,
-        width_sites,
-        handle_sites,
-        bound_handle_sites,
-        f32_literal_sites,
-        bundle_call_sites,
-        namespace_module_sites,
-        destructor_relevance: _,
-    } = sites;
+    // `sites` stays whole through lowering (`lowering_sites!` is THE one projection); the owned
+    // maps the compiler keeps (`type_of`, `map_packed`) move out afterwards.
+
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
     // precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use death
@@ -306,19 +293,7 @@ fn compile_to_mc(
     // index-field set fuses `list[i].field` reads into `Rvalue::IndexField` (P-PACK 2.5+).
     let ir = noeta_ir::lower_with_sites_opts(
         program,
-        noeta_ir::LoweringSites {
-            packed_list_sites: &packed_list_sites,
-            index_field_sites: &index_field_sites,
-            typed_module_call_sites: &typed_module_call_sites,
-            for_stream_sites: &for_stream_sites,
-            width_sites: &width_sites,
-            construction_sites: &construction_sites,
-            handle_sites: &handle_sites,
-            bound_handle_sites: &bound_handle_sites,
-            f32_literal_sites: &f32_literal_sites,
-            bundle_call_sites: &bundle_call_sites,
-            namespace_module_sites: &namespace_module_sites,
-        },
+        noeta_ir::lowering_sites!(sites),
         real_isolates,
         registry,
     )
@@ -345,7 +320,7 @@ fn compile_to_mc(
         types: HashMap::new(),
         module_globals: HashMap::new(),
         module_fns: HashSet::new(),
-        type_of_sites,
+        type_of_sites: sites.type_of_sites,
         cache_slots: 0,
         type_reprs: Vec::new(),
         names: Vec::new(),
@@ -375,7 +350,7 @@ fn compile_to_mc(
     // the `packed_schemas` table — is deterministic regardless of the `HashMap`'s iteration order.
     let map_packed_sites = {
         let mut entries: Vec<(Span, &noeta_ast::reflect::PackedLayout)> =
-            map_packed_sites.iter().map(|(s, l)| (*s, l)).collect();
+            sites.map_packed_sites.iter().map(|(s, l)| (*s, l)).collect();
         entries.sort_by_key(|(s, _)| (s.source, s.start, s.end));
         entries
             .into_iter()
@@ -501,19 +476,7 @@ impl SessionCompiler {
             None => noeta_ir::lower(entry),
             Some(sites) => noeta_ir::lower_with_sites_opts(
                 entry,
-                noeta_ir::LoweringSites {
-                    packed_list_sites: &sites.packed_list_sites,
-                    index_field_sites: &sites.index_field_sites,
-                    typed_module_call_sites: &sites.typed_module_call_sites,
-                    for_stream_sites: &sites.for_stream_sites,
-                    width_sites: &sites.width_sites,
-                    construction_sites: &sites.construction_sites,
-                    handle_sites: &sites.handle_sites,
-                    bound_handle_sites: &sites.bound_handle_sites,
-                    f32_literal_sites: &sites.f32_literal_sites,
-                    bundle_call_sites: &sites.bundle_call_sites,
-                    namespace_module_sites: &sites.namespace_module_sites,
-                },
+                noeta_ir::lowering_sites!(sites),
                 // The REPL keeps cooperative isolates, exactly like the checkerless path.
                 false,
                 // The session's own registry (instance-registry IR5) — the default for a REPL

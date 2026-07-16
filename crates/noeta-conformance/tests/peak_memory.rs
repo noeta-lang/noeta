@@ -87,19 +87,7 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
     let checked = noeta_check::check_all(&program);
     let ir = noeta_ir::lower_with_sites(
         &program,
-        noeta_ir::LoweringSites {
-            packed_list_sites: &checked.sites.packed_list_sites,
-            index_field_sites: &checked.sites.index_field_sites,
-            typed_module_call_sites: &checked.sites.typed_module_call_sites,
-            for_stream_sites: &checked.sites.for_stream_sites,
-            width_sites: &checked.sites.width_sites,
-            construction_sites: &checked.sites.construction_sites,
-            handle_sites: &checked.sites.handle_sites,
-            bound_handle_sites: &checked.sites.bound_handle_sites,
-            f32_literal_sites: &checked.sites.f32_literal_sites,
-            bundle_call_sites: &checked.sites.bundle_call_sites,
-            namespace_module_sites: &checked.sites.namespace_module_sites,
-        },
+        noeta_ir::lowering_sites!(checked.sites),
     )
     .expect("Core-IR lowering is total over the parsed language");
     let relevance = noeta_ir_passes::Relevance {

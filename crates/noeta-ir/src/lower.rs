@@ -110,39 +110,68 @@ pub struct LoweringSites<'a> {
     pub namespace_module_sites: &'a HashMap<Span, String>,
 }
 
+impl LoweringSites<'static> {
+    /// The all-empty site set (the no-hints path: REPL / IR-corpus / property tests) — `'static`
+    /// borrows of shared empty maps, so callers need no eleven-local dance to keep them alive.
+    pub fn empty() -> LoweringSites<'static> {
+        use std::sync::OnceLock;
+        static PACKED: OnceLock<HashMap<Span, noeta_ast::reflect::PackedLayout>> = OnceLock::new();
+        static SPANS: OnceLock<HashSet<Span>> = OnceLock::new();
+        static RECIPES: OnceLock<HashMap<Span, noeta_native::TypeRecipe>> = OnceLock::new();
+        static WIDTHS: OnceLock<HashMap<Span, (bool, u8)>> = OnceLock::new();
+        static REPRS: OnceLock<HashMap<Span, noeta_ast::reflect::TypeRepr>> = OnceLock::new();
+        static HANDLES: OnceLock<HashMap<Span, (String, String, bool)>> = OnceLock::new();
+        static PAIRS: OnceLock<HashMap<Span, (String, String)>> = OnceLock::new();
+        static NAMES: OnceLock<HashMap<Span, String>> = OnceLock::new();
+        LoweringSites {
+            packed_list_sites: PACKED.get_or_init(HashMap::new),
+            index_field_sites: SPANS.get_or_init(HashSet::new),
+            typed_module_call_sites: RECIPES.get_or_init(HashMap::new),
+            for_stream_sites: SPANS.get_or_init(HashSet::new),
+            width_sites: WIDTHS.get_or_init(HashMap::new),
+            construction_sites: REPRS.get_or_init(HashMap::new),
+            handle_sites: HANDLES.get_or_init(HashMap::new),
+            bound_handle_sites: SPANS.get_or_init(HashSet::new),
+            f32_literal_sites: SPANS.get_or_init(HashSet::new),
+            bundle_call_sites: PAIRS.get_or_init(HashMap::new),
+            namespace_module_sites: NAMES.get_or_init(HashMap::new),
+        }
+    }
+}
+
+/// Project a checker `Sites` bundle (or anything with the same field names) into a
+/// [`LoweringSites`] borrow bundle — THE one projection. `noeta-check` and `noeta-ir` are
+/// deliberately decoupled (no dependency edge in either direction), so this is a field-name-
+/// coupled macro rather than a `From` impl; before it existed the projection was hand-copied at
+/// seven call sites across four crates, and a driver that forgot one field compiled fine while
+/// silently dropping a semantic hint (`f32_literal_sites`) or a fusion (`index_field_sites`).
+/// Adding a site map is now three lines: the `Sites` field, the [`LoweringSites`] field, and one
+/// line here.
+#[macro_export]
+macro_rules! lowering_sites {
+    ($s:expr) => {
+        $crate::LoweringSites {
+            packed_list_sites: &$s.packed_list_sites,
+            index_field_sites: &$s.index_field_sites,
+            typed_module_call_sites: &$s.typed_module_call_sites,
+            for_stream_sites: &$s.for_stream_sites,
+            width_sites: &$s.width_sites,
+            construction_sites: &$s.construction_sites,
+            handle_sites: &$s.handle_sites,
+            bound_handle_sites: &$s.bound_handle_sites,
+            f32_literal_sites: &$s.f32_literal_sites,
+            bundle_call_sites: &$s.bundle_call_sites,
+            namespace_module_sites: &$s.namespace_module_sites,
+        }
+    };
+}
+
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
 /// currently-supported subset. List literals lower to the boxed [`Rvalue::List`] and `list[i].f`
 /// reads to the unfused [`Rvalue::Index`] + [`Rvalue::Field`]; see [`lower_with_sites`] to also
 /// stream `List<packed>` literals into a flat buffer and fuse indexed field reads.
 pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
-    // The no-hints path: an all-empty site set (kept live for the call).
-    let packed = HashMap::new();
-    let index = HashSet::new();
-    let ext = HashMap::new();
-    let stream = HashSet::new();
-    let width = HashMap::new();
-    let construction = HashMap::new();
-    let handles = HashMap::new();
-    let bound = HashSet::new();
-    let f32_lits = HashSet::new();
-    let bundles = HashMap::new();
-    let namespaces = HashMap::new();
-    lower_with_sites(
-        program,
-        LoweringSites {
-            packed_list_sites: &packed,
-            index_field_sites: &index,
-            typed_module_call_sites: &ext,
-            for_stream_sites: &stream,
-            width_sites: &width,
-            construction_sites: &construction,
-            handle_sites: &handles,
-            bound_handle_sites: &bound,
-            f32_literal_sites: &f32_lits,
-            bundle_call_sites: &bundles,
-            namespace_module_sites: &namespaces,
-        },
-    )
+    lower_with_sites(program, LoweringSites::empty())
 }
 
 /// As [`lower`], but driven by the checker's [`LoweringSites`] (all pure functions of the program, so

@@ -48,19 +48,7 @@ pub fn reference_run_traced(
     // `run_ir` needs no map (the VM compiles the same).
     let ir = noeta_ir::lower_with_sites(
         program,
-        noeta_ir::LoweringSites {
-            packed_list_sites: &sites.packed_list_sites,
-            index_field_sites: &sites.index_field_sites,
-            typed_module_call_sites: &sites.typed_module_call_sites,
-            for_stream_sites: &sites.for_stream_sites,
-            width_sites: &sites.width_sites,
-            construction_sites: &sites.construction_sites,
-            handle_sites: &sites.handle_sites,
-            bound_handle_sites: &sites.bound_handle_sites,
-            f32_literal_sites: &sites.f32_literal_sites,
-            bundle_call_sites: &sites.bundle_call_sites,
-            namespace_module_sites: &sites.namespace_module_sites,
-        },
+        noeta_ir::lowering_sites!(sites),
     )
     .expect(
         "Core-IR lowering is total over the parsed language \
@@ -84,19 +72,7 @@ pub fn reference_run_with_host(
 ) -> RunResult {
     let ir = noeta_ir::lower_with_sites(
         program,
-        noeta_ir::LoweringSites {
-            packed_list_sites: &sites.packed_list_sites,
-            index_field_sites: &sites.index_field_sites,
-            typed_module_call_sites: &sites.typed_module_call_sites,
-            for_stream_sites: &sites.for_stream_sites,
-            width_sites: &sites.width_sites,
-            construction_sites: &sites.construction_sites,
-            handle_sites: &sites.handle_sites,
-            bound_handle_sites: &sites.bound_handle_sites,
-            f32_literal_sites: &sites.f32_literal_sites,
-            bundle_call_sites: &sites.bundle_call_sites,
-            namespace_module_sites: &sites.namespace_module_sites,
-        },
+        noeta_ir::lowering_sites!(sites),
     )
     .expect(
         "Core-IR lowering is total over the parsed language \
