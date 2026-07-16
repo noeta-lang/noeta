@@ -269,6 +269,16 @@ fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
         return Vec::new();
     };
     let entry_name = entry_path.file_name();
+    let mut modules = read_dir_modules(dir);
+    modules.retain(|m| Path::new(&m.name).file_name() != entry_name);
+    modules
+}
+
+/// Read every `.noe` file directly in `dir` (flat — the sibling scan's scope, unlike
+/// [`read_package_sources`]'s recursive package walk) as a [`RawModule`], in sorted order.
+/// A directory that cannot be read yields no modules; unreadable files are skipped — both
+/// matching [`read_siblings`]'s tolerance (it is this scan minus the entry).
+pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -276,7 +286,6 @@ fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "noe"))
-        .filter(|p| p.file_name() != entry_name)
         .collect();
     paths.sort();
     paths
@@ -430,32 +439,11 @@ pub fn link_with_deps(
 
     // Parse + re-root each dependency package's modules under *that package's* edition (the sources
     // continue past the siblings in the same package order they were assembled above).
-    let mut dep_programs: Vec<Program> = Vec::new();
-    let mut dep_idx = sibling_end;
-    for dep in deps {
-        for _ in &dep.modules {
-            if let Some(mut program) = parse_clean(
-                &sources[dep_idx],
-                &lexeds[dep_idx],
-                dep.edition,
-                &text_tiers,
-            ) {
-                reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
-                dep_programs.push(program);
-            }
-            dep_idx += 1;
-        }
-    }
+    let dep_programs = parse_dep_programs(&sources, &lexeds, sibling_end, deps, &text_tiers);
 
     let sibling_refs: Vec<&Program> = sibling_programs.iter().collect();
     let dep_refs: Vec<&Program> = dep_programs.iter().collect();
-    // A resolved dependency graph is complete knowledge: the always-legitimate non-std roots are the
-    // declared native-package keys (their members live in the composed toolchain, not the link pool).
-    let native_roots: Vec<String> = deps
-        .iter()
-        .filter(|d| d.native)
-        .map(|d| d.key.clone())
-        .collect();
+    let native_roots = native_dep_roots(deps);
     let program = link_parsed_with_deps(
         &entry,
         &entry_parsed.program,
@@ -469,6 +457,205 @@ pub fn link_with_deps(
         sources: SourceMap::new(sources),
         editions,
     })
+}
+
+/// Parse + re-root each dependency package's modules under *that package's* edition. The dependency
+/// modules occupy `sources[offset..]` in package order (the order the caller assembled them); a
+/// module that fails to lex/parse is skipped (its `Source` stays, so ids keep lining up). Shared by
+/// [`link_with_deps`] and the directory batch ([`parse_dir`]).
+fn parse_dep_programs(
+    sources: &[Source],
+    lexeds: &[noeta_lexer::Lexed],
+    offset: usize,
+    deps: &[DepPackage],
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Vec<Program> {
+    let mut dep_programs: Vec<Program> = Vec::new();
+    let mut dep_idx = offset;
+    for dep in deps {
+        for _ in &dep.modules {
+            if let Some(mut program) =
+                parse_clean(&sources[dep_idx], &lexeds[dep_idx], dep.edition, text_tiers)
+            {
+                reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
+                dep_programs.push(program);
+            }
+            dep_idx += 1;
+        }
+    }
+    dep_programs
+}
+
+/// A resolved dependency graph is complete knowledge: the always-legitimate non-std roots are the
+/// declared native-package keys (their members live in the composed toolchain, not the link pool).
+fn native_dep_roots(deps: &[DepPackage]) -> Vec<String> {
+    deps.iter()
+        .filter(|d| d.native)
+        .map(|d| d.key.clone())
+        .collect()
+}
+
+/// One directory module's parse outcome inside a [`ParsedDir`]: the parsed program plus its
+/// chained lex + parse diagnostics. As an **entry** the diagnostics are reported (exactly as
+/// [`link_with_deps`] reports the entry's); as a **sibling** any diagnostic skips the module
+/// ([`parse_clean`]'s policy — both roles come from this one parse).
+#[derive(Debug)]
+struct ModuleParse {
+    program: Program,
+    diagnostics: Vec<Diagnostic>,
+}
+
+/// A directory's modules (plus the entry's dependency packages) lexed and parsed **once**, and
+/// linkable against *any* member as the entry — `noeta check`'s directory mode (audit-4 F4).
+/// Checking a directory treats every `.noe` file as its own entry; loading each entry through
+/// [`load_with_deps`] re-lexed and re-parsed the whole directory per entry (N entries → N× the
+/// work). Here ids are assigned once, in directory (sorted-path) order with dependency modules
+/// after, and every entry's link shares the same parsed pool — so one [`SourceMap`] renders
+/// every entry's diagnostics. Semantics per entry are identical to [`load_with_deps`]: same
+/// sibling set (every *other* cleanly-parsed module), same dependency pool, same text-tier
+/// union and per-package editions; only the `SourceId` numbering differs (entry-first there,
+/// directory-order here), which diagnostics never observe (they render by source name).
+#[derive(Debug)]
+pub struct ParsedDir {
+    sources: Vec<Source>,
+    editions: noeta_lexer::EditionMap,
+    modules: Vec<ModuleParse>,
+    dep_programs: Vec<Program>,
+    native_roots: Vec<String>,
+}
+
+/// Lex + parse a directory's `modules` (from [`read_dir_modules`]) and its dependency packages
+/// once, for per-entry linking via [`ParsedDir::link_entry`]. Mirrors [`link_with_deps`]'s
+/// assembly: one program-wide lex (text-tier union spans every file, dependencies included),
+/// entry/sibling sources under the root package's edition, each dependency's under its own.
+pub fn parse_dir(
+    modules: Vec<RawModule>,
+    root_edition: noeta_lexer::Edition,
+    deps: &[DepPackage],
+) -> ParsedDir {
+    let mut sources: Vec<Source> = Vec::with_capacity(modules.len());
+    let mut editions = noeta_lexer::EditionMap::new();
+    let mut next_id: u32 = 0;
+    for raw in &modules {
+        sources.push(Source::new(
+            SourceId(next_id),
+            raw.name.as_str(),
+            raw.text.as_str(),
+        ));
+        editions.set(SourceId(next_id), root_edition);
+        next_id += 1;
+    }
+    for dep in deps {
+        for raw in &dep.modules {
+            sources.push(Source::new(
+                SourceId(next_id),
+                raw.name.as_str(),
+                raw.text.as_str(),
+            ));
+            editions.set(SourceId(next_id), dep.edition);
+            next_id += 1;
+        }
+    }
+    let (lexeds, text_tiers) = lex_program(&sources, &editions);
+
+    // Parse every directory module once, keeping its chained lex + parse diagnostics — the
+    // entry role parses even after lex errors (as `link_with_deps` does for its entry), and
+    // the sibling role's "cleanly parsed" test is exactly `diagnostics.is_empty()`.
+    let parsed_modules: Vec<ModuleParse> = sources[..modules.len()]
+        .iter()
+        .zip(&lexeds)
+        .map(|(source, lexed)| {
+            let parsed = noeta_parser::parse_in(source, &lexed.tokens, root_edition, &text_tiers);
+            let diagnostics: Vec<Diagnostic> = lexed
+                .diagnostics
+                .iter()
+                .chain(parsed.diagnostics.iter())
+                .cloned()
+                // Lex/parse diagnostics are single-file by construction, but a few lexer/parser
+                // spans are built with the default entry id (`Span::new` → `SourceId::FIRST`) —
+                // harmless in the per-entry loader, where the file being lexed IS id 0 (and its
+                // reporting wraps a one-element `SourceMap` that resolves *every* id to the
+                // entry), but a misattribution under this batch's directory-stable ids.
+                // Normalize every span to the module's own id: exactly the file the per-entry
+                // path rendered them against.
+                .map(|mut diagnostic| {
+                    diagnostic.span.source = source.id();
+                    for label in &mut diagnostic.labels {
+                        label.span.source = source.id();
+                    }
+                    diagnostic
+                })
+                .collect();
+            ModuleParse {
+                program: parsed.program,
+                diagnostics,
+            }
+        })
+        .collect();
+
+    let dep_programs = parse_dep_programs(&sources, &lexeds, modules.len(), deps, &text_tiers);
+    let native_roots = native_dep_roots(deps);
+    ParsedDir {
+        sources,
+        editions,
+        modules: parsed_modules,
+        dep_programs,
+        native_roots,
+    }
+}
+
+impl ParsedDir {
+    /// The index of the directory module whose display name is `name`, for [`Self::link_entry`].
+    /// `None` when the directory scan didn't yield it (an unreadable file, or a path spelled
+    /// differently than the scan spells it — the caller falls back to a lone-file load).
+    pub fn module_index(&self, name: &str) -> Option<usize> {
+        (0..self.modules.len()).find(|&i| self.sources[i].name() == name)
+    }
+
+    /// Every source (directory modules + dependency modules) under the shared id numbering —
+    /// one map renders every entry's diagnostics.
+    pub fn source_map(&self) -> SourceMap {
+        SourceMap::new(self.sources.clone())
+    }
+
+    /// Which edition governs each source, keyed by the shared `SourceId` numbering.
+    pub fn editions(&self) -> &noeta_lexer::EditionMap {
+        &self.editions
+    }
+
+    /// Link the directory module at `index` as the entry, against every *other* cleanly-parsed
+    /// module (the sibling pool) and the dependency programs — [`load_with_deps`]'s per-entry
+    /// semantics over the shared parse. An entry with lex/parse diagnostics returns them, as the
+    /// per-entry load did; their spans resolve against [`Self::source_map`].
+    pub fn link_entry(&self, index: usize) -> Result<Program, Vec<LoadDiagnostic>> {
+        let entry = &self.modules[index];
+        let entry_source = &self.sources[index];
+        if !entry.diagnostics.is_empty() {
+            return Err(entry
+                .diagnostics
+                .iter()
+                .map(|diagnostic| LoadDiagnostic {
+                    source: entry_source.clone(),
+                    diagnostic: diagnostic.clone(),
+                })
+                .collect());
+        }
+        let siblings: Vec<&Program> = self
+            .modules
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| *i != index && m.diagnostics.is_empty())
+            .map(|(_, m)| &m.program)
+            .collect();
+        let dep_refs: Vec<&Program> = self.dep_programs.iter().collect();
+        link_parsed_with_deps(
+            entry_source,
+            &entry.program,
+            &siblings,
+            &dep_refs,
+            Some(&self.native_roots),
+        )
+    }
 }
 
 /// Lex every module of a program as one unit (text-tiers arc): each file lexes with the default
@@ -488,7 +675,11 @@ fn lex_program(
     let lexeds: Vec<_> = sources
         .iter()
         .map(|source| {
-            noeta_lexer::lex_in(source, edition_of(source), &noeta_lexer::TextTiers::default())
+            noeta_lexer::lex_in(
+                source,
+                edition_of(source),
+                &noeta_lexer::TextTiers::default(),
+            )
         })
         .collect();
     // Verbatim-body tiers come from two sources: a program's own `@tier(…, text/expr)` (found by

@@ -33,9 +33,11 @@ pub(crate) struct CheckReport {
 /// `PATH` (default `.`) is a file or a directory; a directory is walked recursively and **every**
 /// `.noe` file is checked as its own entry. The loader links only an entry's *directory-sibling*
 /// modules (there is no cross-directory module graph), so checking each file as an entry is what
-/// guarantees a library module no single entry imports is still parsed and type-checked. A module
-/// shared by several entries is therefore linked (and its diagnostics produced) once per importer;
-/// diagnostics are deduplicated globally by their source file + span + code so each is reported once.
+/// guarantees a library module no single entry imports is still parsed and type-checked. Each
+/// directory's sources are read, lexed, and parsed **once** (and its dependency graph resolved
+/// once) — every entry links against that shared pool (audit-4 F4); a module shared by several
+/// entries still produces its diagnostics once per importer's link, deduplicated globally by
+/// source file + span + code so each is reported once.
 ///
 /// With `--format json` the whole result is emitted as one machine-readable object on stdout (for
 /// CI, editors, and the MCP server) instead of human-rendered diagnostics on stderr; the exit code
@@ -112,57 +114,108 @@ pub(crate) fn cmd_check(
             .or_insert_with(|| (std::rc::Rc::clone(sources), diag.clone()));
     };
 
-    let mut unreadable = false;
+    // Group the entries by directory (audit-4 F4): an entry's workspace is exactly its
+    // directory's `.noe` files, so every entry in one directory shares the same sources, the
+    // same manifest (hence dependency graph and edition), and the same parsed sibling pool.
+    // Loading each entry independently re-lexed/re-parsed the whole directory and re-resolved
+    // the dependency graph once **per entry** (N entries → N× the work); here each directory is
+    // read, resolved, lexed, and parsed once, and each entry links against the shared pool
+    // (`noeta_loader::parse_dir`/`link_entry` — per-entry semantics identical to
+    // `load_with_deps`). Diagnostics still dedup/order by (file, span, code), so output is
+    // unchanged.
+    let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<&PathBuf>> =
+        std::collections::BTreeMap::new();
     for entry in &entries {
-        // Resolve the entry's dependency packages so a cross-package `use <dep-key>.…` type-checks
-        // accurately under `noeta check`, matching `run` (package-manager P2.1c). A resolution
-        // failure is reported like an unreadable file — it doesn't abort the whole check.
-        let deps = match graph::resolve_graph(entry) {
+        // An empty parent (a bare relative name like `noeta check foo.noe`) reads as no
+        // directory, matching the sibling scan's behavior (the entry then links alone).
+        let dir = entry
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .to_path_buf();
+        by_dir.entry(dir).or_default().push(entry);
+    }
+
+    let mut unreadable = false;
+    for (dir, dir_entries) in &by_dir {
+        // Resolve the directory's dependency packages so a cross-package `use <dep-key>.…`
+        // type-checks accurately under `noeta check`, matching `run` (package-manager P2.1c).
+        // One resolve serves every entry in the directory (they share the manifest); a failure
+        // is still reported per entry — like an unreadable file, it doesn't abort the check.
+        let deps = match graph::resolve_graph(dir_entries[0]) {
             Ok(graph) => graph.packages,
             Err(err) => {
-                eprintln!("noeta: {}: {err}", entry.display());
+                for entry in dir_entries {
+                    eprintln!("noeta: {}: {err}", entry.display());
+                }
                 unreadable = true;
                 continue;
             }
         };
-        match noeta_loader::load_with_deps(entry, manifest::root_edition(entry), &deps) {
-            Err(err) => {
-                // One unreadable file does not abort the whole run — record it and keep checking the
-                // rest, so `check` reports as much as it can in a single pass.
-                eprintln!("noeta: cannot read {}: {err}", entry.display());
-                unreadable = true;
-            }
-            Ok(Err(load_diagnostics)) => {
-                // Lex/parse errors — each carries the single source it renders against. Wrap it in a
-                // one-element `SourceMap` (any `SourceId` resolves back to that source), matching how
-                // `cmd_run` renders load diagnostics single-source.
-                for ld in &load_diagnostics {
-                    let sources = std::rc::Rc::new(SourceMap::new(vec![ld.source.clone()]));
-                    fold(&sources, &ld.diagnostic);
+        // Read + lex + parse the directory once; all entries share the parsed pool and one
+        // SourceMap (ids are directory-stable, and the dedup key never uses them).
+        let parsed = noeta_loader::parse_dir(
+            noeta_loader::read_dir_modules(dir),
+            manifest::root_edition(dir_entries[0]),
+            &deps,
+        );
+        let sources = std::rc::Rc::new(parsed.source_map());
+        // Check one entry of a parsed directory: link it against the shared pool, then
+        // activate the resolved dev-tiers before checking, as `run`/`build`/`dump` do (with no
+        // active tiers the program is checked as-is). Checking rides `check_under` with the
+        // directory's edition map, so the per-source editions travel structurally (audit-3 F8).
+        // Entry lex/parse errors' spans live in the entry, and the shared map renders them
+        // against it — the same (file, span, code) dedup key as the per-entry load produced.
+        let mut check_entry = |parsed: &noeta_loader::ParsedDir,
+                               sources: &std::rc::Rc<SourceMap>,
+                               index: usize| {
+            match parsed.link_entry(index) {
+                Err(load_diagnostics) => {
+                    for ld in &load_diagnostics {
+                        fold(sources, &ld.diagnostic);
+                    }
+                }
+                Ok(program) => {
+                    let program_diags = if active_refs.is_empty() {
+                        crate::context::check_under(&program, parsed.editions()).diagnostics
+                    } else {
+                        let activated =
+                            noeta_check::activate_tiers_with(&program, &active_refs, &providers);
+                        let mut ds = activated.diagnostics;
+                        ds.extend(
+                            crate::context::check_under(&activated.program, parsed.editions())
+                                .diagnostics,
+                        );
+                        ds
+                    };
+                    for d in &program_diags {
+                        fold(sources, d);
+                    }
                 }
             }
-            Ok(Ok(linked)) => {
-                // Activate the resolved dev-tiers before checking, as `run`/`build`/`dump` do; with no
-                // active tiers the program is checked as-is. Tier-activation diagnostics resolve
-                // against the same workspace sources. Checking rides `Loaded::check`/`check_under`
-                // so the per-source editions travel structurally (audit-3 F8).
-                let loaded = crate::context::loaded(linked);
-                let program_diags = if active_refs.is_empty() {
-                    loaded.check().diagnostics
-                } else {
-                    let activated =
-                        noeta_check::activate_tiers_with(&loaded.program, &active_refs, &providers);
-                    let mut ds = activated.diagnostics;
-                    ds.extend(
-                        crate::context::check_under(&activated.program, &loaded.editions)
-                            .diagnostics,
-                    );
-                    ds
-                };
-                let sources = std::rc::Rc::new(loaded.sources);
-                for d in &program_diags {
-                    fold(&sources, d);
-                }
+        };
+        for entry in dir_entries {
+            let name = entry.display().to_string();
+            match parsed.module_index(&name) {
+                Some(index) => check_entry(&parsed, &sources, index),
+                // An entry the directory scan didn't yield: either the file itself is
+                // unreadable (report it — one unreadable file does not abort the whole run) or
+                // the scan can't see it (an unreadable/empty parent, e.g. a bare `foo.noe`);
+                // then the entry links alone, exactly as the per-entry sibling scan degraded.
+                None => match std::fs::read_to_string(entry) {
+                    Err(err) => {
+                        eprintln!("noeta: cannot read {}: {err}", entry.display());
+                        unreadable = true;
+                    }
+                    Ok(text) => {
+                        let lone = noeta_loader::parse_dir(
+                            vec![noeta_loader::RawModule { name, text }],
+                            manifest::root_edition(entry),
+                            &deps,
+                        );
+                        let lone_sources = std::rc::Rc::new(lone.source_map());
+                        check_entry(&lone, &lone_sources, 0);
+                    }
+                },
             }
         }
     }
