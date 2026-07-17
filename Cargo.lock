@@ -4330,6 +4330,7 @@ dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
  "noeta-lexer",
+ "noeta-native",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
