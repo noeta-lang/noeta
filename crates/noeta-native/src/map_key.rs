@@ -226,9 +226,10 @@ impl Eq for MapKey {}
 
 /// The total key order every order-observing accessor uses (display, `keys()`, iteration,
 /// destructor walks): ints numerically; strings by content; extern keys by
-/// `(type_name, cmp_value)`; packed keys by `(type_name, fields)` — field-wise semantic order in
-/// declaration order. Cross-kind `Int < Str < Extern < Packed` (arbitrary but fixed; a typed map
-/// never mixes kinds, so this only steadies `dyn` paths).
+/// `(type_identity, cmp_value)` — the qualified identity, so two key types sharing a short name
+/// stay grouped by their own type; packed keys by `(type_name, fields)` — field-wise semantic
+/// order in declaration order. Cross-kind `Int < Str < Extern < Packed` (arbitrary but fixed; a
+/// typed map never mixes kinds, so this only steadies `dyn` paths).
 impl Ord for MapKey {
     fn cmp(&self, other: &MapKey) -> Ordering {
         // Cross-kind rank: Int(0) < Str(1) < Extern(2) < Packed(3).
@@ -244,8 +245,8 @@ impl Ord for MapKey {
             (MapKey::Int(a), MapKey::Int(b)) => a.cmp(b),
             (MapKey::Str(a), MapKey::Str(b)) => a.cmp(b),
             (MapKey::Extern(a), MapKey::Extern(b)) => a
-                .type_name()
-                .cmp(b.type_name())
+                .type_identity()
+                .cmp(b.type_identity())
                 .then_with(|| a.cmp_value(&**b).unwrap_or(Ordering::Equal)),
             (
                 MapKey::Packed {

@@ -31,6 +31,12 @@ pub const GCOUNTER_TYPE_NAME: &str = "GCounter";
 pub const PNCOUNTER_TYPE_NAME: &str = "PnCounter";
 pub const GSET_TYPE_NAME: &str = "GSet";
 
+/// The CRDT types' qualified runtime identities — what
+/// [`noeta_native::ExternValue::type_identity`] returns; registered under `para.crdt`.
+pub const GCOUNTER_TYPE_IDENTITY: &str = "para.crdt.GCounter";
+pub const PNCOUNTER_TYPE_IDENTITY: &str = "para.crdt.PnCounter";
+pub const GSET_TYPE_IDENTITY: &str = "para.crdt.GSet";
+
 /// The built-in traits every CRDT extern type declares (p2p P2): `Mergeable` — the convergence
 /// capability that makes a value safe to sync, which the checker enforces as a `T: Mergeable` bound
 /// on `synced_signal`. This is the extern-type analogue of a user type's `@derive`, seeded into the
@@ -138,8 +144,8 @@ fn gcounter_method_dispatch(
 }
 
 impl ExternValue for GCounter {
-    fn type_name(&self) -> &'static str {
-        GCOUNTER_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        GCOUNTER_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<GCounter>() == Some(self)
@@ -226,8 +232,8 @@ fn pncounter_method_dispatch(
 }
 
 impl ExternValue for PnCounter {
-    fn type_name(&self) -> &'static str {
-        PNCOUNTER_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        PNCOUNTER_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<PnCounter>() == Some(self)
@@ -324,8 +330,8 @@ fn gset_method_dispatch(
 }
 
 impl ExternValue for GSet {
-    fn type_name(&self) -> &'static str {
-        GSET_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        GSET_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<GSet>() == Some(self)

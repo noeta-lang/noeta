@@ -215,8 +215,8 @@ struct Acc {
 }
 
 impl ExternValue for Acc {
-    fn type_name(&self) -> &'static str {
-        "Acc"
+    fn type_identity(&self) -> &'static str {
+        "imgfx.fx.Acc"
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other

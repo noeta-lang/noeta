@@ -12,6 +12,10 @@ use std::cmp::Ordering;
 /// methods (`status`/`ok`/`stdout`/`stderr`).
 pub const EXEC_RESULT_TYPE_NAME: &str = "ExecResult";
 
+/// `ExecResult`'s qualified runtime identity (`{namespace}.{name}` of its `ExtType` registration
+/// in `noeta-stdlib`) — what [`ExternValue::type_identity`] returns.
+pub const EXEC_RESULT_TYPE_IDENTITY: &str = "std.os.ExecResult";
+
 /// A finished subprocess crossing the [`crate::host::Os`] seam: exit status plus captured
 /// output. Plain `Send` data (like [`crate::NetResponse`]): the `os` dispatch requests it,
 /// whichever host runs it produces it.
@@ -30,8 +34,8 @@ pub struct ExecResult {
 /// [`crate::NetResponse`] model: accessor methods dispatch through the registry, equality is by
 /// content, and it has no order.
 impl ExternValue for ExecResult {
-    fn type_name(&self) -> &'static str {
-        EXEC_RESULT_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        EXEC_RESULT_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<ExecResult>() == Some(self)
@@ -84,6 +88,9 @@ impl crate::ExternIo for ExecIo {
 /// the [`crate::host::Os`] seam by id.
 pub const PROCESS_TYPE_NAME: &str = "Process";
 
+/// `Process`'s qualified runtime identity — the [`EXEC_RESULT_TYPE_IDENTITY`] twin.
+pub const PROCESS_TYPE_IDENTITY: &str = "std.os.Process";
+
 /// A handle to a spawned child process — a thin `{ id }` into the host's process registry, the
 /// listener/reader-id model (NOT [`crate::FileHandle`]'s self-contained state, because a real OS
 /// child can only be manipulated through the host). A **reference** value like `FileHandle`: its
@@ -96,8 +103,8 @@ pub struct Process {
 }
 
 impl ExternValue for Process {
-    fn type_name(&self) -> &'static str {
-        PROCESS_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        PROCESS_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<Process>() == Some(self)

@@ -25,9 +25,26 @@ use std::fmt;
 /// the real executor's runtime (the async `ExternIo` seam); `'static` (implied by `Any`) because
 /// values live on the heap beyond any borrow.
 pub trait ExternValue: fmt::Debug + Send {
-    /// The registered type name — must equal the [`crate::registry::ExtType::name`] this value
-    /// belongs to. Drives `type_of`, `is`/`.as<T>()` narrowing, and method-table lookup.
-    fn type_name(&self) -> &'static str;
+    /// The value's **qualified type identity** — `"{namespace}.{name}"`, exactly
+    /// [`crate::registry::ExtType::qualified`] of the `ExtType` this value belongs to
+    /// (`"std.id.Uuid"`). Drives `type_of`, `is`/`.as<T>()` narrowing, and method-table lookup;
+    /// the runtime compares it by pointer/content, so return one pre-joined `&'static` literal —
+    /// never a formatted string. Two extensions may register the same *short* name under distinct
+    /// namespaces; this identity is what keeps their values distinct at runtime. Human-facing
+    /// surfaces (diagnostics, `Value::type_name`) display its short form via
+    /// `noeta_ast::short_type_name`.
+    fn type_identity(&self) -> &'static str;
+
+    /// The human-facing **short name** of this value's type — the segment after the final `.`
+    /// of [`ExternValue::type_identity`] (`"std.id.Uuid"` → `"Uuid"`). The same display rule as
+    /// `noeta_ast::short_type_name` (restated here because the dep-free ABI crate sits below the
+    /// AST): diagnostics and `type_of` stringification show this; identity comparisons never do.
+    fn type_display_name(&self) -> &'static str {
+        let identity = self.type_identity();
+        identity
+            .rsplit_once('.')
+            .map_or(identity, |(_, short)| short)
+    }
 
     /// Value equality. Called with an arbitrary extern value: downcast via [`Self::as_any`] and
     /// return `false` on a kind mismatch. Content vs identity semantics are the implementation's
@@ -113,8 +130,8 @@ mod tests {
     struct Token(u32);
 
     impl ExternValue for Token {
-        fn type_name(&self) -> &'static str {
-            "Token"
+        fn type_identity(&self) -> &'static str {
+            "test.tokens.Token"
         }
         fn eq_value(&self, other: &dyn ExternValue) -> bool {
             other.as_any().downcast_ref::<Token>() == Some(self)
@@ -147,8 +164,8 @@ mod tests {
     struct Other;
 
     impl ExternValue for Other {
-        fn type_name(&self) -> &'static str {
-            "Other"
+        fn type_identity(&self) -> &'static str {
+            "test.tokens.Other"
         }
         fn eq_value(&self, other: &dyn ExternValue) -> bool {
             other.as_any().downcast_ref::<Other>().is_some()
@@ -183,7 +200,7 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, ExternBox::new(Token(8)));
         assert_eq!(a.display_string(), "token#7");
-        assert_eq!(a.type_name(), "Token");
+        assert_eq!(a.type_identity(), "test.tokens.Token");
     }
 
     #[test]

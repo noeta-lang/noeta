@@ -2749,17 +2749,19 @@ impl Interpreter {
         // A type's **higher-order** methods (higher-order-abi H4) route through the ctx seam —
         // they call closures back and reach the retained arena, which the plain by-value
         // dispatch below cannot. Name sets are disjoint, so routing is per-method.
-        let type_name = cell.borrow().type_name();
+        let identity = cell.borrow().type_identity();
         // Bound once (IR3): `&'static`, so it survives the `&mut self` host borrow below.
         let reg = self.reg();
-        if reg.find_type_ctx_method(type_name, name).is_some() {
+        if reg.find_type_ctx_method(identity, name).is_some() {
             let recv = Value::Extern(Rc::clone(cell));
-            return self.call_ctx_type_method(type_name, recv, name, args, span);
+            return self.call_ctx_type_method(identity, recv, name, args, span);
         }
         // A type declaring `deep_marshal` (the metrics instruments' `*_with(_, attrs)`) projects a
         // container argument to a full `NativeValue` tree; every other type uses the shallow
         // projection — mirrors the VM's `call_extern_method`.
-        let deep = reg.find_type(type_name).is_some_and(|t| t.deep_marshal);
+        let deep = reg
+            .find_type_qualified(identity)
+            .is_some_and(|t| t.deep_marshal);
         let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
             args.iter().map(value_to_native_deep).collect()
         } else {
@@ -4367,9 +4369,9 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Class(o.def.name().to_string(), Vec::new())),
-        // An extern-type value reflects as its registered nominal type (`Uuid`), mirroring the
-        // checker's `Type::Named` for it.
-        Value::Extern(e) => TypeRepr::Named(e.borrow().type_name().to_string(), Vec::new()),
+        // An extern-type value reflects as its registered nominal type under its qualified
+        // identity (`std.id.Uuid`), mirroring the checker's `Type::Named` for it.
+        Value::Extern(e) => TypeRepr::Named(e.borrow().type_identity().to_string(), Vec::new()),
         // A type value, module, iterator, or enum-type has no nameable lattice type → top.
         Value::EnumType(_)
         | Value::Type(_)
@@ -4526,10 +4528,10 @@ fn attr_value_to_eval(
 /// erased, so only the **head constructor** is tested — `List<int>` checks "is a list", trusting
 /// the element type from the annotation. Keyed on the same canonical kind names the VM uses
 /// (`Value::type_name` and the enum/object shape name), so both backends decide identically.
-fn runtime_matches(reg: &noeta_stdlib::registry::Registry, value: &Value, ty: &TypeRef) -> bool {
+fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
     match ty {
         // A union target matches if the value matches any member (`x.as<int | string>()`).
-        TypeRef::Union { members, .. } => members.iter().any(|m| runtime_matches(reg, value, m)),
+        TypeRef::Union { members, .. } => members.iter().any(|m| runtime_matches(value, m)),
         // `?T` is `Option<T>`: matches any `Option` value (its payload is not re-checked).
         TypeRef::Optional { .. } => {
             matches!(value, Value::Enum(e) if e.enum_name == "Option")
@@ -4570,15 +4572,12 @@ fn runtime_matches(reg: &noeta_stdlib::registry::Registry, value: &Value, ty: &T
                 other => match value {
                     Value::Object(object) => object.def.name() == other,
                     Value::Enum(enum_value) => enum_value.enum_name == other,
-                    // An extern value matches by its qualified identity (`std.id.Uuid`) — the target
-                    // an imported native type lowers to — so it never matches a same-short-named
-                    // user type (mirrors the VM's `narrow_matches`).
-                    Value::Extern(e) => {
-                        reg.find_type(e.borrow().type_name())
-                            .map(|t| t.qualified())
-                            .as_deref()
-                            == Some(other)
-                    }
+                    // An extern value matches by its qualified identity (`std.id.Uuid`) — the
+                    // target an imported native type lowers to, compared directly against the
+                    // identity the value itself carries — so it never matches a same-short-named
+                    // user type nor another namespace's same-short-named extern type (mirrors
+                    // the VM's `narrow_matches`).
+                    Value::Extern(e) => e.borrow().type_identity() == other,
                     _ => false,
                 },
             };
@@ -5123,11 +5122,7 @@ fn try_branch(value: &Value) -> Option<TryBranch> {
 
 /// Try to match `pattern` against `value`. Returns the bindings it introduces on
 /// success, or `None` if the pattern does not match.
-fn match_pattern(
-    reg: &noeta_stdlib::registry::Registry,
-    pattern: &Pattern,
-    value: &Value,
-) -> Option<Vec<(String, Value)>> {
+fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
     match pattern {
         Pattern::Wildcard { .. } => Some(Vec::new()),
         Pattern::Binding { name, .. } => Some(vec![(name.clone(), value.clone())]),
@@ -5168,13 +5163,13 @@ fn match_pattern(
             }
             let mut all = Vec::new();
             for (sub, data) in bindings.iter().zip(&enum_value.data) {
-                all.extend(match_pattern(reg, sub, data)?);
+                all.extend(match_pattern(sub, data)?);
             }
             Some(all)
         }
         // `is T` matches on the head constructor (same erased test as `x.as<T>()`), binding
         // nothing — the narrowed value is referred to by the scrutinee's own name.
-        Pattern::IsType { ty, .. } => runtime_matches(reg, value, ty).then(Vec::new),
+        Pattern::IsType { ty, .. } => runtime_matches(value, ty).then(Vec::new),
         // A tuple pattern `(p, q, …)` matches a tuple of the same arity, destructuring each position
         // against its sub-pattern (object-model slice 4b); refutable on kind, arity, and elements.
         Pattern::Tuple { elements, .. } => {
@@ -5186,7 +5181,7 @@ fn match_pattern(
             }
             let mut all = Vec::new();
             for (sub, item) in elements.iter().zip(items.iter()) {
-                all.extend(match_pattern(reg, sub, item)?);
+                all.extend(match_pattern(sub, item)?);
             }
             Some(all)
         }

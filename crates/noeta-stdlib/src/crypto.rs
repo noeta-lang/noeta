@@ -100,6 +100,9 @@ pub fn bcrypt_verify(password: &str, hash: &str) -> Result<bool, StdError> {
 /// The registered extern-type name of the incremental hasher.
 pub const HASHER_TYPE_NAME: &str = "Hasher";
 
+/// `Hasher`'s qualified runtime identity — the [`crate::id::TYPE_IDENTITY`] twin.
+pub const HASHER_TYPE_IDENTITY: &str = "std.crypto.Hasher";
+
 /// An incremental digest (crypto arc C3) — ONE extern type over an algorithm enum, so adding an
 /// algorithm never adds a type. The third extern-seam client, and the first in the
 /// **mutable + host-free** corner of the {pure, mutable} × {host-free, effectful} matrix:
@@ -146,8 +149,8 @@ impl std::fmt::Debug for Hasher {
 }
 
 impl crate::ExternValue for Hasher {
-    fn type_name(&self) -> &'static str {
-        HASHER_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        HASHER_TYPE_IDENTITY
     }
 
     /// Equal iff same algorithm and same absorbed content — observable as "the current digests

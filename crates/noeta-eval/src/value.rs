@@ -761,8 +761,9 @@ impl Value {
             Value::Type(_) => "type",
             Value::Object(_) => "object",
             Value::NativeModule(_) => "module",
-            // The registered extern type's own name (`Uuid`), from the value contract.
-            Value::Extern(e) => e.borrow().type_name(),
+            // The extern type's human-facing short name (`Uuid`) — the display form of the
+            // value's qualified identity (`std.id.Uuid`); identity paths read `type_identity()`.
+            Value::Extern(e) => e.borrow().type_display_name(),
             Value::Iter(_) => "iterator",
             Value::Future(_)
             | Value::Timer(_)

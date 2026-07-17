@@ -46,6 +46,9 @@ use noeta_native::{
 /// The reserved surface type name for a span handle. A user declaration of this name is E0049.
 pub const SPAN_TYPE_NAME: &str = "Span";
 
+/// `Span`'s qualified runtime identity — what [`crate::ExternValue::type_identity`] returns.
+pub const SPAN_TYPE_IDENTITY: &str = "std.tracing.Span";
+
 /// `with_span`'s body return type variable — `with_span(name, Fn() -> A) -> A`.
 const VAR_A: SigType = SigType::Var(0);
 
@@ -119,8 +122,8 @@ pub struct Span {
 }
 
 impl ExternValue for Span {
-    fn type_name(&self) -> &'static str {
-        SPAN_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        SPAN_TYPE_IDENTITY
     }
 
     fn eq_value(&self, other: &dyn ExternValue) -> bool {

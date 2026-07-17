@@ -488,7 +488,7 @@ pub type ArenaGetter = (&'static str, fn(&dyn crate::ExternValue) -> crate::Reta
 /// constructor's return names the instantiation ([`SigType::Generic`]) and its method signatures
 /// reference the receiver's type arguments as [`SigType::Var`] (`Var(0)` = first argument) — the
 /// checker seeds the variables from the receiver's static type. At runtime the value is tagged
-/// with the bare nominal name only.
+/// with the nominal identity only (its qualified name, no type arguments).
 #[derive(Debug, Clone, Copy)]
 pub struct ExtType {
     /// The **short display name** (`Uuid`) — what humans see in errors / `type_of` stringification.
@@ -1273,7 +1273,12 @@ impl Registry {
         self.ext_attributes().find(|a| a.name == name)
     }
 
-    /// Find a registered extern type by its short display name (extern-types X1).
+    /// Find a registered extern type by its short display name (extern-types X1) — first match in
+    /// registration order. This is the *checker-side* bridge from a signature's bare
+    /// [`SigType::Named`] name and the E0049 reservation set; **runtime identity paths must use**
+    /// [`Registry::find_type_qualified`] with the value's
+    /// [`crate::ExternValue::type_identity`], which stays unambiguous when two namespaces share a
+    /// short name.
     pub fn find_type(&self, name: &str) -> Option<&'static ExtType> {
         self.units
             .iter()
@@ -1341,7 +1346,9 @@ impl Registry {
         }
     }
 
-    /// Dispatch a method on an extern receiver through its registered [`ExtType`].
+    /// Dispatch a method on an extern receiver through its registered [`ExtType`], resolved by
+    /// the value's **qualified identity** ([`crate::ExternValue::type_identity`]) — so two types
+    /// sharing a short name under distinct namespaces dispatch to their own tables.
     pub fn dispatch_method(
         &self,
         recv: &mut dyn crate::ExternValue,
@@ -1349,17 +1356,17 @@ impl Registry {
         host: &mut dyn Host,
         args: &[crate::NativeValue],
     ) -> Result<crate::NativeOut, StdError> {
-        let type_name = recv.type_name();
-        let Some(ext) = self.resolve_type(type_name) else {
+        let identity = recv.type_identity();
+        let Some(ext) = self.find_type_qualified(identity) else {
             return Err(StdError {
                 kind: crate::ErrorKind::UnknownName,
-                message: format!("`{type_name}` is not a registered type"),
+                message: format!("`{identity}` is not a registered type"),
             });
         };
         let result = (ext.dispatch)(recv, method, host, args);
         #[cfg(debug_assertions)]
         if let Ok(out) = &result {
-            self.debug_verify_out(type_name, method, out);
+            self.debug_verify_out(identity, method, out);
         }
         result
     }
@@ -1393,8 +1400,9 @@ impl Registry {
     // per-value walks over already-cold IO/orchestration paths in dev builds only.
 
     /// Walk a dispatch result for extern values and verify each against its registration —
-    /// `type_name()` must resolve (a typo'd name otherwise errors at *first method call*, per
-    /// value), and a `key_capable` type gets a one-shot equality/order/hash spot check.
+    /// `type_identity()` must resolve as a qualified identity (a typo'd or short name otherwise
+    /// errors at *first method call*, per value), and a `key_capable` type gets a one-shot
+    /// equality/order/hash spot check.
     #[cfg(debug_assertions)]
     fn debug_verify_out(&self, owner: &str, func: &str, out: &crate::NativeOut) {
         use crate::NativeOut as O;
@@ -1430,12 +1438,13 @@ impl Registry {
     /// The per-extern half of [`Registry::debug_verify_out`].
     #[cfg(debug_assertions)]
     fn debug_verify_extern(&self, owner: &str, func: &str, value: &dyn crate::ExternValue) {
-        let name = value.type_name();
-        let Some(ext) = self.resolve_type(name) else {
+        let name = value.type_identity();
+        let Some(ext) = self.find_type_qualified(name) else {
             panic!(
                 "extension author contract violated: `{owner}.{func}` returned an extern value \
-                 whose type_name() is `{name}`, which is not a registered type in this registry — \
-                 ExternValue::type_name must equal the ExtType::name the value belongs to"
+                 whose type_identity() is `{name}`, which is not a registered qualified type \
+                 identity in this registry — ExternValue::type_identity must equal the \
+                 `{{namespace}}.{{name}}` of the ExtType the value belongs to"
             );
         };
         if !ext.key_capable {
@@ -1912,12 +1921,12 @@ pub fn dispatch_method(
     host: &mut dyn Host,
     args: &[crate::NativeValue],
 ) -> Result<crate::NativeOut, StdError> {
-    let type_name = recv.type_name();
+    let identity = recv.type_identity();
     match default_registry() {
         Some(r) => r.dispatch_method(recv, method, host, args),
         None => Err(StdError {
             kind: crate::ErrorKind::UnknownName,
-            message: format!("`{type_name}` is not a registered type"),
+            message: format!("`{identity}` is not a registered type"),
         }),
     }
 }
@@ -2450,8 +2459,8 @@ mod runtime_registry_tests {
 
     #[cfg(debug_assertions)]
     impl crate::ExternValue for BadKey {
-        fn type_name(&self) -> &'static str {
-            "BadKey"
+        fn type_identity(&self) -> &'static str {
+            "q.BadKey"
         }
         fn eq_value(&self, other: &dyn crate::ExternValue) -> bool {
             other.as_any().downcast_ref::<BadKey>().is_some()
@@ -2489,15 +2498,16 @@ mod runtime_registry_tests {
         static Q: TypedUnit = TypedUnit("q.core", "q", &[T_BADKEY]);
         let reg = Registry::new(vec![&Q]);
 
-        // A dispatch result whose extern type_name resolves nowhere: the typo'd-name contract
-        // (`ExternValue::type_name` must equal the `ExtType::name`) fails at the dispatch return
-        // with a message naming the origin, not at first method call per value.
-        /// The typo case: `type_name()` answers a name no ExtType registers.
+        // A dispatch result whose extern type_identity resolves nowhere: the typo'd-identity
+        // contract (`ExternValue::type_identity` must equal the ExtType's qualified identity)
+        // fails at the dispatch return with a message naming the origin, not at first method
+        // call per value.
+        /// The typo case: `type_identity()` answers an identity no ExtType registers.
         #[derive(Debug, Clone)]
         struct Typo;
         impl crate::ExternValue for Typo {
-            fn type_name(&self) -> &'static str {
-                "BadKye" // sic
+            fn type_identity(&self) -> &'static str {
+                "q.BadKye" // sic
             }
             fn eq_value(&self, other: &dyn crate::ExternValue) -> bool {
                 other.as_any().downcast_ref::<Typo>().is_some()
@@ -2531,7 +2541,7 @@ mod runtime_registry_tests {
         }));
         assert!(
             caught.is_err(),
-            "an unregistered type_name must panic in debug"
+            "an unregistered type_identity must panic in debug"
         );
 
         // A key_capable type whose cmp_value is not a total order fails the one-shot spot check —

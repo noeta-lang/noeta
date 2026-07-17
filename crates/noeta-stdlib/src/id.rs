@@ -26,6 +26,10 @@ use crate::extern_value::ExternValue;
 /// The registered extern-type name (`ExtType::name`, `type_of`, `x is Uuid`).
 pub const TYPE_NAME: &str = "Uuid";
 
+/// `Uuid`'s qualified runtime identity (`{namespace}.{name}` of the `ExtType` registration) —
+/// what [`crate::ExternValue::type_identity`] returns; pre-joined, never formatted at dispatch.
+pub const TYPE_IDENTITY: &str = "std.id.Uuid";
+
 /// The first-class `Uuid` value — a newtype around [`uuid::Uuid`] carrying the [`ExternValue`]
 /// contract. [`Deref`]s to the inner `uuid::Uuid` so its accessors (`to_string`, `as_bytes`,
 /// `get_version_num`, `get_timestamp`) are reached directly.
@@ -98,8 +102,8 @@ pub fn timestamp_ms(u: &Uuid) -> Option<u64> {
 /// The `Uuid` extern-value contract: ordered by bytes (v7 = time order), content-hashed,
 /// canonical lowercase hyphenated display. `key_capable` — no mutating methods.
 impl ExternValue for Uuid {
-    fn type_name(&self) -> &'static str {
-        TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        TYPE_IDENTITY
     }
 
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
@@ -213,6 +217,7 @@ mod tests {
         assert_eq!(a.hash_value(), b.hash_value());
         let dyn_a: &dyn ExternValue = &a;
         assert_eq!(dyn_a.display_string(), a.to_string());
-        assert_eq!(dyn_a.type_name(), "Uuid");
+        assert_eq!(dyn_a.type_identity(), "std.id.Uuid");
+        assert_eq!(dyn_a.type_display_name(), "Uuid");
     }
 }

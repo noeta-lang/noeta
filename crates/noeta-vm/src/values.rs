@@ -305,6 +305,13 @@ pub(crate) fn vm_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
     }
     let dyn_ = || Box::new(TypeRepr::Dyn);
     let shape_name = || v.shape().map(|s| s.name.clone()).unwrap_or_default();
+    // An extern-type value reflects as its registered nominal type under its qualified identity
+    // (`std.id.Uuid`), mirroring the checker's `Type::Named` for it and the tree-walker's
+    // `eval_type_repr` (which classified extern values this way first; the VM used to erase them
+    // to `dyn` — a latent divergence on the `type_of(dyn extern)` path).
+    if v.is_extern() {
+        return TypeRepr::Named(v.with_extern(|e| e.type_identity()).to_string(), Vec::new());
+    }
     match v.type_name() {
         "bool" => TypeRepr::Bool,
         "int" => TypeRepr::Int,
@@ -326,7 +333,7 @@ pub(crate) fn vm_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             "Result" => TypeRepr::Result(dyn_(), dyn_()),
             other => TypeRepr::Enum(other.to_string(), Vec::new()),
         },
-        // A module or file handle has no nameable lattice type: it reflects as the top.
+        // A module, iterator, or future has no nameable lattice type: it reflects as the top.
         _ => TypeRepr::Dyn,
     }
 }

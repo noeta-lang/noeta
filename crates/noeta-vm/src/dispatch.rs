@@ -1149,24 +1149,27 @@ impl<'m> Vm<'m> {
                         // shared by-value chain below.
                         if hk == Some(HeapKind::Extern) {
                             let ci = *cache as usize;
-                            let type_name = v.with_extern(|e| e.type_name());
+                            // The value's qualified identity (`std.id.Uuid`) — one interned
+                            // `&'static` literal per type, so the cache key stays a pointer
+                            // compare and the same string keys ctx dispatch and the read gates.
+                            let identity = v.with_extern(|e| e.type_identity());
                             let route = match extern_caches[ci] {
-                                Some((key, route)) if key == type_name.as_ptr() => route,
+                                Some((key, route)) if key == identity.as_ptr() => route,
                                 _ => {
                                     let route = crate::methods::resolve_extern_route(
                                         self.reg(),
-                                        type_name,
+                                        identity,
                                         method,
                                     );
-                                    extern_caches[ci] = Some((type_name.as_ptr(), route));
+                                    extern_caches[ci] = Some((identity.as_ptr(), route));
                                     route
                                 }
                             };
-                            let ctx_type = match route {
-                                crate::methods::ExternRoute::FastRead { type_name, project } => {
+                            let is_ctx = match route {
+                                crate::methods::ExternRoute::FastRead { project } => {
                                     if args.is_empty()
                                         && (self.persist.ext_closed_gates.is_empty()
-                                            || !self.persist.ext_closed_gates.contains(&type_name))
+                                            || !self.persist.ext_closed_gates.contains(&identity))
                                     {
                                         let retained = v.with_extern(|e| project(e));
                                         let value = self.persist.ext_arena[retained as usize]
@@ -1177,16 +1180,16 @@ impl<'m> Vm<'m> {
                                         continue;
                                     }
                                     // Gate closed (or a misuse the dispatch reports): full path.
-                                    Some(type_name)
+                                    true
                                 }
-                                crate::methods::ExternRoute::Ctx { type_name } => Some(type_name),
+                                crate::methods::ExternRoute::Ctx => true,
                                 // The shared by-value chain below owns this (incl. errors).
-                                crate::methods::ExternRoute::Plain => None,
+                                crate::methods::ExternRoute::Plain => false,
                             };
-                            if let Some(type_name) = ctx_type {
+                            if is_ctx {
                                 let arg_values = ArgBuf::collect(args, regs, fbase);
                                 let value = self.call_ctx_type_method(
-                                    type_name,
+                                    identity,
                                     v,
                                     method,
                                     arg_values.as_slice(),
@@ -2130,7 +2133,7 @@ impl<'m> Vm<'m> {
                         none_shape,
                     } => {
                         let v = regs[fbase + *src as usize];
-                        let result = if narrow_matches(self.reg(), v, target) {
+                        let result = if narrow_matches(v, target) {
                             retain(v);
                             let shape = self.persist.shapes[*some_shape as usize];
                             Value::enum_value(shape, vec![v])
@@ -2143,7 +2146,7 @@ impl<'m> Vm<'m> {
                     }
                     Op::IsType { dst, src, target } => {
                         let v = regs[fbase + *src as usize];
-                        let result = Value::bool(narrow_matches(self.reg(), v, target));
+                        let result = Value::bool(narrow_matches(v, target));
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }

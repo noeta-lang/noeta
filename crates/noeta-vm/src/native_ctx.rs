@@ -717,7 +717,7 @@ impl<'m> Vm<'m> {
             recv,
             args,
             span,
-            &format!("{type_name}.{method}"),
+            || format!("{type_name}.{method}"),
             // Compiled-in extensions dispatch through the monomorphized route (every ctx op
             // inlines); anything else falls back to the dyn table (H5 perf).
             |ctx, arg_slots| {
@@ -752,7 +752,7 @@ impl<'m> Vm<'m> {
             recv,
             args,
             span,
-            &format!("{module}::{bundle}.{method}"),
+            || format!("{module}::{bundle}.{method}"),
             |ctx, arg_slots| reg.dispatch_bundle_method(module, bundle, method, ctx, 0, arg_slots),
             || {
                 reg.find_bundle(module, bundle)
@@ -773,7 +773,7 @@ impl<'m> Vm<'m> {
         recv: Value,
         args: &[Value],
         span: Span,
-        label: &str,
+        label: impl FnOnce() -> String,
         dispatch: impl FnOnce(&mut VmCtx<'_, 'm>, &[Slot]) -> Result<CtxOut, CtxError>,
         ret: impl FnOnce() -> noeta_stdlib::RetTy,
     ) -> Result<Value, Abort> {
@@ -803,7 +803,7 @@ impl<'m> Vm<'m> {
                     Err(_) => Err(self.error(
                         DiagnosticCode::Panic,
                         span,
-                        format!("internal: `{label}` returned a freed slot"),
+                        format!("internal: `{}` returned a freed slot", label()),
                     )),
                 }
             }

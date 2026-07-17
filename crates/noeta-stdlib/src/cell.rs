@@ -20,6 +20,10 @@ use noeta_native::{
 
 pub const CELL_TYPE_NAME: &str = "Cell";
 
+/// `Cell`'s qualified runtime identity — what [`crate::ExternValue::type_identity`] returns and
+/// the compiled-in ctx fast route ([`crate::registry::static_dispatch_ctx_method`]) matches on.
+pub const CELL_TYPE_IDENTITY: &str = "std.cell.Cell";
+
 const VAR_A: SigType = SigType::Var(0);
 
 /// `cell.new(v: A) -> Cell<A>` — the module's one function.
@@ -70,8 +74,8 @@ pub struct CellBox {
 }
 
 impl ExternValue for CellBox {
-    fn type_name(&self) -> &'static str {
-        CELL_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        CELL_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<CellBox>() == Some(self)

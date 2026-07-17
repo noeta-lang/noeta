@@ -45,6 +45,10 @@ const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 /// The websocket session handle's type name (server-hmr L0).
 pub const SOCKET_TYPE_NAME: &str = "Socket";
 
+/// `Socket`'s qualified runtime identity — what [`noeta_native::ExternValue::type_identity`]
+/// returns; registered under `std.http` next to `Request`/`Response`.
+pub const SOCKET_TYPE_IDENTITY: &str = "std.http.Socket";
+
 const SOCKET_SIG: SigType = SigType::Named(SOCKET_TYPE_NAME);
 const OPT_STR: SigType = SigType::Option(&SigType::String);
 
@@ -208,8 +212,8 @@ pub struct WsUpgrade {
 }
 
 impl noeta_native::ExternValue for WsUpgrade {
-    fn type_name(&self) -> &'static str {
-        crate::net::RESPONSE_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        crate::net::RESPONSE_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn noeta_native::ExternValue) -> bool {
         other.as_any().downcast_ref::<WsUpgrade>() == Some(self)
@@ -242,8 +246,8 @@ pub struct Socket {
 }
 
 impl noeta_native::ExternValue for Socket {
-    fn type_name(&self) -> &'static str {
-        SOCKET_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        SOCKET_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn noeta_native::ExternValue) -> bool {
         other.as_any().downcast_ref::<Socket>() == Some(self)

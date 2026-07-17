@@ -48,6 +48,14 @@ pub const COMPUTED_TYPE_NAME: &str = "Computed";
 pub const EFFECT_TYPE_NAME: &str = "Effect";
 pub const VIEW_TYPE_NAME: &str = "View";
 
+/// The reactive types' qualified runtime identities — what
+/// [`crate::ExternValue::type_identity`] returns, what the compiled-in ctx fast route matches
+/// on, and the keys the read gates ([`NativeCtx::set_read_gate`]) open and close under.
+pub const SIGNAL_TYPE_IDENTITY: &str = "std.reactive.Signal";
+pub const COMPUTED_TYPE_IDENTITY: &str = "std.reactive.Computed";
+pub const EFFECT_TYPE_IDENTITY: &str = "std.reactive.Effect";
+pub const VIEW_TYPE_IDENTITY: &str = "std.reactive.View";
+
 const VAR_A: SigType = SigType::Var(0);
 
 pub const REACTIVE_CTX_FNS: &[ExtFn] = &[
@@ -198,10 +206,10 @@ pub(crate) fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) 
     let open =
         !ext.graph.is_flushing() && !ext.graph.tracking() && ext.graph.dirty_computed_count() == 0;
     if ext.gates_open.replace(open) != open {
-        ctx.set_read_gate(SIGNAL_TYPE_NAME, open);
+        ctx.set_read_gate(SIGNAL_TYPE_IDENTITY, open);
         // A signal read is compromised only by tracking, but one shared predicate keeps the gate
         // reasoning one sentence long; refine per-type only if a bench demands it.
-        ctx.set_read_gate(COMPUTED_TYPE_NAME, open);
+        ctx.set_read_gate(COMPUTED_TYPE_IDENTITY, open);
     }
 }
 
@@ -959,15 +967,15 @@ pub fn effect_ctx_method_dispatch<C: NativeCtx + ?Sized>(
 // ----- the extern boxes: plain ids, reference semantics (copies alias the node) -----
 
 macro_rules! reactive_box {
-    ($name:ident, $type_name:expr, $display:expr, { $($field:ident: $ty:ty),+ }) => {
+    ($name:ident, $identity:expr, $display:expr, { $($field:ident: $ty:ty),+ }) => {
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $name {
             $(pub $field: $ty,)+
         }
 
         impl ExternValue for $name {
-            fn type_name(&self) -> &'static str {
-                $type_name
+            fn type_identity(&self) -> &'static str {
+                $identity
             }
             fn eq_value(&self, other: &dyn ExternValue) -> bool {
                 other.as_any().downcast_ref::<$name>() == Some(self)
@@ -994,12 +1002,12 @@ macro_rules! reactive_box {
     };
 }
 
-reactive_box!(SignalBox, SIGNAL_TYPE_NAME, "<signal>", { node: NodeId, cell: Retained });
-reactive_box!(ComputedBox, COMPUTED_TYPE_NAME, "<computed>", {
+reactive_box!(SignalBox, SIGNAL_TYPE_IDENTITY, "<signal>", { node: NodeId, cell: Retained });
+reactive_box!(ComputedBox, COMPUTED_TYPE_IDENTITY, "<computed>", {
     node: NodeId, body: Retained, memo: Retained
 });
-reactive_box!(EffectBox, EFFECT_TYPE_NAME, "<effect>", { node: NodeId, body: Retained });
-reactive_box!(ViewBox, VIEW_TYPE_NAME, "<view>", { id: usize });
+reactive_box!(EffectBox, EFFECT_TYPE_IDENTITY, "<effect>", { node: NodeId, body: Retained });
+reactive_box!(ViewBox, VIEW_TYPE_IDENTITY, "<view>", { id: usize });
 
 fn signal_box(e: &dyn ExternValue) -> &SignalBox {
     e.as_any()

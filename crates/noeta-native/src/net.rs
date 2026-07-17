@@ -13,6 +13,11 @@ use std::cmp::Ordering;
 /// returns one, and it narrows (`is Response`), compares by value, and exposes accessor methods.
 pub const RESPONSE_TYPE_NAME: &str = "Response";
 
+/// `Response`'s qualified runtime identity (`{namespace}.{name}` of its `ExtType` registration in
+/// `noeta-stdlib`) — what [`ExternValue::type_identity`] returns and every runtime identity
+/// comparison keys on. Pre-joined so no dispatch path ever formats it.
+pub const RESPONSE_TYPE_IDENTITY: &str = "std.http.Response";
+
 /// An outbound HTTP request crossing the [`crate::host::Network`] seam. Plain `Send` data (like
 /// [`crate::ReadSource`]): the `http` dispatch builds it, whichever host runs it consumes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,8 +57,8 @@ impl NetResponse {
 /// key-capable. Accessor methods (`status`/`ok`/`body`/`body_bytes`/`header`) dispatch through the
 /// registry like `Uuid`'s; equality is by content, and it has no order.
 impl ExternValue for NetResponse {
-    fn type_name(&self) -> &'static str {
-        RESPONSE_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        RESPONSE_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<NetResponse>() == Some(self)
@@ -105,6 +110,9 @@ impl crate::ExternIo for NetFetchIo {
 /// loop hands the handler one, and it reads the method/path/headers/body off it.
 pub const REQUEST_TYPE_NAME: &str = "Request";
 
+/// `Request`'s qualified runtime identity — the [`RESPONSE_TYPE_IDENTITY`] twin.
+pub const REQUEST_TYPE_IDENTITY: &str = "std.http.Request";
+
 /// An **inbound** HTTP request delivered to a server handler. Wraps the plain [`NetRequest`] the
 /// Network seam carries plus the `conn` id the serve loop replies to — the id rides *inside* the
 /// value so the loop can `net_reply` to the right connection after the handler returns, without a
@@ -121,8 +129,8 @@ pub struct Request {
 /// `Request` is a pure, host-free extern type like [`NetResponse`]: accessor methods (S2) dispatch
 /// through the registry, equality is by content, and it is not key-capable.
 impl ExternValue for Request {
-    fn type_name(&self) -> &'static str {
-        REQUEST_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        REQUEST_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<Request>() == Some(self)

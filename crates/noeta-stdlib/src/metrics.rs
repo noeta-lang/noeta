@@ -35,6 +35,14 @@ pub const COUNTER_TYPE_NAME: &str = "Counter";
 pub const HISTOGRAM_TYPE_NAME: &str = "Histogram";
 pub const GAUGE_TYPE_NAME: &str = "Gauge";
 
+/// The instruments' qualified runtime identities — what
+/// [`crate::ExternValue::type_identity`] returns. These short names are exactly the ones a
+/// third-party metrics extension is most likely to reuse; the qualified identity is what keeps
+/// `std.metrics.Counter` and an `acme.metrics.Counter` distinct at runtime.
+pub const COUNTER_TYPE_IDENTITY: &str = "std.metrics.Counter";
+pub const HISTOGRAM_TYPE_IDENTITY: &str = "std.metrics.Histogram";
+pub const GAUGE_TYPE_IDENTITY: &str = "std.metrics.Gauge";
+
 /// A measurement value — `int` or `float` (a non-numeric is a compile-time type error).
 const NUM_VALUE: SigType = SigType::Union(&[SigType::Int, SigType::Float]);
 
@@ -101,15 +109,15 @@ pub const RECORD_METHODS: &[ExtFn] = &[
 /// Declare an instrument handle extern type — the host's opaque [`InstrumentId`] (plain `Copy` data).
 /// Methods reach the host by id; the aggregation state (and the kind) live host-side. Not key-capable.
 macro_rules! instrument_handle {
-    ($ty:ident, $name:expr) => {
+    ($ty:ident, $name:expr, $identity:expr) => {
         #[derive(Debug, Clone, Copy, PartialEq)]
         pub struct $ty {
             pub id: InstrumentId,
         }
 
         impl ExternValue for $ty {
-            fn type_name(&self) -> &'static str {
-                $name
+            fn type_identity(&self) -> &'static str {
+                $identity
             }
             fn eq_value(&self, other: &dyn ExternValue) -> bool {
                 other.as_any().downcast_ref::<$ty>() == Some(self)
@@ -136,9 +144,9 @@ macro_rules! instrument_handle {
     };
 }
 
-instrument_handle!(Counter, COUNTER_TYPE_NAME);
-instrument_handle!(Histogram, HISTOGRAM_TYPE_NAME);
-instrument_handle!(Gauge, GAUGE_TYPE_NAME);
+instrument_handle!(Counter, COUNTER_TYPE_NAME, COUNTER_TYPE_IDENTITY);
+instrument_handle!(Histogram, HISTOGRAM_TYPE_NAME, HISTOGRAM_TYPE_IDENTITY);
+instrument_handle!(Gauge, GAUGE_TYPE_NAME, GAUGE_TYPE_IDENTITY);
 
 /// `std.metrics` ctx dispatch — the instrument constructors (get-or-create). Generic over the ctx so
 /// a compiled-in backend inlines the small ctx ops.

@@ -25,6 +25,12 @@ pub const INSTANT_TYPE_NAME: &str = "Instant";
 pub const ZONED_TYPE_NAME: &str = "Zoned";
 pub const DURATION_TYPE_NAME: &str = "Duration";
 
+/// The datetime types' qualified runtime identities — what
+/// [`crate::ExternValue::type_identity`] returns.
+pub const INSTANT_TYPE_IDENTITY: &str = "std.datetime.Instant";
+pub const ZONED_TYPE_IDENTITY: &str = "std.datetime.Zoned";
+pub const DURATION_TYPE_IDENTITY: &str = "std.datetime.Duration";
+
 // --- The three extern value types ---------------------------------------------------------------
 
 /// An absolute moment in time (`jiff::Timestamp`) — timezone-independent, ordered chronologically.
@@ -42,8 +48,8 @@ pub struct Zoned(pub JiffZoned);
 pub struct Duration(pub Span);
 
 impl ExternValue for Instant {
-    fn type_name(&self) -> &'static str {
-        INSTANT_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        INSTANT_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<Instant>() == Some(self)
@@ -72,8 +78,8 @@ impl ExternValue for Instant {
 }
 
 impl ExternValue for Zoned {
-    fn type_name(&self) -> &'static str {
-        ZONED_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        ZONED_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<Zoned>() == Some(self)
@@ -102,8 +108,8 @@ impl ExternValue for Zoned {
 }
 
 impl ExternValue for Duration {
-    fn type_name(&self) -> &'static str {
-        DURATION_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        DURATION_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         // `Span` intentionally has no `PartialEq` (equality is ambiguous for calendar units); its

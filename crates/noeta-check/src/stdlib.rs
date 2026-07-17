@@ -32,13 +32,15 @@ pub(super) const RECEIVER: &str = "Receiver";
 /// the E0049 reservation set — a user declaration of any of them is rejected.
 pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIVER];
 
-/// The **qualified identity** (`std.id.Uuid`) of a registered extern type named by its bare
-/// registry name (`Uuid`), or the name unchanged if it is not a registered type. This is what the
-/// checker stores in `Type::Named` so a native type is never conflated with a same-short-named user
-/// type; the runtime still tags values with the bare name, and `registry::resolve_type` bridges the
-/// two spellings at every method-lookup site.
+/// The **qualified identity** (`std.id.Uuid`) of a registered extern type named in a signature —
+/// by its bare registry name (`Uuid`; the common spelling, unambiguous within one extension's
+/// signature vocabulary) or already qualified (`acme.metrics.Counter`; the spelling an extension
+/// uses when its short name is shared across namespaces) — or the name unchanged if it is not a
+/// registered type. This is what the checker stores in `Type::Named` so a native type is never
+/// conflated with a same-short-named user type; runtime values carry the same qualified identity
+/// (`ExternValue::type_identity`), so the two sides key dispatch and `is`/`as` identically.
 fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
-    reg.find_type(n)
+    reg.resolve_type(n)
         .map_or_else(|| n.to_string(), registry::ExtType::qualified)
 }
 
