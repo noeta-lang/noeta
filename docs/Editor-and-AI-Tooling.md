@@ -42,6 +42,13 @@ What it does today:
 | **Semantic tokens** | Compiler-accurate token coloring layered over the static grammar. |
 | **Inlay hints** | rust-analyzer style, same spelling as hover: the inferred type of every un-annotated binding (`mut xs`&nbsp;`: List<int>`&nbsp;`= …`) and of inference-typed closure parameters; parameter **names** at call sites (`scale(`&nbsp;`factor:`&nbsp;`2, …)`). Annotated bindings, reassignments, same-named identifier arguments, and uninferred (`dyn`) params show nothing. Packed storage is marked compactly on the type label (`: Vec3 · packed`, `: List<Vec3> · flat`, `: List<Cell> · SoA`); byte sizes stay hover-only. Toggle with VS Code's `editor.inlayHints.enabled`. |
 
+Under load the server stays honest about *which* version it answers for: every open document in
+a directory shares one salsa workspace (one parse per file, however many tabs are open), the
+expensive requests (diagnostics, semantic tokens, completion) run off the message loop and are
+**cancelled when a newer edit supersedes them** — a stale computation answers `ContentModified`
+and the client silently re-asks — and a burst of keystrokes produces one diagnostics publish for
+the final text, not one per keystroke.
+
 The same salsa graph powers the [debugger](Debugging)'s launch compile and the conformance
 harness, so all three tools read one source of truth.
 
