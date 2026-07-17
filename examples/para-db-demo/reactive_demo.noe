@@ -1,0 +1,53 @@
+// Reactive DB -> UI: a repository query wrapped as a reactive `computed` over a DB-revision `signal`.
+// Mutating THROUGH the repo bumps the revision, which re-runs the query and every dependent — an
+// `effect` here, but the same binding is what a LiveView `view.expose(...)` pushes to the browser as
+// a diff. This is the ORM's original value proposition — keep the UI in sync with the database — built
+// today from para/db + std.reactive, no new runtime.
+//
+//   noeta run examples/para-db-demo/reactive_demo.noe
+use para.db
+use para.db.repo.Repository
+use std.reactive.{signal, computed, effect}
+use std.json
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct User {
+    id: int
+    name: string
+    age: int
+}
+
+conn = db.connect("sqlite::memory:")
+conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)", [])
+repo = Repository.new("User", "users", "id")
+
+// The DB-revision signal — bumped after every mutation through the repo.
+rev = signal(0)
+
+// The reactive query: depends on `rev`, so it re-runs on every bump. Expose THIS to a LiveView and
+// the browser re-renders whenever the data changes.
+count_of_users = computed(fn() {
+    rev.get()
+    return repo.all(conn).len()
+})
+
+// An effect stands in for the UI render — it re-runs automatically when the query changes.
+effect(fn() {
+    n = count_of_users.get()
+    echo "UI sees ${n} user(s)"
+})
+
+// Mutate through the repo + bump the revision → the effect re-runs on its own.
+repo.add(User { id: 1, name: "Ada", age: 36 })
+repo.flush(conn)
+rev.update(fn(n) => n + 1)
+
+repo.add(User { id: 2, name: "Bob", age: 41 })
+repo.flush(conn)
+rev.update(fn(n) => n + 1)
+
+repo.remove(1)
+repo.flush(conn)
+rev.update(fn(n) => n + 1)
+
+conn.close()
