@@ -1,0 +1,129 @@
+name: Release
+
+# Tag-triggered release. On a `v*` tag:
+#   - build the `noeta` binary for linux + macOS (x86_64 + aarch64),
+#   - attach the tarballs + SHA256SUMS to a GitHub release,
+#   - on a NON-prerelease, dispatch `release-published` to the web repos so docs advances to this
+#     release's docs and the sites refresh their version pill.
+#
+# Prerelease is detected from the tag: any `-` suffix (v1.2.0-rc.1, v1.2.0-alpha) is a prerelease.
+# crates.io is intentionally NOT published here — extensions resolve toolchain crates by git, not
+# crates.io, and the embedding surface (noeta-embed) isn't stabilized yet. When it is, a
+# `publish-crates` job for the noeta-embed dependency closure drops in, gated on non-prerelease.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    outputs:
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, linker: gcc-aarch64-linux-gnu }
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release metadata
+        id: meta
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross linker (aarch64 linux)
+        if: matrix.linker != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.linker }}
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build the noeta binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p noeta-cli --bin noeta
+
+      - name: Package
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/noeta"
+          strip "$BIN" || true
+          DIST="noeta-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$DIST"
+          cp "$BIN" "$DIST/"
+          cp LICENSE-MIT LICENSE-APACHE README.md "$DIST/" 2>/dev/null || true
+          tar -czf "$DIST.tar.gz" "$DIST"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noeta-${{ matrix.target }}
+          path: "*.tar.gz"
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: ${{ needs.build.outputs.is_prerelease == 'true' }}
+          generate_release_notes: true
+
+  # Advance the web properties. Docs syncs its content from this release's tag, so it must run only
+  # for a real (non-prerelease) release; the landing/playground pills just refresh. GITHUB_TOKEN
+  # can't trigger workflows in another repo, so this uses a PAT with `contents: write` on the sites.
+  notify-web:
+    name: Dispatch to the web repos
+    needs: build
+    if: needs.build.outputs.is_prerelease != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: [noeta-docs, noeta-landing, noeta-playground]
+    steps:
+      - name: repository_dispatch release-published
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH_PAT }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          curl -fsSf -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/noeta-lang/${{ matrix.repo }}/dispatches" \
+            -d "{\"event_type\":\"release-published\",\"client_payload\":{\"tag\":\"$TAG\"}}"
