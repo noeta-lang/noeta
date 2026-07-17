@@ -1,6 +1,6 @@
 {
-  "$comment": "EXAMPLE — the TextMate injection grammar a third-party package would ship to highlight its `@sql { … }` expression-tier bodies as SQL (expr-tiers / text-tiers arcs). This is the extension mechanism for editor highlighting: a package that declares `@tier(sql, text: \"sql\", expr: Query)` ships a grammar of this shape, contributed via the VS Code `grammars` contribution point with `injectTo: [\"source.noeta\"]`. It attaches by textual match (`injectionSelector`), so it needs no change to Noeta's own static grammar — that is why an extension can provide it and the core grammar stays fixed. The body language (`sql` here → `source.sql`) is the tier's declared `text:` language; swap it for `markdown`/`source.yaml`/etc. per tier. Brace counting mirrors the compiler lexer's matching_brace: nested pairs recurse and \\{ \\} \\\\ are literal, so a `{…}` in the SQL never ends the block. `${…}` holes are scoped back to `source.noeta`, so a hole highlights as ordinary Noeta inside the SQL — the same split the compiler makes (statics = SQL text, holes = checked Noeta expressions).",
-  "scopeName": "inline.noeta.sql-tier",
+  "$comment": "The one-rule TextMate INJECTION grammar for para/db's `@sql { … }` expression tier — it highlights an `@sql` body as SQL in VS Code. This is the whole editor-highlighting mechanism for a third-party tier, documented in the Noeta extension README (Text tiers section): a package ships a grammar of this shape targeting `L:source.noeta`; it needs NO change to Noeta's own static grammar (which stays fixed) and no cooperation from the core extension. Install it by contributing it from any VS Code extension's `grammars` with `injectTo: [\"source.noeta\"]` and `embeddedLanguages: { \"meta.embedded.block.sql\": \"sql\" }` — see this package's README. Brace counting mirrors the compiler lexer's matching_brace (nested pairs recurse; `\\{` `\\}` `\\\\` are literal), so a `{…}` in the SQL never ends the block. `${…}` holes scope back to source.noeta, so a hole highlights as ordinary Noeta inside the SQL — the same split the compiler makes (statics = SQL text, holes = checked Noeta expressions).",
+  "scopeName": "inline.noeta.para-db.sql-tier",
   "injectionSelector": "L:source.noeta",
   "patterns": [{ "include": "#sql-tier-block" }],
   "repository": {
@@ -29,7 +29,7 @@
       "match": "\\\\[{}$\\\\]"
     },
     "tier-hole": {
-      "$comment": "A `${ … }` hole is an ordinary Noeta expression — scope its contents back to source.noeta so it highlights as code, not SQL. Nested braces inside the hole are handled by re-including this grammar's brace pair via source.noeta.",
+      "$comment": "A `${ … }` hole is an ordinary Noeta expression — scope its contents back to source.noeta so it highlights as code, not SQL.",
       "begin": "(\\$\\{)",
       "end": "(\\})",
       "beginCaptures": {
