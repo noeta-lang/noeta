@@ -8,6 +8,9 @@ use noeta_span::{Source, SourceId};
 
 /// Lex, parse, and lower a source program, returning the Core-IR dump.
 fn lower_dump(src: &str) -> String {
+    // These tests are their own assembling driver (audit-6 F2): lowering's default options read
+    // the process-default registry, which production drivers seed before lowering runs.
+    noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "golden", src);
     let lexed = noeta_lexer::lex(&source);
     assert!(

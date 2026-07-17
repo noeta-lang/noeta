@@ -194,14 +194,14 @@ pub struct LowerOptions {
     /// lower to the right qualified identity. The production/CLI path keeps the process-global
     /// default; an embed session threads its own assembled set, so a session's compile honors
     /// its extensions.
-    pub registry: &'static noeta_stdlib::registry::Registry,
+    pub registry: &'static noeta_native::registry::Registry,
 }
 
 impl Default for LowerOptions {
     fn default() -> Self {
         LowerOptions {
             real_isolates: false,
-            registry: noeta_stdlib::registry::single_registry_process(),
+            registry: noeta_native::registry::single_registry_process(),
         }
     }
 }
@@ -295,7 +295,7 @@ struct Lowerer<'a> {
     /// The extension registry a **native** expression tier's handler resolves against
     /// (instance-registry IR5): an `@json` block's `ExtTier::handler` is looked up here, so an
     /// embed session's own extension-declared expression tier lowers against *its* registry.
-    registry: &'static noeta_stdlib::registry::Registry,
+    registry: &'static noeta_native::registry::Registry,
 }
 
 /// Build the narrowing-identity map (see [`Lowerer::type_aliases`]) from a program's `use`
@@ -303,7 +303,7 @@ struct Lowerer<'a> {
 /// user-type import resolves to its leaf name.
 fn collect_type_aliases(
     program: &AstProgram,
-    registry: &'static noeta_stdlib::registry::Registry,
+    registry: &'static noeta_native::registry::Registry,
 ) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for stmt in &program.stmts {
