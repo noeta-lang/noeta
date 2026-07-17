@@ -6,7 +6,7 @@
 //   noeta serve examples/liveview-todos/todos.noe   →   open http://localhost:8080
 //
 // Importing `render` brings the `@html` tier declaration into scope.
-use para.html.{render, Html, handle, keyed}
+use para.html.{render, Html, handle, keyed, on_click}
 use std.reactive.signal
 use std.http.server
 use std.http.{Request, Response}
@@ -24,10 +24,17 @@ todos = signal([
 ])
 
 // A row is its own `@html` value. A `${…}` hole in *attribute* position (`class="${…}"`) is
-// inlined and escaped; a hole in *text* position gets a reactive span.
+// inlined and escaped; a hole in *text* position gets a reactive span. Clicking a row binds an inline
+// `on_click` that toggles *that* todo — the closure captures the row's own id, and `keyed` hoists it
+// into the page's dispatch table under the row's key, so a per-item handler routes correctly even as
+// the row re-renders.
 fn row(t: Todo): Html {
     box = if t.done then "[x]" else "[ ]"
-    return @html { <li class="${if t.done then "done" else "todo"}">${box} ${t.title}</li> }
+    return @html { <li ${on_click(fn() => toggle(t.id))} class="${if t.done then "done" else "todo"}">${box} ${t.title}</li> }
+}
+
+fn toggle(id: int): void {
+    todos.update(fn(list) => list.map(fn(t) => if t.id == id then Todo { id: t.id, title: t.title, done: !t.done } else t))
 }
 
 fn remaining(): int {
@@ -42,16 +49,14 @@ fn page(): Html {
         <h1>Todos — ${remaining()} of ${todos.get().len()} left</h1>
         <ul>${keyed(todos, fn(t) => "${t.id}", row)}</ul>
         <p>${if remaining() == 0 then "All done! ✨" else "Keep going."}</p>
-        <button data-live-click="complete-all">complete all</button>
+        <button ${on_click(fn() => complete_all())}>complete all</button>
     }
 }
 
-fn on_event(name: string): void {
-    if name == "complete-all" {
-        todos.update(fn(list) => list.map(fn(t) => Todo { id: t.id, title: t.title, done: true }))
-    }
+fn complete_all(): void {
+    todos.update(fn(list) => list.map(fn(t) => Todo { id: t.id, title: t.title, done: true }))
 }
 
 fn fetch(req: Request): Response {
-    return handle(req, "Noeta LiveView todos", page, on_event)
+    return handle(req, "Noeta LiveView todos", page)
 }
