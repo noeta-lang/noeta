@@ -92,16 +92,37 @@ A second `SqlDriver` (`pg::PostgresDriver`, behind `ring-postgres`) over the syn
 and binds each value to its inferred column type (a `PgVal` `ToSql` adapter; untyped NULL fits any
 column). The native entry crate declares `ring-postgres`, so the composed toolchain auto-enables it.
 Verified with hermetic unit tests + a live round-trip against real PostgreSQL 16, and a Noeta demo.
-**New follow-ups:** F9 — Postgres uses `NoTls` (add a rustls TLS connector for managed/hosted PG); F10
-— a `--native` footprint scan enables *all* `para.db` rings (both drivers share the one `para.db`
-module), so a native binary pulls both SQLite and PG deps; let the app select a driver ring.
 
-## @sql editor highlighting — MECHANISM in place (not core), per design
-Editor coloring of a tier body is **not** wired into the core grammar (only the built-in `doc`→markdown
-is static). By design, a third-party tier plugs into VS Code with a **one-rule injection grammar**
-targeting `L:source.noeta` — documented in `editors/vscode-noeta/README.md` (Text tiers section) and
-shown by `examples/sql_tier_injection.tmLanguage.json`. `@html` is in the same boat (no shipped
-coloring; noeta-html contributes only a `noeta fmt` **body formatter** + the tier's `text:` language →
-LSP hover). **Open choice:** ship para/db's `@sql` one-rule injection grammar as a package artifact,
-and/or build a VS-Code-addon bridge that generates injections from declared `text:` tier languages so
-any package's tier lights up without a hand-written grammar. Not started (pending a direction).
+## F9 — Postgres TLS — ✅ DONE
+`db.connect("postgres://…")` supplies a pure-Rust rustls connector (ring provider, `webpki-roots`).
+The dsn's `sslmode` governs use (default `prefer`: try TLS, fall back). rustls **verifies** the cert
+against the bundled roots — secure by default (managed PG works); a self-signed dev cert needs
+`sslmode=disable` or a trusted cert. Open sub-follow-up: a libpq-style require-without-verify mode.
+
+## F10 — per-driver native ring selection — ✅ DONE
+The driver is a **runtime** dsn choice invisible to the static footprint scan, so a `--native` binary
+got SQLite (the entry crate's default) and a clear error for `postgres://`. Fixed with a declarative
+opt-in: `[native] rings = ["ring-postgres"]` in the app manifest; the AOT build unions these with the
+footprint rings. Proven: a `--native` binary built with the ring declared connects to a live PG.
+
+## @sql editor highlighting — ✅ SHIPPED (as a package artifact, not core)
+Editor coloring of a tier body is **not** in the core grammar (only built-in `doc`→markdown is static).
+By design a third-party tier plugs into VS Code with a **one-rule injection grammar** targeting
+`L:source.noeta` (extension README, "Text tiers and embedded languages"). para/db now **ships** its
+`@sql` grammar at `packages/para-db/editors/sql-tier.tmLanguage.json` + a package README with the
+`contributes.grammars` snippet. `@html` is in the same boat (no shipped coloring; noeta-html
+contributes only a `noeta fmt` body-formatter + `text:`→LSP hover). Optional future: a VS-Code-addon
+bridge that auto-generates injections from any tier's declared `text:` language.
+
+## Reactive DB↔UI sync — LEVEL 1 proven today; LEVEL 2 = a native ReactiveSource
+The ORM's original value prop (keep the UI in sync with the DB). **Level 1 (in-process) works now, no
+new runtime** — `examples/para-db-demo/reactive_demo.noe`: a repository query wrapped in a `computed`
+over a DB-revision `signal` the repo mutation path bumps; the query re-runs and every dependent
+(`effect`, or a LiveView `view.expose`) updates. Could be made *automatic* (repo self-bumps its own
+revision on flush → a `para.db.reactive`/`Live` wrapper so the developer never bumps by hand) — a
+small pure-Noeta module, not yet built. **Level 2 (external writes → UI without polling)**: another
+process/connection changing the DB pushes into the reactive graph via the existing **`ReactiveSource`**
+seam (`create_source`/`read_source`/`wake` in `noeta-reactive-abi`) — exactly how `para.synced` drives
+CRDT merges. para/db would add a native reactive source over Postgres **LISTEN/NOTIFY** (or SQLite's
+update hook): `db.watch(channel)` → a signal that `wake`s on a NOTIFY. Seam proven by para.p2p; new
+native code + a driver hook. Not yet built.
