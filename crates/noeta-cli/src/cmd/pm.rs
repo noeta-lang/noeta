@@ -626,6 +626,8 @@ pub(crate) fn cmd_publish(
         version: version.clone(),
         coords,
         deps,
+        // A freshly published release is by definition not yanked.
+        yanked: false,
         signature,
         bundle,
         // The registry stamps the publish time server-side; the client doesn't supply it.

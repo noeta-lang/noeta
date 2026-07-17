@@ -60,6 +60,12 @@ pub struct Release {
     pub version: Version,
     pub coords: GitCoords,
     pub deps: Vec<Dep>,
+    /// Whether the release is **yanked**. A yanked release is still *served* by the index (Go's
+    /// model — an existing pin keeps resolving) but must never be **newly selected**; that policy
+    /// lives at the selection sites ([`resolve_coords`], the graph's candidate load, `noeta doc`'s
+    /// highest-version pick), not in the wire parse, so the flag is never lost between the registry
+    /// and the resolver.
+    pub yanked: bool,
     /// Hex Ed25519 signature over the attestation (key trust root), or `None`.
     pub signature: Option<String>,
     /// JSON Sigstore bundle over the same attestation (keyless trust root, Phase 5): a DSSE
@@ -96,8 +102,9 @@ impl Release {
 /// **and dependencies**), record a new release, and serve a **scope's public key** (provenance,
 /// Phase 4 #2). Implemented by [`LocalIndex`] here; the hosted service implements the same shape.
 pub trait Index {
-    /// Every published [`Release`] of `name` (`company/package`). An unknown package yields an empty
-    /// list; an `Err` is a real lookup failure (a corrupt/unreadable index).
+    /// Every published [`Release`] of `name` (`company/package`), **including yanked ones** (so an
+    /// existing pin can still resolve — callers that *select* must skip `yanked`). An unknown package
+    /// yields an empty list; an `Err` is a real lookup failure (a corrupt/unreadable index).
     fn releases(&self, name: &str) -> Result<Vec<Release>, PmError>;
 
     /// Record a `name` release (the `noeta publish` write path). Re-publishing the same version with
@@ -162,9 +169,11 @@ pub trait Index {
 }
 
 /// Resolve a registry requirement to a concrete release's coordinates: the **highest published
-/// version** of `name` satisfying `req`. Errors when the package is unknown or no published version
-/// matches. Used where a single dependency is materialized directly; the graph's PubGrub pass
-/// (Phase 4, S5b) instead reads whole candidate sets through [`Index::releases`].
+/// version** of `name` satisfying `req`. A yanked release is never selected here (this is a *new*
+/// selection — only an existing pin may keep resolving one). Errors when the package is unknown or
+/// no published version matches. Used where a single dependency is materialized directly; the
+/// graph's PubGrub pass (Phase 4, S5b) instead reads whole candidate sets through
+/// [`Index::releases`].
 pub fn resolve_coords(
     index: &dyn Index,
     name: &str,
@@ -180,7 +189,7 @@ pub fn resolve_coords(
     releases.sort_by(|a, b| b.version.cmp(&a.version));
     releases
         .iter()
-        .find(|r| req.matches(&r.version))
+        .find(|r| !r.yanked && req.matches(&r.version))
         .map(|r| (r.version.clone(), r.coords.clone()))
         .ok_or_else(|| {
             let available: Vec<String> = releases.iter().map(|r| r.version.to_string()).collect();
@@ -302,6 +311,7 @@ impl Index for LocalIndex {
                         sha: sha.to_string(),
                     },
                     deps,
+                    yanked: t.get("yanked").and_then(|v| v.as_bool()).unwrap_or(false),
                     signature: get("sig").map(str::to_string),
                     bundle: get("bundle").map(str::to_string),
                     // The local (offline) index carries no publish time — never subject to cooldown.
@@ -369,6 +379,9 @@ impl Index for LocalIndex {
             text.push_str(&format!("url = {}\n", quote(&r.coords.url)));
             text.push_str(&format!("tag = {}\n", quote(&r.coords.tag)));
             text.push_str(&format!("sha = {}\n", quote(&r.coords.sha)));
+            if r.yanked {
+                text.push_str("yanked = true\n");
+            }
             if let Some(license) = &r.license {
                 text.push_str(&format!("license = {}\n", quote(license)));
             }
@@ -1312,11 +1325,6 @@ impl Index for HttpIndex {
         })?;
         let mut out = Vec::new();
         for v in body.versions {
-            // A yanked release is never *newly* selected (an existing lockfile pin bypasses the index
-            // entirely, so it still resolves) — skip it from the candidate set.
-            if v.yanked {
-                continue;
-            }
             let Ok(version) = Version::parse(&v.version) else {
                 continue; // ignore an unparseable version rather than failing the whole resolve
             };
@@ -1338,6 +1346,8 @@ impl Index for HttpIndex {
                     sha: v.sha,
                 },
                 deps,
+                // The flag rides through faithfully (never dropped at parse); selection skips it.
+                yanked: v.yanked,
                 signature: v.signature,
                 bundle: v.bundle,
                 published_at: v.published_at_unix,
@@ -1382,21 +1392,32 @@ impl Index for HttpIndex {
                     .to_string(),
             )
         })?;
-        let deps: Vec<_> = release
-            .deps
-            .iter()
-            .map(|d| serde_json::json!({ "package": d.package, "req": d.req.to_string() }))
-            .collect();
-        let body = serde_json::json!({
+        // The canonical publish body (see the wire fixtures): optional fields — `deps` (default
+        // `[]`), `license`, and the provenance root — are **omitted** when absent, never sent as
+        // `null`, so the request shape is exactly what PROTOCOL.md documents.
+        let mut body = serde_json::json!({
             "version": release.version.to_string(),
             "url": release.coords.url,
             "tag": release.coords.tag,
             "sha": release.coords.sha,
-            "deps": deps,
-            "license": release.license,
-            "signature": release.signature,
-            "bundle": release.bundle,
         });
+        if !release.deps.is_empty() {
+            let deps: Vec<_> = release
+                .deps
+                .iter()
+                .map(|d| serde_json::json!({ "package": d.package, "req": d.req.to_string() }))
+                .collect();
+            body["deps"] = serde_json::json!(deps);
+        }
+        if let Some(license) = &release.license {
+            body["license"] = serde_json::json!(license);
+        }
+        if let Some(signature) = &release.signature {
+            body["signature"] = serde_json::json!(signature);
+        }
+        if let Some(bundle) = &release.bundle {
+            body["bundle"] = serde_json::json!(bundle);
+        }
         let resp = self
             .client
             .post(self.url_for(name))
@@ -1580,6 +1601,7 @@ mod tests {
             version: Version::new(major, minor, patch),
             coords: coords(tag),
             deps: Vec::new(),
+            yanked: false,
             signature: None,
             bundle: None,
             published_at: None,
@@ -1817,7 +1839,7 @@ mod http_tests {
     }
 
     #[test]
-    fn http_index_lists_versions_and_skips_yanked() {
+    fn http_index_lists_versions_and_selection_skips_yanked() {
         let base = mock_server(|method, path, _body| {
             assert_eq!(method, "GET");
             assert_eq!(path, "/v1/packages/acme/imgfx");
@@ -1832,14 +1854,21 @@ mod http_tests {
         });
         let index = HttpIndex::new(base).unwrap();
         let releases = index.releases("acme/imgfx").unwrap();
-        // 2.0.0 is yanked → not offered as a candidate; 1.2.0 carries its pinned SHA.
-        assert_eq!(releases.len(), 1);
+        // The listing is faithful to the wire: the yanked 2.0.0 is still *served* (an existing pin
+        // may keep resolving it — Go's model, PROTOCOL.md), its flag intact.
+        assert_eq!(releases.len(), 2);
         assert_eq!(releases[0].version, Version::new(1, 2, 0));
         assert_eq!(releases[0].coords.sha, "abc");
+        assert!(!releases[0].yanked);
+        assert!(releases[1].yanked);
         // The publish timestamp flows through as epoch-millis for the cooldown filter.
         assert_eq!(releases[0].published_at, Some(1_700_000_000_000));
 
-        // resolve_coords picks it through the same trait the local index uses.
+        // Selection never *newly* picks a yanked release: ^2 matches only the yanked 2.0.0 → no
+        // match; ^1.0 picks 1.2.0 through the same trait the local index uses.
+        let err =
+            resolve_coords(&index, "acme/imgfx", &VersionReq::parse("^2").unwrap()).unwrap_err();
+        assert!(err.message().contains("no version"), "{err}");
         let (v, c) =
             resolve_coords(&index, "acme/imgfx", &VersionReq::parse("^1.0").unwrap()).unwrap();
         assert_eq!(v, Version::new(1, 2, 0));
@@ -1873,6 +1902,7 @@ mod http_tests {
                         package: "acme/bar".to_string(),
                         req: VersionReq::parse("^1.0").unwrap(),
                     }],
+                    yanked: false,
                     signature: Some("deadbeef".to_string()),
                     bundle: None,
                     published_at: None,
@@ -1937,6 +1967,7 @@ mod http_tests {
                 sha: "abc".to_string(),
             },
             deps: Vec::new(),
+            yanked: false,
             signature: None,
             bundle: Some(r#"{"mediaType":"m"}"#.to_string()),
             published_at: None,
@@ -1973,6 +2004,7 @@ mod http_tests {
                         sha: "s".to_string(),
                     },
                     deps: Vec::new(),
+                    yanked: false,
                     signature: None,
                     bundle: None,
                     published_at: None,

@@ -169,6 +169,8 @@ impl Index for GitForgeIndex {
                     sha,
                 },
                 deps,
+                // A forge has no yank concept — a tag either exists or it doesn't.
+                yanked: false,
                 signature: None,
                 bundle: None,
                 // A git-forge release carries no publish timestamp, so it is never subject to the
@@ -367,6 +369,7 @@ mod tests {
                 sha: "s".into(),
             },
             deps: Vec::new(),
+            yanked: false,
             signature: None,
             bundle: None,
             published_at: None,

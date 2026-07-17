@@ -50,6 +50,8 @@ pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            // Auto-picking is a *new* selection — never land on a yanked release.
+            releases.retain(|r| !r.yanked);
             releases.sort_by(|a, b| b.version.cmp(&a.version));
             match releases.first() {
                 Some(r) => r.version.clone(),

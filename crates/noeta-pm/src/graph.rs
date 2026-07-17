@@ -960,10 +960,14 @@ impl Walker<'_> {
                 )));
             }
             let company = scope.to_string();
-            let releases = self
+            let mut releases = self
                 .index_for(&company)?
                 .releases(&identity)
                 .map_err(|err| err.map_msg(|m| format!("registry package `{identity}`: {m}")))?;
+            // A yanked release is never *newly selected* (PROTOCOL.md, Go's model): drop it from the
+            // candidate set here — the index still serves it, so an exact lock-pinned version keeps
+            // materializing through the version lookup path.
+            releases.retain(|r| !r.yanked);
             let releases = self.apply_cooldown(&identity, releases, &exact_pins)?;
             for release in &releases {
                 for dep in &release.deps {
@@ -1546,6 +1550,7 @@ mod tests {
                 sha: "s".into(),
             },
             deps: Vec::new(),
+            yanked: false,
             signature: None,
             bundle: None,
             published_at,
