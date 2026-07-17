@@ -349,6 +349,10 @@ impl Builder {
         // count), and a mis-assembled set is a proper `Err`, not a panic out of a library call.
         let registry: Option<&'static noeta_stdlib::registry::Registry> =
             if self.extensions.is_empty() {
+                // The front-end no longer links the std units (audit-6 F2) — riding the
+                // process-global default means this session's driver owns seeding it. An earlier
+                // explicit `install_extensions` wins; after any install this is a no-op.
+                noeta_stdlib::registry::default_seeded();
                 None
             } else {
                 Some(

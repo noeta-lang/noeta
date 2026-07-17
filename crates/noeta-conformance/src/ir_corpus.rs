@@ -73,6 +73,7 @@ impl IrCorpusReport {
 /// interpreter, reporting coverage. Side effects (e.g. an active drop-audit) are observed by the
 /// caller; this returns only the coverage tally.
 pub fn run_ir_corpus(root: &Path, only: Option<&Path>) -> IrCorpusReport {
+    crate::ensure_std_registry();
     let mut cases = Vec::new();
     collect_cases(root, &mut cases);
     cases.sort_by(|a, b| a.entry.cmp(&b.entry));

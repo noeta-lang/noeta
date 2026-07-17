@@ -86,6 +86,7 @@ impl JitDiffReport {
 /// Run the JIT differential oracle over every `.noe` file under `root` (optionally narrowed to one
 /// file).
 pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
+    crate::ensure_std_registry();
     let mut cases = Vec::new();
     collect_cases(root, &mut cases);
     cases.sort_by(|a, b| a.entry.cmp(&b.entry));

@@ -85,6 +85,7 @@ impl LeakReport {
 
 /// Run the leak oracle over every `.noe` file under `root` (optionally narrowed to one file).
 pub fn run_leak_check(root: &Path, only: Option<&Path>) -> LeakReport {
+    crate::ensure_std_registry();
     let mut cases = Vec::new();
     collect_cases(root, &mut cases);
     cases.sort_by(|a, b| a.entry.cmp(&b.entry));

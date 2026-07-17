@@ -98,6 +98,7 @@ impl DiffReport {
 /// Run the differential oracle over every `.noe` file under `root` (optionally narrowed to
 /// one file).
 pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
+    crate::ensure_std_registry();
     let mut cases = Vec::new();
     collect_cases(root, &mut cases);
     cases.sort_by(|a, b| a.entry.cmp(&b.entry));
