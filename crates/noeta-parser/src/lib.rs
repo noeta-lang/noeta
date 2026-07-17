@@ -1670,9 +1670,14 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `channel::<T>(capacity)` — construct a bounded, typed channel (isolates I.1). Same shape as
-        // `from_bytes`: a turbofish message type followed by a parenthesized operand (the buffer size).
-        let channel = just(T::ChannelKw)
+        // `channel::<T>(capacity)` — construct a bounded, typed channel (isolates I.1). A turbofish
+        // message type followed by a parenthesized operand (the buffer size), like `from_bytes`.
+        // `channel` is a CONTEXTUAL keyword, not a reserved one (it is far too common a field/variable
+        // name to reserve): the `channel` identifier is recognized here only when immediately followed
+        // by `::<T>(…)`; anything else — a bare `channel` read, a `channel` field — fails this rule and
+        // falls through to the ordinary identifier atom below.
+        let channel = ident_parser(ctx)
+            .filter(|(name, _)| name == "channel")
             .ignore_then(just(T::ColonColon))
             .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
             .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))

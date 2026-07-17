@@ -24,7 +24,7 @@ pub class LiveRepository {
     repo: Repository
     conn: dyn // a para.db.Connection (typed `dyn` — F5)
     watch: dyn // a para.db.Watch over the table's NOTIFY channel
-    chan: string // the NOTIFY channel (the table name)
+    channel: string // the NOTIFY channel (the table name)
 
     // Construct over the model's runtime type name, its table, its primary-key column, and a
     // connection. The NOTIFY channel is the table name; the watch listens on it immediately.
@@ -33,7 +33,7 @@ pub class LiveRepository {
             repo: Repository.new(model, tbl, pk),
             conn: conn,
             watch: db.watch(conn, tbl),
-            chan: tbl,
+            channel: tbl,
         }
     }
 
@@ -68,7 +68,7 @@ pub class LiveRepository {
     // queries, and — with a trigger — any external listener) wake. Returns the statement count.
     fn flush(): int {
         n = self.repo.flush(self.conn)
-        self.conn.notify(self.chan)
+        self.conn.notify(self.channel)
         return n
     }
 

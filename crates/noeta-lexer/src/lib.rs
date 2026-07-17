@@ -149,11 +149,10 @@ pub enum TokenKind {
     /// surfaces and so the one surviving runtime-dispatch site is lexically visible.
     #[token("invoke")]
     InvokeKw,
-    /// `channel::<T>(capacity)` — construct a bounded, typed channel, yielding the split-endpoint
-    /// pair `(Sender<T>, Receiver<T>)` (isolates milestone I.1). A keyword so the turbofish type
-    /// argument parses unambiguously, mirroring `from_bytes`/`attributes_of`.
-    #[token("channel")]
-    ChannelKw,
+    // `channel::<T>(capacity)` — the bounded-channel constructor (isolates I.1) — is deliberately NOT a
+    // keyword: `channel` is a very common identifier (a field/variable name), and the construct only
+    // ever appears in turbofish position. The parser recognizes it *contextually* (a `channel` ident
+    // immediately followed by `::<T>(…)`), so `channel` stays free as an ordinary name everywhere else.
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
@@ -396,7 +395,6 @@ impl TokenKind {
             TokenKind::RolesOfKw => "RolesOfKw",
             TokenKind::ParamsOfKw => "ParamsOfKw",
             TokenKind::InvokeKw => "InvokeKw",
-            TokenKind::ChannelKw => "ChannelKw",
             TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
@@ -504,7 +502,6 @@ impl TokenKind {
             TokenKind::RolesOfKw => "`roles_of`",
             TokenKind::ParamsOfKw => "`params_of`",
             TokenKind::InvokeKw => "`invoke`",
-            TokenKind::ChannelKw => "`channel`",
             TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",

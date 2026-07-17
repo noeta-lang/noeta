@@ -264,7 +264,7 @@
         },
         {
           "name": "keyword.control.concurrency.noeta",
-          "match": "\\b(async|concurrent|spawn|isolate|channel)\\b"
+          "match": "\\b(async|concurrent|spawn|isolate)\\b"
         },
         {
           "name": "keyword.other.echo.noeta",
