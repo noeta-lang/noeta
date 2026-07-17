@@ -386,7 +386,9 @@ module.exports = grammar({
       '(', ')',
     )),
 
-    arguments: $ => seq('(', optional(commaSep($._argument)), ')'),
+    // A trailing comma is legal (the compiler's call_args list is allow_trailing), so a multi-line
+    // call can end `3,\n)` — the shape the termination conformance corpus exercises.
+    arguments: $ => seq('(', optional(commaSep($._argument)), optional(','), ')'),
     _argument: $ => choice(
       seq(field('name', $.identifier), ':', $._expression),
       $._expression,
