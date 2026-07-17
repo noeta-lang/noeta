@@ -24,7 +24,7 @@ noeta-compiler = { workspace = true }
 noeta-bytecode = { workspace = true }
 noeta-vm = { workspace = true }
 noeta-stdlib = { workspace = true }
-noeta-runtime = { workspace = true }
+noeta-host-real = { workspace = true }
 # Only the DAP wire format is hand-rolled; the JSON payloads themselves ride serde_json (Content-Length
 # framing + request/response/event envelopes mirror the LSP's stdio loop, minus the tower-lsp machinery).
 serde_json = { workspace = true }

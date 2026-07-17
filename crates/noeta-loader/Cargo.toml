@@ -15,7 +15,7 @@ noeta-parser = { workspace = true }
 # The extension-registry mechanism only (the process-default Registry handle + verbatim-tier
 # names). The std units are data seeded by the assembling driver — this crate deliberately does
 # NOT link noeta-stdlib, so a stdlib method-body edit no longer rebuilds the loader (audit-6 F2).
-noeta-native = { workspace = true }
+noeta-ext-abi = { workspace = true }
 
 [dev-dependencies]
 # Tests are their own assembling driver: they seed the process-default registry with the std

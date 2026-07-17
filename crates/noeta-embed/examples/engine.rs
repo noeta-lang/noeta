@@ -11,8 +11,10 @@
 use std::sync::Mutex;
 
 use noeta_embed::{Session, SwapOutcome, Value};
-use noeta_native::registry::{ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, SigType};
-use noeta_native::{Host, StdError, no_function_error};
+use noeta_ext_abi::registry::{
+    ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, SigType,
+};
+use noeta_ext_abi::{Host, StdError, no_function_error};
 
 /// The engine's event queue — scripts write via `engine.emit`, the frame loop drains.
 static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());

@@ -6,10 +6,10 @@
 //! node in that same shared graph so a peer merge propagates to `computed`/`effect` exactly like a
 //! local `set` — must reach the engine to create its node, subscribe a reader, and wake dependents.
 //! It does so through this crate and nothing else: the engine **implements** [`ReactiveSource`], the
-//! foreign extension **consumes** it per-run via [`noeta_native::capability`], and neither the
+//! foreign extension **consumes** it per-run via [`noeta_ext_abi::capability`], and neither the
 //! engine's representation (`ReactiveExt`, the graph's storage) nor the consumer's node type
 //! (`SyncedSignalBox`) ever crosses. Only [`noeta_reactive::NodeId`] handles and arena
-//! [`noeta_native::Retained`] cells do. The contract's second half runs the other way:
+//! [`noeta_ext_abi::Retained`] cells do. The contract's second half runs the other way:
 //! [`ViewSourceExtract`] is a capability the *foreign extension* provides so the engine's
 //! `view.expose` recognizes the foreign node type — same broker, inverse direction.
 //!
@@ -22,12 +22,12 @@
 
 use std::any::Any;
 
-use noeta_native::{CtxError, NativeCtx, Retained};
+use noeta_ext_abi::{CtxError, NativeCtx, Retained};
 use noeta_reactive::NodeId;
 
 /// The reactive engine, as seen by a foreign source node.
 ///
-/// Obtained per-run with `noeta_native::capability::<dyn ReactiveSource>(ctx)`. The returned handle
+/// Obtained per-run with `noeta_ext_abi::capability::<dyn ReactiveSource>(ctx)`. The returned handle
 /// owns its own reference to the engine's per-run state, so it **coexists with `&mut dyn NativeCtx`**
 /// — every method takes `ctx` and manages the engine borrow internally, releasing it before any
 /// re-entry into user code (the reactive flush is exactly such a re-entry). That is why the methods
@@ -68,7 +68,7 @@ pub enum ViewSource {
 /// The inverse-direction twin of [`ReactiveSource`]: there the *engine* provides and the foreign
 /// extension consumes; here the foreign extension (e.g. `para.synced`) **provides** — an
 /// `ExtCapability` on its unit declaring `dyn ViewSourceExtract` — and the engine's `view.expose`
-/// **consumes** it per-run via `noeta_native::capability::<dyn ViewSourceExtract>`, after trying its
+/// **consumes** it per-run via `noeta_ext_abi::capability::<dyn ViewSourceExtract>`, after trying its
 /// own built-in `Signal`/`Computed` handles. This replaced a process-global `RwLock<Vec<fn>>`
 /// extractor list registered from dispatch bodies (audit-2 Finding 12): a registry-declared
 /// capability is scoped to the run's registry (a session whose registry lacks the extension never

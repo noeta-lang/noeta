@@ -1,6 +1,6 @@
 // The extended Ring 1 string surface (stdlib-gaps): trim sides, emptiness, chars/lines,
 // char-based slice, safe probes (char_at/index_of), padding, and strict numeric parsing.
-// Semantics live once in noeta-native, shared by both backends.
+// Semantics live once in noeta-ext-abi, shared by both backends.
 // expect: stdout "x  "
 // expect: stdout "  x"
 // expect: stdout "true"

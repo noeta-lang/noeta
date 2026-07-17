@@ -35,7 +35,7 @@ The same deterministic/real split applies:
 | Host IO | `SandboxHost` (VFS, logical clock) | `RealHost` (disk, tokio) |
 | Network | `SandboxHost` (pure request→response responder) | `RealHost` (reqwest/rustls) |
 | Async | `SandboxExecutor` (logical time) | `RealExecutor` (tokio) |
-| Isolates | cooperative in-VM interleave (deterministic, FIFO channels; `noeta-vm/src/isolate.rs`) | `std::thread`-per-isolate with a per-isolate tokio runtime (`noeta-runtime`) |
+| Isolates | cooperative in-VM interleave (deterministic, FIFO channels; `noeta-vm/src/isolate.rs`) | `std::thread`-per-isolate with a per-isolate tokio runtime (`noeta-host-real`) |
 
 `std.http.client` rides both the Host split (its `Network` capability) and the async split: a sync `client.get` performs the request through the Host, while `client.get_async` returns work the executor tickets — the real host handing over a genuine reqwest future (`RealBody::Async`), the sandbox resolving deterministically at spawn from the pure responder.
 

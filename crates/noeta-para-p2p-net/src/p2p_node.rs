@@ -1,6 +1,6 @@
 //! Real p2p transport via a **p2panda-net node** (p2p P3, `ring-p2p` feature).
 //!
-//! This is the non-loopback backing for the [`P2p`](noeta_native::host::P2p) host capability: where the
+//! This is the non-loopback backing for the [`P2p`](noeta_ext_abi::host::P2p) host capability: where the
 //! sandbox (and the default `RealHost`) use a deterministic in-process broker, a build with the
 //! `ring-p2p` ring gives `RealHost` a genuine p2panda-net node — gossip pub/sub over iroh/QUIC with
 //! mDNS discovery. Non-deterministic and CLI-only, exactly like `reqwest` for `Network`; never
@@ -50,7 +50,7 @@ use p2panda_spaces::{ActorId, Credentials};
 
 use crate::io_error;
 use crate::p2p_crypto::{CryptoGroups, EncryptedGroup};
-use noeta_native::{StdError, SyncStatus};
+use noeta_ext_abi::{StdError, SyncStatus};
 
 /// Every node keeps a single append-only log for its own operations; the durable (log-sync)
 /// transport hard-codes its id, matching p2panda's `chat` example.
@@ -976,14 +976,14 @@ fn create_operation(
     (hash, operation)
 }
 
-/// The real node **is** a [`P2p`](noeta_native::host::P2p) backend (para-namespace F2b): the
+/// The real node **is** a [`P2p`](noeta_ext_abi::host::P2p) backend (para-namespace F2b): the
 /// `para.p2p` extension owns one of these in ctx state and reaches it through the same seam as the
 /// loopback broker, so the transport lives entirely on the extension side — no host implements
 /// `P2p`. Every method delegates to the node's inherent operation (all `&self`: the node is
 /// internally synchronized; the trait's `&mut self` composes over that). The trait's own defaults —
 /// which the loopback broker relies on — are all overridden here with the real log-sync / spaces /
 /// identity behaviour, exactly as `RealHost` used to.
-impl noeta_native::host::P2p for P2pNode {
+impl noeta_ext_abi::host::P2p for P2pNode {
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
         self.publish(topic, message)
     }
@@ -1046,11 +1046,11 @@ mod tests {
     /// two-node integration test (P3.1); this pins that the async bridge itself works.
     /// Two real nodes on the same topic (discovered over mDNS) exchange a gossip message. Not
     /// hermetic — needs real multicast/networking — so `#[ignore]`, run explicitly:
-    /// `cargo test -p noeta-runtime --features ring-p2p -- --ignored two_nodes`.
+    /// `cargo test -p noeta-host-real --features ring-p2p -- --ignored two_nodes`.
     /// The durable (log-sync) catch-up guarantee that gossip lacks: node A publishes **before**
     /// node B exists, and B still receives it once it joins and syncs A's log. Not hermetic (real
     /// networking) — run explicitly:
-    /// `cargo test -p noeta-runtime --features ring-p2p -- --ignored durable_catch_up`.
+    /// `cargo test -p noeta-host-real --features ring-p2p -- --ignored durable_catch_up`.
     /// A unique throwaway data dir under the OS temp dir, removed on drop — so a persistence test
     /// exercises the real on-disk identity/store path without touching the user's XDG dir.
     struct TempDir(PathBuf);
@@ -1067,13 +1067,13 @@ mod tests {
         }
     }
 
-    /// The node **is** a [`noeta_native::host::P2p`] backend (para-namespace F2b) — the extension owns
+    /// The node **is** a [`noeta_ext_abi::host::P2p`] backend (para-namespace F2b) — the extension owns
     /// one and drives it through the trait. Single node, so no delivery; this pins that the trait
     /// delegation + lazy start work end to end (identity present, status Offline with no peer).
     /// Starting a node binds local sockets only, so it stays hermetic (unlike the two-node tests).
     #[test]
     fn a_node_serves_the_p2p_trait() {
-        use noeta_native::{P2p, SyncStatus};
+        use noeta_ext_abi::{P2p, SyncStatus};
         let dir = TempDir::new("trait");
         let mut node = P2pNode::start_with_config(P2pConfig::at(&dir.0)).expect("node starts");
         node.p2p_publish("room", b"hello".to_vec())
@@ -1232,7 +1232,7 @@ mod tests {
     /// welcomes the other as key bundles flow, then publishes a secret that the other decrypts —
     /// the QUIC-over-iroh counterpart of the hermetic `EncryptedGroup` relay test. Not hermetic
     /// (real mDNS multicast + networking), so `#[ignore]`; run explicitly:
-    /// `cargo test -p noeta-runtime --features ring-p2p -- --ignored two_nodes_converge_encrypted`.
+    /// `cargo test -p noeta-host-real --features ring-p2p -- --ignored two_nodes_converge_encrypted`.
     #[test]
     #[ignore = "needs real networking (mDNS multicast); run explicitly"]
     fn two_nodes_converge_on_encrypted_state() {

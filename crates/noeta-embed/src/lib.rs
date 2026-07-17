@@ -278,7 +278,7 @@ pub enum SwapOutcome {
 /// Register native extension units for every session in this process — the engine's own API
 /// surface (`impl Extension`) plus whatever packages it links. Must run **before** the first
 /// session (the registry assembles once; see the module docs for the instance-scoping caveat).
-pub fn install_extensions(units: Vec<&'static (dyn noeta_native::Extension + Sync)>) {
+pub fn install_extensions(units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)>) {
     noeta_stdlib::registry::install_with_extras(&units);
 }
 
@@ -302,7 +302,7 @@ pub struct Builder {
     /// seeds); non-empty ⇒ [`Builder::load`] assembles a private registry (std + these units) and
     /// threads it through the checker, the compiler, and the VM — so two sessions in one process can
     /// run different extension sets. See [`Builder::with_extensions`].
-    extensions: Vec<&'static (dyn noeta_native::Extension + Sync)>,
+    extensions: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)>,
 }
 
 impl std::fmt::Debug for Builder {
@@ -333,7 +333,7 @@ impl Builder {
     /// process-global install.
     pub fn with_extensions(
         mut self,
-        units: Vec<&'static (dyn noeta_native::Extension + Sync)>,
+        units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)>,
     ) -> Builder {
         self.extensions.extend(units);
         self
@@ -387,9 +387,9 @@ impl Builder {
                 Box::new(noeta_stdlib::SandboxExecutor::new()),
             ),
             HostKind::Real => {
-                let real_host = noeta_runtime::RealHost::new()
+                let real_host = noeta_host_real::RealHost::new()
                     .expect("the real host requires a working runtime");
-                let executor = noeta_runtime::RealExecutor::new()
+                let executor = noeta_host_real::RealExecutor::new()
                     .expect("the real executor requires a working runtime");
                 (Box::new(real_host), Box::new(executor))
             }

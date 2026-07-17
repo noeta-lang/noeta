@@ -55,10 +55,10 @@ impl Value {
         } else if self.is_small_int() {
             self.as_int().unwrap().to_string()
         } else if self.is_float() {
-            noeta_native::format_float(self.as_float().unwrap())
+            noeta_ext_abi::format_float(self.as_float().unwrap())
         } else if self.is_f32() {
             // An immediate `f32` displays at f32 precision, byte-identical to the tree-walker.
-            noeta_native::format_f32(self.as_f32().unwrap())
+            noeta_ext_abi::format_f32(self.as_f32().unwrap())
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => s.as_str().to_owned(),
@@ -94,7 +94,7 @@ impl Value {
                     format!("{{{}}}", parts.join(", "))
                 }
                 Payload::Map(entries) => {
-                    let mut kv: Vec<(&noeta_native::MapKey, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&noeta_ext_abi::MapKey, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     // A string key keeps its quoted `{k:?}` form; an extern key renders its
                     // display form unquoted (`MapKey::render` — the shared contract).
@@ -167,21 +167,21 @@ impl Value {
     }
 
     /// The JSON encoding synthesized by `@derive(ToJson)` (and `json.stringify`). Marshals the value
-    /// into the neutral [`noeta_native::NativeValue`] tree (see [`Self::to_native_deep`]) and runs the
-    /// shared [`noeta_native::json_text::stringify`], so the tree-walker — driving the same walk over its
+    /// into the neutral [`noeta_ext_abi::NativeValue`] tree (see [`Self::to_native_deep`]) and runs the
+    /// shared [`noeta_ext_abi::json_text::stringify`], so the tree-walker — driving the same walk over its
     /// own marshalled tree — produces byte-identical output by construction.
     pub fn to_json(self) -> String {
-        noeta_native::json_text::stringify(&self.to_native_deep())
+        noeta_ext_abi::json_text::stringify(&self.to_native_deep())
     }
 
-    /// Deeply marshal this value into the neutral [`noeta_native::NativeValue`] tree the shared JSON
-    /// serializer ([`noeta_native::json_text::stringify`]) consumes — the VM half of `json.stringify` and
+    /// Deeply marshal this value into the neutral [`noeta_ext_abi::NativeValue`] tree the shared JSON
+    /// serializer ([`noeta_ext_abi::json_text::stringify`]) consumes — the VM half of `json.stringify` and
     /// `@derive(Serialize<Json>)`. Numbers become scalars; strings, enum variants, and the opaque
     /// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
     /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`]. Read-only — it never changes a
     /// refcount (a packed list materializes a temporary that is released here).
-    pub fn to_native_deep(self) -> noeta_native::NativeValue {
-        use noeta_native::{NativeValue, Scalar};
+    pub fn to_native_deep(self) -> noeta_ext_abi::NativeValue {
+        use noeta_ext_abi::{NativeValue, Scalar};
         // A packed list serializes via a temporary boxed materialization, identical to the boxed form.
         if self.is_packed_list() {
             let boxed = self.realize_list();
@@ -215,7 +215,7 @@ impl Value {
                 Payload::Map(entries) => {
                     // NativeValue::Map is an ordered Vec; present in sorted-key order. An extern
                     // key marshals as its canonical display form (JSON keys are strings).
-                    let mut kv: Vec<(&noeta_native::MapKey, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&noeta_ext_abi::MapKey, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     NativeValue::Map(
                         kv.into_iter()

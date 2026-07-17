@@ -1,6 +1,6 @@
 //! `std.tracing` — the tracing SDK surface (native OTEL, T1–T3).
 //!
-//! A facade over the [`Tracing`](noeta_native::Tracing) Host capability. The span tree and
+//! A facade over the [`Tracing`](noeta_ext_abi::Tracing) Host capability. The span tree and
 //! export live host-side (the sandbox recorder / the real OTLP exporter); this module owns only the
 //! **active-span stack** that gives spans implicit parenting — exactly the design T0 chose (the
 //! host is a pure span factory/sink, context management is the SDK's job). Since T5a the stack
@@ -35,9 +35,9 @@
 use std::any::Any;
 use std::cmp::Ordering;
 
-use noeta_native::args::{want_arity, want_str};
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::args::{want_arity, want_str};
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     AttrValue, CtxError, CtxOut, CtxResult, ExternBox, ExternValue, Host, NativeCtx, NativeValue,
     Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext, ctx_arity,
     no_function_error, no_method_error, type_error,

@@ -53,14 +53,14 @@ noeta-loader = { path = "crates/noeta-loader" }
 noeta-stdlib = { path = "crates/noeta-stdlib" }
 # Native-extension ABI (P-NATIVE): the contract + dep-free primitives, split out of noeta-stdlib so
 # the batteries (crypto/uuid/json) don't ride the ABI. noeta-stdlib re-exports it (core/std-style).
-noeta-native = { path = "crates/noeta-native" }
-# The real p2panda transport for `para.p2p` (para-namespace F2b), extracted out of noeta-runtime so
-# the iroh/QUIC tree rides with the extension, not the CLI runtime. Depends only on noeta-native.
+noeta-ext-abi = { path = "crates/noeta-ext-abi" }
+# The real p2panda transport for `para.p2p` (para-namespace F2b), extracted out of noeta-host-real so
+# the iroh/QUIC tree rides with the extension, not the CLI runtime. Depends only on noeta-ext-abi.
 noeta-para-p2p-net = { path = "crates/noeta-para-p2p-net" }
 noeta-html = { path = "crates/noeta-html" }
 noeta-css = { path = "crates/noeta-css" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
-noeta-runtime = { path = "crates/noeta-runtime" }
+noeta-host-real = { path = "crates/noeta-host-real" }
 # Lean production runtime (dev-deps D3): the app-execution core (VM+Host+compile front-end, no dev
 # tooling) shared by `noeta-cli` and the standalone `noeta-runner` binary. `default-features = false`
 # here so a consumer's JIT rides *its own* `jit` feature (the CLI forwards it) — the standalone
@@ -81,8 +81,8 @@ noeta-wasm-serve = { path = "crates/noeta-wasm-serve" }
 noeta-reactive = { path = "crates/noeta-reactive" }
 # The reactive extension **contract** (capability-broker seam): the trait an out-of-tree reactive-node
 # extension (`para.synced`) programs against and the in-tree engine (`noeta-stdlib::reactive`)
-# implements — reached per-run via `noeta_native::capability::<dyn ReactiveSource>`. Tiny: deps only
-# noeta-native (NativeCtx/Retained) + noeta-reactive (NodeId). Neither engine internals nor consumer
+# implements — reached per-run via `noeta_ext_abi::capability::<dyn ReactiveSource>`. Tiny: deps only
+# noeta-ext-abi (NativeCtx/Retained) + noeta-reactive (NodeId). Neither engine internals nor consumer
 # node types cross it.
 noeta-reactive-abi = { path = "crates/noeta-reactive-abi" }
 # M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,
@@ -242,7 +242,7 @@ hmac = { version = "0.12", default-features = false }
 # hmac verify twins rely on) — already in-tree transitively via `hmac`; never hand-roll this.
 subtle = { version = "2", default-features = false }
 bcrypt = { version = "0.17", default-features = false, features = ["alloc"] }
-# Real p2p transport (p2p P3, behind noeta-runtime's `ring-p2p` feature — OFF by default): a
+# Real p2p transport (p2p P3, behind noeta-host-real's `ring-p2p` feature — OFF by default): a
 # p2panda-net node (gossip + log-sync over iroh/QUIC). Pre-1.0; pinned exactly because its
 # user-facing API may break before 1.0. Never in a default build. `p2panda-core` supplies the
 # `Hash`/`Topic` types; `futures-util` drives the gossip subscription stream in the drain task.

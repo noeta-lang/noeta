@@ -6,14 +6,14 @@
 //! runtime setup is a shared constant), making the snapshot-vs-lazy delta the read strategy alone.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use noeta_runtime::RealHost;
+use noeta_host_real::RealHost;
 use noeta_stdlib::{FileHandle, FileReader, FileSystem, ReadSource};
 use std::hint::black_box;
 
 /// Write a ~8 MB, 200k-line fixture once and return its path.
 fn write_fixture() -> String {
     let mut path = std::env::temp_dir();
-    path.push("noeta_runtime_lazy_fs_bench.txt");
+    path.push("noeta_host_real_lazy_fs_bench.txt");
     let path = path.to_string_lossy().into_owned();
     let mut content = String::with_capacity(8 * 1024 * 1024);
     for i in 0..200_000 {

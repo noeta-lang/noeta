@@ -407,7 +407,7 @@ impl Value {
 
     /// A registered extern-type value (extern-types X1) — the general form of
     /// [`Value::file_handle`]. A GC leaf (the contract owns no child values).
-    pub fn extern_value(value: noeta_native::ExternBox) -> Value {
+    pub fn extern_value(value: noeta_ext_abi::ExternBox) -> Value {
         heap::alloc(Payload::Extern(value))
     }
 
@@ -417,13 +417,13 @@ impl Value {
     }
 
     /// Read this extern value under a closure. The caller must have checked [`Value::is_extern`].
-    pub fn with_extern<R>(self, f: impl FnOnce(&dyn noeta_native::ExternValue) -> R) -> R {
+    pub fn with_extern<R>(self, f: impl FnOnce(&dyn noeta_ext_abi::ExternValue) -> R) -> R {
         heap::with_extern(self, f)
     }
 
     /// Mutate this extern value under a closure (the receiver of a mutating method). The caller
     /// must have checked [`Value::is_extern`].
-    pub fn with_extern_mut<R>(self, f: impl FnOnce(&mut dyn noeta_native::ExternValue) -> R) -> R {
+    pub fn with_extern_mut<R>(self, f: impl FnOnce(&mut dyn noeta_ext_abi::ExternValue) -> R) -> R {
         heap::with_extern_mut(self, f)
     }
 
@@ -520,14 +520,14 @@ impl Value {
         heap::alloc(Payload::Map(
             entries
                 .into_iter()
-                .map(|(k, v)| (noeta_native::MapKey::from(k), v))
+                .map(|(k, v)| (noeta_ext_abi::MapKey::from(k), v))
                 .collect(),
         ))
     }
 
     /// A heap map from already-built keys (extern-types X4) — the `MakeMap`/extern-key path.
     /// Later duplicates win (insertion order), matching the string builder's BTreeMap semantics.
-    pub fn map_keyed(entries: Vec<(noeta_native::MapKey, Value)>) -> Value {
+    pub fn map_keyed(entries: Vec<(noeta_ext_abi::MapKey, Value)>) -> Value {
         heap::alloc(Payload::Map(entries.into_iter().collect()))
     }
 
@@ -877,8 +877,8 @@ impl Value {
     /// The value for an owned [`MapKey`] probe — the packed-key lane (P-PKEY), where the key was
     /// just built from a value's content. Same sharing contract as [`Value::map_get`].
     ///
-    /// [`MapKey`]: noeta_native::MapKey
-    pub fn map_get_key(self, key: &noeta_native::MapKey) -> Option<Value> {
+    /// [`MapKey`]: noeta_ext_abi::MapKey
+    pub fn map_get_key(self, key: &noeta_ext_abi::MapKey) -> Option<Value> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => entries.get(key).copied(),
@@ -892,8 +892,8 @@ impl Value {
     /// Remove an owned [`MapKey`] (the packed-key lane, P-PKEY), returning the displaced value
     /// (ownership transfers to the caller). Mirrors [`Value::map_remove`].
     ///
-    /// [`MapKey`]: noeta_native::MapKey
-    pub fn map_remove_key(self, key: &noeta_native::MapKey) -> Option<Value> {
+    /// [`MapKey`]: noeta_ext_abi::MapKey
+    pub fn map_remove_key(self, key: &noeta_ext_abi::MapKey) -> Option<Value> {
         if self.is_pointer() {
             heap::with_payload_mut(self, |p| match p {
                 Payload::Map(entries) => entries.remove(key),
@@ -907,10 +907,10 @@ impl Value {
     /// The value for an extern-type `key`, if this is a map containing it (extern-types X4).
     /// Probes through the extern contract with no key allocation. Same sharing contract as
     /// [`Value::map_get`].
-    pub fn map_get_extern(self, key: &dyn noeta_native::ExternValue) -> Option<Value> {
+    pub fn map_get_extern(self, key: &dyn noeta_ext_abi::ExternValue) -> Option<Value> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Map(entries) => entries.get(&noeta_native::ExternKeyRef(key)).copied(),
+                Payload::Map(entries) => entries.get(&noeta_ext_abi::ExternKeyRef(key)).copied(),
                 _ => None,
             })
         } else {
@@ -1057,7 +1057,7 @@ impl Value {
                 Payload::Map(entries) => {
                     // Sorted-key order (the map is a HashMap internally); the shared `MapKey`
                     // order, identical to the tree-walker's BTreeMap iteration.
-                    let mut kv: Vec<(&noeta_native::MapKey, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&noeta_ext_abi::MapKey, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     Some(kv.into_iter().map(|(_, v)| *v).collect())
                 }
@@ -1070,11 +1070,11 @@ impl Value {
 
     /// A map's keys in sorted order, if this is a map. Keys are plain owned [`MapKey`]s (never
     /// heap values — an extern key owns its box inline), so no refcounting is involved.
-    pub fn map_keys(self) -> Option<Vec<noeta_native::MapKey>> {
+    pub fn map_keys(self) -> Option<Vec<noeta_ext_abi::MapKey>> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
-                    let mut keys: Vec<noeta_native::MapKey> = entries.keys().cloned().collect();
+                    let mut keys: Vec<noeta_ext_abi::MapKey> = entries.keys().cloned().collect();
                     keys.sort_unstable();
                     Some(keys)
                 }
@@ -1091,7 +1091,7 @@ impl Value {
     /// buffer is sound only when no other owner can observe it. The map takes ownership of `value`
     /// (the caller transfers a reference); the returned displaced value's reference is handed back to
     /// the caller to release. Returns `None` (a no-op) if this is not a map.
-    pub fn map_insert(self, key: noeta_native::MapKey, value: Value) -> Option<Value> {
+    pub fn map_insert(self, key: noeta_ext_abi::MapKey, value: Value) -> Option<Value> {
         debug_assert!(
             !self.is_map() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "map_insert requires a uniquely-owned map (the COW invariant)"
@@ -1131,14 +1131,14 @@ impl Value {
 
     /// Remove an extern-type `key` **in place** (extern-types X4) — the extern twin of
     /// [`Value::map_remove`], same uniqueness requirement and handback contract.
-    pub fn map_remove_extern(self, key: &dyn noeta_native::ExternValue) -> Option<Value> {
+    pub fn map_remove_extern(self, key: &dyn noeta_ext_abi::ExternValue) -> Option<Value> {
         debug_assert!(
             !self.is_map() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "map_remove_extern requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
             let removed = heap::with_payload_mut(self, |p| match p {
-                Payload::Map(entries) => entries.remove(&noeta_native::ExternKeyRef(key)),
+                Payload::Map(entries) => entries.remove(&noeta_ext_abi::ExternKeyRef(key)),
                 _ => None,
             });
             heap::set_reflect(self, None);
@@ -1176,11 +1176,11 @@ impl Value {
     /// (extern-types X4) — the keyed twin of [`Value::map_entries`], for derived-map rebuilds
     /// that must preserve extern keys. Values share references (not retained), like
     /// [`Value::map_entries`].
-    pub fn map_entries_keyed(self) -> Option<Vec<(noeta_native::MapKey, Value)>> {
+    pub fn map_entries_keyed(self) -> Option<Vec<(noeta_ext_abi::MapKey, Value)>> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
-                    let mut kv: Vec<(noeta_native::MapKey, Value)> =
+                    let mut kv: Vec<(noeta_ext_abi::MapKey, Value)> =
                         entries.iter().map(|(k, v)| (k.clone(), *v)).collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                     Some(kv)
@@ -1260,17 +1260,17 @@ impl Value {
 
     /// The [`MapKey`] for a **key-capable `@packed` struct** value (P-PKEY), or `None` when this
     /// value is not one. Walks the fields in declaration order into plain
-    /// [`noeta_native::PackedKeyField`] data — the erased integer word (immediate or boxed),
+    /// [`noeta_ext_abi::PackedKeyField`] data — the erased integer word (immediate or boxed),
     /// bools, nested key-capable structs — plus the display form (render/JSON only, not
     /// identity). Both backends build keys from the same declarations, so identity, hash, and
     /// order agree by construction. The key is a snapshot holding no heap reference (`@packed`
     /// is value semantics, so it can never drift from an aliased original).
-    pub fn packed_map_key(self) -> Option<noeta_native::MapKey> {
+    pub fn packed_map_key(self) -> Option<noeta_ext_abi::MapKey> {
         let shape = self.shape()?;
         if !shape.key_capable {
             return None;
         }
-        Some(noeta_native::MapKey::packed(
+        Some(noeta_ext_abi::MapKey::packed(
             &shape.name,
             self.packed_key_fields()?,
         ))
@@ -1280,7 +1280,7 @@ impl Value {
     /// contract excludes — defensive: a `key_capable` shape's slots are ints/bools/nested-capable
     /// by construction, so `None` here means a compiler bug, and the caller falls back to the
     /// ordinary key error rather than corrupting a map.
-    fn packed_key_fields(self) -> Option<Vec<noeta_native::PackedKeyField>> {
+    fn packed_key_fields(self) -> Option<Vec<noeta_ext_abi::PackedKeyField>> {
         if !self.is_pointer() {
             return None;
         }
@@ -1293,15 +1293,15 @@ impl Value {
                 .iter()
                 .map(|v| {
                     if let Some(b) = v.as_bool() {
-                        Some(noeta_native::PackedKeyField::Bool(b))
+                        Some(noeta_ext_abi::PackedKeyField::Bool(b))
                     } else if let Some(i) = v.as_int() {
-                        Some(noeta_native::PackedKeyField::Int(i))
+                        Some(noeta_ext_abi::PackedKeyField::Int(i))
                     } else {
                         let shape = v.shape()?;
                         if !shape.key_capable {
                             return None;
                         }
-                        Some(noeta_native::PackedKeyField::Struct(
+                        Some(noeta_ext_abi::PackedKeyField::Struct(
                             shape.name.as_str().into(),
                             v.packed_key_fields()?.into_boxed_slice(),
                         ))
@@ -1326,8 +1326,8 @@ impl Value {
     /// Fill `out` (cleared first) with this object's primitive fields in slot (declared) order —
     /// the allocation-free shallow scalar projection under the ctx element loops (package-manager
     /// N3.4). `false` for a non-object or any non-primitive field (with `out` left cleared).
-    pub fn scalar_slots_into(self, out: &mut Vec<noeta_native::Scalar>) -> bool {
-        use noeta_native::Scalar;
+    pub fn scalar_slots_into(self, out: &mut Vec<noeta_ext_abi::Scalar>) -> bool {
+        use noeta_ext_abi::Scalar;
         out.clear();
         if !self.is_pointer() {
             return false;

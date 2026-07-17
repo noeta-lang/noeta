@@ -114,7 +114,7 @@ pub fn run(
     compiled: &Compiled,
     hook: Option<Box<dyn ProfileHook>>,
 ) -> (RunOutput, Option<Box<dyn ProfileHook>>) {
-    let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
+    let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(host) => Box::new(host),
         Err(err) => {
             return (
@@ -123,7 +123,7 @@ pub fn run(
             );
         }
     };
-    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
+    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_host_real::RealExecutor::new() {
         Ok(executor) => Box::new(executor),
         Err(err) => {
             return (

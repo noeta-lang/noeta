@@ -11,7 +11,7 @@
 //! This crate is compiled and linked only when a program depends on the `para-p2p` package — it is
 //! never part of a default (std-only) build. It is registered through the fixed native-extension
 //! convention: the package's native entry crate re-exports [`NOETA_EXTENSIONS`], which the composed
-//! toolchain aggregates and installs. The heavy p2panda transport stays in `noeta-runtime` behind
+//! toolchain aggregates and installs. The heavy p2panda transport stays in `noeta-host-real` behind
 //! the `ring-p2p` feature (the `p2p`/`synced` modules keep `ring: Some("ring-p2p")`), reached via
 //! the `P2p` host capability, so a program that never imports `para.p2p`/`para.synced` still sheds
 //! the whole iroh/QUIC tree from its shipped binary.
@@ -21,7 +21,7 @@ pub mod p2p;
 pub mod provider;
 pub mod synced;
 
-use noeta_native::registry::{ExtModule, ExtType, Extension};
+use noeta_ext_abi::registry::{ExtModule, ExtType, Extension};
 
 // `P2p` left the mandatory `Host` union (para-namespace arc): `para.p2p`/`para.synced` reach the
 // capability through [`crate::provider`], which prefers the host's real transport (`P2pProvider`)
@@ -50,7 +50,7 @@ impl Extension for ParaP2pExtension {
     /// The `ViewSourceExtract` capability the reactive engine's `view.expose` resolves a
     /// `SyncedSignal` through (see [`synced::SYNCED_CAPABILITIES`]) — declared on the unit so it is
     /// scoped to whatever registry this extension is assembled into.
-    fn capabilities(&self) -> &'static [noeta_native::registry::ExtCapability] {
+    fn capabilities(&self) -> &'static [noeta_ext_abi::registry::ExtCapability] {
         synced::SYNCED_CAPABILITIES
     }
 }

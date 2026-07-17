@@ -9,8 +9,8 @@
 //! duplicated. One shared body, so the backends agree by construction; the slot table owns every
 //! reference the loops juggle, so the early-exit paths cannot leak.
 
-use noeta_native::registry::{ExtFn, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtFn, RetTy, SigType};
+use noeta_ext_abi::{
     CtxError, CtxOut, CtxResult, ErrorKind, NativeCtx, NativeValue, Scalar, Slot, StdError,
     panic_error, type_error,
 };
@@ -83,7 +83,7 @@ pub fn task_ctx_dispatch(
 ) -> Result<CtxOut, CtxError> {
     match func {
         "sleep" => {
-            noeta_native::ctx_arity(func, args, 1)?;
+            noeta_ext_abi::ctx_arity(func, args, 1)?;
             let NativeValue::Scalar(Scalar::Int(ms)) = ctx.view(args[0])? else {
                 return Err(type_error(func, "int").into());
             };
@@ -96,7 +96,7 @@ pub fn task_ctx_dispatch(
         // `concurrent` scopes a round, then advance the clock — and when all three stall, wait
         // for an external (isolate) wake or report the deadlock.
         "all" => {
-            noeta_native::ctx_arity(func, args, 1)?;
+            noeta_ext_abi::ctx_arity(func, args, 1)?;
             let n = expect_list(ctx, func, args[0], "a list of futures")?;
             let futures = list_slots(ctx, args[0], n)?;
             let mut results: Vec<Option<Slot>> = vec![None; n];
@@ -125,7 +125,7 @@ pub fn task_ctx_dispatch(
         // `race(list)`: the first ready result returns; every other entry's task is cancelled
         // (cooperative — a loser never resumes past its last suspension).
         "race" => {
-            noeta_native::ctx_arity(func, args, 1)?;
+            noeta_ext_abi::ctx_arity(func, args, 1)?;
             let n = expect_list(ctx, func, args[0], "a list of futures")?;
             if n == 0 {
                 return Err(panic_error("`race` requires at least one future").into());
@@ -158,7 +158,7 @@ pub fn task_ctx_dispatch(
         // completions in item order, repeat. Freeing each item and resolved future keeps the
         // table bounded on long lists.
         "map_bounded" => {
-            noeta_native::ctx_arity(func, args, 3)?;
+            noeta_ext_abi::ctx_arity(func, args, 3)?;
             let count = expect_list(ctx, func, args[0], "a list")?;
             let NativeValue::Scalar(Scalar::Int(limit)) = ctx.view(args[1])? else {
                 return Err(StdError {
@@ -213,7 +213,7 @@ pub fn task_ctx_dispatch(
                 }
             }
         }
-        _ => Err(noeta_native::no_function_error("task", func).into()),
+        _ => Err(noeta_ext_abi::no_function_error("task", func).into()),
     }
 }
 

@@ -15,7 +15,7 @@
 
 use crate::{ErrorKind, ExternBox, ExternValue, Host, StdError};
 use jiff::{Span, Timestamp, Zoned as JiffZoned, tz::TimeZone};
-use noeta_native::registry::{
+use noeta_ext_abi::registry::{
     ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
 };
 use std::any::Any;
@@ -149,9 +149,9 @@ fn dt_error(message: impl Into<String>) -> StdError {
 }
 
 // --- Argument helpers ---------------------------------------------------------------------------
-// The shared guards come from `noeta_native::args` (audit-2 F8); `want_extern` is the
+// The shared guards come from `noeta_ext_abi::args` (audit-2 F8); `want_extern` is the
 // datetime-specific extractor (a typed extern downcast) and stays local.
-use noeta_native::args::{want_arity, want_int, want_str};
+use noeta_ext_abi::args::{want_arity, want_int, want_str};
 
 /// Downcast an extern-value argument to a concrete datetime type (`Instant`/`Duration`/…).
 fn want_extern<'a, T: 'static>(

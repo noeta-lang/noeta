@@ -270,7 +270,7 @@ fn render_type(t: &ExtType) -> TypeApi {
 }
 
 /// Project an [`ExtFn`] into the tool's shape. The rendering itself is the canonical
-/// [`ExtFn::render`]/[`SigType::render`] in `noeta-native` — the same renderer the LSP's
+/// [`ExtFn::render`]/[`SigType::render`] in `noeta-ext-abi` — the same renderer the LSP's
 /// completion detail uses, so every tooling surface shows one syntax.
 fn render_fn(f: &ExtFn) -> FnSig {
     FnSig {
@@ -362,7 +362,7 @@ mod tests {
         assert!(!out.modules.is_empty(), "catalog returned as fallback");
     }
 
-    // (SigType/RetTy/ExtFn rendering itself is covered where it lives — `noeta-native`'s
+    // (SigType/RetTy/ExtFn rendering itself is covered where it lives — `noeta-ext-abi`'s
     // `render_tests` — since the renderer is shared with the LSP's completion detail.)
 
     #[test]

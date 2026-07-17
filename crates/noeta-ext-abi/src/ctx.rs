@@ -397,7 +397,7 @@ pub trait NativeCtx {
 //
 // Deliberately NOT re-exported at the crate root: the method names mirror `NativeCtx`'s, so a
 // file that imported both traits (e.g. via a glob) would make every existing `ctx.retain(…)`
-// call ambiguous. Consumers name them explicitly (`noeta_native::ctx::PackedBuffers`) or
+// call ambiguous. Consumers name them explicitly (`noeta_ext_abi::ctx::PackedBuffers`) or
 // path-qualify the bound. The slot/call core is not split — that *is* NativeCtx.
 
 /// The **retained-arena** view of a [`NativeCtx`] (Class 3, H4/H5): cross-dispatch value

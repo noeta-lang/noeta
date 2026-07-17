@@ -21,8 +21,8 @@ noeta-span = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-stdlib = { workspace = true }
-noeta-native = { workspace = true }
-noeta-runtime = { workspace = true }
+noeta-ext-abi = { workspace = true }
+noeta-host-real = { workspace = true }
 
 [lints]
 workspace = true

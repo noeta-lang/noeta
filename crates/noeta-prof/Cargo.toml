@@ -24,7 +24,7 @@ noeta-compiler = { workspace = true }
 noeta-bytecode = { workspace = true }
 noeta-vm = { workspace = true }
 noeta-stdlib = { workspace = true }
-noeta-runtime = { workspace = true }
+noeta-host-real = { workspace = true }
 # Emit formats: speedscope JSON (serde_json) and an SVG flamegraph (inferno, from folded stacks).
 serde_json = { workspace = true }
 inferno = { workspace = true }

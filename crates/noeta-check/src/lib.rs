@@ -146,7 +146,7 @@ pub struct CheckOptions {
     /// A per-session extension [`Registry`] (instance-registry F2) to resolve native
     /// modules/functions/extern types/bundles against, instead of the process-global default. `None`
     /// routes every lookup through the default registry — identical to an ordinary check.
-    pub registry: Option<&'static noeta_native::registry::Registry>,
+    pub registry: Option<&'static noeta_ext_abi::registry::Registry>,
     /// Which language [`Edition`] governs each source, keyed by `SourceId` (editions arc): the loader
     /// builds it per merged program. Empty means every declaration is [`Edition::DEFAULT`].
     pub editions: EditionMap,
@@ -219,7 +219,7 @@ pub fn check_all_with_editions(program: &Program, editions: EditionMap) -> Check
 /// because a [`Registry`]'s lookups already return `&'static` data.
 pub fn check_all_with_registry(
     program: &Program,
-    registry: &'static noeta_native::registry::Registry,
+    registry: &'static noeta_ext_abi::registry::Registry,
 ) -> Checked {
     check_all_with(
         program,
@@ -233,7 +233,7 @@ pub fn check_all_with_registry(
 fn check_all_impl(
     program: &Program,
     record_expr_types: bool,
-    registry: Option<&'static noeta_native::registry::Registry>,
+    registry: Option<&'static noeta_ext_abi::registry::Registry>,
     editions: EditionMap,
 ) -> Checked {
     let mut checker = Checker {
@@ -373,7 +373,7 @@ impl SessionChecker {
     /// F2): every native name the session's entries reference resolves against `registry` rather
     /// than the process-global default — the session-mode counterpart of [`check_all_with_registry`],
     /// so an embedding host's REPL/debug console sees exactly the host's extension set.
-    pub fn with_registry(registry: &'static noeta_native::registry::Registry) -> SessionChecker {
+    pub fn with_registry(registry: &'static noeta_ext_abi::registry::Registry) -> SessionChecker {
         Self::with_options(CheckOptions {
             registry: Some(registry),
             ..CheckOptions::default()
@@ -668,7 +668,7 @@ impl TargetKind {
 struct BoundBundle {
     /// The owning module's root-qualified identity (`"std.vec"`).
     module: String,
-    bundle: &'static noeta_native::ExtBundle,
+    bundle: &'static noeta_ext_abi::ExtBundle,
     /// The binding's trait span — conflict reporting orders by it (the textually-later binding
     /// carries the diagnostic).
     span: Span,
@@ -793,7 +793,7 @@ struct Imports {
     modules: HashMap<String, String>,
     /// Names bound to a **namespace group** by `use std.http` — each mapped to the group's
     /// **root-qualified prefix** (`http` → `"std.http"`). A member access `http.client` resolves one
-    /// hop through [`noeta_native::registry::Registry::resolve_namespace_child`] against this prefix;
+    /// hop through [`noeta_ext_abi::registry::Registry::resolve_namespace_child`] against this prefix;
     /// a landing module identity is recorded in `namespace_module_sites` for lowering. The handle is
     /// not a value on its own — a bare reference is an error (a group must be dotted into).
     namespaces: HashMap<String, String>,
@@ -888,7 +888,7 @@ struct Config {
     /// the same set its paired VM runs against. `&'static` because a [`Registry`]'s lookups already
     /// return `&'static` (its units are static); the handle is `Copy`, so `Clone` (the transactional
     /// session snapshot) stays cheap.
-    registry: Option<&'static noeta_native::registry::Registry>,
+    registry: Option<&'static noeta_ext_abi::registry::Registry>,
     /// Which language [`Edition`] governs each source of the merged program, keyed by `SourceId`
     /// (editions compiler arc). The loader builds this from each package's own edition; the checker
     /// recovers a declaration's edition from its span via [`Checker::edition_at`]. Empty — the
@@ -928,10 +928,10 @@ impl Checker {
     /// process-global default. `&'static` because a registry's lookups already yield `&'static`
     /// data. Every stdlib/extern/tier lookup in the checker goes through here, so pointing a session
     /// at a different extension set is a single field — no lookup site knows which registry it holds.
-    fn reg(&self) -> &'static noeta_native::registry::Registry {
+    fn reg(&self) -> &'static noeta_ext_abi::registry::Registry {
         self.config
             .registry
-            .unwrap_or_else(noeta_native::registry::single_registry_process)
+            .unwrap_or_else(noeta_ext_abi::registry::single_registry_process)
     }
 
     /// The language [`Edition`] governing the declaration a `span` belongs to — resolved from the
@@ -995,7 +995,7 @@ impl Checker {
     /// The registered extern type a source annotation name resolves to **in this file's scope**, via
     /// the `use`-import map (`Uuid` → `std.id.Uuid`, an alias → its target) — or `None` if the name
     /// is not an imported native type. The scope-aware counterpart to a bare `registry::find_type`.
-    fn imported_extern(&self, name: &str) -> Option<&'static noeta_native::registry::ExtType> {
+    fn imported_extern(&self, name: &str) -> Option<&'static noeta_ext_abi::registry::ExtType> {
         self.imports
             .extern_types
             .get(name)

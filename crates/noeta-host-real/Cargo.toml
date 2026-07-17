@@ -1,5 +1,5 @@
 [package]
-name = "noeta-runtime"
+name = "noeta-host-real"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -33,7 +33,7 @@ reqwest = { workspace = true, optional = true }
 # over reqwest + serde_json — deliberately NOT `opentelemetry-otlp` (which drags tonic/prost), so a
 # telemetry build adds no protobuf/gRPC tree. Optional so a non-telemetry build links none of it.
 serde_json = { workspace = true, optional = true }
-# (para-namespace F2b) noeta-runtime no longer carries any p2p transport: `RealHost` dropped its
+# (para-namespace F2b) noeta-host-real no longer carries any p2p transport: `RealHost` dropped its
 # `P2p` impl, so the p2panda node + its whole iroh/QUIC tree left this crate entirely — it now lives
 # in `noeta-para-p2p-net`, owned by the `para.p2p` extension. This crate keeps only the `p2p_app_id`
 # config it surfaces to that extension via `P2pProvider::real_p2p`.

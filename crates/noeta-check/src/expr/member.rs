@@ -143,7 +143,7 @@ impl Checker {
         span: Span,
         call_span: Span,
     ) -> Option<Type> {
-        use noeta_native::BundleReceiver;
+        use noeta_ext_abi::BundleReceiver;
         let (type_name, receiver_kind) = match recv {
             Type::Named(n, targs) if targs.is_empty() => (n, BundleReceiver::Element),
             Type::List(elem) => match elem.as_ref() {
@@ -160,7 +160,7 @@ impl Checker {
                 .map(|m| ((b.module.clone(), b.bundle.name.to_string()), m))
         })?;
         let params = stdlib::bundle_method_params(self.reg(), &method.sig, args);
-        let required = noeta_native::SigType::required_count(method.sig.params);
+        let required = noeta_ext_abi::SigType::required_count(method.sig.params);
         self.check_args(&params, required, args, &[], span, name);
         self.sites.bundle_call_sites.insert(call_span, route);
         Some(stdlib::bundle_method_return(
@@ -228,7 +228,7 @@ impl Checker {
     /// (`http.v2` → `"std.http.v2"`). `None` for anything that is not a pure namespace path — a
     /// value, a concrete module, or a type. A local binding shadows a namespace of the same name.
     pub(crate) fn resolve_namespace_prefix(&self, expr: &Expr, env: &Env) -> Option<String> {
-        use noeta_native::registry::NsChild;
+        use noeta_ext_abi::registry::NsChild;
         match expr {
             Expr::Ident { name, .. } if lookup(env, name).is_none() => {
                 self.imports.namespaces.get(name).cloned()
@@ -250,7 +250,7 @@ impl Checker {
     /// [`Rvalue::NativeModule`] carrying the leaf identity. `None` when the chain is not a namespace
     /// path or the final hop is not a module (a sub-namespace, a type, or unresolved).
     pub(crate) fn resolve_namespace_module(&mut self, expr: &Expr, env: &Env) -> Option<String> {
-        use noeta_native::registry::NsChild;
+        use noeta_ext_abi::registry::NsChild;
         let Expr::Member {
             receiver,
             name,
@@ -365,7 +365,7 @@ impl Checker {
         // own, so this precedes the generic receiver synth below (which would treat `http` as an
         // unknown name).
         if let Some(prefix) = self.resolve_namespace_prefix(receiver, env) {
-            use noeta_native::registry::NsChild;
+            use noeta_ext_abi::registry::NsChild;
             match self.reg().resolve_namespace_child(&prefix, name) {
                 NsChild::Module(qm) => {
                     self.sites.namespace_module_sites.insert(member_span, qm);

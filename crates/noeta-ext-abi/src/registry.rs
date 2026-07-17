@@ -814,7 +814,7 @@ pub trait Extension: Sync {
 /// The provider declares this on its [`Extension::capabilities`]; a consumer asks for it with
 /// `capability::<dyn Trait>(ctx)`. The broker matches on [`ExtCapability::id`], ensures the backing
 /// [`ExtState`](crate::ExtState) exists, and calls [`ExtCapability::build`] to mint the erased
-/// trait-object handle. `noeta-native` never names any concrete capability trait — only stores and
+/// trait-object handle. `noeta-ext-abi` never names any concrete capability trait — only stores and
 /// vends these erased thunks.
 pub struct ExtCapability {
     /// The capability trait's `TypeId`, e.g. `|| TypeId::of::<dyn ReactiveSource>()`. A thunk

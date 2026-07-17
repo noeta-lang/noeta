@@ -76,13 +76,13 @@ jobs:
         run: cargo test -p noeta-cli --no-default-features --locked
       # The lean feature SHAPES the AOT/native-size/p2p stories depend on, checked cheaply so a
       # latent gap can't hide until a slow `build --native` e2e (it has before: a ring-less native
-      # build once failed on tokio's private sync module — see noeta-runtime/Cargo.toml). These are
+      # build once failed on tokio's private sync module — see noeta-host-real/Cargo.toml). These are
       # `cargo check` only: the goal is "compiles in this shape", not another test run.
       - name: lean feature shapes compile (aot / no-default hosts / ring-p2p)
         run: |
           cargo check -p noeta-vm --no-default-features --features aot --locked
           cargo check -p noeta-vm --no-default-features --features jit,aot --locked
-          cargo check -p noeta-runtime --no-default-features --locked
+          cargo check -p noeta-host-real --no-default-features --locked
           cargo check -p noeta-stdlib --no-default-features --locked
           cargo check -p noeta-para-p2p --features ring-p2p --locked
 

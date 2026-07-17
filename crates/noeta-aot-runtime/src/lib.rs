@@ -129,9 +129,9 @@ fn load_embedded_module() -> Result<Module, String> {
 fn run_native(module: std::sync::Arc<Module>) -> (noeta_vm::RunResult, Vec<noeta_vm::TraceFrame>) {
     let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(|| {
         let host: Box<dyn noeta_stdlib::Host> =
-            Box::new(noeta_runtime::RealHost::new().expect("cannot start an isolate's runtime"));
+            Box::new(noeta_host_real::RealHost::new().expect("cannot start an isolate's runtime"));
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
-            noeta_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
+            noeta_host_real::RealExecutor::new().expect("cannot start an isolate's async executor"),
         );
         (host, executor)
     });

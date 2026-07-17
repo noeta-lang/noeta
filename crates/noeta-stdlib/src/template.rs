@@ -9,8 +9,8 @@
 //! values with a native handler — the closures arrive as opaque slots and are invoked through the
 //! [`NativeCtx`] higher-order capability, exactly like `cell.update`'s callback.
 
-use noeta_native::registry::{ExtFn, NativeOut, NativeValue, RetTy, SigType};
-use noeta_native::{CtxError, CtxOut, NativeCtx, Slot, ctx_arity, no_function_error};
+use noeta_ext_abi::registry::{ExtFn, NativeOut, NativeValue, RetTy, SigType};
+use noeta_ext_abi::{CtxError, CtxOut, NativeCtx, Slot, ctx_arity, no_function_error};
 
 /// `render(statics: List<string>, holes: List<() -> string>): string` — the `@json` handler. Holes
 /// are `() -> string` (each rendered value JSON-quoted), so a `${value}` is always injected as a

@@ -12,8 +12,8 @@
 use std::any::Any;
 use std::cmp::Ordering;
 
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     CtxError, CtxOut, CtxResult, ExternValue, NativeCtx, Retained, Slot, ctx_arity,
     no_function_error,
 };
@@ -116,7 +116,7 @@ pub fn cell_ctx_dispatch<C: NativeCtx + ?Sized>(
             ctx_arity(func, args, 1)?;
             let retained = ctx.retain(args[0])?;
             Ok(CtxOut::Out(NativeOut::Extern(
-                noeta_native::ExternBox::new(CellBox { retained }),
+                noeta_ext_abi::ExternBox::new(CellBox { retained }),
             )))
         }
         _ => Err(no_function_error("cell", func).into()),
@@ -150,7 +150,7 @@ pub fn cell_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx.retained_set(retained, new)?;
             Ok(CtxOut::Slot(new))
         }
-        _ => Err(noeta_native::no_method_error(CELL_TYPE_NAME, method).into()),
+        _ => Err(noeta_ext_abi::no_method_error(CELL_TYPE_NAME, method).into()),
     }
 }
 

@@ -22,16 +22,16 @@
 //!
 //! The native-extension **ABI** — the [`registry`] contract, the [`Host`] capability seam, the
 //! neutral marshalling ([`NativeValue`]/[`NativeOut`]), and the Ring 1 primitives — lives in the
-//! lean [`noeta_native`] crate (P-NATIVE) so a third-party extension does not drag core's batteries
-//! (crypto/uuid/json). `noeta-stdlib` re-exports it (`pub use noeta_native::*`) and layers the
+//! lean [`noeta_ext_abi`] crate (P-NATIVE) so a third-party extension does not drag core's batteries
+//! (crypto/uuid/json). `noeta-stdlib` re-exports it (`pub use noeta_ext_abi::*`) and layers the
 //! concrete `std` modules on top: the `core`/`std` relationship. Every existing `noeta_stdlib::`
 //! path keeps resolving.
 
 // The ABI — the [`registry`] contract, the [`Host`] capability seam, the extern-value contract,
 // the neutral marshalling, `MapKey`, the async executor seam, and the Ring 1 primitives — lives in
-// `noeta-native` and is re-exported here (the `core`/`std` relation), so every existing
+// `noeta-ext-abi` and is re-exported here (the `core`/`std` relation), so every existing
 // `noeta_stdlib::` path resolves unchanged.
-pub use noeta_native::*;
+pub use noeta_ext_abi::*;
 
 pub mod cell;
 pub mod crypto;
@@ -63,7 +63,7 @@ pub mod tiers;
 pub mod tracing;
 pub mod vec3;
 
-// The stdlib-only surface (the ABI items above arrive via the `noeta_native::*` glob).
+// The stdlib-only surface (the ABI items above arrive via the `noeta_ext_abi::*` glob).
 pub use handle::{FileHandle, FileMode, Flush};
 pub use host::{CounterIds, DeterministicClock, DeterministicEntropy, SandboxHost, SeededRng};
 pub use iter::IterMethod;

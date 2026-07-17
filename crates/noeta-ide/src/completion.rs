@@ -242,7 +242,7 @@ pub fn bundle_members(
                 label: m.sig.name.to_string(),
                 kind: CandidateKind::Method,
                 // Parameter types via the canonical registry-signature renderer
-                // (`SigType::render` in noeta-native, shared with the MCP `stdlib_api` tool),
+                // (`SigType::render` in noeta-ext-abi, shared with the MCP `stdlib_api` tool),
                 // with the bundle provenance as a suffix.
                 detail: Some(format!(
                     "fn {}({}) [{}.{}]",

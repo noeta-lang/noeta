@@ -33,8 +33,8 @@
 use std::any::Any;
 use std::cmp::Ordering;
 
-use noeta_native::registry::{ExtCapability, ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtCapability, ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     ArenaGetter, AttrValue, CtxError, CtxOut, ErrorKind, ExtState, ExternValue, NativeCtx,
     Retained, Slot, SpanKind, SpanStatus, StdError, ctx_arity, no_function_error,
 };
@@ -392,7 +392,7 @@ struct ViewBinding {
 // CRDT-backed signal is the first client: a shared value that `computed`/`effect` track, and that a
 // peer merge wakes so the graph reruns those dependents.
 //
-// The consumer obtains the capability per-run via `noeta_native::capability::<dyn ReactiveSource>`.
+// The consumer obtains the capability per-run via `noeta_ext_abi::capability::<dyn ReactiveSource>`.
 // The handle owns a clone of the engine's `ExtState`, so — exactly like the module dispatches below —
 // each method borrows the cell for its own work and releases before any re-entry into user code
 // (the flush runs effect bodies, which may re-enter reactive and take their own shared borrow of the
@@ -433,7 +433,7 @@ impl ReactiveSource for ReactiveSourceHandle {
 
 /// Build the erased `ReactiveSource` handle from the engine's backing state — the [`ExtCapability`]
 /// `build` thunk. Boxes a `Box<dyn ReactiveSource>` (a sized fat pointer) as `Box<dyn Any>`, which
-/// `noeta_native::capability` recovers by a safe downcast.
+/// `noeta_ext_abi::capability` recovers by a safe downcast.
 fn build_reactive_source(state: ExtState) -> Box<dyn Any> {
     let handle: Box<dyn ReactiveSource> = Box::new(ReactiveSourceHandle { state });
     Box::new(handle)
@@ -550,7 +550,7 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
     match method {
         "expose" => {
             ctx_arity(method, args, 2)?;
-            let noeta_native::registry::NativeValue::Str(name) = ctx.view(args[0])? else {
+            let noeta_ext_abi::registry::NativeValue::Str(name) = ctx.view(args[0])? else {
                 return Err(StdError {
                     kind: ErrorKind::ArgType,
                     message: "view.expose: the binding name must be a string".to_string(),
@@ -562,7 +562,7 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             // signal node (LiveView over synced state), recognized via the foreign extension's
             // `ViewSourceExtract` capability. Resolved up front because the broker needs `ctx`,
             // which `with_extern` borrows; `None` just means no installed extension provides one.
-            let foreign = noeta_native::capability::<dyn ViewSourceExtract, C>(ctx);
+            let foreign = noeta_ext_abi::capability::<dyn ViewSourceExtract, C>(ctx);
             let mut found: Option<(NodeId, ViewSource)> = None;
             let _ = ctx.with_extern(args[1], &mut |e| {
                 if let Some(s) = e.as_any().downcast_ref::<SignalBox>() {
@@ -733,7 +733,7 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 view_frame("patch", "changes", &entries),
             )))))
         }
-        _ => Err(noeta_native::no_method_error(VIEW_TYPE_NAME, method).into()),
+        _ => Err(noeta_ext_abi::no_method_error(VIEW_TYPE_NAME, method).into()),
     }
 }
 
@@ -760,7 +760,7 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
             let node = ext.graph.signal(cell);
             Ok(CtxOut::Out(NativeOut::Extern(
-                noeta_native::ExternBox::new(SignalBox { node, cell }),
+                noeta_ext_abi::ExternBox::new(SignalBox { node, cell }),
             )))
         }
         "computed" => {
@@ -778,7 +778,7 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             // Created dirty — the memo gate is now closed until the first read.
             sync_gates(ctx, ext);
             Ok(CtxOut::Out(NativeOut::Extern(
-                noeta_native::ExternBox::new(ComputedBox { node, body, memo }),
+                noeta_ext_abi::ExternBox::new(ComputedBox { node, body, memo }),
             )))
         }
         "effect" => {
@@ -795,7 +795,7 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
                 drive_flush(ctx, ext)?;
             }
             Ok(CtxOut::Out(NativeOut::Extern(
-                noeta_native::ExternBox::new(EffectBox { node, body }),
+                noeta_ext_abi::ExternBox::new(EffectBox { node, body }),
             )))
         }
         "view" => {
@@ -812,7 +812,7 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
                 views.len() - 1
             };
             Ok(CtxOut::Out(NativeOut::Extern(
-                noeta_native::ExternBox::new(ViewBox { id }),
+                noeta_ext_abi::ExternBox::new(ViewBox { id }),
             )))
         }
         _ => Err(no_function_error("reactive", func).into()),
@@ -884,7 +884,7 @@ pub fn signal_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             }
             Ok(CtxOut::Out(NativeOut::Unit))
         }
-        _ => Err(noeta_native::no_method_error(SIGNAL_TYPE_NAME, method).into()),
+        _ => Err(noeta_ext_abi::no_method_error(SIGNAL_TYPE_NAME, method).into()),
     }
 }
 
@@ -927,7 +927,7 @@ pub fn computed_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             }
             Ok(CtxOut::Retained(memo))
         }
-        _ => Err(noeta_native::no_method_error(COMPUTED_TYPE_NAME, method).into()),
+        _ => Err(noeta_ext_abi::no_method_error(COMPUTED_TYPE_NAME, method).into()),
     }
 }
 
@@ -960,7 +960,7 @@ pub fn effect_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx.release_retained(body);
             Ok(CtxOut::Out(NativeOut::Unit))
         }
-        _ => Err(noeta_native::no_method_error(EFFECT_TYPE_NAME, method).into()),
+        _ => Err(noeta_ext_abi::no_method_error(EFFECT_TYPE_NAME, method).into()),
     }
 }
 

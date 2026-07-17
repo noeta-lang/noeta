@@ -151,7 +151,7 @@ impl ExternIo for FsIo {
 /// backends; the executor owns only *time*. When a poll round makes no progress, the backend asks the
 /// executor to [`advance`](Executor::advance) — jump to the next scheduled event — and re-polls. Two
 /// impls back this: [`SandboxExecutor`] (deterministic logical time, the one the differential always
-/// runs → in-oracle) and the CLI-only `RealExecutor` in `noeta-runtime` (real wall-clock time via a
+/// runs → in-oracle) and the CLI-only `RealExecutor` in `noeta-host-real` (real wall-clock time via a
 /// tokio timer → out-of-oracle). Both drive the *same* backend scheduler, so they agree on ordering
 /// by construction; only the meaning of "time" differs.
 ///

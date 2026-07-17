@@ -205,7 +205,7 @@ impl Checker {
         let mut conflicts: Vec<String> = Vec::new();
         for m in bundle.methods {
             match m.receiver {
-                noeta_native::BundleReceiver::Element => {
+                noeta_ext_abi::BundleReceiver::Element => {
                     if self
                         .symbols
                         .methods
@@ -228,7 +228,7 @@ impl Checker {
                         ));
                     }
                 }
-                noeta_native::BundleReceiver::Bulk => {
+                noeta_ext_abi::BundleReceiver::Bulk => {
                     if stdlib::method_return(
                         self.reg(),
                         &Type::List(Box::new(Type::Dyn)),

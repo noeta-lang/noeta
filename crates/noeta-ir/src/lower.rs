@@ -81,7 +81,7 @@ pub struct LoweringSites<'a> {
     /// to a single [`Rvalue::IndexField`], reading a packed element's field without materializing it.
     pub index_field_sites: &'a HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::TypedModuleCall`].
-    pub typed_module_call_sites: &'a HashMap<Span, noeta_native::TypeRecipe>,
+    pub typed_module_call_sites: &'a HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// `for` spans whose iterable is statically an `Iterator<T>` → the lowered [`Stmt::For`] streams
     /// via `next()` rather than snapshotting a list (Track I.2).
     pub for_stream_sites: &'a HashSet<Span>,
@@ -117,7 +117,7 @@ impl LoweringSites<'static> {
         use std::sync::OnceLock;
         static PACKED: OnceLock<HashMap<Span, noeta_ast::reflect::PackedLayout>> = OnceLock::new();
         static SPANS: OnceLock<HashSet<Span>> = OnceLock::new();
-        static RECIPES: OnceLock<HashMap<Span, noeta_native::TypeRecipe>> = OnceLock::new();
+        static RECIPES: OnceLock<HashMap<Span, noeta_ext_abi::TypeRecipe>> = OnceLock::new();
         static WIDTHS: OnceLock<HashMap<Span, (bool, u8)>> = OnceLock::new();
         static REPRS: OnceLock<HashMap<Span, noeta_ast::reflect::TypeRepr>> = OnceLock::new();
         static HANDLES: OnceLock<HashMap<Span, (String, String, bool)>> = OnceLock::new();
@@ -194,14 +194,14 @@ pub struct LowerOptions {
     /// lower to the right qualified identity. The production/CLI path keeps the process-global
     /// default; an embed session threads its own assembled set, so a session's compile honors
     /// its extensions.
-    pub registry: &'static noeta_native::registry::Registry,
+    pub registry: &'static noeta_ext_abi::registry::Registry,
 }
 
 impl Default for LowerOptions {
     fn default() -> Self {
         LowerOptions {
             real_isolates: false,
-            registry: noeta_native::registry::single_registry_process(),
+            registry: noeta_ext_abi::registry::single_registry_process(),
         }
     }
 }
@@ -295,7 +295,7 @@ struct Lowerer<'a> {
     /// The extension registry a **native** expression tier's handler resolves against
     /// (instance-registry IR5): an `@json` block's `ExtTier::handler` is looked up here, so an
     /// embed session's own extension-declared expression tier lowers against *its* registry.
-    registry: &'static noeta_native::registry::Registry,
+    registry: &'static noeta_ext_abi::registry::Registry,
 }
 
 /// Build the narrowing-identity map (see [`Lowerer::type_aliases`]) from a program's `use`
@@ -303,7 +303,7 @@ struct Lowerer<'a> {
 /// user-type import resolves to its leaf name.
 fn collect_type_aliases(
     program: &AstProgram,
-    registry: &'static noeta_native::registry::Registry,
+    registry: &'static noeta_ext_abi::registry::Registry,
 ) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for stmt in &program.stmts {
@@ -1195,8 +1195,8 @@ impl Lowerer<'_> {
                     // `Method` (which would compute on the full erased i64). A `Convert` (`to_*`) is not
                     // width-relative — it stays an ordinary method.
                     if let Some(&(_, bits)) = self.sites.width_sites.get(span)
-                        && let Some(method) = noeta_native::IntMethod::from_name(name)
-                        && !matches!(method, noeta_native::IntMethod::Convert { .. })
+                        && let Some(method) = noeta_ext_abi::IntMethod::from_name(name)
+                        && !matches!(method, noeta_ext_abi::IntMethod::Convert { .. })
                     {
                         return Ok(self.emit(
                             out,

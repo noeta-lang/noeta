@@ -321,7 +321,7 @@ fn relevant_path(path: &Path) -> bool {
 pub(crate) fn spawn_hot_watcher(
     entry: std::path::PathBuf,
     mailbox: noeta_vm::HotSwapMailbox,
-    wake: std::sync::Arc<noeta_runtime::Notify>,
+    wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
     std::thread::spawn(move || hot_watcher(entry, mailbox, wake));
 }
@@ -329,7 +329,7 @@ pub(crate) fn spawn_hot_watcher(
 fn hot_watcher(
     entry: std::path::PathBuf,
     mailbox: noeta_vm::HotSwapMailbox,
-    wake: std::sync::Arc<noeta_runtime::Notify>,
+    wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
     let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.clone());
     // The baseline: the source that is currently RUNNING (read back at spawn — the run thread
@@ -482,7 +482,7 @@ fn hot_watcher(
 /// Rouse every worker executor parked on the shared wake (server-hmr F5): `notify_waiters` wakes
 /// all currently-parked accepts at once, and `notify_one` leaves a stored permit for a worker
 /// racing into its wait.
-fn wake_all(wake: &noeta_runtime::Notify) {
+fn wake_all(wake: &noeta_host_real::Notify) {
     wake.notify_waiters();
     wake.notify_one();
 }

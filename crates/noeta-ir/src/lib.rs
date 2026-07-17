@@ -149,7 +149,7 @@ pub enum Rvalue {
     /// Reduce a value to its fixed-width integer range (Tier W). Emitted by lowering immediately
     /// after a width-bearing op — same-width `+ - *` and unary `-` on an `IntN` — because fixed-width
     /// values are erased to i64 and the arithmetic runs full-width; this wraps the result back into
-    /// the declared width via `noeta_native::mask_to_width(value, signed, bits)`. Both backends apply
+    /// the declared width via `noeta_ext_abi::mask_to_width(value, signed, bits)`. Both backends apply
     /// the identical helper, so wraparound agrees by construction. Pure, single-operand (like
     /// [`Rvalue::Unary`]); never appears on the boxed/REPL path (only IntN arithmetic produces it).
     MaskWidth {
@@ -198,12 +198,12 @@ pub enum Rvalue {
     /// `leading_zeros`/`rotate_*`/`reverse_bits`/… on an `IntN` receiver, which must act on the low
     /// `bits` bits rather than the full erased i64 (`(1u8).leading_zeros() == 7`). Emitted (in place of
     /// a generic `Method`) when the checker marks a call site as an `IntN`-receiver intrinsic; both
-    /// backends compute it via the shared `noeta_native::int_method_width`. `args` holds the sole
+    /// backends compute it via the shared `noeta_ext_abi::int_method_width`. `args` holds the sole
     /// `rotate_*` shift amount (empty for the nullary intrinsics). `method` is never `Convert` (a
     /// width-typed conversion stays an ordinary `Method`, resolved by `int_method`).
     WidthIntMethod {
         receiver: Atom,
-        method: noeta_native::IntMethod,
+        method: noeta_ext_abi::IntMethod,
         args: Vec<Atom>,
         bits: u8,
         span: Span,
@@ -502,7 +502,7 @@ pub enum Rvalue {
         module: String,
         func: String,
         args: Vec<Atom>,
-        recipe: Option<noeta_native::TypeRecipe>,
+        recipe: Option<noeta_ext_abi::TypeRecipe>,
         span: Span,
     },
     /// A **native module function as a first-class value** (expr-tiers arc) — the same value a

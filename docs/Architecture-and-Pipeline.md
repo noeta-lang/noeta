@@ -68,7 +68,7 @@ The dependency edges form a strict DAG (no back-edges). `noeta-span` is depended
 | IR & memory | `noeta-ir` (ANF), `noeta-ir-passes` (liveness → drops → reuse) |
 | Backends | `noeta-backend` (the seam), `noeta-eval` (reference), `noeta-compiler` + `noeta-bytecode` + `noeta-vm` (the VM), `noeta-builtins` |
 | VM value model | `noeta-object` (shapes), `noeta-value` (NaN-boxed values — the one `unsafe` crate), `noeta-gc` (cycle collector) |
-| Runtime & host | `noeta-stdlib` (shared semantics + `Host`), `noeta-runtime` (the real host) |
+| Runtime & host | `noeta-stdlib` (shared semantics + `Host`), `noeta-host-real` (the real host) |
 | Tooling | `noeta-loader` (modules), `noeta-db` (salsa), `noeta-conformance` (the harness), `noeta-cli` (the binary) |
 
 Each crate carries its own `README.md` as its primary documentation. The following pages go deep on the individual techniques:

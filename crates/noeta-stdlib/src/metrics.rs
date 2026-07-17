@@ -1,6 +1,6 @@
 //! `std.metrics` — the metrics SDK surface (native OTEL, Phase M).
 //!
-//! A facade over the [`Metrics`](noeta_native::Metrics) Host capability. Instruments are
+//! A facade over the [`Metrics`](noeta_ext_abi::Metrics) Host capability. Instruments are
 //! **long-lived and host-owned**: a constructor (`counter`/`up_down_counter`/`histogram`/`gauge`) is
 //! get-or-create by name, returning an extern handle (`Counter`/`Histogram`/`Gauge`) that wraps the
 //! opaque [`InstrumentId`], exactly as `Span` wraps a `SpanId`. Aggregation (sums, histogram buckets)
@@ -22,8 +22,8 @@
 use std::any::Any;
 use std::cmp::Ordering;
 
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     AttrValue, CtxError, CtxOut, CtxResult, ExternBox, ExternValue, Host, InstrumentId,
     InstrumentKind, MetricValue, NativeCtx, NativeValue, Scalar, Slot, StdError, arity_error,
     ctx_arity, no_function_error, no_method_error, type_error,

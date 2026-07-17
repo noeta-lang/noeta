@@ -7,7 +7,7 @@ use crate::support::*;
 
 /// Lay out an app + a dependency package carrying a **native entry crate** (the Phase-3 proving
 /// package): module `fx` (plain dispatch), extern type `Acc` (plain methods + a higher-order ctx
-/// method), and an `fx-info` ExtCommand. The crate depends on this workspace's `noeta-native` by
+/// method), and an `fx-info` ExtCommand. The crate depends on this workspace's `noeta-ext-abi` by
 /// path and exports the composition convention symbol `NOETA_EXTENSIONS`.
 fn composed_project(name: &str) -> PathBuf {
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -67,12 +67,12 @@ fn composed_project(name: &str) -> PathBuf {
         format!(
             "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
              [lib]\npath = \"src/lib.rs\"\n\n\
-             [dependencies]\nnoeta-native = {{ path = \"{}\" }}\n\n\
+             [dependencies]\nnoeta-ext-abi = {{ path = \"{}\" }}\n\n\
              # dev-deps D5: the mixed package gates its dev formatter behind `fmt` (a real crate would\n\
              # also put `malva`/etc. behind it as `dep:`). Off by default — a shipped runner never\n\
              # enables it; the dev toolchain does.\n\
              [features]\nfmt = []\n\n[workspace]\n",
-            workspace.join("crates").join("noeta-native").display()
+            workspace.join("crates").join("noeta-ext-abi").display()
         ),
     )
     .unwrap();
@@ -90,11 +90,11 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrd};
 
-use noeta_native::registry::{
+use noeta_ext_abi::registry::{
     BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, ExtBundle, ExtFn, ExtModule,
     ExtType, Extension, NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, SigType,
 };
-use noeta_native::{
+use noeta_ext_abi::{
     no_function_error, no_method_error, CommandCtx, CtxError, CtxOut, ErrorKind, ExtCommand,
     ExternValue, Host, NativeCtx, ParsedArgs, Slot, StdError,
 };
@@ -125,7 +125,7 @@ fn fx_dispatch(
                 message: "`fx.double` expects an int".to_string(),
             }),
         },
-        "acc" => Ok(NativeOut::Extern(noeta_native::ExternBox(Box::new(
+        "acc" => Ok(NativeOut::Extern(noeta_ext_abi::ExternBox(Box::new(
             Acc::default(),
         )))),
         _ => Err(no_function_error("fx", func)),
@@ -370,8 +370,8 @@ const PIXELS_BUNDLE: ExtBundle = ExtBundle {
 fn pixels_bundle_dispatch(
     method: &str,
     ctx: &mut dyn NativeCtx,
-    recv: noeta_native::Slot,
-    args: &[noeta_native::Slot],
+    recv: noeta_ext_abi::Slot,
+    args: &[noeta_ext_abi::Slot],
 ) -> Result<CtxOut, CtxError> {
     match method {
         // `ps.brighten(delta)` ≡ `fx.brighten_all(ps, delta)` — one kernel, two surfaces.
@@ -423,7 +423,7 @@ impl Extension for ImgfxExtension {
     // features (fmt OFF), so the formatter and marker are absent from the artifact; the dev toolchain
     // would enable `fmt` to reflow this extension's tier bodies under `noeta fmt`.
     #[cfg(feature = "fmt")]
-    fn body_formatters(&self) -> &'static [noeta_native::registry::BodyFormatter] {
+    fn body_formatters(&self) -> &'static [noeta_ext_abi::registry::BodyFormatter] {
         &[("imgfx", imgfx_reformat)]
     }
 }
@@ -434,7 +434,7 @@ impl Extension for ImgfxExtension {
 fn imgfx_reformat(
     body: &str,
     _indent: &str,
-    _sub: &noeta_native::registry::SubFormat,
+    _sub: &noeta_ext_abi::registry::SubFormat,
 ) -> Option<String> {
     const MARKER: &str = "IMGFX_FMT_ONLY_MARKER_7c4e9a";
     Some(format!("{MARKER}:{}", body.trim()))
@@ -603,7 +603,7 @@ fn doc_api_in_a_composed_toolchain_documents_the_native_package() {
     // The publish namespace lint (`--lint`) passes on the well-namespaced fixture. The negative
     // case — a type omitting `namespace:` and so defaulting to `std` — no longer *reaches* the
     // lint: registry assembly refuses the unit at startup (`validate()`, unit-tested in
-    // noeta-native as `a_type_namespace_outside_the_units_root_is_rejected`), so a sloppy package
+    // noeta-ext-abi as `a_type_namespace_outside_the_units_root_is_rejected`), so a sloppy package
     // fails at its very first composed run with the type named, not at publish time.
     let lint = std::process::Command::new(&composed)
         .args(["doc", "--api", "--root", "imgfx", "--lint"])

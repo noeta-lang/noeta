@@ -4,7 +4,7 @@
 //! effect* — it never re-enters program output — so telemetry is real-host-only and **never
 //! differential-tested**: the two backends produce identical `RunResult`s regardless of what they
 //! emit. The deterministic sandbox provides an in-memory recorder (in `noeta-stdlib`) purely so
-//! conformance can assert on emitted spans; the real host exports OTLP (in `noeta-runtime`).
+//! conformance can assert on emitted spans; the real host exports OTLP (in `noeta-host-real`).
 //!
 //! Only **neutral data** crosses this seam — no backend value and no OTel-crate type leaks into the
 //! ABI. The `std.tracing` extension marshals language values into [`AttrValue`]/`&str`, holds the

@@ -8,7 +8,7 @@
 use crate::*;
 
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
-/// `RealHost` + `RealExecutor`), so `noeta-vm` stays free of `noeta-runtime`/tokio. `Send + Sync` so the
+/// `RealHost` + `RealExecutor`), so `noeta-vm` stays free of `noeta-host-real`/tokio. `Send + Sync` so the
 /// worker closure can carry a clone across the thread boundary.
 pub type IsolateFactory =
     Arc<dyn Fn() -> (Box<dyn noeta_stdlib::Host>, Box<dyn noeta_stdlib::Executor>) + Send + Sync>;

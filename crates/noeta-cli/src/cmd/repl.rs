@@ -30,9 +30,9 @@ pub(crate) enum ReplStep {
 pub(crate) fn real_repl_env() -> noeta_vm::HostFactory {
     Box::new(|| {
         let host: Box<dyn noeta_stdlib::Host> =
-            Box::new(noeta_runtime::RealHost::new().expect("cannot start the REPL's runtime"));
+            Box::new(noeta_host_real::RealHost::new().expect("cannot start the REPL's runtime"));
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
-            noeta_runtime::RealExecutor::new().expect("cannot start the REPL's async executor"),
+            noeta_host_real::RealExecutor::new().expect("cannot start the REPL's async executor"),
         );
         (host, executor)
     })

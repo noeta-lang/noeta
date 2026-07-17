@@ -63,7 +63,7 @@ pub(crate) fn install_shutdown_handler() {
             noeta_stdlib::serve::request_shutdown();
             // Wake every blocked worker (server-hmr S1: `notify_waiters` rouses all currently
             // parked accepts at once) plus one stored permit for a worker racing into its wait.
-            let wake = noeta_runtime::shutdown_notify();
+            let wake = noeta_host_real::shutdown_notify();
             wake.notify_waiters();
             wake.notify_one();
             // A second Ctrl-C during the drain forces an immediate exit.
@@ -443,7 +443,7 @@ pub(crate) fn run_worker(
     args: Vec<String>,
     app_id: Option<String>,
 ) -> u8 {
-    let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
+    let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(h) => Box::new(
             h.with_args(args.clone())
                 .with_p2p_app(app_id.clone())
@@ -454,7 +454,7 @@ pub(crate) fn run_worker(
             return 1;
         }
     };
-    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
+    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_host_real::RealExecutor::new() {
         Ok(ex) => Box::new(ex),
         Err(e) => {
             eprintln!("noeta: cannot start a worker executor: {e}");
@@ -464,13 +464,13 @@ pub(crate) fn run_worker(
     let app_id_for_factory = app_id.clone();
     let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(move || {
         let host: Box<dyn noeta_stdlib::Host> = Box::new(
-            noeta_runtime::RealHost::new()
+            noeta_host_real::RealHost::new()
                 .expect("cannot start a nested isolate's runtime")
                 .with_args(args.clone())
                 .with_p2p_app(app_id_for_factory.clone()),
         );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
-            noeta_runtime::RealExecutor::new().expect("cannot start a nested isolate's executor"),
+            noeta_host_real::RealExecutor::new().expect("cannot start a nested isolate's executor"),
         );
         (host, executor)
     });
@@ -503,7 +503,7 @@ pub(crate) fn serve_parallel_hot(
 ) -> u8 {
     let _ = sources;
     let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::default());
-    let wake = std::sync::Arc::new(noeta_runtime::Notify::new());
+    let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),
         std::sync::Arc::clone(&mailbox),
@@ -550,7 +550,7 @@ pub(crate) fn run_worker_hot(
     sites: noeta_compiler::Sites,
     listener: std::net::TcpListener,
     mailbox: noeta_vm::HotSwapMailbox,
-    wake: std::sync::Arc<noeta_runtime::Notify>,
+    wake: std::sync::Arc<noeta_host_real::Notify>,
     args: Vec<String>,
     app_id: Option<String>,
 ) -> u8 {
@@ -562,7 +562,7 @@ pub(crate) fn run_worker_hot(
                 return 1;
             }
         };
-    let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
+    let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(h) => Box::new(
             h.with_args(args)
                 .with_p2p_app(app_id)
@@ -573,7 +573,7 @@ pub(crate) fn run_worker_hot(
             return 1;
         }
     };
-    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
+    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_host_real::RealExecutor::new() {
         Ok(mut ex) => {
             ex.set_wake(wake);
             Box::new(ex)
@@ -626,7 +626,7 @@ pub(crate) fn run_program_hot(entry_path: &std::path::Path, loaded: &Loaded) -> 
     // The wake lets the watcher rouse a *blocked* executor the moment it deposits (server-hmr
     // L3) — otherwise an idle server (accept pending, no traffic) would only apply the swap at
     // its next request (the W1 one-request lag).
-    let wake = std::sync::Arc::new(noeta_runtime::Notify::new());
+    let wake = std::sync::Arc::new(noeta_host_real::Notify::new());
     watch::spawn_hot_watcher(
         entry_path.to_path_buf(),
         std::sync::Arc::clone(&mailbox),
@@ -635,14 +635,14 @@ pub(crate) fn run_program_hot(entry_path: &std::path::Path, loaded: &Loaded) -> 
 
     let args: Vec<String> = std::env::args().collect();
     let app_id = p2p_app_namespace(&args);
-    let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
+    let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(host) => Box::new(host.with_args(args).with_p2p_app(app_id)),
         Err(e) => {
             eprintln!("noeta: cannot start the runtime: {e}");
             return 1;
         }
     };
-    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
+    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_host_real::RealExecutor::new() {
         Ok(mut executor) => {
             executor.set_wake(wake);
             Box::new(executor)

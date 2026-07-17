@@ -599,10 +599,10 @@ pub(crate) type HostPair = (Box<dyn noeta_stdlib::Host>, Box<dyn noeta_stdlib::E
 /// has no `ErrorData` to answer with) can share it.
 pub(crate) fn make_host(real: bool, args: Vec<String>) -> Result<HostPair, String> {
     if real {
-        let host = noeta_runtime::RealHost::new()
+        let host = noeta_host_real::RealHost::new()
             .map_err(|e| format!("cannot start the real host: {e}"))?
             .with_args(args);
-        let executor = noeta_runtime::RealExecutor::new()
+        let executor = noeta_host_real::RealExecutor::new()
             .map_err(|e| format!("cannot start the async executor: {e}"))?;
         Ok((Box::new(host), Box::new(executor)))
     } else {
@@ -619,9 +619,9 @@ fn session_factory(real: bool) -> noeta_vm::HostFactory {
     if real {
         Box::new(|| {
             let host: Box<dyn noeta_stdlib::Host> =
-                Box::new(noeta_runtime::RealHost::new().expect("cannot start the real host"));
+                Box::new(noeta_host_real::RealHost::new().expect("cannot start the real host"));
             let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
-                noeta_runtime::RealExecutor::new().expect("cannot start the async executor"),
+                noeta_host_real::RealExecutor::new().expect("cannot start the async executor"),
             );
             (host, executor)
         })

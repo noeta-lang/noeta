@@ -2,10 +2,10 @@
 //! `para.p2p`/`para.synced` surface reach the [`P2p`] capability without any host implementing it.
 //!
 //! After F2b the transport lives entirely on the extension side: this module owns one [`P2pBackend`]
-//! in per-run ctx state, chosen at first use by the host's [`real_p2p`](noeta_native::host::P2pProvider::real_p2p)
+//! in per-run ctx state, chosen at first use by the host's [`real_p2p`](noeta_ext_abi::host::P2pProvider::real_p2p)
 //! policy:
 //!
-//! - **Loopback broker** ([`noeta_native::P2pBroker`]) — the deterministic in-process log, used on a
+//! - **Loopback broker** ([`noeta_ext_abi::P2pBroker`]) — the deterministic in-process log, used on a
 //!   host that permits no real networking (the sandbox, WASI, browser → `real_p2p()` is `None`), so a
 //!   p2p/synced program is oracle-safe and terminates in-oracle.
 //! - **Real node** ([`noeta_para_p2p_net::P2pNode`]) — a live p2panda-net node (gossip + log-sync
@@ -19,8 +19,8 @@
 
 use std::any::Any;
 
-use noeta_native::host::P2p;
-use noeta_native::{NativeCtx, P2pBackend, P2pReceiveIo, StdError};
+use noeta_ext_abi::host::P2p;
+use noeta_ext_abi::{NativeCtx, P2pBackend, P2pReceiveIo, StdError};
 
 /// The ctx-state key for this extension's per-run p2p backend (namespaced like every other
 /// extension's state — `"std.reactive"`, `"std.cell"`, …).
@@ -92,7 +92,7 @@ fn create_backend<C: NativeCtx + ?Sized>(ctx: &mut C) -> Result<P2pBackend, StdE
 
 /// A fresh loopback-broker backend — the always-available, dep-free default.
 fn loopback_backend() -> P2pBackend {
-    std::sync::Arc::new(std::sync::Mutex::new(noeta_native::P2pBroker::default())) as P2pBackend
+    std::sync::Arc::new(std::sync::Mutex::new(noeta_ext_abi::P2pBroker::default())) as P2pBackend
 }
 
 /// Build the async `receive` descriptor for `topic`: a [`P2pReceiveIo`] over this run's backend (a
@@ -102,7 +102,7 @@ fn loopback_backend() -> P2pBackend {
 pub fn receive_descriptor<C: NativeCtx + ?Sized>(
     ctx: &mut C,
     topic: String,
-) -> Result<Box<dyn noeta_native::ExternIo>, StdError> {
+) -> Result<Box<dyn noeta_ext_abi::ExternIo>, StdError> {
     let backend = p2p_backend(ctx)?;
     Ok(Box::new(P2pReceiveIo { backend, topic }))
 }
