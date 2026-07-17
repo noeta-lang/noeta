@@ -38,6 +38,9 @@
     },
     {
       "include": "#toml-tier"
+    },
+    {
+      "include": "#sparql-tier"
     }
   ],
   "repository": {
@@ -712,6 +715,60 @@
         },
         {
           "include": "source.toml"
+        }
+      ]
+    },
+    "sparql-tier": {
+      "begin": "(@)(sparql)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.sparql",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#sparql-brace"
+        },
+        {
+          "include": "source.sparql"
+        }
+      ]
+    },
+    "sparql-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#sparql-brace"
+        },
+        {
+          "include": "source.sparql"
         }
       ]
     }
