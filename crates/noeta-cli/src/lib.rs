@@ -576,13 +576,25 @@ pub fn run_cli(
     // Extension-contributed subcommands (higher-order-abi H6): augment the derive-built CLI with
     // each registered command (so `noeta --help` lists them and each gets real clap parsing),
     // then dispatch a matched name to its extension `run` — the in-process `cargo clippy` model.
-    let mut cli = <Cli as clap::CommandFactory>::command().arg(
-        clap::Arg::new("watch")
-            .long("watch")
-            .global(true)
-            .action(clap::ArgAction::SetTrue)
-            .help("Restart the command whenever project source files change (*.noe, noeta.toml)"),
-    );
+    let mut cli = <Cli as clap::CommandFactory>::command()
+        .arg(
+            clap::Arg::new("watch")
+                .long("watch")
+                .global(true)
+                .action(clap::ArgAction::SetTrue)
+                .help("Restart the command whenever project source files change (*.noe, noeta.toml)"),
+        )
+        // Accepted and ignored on every subcommand: LSP clients (VS Code's vscode-languageclient
+        // with `TransportKind.stdio`, and others) append `--stdio` to the server argv to select the
+        // stdio transport — the only transport `noeta lsp`/`dap`/`mcp` speak. Nothing reads it; the
+        // global arg exists purely so clap accepts the flag instead of erroring out the server.
+        .arg(
+            clap::Arg::new("stdio")
+                .long("stdio")
+                .global(true)
+                .hide(true)
+                .action(clap::ArgAction::SetTrue),
+        );
     for ext in &trusted_commands {
         cli = cli.subcommand(ext_command_clap(ext));
     }
