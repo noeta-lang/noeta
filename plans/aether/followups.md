@@ -105,14 +105,21 @@ got SQLite (the entry crate's default) and a clear error for `postgres://`. Fixe
 opt-in: `[native] rings = ["ring-postgres"]` in the app manifest; the AOT build unions these with the
 footprint rings. Proven: a `--native` binary built with the ring declared connects to a live PG.
 
-## @sql editor highlighting — ✅ SHIPPED (as a package artifact, not core)
-Editor coloring of a tier body is **not** in the core grammar (only built-in `doc`→markdown is static).
-By design a third-party tier plugs into VS Code with a **one-rule injection grammar** targeting
-`L:source.noeta` (extension README, "Text tiers and embedded languages"). para/db now **ships** its
-`@sql` grammar at `packages/para-db/editors/sql-tier.tmLanguage.json` + a package README with the
-`contributes.grammars` snippet. `@html` is in the same boat (no shipped coloring; noeta-html
-contributes only a `noeta fmt` body-formatter + `text:`→LSP hover). Optional future: a VS-Code-addon
-bridge that auto-generates injections from any tier's declared `text:` language.
+## @sql / embedded-language tier highlighting — ✅ DONE (addon auto-injects by name)
+Coloring is **not** in the core grammar (only built-in `doc`→markdown is static). The VS Code
+extension (v0.9.0) now **bundles** a second injection grammar (`tier-languages.tmLanguage.json`,
+injectTo source.noeta) that auto-lights any tier NAMED after a well-known language — @sql, @html,
+@css, @json, @yaml, @xml, @graphql, @markdown, @javascript, @python, @shell, @toml — with `${…}` holes
+scoped back to Noeta. A first-party tier's name IS its `text:` language, so @sql/@html just work with
+no per-package grammar. (VS Code loads grammars statically → a fixed bundled set, not per-project
+generated from `text:`; a tier whose name ≠ language ships its own one-rule grammar — para/db still
+ships `packages/para-db/editors/sql-tier.tmLanguage.json` as the fallback/reference.) **What the
+injection needs:** `text:` = the language; `expr:` (→ `${…}` holes) = whether to scope holes back.
+
+## `channel` reserved keyword — ✅ FIXED (now contextual)
+`channel` was a hard keyword (`channel::<T>(capacity)`), reserving a very common identifier (bit the
+reactive ORM). Made **contextual**: lexed as an ordinary identifier, recognized as the constructor
+only when followed by `::<T>(…)`. `channel` is free as a name everywhere else. Oracle 632/632.
 
 ## Reactive DB↔UI sync — LEVEL 1 + LEVEL 2 ✅ DONE (opt-in)
 The ORM's original value prop (keep the UI in sync with the DB), built opt-in (the plain repository
