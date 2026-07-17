@@ -6,12 +6,12 @@ This complements the TextMate grammar in `../vscode-noeta/` (which serves VS Cod
 
 ## Status
 
-Parses **≈99% of valid Noeta** — 459 of 466 corpus programs clean; the remainder are either intentional syntax-error tests or two documented gaps (multi-line structured attribute arguments and `@doc { … }` verbatim-Markdown bodies). Built from the real lexer/parser surface and validated against the language's conformance corpus.
+Parses **≈96% of the repository's Noeta** — 642 of 666 `.noe` files clean (2026-07 sweep); the remainder are intentional syntax-error tests, features newer than the grammar (expression tiers `@name{…}`, kernel-method `impl vec.Kernels` bundles), or the two documented gaps (multi-line structured attribute arguments and declared third-party text tiers). Built from the real lexer/parser surface and validated against the language's conformance corpus.
 
 Highlights:
 
 - **Case-insensitive identifiers.** Noeta does not reserve casing — `struct point {}` and `mut Total = 5` are both legal — so type-ness is decided by grammatical position, not by a `[A-Z]` heuristic. (The highlight query keeps a PascalCase heuristic only for bare identifiers whose position is genuinely ambiguous.)
-- **Newline-terminated statements.** An external scanner (`src/scanner.c`) emits an automatic terminator at a line end, and suppresses it after a trailing operator or before a leading continuation (`.`, `|>`, a binary operator) — matching Noeta's own synthetic-`;` rule.
+- **Newline-terminated statements.** An external scanner (`src/scanner.c`) emits an automatic terminator at a line end, and suppresses it after a trailing operator or before a leading continuation (`.`, `|>`, a binary operator). The scanner tracks no bracket depth: continuation inside a multi-line `(...)`/`[...]` falls out of the grammar (terminators are only valid in statement positions, inside `{ }` blocks at any depth), so termination is **brace-relative by construction** — the same depth story as the compiler's `newline_boundaries` after the terminator-barrier change (`a` ⏎ `(n)` is two statements at every nesting level, including inside a bracket-nested closure body). Pinned by `test/corpus/termination.txt`.
 - **Nestable block comments**, also handled by the scanner (`/* /* … */ … */`).
 - The restricted control-flow head (`if x { … }` is `x` + a body, not a struct literal `x { … }`), string interpolation holes, turbofish reflection calls, tier/decorator blocks, and metadata attributes.
 
