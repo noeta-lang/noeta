@@ -154,6 +154,10 @@ fn front_end(
     noeta_db::SourceProgram,
     Vec<noeta_diagnostics::JsonDiagnostic>,
 ) {
+    // The playground is its own assembling driver (audit-6 F2): the salsa front-end resolves
+    // std names against the process-default registry, which run_cli seeds for the CLI but
+    // nothing seeds in this wasm module. Idempotent.
+    noeta_stdlib::registry::default_seeded();
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, SOURCE_NAME, text);
     let src = noeta_db::source_program(&db, &source, noeta_db::Edition::DEFAULT);

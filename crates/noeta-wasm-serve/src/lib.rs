@@ -258,6 +258,7 @@ mod tests {
 
     /// Compile through the salsa pipeline (dev-dependency), like the runner's tests.
     fn compile(text: &str) -> noeta_bytecode::Module {
+        noeta_stdlib::registry::default_seeded();
         let db = noeta_db::LangDatabase::default();
         let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "app.noe", text);
         let src = noeta_db::source_program(&db, &source, noeta_db::Edition::DEFAULT);
