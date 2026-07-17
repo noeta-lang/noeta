@@ -1,14 +1,14 @@
-# The Noeta Wiki
+# The Noeta Docs
 
 > **AI-native, human-first.**
 > A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.
 
 Noeta is a new, general-purpose programming language built from scratch in Rust. It is designed for a world where agents write much of the code — types make machine-written code mechanically checkable, and the toolchain speaks agent natively (`noeta mcp`, the LSP, structured diagnostics) — while every surface decision answers to human readability first. It pairs an approachable, modern surface with an ML-grade type system (algebraic data types, `Result`-typed errors, exhaustive matching, real generics) and a runtime engineered for correctness and speed: a register-based bytecode VM over NaN-boxed values, a shape-based object model with inline caches, compiled precise reference counting with in-place reuse, and a cycle collector.
 
-This wiki is the complete documentation for the language, its tooling, its design, and how to contribute.
+These docs are the complete documentation for the language, its tooling, its design, and how to contribute.
 
 > [!NOTE]
-> **Project status: pre-alpha.** The **language core** and its **tooling** are complete and stable to use: the full syntax, the type system, traits/generics/derives, multi-file modules, a layered standard library, real host IO, structured concurrency (isolates + channels + async), and the `run`/`repl`/`test`/`bench`/`doc` toolchain all ship today. Server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), the package manager (`noeta.toml` + `noeta.lock`, path/git/registry dependencies, native extension packages), the `noeta lsp`/`noeta dap` editor tooling, and the `noeta mcp` agent surface ship today too; the larger vision still on the roadmap — WebSockets/LiveView and desktop packaging — is not yet shipped. Until alpha, anything may change without notice — syntax, stdlib, and file formats included. Where a feature is a plan rather than a reality, this wiki says so plainly.
+> **Project status: pre-alpha.** The **language core** and its **tooling** are complete and stable to use: the full syntax, the type system, traits/generics/derives, multi-file modules, a layered standard library, real host IO, structured concurrency (isolates + channels + async), and the `run`/`repl`/`test`/`bench`/`doc` toolchain all ship today. Server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), the package manager (`noeta.toml` + `noeta.lock`, path/git/registry dependencies, native extension packages), the `noeta lsp`/`noeta dap` editor tooling, and the `noeta mcp` agent surface ship today too; the larger vision still on the roadmap — WebSockets/LiveView and desktop packaging — is not yet shipped. Until alpha, anything may change without notice — syntax, stdlib, and file formats included. Where a feature is a plan rather than a reality, these docs say so plainly.
 
 ---
 

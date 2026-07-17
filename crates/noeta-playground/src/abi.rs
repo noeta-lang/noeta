@@ -62,6 +62,19 @@ pub unsafe extern "C" fn noeta_fmt(ptr: *mut u8, len: usize) -> *mut u8 {
     pack(crate::fmt_source(&text))
 }
 
+/// [`crate::debug_source`] over the ABI — the debug run (W2.4). Unlike the plain entries the
+/// input is a JSON **request** (`{"source", "breakpoints": [line…], "stop_on_entry"}`), and the
+/// embedder MUST supply the `js_debug_pause` import (module `noeta_host`): every pause calls it
+/// with the captured-stack JSON and blocks until it returns the resume-command buffer.
+///
+/// # Safety
+/// `ptr`/`len` must be a live [`noeta_alloc`] allocation holding UTF-8 (lossily decoded if not).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noeta_debug_run(ptr: *mut u8, len: usize) -> *mut u8 {
+    let text = unsafe { take_input(ptr, len) };
+    pack(crate::debug_source(&text))
+}
+
 /// [`crate::run_source_browser`] over the ABI — the "real host" run (W3.0). Requires the
 /// embedder to supply the `noeta_host` imports at instantiation. Safety: as [`noeta_check`].
 ///

@@ -118,10 +118,30 @@ const DEBUG_EVAL_CLOCK_INTERVAL: u64 = 4_096;
 /// never breaks inside `f`.
 struct EvalBudget {
     steps: u64,
-    deadline: std::time::Instant,
+    /// `None` where the platform has no monotonic clock (wasm32-unknown-unknown —
+    /// `Instant::now()` panics there); the step cap alone bounds the run then.
+    deadline: Option<std::time::Instant>,
     /// Set on a trip so the caller can distinguish "the budget stopped it" from an ordinary
     /// fragment abort (the terminate surfaces as `Err(Abort)` either way).
     tripped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl EvalBudget {
+    /// The wall-clock deadline, where the platform can sample one. A browser tab (the playground
+    /// debug console) gets `None` — its embedder already enforces its own wall-clock guard, and
+    /// the deterministic step cap stays as the in-VM backstop.
+    fn deadline() -> Option<std::time::Instant> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            None
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            )
+        }
+    }
 }
 
 impl Debugger for EvalBudget {
@@ -129,7 +149,9 @@ impl Debugger for EvalBudget {
         self.steps += 1;
         if self.steps > DEBUG_EVAL_MAX_STEPS
             || (self.steps.is_multiple_of(DEBUG_EVAL_CLOCK_INTERVAL)
-                && std::time::Instant::now() >= self.deadline)
+                && self
+                    .deadline
+                    .is_some_and(|deadline| std::time::Instant::now() >= deadline))
         {
             self.tripped
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -249,6 +271,15 @@ pub struct DebugEvalRequest {
     pub text: String,
     /// Which paused frame's scope to evaluate against, as the client numbers frames (innermost first).
     pub frame: usize,
+    /// The frame's **in-scope local names** — the ones the fragment's wrapper binds as parameters,
+    /// with their live values read from the frame registers. Computed by the debugger, which owns
+    /// the [`SourceMap`](noeta_span::SourceMap) needed to resolve a *source-line-granular* scope
+    /// (`noeta_vm::debug::frame_param_names`): a pause lands at a line's start, so a local declared
+    /// by that very line is not yet stored and is excluded. The VM has no `SourceMap`, so it takes
+    /// this list verbatim rather than re-deriving scope from raw byte offsets (which mis-orders a
+    /// binding whose value expression sits to the right of its name). Same names the checker gate
+    /// used, so a fragment referencing an out-of-scope name is already refused before it reaches here.
+    pub scope: Vec<String>,
     /// Whether the fragment may run **code** (calls, closures, statements). `false` for a hover — a
     /// hover must stay side-effect-free, so it evaluates paths/operators only and refuses a call.
     pub allow_calls: bool,
@@ -281,6 +312,9 @@ pub struct DebugSetRequest {
     pub value: Program,
     /// Which paused frame, as the client numbers frames (innermost first).
     pub frame: usize,
+    /// The frame's in-scope local names — see [`DebugEvalRequest::scope`]. Both the write target
+    /// `name` and any name the replacement fragment reads are resolved against this set.
+    pub scope: Vec<String>,
     /// The rendered outcome (the new value on success), back to the adapter thread.
     pub reply: Sender<DebugEvalOutcome>,
 }
@@ -3814,6 +3848,7 @@ impl<'m> Vm<'m> {
                                     program,
                                     text,
                                     frame,
+                                    scope,
                                     allow_calls,
                                     reply,
                                 } = req;
@@ -3825,6 +3860,7 @@ impl<'m> Vm<'m> {
                                     self.debug_eval_fragment(
                                         &program,
                                         frame,
+                                        &scope,
                                         !allow_calls,
                                         &text,
                                         &frames[..],
@@ -3846,6 +3882,7 @@ impl<'m> Vm<'m> {
                                     name,
                                     value,
                                     frame,
+                                    scope,
                                     reply,
                                 } = req;
                                 let outcome = if self.debug_session.is_some() {
@@ -3853,6 +3890,7 @@ impl<'m> Vm<'m> {
                                         &name,
                                         &value,
                                         frame,
+                                        &scope,
                                         &frames[..],
                                         &mut regs[..],
                                     )
@@ -6733,8 +6771,7 @@ impl<'m> Vm<'m> {
         let saved = self.debugger.take();
         self.debugger = Some(Box::new(EvalBudget {
             steps: 0,
-            deadline: std::time::Instant::now()
-                + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            deadline: EvalBudget::deadline(),
             tripped: Arc::clone(&tripped),
         }));
         let outcome = self.run_thunk(entry, &[]);
@@ -6908,16 +6945,18 @@ impl<'m> Vm<'m> {
     /// literals ([`is_pure_expr`]), and [`Vm::pure_eval`] backstops the receiver-dependent
     /// dispatches the AST cannot decide (an object's `Index` impl, a user ordering method) by
     /// refusing any frame push during the run. One evaluator for hover, watch, and console.
+    #[allow(clippy::too_many_arguments)]
     fn debug_eval_fragment(
         &mut self,
         program: &Program,
         frame: usize,
+        scope: &[String],
         pure: bool,
         text: &str,
         frames: &[Frame],
         regs: &[Value],
     ) -> DebugEvalOutcome {
-        match self.eval_fragment_owned(program, frame, pure, Some(text), frames, regs) {
+        match self.eval_fragment_owned(program, frame, scope, pure, Some(text), frames, regs) {
             Ok(v) => {
                 let text = v.display();
                 let ty = v.type_display();
@@ -6931,10 +6970,12 @@ impl<'m> Vm<'m> {
     /// The value-returning core of [`Vm::debug_eval_fragment`]: evaluate the fragment and hand back
     /// the resulting **owned** [`Value`] (one reference the caller must consume — render + release
     /// for an `evaluate`, store into a register for a `setVariable`).
+    #[allow(clippy::too_many_arguments)]
     fn eval_fragment_owned(
         &mut self,
         program: &Program,
         frame: usize,
+        scope: &[String],
         pure: bool,
         text: Option<&str>,
         frames: &[Frame],
@@ -6955,8 +6996,11 @@ impl<'m> Vm<'m> {
             }
         }
         // Resolve the target frame (snapshot indices are innermost-first, the view bottom-first)
-        // and collect its in-scope locals — the same declared-before-the-paused-instruction filter
-        // the Variables view applies, so the console sees exactly what the panel shows.
+        // and bind exactly the `scope` names as the wrapper's parameters, reading each one's live
+        // value from the frame registers. `scope` is the debugger's authoritative in-scope set (it
+        // owns the `SourceMap` to resolve the line-granular scope; see `DebugEvalRequest::scope`) —
+        // the VM binds it verbatim rather than re-deriving scope from byte offsets, so a not-yet-
+        // stored current-line local is never bound (and never surfaces as its pre-store `unit`).
         let (params, args): (Vec<String>, Vec<Value>) = {
             let view = DebugView {
                 module: self.module,
@@ -6967,12 +7011,8 @@ impl<'m> Vm<'m> {
                 return Err(format!("no frame {frame} in the paused stack"));
             };
             let f = view.frame(view_idx);
-            let here = f.line_span();
             f.locals()
-                .filter(|(_, def_span, _)| match here {
-                    Some(h) => def_span.start < h.start,
-                    None => true,
-                })
+                .filter(|(name, _, _)| scope.iter().any(|s| s == name))
                 .map(|(name, _, value)| (name.to_string(), value))
                 .unzip()
         };
@@ -7111,8 +7151,7 @@ impl<'m> Vm<'m> {
         let saved = self.debugger.take();
         self.debugger = Some(Box::new(EvalBudget {
             steps: 0,
-            deadline: std::time::Instant::now()
-                + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            deadline: EvalBudget::deadline(),
             tripped: Arc::clone(&tripped),
         }));
         let result = self.run_installed_fragment_inner(entry, args, span);
@@ -7168,11 +7207,17 @@ impl<'m> Vm<'m> {
         name: &str,
         value: &Program,
         frame: usize,
+        scope: &[String],
         frames: &[Frame],
         regs: &mut [Value],
     ) -> DebugEvalOutcome {
         if name == "self" {
             return DebugEvalOutcome::Error("`self` cannot be reassigned".to_string());
+        }
+        // The target must be one of the debugger's in-scope names (`scope`) — its authoritative,
+        // line-granular set, so a not-yet-stored current-line local is not a writable target.
+        if !scope.iter().any(|s| s == name) {
+            return DebugEvalOutcome::Error(format!("no variable `{name}` in scope"));
         }
         // Resolve the target register first, so an unknown name fails before the value evaluates.
         let Some(view_idx) = frames.len().checked_sub(frame + 1) else {
@@ -7180,30 +7225,16 @@ impl<'m> Vm<'m> {
         };
         let target = &frames[view_idx];
         let chunk = &self.module.protos[target.proto as usize];
-        // The frame's current line, with the same innermost/caller pc adjustment `DebugView::frame`
-        // makes — the in-scope filter must match what the Variables panel showed.
-        let pc = if view_idx + 1 == frames.len() {
-            target.pc
-        } else {
-            target.pc.saturating_sub(1)
-        };
-        let here = chunk.line_span(pc);
         let Some(reg) = chunk
             .debug_locals
             .iter()
-            .find(|ld| {
-                ld.name == name
-                    && match here {
-                        Some(h) => ld.def_span.start < h.start,
-                        None => true,
-                    }
-            })
+            .find(|ld| ld.name == name)
             .map(|ld| ld.reg as usize)
         else {
             return DebugEvalOutcome::Error(format!("no variable `{name}` in scope"));
         };
         let slot = target.base + reg;
-        match self.eval_fragment_owned(value, frame, false, None, frames, regs) {
+        match self.eval_fragment_owned(value, frame, scope, false, None, frames, regs) {
             Ok(v) => {
                 let text = v.display();
                 let ty = v.type_display();
@@ -8742,7 +8773,7 @@ mod tests {
         let text = "mut i = 0\nwhile true { i = i + 1 }";
         let program = fragment(text);
         let DebugEvalOutcome::Error(message) =
-            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+            vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
         else {
             panic!("a runaway fragment must be stopped, not hang");
         };
@@ -8752,7 +8783,7 @@ mod tests {
         let text = "base + 1";
         let program = fragment(text);
         let DebugEvalOutcome::Value { text: v, .. } =
-            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+            vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
         else {
             panic!("the session must survive a budget trip");
         };
@@ -8784,7 +8815,7 @@ mod tests {
         let text = "twice(base) + 1";
         let program = fragment(text);
         let DebugEvalOutcome::Value { text: v1, .. } =
-            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+            vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
         else {
             panic!("first eval should succeed");
         };
@@ -8794,7 +8825,7 @@ mod tests {
 
         // Same text, same scope shape → memo hit: nothing appends, the value is fresh.
         let DebugEvalOutcome::Value { text: v2, .. } =
-            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+            vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
         else {
             panic!("second eval should succeed");
         };
@@ -8813,7 +8844,7 @@ mod tests {
         // Different text → a fresh compile (the memo is per-expression, not a single slot).
         let other = fragment("twice(base) + 2");
         let DebugEvalOutcome::Value { text: v3, .. } =
-            vm.debug_eval_fragment(&other, 0, false, "twice(base) + 2", &frames, &regs)
+            vm.debug_eval_fragment(&other, 0, &[], false, "twice(base) + 2", &frames, &regs)
         else {
             panic!("third eval should succeed");
         };

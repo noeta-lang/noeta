@@ -1,6 +1,6 @@
 [package]
-name = "noeta/para_p2p"
+name = "para/p2p"
 version = "0.1.0"
 # This package ships a native Rust extension crate (the `para.p2p`/`para.crdt`/`para.synced`
-# surface). A consumer must authorize it under `[trust] native = ["noeta/para_p2p"]`.
+# surface). A consumer must authorize it under `[trust] native = ["para/p2p"]`.
 native = "native"

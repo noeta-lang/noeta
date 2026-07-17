@@ -9,7 +9,7 @@ It is a **first-party but non-default** package under the `para` ("alongside") n
 para = { path = "…/packages/para-p2p" }   # or a registry/git version once published
 
 [trust]
-native = ["noeta/para_p2p"]
+native = ["para/p2p"]
 ```
 
 Its modules then resolve as `para.crdt`, `para.p2p`, and `para.synced`. (The [LiveView](LiveView) `para.html` package is its sibling under the same namespace.)

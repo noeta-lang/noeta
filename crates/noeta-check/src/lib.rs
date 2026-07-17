@@ -2609,7 +2609,17 @@ impl Checker {
                         let expected = self.current_ret.clone();
                         self.check(value, &expected, env)
                     }
-                    None => Type::Unit,
+                    None => {
+                        // A bare `return` yields unit. When the function has a *known* declared
+                        // return (`current_ret` is `Unknown` only while inferring a closure, where
+                        // the collected returns are joined instead), unit must be assignable to it —
+                        // otherwise `return;` silently escapes a non-`void` function without a value.
+                        if !matches!(self.current_ret, Type::Unknown) {
+                            let expected = self.current_ret.clone();
+                            self.subsume(&Type::Unit, &expected, *span);
+                        }
+                        Type::Unit
+                    }
                 };
                 if let Some(returns) = &mut self.collected_returns {
                     returns.push(ty);

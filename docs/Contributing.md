@@ -74,8 +74,8 @@ A language feature is added as a **vertical slice**, in this order:
 - American English in code, comments, and docs.
 - No hard line-wrap in Markdown.
 - Prefer enums/constants over magic strings; keep `unsafe` quarantined and justified.
-- Each crate keeps its `README.md` current; keep `README.md`/`AGENTS.md`/`ARCHITECTURE.md`/this wiki aligned when architecture or features change.
+- Each crate keeps its `README.md` current; keep `README.md`/`AGENTS.md`/`ARCHITECTURE.md`/these docs aligned when architecture or features change.
 
 ## The docs themselves
 
-This wiki lives in the repo under `docs/` and follows GitHub Wiki conventions (flat pages, `_Sidebar.md` for navigation), synced to the project wiki on push. When you change a feature, update the relevant reference page here alongside the code — the same "lands with its docs" discipline as the conformance rule.
+The docs live in the repo under `docs/` — versioned together with the code — as flat pages with `_Sidebar.md` for navigation, published to docs.noeta.dev. When you change a feature, update the relevant reference page here alongside the code — the same "lands with its docs" discipline as the conformance rule.

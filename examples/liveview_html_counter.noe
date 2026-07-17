@@ -1,0 +1,131 @@
+// LiveView through `@html` — server-side reactive HTML templating, LiveWire/LiveView-style, in
+// pure Noeta. It composes three language substrates:
+//
+//   * expression tiers   — `@html { … ${expr} … }` is a typed template value (expr-tiers arc);
+//   * fine-grained reactivity (std.reactive) — each hole becomes a `computed`, so a signal change
+//     recomputes exactly the affected holes;
+//   * the reactive-view diff-push transport (std.reactive.view + websockets) — which serializes
+//     only the holes that changed and pushes a minimal patch to the browser.
+//
+// Write ordinary HTML with `${…}` holes over signals; the browser view stays in sync over a
+// websocket with no client framework, just the bundled ~50-line shim. This is the `@html`
+// counterpart of `liveview_counter.noe`, which hand-wires every `data-live` span — here the
+// dynamic text is reactive automatically.
+//
+//   noeta serve examples/liveview_html_counter.noe
+//   # then open http://localhost:8080 and click +1 — the count and its double update in place
+//
+// (The reusable-package factoring of the `@html` engine below awaits pre-existing cross-package
+// linking fixes — see plans/expr-tiers; the engine itself is what this file demonstrates.)
+use std.reactive.{signal, computed, view}
+use std.http.server
+use std.http.{Request, Response, Socket}
+use std.json
+
+// --- the `@html` templating engine -----------------------------------------------------------
+
+// A compiled `@html` template: the static HTML skeleton (holes rendered as `<span data-live="hN">`
+// markers, filled with their initial values for a no-flash first paint) plus the per-hole
+// `computed`s the websocket session exposes and diffs (held as `dyn` — `view.expose` accepts it).
+struct Html {
+    skeleton: string
+    holes: List<dyn>
+}
+
+fn escape(s: string): string {
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+}
+
+// The `@html` handler. Holes are `() -> dyn` — a template renders *any* value (like JSX `{x}`),
+// stringified through interpolation, so `${count.get()}` needs no `.to_string()`. Each hole is
+// wrapped in a `computed` so it tracks exactly the signals it reads; the diff transport then
+// pushes only the holes whose rendered value changed.
+@tier(html, text: "html", expr: Html)
+fn render(statics: List<string>, holes: List<() -> dyn>): Html {
+    computeds = holes.map(fn(h) => computed(fn() => "${h()}"))
+    mut skeleton = ""
+    mut i = 0
+    for s in statics {
+        skeleton = skeleton ~ s
+        if i < computeds.len() {
+            c = computeds[i]
+            skeleton = skeleton ~ "<span data-live=\"h${i}\">" ~ escape(c.get()) ~ "</span>"
+        }
+        i = i + 1
+    }
+    return Html { skeleton: skeleton, holes: computeds }
+}
+
+fn document(title: string, page: Html): string {
+    head = "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>${title}</title></head><body>\n"
+    return "${head}${page.skeleton}\n<script src=\"/live.js\"></script></body></html>\n"
+}
+
+// One websocket session: a `view()` over the page's hole computeds, the full snapshot, then a loop
+// — each client event runs the app's handler and pushes the minimal diff of the holes that changed.
+async fn session(sock: Socket, render_page: () -> Html, on_event: (string) -> void): bool {
+    page = render_page()
+    v = view()
+    mut i = 0
+    for c in page.holes {
+        v.expose("h${i}", c)
+        i = i + 1
+    }
+    sock.send(v.snapshot())
+    mut going = true
+    while going {
+        msg = sock.recv().await
+        if msg == none {
+            going = false
+        } else {
+            evt = json.parse(msg ?? "{}")
+            kind = evt["type"]
+            if kind == "event" {
+                name = evt["name"]
+                on_event("${name}")
+            }
+            patch = v.diff() ?? ""
+            if patch != "" {
+                sock.send(patch)
+            }
+        }
+    }
+    return true
+}
+
+// Route one request: the websocket upgrade, the bundled client shim, or the server-rendered page.
+fn serve_liveview(req: Request, title: string, render_page: () -> Html, on_event: (string) -> void): Response {
+    if req.path() == "/ws" {
+        return server.websocket(fn(sock) => session(sock, render_page, on_event))
+    }
+    if req.path() == "/live.js" {
+        return server.response(200, server.liveview_js(), {"content-type": "application/javascript"})
+    }
+    return server.response(200, document(title, render_page()), {"content-type": "text/html"})
+}
+
+// --- the app ----------------------------------------------------------------------------------
+
+count = signal(0)
+
+fn page(): Html {
+    return @html {
+        <h1>Noeta LiveView counter</h1>
+        <p>count: <b>${count.get()}</b> &nbsp; doubled: <b>${count.get() * 2}</b></p>
+        <p><button data-live-click="inc">+1</button>
+        <button data-live-click="reset">reset</button></p>
+    }
+}
+
+fn on_event(name: string): void {
+    if name == "inc" {
+        count.update(fn(n) => n + 1)
+    }
+    if name == "reset" {
+        count.set(0)
+    }
+}
+
+fn fetch(req: Request): Response {
+    return serve_liveview(req, "Noeta LiveView counter", page, on_event)
+}

@@ -9,4 +9,4 @@ para = { path = "../../packages/para-p2p" }
 
 # Running a package's native Rust code requires the root app to authorize it (Phase 4 trust gate).
 [trust]
-native = ["noeta/para_p2p"]
+native = ["para/p2p"]

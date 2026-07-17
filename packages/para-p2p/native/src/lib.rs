@@ -1,4 +1,4 @@
-//! The `noeta/para_p2p` package's native entry crate.
+//! The `para/p2p` package's native entry crate.
 //!
 //! The composed toolchain (package-manager Phase 3) aggregates each native dependency's
 //! `NOETA_EXTENSIONS` slice and installs the union into the runtime registry. This crate is the

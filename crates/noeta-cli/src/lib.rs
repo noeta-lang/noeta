@@ -433,6 +433,11 @@ enum Command {
         /// (it degrades to a warning).
         #[arg(long)]
         no_docs: bool,
+        /// Skip uploading the package's `README.md` (rendered on the registry's package page).
+        /// By default the README rides along with the release when the file exists; an upload
+        /// failure never blocks the publish (it degrades to a warning).
+        #[arg(long)]
+        no_readme: bool,
     },
     /// Report the dependency tree's **trust footprint** (package-manager Phase 4): every resolved
     /// dependency, its source, and which ones run **native code** or contribute **CLI commands** —
@@ -729,7 +734,8 @@ pub fn run_cli(
             interactive,
             oob,
             no_docs,
-        } => cmd_publish(&git, tag.as_deref(), key, interactive, oob, no_docs),
+            no_readme,
+        } => cmd_publish(&git, tag.as_deref(), key, interactive, oob, no_docs, no_readme),
         Command::Audit { path } => cmd_audit(&path),
         Command::Key { action } => cmd_key(&action),
         Command::Claim {
@@ -1148,6 +1154,7 @@ fn cmd_publish(
     interactive: bool,
     oob: bool,
     no_docs: bool,
+    no_readme: bool,
 ) -> ExitCode {
     let manifest_path = match locate_manifest() {
         Ok(p) => p,
@@ -1170,6 +1177,16 @@ fn cmd_publish(
     };
     let name = format!("{}/{}", pkg.name.company, pkg.name.package);
     let version = pkg.version.clone();
+    // The declared license travels with the release into the registry's immutable record (and its
+    // transparency-log leaf). Optional — but nudge, since consumers can't legally use an unlicensed
+    // package.
+    let license = pkg.license.clone();
+    if license.is_none() {
+        eprintln!(
+            "lang: note: `[package]` declares no `license` — consider `license = \"MIT OR Apache-2.0\"` \
+             (an SPDX expression) so consumers know the terms"
+        );
+    }
 
     // A published package must depend **only via the registry** (Phase 4, follow-up #3): a path
     // dependency can't travel to a consumer, and a git dependency isn't expressible in the index's
@@ -1342,6 +1359,7 @@ fn cmd_publish(
         bundle,
         // The registry stamps the publish time server-side; the client doesn't supply it.
         published_at: None,
+        license: license.clone(),
     };
     match index.publish(&name, &release) {
         Ok(()) => {
@@ -1350,11 +1368,11 @@ fn cmd_publish(
             // already-generated, build-gated API docs (`native_docs`); for a pure-Noeta package it
             // is generated now from the `.noe` source. Advisory metadata — an upload failure warns,
             // never unpublishes a release that already succeeded.
+            let pkg_dir = manifest_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
             if !no_docs {
-                let pkg_dir = manifest_path
-                    .parent()
-                    .map(std::path::Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from("."));
                 let docs = match native_docs {
                     // A native package's docs are pre-generated JSON; count declarations from its
                     // module items (the pure-Noeta path gets an exact count from docgen).
@@ -1393,6 +1411,20 @@ fn cmd_publish(
                         Err(err) => eprintln!("lang: warning: docs not uploaded: {err}"),
                     },
                     Err(err) => eprintln!("lang: warning: docs not generated: {err}"),
+                }
+            }
+            // The README rides along too (rendered on the registry's package page — the registry
+            // never fetches source, so the page shows only what we upload). Same posture as docs:
+            // advisory, an upload failure warns, and a package without a README publishes silently.
+            if !no_readme {
+                match std::fs::read_to_string(pkg_dir.join("README.md")) {
+                    Ok(readme) if !readme.trim().is_empty() => {
+                        match index.put_readme(&name, &version, &readme) {
+                            Ok(()) => println!("README uploaded"),
+                            Err(err) => eprintln!("lang: warning: README not uploaded: {err}"),
+                        }
+                    }
+                    _ => {} // no README.md (or an empty one) — nothing to upload
                 }
             }
             ExitCode::SUCCESS
@@ -1541,6 +1573,8 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
                 url,
                 tag,
                 sha,
+                // Resolved deps don't carry a license claim to cross-check — coordinates only.
+                None,
                 pinned.as_deref(),
             ) {
                 Ok(v) => {
