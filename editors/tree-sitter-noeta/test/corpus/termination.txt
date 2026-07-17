@@ -1,0 +1,130 @@
+==================
+Hard barrier: newline-then-paren is a new statement at top level
+==================
+
+a
+(n)
+
+---
+
+(source_file
+  (expression_statement
+    (identifier))
+  (expression_statement
+    (identifier)))
+
+==================
+Hard barrier is brace-relative: newline-then-paren splits inside a bracket-nested closure body
+==================
+
+xs.map(fn(n) {
+    a
+    (n)
+})
+
+---
+
+(source_file
+  (expression_statement
+    (method_call_expression
+      (identifier)
+      (identifier)
+      (arguments
+        (closure_expression
+          (parameters
+            (parameter
+              (identifier)))
+          (block
+            (expression_statement
+              (identifier))
+            (expression_statement
+              (identifier))))))))
+
+==================
+Hard barrier is brace-relative: newline-then-bracket is a list, not an index, inside a closure body
+==================
+
+xs.map(fn(n) {
+    g
+    [1]
+})
+
+---
+
+(source_file
+  (expression_statement
+    (method_call_expression
+      (identifier)
+      (identifier)
+      (arguments
+        (closure_expression
+          (parameters
+            (parameter
+              (identifier)))
+          (block
+            (expression_statement
+              (identifier))
+            (expression_statement
+              (list_literal
+                (integer_literal)))))))))
+
+==================
+Inside parens relative to the innermost brace a newline never terminates: multi-line arg list in a closure body
+==================
+
+xs.map(fn(n) {
+    f(
+        a,
+        b
+    )
+})
+
+---
+
+(source_file
+  (expression_statement
+    (method_call_expression
+      (identifier)
+      (identifier)
+      (arguments
+        (closure_expression
+          (parameters
+            (parameter
+              (identifier)))
+          (block
+            (expression_statement
+              (call_expression
+                (identifier)
+                (arguments
+                  (identifier)
+                  (identifier))))))))))
+
+==================
+Hard barrier applies inside interpolation holes
+==================
+
+s = "${xs.map(fn(x) {
+    a
+    (n)
+})}"
+
+---
+
+(source_file
+  (assignment_statement
+    (identifier)
+    (string_literal
+      (interpolation
+        (method_call_expression
+          (identifier)
+          (identifier)
+          (arguments
+            (closure_expression
+              (parameters
+                (parameter
+                  (identifier)))
+              (block
+                (expression_statement
+                  (identifier))
+                (expression_statement
+                  (identifier))))))))))
