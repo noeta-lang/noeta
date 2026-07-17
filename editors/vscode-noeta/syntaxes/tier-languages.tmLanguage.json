@@ -1,0 +1,719 @@
+{
+  "$comment": "Auto-highlighting for EMBEDDED-LANGUAGE tier bodies (@sql/@html/@css/\u2026). Bundled in the Noeta VS Code extension as an INJECTION grammar (injectTo source.noeta) \u2014 it does NOT touch the core language grammar. Each rule matches a tier named after a well-known language (which, for first-party tiers, is exactly the tier's declared text: language) and injects that language's grammar into the @<name> { \u2026 } body; ${\u2026} holes (expression tiers) scope back to source.noeta. A tier whose name differs from its text: language still ships its own one-rule grammar (see the extension README, Text tiers).",
+  "scopeName": "inline.noeta.tier-languages",
+  "injectionSelector": "L:source.noeta",
+  "patterns": [
+    {
+      "include": "#sql-tier"
+    },
+    {
+      "include": "#html-tier"
+    },
+    {
+      "include": "#css-tier"
+    },
+    {
+      "include": "#json-tier"
+    },
+    {
+      "include": "#yaml-tier"
+    },
+    {
+      "include": "#xml-tier"
+    },
+    {
+      "include": "#graphql-tier"
+    },
+    {
+      "include": "#markdown-tier"
+    },
+    {
+      "include": "#javascript-tier"
+    },
+    {
+      "include": "#python-tier"
+    },
+    {
+      "include": "#shell-tier"
+    },
+    {
+      "include": "#toml-tier"
+    }
+  ],
+  "repository": {
+    "tier-escape": {
+      "$comment": "Text-body escapes \\{ \\} \\\\ \\$ \u2014 matched first so an escaped closer/dollar never triggers a rule below.",
+      "name": "constant.character.escape.noeta",
+      "match": "\\\\[{}$\\\\]"
+    },
+    "tier-hole": {
+      "$comment": "A ${ \u2026 } hole (expr tiers) is ordinary Noeta \u2014 scope it back to source.noeta so it highlights as code.",
+      "begin": "(\\$\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.section.embedded.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.section.embedded.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.line.noeta",
+      "patterns": [
+        {
+          "include": "source.noeta"
+        }
+      ]
+    },
+    "sql-tier": {
+      "begin": "(@)(sql)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.sql",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#sql-brace"
+        },
+        {
+          "include": "source.sql"
+        }
+      ]
+    },
+    "sql-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#sql-brace"
+        },
+        {
+          "include": "source.sql"
+        }
+      ]
+    },
+    "html-tier": {
+      "begin": "(@)(html)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.html",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#html-brace"
+        },
+        {
+          "include": "text.html.basic"
+        }
+      ]
+    },
+    "html-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#html-brace"
+        },
+        {
+          "include": "text.html.basic"
+        }
+      ]
+    },
+    "css-tier": {
+      "begin": "(@)(css)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.css",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#css-brace"
+        },
+        {
+          "include": "source.css"
+        }
+      ]
+    },
+    "css-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#css-brace"
+        },
+        {
+          "include": "source.css"
+        }
+      ]
+    },
+    "json-tier": {
+      "begin": "(@)(json)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.json",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#json-brace"
+        },
+        {
+          "include": "source.json"
+        }
+      ]
+    },
+    "json-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#json-brace"
+        },
+        {
+          "include": "source.json"
+        }
+      ]
+    },
+    "yaml-tier": {
+      "begin": "(@)(yaml)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.yaml",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#yaml-brace"
+        },
+        {
+          "include": "source.yaml"
+        }
+      ]
+    },
+    "yaml-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#yaml-brace"
+        },
+        {
+          "include": "source.yaml"
+        }
+      ]
+    },
+    "xml-tier": {
+      "begin": "(@)(xml)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.xml",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#xml-brace"
+        },
+        {
+          "include": "text.xml"
+        }
+      ]
+    },
+    "xml-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#xml-brace"
+        },
+        {
+          "include": "text.xml"
+        }
+      ]
+    },
+    "graphql-tier": {
+      "begin": "(@)(graphql)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.graphql",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#graphql-brace"
+        },
+        {
+          "include": "source.graphql"
+        }
+      ]
+    },
+    "graphql-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#graphql-brace"
+        },
+        {
+          "include": "source.graphql"
+        }
+      ]
+    },
+    "markdown-tier": {
+      "begin": "(@)(markdown)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.markdown",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#markdown-brace"
+        },
+        {
+          "include": "text.html.markdown"
+        }
+      ]
+    },
+    "markdown-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#markdown-brace"
+        },
+        {
+          "include": "text.html.markdown"
+        }
+      ]
+    },
+    "javascript-tier": {
+      "begin": "(@)(javascript)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.javascript",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#javascript-brace"
+        },
+        {
+          "include": "source.js"
+        }
+      ]
+    },
+    "javascript-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#javascript-brace"
+        },
+        {
+          "include": "source.js"
+        }
+      ]
+    },
+    "python-tier": {
+      "begin": "(@)(python)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.python",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#python-brace"
+        },
+        {
+          "include": "source.python"
+        }
+      ]
+    },
+    "python-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#python-brace"
+        },
+        {
+          "include": "source.python"
+        }
+      ]
+    },
+    "shell-tier": {
+      "begin": "(@)(shell)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.shell",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#shell-brace"
+        },
+        {
+          "include": "source.shell"
+        }
+      ]
+    },
+    "shell-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#shell-brace"
+        },
+        {
+          "include": "source.shell"
+        }
+      ]
+    },
+    "toml-tier": {
+      "begin": "(@)(toml)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.decorator.noeta"
+        },
+        "2": {
+          "name": "entity.name.function.decorator.noeta"
+        },
+        "3": {
+          "name": "punctuation.section.tier.begin.noeta"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.tier.end.noeta"
+        }
+      },
+      "contentName": "meta.embedded.block.toml",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#toml-brace"
+        },
+        {
+          "include": "source.toml"
+        }
+      ]
+    },
+    "toml-brace": {
+      "$comment": "A nested balanced brace pair \u2014 recursion counts depth so a { \u2026 } in the body does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#tier-escape"
+        },
+        {
+          "include": "#tier-hole"
+        },
+        {
+          "include": "#toml-brace"
+        },
+        {
+          "include": "source.toml"
+        }
+      ]
+    }
+  }
+}

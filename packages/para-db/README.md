@@ -15,13 +15,16 @@ repository / unit-of-work, and a typed `@sql` block tier.
 
 ## Editor highlighting for `@sql`
 
-`@sql { … }` bodies highlight as SQL through a **one-rule TextMate injection grammar** — the standard
-mechanism for a package that declares a text/expression tier (see the Noeta VS Code extension's README,
-"Text tiers and embedded languages"). The core language grammar stays fixed; this attaches by textual
-match, so it needs no cooperation from the core extension.
+**With the official Noeta VS Code extension (v0.9.0+), `@sql` highlights automatically** — it bundles
+injection for well-known languages by tier name, and `@sql`'s name is its `text:` language, so nothing
+extra is needed.
 
-This package ships the grammar at [`editors/sql-tier.tmLanguage.json`](editors/sql-tier.tmLanguage.json).
-To enable it, contribute it from a VS Code extension's `contributes.grammars`:
+For **other editors** (or a custom setup), `@sql { … }` bodies highlight as SQL through a **one-rule
+TextMate injection grammar** — the standard mechanism for a package that declares a text/expression
+tier (see the Noeta VS Code extension's README, "Text tiers and embedded languages"). The core
+language grammar stays fixed; this attaches by textual match. This package ships that grammar at
+[`editors/sql-tier.tmLanguage.json`](editors/sql-tier.tmLanguage.json); contribute it from a VS Code
+extension's `contributes.grammars`:
 
 ```jsonc
 {
