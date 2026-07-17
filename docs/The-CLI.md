@@ -371,11 +371,16 @@ Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grant
 
 ### The manifest: `[package]` and dependency forms
 
+The essentials are below; [The `noeta.toml` Manifest](Manifest) is the complete reference for every
+table and key.
+
 ```toml
 [package]
 name = "acme/app"        # the global identity `company/package` the registry indexes
 version = "0.1.0"        # SemVer
 edition = "2026"         # optional — the language edition this package is written against
+license = "MIT OR Apache-2.0"      # optional — declared SPDX expression, recorded with the release
+keywords = ["image", "simd"]       # optional — up to 5 discovery tags the registry indexes by
 
 [dependencies]
 # A local source tree — no network, no resolver:

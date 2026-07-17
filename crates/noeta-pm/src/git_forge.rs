@@ -178,6 +178,8 @@ impl Index for GitForgeIndex {
                 published_at: None,
                 // No registry record to declare one in — the tag's own manifest/LICENSE is right there.
                 license: None,
+                // Likewise no registry listing to be discoverable in; a forge is resolved by URL.
+                keywords: Vec::new(),
             });
         }
         Ok(releases)
@@ -374,6 +376,7 @@ mod tests {
             bundle: None,
             published_at: None,
             license: None,
+            keywords: Vec::new(),
         };
         assert!(
             idx.publish("acme/thing", &r)

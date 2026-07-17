@@ -1680,6 +1680,7 @@ mod tests {
             bundle: None,
             published_at,
             license: None,
+            keywords: Vec::new(),
         }
     }
 

@@ -255,6 +255,17 @@ pub struct PackageMeta {
     /// leaf). `None` when the package declares none. Shape-checked at parse time; the claim is the
     /// publisher's — consumers can check the SHA-pinned source's LICENSE file.
     pub license: Option<String>,
+    /// Discovery keywords (`keywords = ["image", "simd"]`) — up to [`MAX_KEYWORDS`] topic tags the
+    /// registry indexes so a package is findable by what it is *for*, not just by its name. Sent
+    /// with a publish and part of the immutable release record, but — unlike [`license`] — **not**
+    /// bound into the transparency-log leaf: tampering with a keyword mis-files a package in a
+    /// listing, it cannot redirect a build or misrepresent a legal claim.
+    ///
+    /// A set: empty when the package declares none, and stored deduplicated and sorted so the
+    /// declared order never matters. Shape-checked at parse time.
+    ///
+    /// [`license`]: PackageMeta::license
+    pub keywords: Vec<String>,
 }
 
 impl PackageMeta {
@@ -979,12 +990,22 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
             Some(validate_license(expr)?)
         }
     };
+    let keywords = match pkg.get("keywords") {
+        None => Vec::new(),
+        Some(v) => {
+            let list = v
+                .as_array()
+                .ok_or("`package.keywords` must be an array of strings")?;
+            validate_keywords(list)?
+        }
+    };
     Ok(Some(PackageMeta {
         name,
         version,
         edition,
         native,
         license,
+        keywords,
     }))
 }
 
@@ -1005,6 +1026,50 @@ fn validate_license(expr: &str) -> Result<String, String> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+/// The most keywords a release may carry. Enough to place a package; few enough that a keyword
+/// still narrows a listing to something worth reading. MUST match the registry's `MAX_KEYWORDS`.
+pub const MAX_KEYWORDS: usize = 5;
+
+/// Syntactic validation of a `package.keywords` value: up to [`MAX_KEYWORDS`] tags, each 1–20 chars
+/// of lowercase `a–z`, `0–9` and `-`, starting alphanumeric. Mirrors the registry's `KEYWORD` check,
+/// so a publish that would be rejected server-side fails at `noeta check` time instead.
+///
+/// The narrow charset is the point rather than an accident: one canonical spelling per tag is what
+/// makes a keyword listing *group*, instead of fragmenting a topic across `Aether`, `aether_` and
+/// `AEther`. Returns the tags deduplicated and sorted — they are a set, so the order declared in the
+/// manifest carries no meaning and is not worth preserving through the wire and the index.
+fn validate_keywords(list: &[toml::Value]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for value in list {
+        let kw = value
+            .as_str()
+            .ok_or("`package.keywords` must be an array of strings")?;
+        let ok = !kw.is_empty()
+            && kw.len() <= 20
+            && kw.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && kw
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !ok {
+            return Err(format!(
+                "`package.keywords` `{kw}` is not a keyword (1–20 chars of lowercase `a-z`, `0-9` \
+                 and `-`, starting alphanumeric)"
+            ));
+        }
+        if !out.iter().any(|seen| seen == kw) {
+            out.push(kw.to_string());
+        }
+    }
+    if out.len() > MAX_KEYWORDS {
+        return Err(format!(
+            "`package.keywords` declares {} keywords; at most {MAX_KEYWORDS} are allowed",
+            out.len()
+        ));
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Syntactic validation of a `package.native` value (Phase 3, N3.1): a non-empty **relative**
@@ -1526,6 +1591,39 @@ mod tests {
         )
         .expect_err("malformed license rejected");
         assert!(err.message().contains("SPDX"), "{err}");
+    }
+
+    #[test]
+    fn parses_keywords_deduped_and_sorted_and_rejects_bad_ones() {
+        // Declared unsorted with a duplicate → stored as a sorted set.
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n\
+             keywords = [\"simd\", \"image\", \"simd\"]\n",
+        )
+        .expect("valid");
+        assert_eq!(
+            m.package().unwrap().keywords,
+            vec!["image".to_string(), "simd".to_string()]
+        );
+        // Omitted → an empty set.
+        let m =
+            Manifest::parse("[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n").unwrap();
+        assert!(m.package().unwrap().keywords.is_empty());
+        // An uppercase tag is not a keyword (one canonical spelling per tag).
+        let err = Manifest::parse(
+            "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\nkeywords = [\"Image\"]\n",
+        )
+        .expect_err("malformed keyword rejected");
+        assert!(err.message().contains("keyword"), "{err}");
+        // Over the limit is rejected, naming the cap.
+        let err = Manifest::parse(
+            "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n\
+             keywords = [\"a\", \"b\", \"c\", \"d\", \"e\", \"f\"]\n",
+        )
+        .expect_err("too many keywords rejected");
+        assert!(err.message().contains("at most"), "{err}");
     }
 
     // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------

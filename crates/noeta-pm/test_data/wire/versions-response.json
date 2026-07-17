@@ -26,7 +26,11 @@
       "yanked": false,
       "published_at": "2026-02-10T09:30:00.000Z",
       "published_at_unix": 1770715800000,
-      "license": "MIT OR Apache-2.0"
+      "license": "MIT OR Apache-2.0",
+      "keywords": [
+        "image",
+        "simd"
+      ]
     },
     {
       "version": "2.0.0",

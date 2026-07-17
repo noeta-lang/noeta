@@ -6,6 +6,7 @@
 
 **Tools**
 - [The `noeta` CLI](The-CLI)
+- [The `noeta.toml` Manifest](Manifest)
 - [Package Registries](Package-Registries)
 - [Package Provenance](Package-Provenance)
 - [Testing](Testing)

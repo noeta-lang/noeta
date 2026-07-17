@@ -81,6 +81,11 @@ pub struct Release {
     /// publisher-asserted: the SHA-pinned source's LICENSE file is the ground truth. `None` when
     /// the release declared none.
     pub license: Option<String>,
+    /// Discovery keywords (`[package] keywords`), deduplicated and sorted. Part of the immutable
+    /// release record, but **not** bound into the transparency-log leaf the way `license` is —
+    /// a keyword only files a package in a listing, so it is not something a registry could
+    /// meaningfully equivocate about. Empty when the release declared none.
+    pub keywords: Vec<String>,
 }
 
 impl Release {
@@ -303,6 +308,18 @@ impl Index for LocalIndex {
                         }
                     }
                 }
+                // Keywords are an array of strings, so they can't come through `get` (string-only).
+                // A non-string entry is skipped rather than failing the record: the parse is
+                // deliberately lossy, and a mis-typed tag shouldn't cost a resolvable release.
+                let keywords = t
+                    .get("keywords")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|k| k.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 out.push(Release {
                     version,
                     coords: GitCoords {
@@ -317,6 +334,7 @@ impl Index for LocalIndex {
                     // The local (offline) index carries no publish time — never subject to cooldown.
                     published_at: None,
                     license: get("license").map(str::to_string),
+                    keywords,
                 });
             }
         }
@@ -390,6 +408,13 @@ impl Index for LocalIndex {
             }
             if let Some(bundle) = &r.bundle {
                 text.push_str(&format!("bundle = {}\n", quote(bundle)));
+            }
+            // Every scalar key must be emitted before the `[[version.deps]]` sub-tables below: in
+            // TOML a key written after a sub-table header belongs to that sub-table, so a keywords
+            // line placed after the loop would silently become a dep's field.
+            if !r.keywords.is_empty() {
+                let tags: Vec<String> = r.keywords.iter().map(|k| quote(k)).collect();
+                text.push_str(&format!("keywords = [{}]\n", tags.join(", ")));
             }
             for dep in &r.deps {
                 text.push_str("\n[[version.deps]]\n");
@@ -540,6 +565,10 @@ struct WireVersion {
     /// The declared SPDX license expression. Absent for releases (or registries) that predate it.
     #[serde(default)]
     license: Option<String>,
+    /// Discovery keywords, sorted by the registry. Absent for releases (or registries) that predate
+    /// the field → an empty set.
+    #[serde(default)]
+    keywords: Vec<String>,
 }
 
 #[cfg(feature = "registry-http")]
@@ -1352,6 +1381,7 @@ impl Index for HttpIndex {
                 bundle: v.bundle,
                 published_at: v.published_at_unix,
                 license: v.license,
+                keywords: v.keywords,
             });
         }
         Ok(out)
@@ -1411,6 +1441,9 @@ impl Index for HttpIndex {
         }
         if let Some(license) = &release.license {
             body["license"] = serde_json::json!(license);
+        }
+        if !release.keywords.is_empty() {
+            body["keywords"] = serde_json::json!(release.keywords);
         }
         if let Some(signature) = &release.signature {
             body["signature"] = serde_json::json!(signature);
@@ -1606,6 +1639,7 @@ mod tests {
             bundle: None,
             published_at: None,
             license: None,
+            keywords: Vec::new(),
         }
     }
 
@@ -1688,6 +1722,37 @@ mod tests {
             .expect("publish");
         let got = index.releases("acme/pkg").unwrap();
         assert_eq!(got[1].license, None);
+    }
+
+    #[test]
+    fn keywords_round_trip_through_the_local_index_alongside_deps() {
+        let index = mem("keywords_round_trip");
+        // A release carrying BOTH keywords and deps: the keywords line must be emitted before the
+        // `[[version.deps]]` sub-table, or TOML would nest it under the dep and the read would lose
+        // it. Round-tripping with both present is exactly what proves the ordering.
+        let mut rel = release(1, 0, 0, "v1.0.0");
+        rel.keywords = vec!["image".to_string(), "simd".to_string()];
+        rel.deps = vec![Dep {
+            package: "acme/bytes".to_string(),
+            req: VersionReq::parse("^1.0").unwrap(),
+        }];
+        index.publish("acme/pkg", &rel).expect("publish");
+        let got = index.releases("acme/pkg").unwrap();
+        assert_eq!(
+            got[0].keywords,
+            vec!["image".to_string(), "simd".to_string()]
+        );
+        assert_eq!(
+            got[0].deps.len(),
+            1,
+            "the dep survived alongside the keywords"
+        );
+        // A keyword-less release stays empty (absent from the TOML entirely).
+        index
+            .publish("acme/pkg", &release(2, 0, 0, "v2.0.0"))
+            .expect("publish");
+        let got = index.releases("acme/pkg").unwrap();
+        assert!(got[1].keywords.is_empty());
     }
 
     #[test]
@@ -1910,6 +1975,7 @@ mod http_tests {
                     bundle: None,
                     published_at: None,
                     license: Some("MIT".to_string()),
+                    keywords: vec!["image".to_string(), "simd".to_string()],
                 },
             )
             .unwrap();
@@ -1932,6 +1998,11 @@ mod http_tests {
         assert!(
             body.contains("\"license\":\"MIT\""),
             "license in body: {body}"
+        );
+        // As do the discovery keywords, as a JSON array.
+        assert!(
+            body.contains("\"keywords\":[\"image\",\"simd\"]"),
+            "keywords in body: {body}"
         );
     }
 
@@ -1975,6 +2046,7 @@ mod http_tests {
             bundle: Some(r#"{"mediaType":"m"}"#.to_string()),
             published_at: None,
             license: None,
+            keywords: Vec::new(),
         };
         index.publish("a/b", &rel).unwrap();
         let body = rx.recv().unwrap();
@@ -2012,6 +2084,7 @@ mod http_tests {
                     bundle: None,
                     published_at: None,
                     license: None,
+                    keywords: Vec::new(),
                 },
             )
             .unwrap_err();
@@ -2300,8 +2373,9 @@ mod wire_fixture_tests {
         assert_eq!(r.bundle, None);
         assert_eq!(r.published_at, Some(1_767_614_400_000));
         assert_eq!(r.license, None);
+        assert!(r.keywords.is_empty(), "1.0.0 declared no keywords");
 
-        // 1.2.0 — deps + key provenance + license + publish time.
+        // 1.2.0 — deps + key provenance + license + keywords + publish time.
         let r = &releases[1];
         assert_eq!(r.version, Version::new(1, 2, 0));
         assert_eq!(r.coords.sha, SHA_120);
@@ -2322,6 +2396,8 @@ mod wire_fixture_tests {
         assert_eq!(r.bundle, None);
         assert_eq!(r.published_at, Some(1_770_715_800_000));
         assert_eq!(r.license.as_deref(), Some(LICENSE));
+        // Keywords ride through sorted, exactly as the registry stored them.
+        assert_eq!(r.keywords, vec!["image".to_string(), "simd".to_string()]);
 
         // 2.0.0 — keyless bundle, verbatim.
         let r = &releases[2];
@@ -2334,6 +2410,7 @@ mod wire_fixture_tests {
             "the keyless bundle rides through verbatim"
         );
         assert_eq!(r.license, None);
+        assert!(r.keywords.is_empty(), "2.0.0 declared no keywords");
 
         // Selection semantics over the same fixture: the yanked 1.0.0 is never *newly* selected
         // (`=1.0.0` finds nothing), while `^1` picks 1.2.0.
@@ -2379,6 +2456,7 @@ mod wire_fixture_tests {
             bundle: None,
             published_at: None,
             license: None,
+            keywords: Vec::new(),
         };
 
         // Minimal: only the required coordinate fields go on the wire.
@@ -2395,6 +2473,7 @@ mod wire_fixture_tests {
             req: VersionReq::parse("^1.0").unwrap(),
         }];
         signed.license = Some(LICENSE.to_string());
+        signed.keywords = vec!["image".to_string(), "simd".to_string()];
         signed.signature = Some(
             fixture_value("publish-request-signed.json")["signature"]
                 .as_str()
