@@ -12,6 +12,7 @@ use noeta_span::{Source, SourceId};
 
 /// Lower `src` with the checker's site maps and return the pretty-printed Core IR.
 fn lowered_ir(src: &str) -> String {
+    noeta_conformance::ensure_std_registry();
     let source = Source::new(SourceId::FIRST, "fuse.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
