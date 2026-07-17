@@ -1,0 +1,43 @@
+{
+  "name": "acme/imgfx",
+  "versions": [
+    {
+      "version": "1.0.0",
+      "url": "https://github.com/acme/imgfx",
+      "tag": "v1.0.0",
+      "sha": "3d2f8a41c6b95e07d4a2b81f5c9e6a3d70b4c1e9",
+      "deps": [],
+      "yanked": true,
+      "published_at": "2026-01-05T12:00:00.000Z",
+      "published_at_unix": 1767614400000
+    },
+    {
+      "version": "1.2.0",
+      "url": "https://github.com/acme/imgfx",
+      "tag": "v1.2.0",
+      "sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4",
+      "deps": [
+        {
+          "package": "acme/bytes",
+          "req": "^1.0"
+        }
+      ],
+      "signature": "35a70c17627b3da67e4efa87de9e49b3ec0e4de975001b070aceb1230f62ef414bfbbfd1be6ac17bc592f69b18985cf68d32c6c39e94f4b79f2bf705b862c902",
+      "yanked": false,
+      "published_at": "2026-02-10T09:30:00.000Z",
+      "published_at_unix": 1770715800000,
+      "license": "MIT OR Apache-2.0"
+    },
+    {
+      "version": "2.0.0",
+      "url": "https://github.com/acme/imgfx",
+      "tag": "v2.0.0",
+      "sha": "9b74c9897bac770ffc029102a200c5de13f2e2b8",
+      "deps": [],
+      "bundle": "{\"mediaType\":\"application/vnd.dev.sigstore.bundle.v0.3+json\",\"dsseEnvelope\":{\"payload\":\"e30=\",\"payloadType\":\"application/vnd.in-toto+json\"}}",
+      "yanked": false,
+      "published_at": "2026-03-01T00:00:00.000Z",
+      "published_at_unix": 1772323200000
+    }
+  ]
+}

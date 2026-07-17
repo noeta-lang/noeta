@@ -1,0 +1,6 @@
+{
+  "status": "policy updated",
+  "scope": "acme",
+  "require_provenance": true,
+  "root": "keyless"
+}

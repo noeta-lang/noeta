@@ -1,0 +1,10 @@
+{
+  "id": "NOETA-2026-0001",
+  "package": "acme/imgfx",
+  "ranges": ">=1.0.0, <1.2.0",
+  "patched": "1.2.0",
+  "severity": "high",
+  "summary": "Decoder heap overflow on crafted PNG",
+  "details": "A crafted PNG chunk length overflows the decode buffer.\nUpgrade to 1.2.0.",
+  "url": "https://acme.dev/advisories/NOETA-2026-0001"
+}

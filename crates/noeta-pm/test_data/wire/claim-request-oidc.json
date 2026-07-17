@@ -1,0 +1,5 @@
+{
+  "scope": "widgetco",
+  "token": "claim-publish-token-abc123",
+  "oidc": "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ.eyJyZXBvc2l0b3J5X293bmVyIjoid2lkZ2V0Y28ifQ.c2lnbmF0dXJl"
+}

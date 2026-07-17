@@ -1,0 +1,7 @@
+{
+  "version": "2.0.0",
+  "url": "https://github.com/acme/imgfx",
+  "tag": "v2.0.0",
+  "sha": "9b74c9897bac770ffc029102a200c5de13f2e2b8",
+  "bundle": "{\"mediaType\":\"application/vnd.dev.sigstore.bundle.v0.3+json\",\"dsseEnvelope\":{\"payload\":\"e30=\",\"payloadType\":\"application/vnd.in-toto+json\"}}"
+}
