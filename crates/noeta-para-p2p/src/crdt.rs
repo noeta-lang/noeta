@@ -21,8 +21,8 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use noeta_crdt::Mergeable;
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     ErrorKind, ExternValue, Host, NativeValue, Scalar, StdError, arity_error, no_function_error,
     no_method_error, type_error,
 };
@@ -32,7 +32,7 @@ pub const PNCOUNTER_TYPE_NAME: &str = "PnCounter";
 pub const GSET_TYPE_NAME: &str = "GSet";
 
 /// The CRDT types' qualified runtime identities — what
-/// [`noeta_native::ExternValue::type_identity`] returns; registered under `para.crdt`.
+/// [`noeta_ext_abi::ExternValue::type_identity`] returns; registered under `para.crdt`.
 pub const GCOUNTER_TYPE_IDENTITY: &str = "para.crdt.GCounter";
 pub const PNCOUNTER_TYPE_IDENTITY: &str = "para.crdt.PnCounter";
 pub const GSET_TYPE_IDENTITY: &str = "para.crdt.GSet";
@@ -426,15 +426,15 @@ pub fn from_bytes_like(like: &dyn ExternValue, bytes: &[u8]) -> Option<Box<dyn E
 
 /// The `ExtType` method-dispatch entry for each CRDT — paired with its `*_METHODS` table when the
 /// type is registered.
-pub const GCOUNTER_DISPATCH: noeta_native::registry::TypeDispatch = gcounter_method_dispatch;
-pub const PNCOUNTER_DISPATCH: noeta_native::registry::TypeDispatch = pncounter_method_dispatch;
-pub const GSET_DISPATCH: noeta_native::registry::TypeDispatch = gset_method_dispatch;
+pub const GCOUNTER_DISPATCH: noeta_ext_abi::registry::TypeDispatch = gcounter_method_dispatch;
+pub const PNCOUNTER_DISPATCH: noeta_ext_abi::registry::TypeDispatch = pncounter_method_dispatch;
+pub const GSET_DISPATCH: noeta_ext_abi::registry::TypeDispatch = gset_method_dispatch;
 
 // --- Small argument helpers (the plain-dispatch ABI exposes only the error constructors) --------
 
 /// Box an extern value as a dispatch result.
 fn extern_out(value: impl ExternValue + 'static) -> NativeOut {
-    NativeOut::Extern(noeta_native::ExternBox::new(value))
+    NativeOut::Extern(noeta_ext_abi::ExternBox::new(value))
 }
 
 fn want_arity(func: &str, args: &[NativeValue], expected: usize) -> Result<(), StdError> {

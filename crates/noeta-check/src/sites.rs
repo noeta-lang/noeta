@@ -29,9 +29,9 @@ pub struct Sites {
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`): the turbofish `T` resolved into a
-    /// [`noeta_native::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
+    /// [`noeta_ext_abi::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
     /// program, like the other site maps.
-    pub typed_module_call_sites: HashMap<Span, noeta_native::TypeRecipe>,
+    pub typed_module_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// `map(...)` call spans whose result element type is packed → the result element's layout. The
     /// VM's `map` builtin builds a flat result at these sites (P-PACK 2.6 category B); invisible to
     /// `RunResult`, so the eval reference may ignore it and stay boxed.
@@ -106,9 +106,9 @@ pub(crate) struct SiteMaps {
     /// `RunResult`).
     pub(crate) packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), keyed by the `Expr::TypedModuleCall`
-    /// span → the turbofish `T` resolved into a [`noeta_native::TypeRecipe`]. Both backends harvest
+    /// span → the turbofish `T` resolved into a [`noeta_ext_abi::TypeRecipe`]. Both backends harvest
     /// this on the same program, so the lowering bakes identical recipes into `Rvalue::TypedModuleCall`.
-    pub(crate) typed_module_call_sites: HashMap<Span, noeta_native::TypeRecipe>,
+    pub(crate) typed_module_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
     /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
     /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other

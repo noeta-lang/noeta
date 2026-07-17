@@ -18,7 +18,7 @@ noeta-object = { workspace = true }
 # and the shared text halves (float formatting, JSON serialization in `json_text`) — everything the
 # value model consumes. This deliberately replaces the old noeta-stdlib edge (cross-cutting audit
 # finding 2): a stdlib method-body edit no longer rebuilds the value model, GC, or the VM above it.
-noeta-native = { workspace = true }
+noeta-ext-abi = { workspace = true }
 # Hot-path integer formatting for interpolation holes (`display_into`); bypasses `fmt::Formatter`.
 itoa = { workspace = true }
 # The SSO string inside `Payload::Str` (P-SSO); re-exported for the `BuildString` seam.

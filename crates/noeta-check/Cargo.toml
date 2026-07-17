@@ -16,7 +16,7 @@ noeta-types = { workspace = true }
 # IntMethod, ...). The std units are data seeded by the assembling driver — this crate
 # deliberately does NOT link noeta-stdlib, so a stdlib method-body edit no longer rebuilds the
 # checker (audit-6 F2).
-noeta-native = { workspace = true }
+noeta-ext-abi = { workspace = true }
 
 [dev-dependencies]
 # Tests and the corpus bench are their own assembling driver: they seed the process-default

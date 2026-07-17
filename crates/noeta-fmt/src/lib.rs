@@ -249,7 +249,7 @@ pub fn format_source_in(
 /// A native body formatter for `noeta fmt`: `(body, indent, sub) -> Option<reflowed>`. `body` is the
 /// tier body's foreign text with each `${…}` hole a single NUL (`\0`); `indent` is the base column;
 /// `sub(language, body, indent)` delegates an embedded sub-language (a `<style>`/`<script>`) to its
-/// own registered formatter, or `None` if none. See [`noeta_native::registry::BodyFormatter`]. `fmt`
+/// own registered formatter, or `None` if none. See [`noeta_ext_abi::registry::BodyFormatter`]. `fmt`
 /// owns the Noeta side (hole substitution + escaping); a formatter is pure foreign reflow.
 pub type TierBodyFormatter =
     fn(&str, &str, &dyn Fn(&str, &str, &str) -> Option<String>) -> Option<String>;

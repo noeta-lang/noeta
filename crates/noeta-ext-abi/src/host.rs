@@ -5,7 +5,7 @@
 //! funneled through one [`Host`] trait with two intended implementations: `SandboxHost` — the
 //! deterministic in-memory sandbox that conformance and `--differential` always run (in `noeta-
 //! stdlib`, since it drives the concrete VFS/PRNG/net responder) — and a real host (real disk +
-//! real `std::env` + reqwest, in `noeta-runtime`), constructed only by the CLI/REPL/server and
+//! real `std::env` + reqwest, in `noeta-host-real`), constructed only by the CLI/REPL/server and
 //! never differential-tested.
 //!
 //! Only the capability *traits* (and [`ReadSource`], the read-handle backing the [`FileReader`]

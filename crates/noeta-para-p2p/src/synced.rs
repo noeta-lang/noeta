@@ -29,7 +29,7 @@
 //! A synced signal is a **signal node** in the shared reactive graph over an arena cell holding the
 //! CRDT value — the identical machinery `signal` uses — plus a topic and a subscription id. It
 //! participates through the [`ReactiveSource`] **capability** (obtained per-run via
-//! `noeta_native::capability`), the stable trait ABI in `noeta-reactive-abi`: `create_source` mints
+//! `noeta_ext_abi::capability`), the stable trait ABI in `noeta-reactive-abi`: `create_source` mints
 //! the node, `read_source` is the reactive `.get`, and `wake` is the external-change epilogue
 //! `merge`/`sync` run after landing a new value in the cell. That the integration is *real* (one
 //! graph, not a parallel system) is what makes a peer's merge rerun `computed`/`effect` exactly like
@@ -38,8 +38,8 @@
 use std::any::Any;
 use std::cmp::Ordering;
 
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     Cap, CtxError, CtxOut, CtxResult, ErrorKind, ExternBox, ExternValue, NativeCtx, NativeValue,
     Retained, Slot, StdError, capability, ctx_arity, no_function_error, no_method_error,
     type_error,
@@ -49,7 +49,7 @@ use noeta_reactive::NodeId;
 // graph, so a peer's merge propagates to `computed`/`effect` like a local `set`. It reaches the
 // engine through the `ReactiveSource` **capability** (never the engine's internals), and depends on
 // nothing of `noeta-stdlib` — only the tiny `noeta-reactive-abi` contract crate.
-use noeta_native::registry::ExtCapability;
+use noeta_ext_abi::registry::ExtCapability;
 use noeta_reactive_abi::{ReactiveSource, ViewSource, ViewSourceExtract};
 
 use crate::crdt::{from_bytes_like, merge_dyn, to_bytes_dyn};

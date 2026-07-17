@@ -13,8 +13,8 @@
 //! A handler abort becomes a 500 — the canonical "drop [`CtxError::Abort`] to recover" pattern
 //! the ctx error design was shaped around.
 
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     ArgKind, ArgSpec, AttrValue, CtxError, CtxOut, CtxResult, EntryArg, EntryCall, ErrorKind,
     ExtCommand, InstrumentId, InstrumentKind, MetricValue, NativeCtx, NativeValue, NetRequest,
     NetResponse, Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext, arity_error,
@@ -45,7 +45,7 @@ const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 /// The websocket session handle's type name (server-hmr L0).
 pub const SOCKET_TYPE_NAME: &str = "Socket";
 
-/// `Socket`'s qualified runtime identity — what [`noeta_native::ExternValue::type_identity`]
+/// `Socket`'s qualified runtime identity — what [`noeta_ext_abi::ExternValue::type_identity`]
 /// returns; registered under `std.http` next to `Request`/`Response`.
 pub const SOCKET_TYPE_IDENTITY: &str = "std.http.Socket";
 
@@ -208,17 +208,17 @@ struct ServerInstruments {
 /// handler rides in the retained arena until the loop takes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WsUpgrade {
-    pub handler: noeta_native::Retained,
+    pub handler: noeta_ext_abi::Retained,
 }
 
-impl noeta_native::ExternValue for WsUpgrade {
+impl noeta_ext_abi::ExternValue for WsUpgrade {
     fn type_identity(&self) -> &'static str {
         crate::net::RESPONSE_TYPE_IDENTITY
     }
-    fn eq_value(&self, other: &dyn noeta_native::ExternValue) -> bool {
+    fn eq_value(&self, other: &dyn noeta_ext_abi::ExternValue) -> bool {
         other.as_any().downcast_ref::<WsUpgrade>() == Some(self)
     }
-    fn cmp_value(&self, _other: &dyn noeta_native::ExternValue) -> Option<std::cmp::Ordering> {
+    fn cmp_value(&self, _other: &dyn noeta_ext_abi::ExternValue) -> Option<std::cmp::Ordering> {
         None
     }
     fn hash_value(&self) -> u64 {
@@ -227,7 +227,7 @@ impl noeta_native::ExternValue for WsUpgrade {
     fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
         write!(out, "<websocket upgrade>")
     }
-    fn clone_box(&self) -> Box<dyn noeta_native::ExternValue> {
+    fn clone_box(&self) -> Box<dyn noeta_ext_abi::ExternValue> {
         Box::new(self.clone())
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -245,14 +245,14 @@ pub struct Socket {
     pub conn: u64,
 }
 
-impl noeta_native::ExternValue for Socket {
+impl noeta_ext_abi::ExternValue for Socket {
     fn type_identity(&self) -> &'static str {
         SOCKET_TYPE_IDENTITY
     }
-    fn eq_value(&self, other: &dyn noeta_native::ExternValue) -> bool {
+    fn eq_value(&self, other: &dyn noeta_ext_abi::ExternValue) -> bool {
         other.as_any().downcast_ref::<Socket>() == Some(self)
     }
-    fn cmp_value(&self, _other: &dyn noeta_native::ExternValue) -> Option<std::cmp::Ordering> {
+    fn cmp_value(&self, _other: &dyn noeta_ext_abi::ExternValue) -> Option<std::cmp::Ordering> {
         None
     }
     fn hash_value(&self) -> u64 {
@@ -261,7 +261,7 @@ impl noeta_native::ExternValue for Socket {
     fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
         write!(out, "<socket {}>", self.conn)
     }
-    fn clone_box(&self) -> Box<dyn noeta_native::ExternValue> {
+    fn clone_box(&self) -> Box<dyn noeta_ext_abi::ExternValue> {
         Box::new(self.clone())
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -318,7 +318,7 @@ pub fn socket_ctx_method_dispatch(
             ctx.free(unit);
             Ok(CtxOut::Out(NativeOut::Unit))
         }
-        _ => Err(noeta_native::no_method_error(SOCKET_TYPE_NAME, method).into()),
+        _ => Err(noeta_ext_abi::no_method_error(SOCKET_TYPE_NAME, method).into()),
     }
 }
 
@@ -557,7 +557,7 @@ pub fn http_ctx_dispatch(
                                         let unit = ctx.drive(upgraded)?;
                                         ctx.free(unit);
                                         let socket = ctx.intern(NativeOut::Extern(
-                                            noeta_native::ExternBox::new(Socket { conn }),
+                                            noeta_ext_abi::ExternBox::new(Socket { conn }),
                                         ))?;
                                         let session = ctx.retained_get(upgrade.handler)?;
                                         let handler_ctx = std::mem::take(&mut in_flight[k].context);
@@ -668,7 +668,7 @@ pub fn http_ctx_dispatch(
             ctx_arity(func, args, 1)?;
             let handler = ctx.retain(args[0])?;
             Ok(CtxOut::Out(NativeOut::Extern(
-                noeta_native::ExternBox::new(WsUpgrade { handler }),
+                noeta_ext_abi::ExternBox::new(WsUpgrade { handler }),
             )))
         }
         // `server.liveview_js()` (server-hmr L2): the bundled client shim source.

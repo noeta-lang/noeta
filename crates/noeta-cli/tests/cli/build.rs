@@ -276,7 +276,7 @@ fn aot_runtime_does_not_link_the_compiler_frontend() {
     // a run-only artifact AND reachable attack surface (the same property the dev-deps arc gave dev
     // tooling, one layer down: L2 out of a shipped L1). The AOT runtime opts out of noeta-vm's
     // `compile` feature; assert the front-end is absent from its (non-dev) dependency graph, so a
-    // future edit that re-links it (a new default feature, a compiler dep on noeta-runtime) fails HERE
+    // future edit that re-links it (a new default feature, a compiler dep on noeta-host-real) fails HERE
     // rather than silently re-bloating and re-arming the artifact.
     let out = Command::new(env!("CARGO"))
         .current_dir(workspace())

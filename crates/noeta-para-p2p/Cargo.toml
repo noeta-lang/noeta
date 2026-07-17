@@ -9,9 +9,9 @@ rust-version.workspace = true
 [dependencies]
 # The convergence core (dep-free CRDTs) and the extension ABI.
 noeta-crdt = { workspace = true }
-noeta-native = { workspace = true }
+noeta-ext-abi = { workspace = true }
 # `synced` is a node in the SAME reactive graph as core `std.reactive`, reached through the
-# `ReactiveSource` **capability** (`noeta_native::capability::<dyn ReactiveSource>`): create_source /
+# `ReactiveSource` **capability** (`noeta_ext_abi::capability::<dyn ReactiveSource>`): create_source /
 # read_source / wake + the view-source hook — never the engine internals. The contract lives in the
 # tiny `noeta-reactive-abi` crate, so this extension depends on **nothing of `noeta-stdlib`**; the
 # engine implements the same trait on the other side. noeta-reactive supplies the `NodeId` handle.

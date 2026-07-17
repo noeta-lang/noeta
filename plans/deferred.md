@@ -160,7 +160,7 @@ own; these are additive capabilities.
 
 | Item | Source | Trigger to implement |
 |---|---|---|
-| **`packed_names` stays process-global** (`noeta-native/src/map_key.rs`) — the packed-key *display* field-name cache, first-registration-wins, invisible to the per-session registry model | audit-2 Finding 12 (disposition: documented as deliberate at the definition site) | A real per-session need: two co-hosted sessions whose `@packed` types share a short name and whose *rendered* key output must differ, or a hot-swap renaming a packed key type's fields. Cosmetic-only until then — key identity/hashing/compare never touch the names. Move it onto the session/VM alongside the shape story. (Its sibling in the same finding, the foreign view-extractor global, was **closed**: `ViewSourceExtract` is now a registry-declared capability.) |
+| **`packed_names` stays process-global** (`noeta-ext-abi/src/map_key.rs`) — the packed-key *display* field-name cache, first-registration-wins, invisible to the per-session registry model | audit-2 Finding 12 (disposition: documented as deliberate at the definition site) | A real per-session need: two co-hosted sessions whose `@packed` types share a short name and whose *rendered* key output must differ, or a hot-swap renaming a packed key type's fields. Cosmetic-only until then — key identity/hashing/compare never touch the names. Move it onto the session/VM alongside the shape story. (Its sibling in the same finding, the foreign view-extractor global, was **closed**: `ViewSourceExtract` is now a registry-declared capability.) |
 
 ## Crypto (crypto arc — the module is COMPLETE, these are follow-ons)
 

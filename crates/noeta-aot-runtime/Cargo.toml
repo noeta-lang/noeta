@@ -40,7 +40,7 @@ noeta-bytecode = { workspace = true }
 # member may not override the root's default-features when inheriting. This makes this crate's own
 # ring features the *only* thing that turns a stdlib ring (and its native deps) on; `noeta build
 # --native` selects them per-program (DCE Axis B).
-noeta-runtime = { path = "../noeta-runtime", default-features = false }
+noeta-host-real = { path = "../noeta-host-real", default-features = false }
 # Direct path (not workspace inheritance) so we can set default-features = false — an inherited
 # workspace dep may not override default-features. Drops the ring-datetime default (jiff + tzdb) so
 # an AOT binary that never imports std.datetime sheds it; the toolchain (noeta-cli) and differential
@@ -59,13 +59,13 @@ default = ["entry", "ring-http-client", "ring-datetime"]
 # a *composed* AOT runtime for a native-dependency app depends on this crate with this feature OFF and
 # supplies its own `main` (which installs the app's extensions), avoiding a duplicate-`main` link error.
 entry = []
-# The `std.http` outbound-client ring — forwards to reqwest in noeta-runtime.
-ring-http-client = ["noeta-runtime/ring-http-client"]
-# (para-namespace F2b) There is no `ring-p2p` here anymore: the p2panda transport left noeta-runtime
+# The `std.http` outbound-client ring — forwards to reqwest in noeta-host-real.
+ring-http-client = ["noeta-host-real/ring-http-client"]
+# (para-namespace F2b) There is no `ring-p2p` here anymore: the p2panda transport left noeta-host-real
 # for the `para.p2p` extension crate, so the AOT footprint scan gates it on the *extension* crate's
 # own `ring-p2p` feature (through the composed AOT shim), not on this base.
 # The `std.datetime` ring — forwards to jiff + the tzdb in noeta-stdlib. Unlike the two rings above
-# (host-deps in noeta-runtime), jiff is a *pure* dep in noeta-stdlib, so shedding it needs every
+# (host-deps in noeta-host-real), jiff is a *pure* dep in noeta-stdlib, so shedding it needs every
 # noeta-stdlib puller in this crate's graph (vm/value/ir/compiler/check/runtime and this crate) to
 # pull it `default-features = false` — which they do. So `--no-default-features` (a program that
 # never imports `std.datetime`) links no jiff; `--features ring-datetime` (a datetime-using program,

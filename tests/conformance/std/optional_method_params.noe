@@ -1,7 +1,7 @@
 // Optional parameters on core built-in methods (the core analogue of a Ring 2 function's
 // trailing-optional param). `split(sep, limit?)`, string/list `slice(start, end?)`,
 // `index_of(sub, from?)`, `pad_start/pad_end(width, fill?)`, `list.join(sep?)` — the mechanism
-// lives once in noeta-native / the shared arity model, so both backends agree.
+// lives once in noeta-ext-abi / the shared arity model, so both backends agree.
 // expect: stdout "[\"a\", \"b,c,d\"]"
 // expect: stdout "[\"a\", \"b\", \"c\"]"
 // expect: stdout "llo"

@@ -1867,7 +1867,7 @@ mod tests {
     }
 
     /// The real `Network` capability against a live endpoint. `#[ignore]` so CI stays hermetic —
-    /// run explicitly (`cargo test -p noeta-runtime -- --ignored real_host_fetches`) when network
+    /// run explicitly (`cargo test -p noeta-host-real -- --ignored real_host_fetches`) when network
     /// is available. Locks the reqwest wiring: a real GET returns 200 with a body and headers.
     #[test]
     #[ignore = "hits the real network; run explicitly"]
@@ -1890,7 +1890,7 @@ mod tests {
     fn real_host_disk_round_trip() {
         let mut host = RealHost::new().unwrap();
         let mut path = std::env::temp_dir();
-        path.push("noeta_runtime_roundtrip_test.txt");
+        path.push("noeta_host_real_roundtrip_test.txt");
         let path = path.to_string_lossy().into_owned();
         let _ = host.fs_remove(&path);
 
@@ -1912,7 +1912,7 @@ mod tests {
     fn real_host_directory_hierarchy() {
         let mut host = RealHost::new().unwrap();
         let mut root = std::env::temp_dir();
-        root.push("noeta_runtime_dirs_test");
+        root.push("noeta_host_real_dirs_test");
         let root = root.to_string_lossy().into_owned();
         // Start clean.
         let _ = std::fs::remove_dir_all(&root);
@@ -1954,7 +1954,7 @@ mod tests {
     fn real_host_reads_lazily_through_a_file_handle() {
         let mut host = RealHost::new().unwrap();
         let mut path = std::env::temp_dir();
-        path.push("noeta_runtime_lazy_read_test.txt");
+        path.push("noeta_host_real_lazy_read_test.txt");
         let path = path.to_string_lossy().into_owned();
         let _ = host.fs_remove(&path);
 

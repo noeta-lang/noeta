@@ -4,7 +4,7 @@
 //!
 //! Split out of `noeta-stdlib` so the contract does not drag core's batteries (crypto/UUID/JSON):
 //! a third-party extension — and internal mid-end crates like `noeta-ir` — depend on this lean
-//! crate, while `noeta-stdlib` re-exports it (`pub use noeta_native::*`) and adds the concrete
+//! crate, while `noeta-stdlib` re-exports it (`pub use noeta_ext_abi::*`) and adds the concrete
 //! `std` modules on top (the `core`/`std` relationship). See `plans/native-abi/README.md`.
 
 /// The extension **ABI version** — bumped on any change to the registration/dispatch contract
@@ -53,8 +53,8 @@ pub use registry::{
     NativeValue, PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
 };
 // The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
-// (`noeta_native::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared
-// argument guards stay namespaced (`noeta_native::args::want_str`) — dispatch modules import
+// (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared
+// argument guards stay namespaced (`noeta_ext_abi::args::want_str`) — dispatch modules import
 // them explicitly, so a module-local extractor never shadows silently.
 pub use ring1::*;
 pub use telemetry::{

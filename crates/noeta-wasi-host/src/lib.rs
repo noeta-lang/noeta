@@ -762,6 +762,6 @@ mod tests {
         host.tel_release_remote(seed);
         assert!(!host.tel_is_remote(seed));
     }
-    // (The p2p loopback-broker round-trip test moved to `noeta-native`'s `p2p.rs` when P2p left the
+    // (The p2p loopback-broker round-trip test moved to `noeta-ext-abi`'s `p2p.rs` when P2p left the
     // Host union — F2b: `WasiHost` no longer implements `P2p`; the broker owns those semantics.)
 }

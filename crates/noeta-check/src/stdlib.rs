@@ -9,7 +9,7 @@
 //! `noeta-stdlib`; if a name is added there without a row here it simply falls back to `dyn`/runtime
 //! dispatch, never to a wrong type.
 
-use noeta_native::registry;
+use noeta_ext_abi::registry;
 use noeta_types::Type;
 
 /// Reserved built-in type name for the value `iter()` returns (Track I.1a). `Iterator<T>` carries its
@@ -348,13 +348,13 @@ fn bytes_method(name: &str) -> Option<Type> {
 /// The methods on `int` (and, identically, any fixed-width `IntN`): the bit-manipulation intrinsics
 /// (P-BITS Tier B4 — all return `int`; `rotate_*` take an `int`, the rest none) and the total
 /// numeric conversions (Tier W4 — `to_u8`/`to_i32`/…/`to_int`, each returning its destination type).
-/// The method set is the shared `noeta_native::IntMethod` enum, so a bad arity is caught statically.
+/// The method set is the shared `noeta_ext_abi::IntMethod` enum, so a bad arity is caught statically.
 fn int_method(name: &str) -> Option<Type> {
     // A conversion carries a destination type distinct from `int`; the bit intrinsics all return `int`.
     if let Some(t) = int_conversion_return(name) {
         return Some(t);
     }
-    noeta_native::IntMethod::from_name(name).map(|_| Type::Int)
+    noeta_ext_abi::IntMethod::from_name(name).map(|_| Type::Int)
 }
 
 /// The destination type of a `to_<type>` conversion method (Tier W4), or `None` if `name` is not a
@@ -593,7 +593,7 @@ fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
 /// `rotate_right` take an `int` amount; the rest take none. The method set is the shared enum, so a
 /// bad arity/arg-type is caught statically and neither backend needs a runtime arity check.
 fn int_params(name: &str) -> Option<Vec<Type>> {
-    let method = noeta_native::IntMethod::from_name(name)?;
+    let method = noeta_ext_abi::IntMethod::from_name(name)?;
     Some(vec![Type::Int; method.arity()])
 }
 

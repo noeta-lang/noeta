@@ -13,7 +13,7 @@
 //! holes and re-applies tier-body escaping. So this file never sees Noeta syntax; it only
 //! pretty-prints HTML.
 
-use noeta_native::registry::{BodyFormatter, ExtModule, Extension};
+use noeta_ext_abi::registry::{BodyFormatter, ExtModule, Extension};
 
 /// The formatter-only extension. It contributes no modules or types — its whole purpose is to
 /// register the `"html"` body formatter so `@html` (and any `text: "html"` tier) reflows under

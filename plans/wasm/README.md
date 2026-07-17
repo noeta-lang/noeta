@@ -33,10 +33,10 @@ p2p/local-first in the browser, and **direct wasm codegen** for Noeta functions 
 - **`SandboxHost` is already a wasm host.** Every capability (fs/rng/clock/entropy/ids/network/
   env/os/telemetry) implemented deterministically with zero OS deps; `host.rs:188` even documents
   `"wasm32"`-style arch constants for it. `RealHost` (tokio/reqwest/p2panda) is CLI-only in
-  `noeta-runtime` and never enters a wasm build.
+  `noeta-host-real` and never enters a wasm build.
 - **The NaN-boxing core is width-agnostic.** `noeta-value/src/heap.rs` is the miri-sound
   exposed-provenance int↔pointer round-trip; 32-bit wasm pointers fit the codec. No mmap, no
-  executable memory, no `target_os` cfgs outside `noeta-jit`/`noeta-runtime`/`noeta-cache`.
+  executable memory, no `target_os` cfgs outside `noeta-jit`/`noeta-host-real`/`noeta-cache`.
 - **The bundling ladder carries over.** `.noeb` bundles (`noeta-bundle`, L1) are plain data;
   the per-ring DCE feature architecture (P-AOT L3.4, Axis B) applies directly to wasm binary size.
 - **Cranelift cannot emit wasm** — it consumes it (wasmtime's backend). The L3 native-AOT path has

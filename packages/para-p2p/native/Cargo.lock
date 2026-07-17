@@ -325,7 +325,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "noeta-native"
+name = "noeta-ext-abi"
 version = "0.1.0"
 dependencies = [
  "compact_str",
@@ -339,7 +339,7 @@ name = "noeta-para-p2p"
 version = "0.1.0"
 dependencies = [
  "noeta-crdt",
- "noeta-native",
+ "noeta-ext-abi",
  "noeta-reactive",
  "noeta-stdlib",
 ]
@@ -360,7 +360,7 @@ dependencies = [
  "jiff",
  "md-5",
  "noeta-crdt",
- "noeta-native",
+ "noeta-ext-abi",
  "noeta-reactive",
  "serde_json",
  "sha1",

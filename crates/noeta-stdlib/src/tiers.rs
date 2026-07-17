@@ -8,10 +8,10 @@
 //! declarations live here.
 //!
 //! Names are literals rather than `noeta_ast::reflect` constants because the ABI sits beneath the
-//! syntax crates (neither `noeta-native` nor this crate sees `noeta-ast`); a checker test pins
+//! syntax crates (neither `noeta-ext-abi` nor this crate sees `noeta-ast`); a checker test pins
 //! the two spellings together so they cannot drift.
 
-use noeta_native::registry::{
+use noeta_ext_abi::registry::{
     AttrFieldDefault, AttrFieldType, BodyFormatter, ExtAttrField, ExtAttribute, ExtTier,
 };
 

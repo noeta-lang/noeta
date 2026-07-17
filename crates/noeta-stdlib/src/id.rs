@@ -12,7 +12,7 @@
 //! ([`crate::ExternValue`] below): one type both backends host, ordered by its bytes (a v7
 //! therefore sorts by time), key-capable, displayed in the canonical lowercase hyphenated form
 //! `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12). The newtype is required because the
-//! extern-value contract (`ExternValue`) now lives in the `noeta-native` ABI crate while the
+//! extern-value contract (`ExternValue`) now lives in the `noeta-ext-abi` ABI crate while the
 //! `uuid` crate is foreign to it — the orphan rule forbids `impl ExternValue for uuid::Uuid`, so
 //! we wrap it, exactly as a third-party extension would wrap any foreign type it wants to expose.
 

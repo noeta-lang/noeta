@@ -19,7 +19,7 @@ noeta-object = { workspace = true }
 # handle). The std units are data seeded by the assembling driver — this crate deliberately does
 # NOT link noeta-stdlib, so a stdlib method-body edit no longer rebuilds the bytecode compiler
 # (audit-6 F2).
-noeta-native = { workspace = true }
+noeta-ext-abi = { workspace = true }
 noeta-check = { workspace = true }
 # The hot-swap differ token-normalizes type-declaration residuals (server-hmr H2).
 noeta-lexer = { workspace = true }

@@ -11,10 +11,10 @@
 //! struct EngineHost { base: SandboxHost, world: World }
 //!
 //! // Env is hand-written (the override)…
-//! impl noeta_native::Env for EngineHost { /* … the engine's view … */ }
+//! impl noeta_ext_abi::Env for EngineHost { /* … the engine's view … */ }
 //!
 //! // …everything else forwards to the base. `EngineHost` is now a full `Host`.
-//! noeta_native::delegate_host!(EngineHost => base :
+//! noeta_ext_abi::delegate_host!(EngineHost => base :
 //!     FileReader, FileSystem, Rng, Clock, Os, Entropy, Ids, Network, P2pProvider,
 //!     Tracing, Metrics, Logging);
 //! ```

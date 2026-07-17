@@ -143,7 +143,7 @@ pub struct Checked {
     pub expr_types: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// The checker's compile-input bundle (every span-keyed codegen hint + destructor relevance),
     /// consumed as a unit by the compiler and the eval reference. (The T2 `Sites` bundling subsumed
-    /// main's flat per-map fields, including the noeta-native `TypeRecipe` rename — the bundle's
+    /// main's flat per-map fields, including the noeta-ext-abi `TypeRecipe` rename — the bundle's
     /// field types live in `noeta_check::Sites` and follow that rename through the re-export.)
     pub sites: noeta_check::Sites,
     /// Method-bundle bindings by target type (kernel-methods K4) — what member completion reads
@@ -236,7 +236,7 @@ pub fn seed_ext_env(db: &mut dyn salsa::Database, verbatim_tier_names: Vec<Strin
 fn ext_verbatim_tier_names(db: &dyn salsa::Database) -> Vec<String> {
     match ExtEnv::try_get(db) {
         Some(env) => env.verbatim_tier_names(db).clone(),
-        None => noeta_native::registry::single_registry_process()
+        None => noeta_ext_abi::registry::single_registry_process()
             .ext_verbatim_tier_names()
             .into_iter()
             .map(str::to_string)

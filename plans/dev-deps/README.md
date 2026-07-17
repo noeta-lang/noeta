@@ -133,7 +133,7 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
 - `resolve_graph` → `ResolvedGraph { native_crates: Vec<NativeCrate>, … }` (`noeta-pm/src/graph.rs`);
   one `noeta.lock`.
 - `compose.rs` generates the `noeta-composed` Cargo project (`shim_cargo_toml`/`shim_main_rs`):
-  `[dependencies]` = `noeta-cli` + `noeta-native` + one `extN` per native crate, then `cargo build`,
+  `[dependencies]` = `noeta-cli` + `noeta-ext-abi` + one `extN` per native crate, then `cargo build`,
   cache by content hash, delegate. **This is the hook** for both dep-subsetting and feature toggling.
 - `Extension` capabilities: `modules`/`types`/`tiers`/`attributes`/`commands` (runtime) vs
   `body_formatters` (dev). `noeta-html`/`noeta-css` are already **formatter-only** crates (the ideal
@@ -187,7 +187,7 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
     `--target dev` layers dev tiers/deps in.
   - **D4c — composed runner for native-dependency apps. ✅ (`<this branch>`).** `compose.rs` now
     composes two shim **kinds** off one machinery: the full-CLI `Toolchain` (dev) and a lean `Runner`
-    base (`noeta-runner` + `noeta-native` + each native crate at default features, so a mixed crate's
+    base (`noeta-runner` + `noeta-ext-abi` + each native crate at default features, so a mixed crate's
     formatter stays off). `emit_exe` picks the composed runner when the app has native crates, else
     the stock runner. Fixed a D4a regression (native-dep `--exe` had stapled onto the stock runner,
     which lacked the app's extensions). The runner shim's `main` calls
@@ -218,9 +218,9 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
     crates (else the stock `libnoeta_aot.a`) — the `--native` analogue of `runner_base`. e2e
     `build_native_of_a_native_dep_app_runs_the_composed_handler`: the native binary runs its handler
     (`fx.double(21)` → 42) **and** carries no dev formatter. Also fixed a **pre-existing latent bug**
-    this surfaced: `noeta-runtime`'s always-compiled `ws.rs` uses `tokio::sync`/`select!`, but the
+    this surfaced: `noeta-host-real`'s always-compiled `ws.rs` uses `tokio::sync`/`select!`, but the
     workspace tokio dep declared neither — a ring-less `--native` build (no ring transitively enabling
-    them) failed to compile; `noeta-runtime` now declares `sync`/`macros` for its own code.
+    them) failed to compile; `noeta-host-real` now declares `sync`/`macros` for its own code.
   - **D5b — dev-toolchain dev-feature enablement (was deferred):** the composed **`Toolchain`** now
     turns on a mixed crate's declared conventional dev feature (`DEV_FEATURES = ["fmt"]`) so `noeta fmt`
     reflows its tier bodies; the shipped `Runner`/`AotRuntime` bases keep default features (formatter

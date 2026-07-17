@@ -262,7 +262,7 @@ struct IsolateState {
     /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
     /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
     /// worker thread can own the module for its lifetime; `isolate_factory` builds a fresh host +
-    /// executor per worker (injected by the CLI so `noeta-vm` needs no `noeta-runtime`/tokio dependency);
+    /// executor per worker (injected by the CLI so `noeta-vm` needs no `noeta-host-real`/tokio dependency);
     /// `isolates` holds each spawned worker's result channel + join handle; `inflight_isolates` counts
     /// workers whose result has not yet been harvested (so the scheduler treats a pending isolate as
     /// progress, not a deadlock). All inert in the sandbox (`parallel_isolates` false).

@@ -3932,7 +3932,7 @@ dependencies = [
  "noeta-bundle",
  "noeta-bytecode",
  "noeta-diagnostics",
- "noeta-runtime",
+ "noeta-host-real",
  "noeta-span",
  "noeta-stdlib",
  "noeta-vm",
@@ -3978,7 +3978,7 @@ version = "0.1.0"
 dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
- "noeta-native",
+ "noeta-ext-abi",
  "noeta-object",
  "noeta-span",
  "postcard",
@@ -4001,8 +4001,8 @@ dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
  "noeta-edition",
+ "noeta-ext-abi",
  "noeta-lexer",
- "noeta-native",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
@@ -4028,6 +4028,7 @@ dependencies = [
  "noeta-dap",
  "noeta-diagnostics",
  "noeta-fmt",
+ "noeta-host-real",
  "noeta-html",
  "noeta-ide",
  "noeta-lexer",
@@ -4039,7 +4040,6 @@ dependencies = [
  "noeta-pm",
  "noeta-prof",
  "noeta-runner",
- "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
  "noeta-vm",
@@ -4062,10 +4062,10 @@ dependencies = [
  "noeta-bytecode",
  "noeta-check",
  "noeta-diagnostics",
+ "noeta-ext-abi",
  "noeta-ir",
  "noeta-ir-passes",
  "noeta-lexer",
- "noeta-native",
  "noeta-object",
  "noeta-parser",
  "noeta-span",
@@ -4117,7 +4117,7 @@ name = "noeta-css"
 version = "0.1.0"
 dependencies = [
  "malva",
- "noeta-native",
+ "noeta-ext-abi",
 ]
 
 [[package]]
@@ -4129,12 +4129,12 @@ dependencies = [
  "noeta-check",
  "noeta-compiler",
  "noeta-diagnostics",
+ "noeta-host-real",
  "noeta-lexer",
  "noeta-loader",
  "noeta-parser",
  "noeta-pm",
  "noeta-runner",
- "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
  "noeta-value",
@@ -4151,9 +4151,9 @@ dependencies = [
  "noeta-check",
  "noeta-compiler",
  "noeta-diagnostics",
+ "noeta-ext-abi",
  "noeta-lexer",
  "noeta-loader",
- "noeta-native",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
@@ -4185,10 +4185,10 @@ dependencies = [
  "noeta-check",
  "noeta-compiler",
  "noeta-diagnostics",
+ "noeta-ext-abi",
+ "noeta-host-real",
  "noeta-lexer",
- "noeta-native",
  "noeta-parser",
- "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
  "noeta-vm",
@@ -4215,6 +4215,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-ext-abi"
+version = "0.1.0"
+dependencies = [
+ "compact_str",
+ "equivalent",
+ "hashbrown 0.17.1",
+ "serde",
+]
+
+[[package]]
 name = "noeta-fmt"
 version = "0.1.0"
 dependencies = [
@@ -4236,10 +4246,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-host-real"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "compact_str",
+ "criterion",
+ "gethostname",
+ "getrandom 0.3.4",
+ "noeta-stdlib",
+ "reqwest 0.12.28",
+ "serde_json",
+ "sha1",
+ "tokio",
+]
+
+[[package]]
 name = "noeta-html"
 version = "0.1.0"
 dependencies = [
- "noeta-native",
+ "noeta-ext-abi",
 ]
 
 [[package]]
@@ -4268,8 +4294,8 @@ dependencies = [
  "insta",
  "noeta-ast",
  "noeta-diagnostics",
+ "noeta-ext-abi",
  "noeta-lexer",
- "noeta-native",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
@@ -4333,8 +4359,8 @@ version = "0.1.0"
 dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
+ "noeta-ext-abi",
  "noeta-lexer",
- "noeta-native",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
@@ -4365,13 +4391,13 @@ dependencies = [
  "noeta-db",
  "noeta-diagnostics",
  "noeta-fmt",
+ "noeta-host-real",
  "noeta-ide",
  "noeta-lexer",
  "noeta-loader",
  "noeta-parser",
  "noeta-pm",
  "noeta-runner",
- "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
  "noeta-vm",
@@ -4379,16 +4405,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "noeta-native"
-version = "0.1.0"
-dependencies = [
- "compact_str",
- "equivalent",
- "hashbrown 0.17.1",
- "serde",
 ]
 
 [[package]]
@@ -4404,7 +4420,7 @@ version = "0.1.0"
 dependencies = [
  "noeta-conformance",
  "noeta-crdt",
- "noeta-native",
+ "noeta-ext-abi",
  "noeta-para-p2p-net",
  "noeta-reactive",
  "noeta-reactive-abi",
@@ -4416,7 +4432,7 @@ name = "noeta-para-p2p-net"
 version = "0.1.0"
 dependencies = [
  "futures-util",
- "noeta-native",
+ "noeta-ext-abi",
  "p2panda-auth",
  "p2panda-core",
  "p2panda-encryption",
@@ -4499,10 +4515,10 @@ dependencies = [
  "noeta-check",
  "noeta-compiler",
  "noeta-diagnostics",
+ "noeta-host-real",
  "noeta-loader",
  "noeta-pm",
  "noeta-runner",
- "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
  "noeta-vm",
@@ -4517,7 +4533,7 @@ version = "0.1.0"
 name = "noeta-reactive-abi"
 version = "0.1.0"
 dependencies = [
- "noeta-native",
+ "noeta-ext-abi",
  "noeta-reactive",
 ]
 
@@ -4536,28 +4552,12 @@ dependencies = [
  "noeta-db",
  "noeta-diagnostics",
  "noeta-edition",
+ "noeta-host-real",
  "noeta-loader",
  "noeta-pm",
- "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
  "noeta-vm",
-]
-
-[[package]]
-name = "noeta-runtime"
-version = "0.1.0"
-dependencies = [
- "base64",
- "compact_str",
- "criterion",
- "gethostname",
- "getrandom 0.3.4",
- "noeta-stdlib",
- "reqwest 0.12.28",
- "serde_json",
- "sha1",
- "tokio",
 ]
 
 [[package]]
@@ -4580,7 +4580,7 @@ dependencies = [
  "jiff",
  "md-5",
  "noeta-crdt",
- "noeta-native",
+ "noeta-ext-abi",
  "noeta-reactive",
  "noeta-reactive-abi",
  "serde_json",
@@ -4608,7 +4608,7 @@ dependencies = [
  "noeta-ast",
  "noeta-bytecode",
  "noeta-diagnostics",
- "noeta-native",
+ "noeta-ext-abi",
  "noeta-object",
  "proptest",
 ]

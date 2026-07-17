@@ -12,7 +12,7 @@
 //! handles fetch/offline/reuse. `NOETA_TOOLCHAIN_SRC` overrides with an explicit checkout.
 //!
 //! An entry crate exports its units under a fixed convention:
-//! `pub static NOETA_EXTENSIONS: &[&(dyn noeta_native::Extension + Sync)]` — a slice, so one
+//! `pub static NOETA_EXTENSIONS: &[&(dyn noeta_ext_abi::Extension + Sync)]` — a slice, so one
 //! package registers any number of extension units (std's own shape).
 
 use std::path::{Path, PathBuf};
@@ -616,7 +616,7 @@ const DEFAULT_AOT_LIBS: &[&str] = &[
 ];
 
 /// The composed AOT runtime's manifest: a `staticlib` depending on `noeta-aot-runtime` (with its C
-/// `main` OFF via `default-features = false`, forwarding the program's stdlib rings), `noeta-native`,
+/// `main` OFF via `default-features = false`, forwarding the program's stdlib rings), `noeta-ext-abi`,
 /// and each native crate at **default features** (a mixed crate's formatter stays stripped). The empty
 /// `[workspace]` keeps it from being workspace-adopted; the release profile mirrors the toolchain's.
 fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[String]) -> String {
@@ -634,7 +634,7 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
         }
     };
     // Rings the AOT **base** (`noeta-aot-runtime`) owns — it forwards them to noeta-stdlib /
-    // noeta-runtime. An **extension-owned** ring is not a base feature: since para-namespace F2b the
+    // noeta-host-real. An **extension-owned** ring is not a base feature: since para-namespace F2b the
     // p2panda transport is `ring-p2p` on the `para.p2p` *extension* crate, whose native tree is linked
     // through the entry crate that declares it (default-on there), not the base. So such a ring is
     // filtered out of the base feature set here — applying it to the base would be an unknown-feature
@@ -660,8 +660,8 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
         src_spec("noeta-aot-runtime")
     ));
     out.push_str(&format!(
-        "noeta-native = {{ {} }}\n",
-        src_spec("noeta-native")
+        "noeta-ext-abi = {{ {} }}\n",
+        src_spec("noeta-ext-abi")
     ));
     for (n, e) in entries.iter().enumerate() {
         // Footprint-gate the entry crate's rings: enable only those the program actually selected, so
@@ -707,7 +707,7 @@ fn aot_shim_lib_rs(entries: &[Entry]) -> String {
          //! Installs the app's native runtime extensions, then runs the embedded AOT program.\n\n\
          #[unsafe(no_mangle)]\n\
          pub extern \"C\" fn main() -> core::ffi::c_int {\n\
-         \x20   let mut units: Vec<&'static (dyn noeta_native::Extension + Sync)> = Vec::new();\n",
+         \x20   let mut units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)> = Vec::new();\n",
     );
     for (n, e) in entries.iter().enumerate() {
         out.push_str(&format!(
@@ -745,13 +745,13 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, kind: ShimKin
         ),
     };
     // The base: the full toolchain (`noeta-cli`) for a dev composition, or the lean `noeta-runner`
-    // for a shipped artifact's base (dev-deps D4c — no fmt/LSP/DAP). `noeta-native` supplies the
+    // for a shipped artifact's base (dev-deps D4c — no fmt/LSP/DAP). `noeta-ext-abi` supplies the
     // extension ABI for both. Each `extN` (a native runtime crate) is pulled with **default features**
     // for a shipped base, so a mixed crate's formatter (gated behind its `fmt` feature) is *not*
     // compiled in; a **dev toolchain** additionally turns on the crate's declared dev features
     // (dev-deps D5b) so `noeta fmt` can reflow its tier bodies.
     out.push_str(&toolchain_dep(kind.base_crate()));
-    out.push_str(&toolchain_dep("noeta-native"));
+    out.push_str(&toolchain_dep("noeta-ext-abi"));
     for (n, e) in entries.iter().enumerate() {
         // A dev toolchain turns on the crate's dev features (`fmt`); a Toolchain *and* a Runner
         // (shipped `--exe`) both enable ALL of the crate's footprint rings — a runnable binary is
@@ -784,12 +784,12 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, kind: ShimKin
 
 /// The `[patch]` section that redirects a native package's git dependencies **on the canonical
 /// toolchain repo** to *this* toolchain's own crates (para-namespace follow-on F3). It is what makes
-/// an **out-of-tree** native package buildable: the package's entry crate depends on `noeta-native`
+/// an **out-of-tree** native package buildable: the package's entry crate depends on `noeta-ext-abi`
 /// (and, for a first-party package, its own toolchain-resident impl crate) by git on the noeta repo —
 /// resolvable in a standalone clone — and here the composer overrides every one of those with the
 /// consumer's *exact* toolchain source. Without this the git crates would be a **second** copy of
-/// `noeta-native`, so a `dyn Extension` from the package would not match the shim's
-/// `noeta_native::Extension` type and the `NOETA_EXTENSIONS` aggregation would not type-check.
+/// `noeta-ext-abi`, so a `dyn Extension` from the package would not match the shim's
+/// `noeta_ext_abi::Extension` type and the `NOETA_EXTENSIONS` aggregation would not type-check.
 ///
 /// Only emitted for a **workspace** (local-path) toolchain: a git-tag toolchain unifies naturally
 /// when the package pins the same tag, and Cargo forbids patching a git source with itself. Every
@@ -842,7 +842,7 @@ fn shim_main_rs(entries: &[Entry], trusted_command_roots: &[String], kind: ShimK
     out.push_str(
         "//! Generated by noeta (package-manager Phase 3 / dev-deps D4c) — a composed shim. Do not edit.\n\n\
          fn main() -> std::process::ExitCode {\n\
-         \x20   let mut units: Vec<&'static (dyn noeta_native::Extension + Sync)> = Vec::new();\n",
+         \x20   let mut units: Vec<&'static (dyn noeta_ext_abi::Extension + Sync)> = Vec::new();\n",
     );
     for (n, e) in entries.iter().enumerate() {
         out.push_str(&format!(
@@ -1014,10 +1014,10 @@ mod tests {
     fn shim_patches_noeta_repo_git_crates_to_the_workspace_for_out_of_tree_packages() {
         // A workspace toolchain with two crates. `toolchain_patch_section` must emit a `[patch]` on
         // the canonical repo URL redirecting each `crates/*` member to its path — so a native package
-        // that git-deps the noeta repo unifies its `noeta_native::Extension` with the shim's.
+        // that git-deps the noeta repo unifies its `noeta_ext_abi::Extension` with the shim's.
         let root = std::env::temp_dir().join(format!("noeta_patch_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for c in ["noeta-native", "noeta-crdt"] {
+        for c in ["noeta-ext-abi", "noeta-crdt"] {
             let d = root.join("crates").join(c);
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{c}\"\n")).unwrap();
@@ -1033,8 +1033,8 @@ mod tests {
         assert!(toml.contains("[patch."), "a [patch] section:\n{toml}");
         assert!(
             toml.contains(&format!(
-                "noeta-native = {{ path = \"{}\" }}",
-                root.join("crates").join("noeta-native").display()
+                "noeta-ext-abi = {{ path = \"{}\" }}",
+                root.join("crates").join("noeta-ext-abi").display()
             )),
             "each crate redirected to its path:\n{toml}"
         );

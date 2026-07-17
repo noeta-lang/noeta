@@ -42,7 +42,7 @@ use p2panda_store::spaces::{SpacesStore, SqliteSpacesStore};
 use p2panda_store::{SqliteError, SqliteStore, Transaction, tx};
 
 use crate::io_error;
-use noeta_native::StdError;
+use noeta_ext_abi::StdError;
 
 /// We don't use conditional access, so the spaces "conditions" type is unit.
 pub type Conditions = ();

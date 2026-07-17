@@ -690,7 +690,7 @@ fn lex_program(
         .flat_map(|l| l.text_tier_decls.iter().cloned())
         .collect();
     declared.extend(
-        noeta_native::registry::single_registry_process()
+        noeta_ext_abi::registry::single_registry_process()
             .ext_verbatim_tier_names()
             .into_iter()
             .map(str::to_string),
@@ -797,7 +797,7 @@ fn link_core(
     // For the complete policy: the always-retained roots are the installed extensions. The loader
     // is already global-registry-coupled (verbatim-tier names below), so the process default —
     // seeded by the assembling driver (audit-6 F2) — is the lens.
-    let reg = noeta_native::registry::single_registry_process();
+    let reg = noeta_ext_abi::registry::single_registry_process();
     // A module contributes only if it declares a namespace to resolve against.
     let module_views: Vec<ModuleView> = pool
         .iter()

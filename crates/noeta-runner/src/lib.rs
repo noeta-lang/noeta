@@ -35,7 +35,7 @@ pub use compile::{CompileFailure, Compiled, compile_real, compile_whole_file, re
 /// A factory mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the main
 /// program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk / clock
 /// / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
-/// `noeta-runtime`/tokio dependency.
+/// `noeta-host-real`/tokio dependency.
 pub fn run_module_real_host(
     module: Arc<Module>,
     args: Vec<String>,
@@ -44,13 +44,13 @@ pub fn run_module_real_host(
 ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
     let factory: noeta_vm::IsolateFactory = Arc::new(move || {
         let host: Box<dyn noeta_stdlib::Host> = Box::new(
-            noeta_runtime::RealHost::new()
+            noeta_host_real::RealHost::new()
                 .expect("cannot start an isolate's runtime")
                 .with_args(args.clone())
                 .with_p2p_app(app_id.clone()),
         );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
-            noeta_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
+            noeta_host_real::RealExecutor::new().expect("cannot start an isolate's async executor"),
         );
         (host, executor)
     });

@@ -67,7 +67,7 @@ The `@html` expression tier travels with the package (importing `render` brings 
 
 ### Native packages: git-deps + a composer `[patch]` (proven, F3)
 
-A native entry crate compiled by the composed toolchain depends on `noeta-native` (and, for a
+A native entry crate compiled by the composed toolchain depends on `noeta-ext-abi` (and, for a
 first-party package, its toolchain-resident impl crate — `para-p2p` depends on
 `noeta-para-p2p`). These are **toolchain** crates, versioned with the language — never published
 to a foreign registry (crates.io is irrelevant; Noeta packages resolve through the Noeta
@@ -81,12 +81,12 @@ noeta-para-p2p = { git = "https://github.com/…/noeta", tag = "vX" }
 ```
 
 The catch: that git crate is a *second* copy of the toolchain, so a `dyn Extension` from it
-would not match the shim's `noeta_native::Extension` type. The composed toolchain closes this
+would not match the shim's `noeta_ext_abi::Extension` type. The composed toolchain closes this
 with a **`[patch]`** it injects into the generated shim
 (`compose.rs::toolchain_patch_section`): for a workspace (local-path) toolchain it rewrites
 **every** `crates/*` member of the noeta repo to the consumer's *exact* toolchain path, so the
 whole graph — including the package's git-deps and their transitive `workspace = true` deps —
-unifies on one `noeta-native`. The patch key is this build's `repository`, overridable via
+unifies on one `noeta-ext-abi`. The patch key is this build's `repository`, overridable via
 `NOETA_TOOLCHAIN_REPO` (a fork, a private mirror, or a local `file://` clone). A **git-tag**
 toolchain needs no patch: the package pins the same tag and Cargo unifies the identical git
 source (and Cargo forbids patching a git source with itself). Cargo does fetch the git source

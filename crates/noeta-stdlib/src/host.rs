@@ -1,22 +1,22 @@
 //! The deterministic sandbox host (M2.1). The host-capability *traits* (`FileSystem`/`Rng`/
 //! `Clock`/`Env`/`Entropy`/`Ids`/`Network`/`Host` + `FileReader`, and `ReadSource`) live in the ABI
-//! crate ([`noeta_native::host`], re-exported here); this module provides the concrete
+//! crate ([`noeta_ext_abi::host`], re-exported here); this module provides the concrete
 //! [`SandboxHost`] — the in-memory VFS, seeded PRNG, logical clock, and pure network responder that
 //! conformance and `--differential` always run. It owns the *bytes* the capabilities read/write, so
 //! it stays with the modules ([`crate::fs`], [`crate::random`], [`crate::net`]) whose state it holds.
 
-pub use noeta_native::host::{
+pub use noeta_ext_abi::host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
     ReadSource, RealP2pConfig, Rng,
 };
-pub use noeta_native::{Logging, Metrics, Tracing};
+pub use noeta_ext_abi::{Logging, Metrics, Tracing};
 
 use crate::env;
 use crate::fs::Vfs;
 use crate::random;
 use crate::{ErrorKind, StdError};
-use noeta_native::ExecResult;
-use noeta_native::{
+use noeta_ext_abi::ExecResult;
+use noeta_ext_abi::{
     AttrValue, InstrumentId, InstrumentKind, LogRecord, MetricData, MetricStore, MetricValue,
     SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext,
 };
@@ -38,7 +38,7 @@ pub const SANDBOX_ENTROPY_SEED: u64 = 0xA076_1D64_78BD_642F;
 // were line-identical state-threading around the shared pure kernels (`random::*`) — 3x per
 // capability, with each host's real differences (e.g. its `clock_unix_ms` reading) hiding among
 // identical-looking blocks. Each capability now lives ONCE as an embeddable component struct; a
-// host embeds the components it wants and forwards with `noeta_native::delegate_host!`, keeping
+// host embeds the components it wants and forwards with `noeta_ext_abi::delegate_host!`, keeping
 // hand-written impls only where it genuinely differs. `SandboxHost` below is the in-tree proof;
 // the Wasi/browser hosts can adopt the same components without behavior change.
 
@@ -431,10 +431,10 @@ impl FileSystem for SandboxHost {
 
 // The deterministic quartet forwards to the embedded components — the capability semantics
 // (including `clock_unix_ms`'s derived-read subtlety) live on the component types above.
-noeta_native::delegate_host!(SandboxHost => rng : Rng);
-noeta_native::delegate_host!(SandboxHost => clock : Clock);
-noeta_native::delegate_host!(SandboxHost => entropy : Entropy);
-noeta_native::delegate_host!(SandboxHost => ids : Ids);
+noeta_ext_abi::delegate_host!(SandboxHost => rng : Rng);
+noeta_ext_abi::delegate_host!(SandboxHost => clock : Clock);
+noeta_ext_abi::delegate_host!(SandboxHost => entropy : Entropy);
+noeta_ext_abi::delegate_host!(SandboxHost => ids : Ids);
 
 impl Network for SandboxHost {
     /// The whole outbound network is the pure sandbox responder — deterministic, so both backends
@@ -658,7 +658,7 @@ impl Os for SandboxHost {
         self.procs
             .get(&handle)
             .map(|p| p.result.clone())
-            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))
+            .ok_or_else(|| noeta_ext_abi::os::unknown_process_error(handle))
     }
 
     /// The scripted child completed at spawn, so `try_wait` always reports it done — a program's
@@ -673,7 +673,7 @@ impl Os for SandboxHost {
         if self.procs.contains_key(&handle) {
             Ok(())
         } else {
-            Err(noeta_native::os::unknown_process_error(handle))
+            Err(noeta_ext_abi::os::unknown_process_error(handle))
         }
     }
 
@@ -684,7 +684,7 @@ impl Os for SandboxHost {
         let proc = self
             .procs
             .get_mut(&handle)
-            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+            .ok_or_else(|| noeta_ext_abi::os::unknown_process_error(handle))?;
         Ok(scripted_read_line(
             &proc.result.stdout,
             &mut proc.stdout_cursor,
@@ -696,7 +696,7 @@ impl Os for SandboxHost {
         let proc = self
             .procs
             .get_mut(&handle)
-            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+            .ok_or_else(|| noeta_ext_abi::os::unknown_process_error(handle))?;
         Ok(scripted_read(
             &proc.result.stdout,
             &mut proc.stdout_cursor,
@@ -709,7 +709,7 @@ impl Os for SandboxHost {
         let proc = self
             .procs
             .get_mut(&handle)
-            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+            .ok_or_else(|| noeta_ext_abi::os::unknown_process_error(handle))?;
         Ok(scripted_read_line(
             &proc.result.stderr,
             &mut proc.stderr_cursor,
@@ -735,7 +735,7 @@ impl SandboxHost {
         if self.procs.contains_key(&handle) {
             Ok(())
         } else {
-            Err(noeta_native::os::unknown_process_error(handle))
+            Err(noeta_ext_abi::os::unknown_process_error(handle))
         }
     }
 }
@@ -940,7 +940,7 @@ mod tests {
         }
 
         // Everything else forwards — one line per capability, provided methods included.
-        noeta_native::delegate_host!(EngineHost => base :
+        noeta_ext_abi::delegate_host!(EngineHost => base :
             FileReader, FileSystem, Rng, Clock, Os, Entropy, Ids, Network, P2pProvider,
             Tracing, Metrics, Logging);
 
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn log_recorder_captures_records_deterministically() {
-        use noeta_native::Severity;
+        use noeta_ext_abi::Severity;
 
         let emit = |host: &mut SandboxHost| {
             // A correlated record (emitted "inside" a span) + a top-level one.

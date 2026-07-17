@@ -16,7 +16,7 @@
 //!   (`ln(-1.0)`, `asin(2.0)`) yield NaN, matching `sqrt(-1.0)` — no new failure mode.
 
 use crate::{Arg, Dispatch, ErrorKind, Output, StdError};
-use noeta_native::args::want_arity;
+use noeta_ext_abi::args::want_arity;
 
 /// The `math` function names, in dispatch order — for tooling that wants the surface.
 pub const FUNCTIONS: &[&str] = &[

@@ -18,7 +18,7 @@ semver = { workspace = true }
 pubgrub = { workspace = true }
 toml = { workspace = true }
 # The HTTP registry client (Phase 4, S4) is opt-in so pure/offline consumers (and the LSP) don't pull
-# a TLS stack. reqwest is already compiled by the CLI (noeta-runtime), so this shares its rustls.
+# a TLS stack. reqwest is already compiled by the CLI (noeta-host-real), so this shares its rustls.
 reqwest = { workspace = true, optional = true, features = ["blocking", "json"] }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

@@ -181,11 +181,11 @@ fn mismatch(expected: &str, found: &Json) -> StdError {
     }
 }
 
-// `stringify` + `json_string` moved to `noeta_native::json_text` (cross-cutting audit finding 2:
+// `stringify` + `json_string` moved to `noeta_ext_abi::json_text` (cross-cutting audit finding 2:
 // they are the pure text half both backends and the value crate share, and keeping them here forced
 // `noeta-value` to sit above the whole stdlib battery tree). Re-exported so `crate::json::stringify`
 // / `json_string` remain the paths every module and doc reference uses.
-pub use noeta_native::json_text::{json_string, stringify};
+pub use noeta_ext_abi::json_text::{json_string, stringify};
 
 fn convert(value: JsonValue) -> Json {
     match value {

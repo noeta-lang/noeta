@@ -1,9 +1,9 @@
 # The real p2panda transport for the `para.p2p` capability (para-namespace follow-on F2b) — a
 # p2panda-net node (gossip + log-sync over iroh/QUIC) plus its group-encryption assembly. Extracted
-# out of `noeta-runtime` so the heavy iroh/QUIC/p2panda tree no longer rides in the CLI runtime; the
-# `para.p2p` extension owns this node instead of `RealHost`. Depends only on `noeta-native` (for the
+# out of `noeta-host-real` so the heavy iroh/QUIC/p2panda tree no longer rides in the CLI runtime; the
+# `para.p2p` extension owns this node instead of `RealHost`. Depends only on `noeta-ext-abi` (for the
 # `P2p` trait it implements + `StdError`/`SyncStatus`) and the p2panda/tokio tree — nothing above it,
-# so it stays out of any dependency cycle with `noeta-runtime`.
+# so it stays out of any dependency cycle with `noeta-host-real`.
 [package]
 name = "noeta-para-p2p-net"
 version.workspace = true
@@ -13,7 +13,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-noeta-native = { workspace = true }
+noeta-ext-abi = { workspace = true }
 # The node owns its OWN multi-thread runtime (persistent gossip/sync tasks outlive individual
 # dispatches — a current-thread `block_on`-per-call runtime cannot), plus mpsc for the drain channels.
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }

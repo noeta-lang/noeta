@@ -37,6 +37,8 @@ Every stage emits typed `Diagnostic`s rendered in exactly one place (`noeta-diag
 
 Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on by everyone; `noeta-cli` depends on (nearly) everything. The two backends are **siblings** — neither depends on the other; both meet at the `Backend`/`RunResult` seam.
 
+**Name disambiguation:** the language *runtime* is `noeta-vm`; `noeta-runner` is the lean execution core the prod artifacts staple onto; `noeta-aot-runtime` is the AOT link archive for `--native` builds; `noeta-host-real` is only the CLI's real-IO `Host`; `noeta-ext-abi` is the extension ABI (nothing to do with AOT); and `noeta-compiler` is only IR→bytecode — the "compiler" a newcomer expects is check + compiler + loader together.
+
 ### Frontend
 | Crate | Role |
 |---|---|
@@ -81,9 +83,9 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 ### Shared runtime & host
 | Crate | Role |
 |---|---|
-| `noeta-native` | The extension **ABI**: the `Host` supertrait (twelve capability traits — filesystem, rng, clock, env, os, entropy, ids, network, tracing, metrics, logging, and the `P2pProvider` seam that replaced the in-union p2p capability, para-namespace F2b), `ExtModule`/`ExtType`/`ExtFn` registration, the assembled `Registry` + the process-default slot (`install`/`single_registry_process`), and the neutral `NativeValue`/`PackedView` marshalling seam. What third-party native packages link against — and the **only** extension crate the front-end (`noeta-check`/`noeta-loader`/`noeta-compiler`/`noeta-ir`/`noeta-db`) links: they consume the registry as *data* seeded by the assembling driver, so a stdlib method-body edit rebuilds none of them (audit-6 F2). |
-| `noeta-stdlib` | The **shared semantics layer**: Ring 1/Ring 2 stdlib + `SandboxHost` (deterministic) implemented over the `noeta-native` ABI. Both backends route through it so behaviour cannot drift. Linked by the runtimes and drivers (vm/eval/runtime/runner/embed/tooling/cli) — the driver seeds the process-default registry (`registry::default_seeded()`/`install_with_extras`) before the front-end's first lookup. |
-| `noeta-runtime` | `RealHost`: per-isolate tokio, real disk async + real `env`/`args`/network + telemetry export. CLI/REPL only; never differential-tested. |
+| `noeta-ext-abi` | The extension **ABI**: the `Host` supertrait (twelve capability traits — filesystem, rng, clock, env, os, entropy, ids, network, tracing, metrics, logging, and the `P2pProvider` seam that replaced the in-union p2p capability, para-namespace F2b), `ExtModule`/`ExtType`/`ExtFn` registration, the assembled `Registry` + the process-default slot (`install`/`single_registry_process`), and the neutral `NativeValue`/`PackedView` marshalling seam. What third-party native packages link against — and the **only** extension crate the front-end (`noeta-check`/`noeta-loader`/`noeta-compiler`/`noeta-ir`/`noeta-db`) links: they consume the registry as *data* seeded by the assembling driver, so a stdlib method-body edit rebuilds none of them (audit-6 F2). |
+| `noeta-stdlib` | The **shared semantics layer**: Ring 1/Ring 2 stdlib + `SandboxHost` (deterministic) implemented over the `noeta-ext-abi` ABI. Both backends route through it so behaviour cannot drift. Linked by the runtimes and drivers (vm/eval/runtime/runner/embed/tooling/cli) — the driver seeds the process-default registry (`registry::default_seeded()`/`install_with_extras`) before the front-end's first lookup. |
+| `noeta-host-real` | `RealHost`: per-isolate tokio, real disk async + real `env`/`args`/network + telemetry export. CLI/REPL only; never differential-tested. |
 | `noeta-reactive` | Signals/computed/effects: the reactive graph, topological flush, and the E0045 runaway guard. |
 | `noeta-crdt` | Local-first CRDTs (gcounter/pncounter/gset) + the p2panda transport behind `std.synced`/`std.p2p`. |
 

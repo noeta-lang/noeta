@@ -414,8 +414,8 @@ pub(crate) fn bench_execute(
     program: &Program,
     checked: &noeta_check::Checked,
 ) -> Result<(noeta_backend::RunResult, std::time::Duration), String> {
-    let host =
-        noeta_runtime::RealHost::new().map_err(|err| format!("cannot start the runtime: {err}"))?;
+    let host = noeta_host_real::RealHost::new()
+        .map_err(|err| format!("cannot start the runtime: {err}"))?;
     // Compile to bytecode untimed (isolates I.4a — the real path is the VM), then time execution
     // alone, so the measurement excludes both lowering and bytecode generation.
     let module = compile_real(program, checked)?;

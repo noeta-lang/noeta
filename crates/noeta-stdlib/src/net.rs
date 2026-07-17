@@ -1,6 +1,6 @@
 //! The `Network` capability's deterministic sandbox responder (http arc H1) — the [`crate::fs::Vfs`]
 //! analog for the network. The seam *types* (`NetRequest`/`NetResponse`/`NetFetchIo`) live in the
-//! ABI crate ([`noeta_native::net`], re-exported here); the responder stays here because it uses
+//! ABI crate ([`noeta_ext_abi::net`], re-exported here); the responder stays here because it uses
 //! `serde_json`, which the lean ABI crate deliberately does not pull.
 //!
 //! A network has no program-visible "write" step, so unlike the Vfs there is no mutable store to
@@ -9,7 +9,7 @@
 //! response path and pin exact bytes. Under the sandbox every request — whatever its URL — is
 //! answered here; a program that wants real data runs under `noeta run` (the real host).
 
-pub use noeta_native::net::{
+pub use noeta_ext_abi::net::{
     NetFetchIo, NetRequest, NetResponse, REQUEST_TYPE_IDENTITY, REQUEST_TYPE_NAME,
     RESPONSE_TYPE_IDENTITY, RESPONSE_TYPE_NAME, Request, WS_ACCEPT_GUID, accept_outcome,
     query_value, request_header, request_path, ws_recv_outcome,

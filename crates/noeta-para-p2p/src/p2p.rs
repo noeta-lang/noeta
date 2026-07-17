@@ -1,9 +1,9 @@
-//! `para.p2p` (p2p P1) — the language surface over the [`noeta_native::host::P2p`] capability: a
+//! `para.p2p` (p2p P1) — the language surface over the [`noeta_ext_abi::host::P2p`] capability: a
 //! program `publish`es a message to a topic and `receive`s the next message on a topic.
 //!
 //! `publish` is a plain host effect (bytes cross the seam by value). `receive` returns a
 //! `Future<?bytes>` — it hands the executor the extension's async receive descriptor
-//! ([`noeta_native::P2pReceiveIo`], built by [`crate::provider::receive_descriptor`]) via a spawned
+//! ([`noeta_ext_abi::P2pReceiveIo`], built by [`crate::provider::receive_descriptor`]) via a spawned
 //! future, exactly like `fs.read_async` / `http.get_async`; under the deterministic loopback broker
 //! it resolves at spawn, so a receive loop (`while let some(msg) = p2p.receive(topic).await`) drains
 //! the topic and terminates in-oracle. The message is `string|bytes` on the way in (a string rides as
@@ -14,8 +14,8 @@
 //! deterministic loopback broker on the sandbox, or the real p2panda node on a host that permits real
 //! networking — both reached through [`crate::provider`], neither owned by the host.
 
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     CtxError, CtxOut, NativeCtx, NativeValue, Slot, ctx_arity, no_function_error, type_error,
 };
 

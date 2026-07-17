@@ -99,11 +99,11 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
 /// extend it on the run worker). Never panics on ordinary failure: a host/executor that cannot
 /// start becomes a `stderr` chunk with a non-zero exit.
 pub fn run_compiled(compiled: Compiled, debugger: Option<Box<dyn Debugger>>) -> RunOutput {
-    let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
+    let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(host) => Box::new(host),
         Err(err) => return RunOutput::failed(format!("noeta: cannot start host: {err}\n"), 2),
     };
-    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
+    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_host_real::RealExecutor::new() {
         Ok(executor) => Box::new(executor),
         Err(err) => return RunOutput::failed(format!("noeta: cannot start executor: {err}\n"), 2),
     };

@@ -1,5 +1,5 @@
 //! The `std` extension registration — the concrete half of the native-extension registry (the ABI
-//! type & trait vocabulary lives in [`noeta_native::registry`], re-exported here).
+//! type & trait vocabulary lives in [`noeta_ext_abi::registry`], re-exported here).
 //!
 //! Core's `std` is the dogfood: several in-tree [`Extension`] units ([`CoreExtension`],
 //! [`HttpExtension`], [`CryptoExtension`], [`IdExtension`], [`VecExtension`]), all
@@ -12,7 +12,7 @@
 //! ([`NativeValue`]/[`NativeOut`]) and the [`Host`] seam are the ABI crate's; this module only
 //! *uses* them.
 
-pub use noeta_native::registry::*;
+pub use noeta_ext_abi::registry::*;
 
 use crate::{
     Arg, Dispatch, ErrorKind, Host, Output, StdError, arity_error, math, no_function_error,
@@ -69,16 +69,16 @@ impl Extension for CoreExtension {
     fn types(&self) -> &'static [ExtType] {
         CORE_TYPES
     }
-    fn tiers(&self) -> &'static [noeta_native::registry::ExtTier] {
+    fn tiers(&self) -> &'static [noeta_ext_abi::registry::ExtTier] {
         crate::tiers::TIERS
     }
-    fn attributes(&self) -> &'static [noeta_native::registry::ExtAttribute] {
+    fn attributes(&self) -> &'static [noeta_ext_abi::registry::ExtAttribute] {
         crate::tiers::ATTRIBUTES
     }
-    fn body_formatters(&self) -> &'static [noeta_native::registry::BodyFormatter] {
+    fn body_formatters(&self) -> &'static [noeta_ext_abi::registry::BodyFormatter] {
         crate::tiers::BODY_FORMATTERS
     }
-    fn capabilities(&self) -> &'static [noeta_native::registry::ExtCapability] {
+    fn capabilities(&self) -> &'static [noeta_ext_abi::registry::ExtCapability] {
         // The reactive engine provides the `ReactiveSource` capability (capability-broker seam) so a
         // foreign source node — `para.synced` — reaches the shared graph by trait, out of `std`.
         crate::reactive::REACTIVE_CAPABILITIES
@@ -121,7 +121,7 @@ impl Extension for HttpExtension {
     fn types(&self) -> &'static [ExtType] {
         HTTP_TYPES
     }
-    fn commands(&self) -> &'static [noeta_native::ExtCommand] {
+    fn commands(&self) -> &'static [noeta_ext_abi::ExtCommand] {
         // `noeta serve` (higher-order-abi H6) — contributed here, not a core CLI verb.
         &[crate::serve::SERVE_COMMAND]
     }
@@ -407,7 +407,7 @@ fn file_handle_dispatch(
 
 /// The `std` extension units this crate contributes — what the facade below installs as the
 /// registry's lazy default, and what an assembling binary (`noeta_cli::run_cli`, a composed
-/// Phase-3 shim) passes to [`noeta_native::registry::install`] alongside its extra units. The
+/// Phase-3 shim) passes to [`noeta_ext_abi::registry::install`] alongside its extra units. The
 /// order is cosmetic — every lookup iterates the whole list filtered by namespace root.
 pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
     #[allow(unused_mut)]
@@ -428,7 +428,7 @@ pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
 // --- the registry facade (package-manager Phase 3, N3.0) ----------------------------------------
 //
 // The registry *mechanism* — the assembled unit list and the whole generic lookup layer — lives in
-// `noeta_native::registry` (it was grown here around the dogfood, but nothing in it was
+// `noeta_ext_abi::registry` (it was grown here around the dogfood, but nothing in it was
 // std-specific, and Phase 3's composed shim must not register its units through the dogfood
 // crate). These wrappers keep every existing `noeta_stdlib::registry::*` call site working
 // unchanged, and make an unseeded registry unobservable: each ensures the std units are installed
@@ -440,9 +440,9 @@ pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
 // the N3.4 `with_packed` migration, as planned.)
 
 /// Ensure the std units are installed before a lookup (lazy default; an explicit
-/// [`noeta_native::registry::install`] by the assembling binary wins).
+/// [`noeta_ext_abi::registry::install`] by the assembling binary wins).
 fn ensure() {
-    noeta_native::registry::install_default(std_units);
+    noeta_ext_abi::registry::install_default(std_units);
 }
 
 /// The process-global default [`Registry`] as a first-class handle — the seeded-and-unwrapped form
@@ -450,9 +450,9 @@ fn ensure() {
 /// given an explicit per-session registry. Ensures the std units are installed (like every facade
 /// lookup), so the returned reference is always live. A host wanting a *different* extension set per
 /// session builds its own [`Registry`] and threads that instead of calling this.
-pub fn default_seeded() -> &'static noeta_native::registry::Registry {
+pub fn default_seeded() -> &'static noeta_ext_abi::registry::Registry {
     ensure();
-    noeta_native::registry::default_registry()
+    noeta_ext_abi::registry::default_registry()
         .expect("the default registry is seeded by `ensure()` immediately above")
 }
 
@@ -464,7 +464,7 @@ pub fn default_seeded() -> &'static noeta_native::registry::Registry {
 /// MCP toolchain) must NOT reach code that calls this; it threads its own registry via the
 /// options/`_with_registry` seams. Grepping this name finds every site to upgrade if the IDE ever
 /// goes session-aware. Behavior-identical to [`default_seeded`].
-pub fn single_registry_process() -> &'static noeta_native::registry::Registry {
+pub fn single_registry_process() -> &'static noeta_ext_abi::registry::Registry {
     default_seeded()
 }
 
@@ -478,7 +478,7 @@ pub fn install_with_extras(extra: &[&'static (dyn Extension + Sync)]) {
     } else {
         let mut units = std_units();
         units.extend_from_slice(extra);
-        noeta_native::registry::install(units);
+        noeta_ext_abi::registry::install(units);
     }
 }
 
@@ -486,14 +486,14 @@ pub fn install_with_extras(extra: &[&'static (dyn Extension + Sync)]) {
 /// process-global default (instance-registry IR5). This is the per-session assembly seam: an
 /// embedding host that wants a session with its own extension set builds one here and threads it
 /// through the checker / compiler / VM, so two sessions with different extension sets can coexist in
-/// one process. (The uniqueness sweep in [`noeta_native::registry::Registry::new`] still applies —
+/// one process. (The uniqueness sweep in [`noeta_ext_abi::registry::Registry::new`] still applies —
 /// a duplicate module identity across `extra` and std panics, as at install time.)
 pub fn assemble_with_extras(
     extra: &[&'static (dyn Extension + Sync)],
-) -> noeta_native::registry::Registry {
+) -> noeta_ext_abi::registry::Registry {
     let mut units = std_units();
     units.extend_from_slice(extra);
-    noeta_native::registry::Registry::new(units)
+    noeta_ext_abi::registry::Registry::new(units)
 }
 
 /// Assemble (std ∪ `extra`) as an **interned** `&'static` registry — the per-session entry
@@ -505,11 +505,11 @@ pub fn assemble_with_extras(
 /// never a panic out of a library entry point.
 pub fn interned_with_extras(
     extra: &[&'static (dyn Extension + Sync)],
-) -> Result<&'static noeta_native::registry::Registry, String> {
+) -> Result<&'static noeta_ext_abi::registry::Registry, String> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static INTERNED: OnceLock<
-        Mutex<HashMap<Vec<usize>, &'static noeta_native::registry::Registry>>,
+        Mutex<HashMap<Vec<usize>, &'static noeta_ext_abi::registry::Registry>>,
     > = OnceLock::new();
     // Key on the extras' pointer identities, order-normalized: `&'static dyn Extension` units are
     // statics, so pointer equality is configuration equality.
@@ -528,7 +528,7 @@ pub fn interned_with_extras(
     let mut units = std_units();
     units.extend_from_slice(extra);
     let registry: &'static _ =
-        Box::leak(Box::new(noeta_native::registry::Registry::try_new(units)?));
+        Box::leak(Box::new(noeta_ext_abi::registry::Registry::try_new(units)?));
     interned.insert(key, registry);
     Ok(registry)
 }
@@ -536,25 +536,25 @@ pub fn interned_with_extras(
 /// All registered extensions.
 pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
     ensure();
-    noeta_native::registry::extensions()
+    noeta_ext_abi::registry::extensions()
 }
 
-/// See [`noeta_native::registry::find_module`].
+/// See [`noeta_ext_abi::registry::find_module`].
 pub fn find_module(name: &str) -> Option<&'static ExtModule> {
     ensure();
-    noeta_native::registry::find_module(name)
+    noeta_ext_abi::registry::find_module(name)
 }
 
-/// See [`noeta_native::registry::ext_tiers`].
-pub fn ext_tiers() -> impl Iterator<Item = &'static noeta_native::registry::ExtTier> {
+/// See [`noeta_ext_abi::registry::ext_tiers`].
+pub fn ext_tiers() -> impl Iterator<Item = &'static noeta_ext_abi::registry::ExtTier> {
     ensure();
-    noeta_native::registry::ext_tiers()
+    noeta_ext_abi::registry::ext_tiers()
 }
 
-/// See [`noeta_native::registry::find_ext_tier`].
-pub fn find_ext_tier(name: &str) -> Option<&'static noeta_native::registry::ExtTier> {
+/// See [`noeta_ext_abi::registry::find_ext_tier`].
+pub fn find_ext_tier(name: &str) -> Option<&'static noeta_ext_abi::registry::ExtTier> {
     ensure();
-    noeta_native::registry::find_ext_tier(name)
+    noeta_ext_abi::registry::find_ext_tier(name)
 }
 
 /// Every installed extension's **verbatim-body** tier names — the text tiers (`doc` → markdown)
@@ -569,68 +569,68 @@ pub fn ext_verbatim_tier_names() -> Vec<&'static str> {
 /// Every installed extension's **tier-body formatters** as `(language, formatter)` pairs — the
 /// languages an extension supplied a `noeta fmt` reflow for (extension-driven tier-body formatting,
 /// keyed by body language). The `noeta fmt` front-end maps a tier's declared `text:` language to one
-/// of these; a language absent here stays verbatim. See [`noeta_native::registry::BodyFormatter`].
-pub fn ext_body_formatters() -> Vec<noeta_native::registry::BodyFormatter> {
+/// of these; a language absent here stays verbatim. See [`noeta_ext_abi::registry::BodyFormatter`].
+pub fn ext_body_formatters() -> Vec<noeta_ext_abi::registry::BodyFormatter> {
     ensure();
-    noeta_native::registry::ext_body_formatters()
+    noeta_ext_abi::registry::ext_body_formatters()
         .copied()
         .collect()
 }
 
-/// See [`noeta_native::registry::ext_attributes`].
-pub fn ext_attributes() -> impl Iterator<Item = &'static noeta_native::registry::ExtAttribute> {
+/// See [`noeta_ext_abi::registry::ext_attributes`].
+pub fn ext_attributes() -> impl Iterator<Item = &'static noeta_ext_abi::registry::ExtAttribute> {
     ensure();
-    noeta_native::registry::ext_attributes()
+    noeta_ext_abi::registry::ext_attributes()
 }
 
-/// See [`noeta_native::registry::find_ext_attribute`].
-pub fn find_ext_attribute(name: &str) -> Option<&'static noeta_native::registry::ExtAttribute> {
+/// See [`noeta_ext_abi::registry::find_ext_attribute`].
+pub fn find_ext_attribute(name: &str) -> Option<&'static noeta_ext_abi::registry::ExtAttribute> {
     ensure();
-    noeta_native::registry::find_ext_attribute(name)
+    noeta_ext_abi::registry::find_ext_attribute(name)
 }
 
-/// See [`noeta_native::registry::module_name`] (pure string projection — no registry state).
+/// See [`noeta_ext_abi::registry::module_name`] (pure string projection — no registry state).
 pub fn module_name(module: &str) -> &str {
-    noeta_native::registry::module_name(module)
+    noeta_ext_abi::registry::module_name(module)
 }
 
-/// See [`noeta_native::registry::ring_of`].
+/// See [`noeta_ext_abi::registry::ring_of`].
 pub fn ring_of(module: &str) -> Option<&'static str> {
     ensure();
-    noeta_native::registry::ring_of(module)
+    noeta_ext_abi::registry::ring_of(module)
 }
 
-/// See [`noeta_native::registry::is_extension_root`].
+/// See [`noeta_ext_abi::registry::is_extension_root`].
 pub fn is_extension_root(root: &str) -> bool {
     ensure();
-    noeta_native::registry::is_extension_root(root)
+    noeta_ext_abi::registry::is_extension_root(root)
 }
 
-/// See [`noeta_native::registry::find_module_qualified`].
+/// See [`noeta_ext_abi::registry::find_module_qualified`].
 pub fn find_module_qualified(path: &[String]) -> Option<&'static ExtModule> {
     ensure();
-    noeta_native::registry::find_module_qualified(path)
+    noeta_ext_abi::registry::find_module_qualified(path)
 }
 
-/// See [`noeta_native::registry::find_function`].
+/// See [`noeta_ext_abi::registry::find_function`].
 pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
     ensure();
-    noeta_native::registry::find_function(module, func)
+    noeta_ext_abi::registry::find_function(module, func)
 }
 
-/// See [`noeta_native::registry::find_ctx_function`].
+/// See [`noeta_ext_abi::registry::find_ctx_function`].
 pub fn find_ctx_function(module: &str, func: &str) -> Option<&'static ExtFn> {
     ensure();
-    noeta_native::registry::find_ctx_function(module, func)
+    noeta_ext_abi::registry::find_ctx_function(module, func)
 }
 
-/// See [`noeta_native::registry::find_function_sig`].
+/// See [`noeta_ext_abi::registry::find_function_sig`].
 pub fn find_function_sig(module: &str, func: &str) -> Option<&'static ExtFn> {
     ensure();
-    noeta_native::registry::find_function_sig(module, func)
+    noeta_ext_abi::registry::find_function_sig(module, func)
 }
 
-/// See [`noeta_native::registry::dispatch_ctx`].
+/// See [`noeta_ext_abi::registry::dispatch_ctx`].
 pub fn dispatch_ctx(
     module: &str,
     func: &str,
@@ -638,22 +638,22 @@ pub fn dispatch_ctx(
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
     ensure();
-    noeta_native::registry::dispatch_ctx(module, func, ctx, args)
+    noeta_ext_abi::registry::dispatch_ctx(module, func, ctx, args)
 }
 
-/// See [`noeta_native::registry::commands`].
-pub fn commands() -> impl Iterator<Item = &'static noeta_native::ExtCommand> {
+/// See [`noeta_ext_abi::registry::commands`].
+pub fn commands() -> impl Iterator<Item = &'static noeta_ext_abi::ExtCommand> {
     ensure();
-    noeta_native::registry::commands()
+    noeta_ext_abi::registry::commands()
 }
 
-/// See [`noeta_native::registry::find_bundle`] (kernel-methods K0).
+/// See [`noeta_ext_abi::registry::find_bundle`] (kernel-methods K0).
 pub fn find_bundle(module: &str, bundle: &str) -> Option<&'static ExtBundle> {
     ensure();
-    noeta_native::registry::find_bundle(module, bundle)
+    noeta_ext_abi::registry::find_bundle(module, bundle)
 }
 
-/// See [`noeta_native::registry::dispatch_bundle_method`] (kernel-methods K0).
+/// See [`noeta_ext_abi::registry::dispatch_bundle_method`] (kernel-methods K0).
 pub fn dispatch_bundle_method(
     module: &str,
     bundle: &str,
@@ -663,46 +663,46 @@ pub fn dispatch_bundle_method(
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
     ensure();
-    noeta_native::registry::dispatch_bundle_method(module, bundle, method, ctx, recv, args)
+    noeta_ext_abi::registry::dispatch_bundle_method(module, bundle, method, ctx, recv, args)
 }
 
-/// See [`noeta_native::registry::find_type`].
+/// See [`noeta_ext_abi::registry::find_type`].
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
     ensure();
-    noeta_native::registry::find_type(name)
+    noeta_ext_abi::registry::find_type(name)
 }
 
-/// See [`noeta_native::registry::find_type_qualified`] (extern-type namespacing).
+/// See [`noeta_ext_abi::registry::find_type_qualified`] (extern-type namespacing).
 pub fn find_type_qualified(qualified: &str) -> Option<&'static ExtType> {
     ensure();
-    noeta_native::registry::find_type_qualified(qualified)
+    noeta_ext_abi::registry::find_type_qualified(qualified)
 }
 
-/// See [`noeta_native::registry::resolve_type`] (extern-type namespacing).
+/// See [`noeta_ext_abi::registry::resolve_type`] (extern-type namespacing).
 pub fn resolve_type(name: &str) -> Option<&'static ExtType> {
     ensure();
-    noeta_native::registry::resolve_type(name)
+    noeta_ext_abi::registry::resolve_type(name)
 }
 
-/// See [`noeta_native::registry::find_type_method`].
+/// See [`noeta_ext_abi::registry::find_type_method`].
 pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
     ensure();
-    noeta_native::registry::find_type_method(type_name, method)
+    noeta_ext_abi::registry::find_type_method(type_name, method)
 }
 
-/// See [`noeta_native::registry::find_type_ctx_method`].
+/// See [`noeta_ext_abi::registry::find_type_ctx_method`].
 pub fn find_type_ctx_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
     ensure();
-    noeta_native::registry::find_type_ctx_method(type_name, method)
+    noeta_ext_abi::registry::find_type_ctx_method(type_name, method)
 }
 
-/// See [`noeta_native::registry::find_type_method_sig`].
+/// See [`noeta_ext_abi::registry::find_type_method_sig`].
 pub fn find_type_method_sig(type_name: &str, method: &str) -> Option<&'static ExtFn> {
     ensure();
-    noeta_native::registry::find_type_method_sig(type_name, method)
+    noeta_ext_abi::registry::find_type_method_sig(type_name, method)
 }
 
-/// See [`noeta_native::registry::dispatch_ctx_method`].
+/// See [`noeta_ext_abi::registry::dispatch_ctx_method`].
 pub fn dispatch_ctx_method(
     type_name: &str,
     method: &str,
@@ -711,10 +711,10 @@ pub fn dispatch_ctx_method(
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
     ensure();
-    noeta_native::registry::dispatch_ctx_method(type_name, method, ctx, recv, args)
+    noeta_ext_abi::registry::dispatch_ctx_method(type_name, method, ctx, recv, args)
 }
 
-/// See [`noeta_native::registry::dispatch_method`].
+/// See [`noeta_ext_abi::registry::dispatch_method`].
 pub fn dispatch_method(
     recv: &mut dyn crate::ExternValue,
     method: &str,
@@ -722,7 +722,7 @@ pub fn dispatch_method(
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
     ensure();
-    noeta_native::registry::dispatch_method(recv, method, host, args)
+    noeta_ext_abi::registry::dispatch_method(recv, method, host, args)
 }
 
 // (The **virtual-module** mechanism — prelude-redesign P2's `VIRTUAL_MODULES` table, backend
@@ -740,7 +740,7 @@ pub fn is_module_function(module: &str, func: &str) -> bool {
     find_function_sig(module, func).is_some()
 }
 
-/// See [`noeta_native::registry::dispatch`].
+/// See [`noeta_ext_abi::registry::dispatch`].
 pub fn dispatch(
     module: &str,
     func: &str,
@@ -748,13 +748,13 @@ pub fn dispatch(
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
     ensure();
-    noeta_native::registry::dispatch(module, func, host, args)
+    noeta_ext_abi::registry::dispatch(module, func, host, args)
 }
 
 // --- argument helpers (shared by the module dispatch functions) ---------------------------------
-// The exact-duplicate guard family lives once in `noeta_native::args` (audit-2 F8); only the
+// The exact-duplicate guard family lives once in `noeta_ext_abi::args` (audit-2 F8); only the
 // module-specific extractors (`want_data`/`want_tag`/`want_headers`/`want_argv`) stay here.
-use noeta_native::args::{want_arity, want_arity_range, want_int, want_str};
+use noeta_ext_abi::args::{want_arity, want_arity_range, want_int, want_str};
 
 fn str_list(items: impl IntoIterator<Item = String>) -> NativeOut {
     NativeOut::List(items.into_iter().map(NativeOut::Str).collect())

@@ -15,10 +15,10 @@
 //! *its* registry.
 
 use noeta_embed::{Error, Session, Value};
-use noeta_native::registry::{
+use noeta_ext_abi::registry::{
     ExtFn, ExtModule, ExtTier, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
 };
-use noeta_native::{ErrorKind, Host, StdError};
+use noeta_ext_abi::{ErrorKind, Host, StdError};
 
 // --- A minimal native extension: `plugin.demo.answer(): int` → 42 --------------------------------
 
@@ -255,11 +255,11 @@ fn a_mis_assembled_extension_set_is_an_error_not_a_panic() {
         fn modules(&self) -> &'static [ExtModule] {
             &[]
         }
-        fn types(&self) -> &'static [noeta_native::registry::ExtType] {
+        fn types(&self) -> &'static [noeta_ext_abi::registry::ExtType] {
             // A forgotten `namespace:` — DEFAULTS fills "std".
-            const T: noeta_native::registry::ExtType = noeta_native::registry::ExtType {
+            const T: noeta_ext_abi::registry::ExtType = noeta_ext_abi::registry::ExtType {
                 name: "Widget",
-                ..noeta_native::registry::ExtType::DEFAULTS
+                ..noeta_ext_abi::registry::ExtType::DEFAULTS
             };
             &[T]
         }

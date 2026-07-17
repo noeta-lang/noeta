@@ -30,7 +30,7 @@ noeta-bundle = { workspace = true }
 noeta-backend = { workspace = true }
 noeta-vm = { workspace = true }
 noeta-stdlib = { workspace = true }
-noeta-runtime = { workspace = true }
+noeta-host-real = { workspace = true }
 # The L2 compile front-end (dev-deps D3c): source → typed → bytecode, so the runner runs `.noe`
 # source (PHP-style deploy), sharing the CLI's exact pipeline. `noeta-pm` is pulled with DEFAULT
 # features only — NOT `registry-http`/`provenance`/`keyless` — so the lean runtime links manifest +

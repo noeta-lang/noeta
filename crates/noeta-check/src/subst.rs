@@ -21,11 +21,11 @@ pub(crate) fn decl_runner_root(qualified: &str) -> String {
 }
 
 /// Map an extension attribute field's declared literal type onto the checker lattice.
-pub(crate) fn attr_field_type(ty: noeta_native::registry::AttrFieldType) -> Type {
+pub(crate) fn attr_field_type(ty: noeta_ext_abi::registry::AttrFieldType) -> Type {
     match ty {
-        noeta_native::registry::AttrFieldType::Int => Type::Int,
-        noeta_native::registry::AttrFieldType::Str => Type::String,
-        noeta_native::registry::AttrFieldType::Dyn => Type::Dyn,
+        noeta_ext_abi::registry::AttrFieldType::Int => Type::Int,
+        noeta_ext_abi::registry::AttrFieldType::Str => Type::String,
+        noeta_ext_abi::registry::AttrFieldType::Dyn => Type::Dyn,
     }
 }
 
@@ -586,10 +586,10 @@ pub(crate) fn variant_field_type(p: &Param, xt: &HashMap<String, String>) -> Typ
 /// kernel performs. `None` = satisfied; `Some(message)` names exactly what disagrees.
 pub(crate) fn constraint_mismatch(
     layout: &noeta_ast::reflect::PackedLayout,
-    constraint: &noeta_native::PackedConstraint,
+    constraint: &noeta_ext_abi::PackedConstraint,
 ) -> Option<String> {
     use noeta_ast::reflect::PackedKind;
-    use noeta_native::{ConstraintField, ConstraintLayout};
+    use noeta_ext_abi::{ConstraintField, ConstraintLayout};
     fn render(fields: &[ConstraintField]) -> String {
         fields
             .iter()

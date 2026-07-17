@@ -36,7 +36,7 @@ noeta-check = { workspace = true }
 noeta-loader = { workspace = true }
 # Also the impact engine (server-hmr W3): `noeta test/bench --watch` reruns only impacted decls.
 noeta-ide = { workspace = true }
-noeta-runtime = { workspace = true }
+noeta-host-real = { workspace = true }
 # The shared app-execution core (dev-deps D3): `run`/`--exe` delegate to it so the CLI and the
 # standalone lean `noeta-runner` binary execute bundles/modules through one implementation. Its JIT
 # rides the CLI's own `jit` feature (below), so `--no-default-features` stays Cranelift-free (the

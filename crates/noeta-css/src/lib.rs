@@ -8,7 +8,7 @@
 //! a toolchain that does not want the CSS dependency simply does not install this extension, and
 //! `<style>` bodies stay verbatim.
 
-use noeta_native::registry::{BodyFormatter, ExtModule, Extension};
+use noeta_ext_abi::registry::{BodyFormatter, ExtModule, Extension};
 
 /// The formatter-only CSS extension (namespace root `"css"`, distinct from `std`).
 #[derive(Debug)]

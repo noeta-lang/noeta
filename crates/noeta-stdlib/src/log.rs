@@ -1,6 +1,6 @@
 //! `std.log` — the logs SDK surface (native OTEL, Phase L).
 //!
-//! A facade over the [`Logging`](noeta_native::Logging) Host capability. Emits OTel `LogRecord`s:
+//! A facade over the [`Logging`](noeta_ext_abi::Logging) Host capability. Emits OTel `LogRecord`s:
 //! structured, exported log lines — **not** a `print`. The defining feature is **automatic
 //! trace-correlation**: a record carries the [`TraceContext`] of the span active when it was
 //! emitted (read from the same task-local active-span stack `std.tracing` maintains), so a log
@@ -17,8 +17,8 @@
 //! `debug`/`info`/`warn`/`error` conveniences. `trace`/`fatal` are reachable through the generic
 //! `log`. Structured attributes (`*_with(message, attrs)`) arrive in L2.
 
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
-use noeta_native::{
+use noeta_ext_abi::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{
     AttrValue, CtxError, CtxOut, CtxResult, LogRecord, NativeCtx, NativeValue, Scalar, Severity,
     Slot, TraceContext, ctx_arity, no_function_error, type_error,
 };
