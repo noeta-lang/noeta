@@ -1792,7 +1792,10 @@ mod http_tests {
 
     /// A one-shot in-process HTTP/1.1 server: it handles connections on a background thread, calling
     /// `handler(method, path, body) -> (status, json)`. Returns the base URL. Hermetic — no network.
-    fn mock_server(handler: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static) -> String {
+    /// `pub(super)` so the wire-fixture tests drive the same client through the same seam.
+    pub(super) fn mock_server(
+        handler: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -2220,5 +2223,448 @@ mod http_tests {
             )
             .unwrap_err();
         assert!(err.message().contains("checkpoint signature"), "{err}");
+    }
+}
+
+/// Golden wire-fixture tests (audit-5 finding 9): the registry protocol's JSON shapes are pinned by
+/// the fixture files in `test_data/wire/` — ONE canonical set, mirrored verbatim into the
+/// `noeta-registry` repo (whose Worker tests assert the same bytes from the server side; see the
+/// fixtures' README for the sync rule). These tests prove the client's serializers/parsers
+/// round-trip those exact bytes: responses are served verbatim to `HttpIndex` and the parsed values
+/// asserted; requests are serialized by `HttpIndex` and compared to the fixture as JSON values
+/// (canonical formatting aside, the shapes must be identical — absent means absent, not `null`).
+#[cfg(all(test, feature = "registry-http"))]
+mod wire_fixture_tests {
+    use super::http_tests::mock_server;
+    use super::*;
+    use std::sync::mpsc;
+
+    /// A fixture's raw bytes (as text) from `test_data/wire/`.
+    fn fixture(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test_data/wire")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read fixture `{}`: {err}", path.display()))
+    }
+
+    fn fixture_value(name: &str) -> serde_json::Value {
+        serde_json::from_str(&fixture(name)).expect(name)
+    }
+
+    /// Shared fixture constants — must match the fixture files (`versions-response.json` et al.).
+    const NAME: &str = "acme/imgfx";
+    const URL: &str = "https://github.com/acme/imgfx";
+    const SHA_100: &str = "3d2f8a41c6b95e07d4a2b81f5c9e6a3d70b4c1e9";
+    const SHA_120: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4";
+    const SHA_200: &str = "9b74c9897bac770ffc029102a200c5de13f2e2b8";
+    const LICENSE: &str = "MIT OR Apache-2.0";
+
+    /// An `HttpIndex` with an explicit token, avoiding the process-global env var.
+    fn index_with_token(base: String, token: &str) -> HttpIndex {
+        HttpIndex {
+            token: Some(token.to_string()),
+            ..HttpIndex::new(base).unwrap()
+        }
+    }
+
+    #[test]
+    fn versions_response_fixture_parses_faithfully() {
+        let base = mock_server(|method, path, _| {
+            assert_eq!(method, "GET");
+            assert_eq!(path, "/v1/packages/acme/imgfx");
+            (200, fixture("versions-response.json"))
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let releases = index.releases(NAME).unwrap();
+        assert_eq!(
+            releases.len(),
+            3,
+            "all versions are served, yanked included"
+        );
+
+        // 1.0.0 — minimal + yanked: the flag survives the parse (nothing on the wire is dropped).
+        let r = &releases[0];
+        assert_eq!(r.version, Version::new(1, 0, 0));
+        assert_eq!(
+            r.coords,
+            GitCoords {
+                url: URL.to_string(),
+                tag: "v1.0.0".to_string(),
+                sha: SHA_100.to_string()
+            }
+        );
+        assert!(r.deps.is_empty());
+        assert!(r.yanked);
+        assert_eq!(r.signature, None);
+        assert_eq!(r.bundle, None);
+        assert_eq!(r.published_at, Some(1_767_614_400_000));
+        assert_eq!(r.license, None);
+
+        // 1.2.0 — deps + key provenance + license + publish time.
+        let r = &releases[1];
+        assert_eq!(r.version, Version::new(1, 2, 0));
+        assert_eq!(r.coords.sha, SHA_120);
+        assert_eq!(
+            r.deps,
+            vec![Dep {
+                package: "acme/bytes".to_string(),
+                req: VersionReq::parse("^1.0").unwrap(),
+            }]
+        );
+        assert!(!r.yanked);
+        let vfix = fixture_value("versions-response.json");
+        assert_eq!(
+            r.signature.as_deref(),
+            vfix["versions"][1]["signature"].as_str(),
+            "the release signature rides through verbatim"
+        );
+        assert_eq!(r.bundle, None);
+        assert_eq!(r.published_at, Some(1_770_715_800_000));
+        assert_eq!(r.license.as_deref(), Some(LICENSE));
+
+        // 2.0.0 — keyless bundle, verbatim.
+        let r = &releases[2];
+        assert_eq!(r.version, Version::new(2, 0, 0));
+        assert_eq!(r.coords.sha, SHA_200);
+        assert_eq!(r.signature, None);
+        assert_eq!(
+            r.bundle.as_deref(),
+            vfix["versions"][2]["bundle"].as_str(),
+            "the keyless bundle rides through verbatim"
+        );
+        assert_eq!(r.license, None);
+
+        // Selection semantics over the same fixture: the yanked 1.0.0 is never *newly* selected
+        // (`=1.0.0` finds nothing), while `^1` picks 1.2.0.
+        let err = resolve_coords(&index, NAME, &VersionReq::parse("=1.0.0").unwrap()).unwrap_err();
+        assert!(err.message().contains("no version"), "{err}");
+        let (v, c) = resolve_coords(&index, NAME, &VersionReq::parse("^1").unwrap()).unwrap();
+        assert_eq!(v, Version::new(1, 2, 0));
+        assert_eq!(c.tag, "v1.2.0");
+    }
+
+    /// Build the `Release` a fixture publish request describes, publish it through the client, and
+    /// assert the serialized body is exactly the fixture (as a JSON value): same fields, same
+    /// values, and — crucially — absent optionals are *absent*, not `null`.
+    fn assert_publish_body_matches(fixture_name: &str, release: Release) {
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, body| {
+            tx.send((method.to_string(), path.to_string(), body.to_string()))
+                .unwrap();
+            // The canonical success ack — the client only requires 2xx, but serve the real shape.
+            (201, fixture("publish-response.json"))
+        });
+        let index = index_with_token(base, "acme-publish-token-0123456789abcdef");
+        index.publish(NAME, &release).unwrap();
+        let (method, path, body) = rx.recv().unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/packages/acme/imgfx");
+        let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent, fixture_value(fixture_name), "for `{fixture_name}`");
+    }
+
+    #[test]
+    fn publish_request_fixtures_round_trip() {
+        let release = |version: &str, tag: &str, sha: &str| Release {
+            version: Version::parse(version).unwrap(),
+            coords: GitCoords {
+                url: URL.to_string(),
+                tag: tag.to_string(),
+                sha: sha.to_string(),
+            },
+            deps: Vec::new(),
+            yanked: false,
+            signature: None,
+            bundle: None,
+            published_at: None,
+            license: None,
+        };
+
+        // Minimal: only the required coordinate fields go on the wire.
+        assert_publish_body_matches(
+            "publish-request-minimal.json",
+            release("1.0.0", "v1.0.0", SHA_100),
+        );
+
+        // Signed: deps + license + key signature (the fixture signature is REAL — Ed25519 over the
+        // canonical attestation with the fixture scope key, so the Worker-side test verifies it).
+        let mut signed = release("1.2.0", "v1.2.0", SHA_120);
+        signed.deps = vec![Dep {
+            package: "acme/bytes".to_string(),
+            req: VersionReq::parse("^1.0").unwrap(),
+        }];
+        signed.license = Some(LICENSE.to_string());
+        signed.signature = Some(
+            fixture_value("publish-request-signed.json")["signature"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+        assert_publish_body_matches("publish-request-signed.json", signed);
+
+        // Keyless: the Sigstore bundle rides as a JSON *string*, verbatim.
+        let mut keyless = release("2.0.0", "v2.0.0", SHA_200);
+        keyless.bundle = Some(
+            fixture_value("publish-request-keyless.json")["bundle"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+        assert_publish_body_matches("publish-request-keyless.json", keyless);
+    }
+
+    #[test]
+    fn claim_request_fixtures_round_trip() {
+        for (fixture_name, proof_field) in [
+            ("claim-request-oidc.json", "oidc"),
+            ("claim-request-github-token.json", "github_token"),
+            ("claim-request-domain.json", "domain"),
+        ] {
+            let fix = fixture_value(fixture_name);
+            let proof_value = fix[proof_field].as_str().unwrap().to_string();
+            let proof = match proof_field {
+                "oidc" => ClaimProof::Oidc(proof_value),
+                "github_token" => ClaimProof::GithubToken(proof_value),
+                _ => ClaimProof::Domain(proof_value),
+            };
+            let (tx, rx) = mpsc::channel();
+            let response = if proof_field == "domain" {
+                "claim-response-domain.json"
+            } else {
+                "claim-response.json"
+            };
+            let base = mock_server(move |method, path, body| {
+                tx.send((method.to_string(), path.to_string(), body.to_string()))
+                    .unwrap();
+                (201, fixture(response))
+            });
+            let index = HttpIndex::new(base).unwrap();
+            let msg = index
+                .claim_scope("widgetco", fix["token"].as_str().unwrap(), &proof)
+                .unwrap();
+            // The human-readable status from the canonical response surfaces as the message.
+            assert_eq!(msg, "scope claimed");
+            let (method, path, body) = rx.recv().unwrap();
+            assert_eq!(method, "POST");
+            assert_eq!(path, "/v1/scopes/claim");
+            let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(sent, fix, "for `{fixture_name}`");
+        }
+    }
+
+    #[test]
+    fn policy_request_fixture_round_trips() {
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, body| {
+            tx.send((method.to_string(), path.to_string(), body.to_string()))
+                .unwrap();
+            (200, fixture("policy-response.json"))
+        });
+        let index = index_with_token(base, "acme-publish-token-0123456789abcdef");
+        let msg = index
+            .set_scope_policy("acme", true, Some("keyless"))
+            .unwrap();
+        assert_eq!(msg, "policy updated");
+        let (method, path, body) = rx.recv().unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/scopes/acme/policy");
+        let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent, fixture_value("policy-request.json"));
+    }
+
+    #[test]
+    fn scope_key_response_fixture_parses() {
+        let base = mock_server(|method, path, _| {
+            assert_eq!(method, "GET");
+            assert_eq!(path, "/v1/scopes/acme");
+            (200, fixture("scope-key-response.json"))
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let expected = fixture_value("scope-key-response.json")["public_key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(index.scope_key("acme").unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn docs_and_readme_put_responses_are_accepted() {
+        let base = mock_server(|method, path, _| match (method, path) {
+            ("PUT", "/v1/packages/acme/imgfx/docs/1.2.0") => {
+                (200, fixture("docs-put-response.json"))
+            }
+            ("PUT", "/v1/packages/acme/imgfx/readme/1.2.0") => {
+                (200, fixture("readme-put-response.json"))
+            }
+            (m, p) => panic!("unexpected {m} {p}"),
+        });
+        let index = index_with_token(base, "acme-publish-token-0123456789abcdef");
+        let v = Version::new(1, 2, 0);
+        index.put_docs(NAME, &v, "{\"schema\":1}").unwrap();
+        index.put_readme(NAME, &v, "# imgfx\n").unwrap();
+    }
+
+    #[test]
+    fn error_response_fixture_surfaces_the_message() {
+        // The error envelope is always `{ "error": … }`; the client surfaces it verbatim.
+        let base = mock_server(|_, _, _| (403, fixture("error-response.json")));
+        let index = HttpIndex::new(base).unwrap();
+        let err = index
+            .claim_scope(
+                "widgetco",
+                "claim-publish-token-abc123",
+                &ClaimProof::Domain("widgetco.dev".into()),
+            )
+            .unwrap_err();
+        assert!(err.message().contains("not found"), "{err}");
+    }
+
+    /// The transparency-log fixtures verify the client's FULL trust chain — fetch key/checkpoint/
+    /// proof, check the checkpoint signature, match the canonical record (coordinates + license),
+    /// and verify inclusion. Their crypto is real: the checkpoint is signed by the registry repo's
+    /// fixed *test* log key, so this pins the canonical record and checkpoint byte formats across
+    /// the two repos, not just the JSON field names.
+    #[cfg(feature = "provenance")]
+    #[test]
+    fn log_fixtures_verify_the_full_client_chain() {
+        let base = mock_server(|_, path, _| match path {
+            "/v1/log/key" => (200, fixture("log-key-response.json")),
+            "/v1/log/checkpoint" => (200, fixture("log-checkpoint-response.json")),
+            "/v1/log/proof/acme/imgfx/1.2.0" => (200, fixture("log-proof-response.json")),
+            _ => (404, fixture("error-response.json")),
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let verified = index
+            .verify_release_logged(NAME, "1.2.0", URL, "v1.2.0", SHA_120, Some(LICENSE), None)
+            .unwrap();
+        let cp = fixture_value("log-checkpoint-response.json");
+        assert_eq!(verified.tree_size, cp["tree_size"].as_u64().unwrap());
+        assert_eq!(verified.root_hex, cp["root_hash"].as_str().unwrap());
+        assert_eq!(
+            verified.public_key,
+            fixture_value("log-key-response.json")["public_key"]
+                .as_str()
+                .unwrap()
+        );
+
+        // The record binds the license: claiming a different one is caught as equivocation.
+        let err = index
+            .verify_release_logged(
+                NAME,
+                "1.2.0",
+                URL,
+                "v1.2.0",
+                SHA_120,
+                Some("GPL-3.0-only"),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.message().contains("license"), "{err}");
+    }
+
+    #[cfg(feature = "provenance")]
+    #[test]
+    fn log_consistency_fixture_parses_and_verifies() {
+        use crate::transparency;
+        let base = mock_server(|_, path, _| {
+            assert_eq!(path, "/v1/log/consistency?from=1&to=2");
+            (200, fixture("log-consistency-response.json"))
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let cons = index.log_consistency(1, 2).unwrap();
+        let fix = fixture_value("log-consistency-response.json");
+        assert_eq!(
+            cons.proof,
+            fix["proof"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        );
+        // The fixture proof really does extend root_from into root_to (append-only).
+        let root_from =
+            transparency::hex_to_array::<32>(fix["root_from"].as_str().unwrap()).unwrap();
+        let root_to = transparency::hex_to_array::<32>(fix["root_to"].as_str().unwrap()).unwrap();
+        let proof: Vec<[u8; 32]> = cons
+            .proof
+            .iter()
+            .map(|h| transparency::hex_to_array::<32>(h).unwrap())
+            .collect();
+        assert!(transparency::verify_consistency(
+            1, 2, &proof, &root_from, &root_to
+        ));
+    }
+
+    /// The advisory fixtures verify the client's FULL advisory trust chain — per-advisory Ed25519
+    /// signatures against the pinned feed key, the signed head, and the recomputed feed digest —
+    /// with signatures produced by the registry repo's fixed *test* advisory key. This pins the
+    /// advisory canonical-bytes format across the repos.
+    #[cfg(feature = "provenance")]
+    #[test]
+    fn advisory_fixtures_verify_the_full_client_chain() {
+        let base = mock_server(|_, path, _| match path {
+            "/v1/advisories" => (200, fixture("advisory-feed-response.json")),
+            "/v1/advisories/checkpoint" => (200, fixture("advisory-checkpoint-response.json")),
+            "/v1/advisories/key" => (200, fixture("advisory-key-response.json")),
+            _ => (404, fixture("error-response.json")),
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let verified = index.fetch_advisories(None).unwrap();
+        assert_eq!(verified.count, 1);
+        assert_eq!(
+            verified.digest,
+            fixture_value("advisory-checkpoint-response.json")["digest"]
+                .as_str()
+                .unwrap()
+        );
+        let a = &verified.advisories[0];
+        assert_eq!(a.id, "NOETA-2026-0001");
+        assert_eq!(a.package, NAME);
+        assert_eq!(a.ranges, ">=1.0.0, <1.2.0");
+        assert_eq!(a.patched.as_deref(), Some("1.2.0"));
+        assert_eq!(a.severity, "high");
+        assert!(!a.withdrawn);
+        assert_eq!(a.seq, 0);
+        assert_eq!(a.log_index, Some(0));
+        // And it matches the versions the fixture yanked/patched story says it should.
+        assert!(a.affects(&Version::new(1, 0, 0)));
+        assert!(!a.affects(&Version::new(1, 2, 0)));
+    }
+
+    /// The manifest pins the fixture BYTES: both repos carry the identical `MANIFEST.sha256`, so a
+    /// copy that drifts from the canonical set fails this test (here) or its mirror (in the
+    /// noeta-registry repo). Every fixture must be listed, and every listed hash must match.
+    #[cfg(feature = "provenance")] // sha2
+    #[test]
+    fn manifest_pins_the_fixture_bytes() {
+        use sha2::{Digest, Sha256};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/wire");
+        let manifest = fixture("MANIFEST.sha256");
+        let mut listed = std::collections::BTreeSet::new();
+        for line in manifest.lines() {
+            let (hash, name) = line.split_once("  ").expect("sha256sum format");
+            listed.insert(name.to_string());
+            let bytes = std::fs::read(dir.join(name)).unwrap();
+            let actual = Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            assert_eq!(
+                actual, hash,
+                "fixture `{name}` does not match MANIFEST.sha256 — regenerate the manifest and \
+                 re-copy the fixtures to the noeta-registry repo (see test_data/wire/README.md)"
+            );
+        }
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if name.ends_with(".json") {
+                assert!(
+                    listed.contains(&name),
+                    "fixture `{name}` is not in MANIFEST.sha256 — regenerate it"
+                );
+            }
+        }
     }
 }
