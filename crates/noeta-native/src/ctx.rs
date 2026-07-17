@@ -283,10 +283,13 @@ pub trait NativeCtx {
     fn release_retained(&mut self, retained: Retained);
 
     /// Open/close an extern type's **read gate** (H5 perf — see
-    /// [`crate::registry::ExtType::arena_getter`]). While closed, the type's declared arena-read
-    /// method dispatches through the full ctx path (where the extension can track dependencies,
-    /// recompute a memo, …); while open — the default — the backend inlines the read. Closing an
-    /// already-closed gate (or opening an open one) is a no-op; gates are per-run, per-type.
+    /// [`crate::registry::ExtType::arena_getter`]). `type_name` is the type's **qualified
+    /// identity** — the same `&'static` literal its values return from
+    /// [`crate::ExternValue::type_identity`], which is what the backend's fast-read check
+    /// compares against. While closed, the type's declared arena-read method dispatches through
+    /// the full ctx path (where the extension can track dependencies, recompute a memo, …);
+    /// while open — the default — the backend inlines the read. Closing an already-closed gate
+    /// (or opening an open one) is a no-op; gates are per-run, per-type.
     fn set_read_gate(&mut self, type_name: &'static str, open: bool);
 
     /// Run a retained zero-argument thunk for its **effect**, discarding (and releasing) its

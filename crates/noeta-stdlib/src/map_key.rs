@@ -10,7 +10,7 @@ pub use noeta_native::map_key::{ExternKeyRef, MapKey, PackedKeyField, packed_nam
 /// [`crate::registry::ExtType::key_capable`] flag (extern-types X4). The runtime gate both
 /// backends consult; string keys never reach it (they short-circuit earlier).
 pub fn extern_key_capable(value: &dyn crate::ExternValue) -> bool {
-    crate::registry::find_type(value.type_name()).is_some_and(|t| t.key_capable)
+    crate::registry::find_type_qualified(value.type_identity()).is_some_and(|t| t.key_capable)
 }
 
 /// The canonical invalid-map-key error (→ `E0007`), shared by both backends and the static

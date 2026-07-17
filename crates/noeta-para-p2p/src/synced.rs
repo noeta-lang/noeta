@@ -95,6 +95,9 @@ pub const SYNCED_CAPABILITIES: &[ExtCapability] = &[ExtCapability {
 
 pub const SYNCED_SIGNAL_TYPE_NAME: &str = "SyncedSignal";
 
+/// `SyncedSignal`'s qualified runtime identity — registered under `para.synced`.
+pub const SYNCED_SIGNAL_TYPE_IDENTITY: &str = "para.synced.SyncedSignal";
+
 const VAR_A: SigType = SigType::Var(0);
 /// The optional third argument: the member set of an **encrypted** group (p2p P3.4b). A list of
 /// peer-id (hex) strings. Present ⇒ the signal is end-to-end encrypted to exactly those members;
@@ -183,8 +186,8 @@ impl SyncedSignalBox {
 }
 
 impl ExternValue for SyncedSignalBox {
-    fn type_name(&self) -> &'static str {
-        SYNCED_SIGNAL_TYPE_NAME
+    fn type_identity(&self) -> &'static str {
+        SYNCED_SIGNAL_TYPE_IDENTITY
     }
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
         other.as_any().downcast_ref::<SyncedSignalBox>() == Some(self)

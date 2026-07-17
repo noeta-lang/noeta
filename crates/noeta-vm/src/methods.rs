@@ -12,46 +12,43 @@ use noeta_value::Value;
 use crate::*;
 
 /// The per-call-site routing decision for a method on an extern receiver (H5 perf), cached in
-/// `Op::CallMethod`'s route cache keyed by the extern type's interned name pointer.
+/// `Op::CallMethod`'s route cache keyed by the pointer of the extern value's interned
+/// **qualified identity** ([`noeta_stdlib::ExternValue::type_identity`]). The routes carry no
+/// name of their own: the dispatch site already holds the identity it cached under, which is the
+/// exact string ctx dispatch and the read gates key on.
 #[derive(Clone, Copy)]
 pub(crate) enum ExternRoute {
     /// A declared arena read ([`noeta_stdlib::ExtType`]`::arena_getter`): inline to an arena
     /// load while the type's gate is open; the full ctx dispatch while closed.
     FastRead {
-        type_name: &'static str,
         project: fn(&dyn noeta_stdlib::ExternValue) -> u32,
     },
     /// A ctx-table method — straight to the type's ctx dispatch.
-    Ctx { type_name: &'static str },
+    Ctx,
     /// The plain by-value dispatch (including unknown methods — the shared error path).
     Plain,
 }
 
-/// Resolve the route for `method` on the extern type `type_name` — the uncached registry walk a
-/// route-cache miss performs. The caller passes its VM's registry (instance-registry IR3); the walk
-/// is `#[cold]` (only a route-cache miss reaches it), so the extra argument never touches the hot
-/// per-op path.
+/// Resolve the route for `method` on the extern type with qualified identity `identity` — the
+/// uncached registry walk a route-cache miss performs. The caller passes its VM's registry
+/// (instance-registry IR3); the walk is `#[cold]` (only a route-cache miss reaches it), so the
+/// extra argument never touches the hot per-op path.
 #[cold]
 pub(crate) fn resolve_extern_route(
     reg: &noeta_stdlib::registry::Registry,
-    type_name: &str,
+    identity: &str,
     method: &str,
 ) -> ExternRoute {
-    let Some(ext) = reg.find_type(type_name) else {
+    let Some(ext) = reg.find_type_qualified(identity) else {
         return ExternRoute::Plain;
     };
     if let Some((getter, project)) = ext.arena_getter
         && getter == method
     {
-        return ExternRoute::FastRead {
-            type_name: ext.name,
-            project,
-        };
+        return ExternRoute::FastRead { project };
     }
     if ext.ctx_methods.iter().any(|m| m.name == method) {
-        return ExternRoute::Ctx {
-            type_name: ext.name,
-        };
+        return ExternRoute::Ctx;
     }
     ExternRoute::Plain
 }
@@ -451,24 +448,23 @@ impl<'m> Vm<'m> {
         // (`ExtType::arena_getter`) — the projected retained id. `reg` is bound once (`&'static`,
         // Copy) so the closures below capture it without holding a borrow of `self` (IR3).
         let reg = self.reg();
-        let (ext, fast_read) = recv.with_extern(|e| {
-            let ext = reg.find_type(e.type_name());
+        let (identity, ext, fast_read) = recv.with_extern(|e| {
+            let identity = e.type_identity();
+            let ext = reg.find_type_qualified(identity);
             let fast = ext.and_then(|t| {
                 let (getter, project) = t.arena_getter?;
                 (getter == method).then(|| project(e))
             });
-            (ext, fast)
+            (identity, ext, fast)
         });
         // The fast read: while the type's read gate is open — the overwhelmingly common state —
         // the whole call is an arena load + retain, no ctx machinery, which is what keeps a
-        // `get()` hot loop at intercept speed.
+        // `get()` hot loop at intercept speed. The gate set is keyed by the same qualified
+        // identity the value carries.
         if let Some(retained) = fast_read
             && args.is_empty()
             && (self.persist.ext_closed_gates.is_empty()
-                || !self
-                    .persist
-                    .ext_closed_gates
-                    .contains(&ext.expect("fast read implies a type").name))
+                || !self.persist.ext_closed_gates.contains(&identity))
         {
             let value = self.persist.ext_arena[retained as usize].expect("a live arena entry");
             retain(value);
@@ -480,7 +476,7 @@ impl<'m> Vm<'m> {
         if let Some(ext) = ext
             && ext.ctx_methods.iter().any(|m| m.name == method)
         {
-            return self.call_ctx_type_method(ext.name, recv, method, args, span);
+            return self.call_ctx_type_method(identity, recv, method, args, span);
         }
         // A type declaring `deep_marshal` (the metrics instruments' `*_with(_, attrs)`) projects a
         // container argument to a full `NativeValue` tree; every other type uses the cheap shallow

@@ -10,8 +10,9 @@
 //! answered here; a program that wants real data runs under `noeta run` (the real host).
 
 pub use noeta_native::net::{
-    NetFetchIo, NetRequest, NetResponse, REQUEST_TYPE_NAME, RESPONSE_TYPE_NAME, Request,
-    WS_ACCEPT_GUID, accept_outcome, query_value, request_header, request_path, ws_recv_outcome,
+    NetFetchIo, NetRequest, NetResponse, REQUEST_TYPE_IDENTITY, REQUEST_TYPE_NAME,
+    RESPONSE_TYPE_IDENTITY, RESPONSE_TYPE_NAME, Request, WS_ACCEPT_GUID, accept_outcome,
+    query_value, request_header, request_path, ws_recv_outcome,
 };
 
 use serde_json::json;

@@ -488,7 +488,7 @@ pub type ArenaGetter = (&'static str, fn(&dyn crate::ExternValue) -> crate::Reta
 /// constructor's return names the instantiation ([`SigType::Generic`]) and its method signatures
 /// reference the receiver's type arguments as [`SigType::Var`] (`Var(0)` = first argument) — the
 /// checker seeds the variables from the receiver's static type. At runtime the value is tagged
-/// with the bare nominal name only.
+/// with the nominal identity only (its qualified name, no type arguments).
 #[derive(Debug, Clone, Copy)]
 pub struct ExtType {
     /// The **short display name** (`Uuid`) — what humans see in errors / `type_of` stringification.
@@ -1273,7 +1273,12 @@ impl Registry {
         self.ext_attributes().find(|a| a.name == name)
     }
 
-    /// Find a registered extern type by its short display name (extern-types X1).
+    /// Find a registered extern type by its short display name (extern-types X1) — first match in
+    /// registration order. This is the *checker-side* bridge from a signature's bare
+    /// [`SigType::Named`] name and the E0049 reservation set; **runtime identity paths must use**
+    /// [`Registry::find_type_qualified`] with the value's
+    /// [`crate::ExternValue::type_identity`], which stays unambiguous when two namespaces share a
+    /// short name.
     pub fn find_type(&self, name: &str) -> Option<&'static ExtType> {
         self.units
             .iter()
@@ -1341,7 +1346,9 @@ impl Registry {
         }
     }
 
-    /// Dispatch a method on an extern receiver through its registered [`ExtType`].
+    /// Dispatch a method on an extern receiver through its registered [`ExtType`], resolved by
+    /// the value's **qualified identity** ([`crate::ExternValue::type_identity`]) — so two types
+    /// sharing a short name under distinct namespaces dispatch to their own tables.
     pub fn dispatch_method(
         &self,
         recv: &mut dyn crate::ExternValue,
@@ -1349,17 +1356,17 @@ impl Registry {
         host: &mut dyn Host,
         args: &[crate::NativeValue],
     ) -> Result<crate::NativeOut, StdError> {
-        let type_name = recv.type_name();
-        let Some(ext) = self.resolve_type(type_name) else {
+        let identity = recv.type_identity();
+        let Some(ext) = self.find_type_qualified(identity) else {
             return Err(StdError {
                 kind: crate::ErrorKind::UnknownName,
-                message: format!("`{type_name}` is not a registered type"),
+                message: format!("`{identity}` is not a registered type"),
             });
         };
         let result = (ext.dispatch)(recv, method, host, args);
         #[cfg(debug_assertions)]
         if let Ok(out) = &result {
-            self.debug_verify_out(type_name, method, out);
+            self.debug_verify_out(identity, method, out);
         }
         result
     }
@@ -1393,8 +1400,9 @@ impl Registry {
     // per-value walks over already-cold IO/orchestration paths in dev builds only.
 
     /// Walk a dispatch result for extern values and verify each against its registration —
-    /// `type_name()` must resolve (a typo'd name otherwise errors at *first method call*, per
-    /// value), and a `key_capable` type gets a one-shot equality/order/hash spot check.
+    /// `type_identity()` must resolve as a qualified identity (a typo'd or short name otherwise
+    /// errors at *first method call*, per value), and a `key_capable` type gets a one-shot
+    /// equality/order/hash spot check.
     #[cfg(debug_assertions)]
     fn debug_verify_out(&self, owner: &str, func: &str, out: &crate::NativeOut) {
         use crate::NativeOut as O;
@@ -1430,12 +1438,13 @@ impl Registry {
     /// The per-extern half of [`Registry::debug_verify_out`].
     #[cfg(debug_assertions)]
     fn debug_verify_extern(&self, owner: &str, func: &str, value: &dyn crate::ExternValue) {
-        let name = value.type_name();
-        let Some(ext) = self.resolve_type(name) else {
+        let name = value.type_identity();
+        let Some(ext) = self.find_type_qualified(name) else {
             panic!(
                 "extension author contract violated: `{owner}.{func}` returned an extern value \
-                 whose type_name() is `{name}`, which is not a registered type in this registry — \
-                 ExternValue::type_name must equal the ExtType::name the value belongs to"
+                 whose type_identity() is `{name}`, which is not a registered qualified type \
+                 identity in this registry — ExternValue::type_identity must equal the \
+                 `{{namespace}}.{{name}}` of the ExtType the value belongs to"
             );
         };
         if !ext.key_capable {
@@ -1544,24 +1553,27 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             ));
         }
     }
-    // Extern-type identities. The runtime resolves a value's type by its SHORT `type_name()`
-    // (`find_type` scans units in registration order), so two types sharing a short name — even
-    // under distinct namespaces — would silently dispatch through whichever unit registered
-    // first: the wrong `ExtType`'s downcast then fails per value at call time, and `is`/`.as<T>()`
-    // answer against the wrong qualified name. Until extern values carry their qualified identity,
-    // a short-name collision is a mis-assembly — refuse to start rather than mis-dispatch.
-    let mut types: Vec<(&str, &str)> = units
+    // Extern-type identities. Runtime dispatch, `is`/`.as<T>()`, and the checker all key on the
+    // QUALIFIED identity (`namespace.name` — `ExternValue::type_identity`), so two types sharing
+    // a short name under distinct namespaces are distinct and coexist. Two declarations of the
+    // same qualified identity, however, would be first-wins at every lookup — refuse to start
+    // rather than silently shadow (this also covers a duplicate within one unit).
+    let mut types: Vec<((&str, &str), &str)> = units
         .iter()
-        .flat_map(|e| e.types().iter().map(move |t| (t.name, e.name())))
+        .flat_map(|e| {
+            e.types()
+                .iter()
+                .map(move |t| ((t.namespace, t.name), e.name()))
+        })
         .collect();
     types.sort_unstable();
     for pair in types.windows(2) {
         if pair[0].0 == pair[1].0 {
             return Err(format!(
-                "duplicate extern type `{}` in the assembled registry (units `{}` and `{}`): \
-                 runtime dispatch resolves extern types by their short name, so two extensions \
-                 cannot register the same type name",
-                pair[0].0, pair[0].1, pair[1].1
+                "duplicate extern type `{}.{}` in the assembled registry (units `{}` and `{}`): \
+                 a qualified type identity must be declared exactly once — distinct namespaces \
+                 may share a short name, one namespace may not",
+                pair[0].0.0, pair[0].0.1, pair[0].1, pair[1].1
             ));
         }
     }
@@ -1912,12 +1924,12 @@ pub fn dispatch_method(
     host: &mut dyn Host,
     args: &[crate::NativeValue],
 ) -> Result<crate::NativeOut, StdError> {
-    let type_name = recv.type_name();
+    let identity = recv.type_identity();
     match default_registry() {
         Some(r) => r.dispatch_method(recv, method, host, args),
         None => Err(StdError {
             kind: crate::ErrorKind::UnknownName,
-            message: format!("`{type_name}` is not a registered type"),
+            message: format!("`{identity}` is not a registered type"),
         }),
     }
 }
@@ -2262,11 +2274,13 @@ mod runtime_registry_tests {
     }
 
     #[test]
-    fn duplicate_extern_type_short_name_is_rejected() {
-        // Two units registering the same SHORT type name — even under distinct namespaces — must
-        // refuse to assemble: runtime dispatch resolves an extern value's type by its short
-        // `type_name()` (`find_type` scans units in order), so the collision would silently route
-        // one unit's values through the other's dispatch.
+    fn same_short_name_across_namespaces_coexists() {
+        // Two units registering the same SHORT type name under DISTINCT namespaces assemble
+        // fine: runtime dispatch and `is`/`.as<T>()` key on the qualified identity a value
+        // carries (`ExternValue::type_identity`), so `std.metrics.Counter` and
+        // `acme.metrics.Counter` are distinct types — the coexistence the qualified-identity
+        // model exists to enable. Both stay individually resolvable by their qualified name;
+        // the ambiguous short-name lookup answers the first registration (checker-side only).
         const T_STD_COUNTER: ExtType = ExtType {
             name: "Counter",
             namespace: "std.metrics",
@@ -2280,8 +2294,46 @@ mod runtime_registry_tests {
         static SM: NsUnit = NsUnit("std", &[], &[T_STD_COUNTER]);
         static AM: TypedUnit = TypedUnit("acme.metrics", "acme", &[T_ACME_COUNTER]);
         assert!(
-            validate(&[&SM, &AM]).is_err(),
-            "duplicate extern-type short name must refuse to assemble"
+            validate(&[&SM, &AM]).is_ok(),
+            "same short name under distinct namespaces must assemble"
+        );
+        let reg = Registry::new(vec![&SM, &AM]);
+        assert_eq!(
+            reg.find_type_qualified("std.metrics.Counter")
+                .map(|t| t.namespace),
+            Some("std.metrics")
+        );
+        assert_eq!(
+            reg.find_type_qualified("acme.metrics.Counter")
+                .map(|t| t.namespace),
+            Some("acme.metrics")
+        );
+    }
+
+    #[test]
+    fn duplicate_qualified_extern_type_is_rejected() {
+        // The SAME qualified identity twice — whether across units or within one — is first-wins
+        // at every lookup and must refuse to assemble.
+        const T_COUNTER_A: ExtType = ExtType {
+            name: "Counter",
+            namespace: "acme.metrics",
+            ..ExtType::DEFAULTS
+        };
+        const T_COUNTER_B: ExtType = ExtType {
+            name: "Counter",
+            namespace: "acme.metrics",
+            ..ExtType::DEFAULTS
+        };
+        static AM1: TypedUnit = TypedUnit("acme.metrics", "acme", &[T_COUNTER_A]);
+        static AM2: TypedUnit = TypedUnit("acme.metrics2", "acme", &[T_COUNTER_B]);
+        assert!(
+            validate(&[&AM1, &AM2]).is_err(),
+            "a duplicate qualified extern-type identity must refuse to assemble"
+        );
+        static AM_TWICE: TypedUnit = TypedUnit("acme.metrics", "acme", &[T_COUNTER_A, T_COUNTER_B]);
+        assert!(
+            validate(&[&AM_TWICE]).is_err(),
+            "a duplicate qualified identity within one unit must refuse to assemble"
         );
     }
 
@@ -2450,8 +2502,8 @@ mod runtime_registry_tests {
 
     #[cfg(debug_assertions)]
     impl crate::ExternValue for BadKey {
-        fn type_name(&self) -> &'static str {
-            "BadKey"
+        fn type_identity(&self) -> &'static str {
+            "q.BadKey"
         }
         fn eq_value(&self, other: &dyn crate::ExternValue) -> bool {
             other.as_any().downcast_ref::<BadKey>().is_some()
@@ -2489,15 +2541,16 @@ mod runtime_registry_tests {
         static Q: TypedUnit = TypedUnit("q.core", "q", &[T_BADKEY]);
         let reg = Registry::new(vec![&Q]);
 
-        // A dispatch result whose extern type_name resolves nowhere: the typo'd-name contract
-        // (`ExternValue::type_name` must equal the `ExtType::name`) fails at the dispatch return
-        // with a message naming the origin, not at first method call per value.
-        /// The typo case: `type_name()` answers a name no ExtType registers.
+        // A dispatch result whose extern type_identity resolves nowhere: the typo'd-identity
+        // contract (`ExternValue::type_identity` must equal the ExtType's qualified identity)
+        // fails at the dispatch return with a message naming the origin, not at first method
+        // call per value.
+        /// The typo case: `type_identity()` answers an identity no ExtType registers.
         #[derive(Debug, Clone)]
         struct Typo;
         impl crate::ExternValue for Typo {
-            fn type_name(&self) -> &'static str {
-                "BadKye" // sic
+            fn type_identity(&self) -> &'static str {
+                "q.BadKye" // sic
             }
             fn eq_value(&self, other: &dyn crate::ExternValue) -> bool {
                 other.as_any().downcast_ref::<Typo>().is_some()
@@ -2531,7 +2584,7 @@ mod runtime_registry_tests {
         }));
         assert!(
             caught.is_err(),
-            "an unregistered type_name must panic in debug"
+            "an unregistered type_identity must panic in debug"
         );
 
         // A key_capable type whose cmp_value is not a total order fails the one-shot spot check —

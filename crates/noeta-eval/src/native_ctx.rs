@@ -573,7 +573,7 @@ impl Interpreter {
             recv,
             args,
             span,
-            &format!("{type_name}.{method}"),
+            || format!("{type_name}.{method}"),
             // Same monomorphized route as the VM (identical fn either way — the instantiation
             // only decides inlining).
             |ctx, arg_slots| {
@@ -607,7 +607,7 @@ impl Interpreter {
             recv,
             args,
             span,
-            &format!("{module}::{bundle}.{method}"),
+            || format!("{module}::{bundle}.{method}"),
             |ctx, arg_slots| reg.dispatch_bundle_method(module, bundle, method, ctx, 0, arg_slots),
             || {
                 reg.find_bundle(module, bundle)
@@ -625,7 +625,7 @@ impl Interpreter {
         recv: Value,
         args: &[Value],
         span: Span,
-        label: &str,
+        label: impl FnOnce() -> String,
         dispatch: impl FnOnce(&mut EvalCtx<'_>, &[Slot]) -> Result<CtxOut, CtxError>,
         ret: impl FnOnce() -> noeta_stdlib::RetTy,
     ) -> Eval<Value> {
@@ -644,7 +644,7 @@ impl Interpreter {
                     Err(_) => Err(self.runtime_error(
                         DiagnosticCode::Panic,
                         span,
-                        format!("internal: `{label}` returned a freed slot"),
+                        format!("internal: `{}` returned a freed slot", label()),
                     )),
                 }
             }

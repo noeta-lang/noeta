@@ -67,6 +67,8 @@ DISPATCH (VM; noeta-eval mirrors the same shape)
 
 **Perf-regression risk:** none for step 1; low for step 2 (identity strings are compared by pointer in the hot cache; only cache-miss resolution changes).
 
+**Disposition (branch `extern-identity`):** ✅ FIXED end to end. Step 1 (assembly-time short-name refusal) landed as the stopgap; step 2 then made the value carry its identity: `ExternValue::type_name` became `type_identity` returning the pre-joined qualified `namespace.name` literal, and every runtime identity consumer — the VM route cache (pointer-keyed on the interned identity), `Registry::dispatch_method`/`resolve_extern_route` (now `find_type_qualified`), `is`/`.as<T>()` narrowing (a direct string compare, no registry walk), the read gates, the compiled-in ctx fast routes, extern map keys, and reflection (`TypeRepr::Named(identity)`, also fixing a latent VM-vs-eval divergence) — keys on it in both backends. Display stays the short name (`type_display_name`). The short-name refusal was then replaced: distinct namespaces may share a short name (proven end to end by `crates/noeta-conformance/tests/extern_identity.rs` on both backends); a duplicate qualified identity still refuses to assemble. `.noeb` needed no format bump: the checker already emitted qualified narrowing targets, and the cache key folds in the running binary's build identity.
+
 ---
 
 ## Finding 2 — Per-session registry threading (IR5) has a hole: `Session::hot_swap` checks against the process-global default

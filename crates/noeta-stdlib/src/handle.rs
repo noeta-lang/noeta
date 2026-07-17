@@ -336,8 +336,8 @@ fn not_writable_error(path: &str) -> StdError {
 /// shared-state comparison (the derived `PartialEq`: path, mode, cursor, buffer, closed);
 /// unordered and NOT key-capable (a handle mutates — its hash/order could go stale under a key).
 impl crate::ExternValue for FileHandle {
-    fn type_name(&self) -> &'static str {
-        "FileHandle"
+    fn type_identity(&self) -> &'static str {
+        "std.fs.FileHandle"
     }
 
     fn eq_value(&self, other: &dyn crate::ExternValue) -> bool {

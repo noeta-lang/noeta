@@ -1456,8 +1456,10 @@ impl Value {
             } else if self.is_bytes() {
                 "bytes"
             } else if self.is_extern() {
-                // The registered extern type's own name (`Uuid`), from the value contract.
-                self.with_extern(|e| e.type_name())
+                // The extern type's human-facing short name (`Uuid`) — the display form of the
+                // value's qualified identity (`std.id.Uuid`), exactly as user objects display
+                // their shape's short name. Identity paths read `type_identity()` directly.
+                self.with_extern(|e| e.type_display_name())
             } else {
                 "string"
             }

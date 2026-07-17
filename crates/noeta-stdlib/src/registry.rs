@@ -787,7 +787,7 @@ fn native_type_name(value: &NativeValue) -> &str {
         NativeValue::List(_) => "list",
         NativeValue::Map(_) => "map",
         NativeValue::Object { type_name, .. } | NativeValue::Opaque(type_name) => type_name,
-        NativeValue::Extern(e) => e.type_name(),
+        NativeValue::Extern(e) => e.type_display_name(),
     }
 }
 
@@ -4017,19 +4017,19 @@ pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
     args: &[crate::Slot],
 ) -> Option<Result<crate::CtxOut, crate::CtxError>> {
     match type_name {
-        crate::cell::CELL_TYPE_NAME => Some(crate::cell::cell_ctx_method_dispatch(
+        crate::cell::CELL_TYPE_IDENTITY => Some(crate::cell::cell_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
-        crate::reactive::SIGNAL_TYPE_NAME => Some(crate::reactive::signal_ctx_method_dispatch(
+        crate::reactive::SIGNAL_TYPE_IDENTITY => Some(crate::reactive::signal_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
-        crate::reactive::COMPUTED_TYPE_NAME => Some(crate::reactive::computed_ctx_method_dispatch(
+        crate::reactive::COMPUTED_TYPE_IDENTITY => Some(
+            crate::reactive::computed_ctx_method_dispatch(method, ctx, recv, args),
+        ),
+        crate::reactive::EFFECT_TYPE_IDENTITY => Some(crate::reactive::effect_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
-        crate::reactive::EFFECT_TYPE_NAME => Some(crate::reactive::effect_ctx_method_dispatch(
-            method, ctx, recv, args,
-        )),
-        crate::reactive::VIEW_TYPE_NAME => Some(crate::reactive::view_ctx_method_dispatch(
+        crate::reactive::VIEW_TYPE_IDENTITY => Some(crate::reactive::view_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
         // `para.synced`'s `SyncedSignal` is out-of-`std` — dispatched via its registered ExtType's

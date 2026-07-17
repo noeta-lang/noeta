@@ -129,11 +129,7 @@ pub(crate) fn try_classify(v: Value) -> Option<TryOutcome> {
 /// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
 /// backends decide a narrowing identically; `Named` (a user struct/class/enum, or the built-in
 /// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing).
-pub(crate) fn narrow_matches(
-    reg: &noeta_stdlib::registry::Registry,
-    v: Value,
-    target: &NarrowTarget,
-) -> bool {
+pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
     let kind = match target {
         NarrowTarget::Int => "int",
         NarrowTarget::Float => "float",
@@ -149,21 +145,18 @@ pub(crate) fn narrow_matches(
         NarrowTarget::Dyn => return true,
         NarrowTarget::Named(name) => {
             // An extern-type value matches by its **qualified identity** (`std.id.Uuid`) — the
-            // narrowing target the lowering produced for an imported native type — so it never
-            // matches a same-short-named *user* type (whose shape name is bare). User objects/enums
-            // match their (bare) shape name.
+            // narrowing target the lowering produced for an imported native type, compared
+            // directly against the identity the value itself carries (no registry walk) — so it
+            // never matches a same-short-named *user* type (whose shape name is bare) nor a
+            // same-short-named extern type from another namespace. User objects/enums match
+            // their shape name.
             if v.is_extern() {
-                return v.with_extern(|e| {
-                    reg.find_type(e.type_name())
-                        .map(|t| t.qualified())
-                        .as_deref()
-                        == Some(name)
-                });
+                return v.with_extern(|e| e.type_identity() == name);
             }
             return v.shape().is_some_and(|s| &s.name == name);
         }
         NarrowTarget::AnyOf(members) => {
-            return members.iter().any(|m| narrow_matches(reg, v, m));
+            return members.iter().any(|m| narrow_matches(v, m));
         }
         // Abstract kind-types match any value of that declaration kind, by the value's shape kind.
         NarrowTarget::AnyEnum => {
@@ -180,7 +173,7 @@ pub(crate) fn narrow_matches(
         // match `args` (a `dyn` on either side is a wildcard). An untagged value classifies its args
         // to `dyn`, so `vm_type_repr` yields `dyn` arguments and the check passes head-only.
         NarrowTarget::Generic { head, args } => {
-            return narrow_matches(reg, v, head)
+            return narrow_matches(v, head)
                 && noeta_ast::reflect::narrow_args_match(args, &vm_type_repr(&v));
         }
     };
