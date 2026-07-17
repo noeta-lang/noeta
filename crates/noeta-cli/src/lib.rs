@@ -4083,7 +4083,14 @@ fn emit_native(
     // is built with only the stdlib rings this program uses, so unused rings' native deps are dropped.
     // For a native-dependency app it is a *composed* AOT runtime (the lean runtime + those crates'
     // runtime extensions, dev tooling off — dev-deps); a pure-Noeta app uses the stock archive.
-    let rings = aot_ring_features(module);
+    // The import footprint selects each ring whose module the program references. A native package
+    // with several drivers behind one module (para/db's SQLite + Postgres) picks its driver at runtime
+    // from the dsn — invisible to a static scan — so union in any driver rings the manifest requests
+    // (`[native] rings = [...]`). An undeclared name is harmlessly ignored by the composer.
+    let mut rings = aot_ring_features(module);
+    rings.extend(noeta_pm::manifest::native_rings(file));
+    rings.sort();
+    rings.dedup();
     let (archive, libs) = match aot_runtime_base(file, &rings) {
         Ok(pair) => pair,
         Err(err) => {

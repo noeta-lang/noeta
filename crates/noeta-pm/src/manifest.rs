@@ -544,6 +544,38 @@ pub fn root_edition(entry: &Path) -> crate::edition::Edition {
     }
 }
 
+/// The extra native driver **rings** a `noeta build --native` binary should include beyond its import
+/// footprint — `[native] rings = ["ring-postgres"]`. A native package with several drivers behind one
+/// module (e.g. `para/db`'s SQLite + PostgreSQL) picks the driver at runtime from the dsn, which the
+/// static footprint scan cannot see; so a **non-default** driver is requested here explicitly. The
+/// composer enables only rings an entry crate actually declares, so an unknown/undeclared name is
+/// harmlessly ignored. Empty when there is no manifest or no `[native]` table (today's behavior — the
+/// default `ring-sqlite` driver still rides the entry crate's own defaults). A standalone read (like
+/// [`root_edition`]) so it stays a cheap manifest peek, not a graph walk.
+pub fn native_rings(entry: &Path) -> Vec<String> {
+    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    let Some(path) = find(dir) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    table
+        .get("native")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("rings"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The `[package] name` of a **cargo** manifest — what a composed-toolchain shim writes into its
 /// dependency line for a native entry crate (package-manager Phase 3, N3.2). Kept here because
 /// `noeta-pm` owns the toml dependency; this reads cargo's manifest, not ours.
@@ -1810,6 +1842,30 @@ mod tests {
         // A second add of the same key is rejected (and a non-identifier key too).
         assert!(add_dependency(&path, "http", "\"^1\"").is_err());
         assert!(add_dependency(&path, "bad-key", "\"^1\"").is_err());
+    }
+
+    #[test]
+    fn native_rings_reads_the_native_table() {
+        let dir = std::env::temp_dir().join("noeta_native_rings_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(MANIFEST_NAME),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [native]\nrings = [\"ring-postgres\"]\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.noe");
+        std::fs::write(&entry, "echo 1\n").unwrap();
+        assert_eq!(native_rings(&entry), vec!["ring-postgres".to_string()]);
+
+        // No `[native]` table → no extra rings (today's default behavior).
+        std::fs::write(
+            dir.join(MANIFEST_NAME),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert!(native_rings(&entry).is_empty());
     }
 
     #[test]

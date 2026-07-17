@@ -10,3 +10,8 @@ para = { path = "../../packages/para-db" }
 # Running a package's native Rust code requires the root app to authorize it (Phase 4 trust gate).
 [trust]
 native = ["para/db"]
+
+[native]
+# A `--native` binary picks its driver at runtime; request the Postgres driver ring so the AOT build
+# includes it (the SQLite default already rides the entry crate).
+rings = ["ring-postgres"]
