@@ -895,6 +895,49 @@ impl DocumentStore {
             .map(str::to_string)
     }
 
+    /// A **type-definition hover** for the `struct`/`class`/`enum` name under the cursor: the type's
+    /// declaration rendered in surface syntax — its fields (with types and defaults) or variants, and
+    /// its method signatures — plus the name's LSP range. Where [`hover_type`] reports only the
+    /// nominal name (`Point`) for a type reference, this shows what the type *is*.
+    ///
+    /// Fires whenever the identifier under the cursor names a type declared in the workspace: at a
+    /// construction (`Point {}`), a type annotation (`x: Point`), an associated-call receiver
+    /// (`Point.origin`), or the declaration name itself. `None` when the cursor is not on a declared
+    /// type name (a value binding keeps its ordinary type hover). Field defaults are rendered from
+    /// source when the declaration is in the file under the cursor; a type imported from another file
+    /// elides them (its text is not the entry text).
+    ///
+    /// [`hover_type`]: Self::hover_type
+    pub fn hover_type_definition(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(String, Range)> {
+        let (cache, doc, source) = self.doc_cache(uri)?;
+        let db = &self.db;
+        let text = doc.text(db);
+        let index = LineIndex::new(text);
+        let offset = index.offset(position, encoding);
+
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+
+        let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|t| {
+            t.kind == TokenKind::Ident
+                && t.span.source == source
+                && t.span.start <= offset
+                && offset <= t.span.end
+        })?;
+        let name = &text[token.span.range()];
+        let rendered = render_type_definition(program, name, text, source)?;
+        Some((rendered, index.range(token.span, encoding)))
+    }
+
     /// A hover for a **namespace-group** binding (`http` from `use std.http`, module-namespaces):
     /// the group's qualified prefix and its members. A group is not a typed value, so [`hover_type`]
     /// returns nothing for it — this fills that gap. `None` unless the cursor's identifier is a group
@@ -2255,6 +2298,119 @@ fn render_fn_signature(decl: &noeta_ast::FnDecl) -> String {
     }
 }
 
+/// Render generic type parameters as `<A, B>`, or `""` when there are none — for a type-definition
+/// hover header (`struct Pair<A, B>`).
+fn render_type_params(params: &[noeta_ast::TypeParam]) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    format!("<{}>", names.join(", "))
+}
+
+/// One `struct`/`class` field rendered as a body line: `[pub ][mut ]name: Type[ = default]`. The
+/// default value is sliced from `text` when it lives in the file under the cursor (`source`); a field
+/// whose declaration was imported from another file shows `= …` since its source text is not `text`.
+fn render_field(field: &noeta_ast::FieldDecl, text: &str, source: SourceId) -> String {
+    let mut line = String::new();
+    if field.is_public {
+        line.push_str("pub ");
+    }
+    if field.mut_field {
+        line.push_str("mut ");
+    }
+    line.push_str(&field.name);
+    if let Some(ty) = &field.ty {
+        line.push_str(": ");
+        line.push_str(&symbols::render_type_ref(ty));
+    }
+    if let Some(default) = &field.default {
+        let span = default.span();
+        if span.source == source {
+            line.push_str(" = ");
+            line.push_str(&text[span.range()]);
+        } else {
+            line.push_str(" = …");
+        }
+    }
+    line
+}
+
+/// One enum variant rendered as a body line: `Name`, `Name(A, B)` for an algebraic variant, or
+/// `Name = <backed>` for a backed enum, with the backed value sliced from `text` when in-file.
+fn render_variant(variant: &noeta_ast::VariantDecl, text: &str, source: SourceId) -> String {
+    let mut line = variant.name.clone();
+    if !variant.fields.is_empty() {
+        let fields: Vec<String> = variant.fields.iter().map(symbols::param_detail).collect();
+        line.push_str(&format!("({})", fields.join(", ")));
+    }
+    if let Some(backed) = &variant.backed_value {
+        let span = backed.span();
+        if span.source == source {
+            line.push_str(&format!(" = {}", &text[span.range()]));
+        }
+    }
+    line
+}
+
+/// Render the declaration of the `struct`/`class`/`enum` named `name` in surface syntax for a
+/// type-definition hover: the header (`struct Point`, with generic params), the fields or variants,
+/// and each method's signature — one member per line, four-space indented. `None` when no such type
+/// is declared in `program`.
+fn render_type_definition(
+    program: &noeta_ast::Program,
+    name: &str,
+    text: &str,
+    source: SourceId,
+) -> Option<String> {
+    // Header keyword, member lines, and method signatures for the matched declaration.
+    let (keyword, generics, mut members, methods): (
+        &str,
+        String,
+        Vec<String>,
+        &[noeta_ast::FnDecl],
+    ) = program.stmts.iter().find_map(|stmt| match stmt {
+        noeta_ast::Stmt::Struct(d) if d.name == name => Some((
+            "struct",
+            render_type_params(&d.type_params),
+            d.fields
+                .iter()
+                .map(|f| render_field(f, text, source))
+                .collect(),
+            d.methods.as_slice(),
+        )),
+        noeta_ast::Stmt::Class(d) if d.name == name => Some((
+            "class",
+            render_type_params(&d.type_params),
+            d.fields
+                .iter()
+                .map(|f| render_field(f, text, source))
+                .collect(),
+            d.methods.as_slice(),
+        )),
+        noeta_ast::Stmt::Enum(d) if d.name == name => Some((
+            "enum",
+            render_type_params(&d.type_params),
+            d.variants
+                .iter()
+                .map(|v| render_variant(v, text, source))
+                .collect(),
+            d.methods.as_slice(),
+        )),
+        _ => None,
+    })?;
+    members.extend(methods.iter().map(render_fn_signature));
+    if members.is_empty() {
+        return Some(format!("{keyword} {name}{generics} {{}}"));
+    }
+    let body = members
+        .iter()
+        .map(|m| format!("    {m}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!("{keyword} {name}{generics} {{\n{body}\n}}"))
+}
+
 /// Whether `name` is a type declared in this program (a `struct`/`class`/`enum`) — the signal that a
 /// member-access receiver like `Point` in `Point.origin` is the type itself (an associated-function
 /// call) rather than a value.
@@ -3365,6 +3521,46 @@ mod tests {
         assert_eq!(sig(3, 10).as_deref(), Some("fn manhattan(): int"));
         // A non-callable identifier (the binding `r`) has no signature — the type hover handles it.
         assert_eq!(sig(6, 0), None);
+    }
+
+    #[test]
+    fn hover_type_definition_renders_the_declaration_of_the_type_under_the_cursor() {
+        let mut store = test_store();
+        let src = "struct Point {\n\
+                   \x20   x: int = 0\n\
+                   \x20   y: int = 0\n\
+                   \x20   fn manhattan(): int { return self.x }\n\
+                   }\n\
+                   enum Shape {\n\
+                   \x20   Circle(float);\n\
+                   \x20   Rect(int, int);\n\
+                   }\n\
+                   p = Point {}\n\
+                   s: Shape = Shape.Circle(1.0)\n";
+        store.open("file:///t.noe", src.to_string());
+        let def = |line, character| {
+            store
+                .hover_type_definition(
+                    "file:///t.noe",
+                    Position { line, character },
+                    Encoding::Utf8,
+                )
+                .map(|(label, _range)| label)
+        };
+        // On the construction `Point {}` (line 9): the whole struct, with defaults and the method.
+        assert_eq!(
+            def(9, 4).as_deref(),
+            Some("struct Point {\n    x: int = 0\n    y: int = 0\n    fn manhattan(): int\n}")
+        );
+        // On the declaration name itself (line 0).
+        assert!(def(0, 8).is_some());
+        // An enum: its variants (line 5 header, and the annotation `Shape` on line 10).
+        assert_eq!(
+            def(10, 3).as_deref(),
+            Some("enum Shape {\n    Circle(float)\n    Rect(int, int)\n}")
+        );
+        // A value binding (`p`) is not a type name — no definition hover (the type hover covers it).
+        assert_eq!(def(9, 0), None);
     }
 
     #[test]

@@ -924,7 +924,7 @@ impl LanguageServer for Backend {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
         let position = ide_position(position_params.position);
-        let (found, doc, tier, namespace, signature) = {
+        let (found, doc, tier, namespace, signature, type_def) = {
             let store = self.store.lock().expect("document store poisoned");
             (
                 store.hover_type(uri.as_str(), position, self.encoding()),
@@ -932,6 +932,7 @@ impl LanguageServer for Backend {
                 store.hover_tier(uri.as_str(), position, self.encoding()),
                 store.hover_namespace(uri.as_str(), position, self.encoding()),
                 store.hover_signature(uri.as_str(), position, self.encoding()),
+                store.hover_type_definition(uri.as_str(), position, self.encoding()),
             )
         };
         let markdown = |value: String| {
@@ -962,6 +963,19 @@ impl LanguageServer for Backend {
         // ahead of the type hover, whose tightest span at a call is the result type alone (`int`).
         if let Some((sig, range)) = signature {
             let mut value = format!("```noeta\n{sig}\n```");
+            if let Some(doc) = doc {
+                value.push_str("\n\n---\n\n");
+                value.push_str(&doc);
+            }
+            return Ok(Some(Hover {
+                contents: markdown(value),
+                range: Some(wire_range(range)),
+            }));
+        }
+        // Hovering a type name (`Point`) shows its declaration — fields/variants and method
+        // signatures — ahead of the type hover, which would otherwise report just the nominal name.
+        if let Some((def, range)) = type_def {
+            let mut value = format!("```noeta\n{def}\n```");
             if let Some(doc) = doc {
                 value.push_str("\n\n---\n\n");
                 value.push_str(&doc);
