@@ -563,10 +563,7 @@ pub fn find_ext_tier(name: &str) -> Option<&'static noeta_native::registry::ExtT
 /// even though no `.noe` file declares them (a program `@tier(…, text/expr)` is discovered by the
 /// lexer's own token scan instead).
 pub fn ext_verbatim_tier_names() -> Vec<&'static str> {
-    ext_tiers()
-        .filter(|t| t.text.is_some() || t.expr.is_some())
-        .map(|t| t.name)
-        .collect()
+    default_seeded().ext_verbatim_tier_names()
 }
 
 /// Every installed extension's **tier-body formatters** as `(language, formatter)` pairs — the
