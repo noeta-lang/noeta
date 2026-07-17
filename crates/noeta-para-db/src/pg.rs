@@ -97,6 +97,40 @@ impl SqlDriver for PostgresDriver {
         }
         Ok(out)
     }
+
+    fn listen(&mut self, channel: &str) -> Result<(), String> {
+        // `LISTEN` names an identifier, not a bind parameter, so the channel is quoted as one.
+        self.client
+            .batch_execute(&format!("LISTEN {}", quote_ident(channel)))
+            .map_err(pg_err)
+    }
+
+    fn notify(&mut self, channel: &str) -> Result<(), String> {
+        // Quoted identically to `listen`, so a `NOTIFY` matches a `LISTEN` on the same channel.
+        self.client
+            .batch_execute(&format!("NOTIFY {}", quote_ident(channel)))
+            .map_err(pg_err)
+    }
+
+    fn notifications(&mut self) -> Result<Vec<String>, String> {
+        use postgres::fallible_iterator::FallibleIterator;
+        // A cheap round-trip processes any just-arrived wire bytes into the notification buffer; then
+        // `try_iter` drains the buffered notifications non-blocking (it never waits on an empty queue).
+        self.client.batch_execute("").map_err(pg_err)?;
+        let mut notifications = self.client.notifications();
+        let mut iter = notifications.iter();
+        let mut channels = Vec::new();
+        while let Some(n) = iter.next().map_err(pg_err)? {
+            channels.push(n.channel().to_string());
+        }
+        Ok(channels)
+    }
+}
+
+/// Quote a Postgres identifier (a `LISTEN`/`NOTIFY` channel name): wrap in double quotes and double any
+/// embedded quote, so an arbitrary channel string can never break out of the identifier.
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 /// Render a `postgres::Error` with its **server** detail — the bare `Display` is only `"db error"`,
@@ -329,5 +363,37 @@ mod tests {
             ]
         );
         d.execute("DROP TABLE noeta_pg_it", &[]).unwrap();
+    }
+
+    /// LISTEN/NOTIFY round-trip against a live server (env-gated). A listener connection subscribes to
+    /// a channel; a *separate* writer connection fires `NOTIFY`; the listener's non-blocking poll then
+    /// reports the channel — the basis of the reactive DB source (external writes → wake).
+    #[test]
+    fn listen_notify_round_trip() {
+        let Ok(dsn) = std::env::var("NOETA_PG_TEST_DSN") else {
+            return;
+        };
+        let mut listener = PostgresDriver::connect(&dsn).expect("listener");
+        listener.listen("noeta_watch_test").expect("listen");
+        assert!(
+            listener.notifications().unwrap().is_empty(),
+            "no notifications before any NOTIFY"
+        );
+
+        let mut writer = PostgresDriver::connect(&dsn).expect("writer");
+        writer
+            .execute("NOTIFY noeta_watch_test", &[])
+            .expect("notify");
+
+        // Delivery is asynchronous; poll a few times (non-blocking) until the notification lands.
+        let mut seen = Vec::new();
+        for _ in 0..40 {
+            seen = listener.notifications().unwrap();
+            if !seen.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(seen, vec!["noeta_watch_test".to_string()]);
     }
 }

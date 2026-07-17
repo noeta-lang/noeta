@@ -4440,6 +4440,8 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "noeta-native",
+ "noeta-reactive",
+ "noeta-reactive-abi",
  "postgres",
  "rusqlite",
  "rustls",

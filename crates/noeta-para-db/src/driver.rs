@@ -31,4 +31,26 @@ pub trait SqlDriver: Send {
 
     /// Run a query, returning every row as column-name → value pairs. `Err(message)` on error.
     fn query(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, String>;
+
+    /// **Change notifications** (reactive DB↔UI, aether DB5) — subscribe this connection to a
+    /// notification `channel` (Postgres `LISTEN`). A driver without a push channel leaves the default
+    /// (unsupported), so the reactive layer degrades to in-process invalidation only.
+    fn listen(&mut self, channel: &str) -> Result<(), String> {
+        let _ = channel;
+        Err("this driver does not support change notifications (LISTEN/NOTIFY)".to_string())
+    }
+
+    /// Poll pending change notifications **non-blocking**, returning the channels that fired since the
+    /// last poll (empty if none). Pumped from the app's loop — never blocks it. Default: none.
+    fn notifications(&mut self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Fire a change notification on `channel` (Postgres `NOTIFY`) — the write-side companion to
+    /// [`SqlDriver::listen`], so a mutation can wake watchers on the same channel. A driver without a
+    /// push channel leaves the default (a no-op), so the reactive layer stays in-process only.
+    fn notify(&mut self, channel: &str) -> Result<(), String> {
+        let _ = channel;
+        Ok(())
+    }
 }

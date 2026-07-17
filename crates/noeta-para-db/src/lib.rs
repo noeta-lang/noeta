@@ -20,6 +20,7 @@ pub mod driver;
 pub mod pg;
 #[cfg(feature = "ring-sqlite")]
 pub mod sqlite;
+pub mod watch;
 
 use noeta_native::registry::{ExtModule, ExtType, Extension};
 
@@ -54,29 +55,68 @@ const PARA_DB_MODULES: &[ExtModule] = &[ExtModule {
     name: "db",
     functions: crate::conn::DB_FNS,
     dispatch: crate::conn::db_dispatch,
+    // `db.watch(conn, channel)` reaches the reactive engine, so it is a higher-order (ctx) function
+    // alongside the plain `db.connect` (aether DB5, reactive DB source).
+    ctx_functions: crate::watch::WATCH_FNS,
+    ctx_dispatch: Some(|func, ctx, args| crate::watch::watch_ctx_dispatch(func, ctx, args)),
     docs: DB_DOCS,
     ..ExtModule::DEFAULTS
 }];
 
-/// The `para.db` extern types — the `Connection` handle. `deep_marshal` so its `List<dyn>` params
-/// and future container arguments project to a full `NativeValue` tree the driver can read.
-const PARA_DB_TYPES: &[ExtType] = &[ExtType {
-    name: crate::conn::CONNECTION_TYPE_NAME,
-    namespace: "para.db",
-    methods: crate::conn::CONNECTION_METHODS,
-    dispatch: crate::conn::CONNECTION_DISPATCH,
-    deep_marshal: true,
-    docs: CONNECTION_DOCS,
-    ..ExtType::DEFAULTS
-}];
+/// The `para.db` extern types — the `Connection` handle and the reactive `Watch` source (DB5).
+/// `Connection` declares `deep_marshal` so its `List<dyn>` params project to a full `NativeValue`
+/// tree the driver can read.
+const PARA_DB_TYPES: &[ExtType] = &[
+    ExtType {
+        name: crate::conn::CONNECTION_TYPE_NAME,
+        namespace: "para.db",
+        methods: crate::conn::CONNECTION_METHODS,
+        dispatch: crate::conn::CONNECTION_DISPATCH,
+        deep_marshal: true,
+        docs: CONNECTION_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::watch::WATCH_TYPE_NAME,
+        namespace: "para.db",
+        ctx_methods: crate::watch::WATCH_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::watch::watch_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        docs: WATCH_DOCS,
+        ..ExtType::DEFAULTS
+    },
+];
 
-const DB_DOCS: &[(&str, &str)] = &[(
-    "connect",
-    "Open a database connection from a dsn — the scheme selects the driver: `sqlite::memory:` (or \
-     `:memory:`) for an in-memory database, `sqlite:PATH` (or a bare path) for a SQLite file, or \
-     `postgres://user:pass@host:5432/db` (`postgresql://` too) for a PostgreSQL server. Returns a \
-     `Connection`.",
-)];
+const DB_DOCS: &[(&str, &str)] = &[
+    (
+        "connect",
+        "Open a database connection from a dsn — the scheme selects the driver: `sqlite::memory:` (or \
+         `:memory:`) for an in-memory database, `sqlite:PATH` (or a bare path) for a SQLite file, or \
+         `postgres://user:pass@host:5432/db` (`postgresql://` too) for a PostgreSQL server. Returns a \
+         `Connection`.",
+    ),
+    (
+        "watch",
+        "Create a reactive `Watch` over a notification `channel` (Postgres `LISTEN`) — a node in the \
+         `std.reactive` graph whose value is a revision counter. A `computed` that reads `watch.get()` \
+         and re-queries the database re-runs whenever an external write fires `NOTIFY channel` and the \
+         app `pump`s the watch — the basis of keeping a UI in sync with the database.",
+    ),
+];
+
+const WATCH_DOCS: &[(&str, &str)] = &[
+    (
+        "get",
+        "Read the watch's revision reactively — subscribes the running `computed`/`effect`, so it \
+         re-runs when the watch wakes.",
+    ),
+    (
+        "pump",
+        "Poll pending change notifications non-blocking; if any fired on this channel, bump the \
+         revision and wake every dependent. Returns whether it woke. Call it from the app's loop.",
+    ),
+];
 
 const CONNECTION_DOCS: &[(&str, &str)] = &[
     (
@@ -88,6 +128,11 @@ const CONNECTION_DOCS: &[(&str, &str)] = &[
         "query",
         "Run a query with positional `?` bind parameters; returns each result row as a \
          `Map<string, dyn>` of column name to value.",
+    ),
+    (
+        "notify",
+        "Fire a change notification on a channel (Postgres `NOTIFY`) — wakes any `db.watch` listening \
+         on it (this connection or another). A no-op on a driver without a push channel (SQLite).",
     ),
     (
         "close",

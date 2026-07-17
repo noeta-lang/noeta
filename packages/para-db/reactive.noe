@@ -1,0 +1,81 @@
+// para.db.reactive — the OPT-IN reactive layer over the repository (aether DB5).
+//
+// Reactivity is a choice, not a tax: the plain `Repository` (para.db.repo) stays non-reactive and
+// zero-overhead. When you want the UI to track the database, you wrap it in a `LiveRepository` — its
+// `all()` is a reactive `std.reactive` query that re-runs whenever the table changes, and its
+// mutations notify so dependents wake. Internally it composes `db.watch` (a node in the reactive
+// graph over the table's NOTIFY channel) with a plain repository — no new runtime, and the same
+// reactive value a LiveView `view.expose(...)` diffs to the browser.
+//
+// EXTERNAL writes (another process/connection changing the table) wake the UI too: have the database
+// NOTIFY the channel on write — either a trigger (`AFTER INSERT/UPDATE/DELETE … pg_notify('<table>')`)
+// so ANY writer fires it, or `conn.notify("<table>")` from each writer. The app `pump()`s the live
+// repository from its loop (e.g. the serve loop, alongside background tasks) to deliver them.
+
+namespace para.db.reactive
+
+use para.db
+use para.db.repo.Repository
+use std.reactive.computed
+
+// A live, reactive repository over one model + table. Opt in by constructing one instead of a plain
+// `Repository`. Reads become reactive queries; writes stage through the same unit-of-work and notify.
+pub class LiveRepository {
+    repo: Repository
+    conn: dyn // a para.db.Connection (typed `dyn` — F5)
+    watch: dyn // a para.db.Watch over the table's NOTIFY channel
+    chan: string // the NOTIFY channel (the table name)
+
+    // Construct over the model's runtime type name, its table, its primary-key column, and a
+    // connection. The NOTIFY channel is the table name; the watch listens on it immediately.
+    fn new(model: string, tbl: string, pk: string, conn: dyn): LiveRepository {
+        return LiveRepository {
+            repo: Repository.new(model, tbl, pk),
+            conn: conn,
+            watch: db.watch(conn, tbl),
+            chan: tbl,
+        }
+    }
+
+    // A REACTIVE query of every row, mapped to the model — re-runs whenever the table changes (the
+    // watch wakes). Read it in an `effect`, or hand it to a LiveView `view.expose(...)`. The DB read
+    // itself is not a reactive dependency; the `watch` is what invalidates it.
+    fn all(): dyn {
+        w = self.watch
+        r = self.repo
+        c = self.conn
+        return computed(fn() {
+            w.get()
+            return r.all(c)
+        })
+    }
+
+    // --- Writes: stage through the unit of work, then notify on flush so dependents wake. ---------
+
+    fn add(entity: dyn): void {
+        self.repo.add(entity)
+    }
+
+    fn save(entity: dyn): void {
+        self.repo.save(entity)
+    }
+
+    fn remove(id: dyn): void {
+        self.repo.remove(id)
+    }
+
+    // Commit the staged writes as one batch, then fire a notification so watchers (this app's live
+    // queries, and — with a trigger — any external listener) wake. Returns the statement count.
+    fn flush(): int {
+        n = self.repo.flush(self.conn)
+        self.conn.notify(self.chan)
+        return n
+    }
+
+    // Pump the watch — deliver pending change notifications and wake the reactive queries if any
+    // fired. Call it from the app's loop (the serve loop drives it alongside background tasks).
+    fn pump(): bool {
+        // `watch` is typed `dyn` (F5), so narrow its native `bool` result.
+        return self.watch.pump().as<bool>() ?? false
+    }
+}

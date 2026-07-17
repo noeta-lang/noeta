@@ -176,6 +176,11 @@ pub const CONNECTION_METHODS: &[ExtFn] = &[
         ))),
     },
     ExtFn {
+        name: "notify",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
         name: "close",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
@@ -215,6 +220,17 @@ fn connection_method_dispatch(
                 .map_err(|_| io_error("connection lock poisoned"))?;
             let rows = driver.query(&sql, &params).map_err(io_error)?;
             Ok(NativeOut::List(rows.into_iter().map(row_to_out).collect()))
+        }
+        "notify" => {
+            want_arity(method, args, 1)?;
+            let channel = want_str(method, args, 0)?.to_string();
+            let conn = conn_of(recv)?;
+            let mut driver = conn
+                .0
+                .lock()
+                .map_err(|_| io_error("connection lock poisoned"))?;
+            driver.notify(&channel).map_err(io_error)?;
+            Ok(NativeOut::Unit)
         }
         "close" => {
             want_arity(method, args, 0)?;

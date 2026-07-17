@@ -1,0 +1,55 @@
+// The OPT-IN reactive ORM (aether DB5): a `LiveRepository` — reactivity you choose by wrapping a plain
+// repository. Its `all()` is a reactive query; `flush()` notifies; `pump()` delivers changes. The
+// plain `Repository` stays non-reactive. Writing through it updates the "UI" (an effect here, a
+// LiveView `view.expose` in a real app) with no manual signal wiring.
+//
+//   docker run -d --rm -e POSTGRES_PASSWORD=test -e POSTGRES_DB=testdb -p 5433:5432 postgres:16-alpine
+//   noeta run examples/para-db-demo/live_repo_demo.noe
+use para.db
+use para.db.reactive.LiveRepository
+use std.reactive.effect
+use std.json
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct User {
+    id: int
+    name: string
+    age: int
+}
+
+// Pump a live repository until a change is delivered (or we give up) — stands in for the serve loop.
+fn settle(users: LiveRepository): void {
+    mut woke = false
+    mut tries = 0
+    while !woke && tries < 100 {
+        woke = users.pump()
+        tries = tries + 1
+    }
+}
+
+conn = db.connect("postgres://postgres:test@127.0.0.1:5433/testdb")
+conn.execute("DROP TABLE IF EXISTS users", [])
+conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT)", [])
+
+// Opt in: a LiveRepository instead of a plain Repository.
+users = LiveRepository.new("User", "users", "id", conn)
+
+// A reactive query — re-runs whenever the table changes.
+live_users = users.all()
+
+// The "UI" re-renders automatically on every change.
+effect(fn() {
+    all = live_users.get()
+    echo "UI: ${all.len()} user(s)"
+})
+
+// Write through the live repository — flush notifies, the pump wakes the query.
+users.add(User { id: 1, name: "Ada", age: 36 })
+users.flush()
+settle(users)
+
+users.add(User { id: 2, name: "Bob", age: 41 })
+users.flush()
+settle(users)
+
+conn.close()

@@ -9,6 +9,14 @@ rust-version.workspace = true
 [dependencies]
 # The extension ABI (the module/type registry, ExternValue contract, error constructors).
 noeta-native = { workspace = true }
+# The reactive DB source (`db.watch`, aether DB5) is a node in the SAME reactive graph as core
+# `std.reactive`, reached through the `ReactiveSource` capability contract — never the engine
+# internals (so this crate depends on nothing of `noeta-stdlib`). `noeta-reactive` supplies the
+# `NodeId` handle; `noeta-reactive-abi` the capability + view-source contract. Same seam para.synced
+# uses. Light crates, always linked (the `db.watch` surface works for any driver — SQLite degrades to
+# in-process-only, Postgres adds external LISTEN/NOTIFY).
+noeta-reactive = { workspace = true }
+noeta-reactive-abi = { workspace = true }
 # The SQLite driver, behind the `ring-sqlite` ring. `bundled` compiles SQLite from source, so a
 # consumer needs no system libsqlite3 (the amalgamation reuses the workspace's existing
 # libsqlite3-sys build). Optional + gated exactly like para-p2p's `ring-p2p`: a pure/loopback build
