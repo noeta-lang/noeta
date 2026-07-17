@@ -48,6 +48,8 @@ ys = xs.map(fn(n) {
 })
 ```
 
+Termination is also a **barrier**: after a line that can stand as a complete statement, a next line starting with `(` or `[` begins a new statement — it is never a call or index on the previous line's value. This holds at every nesting level, closure bodies included. To call across the break, keep the `(` on the same line.
+
 Type, `struct`, and `class` bodies are newline-separated — fields need no terminator.
 
 ### Parentheses around control-flow headers
