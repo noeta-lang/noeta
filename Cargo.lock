@@ -4303,6 +4303,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
  "noeta-value",
  "object 0.37.3",
 ]

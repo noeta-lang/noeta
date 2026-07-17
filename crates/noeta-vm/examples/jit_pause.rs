@@ -23,6 +23,8 @@ fn make_fn(name: &str, stmts: usize) -> String {
 }
 
 fn main() {
+    // Own assembling driver (audit-6 F2): seed the std units before compiling.
+    noeta_stdlib::registry::default_seeded();
     // 30 functions, each called 60 times (> JIT_HOT_THRESHOLD = 50) so every one is promoted
     // mid-run. Sizes: mixed 5/40/160 statements by default; `JIT_PAUSE_STMTS=<n>` makes all 30
     // uniform at n statements (for per-size pause numbers).

@@ -80,6 +80,9 @@ impl Backend for IrRefBackend {
     /// it was neither a production path nor the differential oracle — the oracle is VM-vs-IR — so it
     /// was pure duplication. Lowering is total over the parsed language, so this never fails.)
     fn run(&self, program: &Program) -> RunResult {
+        // The reference backend is an assembling driver in its own right (audit-6 F2): the checker
+        // and lowering resolve std names against the process-default registry. Idempotent.
+        noeta_stdlib::registry::default_seeded();
         // Apply the same IR passes the production paths do (`lang run` in `noeta-cli`, the conformance
         // reference): precise-RC drop insertion (with destructor relevance) and reuse-token threading.
         // Without them `reuse` is never set, so e.g. a list self-append `acc ~= [i]` copies the whole

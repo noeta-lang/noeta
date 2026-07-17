@@ -23,6 +23,9 @@ use noeta_vm::VmBackend;
 /// Source → compiled `Module`. Panics if the program falls outside the VM subset, so a silently
 /// near-empty module never benches nothing (mirrors the `vm` bench's `compile`).
 fn compile(src: &str) -> Module {
+    // The bench is its own assembling driver (audit-6 F2): the compiler resolves std names
+    // against the process-default registry. Outside the measured loop; idempotent.
+    noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "reactivity_bench.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);

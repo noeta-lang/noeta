@@ -744,6 +744,7 @@ mod tests {
     /// Compile `src` as a **checked** program keeping the compiler alive — the dance the debug
     /// adapter's launch path runs (T3). Panics on any parse/check/compile failure.
     fn checked_session(src: &str) -> (noeta_bytecode::Module, noeta_compiler::SessionCompiler) {
+        noeta_stdlib::registry::default_seeded();
         let source = Source::new(SourceId::FIRST, "<file>", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
