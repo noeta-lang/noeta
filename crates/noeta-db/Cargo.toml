@@ -16,8 +16,6 @@ noeta-bytecode = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-check = { workspace = true }
 noeta-native = { workspace = true }
-# For the installed extensions' verbatim-body tier names (seeding workspace-wide lexing).
-noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 noeta-loader = { workspace = true }
 salsa = { workspace = true }
 
@@ -25,6 +23,11 @@ salsa = { workspace = true }
 # `Update` impls for the pass-through result newtypes are `unsafe` (a small,
 # audited always-replace surface — see the `replace_update!` macro). It re-states
 # the rest of the workspace lints minus `unsafe_code = "forbid"`.
+[dev-dependencies]
+# Tests are their own assembling driver: they seed the process-default registry with the std
+# units (a dev-dep never re-enters the library build graph).
+noeta-stdlib = { workspace = true }
+
 [lints.rust]
 missing_debug_implementations = "warn"
 
