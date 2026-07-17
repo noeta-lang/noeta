@@ -3623,6 +3623,9 @@ mod tests {
         // innermost `{` is no boundary, even when that argument list is itself inside a closure.
         let args = parse_str("ys = xs.map(fn(n) {\n  return g(\n    n,\n    1,\n  )\n})\n");
         assert!(args.diagnostics.is_empty(), "{:?}", args.diagnostics);
+        // A `${…}` interpolation hole weaves its own hard boundaries (`parse_hole`): the same
+        // barrier applies to a multi-line closure body nested inside the hole's expression.
+        assert_eq!(calls_in("msg = `s: ${xs.map(fn(n) {\n  a\n(n)\n})}`\n"), 1);
     }
 
     #[test]
