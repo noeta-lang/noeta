@@ -23,10 +23,61 @@ use std.json
 // the websocket session exposes and diffs, and the marker `id`s (parallel to `holes`) the session
 // exposes each computed under. Holes are `dyn` — they *are* `Computed<string>`s, but `view.expose`
 // accepts `dyn` and this keeps the field a built-in.
+//
+// `handlers` is the template's inline event table: an `${on_click(fn() => …)}` hole registers its
+// closure here under an auto id (`eN`) and emits a matching `data-live-*` marker, so a client event
+// routes straight to the closure at the element — no magic string, no central `on_event` match.
 pub struct Html {
     skeleton: string
     holes: List<dyn>
     ids: List<string>
+    handlers: Map<string, (string) -> void>
+}
+
+// The typed DOM events a template binds. This enum is the single source of truth for the event path:
+// each variant maps to one `data-live-*` wire marker (`wire_attr`) and one client-side listener, so
+// no event kind is ever a bare string. `on_click`/`on_input`/`on_submit` construct the `Binding`.
+pub enum DomEvent {
+    Click
+    Input
+    Submit
+}
+
+// A handler bound inline in a template (`<button ${on_click(fn() => …)}>`). The `@html` handler
+// registers `run` in the page's `handlers` table under an auto id and emits `event`'s marker; the
+// session loop looks the closure up by id when the client reports the event. `run` receives the
+// event payload — empty for a click, the field value for an input, the URL-encoded body for a submit.
+pub struct Binding {
+    event: DomEvent
+    run: (string) -> void
+}
+
+// The `data-live-*` wire marker for an event kind. The client shim (`live_js`) listens for the DOM
+// event and reports the bound id under this attribute; `render` emits it; `prefix_markers` namespaces
+// it when a region is folded. One place decides the attribute name for all three.
+fn wire_attr(e: DomEvent): string {
+    return match e {
+        DomEvent.Click => "data-live-click",
+        DomEvent.Input => "data-live-input",
+        DomEvent.Submit => "data-live-submit",
+    }
+}
+
+// Bind a **click**. The overwhelmingly common case, so it takes a bare `() -> void` — the click
+// carries no payload.
+pub fn on_click(handler: () -> void): Binding {
+    return Binding { event: DomEvent.Click, run: fn(_: string) => handler() }
+}
+
+// Bind an **input** — the handler receives the field's current value on every keystroke.
+pub fn on_input(handler: (string) -> void): Binding {
+    return Binding { event: DomEvent.Input, run: handler }
+}
+
+// Bind a form **submit** — the handler receives the URL-encoded form body (`a=1&b=2`). The client
+// prevents the default navigation so the page stays live.
+pub fn on_submit(handler: (string) -> void): Binding {
+    return Binding { event: DomEvent.Submit, run: handler }
 }
 
 // Minimal HTML-text escaping for a *scalar* hole's rendered value (XSS-safe by default).
@@ -66,7 +117,7 @@ fn is_markup(v: dyn): bool {
 // deterministic namespace (`<prefix>-hN`) — stable across renders (so unchanged rows stay equal and
 // the diff drops them) and never colliding with an exposed id.
 fn prefix_markers(s: string, p: string): string {
-    return s.replace("data-live=\"h", "data-live=\"${p}-h").replace("data-live-html=\"h", "data-live-html=\"${p}-h")
+    return s.replace("data-live=\"h", "data-live=\"${p}-h").replace("data-live-html=\"h", "data-live-html=\"${p}-h").replace("data-live-click=\"e", "data-live-click=\"${p}-e").replace("data-live-input=\"e", "data-live-input=\"${p}-e").replace("data-live-submit=\"e", "data-live-submit=\"${p}-e")
 }
 
 // Render one hole value to its HTML string: an `Html`'s skeleton verbatim, a `List<Html>` (a loop)
@@ -74,7 +125,7 @@ fn prefix_markers(s: string, p: string): string {
 fn render_value(v: dyn): string {
     single = v.as<Html>()
     if single != none {
-        return prefix_markers((single ?? Html { skeleton: "", holes: [], ids: [] }).skeleton, "s")
+        return prefix_markers((single ?? Html { skeleton: "", holes: [], ids: [], handlers: {} }).skeleton, "s")
     }
     many = v.as<List<Html>>()
     if many != none {
@@ -102,6 +153,7 @@ fn render_value(v: dyn): string {
 struct Keyed {
     ids: List<string>
     rows: List<dyn>
+    handlers: Map<string, (string) -> void>
 }
 
 // One row's persistent `computed`: it re-derives *its* item from the source signal by key on every
@@ -135,12 +187,37 @@ pub fn keyed<T>(
 ): Keyed {
     mut ids: List<string> = []
     mut rows: List<dyn> = []
+    mut handlers: Map<string, (string) -> void> = {}
     for item in source.get() {
         k = key_of(item)
         ids = ids ~ ["row-${k}"]
         rows = rows ~ [keyed_row(source, k, key_of, render_row)]
+        // Hoist this row's inline handlers under key-namespaced ids (`<key>-eN`), matching how
+        // `prefix_markers` rewrites the row's `data-live-*` attributes when the row is folded. The row
+        // rebuilds its closures on every change, but each carries the same captured key/id, so a
+        // click on the (stable-id) element routes to the registered closure.
+        rh = render_row(item).handlers
+        for hid in rh.keys() {
+            handlers = handlers.set("${k}-${hid}", rh.get_or(hid, fn(_: string) {}))
+        }
     }
-    return Keyed { ids: ids, rows: rows }
+    return Keyed { ids: ids, rows: rows, handlers: handlers }
+}
+
+// Fold `from`'s inline handlers into `into` under `prefix` — the same prefix `prefix_markers` gives
+// the folded region's `data-live-*` attributes, so a registered id (`s-e0`, `c1-e0`, `<key>-e0`)
+// matches the attribute the client reports. Used to hoist a nested/keyed child's handlers up to the
+// page's single dispatch table.
+fn merge_handlers(
+    into: Map<string, (string) -> void>,
+    from: Map<string, (string) -> void>,
+    prefix: string,
+): Map<string, (string) -> void> {
+    mut out = into
+    for hid in from.keys() {
+        out = out.set("${prefix}${hid}", from.get_or(hid, fn(_: string) {}))
+    }
+    return out
 }
 
 // The `@html` handler. Holes are `() -> dyn` — a template renders *any* value (like JSX `{x}`) — so
@@ -149,11 +226,17 @@ pub fn keyed<T>(
 // they change; the diff transport then pushes only the holes whose rendered value differs. A markup
 // hole gets a `data-live-html` marker (the client applies patches via `innerHTML`); a text hole a
 // `data-live` marker (`textContent`, escaped).
+//
+// A hole in *attribute* position that is an `on_*(…)` `Binding` is not rendered as text: it registers
+// its closure in `handlers` under an auto id (`eN`) and emits the event's `data-live-*` marker. A
+// nested `Html`/`List<Html>` folded into a text hole contributes *its* handlers too (prefix-namespaced
+// to match `prefix_markers`), so the page ends with one flat dispatch table over every bound element.
 @tier(html, text: "html", expr: Html)
 pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
     mut skeleton = ""
     mut exposed: List<dyn> = []
     mut ids: List<string> = []
+    mut handlers: Map<string, (string) -> void> = {}
     mut i = 0
     for s in statics {
         skeleton = skeleton ~ s
@@ -161,10 +244,13 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
             hole = holes[i]
             val = hole()
             keyed_val = val.as<Keyed>()
+            binding = val.as<Binding>()
             if keyed_val != none {
                 // A keyed list: expand into one `data-live-html` region *per row*, exposing each
-                // row's own persistent `computed`. A change to one row diffs only that row.
-                k = keyed_val ?? Keyed { ids: [], rows: [] }
+                // row's own persistent `computed`. A change to one row diffs only that row. The rows'
+                // inline handlers (already key-namespaced by `keyed`) come along.
+                k = keyed_val ?? Keyed { ids: [], rows: [], handlers: {} }
+                handlers = merge_handlers(handlers, k.handlers, "")
                 mut j = 0
                 for rid in k.ids {
                     rc = k.rows[j]
@@ -173,6 +259,13 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
                     skeleton = skeleton ~ "<span data-live-html=\"${rid}\">" ~ computed_string(rc) ~ "</span>"
                     j = j + 1
                 }
+            } else if in_tag(skeleton) && binding != none {
+                // Attribute position, inline event handler: register the closure and emit the event's
+                // wire marker (`data-live-click="eN"`) so a client event routes straight to it.
+                b = binding ?? Binding { event: DomEvent.Click, run: fn(_: string) {} }
+                hid = "e${i}"
+                handlers = handlers.set(hid, b.run)
+                skeleton = skeleton ~ "${wire_attr(b.event)}=\"${hid}\""
             } else if in_tag(skeleton) {
                 // Attribute position: inline the escaped value (no `<span>` — it would be illegal
                 // inside a tag). Its value re-renders with the enclosing region (a row), not on its
@@ -180,18 +273,31 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
                 skeleton = skeleton ~ attr_escape("${val}")
             } else {
                 // Text position: wrap the hole in a `computed` (tracks exactly the signals it reads)
-                // behind a `data-live`/`data-live-html` marker the session exposes and diffs.
+                // behind a `data-live`/`data-live-html` marker the session exposes and diffs. A folded
+                // child template's handlers are hoisted under the same prefix its markers get.
                 c = computed(fn() => render_value(hole()))
                 hid = "h${i}"
                 ids = ids ~ [hid]
                 exposed = exposed ~ [c]
                 marker = if is_markup(val) then "data-live-html" else "data-live"
                 skeleton = skeleton ~ "<span ${marker}=\"${hid}\">" ~ c.get() ~ "</span>"
+                child = val.as<Html>()
+                if child != none {
+                    handlers = merge_handlers(handlers, (child ?? Html { skeleton: "", holes: [], ids: [], handlers: {} }).handlers, "s-")
+                }
+                children = val.as<List<Html>>()
+                if children != none {
+                    mut ci = 0
+                    for c2 in children ?? [] {
+                        handlers = merge_handlers(handlers, c2.handlers, "c${ci}-")
+                        ci = ci + 1
+                    }
+                }
             }
         }
         i = i + 1
     }
-    return Html { skeleton: skeleton, holes: exposed, ids: ids }
+    return Html { skeleton: skeleton, holes: exposed, ids: ids, handlers: handlers }
 }
 
 // A row's initial rendered value for the first-paint skeleton. `c` is a `Computed<string>` carried
@@ -229,10 +335,18 @@ fn live_js(): string {
     ws.onmessage = (e) => handle(JSON.parse(e.data));
     ws.onclose = () => setTimeout(connect, 1000);
   };
-  const send = (name) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "event", name })); };
+  const send = (name, value) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "event", name, value: value || "" })); };
   document.addEventListener("click", (e) => {
     const el = e.target.closest("[data-live-click]");
-    if (el) send(el.dataset.liveClick);
+    if (el) send(el.dataset.liveClick, "");
+  });
+  document.addEventListener("input", (e) => {
+    const el = e.target.closest("[data-live-input]");
+    if (el) send(el.dataset.liveInput, el.value);
+  });
+  document.addEventListener("submit", (e) => {
+    const el = e.target.closest("[data-live-submit]");
+    if (el) { e.preventDefault(); send(el.dataset.liveSubmit, new URLSearchParams(new FormData(el)).toString()); }
   });
   window.noetaLive = { state, send };
   connect();
@@ -247,8 +361,9 @@ fn document(title: string, page: Html): string {
 }
 
 // One websocket session: a `view()` over the page's hole computeds, the full snapshot, then a loop —
-// each client event runs the app's handler and pushes the minimal diff of the holes that changed.
-async fn session(sock: Socket, render_page: () -> Html, on_event: (string) -> void): bool {
+// each client event looks up the element's inline handler in the page's `handlers` table, runs it
+// (with the event payload), and pushes the minimal diff of the holes that changed.
+async fn session(sock: Socket, render_page: () -> Html): bool {
     page = render_page()
     v = view()
     mut i = 0
@@ -266,8 +381,14 @@ async fn session(sock: Socket, render_page: () -> Html, on_event: (string) -> vo
             evt = json.parse(msg ?? "{}")
             kind = evt["type"]
             if kind == "event" {
-                name = evt["name"]
-                on_event("${name}")
+                raw_name = evt["name"]
+                raw_value = evt["value"]
+                name = "${raw_name}"
+                value = "${raw_value}"
+                if page.handlers.has(name) {
+                    handler = page.handlers.get_or(name, fn(_: string) {})
+                    handler(value)
+                }
             }
             patch = v.diff() ?? ""
             if patch != "" {
@@ -280,16 +401,15 @@ async fn session(sock: Socket, render_page: () -> Html, on_event: (string) -> vo
 
 // Handle one request: the websocket upgrade (the diff-push session), the bundled client shim, or
 // the server-rendered page. An app's `fn fetch(req)` delegates here, so it runs under `noeta serve`
-// like any `std.http.server` app. `render_page` produces the reactive page (an `@html` value);
-// `on_event` handles a client event by name (a `data-live-click="name"`).
+// like any `std.http.server` app. `render_page` produces the reactive page (an `@html` value); its
+// inline `on_*(…)` bindings carry their own handlers, so no separate event callback is needed.
 pub fn handle(
     req: Request,
     title: string,
     render_page: () -> Html,
-    on_event: (string) -> void,
 ): Response {
     if req.path() == "/ws" {
-        return server.websocket(fn(sock) => session(sock, render_page, on_event))
+        return server.websocket(fn(sock) => session(sock, render_page))
     }
     if req.path() == "/live.js" {
         return server.response(200, live_js(), {"content-type": "application/javascript"})
