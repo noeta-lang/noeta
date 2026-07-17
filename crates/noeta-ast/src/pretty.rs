@@ -275,8 +275,27 @@ impl Pretty for FnDecl {
             }
             None => String::new(),
         };
+        // Leading `@<tier>` method directives (`@test`, `@doc { … }`) — rendered into the structural
+        // skeleton so the formatter's safety gate treats dropping or altering one as a program
+        // change (a text tier's body is part of its identity, like the `@tier` `text:` field above).
+        let directives: String = self
+            .directives
+            .iter()
+            .map(|d| {
+                let args = if d.args.is_empty() {
+                    String::new()
+                } else {
+                    format!("({})", d.args.len())
+                };
+                let body = match &d.doc_text {
+                    Some(text) => format!(" {{{text}}}"),
+                    None => String::new(),
+                };
+                format!("@{}{args}{body} ", d.name)
+            })
+            .collect();
         out.push_str(&format!(
-            "({tier}{}fn {}{}{} [{}] {}",
+            "({tier}{directives}{}fn {}{}{} [{}] {}",
             if self.is_async { "async " } else { "" },
             pub_str(self.is_public),
             self.name,

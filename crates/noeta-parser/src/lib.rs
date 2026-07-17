@@ -32,9 +32,9 @@ use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
-    FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, PackedDirective,
-    PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TraitDecl,
-    TraitMethod, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, MethodDirective, ObjectLit,
+    PackedDirective, PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl,
+    TraitDecl, TraitMethod, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -130,6 +130,14 @@ impl Ctx<'_> {
 enum ObjItem {
     Field(FieldInit),
     Spread(Box<Expr>),
+}
+
+/// One leading decorator on a **method**: a `@<tier>` directive or a `#[...]` data attribute. The
+/// two share the leading position (in any order) and are split back into the method's `directives`
+/// and `attrs` after the run is parsed.
+enum MethodDeco {
+    Directive(noeta_ast::MethodDirective),
+    Attr(Attribute),
 }
 
 /// One member parsed from a class body: a field declaration, a method, or the (at most one)
@@ -2500,6 +2508,8 @@ where
                         params,
                         ret,
                         attrs,
+                        // A top-level function carries any `@<tier>` via a wrapping `TierBlock`, not here.
+                        directives: Vec::new(),
                         is_dev_tier: false,
                         tier: None,
                         is_async: async_kw.is_some(),
@@ -2566,10 +2576,57 @@ where
         let class_field = object_field.clone().map(ClassMember::Field);
         // A bare `#[...]? fn ...` declaration, shared by plain class methods and `impl`-block
         // methods. Leading `#[...]` attributes attach to the method (P2.4).
-        let method = attr_decl
-            .clone()
-            .repeated()
-            .collect::<Vec<_>>()
+        // A `@<tier>` directive leading a **method** (directive attachment sites): `@test`,
+        // `@bench(1000)`, or a text-tier body `@doc { … }`. The tier name is any identifier that is
+        // not a decorator directive (the same name-based dispatch `tier_name` uses, replicated here
+        // because that binding is defined later in the grammar). An optional `( … )` carries directive
+        // args (the `attr_arg` literal grammar); an optional `{ … }` carries a text-tier's verbatim
+        // body — the lexer captured it as one `DocText` token, sliced and unescaped here as in
+        // `tier_body`. The top-level annotation/block forms are unchanged; this is the method analogue.
+        let method_directive = {
+            let dir_name = id
+                .clone()
+                .filter(|(name, _): &(String, Span)| !is_decorator_directive(name));
+            let dir_args = attr_arg
+                .clone()
+                .separated_by(just(T::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(T::LParen), just(T::RParen))
+                .or_not()
+                .map(Option::unwrap_or_default);
+            let dir_body = just(T::DocText)
+                .map_with(move |_, e| {
+                    noeta_lexer::unescape_text_body(ctx.source.slice(ctx.to_span(e.span())))
+                })
+                .delimited_by(just(T::LBrace), just(T::RBrace))
+                .or_not();
+            just(T::At)
+                .ignore_then(dir_name)
+                .then(dir_args)
+                .then(dir_body)
+                // Absorb the woven hard-boundary `;` a directive on its own line above the method
+                // picks up (slice 7), exactly as `attr_decl` / `tier_decl_fn` do.
+                .then_ignore(just(T::Semicolon).repeated())
+                .map_with(
+                    move |(((name, name_span), args), doc_text), e| MethodDirective {
+                        name,
+                        name_span,
+                        args,
+                        doc_text,
+                        span: ctx.to_span(e.span()),
+                    },
+                )
+        };
+        // A method's leading decorators — `@<tier>` directives and `#[...]` data attributes, in any
+        // order (their first tokens `@`/`#` never collide) — split back into `directives` and `attrs`.
+        let method_decos = choice((
+            method_directive.map(MethodDeco::Directive),
+            attr_decl.clone().map(MethodDeco::Attr),
+        ))
+        .repeated()
+        .collect::<Vec<_>>();
+        let method = method_decos
             .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
@@ -2577,23 +2634,34 @@ where
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
-                move |(((((attrs, async_kw), name_pair), params), ret), body), e| FnDecl {
-                    name: name_pair.0,
-                    name_span: name_pair.1,
-                    is_public: false,
-                    // Methods are generic over their enclosing class's parameters, not their own.
-                    type_params: Vec::new(),
-                    params,
-                    ret,
-                    attrs,
-                    // A method body is checked with `current_type` set, so it already sees its own
-                    // type's privates; the dev-tier white-box relaxation is only for lifted top-level
-                    // fns.
-                    is_dev_tier: false,
-                    tier: None,
-                    is_async: async_kw.is_some(),
-                    body,
-                    span: ctx.to_span(e.span()),
+                move |(((((decos, async_kw), name_pair), params), ret), body), e| {
+                    let mut directives = Vec::new();
+                    let mut attrs = Vec::new();
+                    for deco in decos {
+                        match deco {
+                            MethodDeco::Directive(d) => directives.push(d),
+                            MethodDeco::Attr(a) => attrs.push(a),
+                        }
+                    }
+                    FnDecl {
+                        name: name_pair.0,
+                        name_span: name_pair.1,
+                        is_public: false,
+                        // Methods are generic over their enclosing class's parameters, not their own.
+                        type_params: Vec::new(),
+                        params,
+                        ret,
+                        attrs,
+                        directives,
+                        // A method body is checked with `current_type` set, so it already sees its own
+                        // type's privates; the dev-tier white-box relaxation is only for lifted
+                        // top-level fns.
+                        is_dev_tier: false,
+                        tier: None,
+                        is_async: async_kw.is_some(),
+                        body,
+                        span: ctx.to_span(e.span()),
+                    }
                 },
             );
         let class_method = method.clone().map(ClassMember::Method);
@@ -2758,6 +2826,7 @@ where
                             params,
                             ret,
                             attrs,
+                            directives: Vec::new(),
                             is_dev_tier: false,
                             tier: None,
                             is_async: async_kw.is_some(),
@@ -4418,6 +4487,33 @@ mod tests {
             parsed.diagnostics
         );
         assert_eq!(parsed.program.stmts.len(), 1);
+    }
+
+    #[test]
+    fn method_carries_leading_tier_directives() {
+        let parsed = parse_str(
+            "struct Point {\n    \
+             x: int = 0\n    \
+             @doc { Distance from origin. }\n    \
+             @test\n    \
+             fn manhattan(): int { return self.x }\n\
+             }\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Struct(decl) = &parsed.program.stmts[0] else {
+            panic!("expected a struct");
+        };
+        let method = &decl.methods[0];
+        assert_eq!(method.name, "manhattan");
+        let names: Vec<&str> = method.directives.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["doc", "test"]);
+        // The `@doc` text tier captured its body verbatim (surrounding space included); `@test` is a
+        // bare annotation with no body.
+        assert_eq!(
+            method.directives[0].doc_text.as_deref(),
+            Some(" Distance from origin. ")
+        );
+        assert_eq!(method.directives[1].doc_text, None);
     }
 
     #[test]

@@ -299,6 +299,24 @@ pub struct AttrArg {
     pub span: Span,
 }
 
+/// A `@<tier>` directive attached to a **method** (`@test`/`@doc { … }`/`@bench(1000)` leading a
+/// method in a `struct`/`class`/`enum` body). It mirrors the fields a top-level tier annotation puts
+/// on a [`Stmt::TierBlock`] — the tier name, its directive arguments, and (for a text tier like
+/// `@doc`) the verbatim body — but rides on the method's [`FnDecl::directives`] because a method has
+/// no statement wrapper. The checker resolves `name` against the tier registry and enforces its
+/// declared attachment sites (E0054).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MethodDirective {
+    pub name: String,
+    pub name_span: Span,
+    /// Directive arguments (`@bench(1000)`), the same literal grammar `#[...]` uses; empty otherwise.
+    pub args: Vec<AttrArg>,
+    /// The verbatim body of a text-tier directive (`@doc { … }`), unescaped; `None` for an
+    /// annotation-form directive (`@test`, `@bench(…)`).
+    pub doc_text: Option<String>,
+    pub span: Span,
+}
+
 /// A literal value in attribute-argument position — the **constant literal tree** that may
 /// construct an attribute struct: scalars plus the collection and nominal literals, composed
 /// recursively (a `List` of `Struct`s of `Enum`s is one tree). Never an expression — no `1 + 2`,
@@ -676,6 +694,12 @@ pub struct FnDecl {
     /// Captured in the reflection manifest like a type's attributes; `@derive` is *not* permitted
     /// here (it is codegen for types only). Empty for the common unannotated function.
     pub attrs: Vec<Attribute>,
+    /// Leading `@<tier>` directives on a **method** (`@test`/`@doc { … }`/`@bench(…)` before a method
+    /// in a type body). A top-level function carries its tier via a wrapping [`Stmt::TierBlock`]
+    /// instead — a method lives inside `methods: Vec<FnDecl>` with no statement wrapper, so it
+    /// carries them here. Validated for a known name and a permitted attachment site (E0054); empty
+    /// for the common undecorated method and for every top-level function.
+    pub directives: Vec<MethodDirective>,
     /// Whether this fn was lifted from a **dev-tier block** (`@test`/`@bench`/…, object-model slice
     /// 6d). Set by `activate_tiers` when it inlines a tier block's items; `false` for an ordinary fn
     /// or a method. A dev-tier fn is co-located developer-tooling code, so it gets **white-box access
