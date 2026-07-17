@@ -697,9 +697,9 @@ impl<'m> Vm<'m> {
                             noeta_stdlib::MapKey::Str(s) => Value::string(s.as_str()),
                             noeta_stdlib::MapKey::Int(i) => Value::int(i),
                             noeta_stdlib::MapKey::Extern(e) => Value::extern_value(e),
-                            noeta_stdlib::MapKey::Packed {
-                                type_name, fields, ..
-                            } => self.packed_key_value(&type_name, &fields),
+                            noeta_stdlib::MapKey::Packed(p) => {
+                                self.packed_key_value(&p.type_name, &p.fields)
+                            }
                         })
                         .collect(),
                 ))
@@ -836,13 +836,13 @@ impl<'m> Vm<'m> {
             noeta_stdlib::MapMethod::Remove => {
                 self.stdlib_arity(name, args, 1, span)?;
                 let key = self.map_update_key(consume_key, args[0], name, span)?;
-                let removed =
-                    match &key {
-                        noeta_stdlib::MapKey::Str(k) => map.map_remove(k.as_str()),
-                        noeta_stdlib::MapKey::Extern(e) => map.map_remove_extern(&**e),
-                        owned @ (noeta_stdlib::MapKey::Int(_)
-                        | noeta_stdlib::MapKey::Packed { .. }) => map.map_remove_key(owned),
-                    };
+                let removed = match &key {
+                    noeta_stdlib::MapKey::Str(k) => map.map_remove(k.as_str()),
+                    noeta_stdlib::MapKey::Extern(e) => map.map_remove_extern(&**e),
+                    owned @ (noeta_stdlib::MapKey::Int(_) | noeta_stdlib::MapKey::Packed(_)) => {
+                        map.map_remove_key(owned)
+                    }
+                };
                 if let Some(old) = removed {
                     self.release_value(old);
                 }

@@ -35,10 +35,21 @@ pub enum MapKey {
     /// reference and reconstructs a value for `keys()`). Identity is `(type_name, fields)`;
     /// display derives on demand through [`packed_names`] (field names register once per type at
     /// load/declare), so building a key — the hot map/set path — formats nothing.
-    Packed {
-        type_name: compact_str::CompactString,
-        fields: Box<[PackedKeyField]>,
-    },
+    /// Boxed, deliberately: the payload is two pointers-plus wide, and an inline variant grew
+    /// `MapKey` 24 → 40 bytes — a +67% footprint on EVERY string/int map entry, measured as
+    /// ~+18% on the 100k-string-key xlang `assoc` bench (2026-07-17). Packed keys are the rare
+    /// kind; they pay one cold Box per key build so the common kinds stay one cache-line-lean
+    /// word each. Same lesson as `Op` (P-VMT S4.2); the `map_key_size` test is the ratchet.
+    Packed(Box<PackedKey>),
+}
+
+/// The boxed payload of [`MapKey::Packed`]: the qualified type name and the field values in
+/// declaration order. Identity is `(type_name, fields)` — display derives on demand through
+/// [`packed_names`], so building a key formats nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedKey {
+    pub type_name: compact_str::CompactString,
+    pub fields: Box<[PackedKeyField]>,
 }
 
 /// The **field-name registry** for packed keys (P-PKEY): `type name → field names`, registered
@@ -146,10 +157,10 @@ pub enum PackedKeyField {
 impl MapKey {
     /// A packed-struct key (P-PKEY) from its canonical parts: field values in declaration order.
     pub fn packed(type_name: &str, fields: Vec<PackedKeyField>) -> MapKey {
-        MapKey::Packed {
+        MapKey::Packed(Box::new(PackedKey {
             type_name: compact_str::CompactString::from(type_name),
             fields: fields.into_boxed_slice(),
-        }
+        }))
     }
 
     /// The key's display form inside a rendered map: a string key keeps its quoted `{k:?}` form;
@@ -159,7 +170,7 @@ impl MapKey {
             MapKey::Str(s) => format!("{s:?}"),
             MapKey::Int(i) => i.to_string(),
             MapKey::Extern(e) => e.display_string(),
-            MapKey::Packed { type_name, fields } => packed_names::display(type_name, fields),
+            MapKey::Packed(p) => packed_names::display(&p.type_name, &p.fields),
         }
     }
 
@@ -170,7 +181,7 @@ impl MapKey {
             MapKey::Str(s) => s.as_str().to_owned(),
             MapKey::Int(i) => i.to_string(),
             MapKey::Extern(e) => e.display_string(),
-            MapKey::Packed { type_name, fields } => packed_names::display(type_name, fields),
+            MapKey::Packed(p) => packed_names::display(&p.type_name, &p.fields),
         }
     }
 
@@ -178,7 +189,7 @@ impl MapKey {
     pub fn as_str(&self) -> Option<&str> {
         match self {
             MapKey::Str(s) => Some(s.as_str()),
-            MapKey::Int(_) | MapKey::Extern(_) | MapKey::Packed { .. } => None,
+            MapKey::Int(_) | MapKey::Extern(_) | MapKey::Packed(_) => None,
         }
     }
 }
@@ -193,9 +204,9 @@ impl Hash for MapKey {
             MapKey::Str(s) => s.as_str().hash(h),
             MapKey::Int(i) => i.hash(h),
             MapKey::Extern(e) => h.write_u64(e.hash_value()),
-            MapKey::Packed { type_name, fields } => {
-                type_name.as_str().hash(h);
-                fields.hash(h);
+            MapKey::Packed(p) => {
+                p.type_name.as_str().hash(h);
+                p.fields.hash(h);
             }
         }
     }
@@ -207,16 +218,7 @@ impl PartialEq for MapKey {
             (MapKey::Str(a), MapKey::Str(b)) => a == b,
             (MapKey::Int(a), MapKey::Int(b)) => a == b,
             (MapKey::Extern(a), MapKey::Extern(b)) => a.eq_value(&**b),
-            (
-                MapKey::Packed {
-                    type_name: an,
-                    fields: af,
-                },
-                MapKey::Packed {
-                    type_name: bn,
-                    fields: bf,
-                },
-            ) => an == bn && af == bf,
+            (MapKey::Packed(a), MapKey::Packed(b)) => a == b,
             _ => false,
         }
     }
@@ -238,7 +240,7 @@ impl Ord for MapKey {
                 MapKey::Int(_) => 0,
                 MapKey::Str(_) => 1,
                 MapKey::Extern(_) => 2,
-                MapKey::Packed { .. } => 3,
+                MapKey::Packed(_) => 3,
             }
         }
         match (self, other) {
@@ -248,16 +250,10 @@ impl Ord for MapKey {
                 .type_identity()
                 .cmp(b.type_identity())
                 .then_with(|| a.cmp_value(&**b).unwrap_or(Ordering::Equal)),
-            (
-                MapKey::Packed {
-                    type_name: an,
-                    fields: af,
-                },
-                MapKey::Packed {
-                    type_name: bn,
-                    fields: bf,
-                },
-            ) => an.cmp(bn).then_with(|| af.cmp(bf)),
+            (MapKey::Packed(a), MapKey::Packed(b)) => a
+                .type_name
+                .cmp(&b.type_name)
+                .then_with(|| a.fields.cmp(&b.fields)),
             (a, b) => rank(a).cmp(&rank(b)),
         }
     }
@@ -360,5 +356,24 @@ mod tests {
         );
         assert_ne!(nested_a, nested_b);
         assert!(nested_a < nested_b, "false < true");
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    /// The footprint ratchet the boxed `Packed` variant exists for: every map/set entry carries
+    /// a `MapKey` inline, so its size is a per-entry memory tax on the two overwhelmingly common
+    /// key kinds (string, int). 24 bytes = `CompactString`'s own size (its niche absorbs the
+    /// discriminant). Growing this is a measured regression on 100k-entry maps, not a style
+    /// choice — box new wide variants like `Packed`.
+    #[test]
+    fn map_key_stays_at_compact_string_size() {
+        assert_eq!(
+            std::mem::size_of::<MapKey>(),
+            std::mem::size_of::<compact_str::CompactString>(),
+            "MapKey grew past CompactString — box the new variant's payload"
+        );
     }
 }

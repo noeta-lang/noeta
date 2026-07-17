@@ -2958,9 +2958,9 @@ impl Interpreter {
                             Value::Extern(Rc::new(RefCell::new(e.clone())))
                         }
                         // P-PKEY: rebuild the packed struct value from the content snapshot.
-                        noeta_stdlib::MapKey::Packed {
-                            type_name, fields, ..
-                        } => self.packed_key_value(type_name, fields),
+                        noeta_stdlib::MapKey::Packed(p) => {
+                            self.packed_key_value(&p.type_name, &p.fields)
+                        }
                     })
                     .collect();
                 Ok(Value::list(keys))
