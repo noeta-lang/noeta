@@ -8,6 +8,15 @@
 //                       operator (handled by the parser — after a dangling operator a terminator is
 //                       not valid, so we are never asked) or a *leading* continuation on the next
 //                       line (`.`, `|>`, a binary operator), which we detect by peeking here.
+//                       No bracket depth is tracked here, deliberately: suppression inside a
+//                       multi-line `(...)`/`[...]` falls out of the grammar (a terminator is only
+//                       *valid* in statement positions, i.e. inside `{ }` blocks at any depth,
+//                       never inside an argument list), which makes termination brace-relative by
+//                       construction — the same depth story as the compiler's
+//                       `noeta_lexer::newline_boundaries` (terminator-barrier change): `a`
+//                       newline `(n)` is two statements at every nesting level, including inside
+//                       a bracket-nested closure body, while a newline inside `(...)` relative to
+//                       the innermost `{` never terminates. Pinned by test/corpus/termination.txt.
 //   * TEXT_BODY       — the verbatim body of a text-tier block (`@doc { … }`): everything up to
 //                       the balancing `}`, counted exactly like the compiler lexer's
 //                       `matching_brace` — braces nest, `\{`/`\}` are literal braces (not counted)
