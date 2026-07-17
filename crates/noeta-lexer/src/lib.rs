@@ -1041,88 +1041,11 @@ fn unterminated_text_block(open: Span, tier: &str) -> Diagnostic {
     )
 }
 
-/// **Legacy** (audit-3 Finding 7 migration): the original synthetic-`;` algorithm (object-model
-/// slice 7), superseded by [`newline_boundaries`] — the lexer no longer synthesizes terminator
-/// tokens; the parser materializes each *hard* boundary itself. Kept verbatim, exercised only by
-/// the termination differential (`noeta-parser/tests/termination_differential.rs`), which proves
-/// the converged path makes decision-for-decision identical choices over the whole corpus. Delete
-/// once the differential has covered a release.
-///
-/// A `;` is inserted in a gap iff **all** hold: the gap contains a newline; the bracket nesting of
-/// `(`/`[` is zero (inside a call/list/index a newline never terminates); the preceding token can
-/// *end* a statement ([`is_statement_ending`]); and the following token does not *continue* the line
-/// ([`is_leading_continuation`], so a leading `.`/`|>`/operator/`else`/closing brace joins the
-/// lines). At most one `;` per gap, so blank lines never yield empty statements. `{`/`}` are not
-/// depth-tracked: a `}` is a leading-continuation (suppressing a `;` before it), so multi-line
-/// blocks and `{...}` literals are unaffected and the parser's terminator tolerates a peeked `}`.
-pub fn insert_terminators(source: &Source, tokens: Vec<Token>) -> Vec<Token> {
-    let text = source.text();
-    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
-    let mut depth: u32 = 0;
-    for tok in tokens {
-        if let Some(prev) = out.last()
-            && depth == 0
-            && is_statement_ending(prev.kind)
-            && !is_leading_continuation(tok.kind)
-            && gap_has_newline(text, prev.span.end, tok.span.start)
-        {
-            let at = prev.span.end;
-            out.push(Token {
-                kind: TokenKind::Semicolon,
-                span: Span::empty_at_in(prev.span.source, at),
-            });
-        }
-        match tok.kind {
-            TokenKind::LParen | TokenKind::LBracket => depth += 1,
-            TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        out.push(tok);
-    }
-    out
-}
-
 /// Whether the source between two byte offsets contains a newline (the gap between two tokens —
 /// whitespace and/or a line comment logos skipped).
 fn gap_has_newline(text: &str, start: u32, end: u32) -> bool {
     text.get(start as usize..end as usize)
         .is_some_and(|gap| gap.contains('\n'))
-}
-
-/// **Legacy** (audit-3 Finding 7 migration): the original soft-terminator scan — the rule
-/// [`insert_terminators`] uses, *minus* the [`is_statement_ending`] gate on the previous token, and
-/// with the `(`/`[` depth measured **relative to the innermost `{`** rather than absolutely.
-/// Superseded by [`newline_boundaries`], which computes the same offsets (plus the hard/soft
-/// classification) in one scan. Kept verbatim, exercised only by the termination differential
-/// (`noeta-parser/tests/termination_differential.rs`); ran on the post-[`insert_terminators`] token
-/// stream (synthetic `;` are zero-width and change nothing). Delete with [`insert_terminators`].
-pub fn newline_terminator_offsets(source: &Source, tokens: &[Token]) -> Vec<u32> {
-    let text = source.text();
-    let mut out = Vec::new();
-    let mut depth: u32 = 0;
-    let mut saved: Vec<u32> = Vec::new(); // bracket depth outside each enclosing `{`
-    let mut prev: Option<&Token> = None;
-    for tok in tokens {
-        if let Some(p) = prev
-            && depth == 0
-            && !is_leading_continuation(tok.kind)
-            && gap_has_newline(text, p.span.end, tok.span.start)
-        {
-            out.push(tok.span.start);
-        }
-        match tok.kind {
-            TokenKind::LParen | TokenKind::LBracket => depth += 1,
-            TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
-            TokenKind::LBrace => {
-                saved.push(depth);
-                depth = 0;
-            }
-            TokenKind::RBrace => depth = saved.pop().unwrap_or(0),
-            _ => {}
-        }
-        prev = Some(tok);
-    }
-    out
 }
 
 /// One point at which a newline can end the preceding statement — the unit of the **single**
@@ -1135,9 +1058,8 @@ pub fn newline_terminator_offsets(source: &Source, tokens: &[Token]) -> Vec<u32>
 ///
 /// A `hard` boundary is additionally a statement **barrier**: no construct may extend across it, so
 /// the parser materializes it as a zero-width `;` in its parse input. `f\n(x)` stays two statements
-/// (never a call), `x\n= 1` stays an error. Hard boundaries carry the historical gate of the
-/// synthetic-`;` algorithm: the previous token can *end* a statement ([`is_statement_ending`]) and
-/// the **absolute** `(`/`[` depth is zero.
+/// (never a call), `x\n= 1` stays an error — at every brace-nesting level alike. A boundary is hard
+/// iff the previous token can *end* a statement ([`is_statement_ending`]); otherwise it is soft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NewlineBoundary {
     /// Byte offset of the token the newline precedes (a token start).
@@ -1155,57 +1077,43 @@ pub struct NewlineBoundary {
 /// brace joins the lines), and the `(`/`[` depth measured **relative to the innermost `{`** is zero
 /// (a `{` saves the depth and resets it to zero; the matching `}` restores it — so a `{ … }` body
 /// nested inside a call, `xs.map(fn(n) { … })`, gets exactly the newline treatment the same block
-/// has at top level). It is [`NewlineBoundary::hard`] iff the previous token is statement-ending
-/// and the **absolute** `(`/`[` depth is zero — the historical synthetic-`;` rule, kept verbatim so
-/// hard barriers are unchanged.
+/// has at top level). It is [`NewlineBoundary::hard`] iff the previous token is statement-ending;
+/// soft otherwise.
 ///
-/// The two depth parameterizations are deliberate, not accidental: the soft rule is brace-relative
-/// so closure bodies inside argument lists newline-terminate; the hard rule stays absolute because
-/// widening the *barrier* into bracket-nested bodies would reparse today-valid code (`a\n(b)` inside
-/// a call's closure body is a call today). Unifying them is a language-level decision, out of scope
-/// here. On any *balanced* stream, hard boundaries are a subset of the boundaries this returns.
-///
-/// The legacy pair this replaces — [`insert_terminators`] (synthetic `;` tokens) and
-/// [`newline_terminator_offsets`] (a second scan the parser peeked) — is kept only for the
-/// migration differential that proves decision-for-decision equivalence over the corpus.
+/// One depth story for both halves (terminator-barrier change): soft termination and the hard
+/// barrier use the same brace-relative depth, so statement termination is uniform at every nesting
+/// level — `f\n(x)` is two statements inside a bracket-nested closure body exactly as at top level.
+/// Historically the barrier used the *absolute* `(`/`[` depth (the synthetic-`;` rule), which made
+/// `a\n(b)` inside a call's closure body silently parse as a call `a(b)`; that wart is gone.
+/// Inside `(`/`[` relative to the innermost `{` — a multi-line argument list or list literal — a
+/// newline is still never a boundary of either kind.
 pub fn newline_boundaries(source: &Source, tokens: &[Token]) -> Vec<NewlineBoundary> {
     let text = source.text();
     let mut out = Vec::new();
-    // Absolute `(`/`[` depth (the hard rule) and depth relative to the innermost `{` (the soft
-    // rule), tracked together — one scan, both parameterizations explicit.
-    let mut abs: u32 = 0;
-    let mut rel: u32 = 0;
+    // `(`/`[` depth relative to the innermost `{`: the single depth parameterization both the
+    // soft terminator and the hard barrier share.
+    let mut depth: u32 = 0;
     let mut saved: Vec<u32> = Vec::new(); // bracket depth outside each enclosing `{`
     let mut prev: Option<&Token> = None;
     for tok in tokens {
         if let Some(p) = prev
+            && depth == 0
             && !is_leading_continuation(tok.kind)
             && gap_has_newline(text, p.span.end, tok.span.start)
         {
-            let hard = abs == 0 && is_statement_ending(p.kind);
-            // `hard && rel != 0` is possible only on unbalanced (already-erroneous) streams;
-            // recording it keeps the hard barrier exactly where the legacy algorithm put its `;`.
-            if rel == 0 || hard {
-                out.push(NewlineBoundary {
-                    offset: tok.span.start,
-                    hard,
-                });
-            }
+            out.push(NewlineBoundary {
+                offset: tok.span.start,
+                hard: is_statement_ending(p.kind),
+            });
         }
         match tok.kind {
-            TokenKind::LParen | TokenKind::LBracket => {
-                abs += 1;
-                rel += 1;
-            }
-            TokenKind::RParen | TokenKind::RBracket => {
-                abs = abs.saturating_sub(1);
-                rel = rel.saturating_sub(1);
-            }
+            TokenKind::LParen | TokenKind::LBracket => depth += 1,
+            TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
             TokenKind::LBrace => {
-                saved.push(rel);
-                rel = 0;
+                saved.push(depth);
+                depth = 0;
             }
-            TokenKind::RBrace => rel = saved.pop().unwrap_or(0),
+            TokenKind::RBrace => depth = saved.pop().unwrap_or(0),
             _ => {}
         }
         prev = Some(tok);
@@ -1874,14 +1782,49 @@ mod tests {
     }
 
     #[test]
-    fn closure_body_inside_call_gets_soft_boundaries_only() {
-        // Brace-relative depth: the `{` body inside `map(...)` resets the `(` depth, so its
-        // statements get boundaries — but the absolute depth is 1, so they are *soft* (the hard
-        // barrier deliberately keeps the historical absolute-depth rule; see `newline_boundaries`).
+    fn closure_body_inside_call_gets_the_top_level_boundaries() {
+        // Brace-relative depth for both halves: the `{` body inside `map(...)` resets the `(`
+        // depth, so its statements get exactly the boundaries the same block has at top level —
+        // soft after the `{` (not statement-ending), hard after `n` (statement-ending).
         let src = "ys = xs.map(fn(n) {\n  d = n\n  return d\n})\n";
         let d = src.find("d =").unwrap() as u32;
         let r = src.find("return").unwrap() as u32;
-        assert_eq!(boundaries_of(src), vec![(d, false), (r, false)]);
+        assert_eq!(boundaries_of(src), vec![(d, false), (r, true)]);
+    }
+
+    #[test]
+    fn hard_boundaries_are_uniform_at_every_nesting_depth() {
+        // The wart the terminator-barrier change fixed: `a\n(n)` used to be a barrier only at
+        // absolute `(`/`[` depth 0, so inside a bracket-nested closure body it silently parsed
+        // as a call. The barrier is now brace-relative — hard at depth 0, 1, and 2 alike.
+        let top = "a\n(n)\n";
+        assert_eq!(boundaries_of(top), vec![(2, true)]);
+        let nested = "ys = xs.map(fn(n) {\n  a\n  (n)\n})\n";
+        let p = nested.rfind("(n)").unwrap() as u32;
+        assert_eq!(
+            boundaries_of(nested),
+            vec![(nested.find("a\n").unwrap() as u32, false), (p, true)]
+        );
+        let doubly = "f(fn() {\n  g(fn() {\n    a\n    (n)\n  })\n})\n";
+        let boundaries = boundaries_of(doubly);
+        let p = doubly.rfind("(n)").unwrap() as u32;
+        assert!(
+            boundaries.contains(&(p, true)),
+            "expected a hard boundary at the doubly nested `(n)`: {boundaries:?}"
+        );
+    }
+
+    #[test]
+    fn no_boundary_inside_a_multi_line_argument_list_at_any_depth() {
+        // Inside `(`/`[` relative to the innermost `{`, a newline never terminates — including
+        // an argument list opened *inside* a closure body (relative depth 1 there).
+        assert_eq!(
+            boundaries_of("ys = xs.map(fn(n) {\n  g(\n    n,\n    1,\n  )\n})\n")
+                .into_iter()
+                .filter(|(_, hard)| *hard)
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -1897,46 +1840,45 @@ mod tests {
     }
 
     #[test]
-    fn boundaries_agree_with_the_legacy_algorithms() {
-        // Decision-level convergence (audit-3 Finding 7): over representative snippets, the single
-        // scan reproduces the legacy pair exactly — hard boundaries sit where `insert_terminators`
-        // synthesized a `;` (the token *after* each zero-width `;`), and the full offset set equals
-        // `newline_terminator_offsets` over the legacy stream. The whole-corpus differential lives
-        // in `noeta-parser/tests/termination_differential.rs`.
-        for src in [
-            "x = 1\ny = 2\n",
-            "echo xs is List<int>\necho xs is List<string>\necho 1\n",
-            "ys = [1].map(fn(n) {\n    d = n * 2\n    return d + 1\n})\n",
-            "total = 1 +\n2\n",
-            "fn f() {\n  return 1\n}\nx = f()\n",
-            "f(\n    1,\n    {\n        \"a\": fn() {\n            x = 1\n            return x\n        },\n    },\n)\n",
-            "m = {\n  \"a\": 1,\n}\nn = m\n",
-            "if c {\n  a = 1\n} else {\n  b = 2\n}\necho 3\n",
+    fn boundaries_over_representative_snippets_are_pinned() {
+        // The single scan's decisions over representative shapes, pinned directly (this replaced
+        // the legacy-convergence differential once the brace-relative barrier landed): rendered
+        // as `offset:h`/`offset:s` per snippet.
+        for (src, expected) in [
+            ("x = 1\ny = 2\n", "6:h"),
+            (
+                "echo xs is List<int>\necho xs is List<string>\necho 1\n",
+                "21:s 45:s",
+            ),
+            (
+                "ys = [1].map(fn(n) {\n    d = n * 2\n    return d + 1\n})\n",
+                "25:s 39:h",
+            ),
+            // A soft boundary exists before the `2`, but the parser's soft terminator fires only
+            // once a statement has parsed to completion — `1 +` is incomplete, so it continues.
+            ("total = 1 +\n2\n", "12:s"),
+            ("fn f() {\n  return 1\n}\nx = f()\n", "11:s 22:h"),
+            // The closure body is at absolute `(`/`[` depth 2 — its `return` boundary is hard
+            // all the same (brace-relative barrier), while the argument-list newlines around it
+            // are no boundary at all.
+            (
+                "f(\n    1,\n    {\n        \"a\": fn() {\n            x = 1\n            return x\n        },\n    },\n)\n",
+                "24:s 48:s 66:h",
+            ),
+            ("m = {\n  \"a\": 1,\n}\nn = m\n", "8:s 18:h"),
+            (
+                "if c {\n  a = 1\n} else {\n  b = 2\n}\necho 3\n",
+                "9:s 26:s 34:h",
+            ),
         ] {
-            let (source, lexed) = lex_str(src);
-            let boundaries = newline_boundaries(&source, &lexed.tokens);
-            let legacy = insert_terminators(&source, lexed.tokens.clone());
-
-            // Hard boundaries ↔ legacy synthetic `;` insertion points.
-            let hard: Vec<u32> = boundaries
-                .iter()
-                .filter(|b| b.hard)
-                .map(|b| b.offset)
+            let rendered: Vec<String> = boundaries_of(src)
+                .into_iter()
+                .map(|(off, hard)| format!("{off}:{}", if hard { 'h' } else { 's' }))
                 .collect();
-            let synthesized: Vec<u32> = legacy
-                .iter()
-                .zip(legacy.iter().skip(1))
-                .filter(|(t, _)| t.kind == TokenKind::Semicolon && t.span.start == t.span.end)
-                .map(|(_, next)| next.span.start)
-                .collect();
-            assert_eq!(hard, synthesized, "hard boundaries diverged for {src:?}");
-
-            // All boundary offsets ↔ the legacy soft scan over the legacy stream.
-            let offsets: Vec<u32> = boundaries.iter().map(|b| b.offset).collect();
             assert_eq!(
-                offsets,
-                newline_terminator_offsets(&source, &legacy),
-                "soft offsets diverged for {src:?}"
+                rendered.join(" "),
+                expected,
+                "boundaries diverged for {src:?}"
             );
         }
     }

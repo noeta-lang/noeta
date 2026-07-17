@@ -913,13 +913,13 @@ fn parse_inner(
 
 /// Build the chumsky parse input from a lexed token stream, materializing each **hard**
 /// [`noeta_lexer::NewlineBoundary`] as a zero-width `;` just after the preceding token — the
-/// statement *barrier* half of newline termination. The lexer no longer synthesizes terminator
-/// tokens (audit-3 Finding 7); the parser applies the statement-ending gate itself, here, so the
-/// expression grammar cannot extend a construct across a hard boundary (`f\n(x)` stays two
-/// statements) while the grammar proper stays untouched. The woven `;` is byte-identical to the
-/// synthetic token the lexer used to insert: `T::Semicolon`, empty span at the previous token's
-/// end. `shift` rebases spans into the enclosing source (0 for a whole file; the hole's absolute
-/// offset for a re-lexed `${…}` hole slice, whose boundaries are hole-local).
+/// statement *barrier* half of newline termination. The lexer never synthesizes terminator tokens
+/// (audit-3 Finding 7); the parser materializes the barriers itself, here, so the expression
+/// grammar cannot extend a construct across a hard boundary (`f\n(x)` stays two statements, at
+/// every brace-nesting level) while the grammar proper stays untouched. The woven `;` is a plain
+/// `T::Semicolon` with an empty span at the previous token's end. `shift` rebases spans into the
+/// enclosing source (0 for a whole file; the hole's absolute offset for a re-lexed `${…}` hole
+/// slice, whose boundaries are hole-local).
 fn weave_hard_semicolons(
     tokens: &[Token],
     boundaries: &[noeta_lexer::NewlineBoundary],
@@ -3567,9 +3567,8 @@ mod tests {
     #[test]
     fn hard_boundary_is_a_barrier_not_just_a_terminator() {
         // A hard newline boundary is woven into the parse input as a zero-width `;`
-        // (`weave_hard_semicolons`), so no construct extends across it — the behavior the lexer's
-        // synthetic `;` used to provide. A `(` or `[` opening the next line is a new statement,
-        // never a call/index on the previous line's value.
+        // (`weave_hard_semicolons`), so no construct extends across it. A `(` or `[` opening the
+        // next line is a new statement, never a call/index on the previous line's value.
         let call = parse_str("x = f\n(1)\n");
         assert!(call.diagnostics.is_empty(), "{:?}", call.diagnostics);
         assert_eq!(call.program.stmts.len(), 2, "`f\\n(1)` must not be a call");
@@ -3584,16 +3583,46 @@ mod tests {
         assert!(!parse_str("x\n= 1\n").diagnostics.is_empty());
         // Allman-style braces stay rejected: the barrier separates `if c` from `{ }`.
         assert!(!parse_str("if c\n{ echo 1 }\n").diagnostics.is_empty());
-        // Inside a bracket-nested closure body the *hard* rule keeps its historical absolute-depth
-        // parameterization: `a\n(n)` there is a call, exactly as before the convergence. (The soft
-        // terminator never fires mid-expression, and no `;` is woven at absolute depth 1.)
-        let nested = parse_str("ys = xs.map(fn(n) {\n  a\n(n)\n})\n");
-        assert!(nested.diagnostics.is_empty(), "{:?}", nested.diagnostics);
+    }
+
+    #[test]
+    fn hard_boundary_is_brace_relative_so_termination_is_uniform_at_every_depth() {
+        // The terminator-barrier change: the hard barrier uses the same brace-relative depth as
+        // the soft terminator, so `a\n(n)` inside a bracket-nested closure body is two statements
+        // exactly as at top level. (Historically the barrier used the absolute `(`/`[` depth, so
+        // this silently parsed as a call `a(n)` — the wart this test used to pin.)
+        let calls_in = |src: &str| {
+            let parsed = parse_str(src);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{src:?}: {:?}",
+                parsed.diagnostics
+            );
+            parsed.program.to_pretty_string().matches("(call ").count()
+        };
+        // Split: the only call is `xs.map(...)` — `a` and `(n)` are two statements. Joining the
+        // lines keeps the call, at every depth: the author spells intent.
+        assert_eq!(calls_in("ys = xs.map(fn(n) {\n  a\n(n)\n})\n"), 1);
+        assert_eq!(calls_in("ys = xs.map(fn(n) {\n  a(n)\n})\n"), 2);
+        // `x\n= 1` is an error inside a nested closure body too, not a silent reparse.
         assert!(
-            nested.program.to_pretty_string().contains("(call"),
-            "`a\\n(n)` inside a call's closure body stays a call:\n{}",
-            nested.program.to_pretty_string()
+            !parse_str("ys = xs.map(fn(n) {\n  x\n= 1\n})\n")
+                .diagnostics
+                .is_empty()
         );
+        // And a doubly nested body (closure inside a map literal inside a call) behaves the same.
+        assert_eq!(
+            calls_in("f(\n  {\n    \"a\": fn() {\n      a\n(n)\n    },\n  },\n)\n"),
+            1
+        );
+        assert_eq!(
+            calls_in("f(\n  {\n    \"a\": fn() {\n      a(n)\n    },\n  },\n)\n"),
+            2
+        );
+        // Multi-line argument lists still continue — a newline inside `(...)` relative to the
+        // innermost `{` is no boundary, even when that argument list is itself inside a closure.
+        let args = parse_str("ys = xs.map(fn(n) {\n  return g(\n    n,\n    1,\n  )\n})\n");
+        assert!(args.diagnostics.is_empty(), "{:?}", args.diagnostics);
     }
 
     #[test]
