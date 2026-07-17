@@ -7,10 +7,15 @@
 // graph over the table's NOTIFY channel) with a plain repository — no new runtime, and the same
 // reactive value a LiveView `view.expose(...)` diffs to the browser.
 //
-// EXTERNAL writes (another process/connection changing the table) wake the UI too: have the database
-// NOTIFY the channel on write — either a trigger (`AFTER INSERT/UPDATE/DELETE … pg_notify('<table>')`)
-// so ANY writer fires it, or `conn.notify("<table>")` from each writer. The app `pump()`s the live
-// repository from its loop (e.g. the serve loop, alongside background tasks) to deliver them.
+// Reactivity reaches beyond this repository's own writes, per driver:
+//   * SQLite — a write through ANY connection in the process (this isolate or a sibling parallel-serve
+//     worker) fires the connection's update hook and wakes the watch automatically. No trigger needed.
+//     It does NOT cross to a separate OS process (SQLite has no server notify).
+//   * PostgreSQL — a write from any process/worker wakes the UI if the database NOTIFYs the channel:
+//     a trigger (`AFTER INSERT/UPDATE/DELETE … pg_notify('<table>')`) so ANY writer fires it, or
+//     `conn.notify("<table>")` from each writer.
+// Either way the app `pump()`s the live repository from its loop (e.g. the serve loop, alongside
+// background tasks) to deliver them.
 
 namespace para.db.reactive
 

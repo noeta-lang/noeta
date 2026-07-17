@@ -1,0 +1,45 @@
+// The opt-in reactive ORM on SQLite (DB5) — same as live_repo_demo.noe but `sqlite::memory:`. SQLite
+// has no LISTEN/NOTIFY, so the driver uses its per-connection update hook + a process bus: a write
+// through the connection wakes the watch. Writing through the LiveRepository updates the reactive UI.
+//   noeta run examples/para-db-demo/live_repo_sqlite_demo.noe
+use para.db
+use para.db.reactive.LiveRepository
+use std.reactive.effect
+use std.json
+
+@derive(Serialize<Json>, Deserialize<Json>)
+struct User {
+    id: int
+    name: string
+    age: int
+}
+
+fn settle(users: LiveRepository): void {
+    mut woke = false
+    mut tries = 0
+    while !woke && tries < 100 {
+        woke = users.pump()
+        tries = tries + 1
+    }
+}
+
+conn = db.connect("sqlite::memory:")
+conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)", [])
+
+users = LiveRepository.new("User", "users", "id", conn)
+live_users = users.all()
+
+effect(fn() {
+    all = live_users.get()
+    echo "UI: ${all.len()} user(s)"
+})
+
+users.add(User { id: 1, name: "Ada", age: 36 })
+users.flush()
+settle(users)
+
+users.add(User { id: 2, name: "Bob", age: 41 })
+users.flush()
+settle(users)
+
+conn.close()

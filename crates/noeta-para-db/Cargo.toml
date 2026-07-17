@@ -21,7 +21,9 @@ noeta-reactive-abi = { workspace = true }
 # consumer needs no system libsqlite3 (the amalgamation reuses the workspace's existing
 # libsqlite3-sys build). Optional + gated exactly like para-p2p's `ring-p2p`: a pure/loopback build
 # that never touches `para.db` links no SQLite.
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# `hooks` enables the per-connection update hook (DB5 reactive source — SQLite has no LISTEN/NOTIFY,
+# so a write fires the hook, which publishes to the process notification bus).
+rusqlite = { version = "0.32", features = ["bundled", "hooks"], optional = true }
 # The PostgreSQL driver, behind the `ring-postgres` ring. The synchronous `postgres` client (blocking,
 # its own runtime) fits the sync `SqlDriver` trait exactly like `rusqlite`. Optional + off by default:
 # a build that never connects to Postgres links no PG client. A second driver behind the SAME seam —

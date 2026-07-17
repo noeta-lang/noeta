@@ -13,9 +13,12 @@
 //! on the reactive thread — no cross-thread reactivity. The reactive engine is reached purely through
 //! the `ReactiveSource` capability contract; this module never sees the engine's internals.
 //!
-//! Driver-agnostic: a driver without a push channel (SQLite today) leaves `listen`/`notifications` at
-//! their unsupported defaults, so `watch` degrades to an in-process revision signal (`pump` never
-//! wakes) — the same value works, external notifications simply don't arrive.
+//! Driver-agnostic: **Postgres** uses real `LISTEN`/`NOTIFY` (cross-process, cross-worker).
+//! **SQLite** — a library with no server notify — uses its per-connection update hook plus a
+//! process-global bus, so a write wakes watchers in this isolate and any sibling *isolate* of the
+//! same process (the parallel server's workers), but not a separate OS process writing the same file.
+//! A driver that supports neither leaves the `listen`/`notifications` defaults and `watch` degrades to
+//! an in-process revision signal (`pump` never wakes).
 
 use std::any::Any;
 use std::cmp::Ordering;
