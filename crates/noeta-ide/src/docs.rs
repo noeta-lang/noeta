@@ -549,7 +549,8 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
                     title: m.qualified,
                     kind: DocKind::Module,
                     detail: None,
-                    has_page: false,
+                    // A module opens an overview page (its function list), like docs.rs.
+                    has_page: true,
                     expandable: true,
                     location: None,
                 })
@@ -559,7 +560,7 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
                 title: t.qualified,
                 kind: DocKind::Struct,
                 detail: None,
-                has_page: false,
+                has_page: true,
                 expandable: true,
                 location: None,
             }));
@@ -585,13 +586,60 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
     }
 }
 
-/// The page for an `api/<module>/<fn>` or `api/<type>/<method>` id: the rendered signature, its
-/// prose, and cross-references to guide pages that mention it.
+/// The page for an API id: a module/type **overview** for a two-segment id (`api/std.math`), or a
+/// single function/method page for a three-segment id (`api/std.math/sqrt`).
 fn api_page(id: &DocId) -> Option<DocPage> {
-    let segments = id.segments();
-    let [_root, qualified, name] = segments.as_slice() else {
+    match id.segments().as_slice() {
+        [_root, qualified] => api_overview_page(qualified),
+        [_root, qualified, name] => api_member_page(id, qualified, name),
+        _ => None,
+    }
+}
+
+/// A module's (or extern type's) overview page: its members listed with signatures and one-line
+/// summaries, like a docs.rs module page. Gives the tree's module/type rows something to open and
+/// gives a module-name search hit a destination.
+fn api_overview_page(qualified: &str) -> Option<DocPage> {
+    let (kind, members): (DocKind, Vec<api::ApiFn>) = if let Some(m) = api::module(qualified) {
+        (DocKind::Module, m.functions)
+    } else if let Some(t) = api::type_(qualified) {
+        (DocKind::Struct, t.methods)
+    } else {
         return None;
     };
+    let noun = if kind == DocKind::Module {
+        "Functions"
+    } else {
+        "Methods"
+    };
+    let mut markdown = String::new();
+    if members.is_empty() {
+        markdown.push_str(&format!("_No {}._", noun.to_lowercase()));
+    } else {
+        markdown.push_str(&format!("### {noun}\n\n"));
+        for f in &members {
+            let summary = f.doc.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            if summary.is_empty() {
+                markdown.push_str(&format!("- `{}`\n", f.signature));
+            } else {
+                markdown.push_str(&format!("- `{}` — {}\n", f.signature, summary.trim()));
+            }
+        }
+    }
+    Some(DocPage {
+        id: DocId::new(format!("{API_ROOT}/{qualified}")),
+        title: qualified.to_string(),
+        kind,
+        signature: None,
+        markdown,
+        location: None,
+        xrefs: Vec::new(),
+    })
+}
+
+/// A single function/method page: the rendered signature, its prose, and cross-references to guide
+/// pages that mention it.
+fn api_member_page(id: &DocId, qualified: &str, name: &str) -> Option<DocPage> {
     let (f, kind) = match api::function(qualified, name) {
         Some(f) => (f, DocKind::Function),
         None => (api::method(qualified, name)?, DocKind::Method),
@@ -643,16 +691,43 @@ fn api_score_into(
     }
 }
 
-/// API-reference search: rank module functions and type methods by name (highest), signature, and
-/// prose. `needle` is already lowercased.
+/// Score an API module/type container by its qualified name, so filtering or searching a module
+/// name (`crypto` → `std.crypto`) surfaces the module itself — not only its functions, whose names
+/// rarely repeat the module name. Pushes the container's overview node as a hit when it matches.
+fn api_container_score_into(qualified: &str, kind: DocKind, needle: &str, hits: &mut Vec<DocHit>) {
+    let q = qualified.to_lowercase();
+    // Match against the short segment (`crypto`) and the whole qualified name (`std.crypto`).
+    let short = qualified.rsplit('.').next().unwrap_or(qualified).to_lowercase();
+    let score = if short == needle || q == needle {
+        90
+    } else if short.contains(needle) || q.contains(needle) {
+        35
+    } else {
+        0
+    };
+    if score > 0 {
+        hits.push(DocHit {
+            id: DocId::new(format!("{API_ROOT}/{qualified}")),
+            title: qualified.to_string(),
+            kind,
+            snippet: String::new(),
+            score,
+        });
+    }
+}
+
+/// API-reference search: rank module/type containers by their qualified name, and their member
+/// functions/methods by name (highest), signature, and prose. `needle` is already lowercased.
 fn api_search(needle: &str) -> Vec<DocHit> {
     let mut hits = Vec::new();
     for m in api::modules() {
+        api_container_score_into(&m.qualified, DocKind::Module, needle, &mut hits);
         for f in &m.functions {
             api_score_into(&m.qualified, f, DocKind::Function, needle, &mut hits);
         }
     }
     for t in api::types() {
+        api_container_score_into(&t.qualified, DocKind::Struct, needle, &mut hits);
         for f in &t.methods {
             api_score_into(&t.qualified, f, DocKind::Method, needle, &mut hits);
         }
@@ -968,7 +1043,11 @@ mod tests {
             .iter()
             .find(|m| m.title == "std.math")
             .expect("std.math is a module");
-        assert!(math.expandable && !math.has_page);
+        // A module is expandable AND opens an overview page (its function list).
+        assert!(math.expandable && math.has_page);
+        let overview = page(&ctx, &math.id).expect("the module overview renders");
+        assert_eq!(overview.kind, DocKind::Module);
+        assert!(overview.markdown.contains("sqrt"), "overview lists functions");
 
         let fns = children(&ctx, &math.id);
         let sqrt = fns.iter().find(|f| f.title == "sqrt").expect("math.sqrt");
@@ -983,6 +1062,14 @@ mod tests {
         // Search spans the API corpus.
         let hits = search(&ctx, "sqrt");
         assert!(hits.iter().any(|h| h.id.as_str() == "api/std.math/sqrt"));
+
+        // A module-name query surfaces the module container itself (its functions rarely repeat the
+        // module name), so the tree filter can narrow to a whole module.
+        let math_hits = search(&ctx, "math");
+        assert!(
+            math_hits.iter().any(|h| h.id.as_str() == "api/std.math"),
+            "the std.math container is a hit for `math`"
+        );
     }
 
     #[test]
