@@ -3048,6 +3048,33 @@ mod tests {
     }
 
     #[test]
+    fn inlay_hints_skip_the_field_assignment_desugar() {
+        let mut store = test_store();
+        // `self.n = …` desugars to a `Stmt::Binding` for the receiver `self` carrying an
+        // `Expr::FieldSet` — it must NOT be hinted (it would render `self: Counter` inside the body).
+        store.open(
+            "file:///c.noe",
+            "class Counter {\n    \
+             mut n: u64 = 0u64\n    \
+             fn bump(by: int): void {\n        \
+             self.n = self.n + by.to_u64()\n    \
+             }\n\
+             }\n"
+            .to_string(),
+        );
+        let hints = hints_of(&store, "file:///c.noe");
+        // The field-assignment line (line 3) shows no type hint at all.
+        assert!(
+            !hints.iter().any(|(line, _)| *line == 3),
+            "field assignment must not hint: {hints:?}"
+        );
+        assert!(
+            !hints.iter().any(|(_, label)| label.contains("Counter")),
+            "no `: Counter` receiver hint anywhere: {hints:?}"
+        );
+    }
+
+    #[test]
     fn inlay_hints_mark_packed_storage_compactly() {
         let mut store = test_store();
         store.open(

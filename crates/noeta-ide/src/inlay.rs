@@ -91,7 +91,12 @@ impl Walker<'_> {
                 value,
                 ..
             } => {
+                // The `x.f = v` field-assignment desugar reuses the `Stmt::Binding` shape — a
+                // reassignment of the receiver `x` carrying an `Expr::FieldSet` value (parser: the
+                // `Expr::Member` assignment arm). It is not a fresh value binding, so it must never
+                // show a type hint: doing so renders `self⟨: Counter⟩.n = …` inside a method body.
                 if ty.is_none()
+                    && !matches!(value, Expr::FieldSet { .. })
                     && name_span.source == self.source
                     && self.declarations.contains(name_span)
                     && let Some(repr) = self.expr_types.get(&value.span())
