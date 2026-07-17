@@ -61,6 +61,7 @@ impl Extension for PluginExtension {
     fn tiers(&self) -> &'static [ExtTier] {
         &[ExtTier {
             name: "audit",
+            sites: &[],
             config: None,
             text: None,
             expr: None,

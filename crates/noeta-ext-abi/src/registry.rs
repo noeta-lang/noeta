@@ -706,6 +706,22 @@ pub struct ExtAttribute {
     pub fields: &'static [ExtAttrField],
 }
 
+/// Where a dev-tier directive may **attach** (the directive attachment-site model). A tier declares
+/// its allowed sites when it is registered; the checker rejects the directive at any site not listed
+/// (E0054). This is the tier counterpart of an `@attribute(Method, Function, …)` placement list, and
+/// applies only to the **annotation / adjacency** forms that decorate a declaration (`@test fn`,
+/// `@doc { … } struct`) — the statement-position **block** form (`@debug { … }`, `@json { … }`) is
+/// not an attachment and is never site-checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierSite {
+    /// A top-level function (`@test fn foo()`).
+    Function,
+    /// A method inside a `struct`/`class`/`enum` body (`@test fn method()`).
+    Method,
+    /// A type declaration — `struct`, `class`, or `enum` (`@doc { … } struct Point`).
+    Type,
+}
+
 /// An extension-declared **dev-tier** — the extension counterpart of a program's `@tier`
 /// declaration. std ships the built-in four (`test`/`bench`/`doc`/`debug`); the tier name-space
 /// the checker validates against is the installed extensions' tiers ∪ the program's own `@tier`
@@ -714,6 +730,12 @@ pub struct ExtAttribute {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtTier {
     pub name: &'static str,
+    /// Which declaration sites this tier's annotation/adjacency form may attach to (directive
+    /// attachment-site model). **Empty ⇒ unrestricted** — the directive attaches anywhere the
+    /// grammar admits it, which keeps a tier that predates the model (and every statement/expression
+    /// block tier, which is never attachment-checked) working unchanged. `test`/`bench` list
+    /// `Function`+`Method`; `doc` adds `Type`.
+    pub sites: &'static [TierSite],
     /// The knob attribute a `@<tier>(args)` block stamps onto its fns — one of the extension's
     /// [`Extension::attributes`] — or `None` for a knob-less tier (whose directive rejects args).
     pub config: Option<&'static str>,
@@ -2429,6 +2451,7 @@ mod runtime_registry_tests {
             fn tiers(&self) -> &'static [ExtTier] {
                 &[ExtTier {
                     name: "audit",
+                    sites: &[],
                     config: None,
                     text: None,
                     expr: None,

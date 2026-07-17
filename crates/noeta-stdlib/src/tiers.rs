@@ -12,7 +12,7 @@
 //! the two spellings together so they cannot drift.
 
 use noeta_ext_abi::registry::{
-    AttrFieldDefault, AttrFieldType, BodyFormatter, ExtAttrField, ExtAttribute, ExtTier,
+    AttrFieldDefault, AttrFieldType, BodyFormatter, ExtAttrField, ExtAttribute, ExtTier, TierSite,
 };
 
 /// std's **tier-body formatters** keyed by body language (extension-driven tier-body formatting).
@@ -26,6 +26,9 @@ pub const BODY_FORMATTERS: &[BodyFormatter] = &[("json", json_reindent)];
 pub const TIERS: &[ExtTier] = &[
     ExtTier {
         name: "test",
+        // A test attaches to a function or a method (a `@test` method must be an associated
+        // function — no `self` — so the runner can call it with no receiver).
+        sites: &[TierSite::Function, TierSite::Method],
         config: None,
         text: None,
         expr: None,
@@ -33,6 +36,7 @@ pub const TIERS: &[ExtTier] = &[
     },
     ExtTier {
         name: "bench",
+        sites: &[TierSite::Function, TierSite::Method],
         config: Some("Bench"),
         text: None,
         expr: None,
@@ -44,6 +48,8 @@ pub const TIERS: &[ExtTier] = &[
     // injection, LSP hover.
     ExtTier {
         name: "doc",
+        // Documentation attaches to any function, method, or type declaration.
+        sites: &[TierSite::Function, TierSite::Method, TierSite::Type],
         config: None,
         text: Some("markdown"),
         expr: None,
@@ -51,6 +57,8 @@ pub const TIERS: &[ExtTier] = &[
     },
     ExtTier {
         name: "debug",
+        // A statement-position block tier — never attachment-checked, so its site set is empty.
+        sites: &[],
         config: None,
         text: None,
         expr: None,
@@ -62,6 +70,8 @@ pub const TIERS: &[ExtTier] = &[
     // handler — through the same `ExtTier` surface a program `@tier(…, text/expr)` uses.
     ExtTier {
         name: "json",
+        // An expression-position block tier — never attachment-checked.
+        sites: &[],
         config: None,
         text: Some("json"),
         expr: Some("string"),
