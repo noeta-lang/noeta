@@ -30,7 +30,8 @@
       "keywords": [
         "image",
         "simd"
-      ]
+      ],
+      "description": "Fast image effects for Noeta"
     },
     {
       "version": "2.0.0",

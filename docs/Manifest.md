@@ -29,14 +29,16 @@ identity, so it cannot be published.
 | `native` | no | relative directory | Points at this package's native Rust entry crate. See [Native Extensions](Native-Extensions). |
 | `license` | no | SPDX expression | Recorded with the release and bound into its transparency-log leaf. |
 | `keywords` | no | array of tags | Discovery tags the registry indexes by. |
+| `description` | no | one-line string | The blurb package search shows. |
 
 ```toml
 [package]
-name = "acme/imgfx"                  # the global identity the registry indexes
-version = "1.2.0"                    # SemVer
-edition = "2026"                     # optional — the language edition this package targets
-license = "MIT OR Apache-2.0"        # optional — declared SPDX expression
-keywords = ["image", "simd"]         # optional — up to 5 discovery tags
+name = "acme/imgfx"                          # the global identity the registry indexes
+version = "1.2.0"                            # SemVer
+edition = "2026"                             # optional — the language edition this package targets
+license = "MIT OR Apache-2.0"                # optional — declared SPDX expression
+keywords = ["image", "simd"]                 # optional — up to 5 discovery tags
+description = "Fast image effects for Noeta" # optional — one-line search blurb
 ```
 
 **`name`** is a global identity `company/package`. Each half is an identifier — a letter or `_`,
@@ -56,6 +58,11 @@ per tag is what lets a registry group everything tagged `aether` into one listin
 scattering it across `Aether`, `aether_`, and `AEther`. Unlike `license`, keywords are **not** bound
 into the transparency-log leaf — tampering with one only mis-files a package in a listing, it can't
 redirect a build.
+
+**`description`** is a single-line blurb of up to 200 characters — no line breaks — shown next to
+your package in search results and on its registry page. Like `keywords` it is discovery metadata
+(indexed for search, not bound into the transparency log). Leave it off and a package is still
+searchable by name and keyword; it just has no one-line summary in the results.
 
 ## `[dependencies]` — what the package builds against
 

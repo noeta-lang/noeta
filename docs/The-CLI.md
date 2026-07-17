@@ -381,6 +381,7 @@ version = "0.1.0"        # SemVer
 edition = "2026"         # optional — the language edition this package is written against
 license = "MIT OR Apache-2.0"      # optional — declared SPDX expression, recorded with the release
 keywords = ["image", "simd"]       # optional — up to 5 discovery tags the registry indexes by
+description = "Fast image effects" # optional — one-line blurb shown in package search
 
 [dependencies]
 # A local source tree — no network, no resolver:

@@ -457,6 +457,8 @@ pub(crate) fn cmd_publish(
     // Discovery keywords ride along into the same record. Unlike the license there is no nudge for
     // an empty set: an untagged package is merely harder to stumble across, not unusable.
     let keywords = pkg.keywords.clone();
+    // The one-line search blurb, likewise.
+    let description = pkg.description.clone();
 
     // A published package must depend **only via the registry** (Phase 4, follow-up #3): a path
     // dependency can't travel to a consumer, and a git dependency isn't expressible in the index's
@@ -646,6 +648,7 @@ pub(crate) fn cmd_publish(
         published_at: None,
         license: license.clone(),
         keywords: keywords.clone(),
+        description: description.clone(),
     };
     match index.publish(&name, &release) {
         Ok(()) => {

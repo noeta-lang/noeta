@@ -86,6 +86,10 @@ pub struct Release {
     /// a keyword only files a package in a listing, so it is not something a registry could
     /// meaningfully equivocate about. Empty when the release declared none.
     pub keywords: Vec<String>,
+    /// A one-line description (`[package] description`) — the blurb package search shows. Part of the
+    /// immutable release record; like `keywords`, discovery metadata, not bound into the log leaf.
+    /// `None` when the release declared none.
+    pub description: Option<String>,
 }
 
 impl Release {
@@ -335,6 +339,7 @@ impl Index for LocalIndex {
                     published_at: None,
                     license: get("license").map(str::to_string),
                     keywords,
+                    description: get("description").map(str::to_string),
                 });
             }
         }
@@ -402,6 +407,9 @@ impl Index for LocalIndex {
             }
             if let Some(license) = &r.license {
                 text.push_str(&format!("license = {}\n", quote(license)));
+            }
+            if let Some(description) = &r.description {
+                text.push_str(&format!("description = {}\n", quote(description)));
             }
             if let Some(sig) = &r.signature {
                 text.push_str(&format!("sig = {}\n", quote(sig)));
@@ -569,6 +577,9 @@ struct WireVersion {
     /// the field → an empty set.
     #[serde(default)]
     keywords: Vec<String>,
+    /// A one-line search blurb. Absent for releases (or registries) that predate the field.
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[cfg(feature = "registry-http")]
@@ -1382,6 +1393,7 @@ impl Index for HttpIndex {
                 published_at: v.published_at_unix,
                 license: v.license,
                 keywords: v.keywords,
+                description: v.description,
             });
         }
         Ok(out)
@@ -1444,6 +1456,9 @@ impl Index for HttpIndex {
         }
         if !release.keywords.is_empty() {
             body["keywords"] = serde_json::json!(release.keywords);
+        }
+        if let Some(description) = &release.description {
+            body["description"] = serde_json::json!(description);
         }
         if let Some(signature) = &release.signature {
             body["signature"] = serde_json::json!(signature);
@@ -1640,6 +1655,7 @@ mod tests {
             published_at: None,
             license: None,
             keywords: Vec::new(),
+            description: None,
         }
     }
 
@@ -1732,6 +1748,7 @@ mod tests {
         // it. Round-tripping with both present is exactly what proves the ordering.
         let mut rel = release(1, 0, 0, "v1.0.0");
         rel.keywords = vec!["image".to_string(), "simd".to_string()];
+        rel.description = Some("Fast image effects".to_string());
         rel.deps = vec![Dep {
             package: "acme/bytes".to_string(),
             req: VersionReq::parse("^1.0").unwrap(),
@@ -1742,10 +1759,11 @@ mod tests {
             got[0].keywords,
             vec!["image".to_string(), "simd".to_string()]
         );
+        assert_eq!(got[0].description.as_deref(), Some("Fast image effects"));
         assert_eq!(
             got[0].deps.len(),
             1,
-            "the dep survived alongside the keywords"
+            "the dep and the scalar fields all survived the round-trip together"
         );
         // A keyword-less release stays empty (absent from the TOML entirely).
         index
@@ -1976,6 +1994,7 @@ mod http_tests {
                     published_at: None,
                     license: Some("MIT".to_string()),
                     keywords: vec!["image".to_string(), "simd".to_string()],
+                    description: Some("Fast blur".to_string()),
                 },
             )
             .unwrap();
@@ -2003,6 +2022,11 @@ mod http_tests {
         assert!(
             body.contains("\"keywords\":[\"image\",\"simd\"]"),
             "keywords in body: {body}"
+        );
+        // And the search blurb.
+        assert!(
+            body.contains("\"description\":\"Fast blur\""),
+            "description in body: {body}"
         );
     }
 
@@ -2047,6 +2071,7 @@ mod http_tests {
             published_at: None,
             license: None,
             keywords: Vec::new(),
+            description: None,
         };
         index.publish("a/b", &rel).unwrap();
         let body = rx.recv().unwrap();
@@ -2085,6 +2110,7 @@ mod http_tests {
                     published_at: None,
                     license: None,
                     keywords: Vec::new(),
+                    description: None,
                 },
             )
             .unwrap_err();
@@ -2332,6 +2358,7 @@ mod wire_fixture_tests {
     const SHA_120: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4";
     const SHA_200: &str = "9b74c9897bac770ffc029102a200c5de13f2e2b8";
     const LICENSE: &str = "MIT OR Apache-2.0";
+    const DESCRIPTION: &str = "Fast image effects for Noeta";
 
     /// An `HttpIndex` with an explicit token, avoiding the process-global env var.
     fn index_with_token(base: String, token: &str) -> HttpIndex {
@@ -2374,6 +2401,7 @@ mod wire_fixture_tests {
         assert_eq!(r.published_at, Some(1_767_614_400_000));
         assert_eq!(r.license, None);
         assert!(r.keywords.is_empty(), "1.0.0 declared no keywords");
+        assert_eq!(r.description, None, "1.0.0 declared no description");
 
         // 1.2.0 — deps + key provenance + license + keywords + publish time.
         let r = &releases[1];
@@ -2398,6 +2426,7 @@ mod wire_fixture_tests {
         assert_eq!(r.license.as_deref(), Some(LICENSE));
         // Keywords ride through sorted, exactly as the registry stored them.
         assert_eq!(r.keywords, vec!["image".to_string(), "simd".to_string()]);
+        assert_eq!(r.description.as_deref(), Some(DESCRIPTION));
 
         // 2.0.0 — keyless bundle, verbatim.
         let r = &releases[2];
@@ -2411,6 +2440,7 @@ mod wire_fixture_tests {
         );
         assert_eq!(r.license, None);
         assert!(r.keywords.is_empty(), "2.0.0 declared no keywords");
+        assert_eq!(r.description, None, "2.0.0 declared no description");
 
         // Selection semantics over the same fixture: the yanked 1.0.0 is never *newly* selected
         // (`=1.0.0` finds nothing), while `^1` picks 1.2.0.
@@ -2457,6 +2487,7 @@ mod wire_fixture_tests {
             published_at: None,
             license: None,
             keywords: Vec::new(),
+            description: None,
         };
 
         // Minimal: only the required coordinate fields go on the wire.
@@ -2474,6 +2505,7 @@ mod wire_fixture_tests {
         }];
         signed.license = Some(LICENSE.to_string());
         signed.keywords = vec!["image".to_string(), "simd".to_string()];
+        signed.description = Some(DESCRIPTION.to_string());
         signed.signature = Some(
             fixture_value("publish-request-signed.json")["signature"]
                 .as_str()

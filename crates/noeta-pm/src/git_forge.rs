@@ -180,6 +180,7 @@ impl Index for GitForgeIndex {
                 license: None,
                 // Likewise no registry listing to be discoverable in; a forge is resolved by URL.
                 keywords: Vec::new(),
+                description: None,
             });
         }
         Ok(releases)
@@ -377,6 +378,7 @@ mod tests {
             published_at: None,
             license: None,
             keywords: Vec::new(),
+            description: None,
         };
         assert!(
             idx.publish("acme/thing", &r)

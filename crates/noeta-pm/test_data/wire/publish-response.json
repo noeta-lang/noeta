@@ -8,6 +8,7 @@
     "image",
     "simd"
   ],
+  "description": "Fast image effects for Noeta",
   "provenance": "key",
   "log_index": 0
 }

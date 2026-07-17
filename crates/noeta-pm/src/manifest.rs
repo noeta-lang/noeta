@@ -266,6 +266,15 @@ pub struct PackageMeta {
     ///
     /// [`license`]: PackageMeta::license
     pub keywords: Vec<String>,
+    /// A one-line description (`description = "Fast image effects for Noeta"`) — the blurb the
+    /// registry shows in package-search results. Sent with a publish and part of the immutable
+    /// release record, but — like [`keywords`] and unlike [`license`] — **not** bound into the
+    /// transparency-log leaf: it is discovery prose, not a claim a consumer resolves against.
+    /// `None` when the package declares none. Shape-checked at parse time (single line, bounded).
+    ///
+    /// [`license`]: PackageMeta::license
+    /// [`keywords`]: PackageMeta::keywords
+    pub description: Option<String>,
 }
 
 impl PackageMeta {
@@ -999,6 +1008,13 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
             validate_keywords(list)?
         }
     };
+    let description = match pkg.get("description") {
+        None => None,
+        Some(v) => {
+            let text = v.as_str().ok_or("`package.description` must be a string")?;
+            Some(validate_description(text)?)
+        }
+    };
     Ok(Some(PackageMeta {
         name,
         version,
@@ -1006,6 +1022,7 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
         native,
         license,
         keywords,
+        description,
     }))
 }
 
@@ -1070,6 +1087,27 @@ fn validate_keywords(list: &[toml::Value]) -> Result<Vec<String>, String> {
     }
     out.sort();
     Ok(out)
+}
+
+/// The longest a `package.description` may be. A one-line search blurb — long enough to be useful,
+/// short enough to stay a single result-card row. MUST match the registry's `MAX_DESCRIPTION`.
+pub const MAX_DESCRIPTION: usize = 200;
+
+/// Syntactic validation of a `package.description` value: a single line, trimmed, non-empty, at most
+/// [`MAX_DESCRIPTION`] characters, with no control characters (which rules out newlines and tabs).
+/// Mirrors the registry's `description` check, so a publish rejected server-side fails at
+/// `noeta check` time instead. Returns the trimmed value.
+fn validate_description(text: &str) -> Result<String, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > MAX_DESCRIPTION
+        || trimmed.chars().any(|c| c.is_control())
+    {
+        return Err(format!(
+            "`package.description` must be a single line of 1–{MAX_DESCRIPTION} characters"
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Syntactic validation of a `package.native` value (Phase 3, N3.1): a non-empty **relative**
@@ -1624,6 +1662,39 @@ mod tests {
         )
         .expect_err("too many keywords rejected");
         assert!(err.message().contains("at most"), "{err}");
+    }
+
+    #[test]
+    fn parses_a_description_and_rejects_a_multiline_or_over_long_one() {
+        // A declared blurb is trimmed and kept.
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n\
+             description = \"  Fast image effects for Noeta  \"\n",
+        )
+        .expect("valid");
+        assert_eq!(
+            m.package().unwrap().description.as_deref(),
+            Some("Fast image effects for Noeta")
+        );
+        // Omitted → None.
+        let m =
+            Manifest::parse("[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n").unwrap();
+        assert_eq!(m.package().unwrap().description, None);
+        // A newline (a control character) is rejected — a description is a single line.
+        let err = Manifest::parse(
+            "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\ndescription = \"one\\ntwo\"\n",
+        )
+        .expect_err("multi-line description rejected");
+        assert!(err.message().contains("single line"), "{err}");
+        // Over the length cap is rejected.
+        let long = "x".repeat(MAX_DESCRIPTION + 1);
+        let err = Manifest::parse(&format!(
+            "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\ndescription = \"{long}\"\n"
+        ))
+        .expect_err("over-long description rejected");
+        assert!(err.message().contains("single line"), "{err}");
     }
 
     // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------

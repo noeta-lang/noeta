@@ -1681,6 +1681,7 @@ mod tests {
             published_at,
             license: None,
             keywords: Vec::new(),
+            description: None,
         }
     }
 
