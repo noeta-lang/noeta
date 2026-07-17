@@ -4284,6 +4284,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
 ]
 
 [[package]]
@@ -4345,6 +4346,7 @@ version = "0.1.0"
 dependencies = [
  "noeta-diagnostics",
  "noeta-ide",
+ "noeta-stdlib",
  "serde",
  "serde_json",
  "tokio",

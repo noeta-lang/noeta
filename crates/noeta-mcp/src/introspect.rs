@@ -352,6 +352,7 @@ enum Color { Red; Green }
 ";
 
     fn prep() -> Prepared {
+        noeta_stdlib::registry::default_seeded();
         prepare(&Some(SRC.to_string()), &None).unwrap()
     }
 

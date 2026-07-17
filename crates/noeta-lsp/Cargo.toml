@@ -23,5 +23,9 @@ tower-lsp-server = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# Tests seed the process-default registry (audit-6 F2).
+noeta-stdlib = { workspace = true }
+
 [lints]
 workspace = true

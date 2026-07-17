@@ -785,6 +785,7 @@ mod tests {
     use super::*;
 
     fn registry() -> Registry {
+        noeta_stdlib::registry::default_seeded();
         Registry::default()
     }
 

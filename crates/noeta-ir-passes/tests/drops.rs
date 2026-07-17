@@ -6,6 +6,8 @@ use noeta_ir_passes::insert_drops;
 use noeta_span::{Source, SourceId};
 
 fn lower(src: &str) -> Program {
+    // Own assembling driver (audit-6 F2): seed the std units before the front-end runs.
+    noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "drops", src);
     let lexed = noeta_lexer::lex(&source);
     assert!(lexed.diagnostics.is_empty(), "lex: {:?}", lexed.diagnostics);

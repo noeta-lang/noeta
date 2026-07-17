@@ -666,6 +666,7 @@ mod tests {
     use crate::analyze::prepare;
 
     fn prep(src: &str) -> Prepared {
+        noeta_stdlib::registry::default_seeded();
         prepare(&Some(src.to_string()), &None).unwrap()
     }
 
@@ -718,6 +719,7 @@ mod tests {
 
     #[test]
     fn eval_reports_value_and_type() {
+        noeta_stdlib::registry::default_seeded();
         let out = eval("1 + 2", None, false);
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
         assert_eq!(out.value.as_deref(), Some("3"));
@@ -726,6 +728,7 @@ mod tests {
 
     #[test]
     fn eval_uses_the_context() {
+        noeta_stdlib::registry::default_seeded();
         let out = eval("xs.len()", Some("xs = [10, 20, 30];"), false);
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
         assert_eq!(out.value.as_deref(), Some("3"));
@@ -733,6 +736,7 @@ mod tests {
 
     #[test]
     fn eval_surfaces_a_parse_error() {
+        noeta_stdlib::registry::default_seeded();
         let out = eval("1 +", None, false);
         assert!(!out.ok);
         assert!(!out.diagnostics.is_empty());
@@ -740,6 +744,7 @@ mod tests {
 
     #[test]
     fn test_runs_at_test_cases() {
+        noeta_stdlib::registry::default_seeded();
         let src = "\
 fn add(a: int, b: int): int { return a + b; }
 

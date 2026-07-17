@@ -6,6 +6,8 @@ use noeta_span::{Source, SourceId};
 
 /// Lex, parse, and lower a source program, then analyze its liveness.
 fn live(src: &str) -> noeta_ir_passes::ProgramLiveness {
+    // Own assembling driver (audit-6 F2): seed the std units before the front-end runs.
+    noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "live", src);
     let lexed = noeta_lexer::lex(&source);
     assert!(
