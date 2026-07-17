@@ -13,6 +13,56 @@ repository / unit-of-work, and a typed `@sql` block tier.
   (stage writes during a request, flush them as one batch); `@sql { … }` — a typed SQL statement with
   `${…}` bound-param holes.
 
+## Reactive queries — keep the UI in sync with the database
+
+`para.db` integrates with `std.reactive`, so a query can be a **reactive value**: when the data
+changes, the query re-runs and every dependent — an `effect`, a `computed`, a LiveView
+`view.expose(...)` — updates. Reactivity is **opt-in**: the plain `Repository` stays non-reactive and
+zero-overhead; you choose it by using `LiveRepository`.
+
+```noe
+use para.db
+use para.db.reactive.LiveRepository
+use std.reactive.effect
+
+conn = db.connect("sqlite::memory:")           // or postgres://…
+users = LiveRepository.new("User", "users", "id", conn)
+
+live = users.all()                             // a reactive query (a computed)
+effect(fn() {
+    echo "UI: ${live.get().len()} user(s)"     // re-renders whenever `users` changes
+})
+
+users.add(User { id: 1, name: "Ada", age: 36 })
+users.flush()                                  // commit + notify
+users.pump()                                   // deliver notifications → the effect re-runs
+```
+
+`LiveRepository` wraps a plain `Repository` with three additions: `all()` returns a reactive query,
+`flush()` notifies after committing, and `pump()` (called from your loop, e.g. the serve loop) delivers
+pending change notifications and wakes the reactive graph. Under the hood it composes `db.watch(conn,
+channel)` — a reactive source node over a change-notification channel — with a plain repository.
+
+**How far a change propagates depends on the driver:**
+
+| a write is seen by a reactive query… | in the same process | across parallel-serve workers (isolate threads of one process) | across separate OS processes |
+| --- | --- | --- | --- |
+| **SQLite** (per-connection update hook + a process bus) | ✅ | ✅ (only channel-name strings cross — `Send`-safe) | ❌ — SQLite has no server to push |
+| **PostgreSQL** (`LISTEN`/`NOTIFY`) | ✅ | ✅ | ✅ |
+
+For SQLite, a write through **any** connection in the process fires its update hook and wakes every
+`db.watch` on that table — no trigger or explicit `NOTIFY` needed. For PostgreSQL, a write from another
+process wakes the UI when the database `NOTIFY`s the channel: either `conn.notify("<table>")` from each
+writer, or a trigger so *any* writer fires it —
+
+```sql
+CREATE FUNCTION users_notify() RETURNS trigger AS $$ BEGIN PERFORM pg_notify('users', ''); RETURN NULL; END; $$ LANGUAGE plpgsql;
+CREATE TRIGGER users_changed AFTER INSERT OR UPDATE OR DELETE ON users FOR EACH STATEMENT EXECUTE FUNCTION users_notify();
+```
+
+See `examples/para-db-demo/` — `reactive_demo.noe` (the manual-signal pattern, any driver),
+`live_repo_sqlite_demo.noe`, `live_repo_demo.noe` + `watch_demo.noe` (PostgreSQL, external writes).
+
 ## Editor highlighting for `@sql`
 
 **With the official Noeta VS Code extension (v0.9.0+), `@sql` highlights automatically** — it bundles
