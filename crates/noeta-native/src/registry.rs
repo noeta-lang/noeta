@@ -1553,24 +1553,27 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             ));
         }
     }
-    // Extern-type identities. The runtime resolves a value's type by its SHORT `type_name()`
-    // (`find_type` scans units in registration order), so two types sharing a short name — even
-    // under distinct namespaces — would silently dispatch through whichever unit registered
-    // first: the wrong `ExtType`'s downcast then fails per value at call time, and `is`/`.as<T>()`
-    // answer against the wrong qualified name. Until extern values carry their qualified identity,
-    // a short-name collision is a mis-assembly — refuse to start rather than mis-dispatch.
-    let mut types: Vec<(&str, &str)> = units
+    // Extern-type identities. Runtime dispatch, `is`/`.as<T>()`, and the checker all key on the
+    // QUALIFIED identity (`namespace.name` — `ExternValue::type_identity`), so two types sharing
+    // a short name under distinct namespaces are distinct and coexist. Two declarations of the
+    // same qualified identity, however, would be first-wins at every lookup — refuse to start
+    // rather than silently shadow (this also covers a duplicate within one unit).
+    let mut types: Vec<((&str, &str), &str)> = units
         .iter()
-        .flat_map(|e| e.types().iter().map(move |t| (t.name, e.name())))
+        .flat_map(|e| {
+            e.types()
+                .iter()
+                .map(move |t| ((t.namespace, t.name), e.name()))
+        })
         .collect();
     types.sort_unstable();
     for pair in types.windows(2) {
         if pair[0].0 == pair[1].0 {
             return Err(format!(
-                "duplicate extern type `{}` in the assembled registry (units `{}` and `{}`): \
-                 runtime dispatch resolves extern types by their short name, so two extensions \
-                 cannot register the same type name",
-                pair[0].0, pair[0].1, pair[1].1
+                "duplicate extern type `{}.{}` in the assembled registry (units `{}` and `{}`): \
+                 a qualified type identity must be declared exactly once — distinct namespaces \
+                 may share a short name, one namespace may not",
+                pair[0].0.0, pair[0].0.1, pair[0].1, pair[1].1
             ));
         }
     }
@@ -2271,11 +2274,13 @@ mod runtime_registry_tests {
     }
 
     #[test]
-    fn duplicate_extern_type_short_name_is_rejected() {
-        // Two units registering the same SHORT type name — even under distinct namespaces — must
-        // refuse to assemble: runtime dispatch resolves an extern value's type by its short
-        // `type_name()` (`find_type` scans units in order), so the collision would silently route
-        // one unit's values through the other's dispatch.
+    fn same_short_name_across_namespaces_coexists() {
+        // Two units registering the same SHORT type name under DISTINCT namespaces assemble
+        // fine: runtime dispatch and `is`/`.as<T>()` key on the qualified identity a value
+        // carries (`ExternValue::type_identity`), so `std.metrics.Counter` and
+        // `acme.metrics.Counter` are distinct types — the coexistence the qualified-identity
+        // model exists to enable. Both stay individually resolvable by their qualified name;
+        // the ambiguous short-name lookup answers the first registration (checker-side only).
         const T_STD_COUNTER: ExtType = ExtType {
             name: "Counter",
             namespace: "std.metrics",
@@ -2289,8 +2294,46 @@ mod runtime_registry_tests {
         static SM: NsUnit = NsUnit("std", &[], &[T_STD_COUNTER]);
         static AM: TypedUnit = TypedUnit("acme.metrics", "acme", &[T_ACME_COUNTER]);
         assert!(
-            validate(&[&SM, &AM]).is_err(),
-            "duplicate extern-type short name must refuse to assemble"
+            validate(&[&SM, &AM]).is_ok(),
+            "same short name under distinct namespaces must assemble"
+        );
+        let reg = Registry::new(vec![&SM, &AM]);
+        assert_eq!(
+            reg.find_type_qualified("std.metrics.Counter")
+                .map(|t| t.namespace),
+            Some("std.metrics")
+        );
+        assert_eq!(
+            reg.find_type_qualified("acme.metrics.Counter")
+                .map(|t| t.namespace),
+            Some("acme.metrics")
+        );
+    }
+
+    #[test]
+    fn duplicate_qualified_extern_type_is_rejected() {
+        // The SAME qualified identity twice — whether across units or within one — is first-wins
+        // at every lookup and must refuse to assemble.
+        const T_COUNTER_A: ExtType = ExtType {
+            name: "Counter",
+            namespace: "acme.metrics",
+            ..ExtType::DEFAULTS
+        };
+        const T_COUNTER_B: ExtType = ExtType {
+            name: "Counter",
+            namespace: "acme.metrics",
+            ..ExtType::DEFAULTS
+        };
+        static AM1: TypedUnit = TypedUnit("acme.metrics", "acme", &[T_COUNTER_A]);
+        static AM2: TypedUnit = TypedUnit("acme.metrics2", "acme", &[T_COUNTER_B]);
+        assert!(
+            validate(&[&AM1, &AM2]).is_err(),
+            "a duplicate qualified extern-type identity must refuse to assemble"
+        );
+        static AM_TWICE: TypedUnit = TypedUnit("acme.metrics", "acme", &[T_COUNTER_A, T_COUNTER_B]);
+        assert!(
+            validate(&[&AM_TWICE]).is_err(),
+            "a duplicate qualified identity within one unit must refuse to assemble"
         );
     }
 
