@@ -114,15 +114,25 @@ By design a third-party tier plugs into VS Code with a **one-rule injection gram
 contributes only a `noeta fmt` body-formatter + `text:`→LSP hover). Optional future: a VS-Code-addon
 bridge that auto-generates injections from any tier's declared `text:` language.
 
-## Reactive DB↔UI sync — LEVEL 1 proven today; LEVEL 2 = a native ReactiveSource
-The ORM's original value prop (keep the UI in sync with the DB). **Level 1 (in-process) works now, no
-new runtime** — `examples/para-db-demo/reactive_demo.noe`: a repository query wrapped in a `computed`
-over a DB-revision `signal` the repo mutation path bumps; the query re-runs and every dependent
-(`effect`, or a LiveView `view.expose`) updates. Could be made *automatic* (repo self-bumps its own
-revision on flush → a `para.db.reactive`/`Live` wrapper so the developer never bumps by hand) — a
-small pure-Noeta module, not yet built. **Level 2 (external writes → UI without polling)**: another
-process/connection changing the DB pushes into the reactive graph via the existing **`ReactiveSource`**
-seam (`create_source`/`read_source`/`wake` in `noeta-reactive-abi`) — exactly how `para.synced` drives
-CRDT merges. para/db would add a native reactive source over Postgres **LISTEN/NOTIFY** (or SQLite's
-update hook): `db.watch(channel)` → a signal that `wake`s on a NOTIFY. Seam proven by para.p2p; new
-native code + a driver hook. Not yet built.
+## Reactive DB↔UI sync — LEVEL 1 + LEVEL 2 ✅ DONE (opt-in)
+The ORM's original value prop (keep the UI in sync with the DB), built opt-in (the plain repository
+stays non-reactive). **Level 1 (in-process)** — `examples/para-db-demo/reactive_demo.noe`: a repository
+query as a `computed` over a DB-revision `signal` the mutation path bumps. **Level 2 (external writes
+→ UI without polling)** — a native reactive DB source: `db.watch(conn, channel) -> Watch`, a node in
+the shared `std.reactive` graph (via the `ReactiveSource` seam, like para.synced), whose `pump()`
+polls Postgres LISTEN/NOTIFY non-blocking and `wake`s the graph. Plus `conn.notify(channel)` and a
+`SqlDriver::listen`/`notifications`/`notify` seam (Postgres impl; SQLite default no-op → in-process
+degrade). The **opt-in** is `para.db.reactive.LiveRepository` (`packages/para-db/reactive.noe`): wrap a
+plain `Repository` to get reactive `all()` + notify-on-`flush` + `pump`. Proven end to end against a
+live PG: an EXTERNAL write on a separate connection woke the UI (`examples/para-db-demo/{watch,
+live_repo}_demo.noe`, "UI sees 0 → 2"). Driver-agnostic; SQLite degrades to in-process only.
+
+### Language/dev-experience warts surfaced (worth fixing)
+- **`channel` is a reserved keyword** (from the coroutine `channel` construct) — it can't be a field
+  or variable name, which is surprising for a common identifier (had to rename to `chan`). Consider
+  making `channel` a *contextual* keyword so ordinary code can use the name.
+- **Compose-cache staleness on a transitive native-source change** — `noeta run`'s composed-toolchain
+  cache keys on the entry crate (`para-db-native`), NOT its transitive path-dep impl (`noeta-para-db`),
+  so editing the impl crate does not invalidate the cache (stale binary → "no function/method X" until
+  `rm -rf ~/.cache/noeta/compose`). The compose key should hash the resolved transitive native source
+  (or skip caching for an in-tree path-dep dev build). Bit me repeatedly building DB5.
