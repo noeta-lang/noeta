@@ -27,11 +27,8 @@ fn lowered_ir(src: &str) -> String {
         "program must check cleanly: {:?}",
         checked.diagnostics
     );
-    let ir = noeta_ir::lower_with_sites(
-        &parsed.program,
-        noeta_ir::lowering_sites!(checked.sites),
-    )
-    .expect("lowering is total over the parsed language");
+    let ir = noeta_ir::lower_with_sites(&parsed.program, noeta_ir::lowering_sites!(checked.sites))
+        .expect("lowering is total over the parsed language");
     noeta_ir::dump(&ir)
 }
 
