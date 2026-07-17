@@ -970,8 +970,36 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     } else {
         DiagnosticCode::UnexpectedToken
     };
-    // Render `found`/`expected` via the human-facing token descriptions.
-    let message = err.map_token(|t| t.describe()).to_string();
+    // Render `found`/`expected` via the human-facing token descriptions. The expected set is
+    // rebuilt by hand with a SORTED alternative list: chumsky's own Display iterates its
+    // internal set in an order that is not stable across builds, which made every pinned
+    // E0003/E0004 message (snapshots, corpus error fixtures) a latent per-build flake. Only the
+    // ordering changes here — the prose scaffold matches chumsky's exactly.
+    let err = err.map_token(|t| t.describe());
+    let message = {
+        let mut expected: Vec<String> = err.expected().map(|p| format!("'{p}'")).collect();
+        if expected.is_empty() {
+            // Labelled/custom reasons (e.g. "expected a statement terminator") carry no
+            // alternative set — chumsky's own rendering is already deterministic there.
+            err.to_string()
+        } else {
+            expected.sort_unstable();
+            expected.dedup();
+            let found = match err.found() {
+                Some(d) => format!("found '{d}' "),
+                None => "found end of input ".to_string(),
+            };
+            let list = match expected.len() {
+                1 => expected[0].clone(),
+                _ => format!(
+                    "{}, or {}",
+                    expected[..expected.len() - 1].join(", "),
+                    expected[expected.len() - 1]
+                ),
+            };
+            format!("{found}expected {list}")
+        }
+    };
     Diagnostic::error(code, span, message)
 }
 
