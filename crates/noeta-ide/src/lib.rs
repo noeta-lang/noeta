@@ -2417,6 +2417,17 @@ fn splices_a_type(insert: &str, text: &str, offset: u32) -> bool {
 mod tests {
     use super::*;
 
+    /// A fresh store with the process-global std registry seeded first. Every IDE feature that runs
+    /// the checker resolves stdlib names (`abs`, `math.sqrt`, …) through the extension registry, so
+    /// it must be installed before the first front-end lookup or the checker panics. Production seeds
+    /// it (a possibly *composed*, per-session registry) in the assembling binary before building the
+    /// store — hence this is test-only and not folded into `DocumentStore::default`. `default_seeded`
+    /// is idempotent, so calling it per test (across parallel threads) is safe.
+    fn test_store() -> DocumentStore {
+        noeta_stdlib::registry::default_seeded();
+        DocumentStore::default()
+    }
+
     /// The salsa input serving `uri` in its directory's shared workspace — the test-side view of
     /// [`DocumentStore::doc_cache`].
     fn doc_program(store: &DocumentStore, uri: &str) -> SourceProgram {
@@ -2428,7 +2439,7 @@ mod tests {
 
     #[test]
     fn open_registers_a_document() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "let x = 1".to_string());
         assert_eq!(store.buffers.len(), 1);
         let program = doc_program(&store, "file:///a.noe");
@@ -2440,7 +2451,7 @@ mod tests {
         // The editor surfaces a mistyped `use` target (module-namespaces): a std module typo is an
         // E0019 the checker produces, flowing through the whole-workspace `linked_checked` query to
         // the client, and carries a "did you mean" hint.
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "use std.htpt\n".to_string());
         let (diags, _) = store
             .diagnostics("file:///a.noe")
@@ -2454,7 +2465,7 @@ mod tests {
 
     #[test]
     fn hover_doc_surfaces_the_attached_doc_block() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///a.noe",
             "@doc { Adds two ints. }\n\
@@ -2477,7 +2488,7 @@ mod tests {
 
     #[test]
     fn doc_model_browses_the_workspace_through_the_store() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///widgets.noe",
             "@doc { Makes a widget. }\n\
@@ -2536,7 +2547,7 @@ mod tests {
 
     #[test]
     fn hover_tier_describes_an_expression_block_body() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///a.noe",
             "@tier(sql, text: \"sql\", expr: Query)\n\
@@ -2560,7 +2571,7 @@ mod tests {
 
     #[test]
     fn hover_tier_describes_a_doc_text_block() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///a.noe",
             "@doc { Some prose. }\nfn f(): int { return 1 }\n".to_string(),
@@ -2578,7 +2589,7 @@ mod tests {
         // std's `@json` is a *native* (extension-declared) expression tier — no program `@tier`
         // declares it. Hover reads it through the same registry surface as a program tier, so it
         // reports the declared `json` body language and the `string` value type.
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///a.noe",
             "n = \"x\"\ndoc = @json { {\"k\": ${n}} }\necho doc\n".to_string(),
@@ -2592,7 +2603,7 @@ mod tests {
 
     #[test]
     fn format_document_returns_a_full_replacement_edit() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "fn  f( a ){\n echo a\n}\n".to_string());
         let edits = store
             .format_document("file:///a.noe", Encoding::Utf16)
@@ -2605,7 +2616,7 @@ mod tests {
 
     #[test]
     fn format_document_of_canonical_source_is_a_no_op() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "echo 1\n".to_string());
         let edits = store
             .format_document("file:///a.noe", Encoding::Utf16)
@@ -2615,7 +2626,7 @@ mod tests {
 
     #[test]
     fn format_document_declines_unparseable_source() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "fn (".to_string());
         // Broken source yields no edits (the LSP returns `None`), leaving the buffer untouched.
         let edits = store.format_document("file:///a.noe", Encoding::Utf16);
@@ -2624,7 +2635,7 @@ mod tests {
 
     #[test]
     fn format_on_type_reformats_the_closed_block() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         // Cursor at end of line 1 (just after the fn's `}`), UTF-16.
         store.open("file:///a.noe", "fn  f( a ){\n    echo a\n}\n".to_string());
         let edits = store
@@ -2637,7 +2648,7 @@ mod tests {
 
     #[test]
     fn format_range_reformats_the_selected_statement() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///a.noe",
             "fn  a(){\n echo 1\n}\nfn  b(){\n echo 2\n}\n".to_string(),
@@ -2653,7 +2664,7 @@ mod tests {
 
     #[test]
     fn format_on_type_is_quiet_mid_typing() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "fn f() {\n".to_string()); // unbalanced, mid-type
         assert!(
             store
@@ -2664,7 +2675,7 @@ mod tests {
 
     #[test]
     fn change_mutates_the_same_input_in_place() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "old".to_string());
         let before = doc_program(&store, "file:///a.noe");
 
@@ -2679,7 +2690,7 @@ mod tests {
 
     #[test]
     fn change_on_unknown_document_registers_it() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         let program = store.change("file:///ghost.noe", "hi".to_string());
         assert_eq!(program.text(&store.db), "hi");
         assert_eq!(store.buffers.len(), 1);
@@ -2687,7 +2698,7 @@ mod tests {
 
     #[test]
     fn close_drops_the_document() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "x".to_string());
         store.close("file:///a.noe");
         assert!(store.buffers.is_empty());
@@ -2710,7 +2721,7 @@ mod tests {
 
     #[test]
     fn inlay_hints_show_inferred_types_for_unannotated_declarations_only() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///hints.noe",
             "mut xs = [1, 2, 3]\n\
@@ -2750,7 +2761,7 @@ mod tests {
 
     #[test]
     fn inlay_hints_mark_packed_storage_compactly() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///packed.noe",
             "@packed struct Vec3 { x: f32; y: f32; z: f32 }\n\
@@ -2784,7 +2795,7 @@ mod tests {
 
     #[test]
     fn inlay_hints_cover_closure_bodies_and_respect_the_range() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///closure.noe",
             "mut total = 0\n\
@@ -2819,7 +2830,7 @@ mod tests {
 
     #[test]
     fn inlay_hints_type_closure_parameters_and_name_call_arguments() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///params.noe",
             "fn scale(factor: int, offset: int): int { return factor + offset }\n\
@@ -2906,7 +2917,7 @@ mod tests {
             )],
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         // Without the workspace, `User` would be an unknown name; with the sibling linked in, it
         // resolves and there are no diagnostics.
         store.open(
@@ -2934,7 +2945,7 @@ mod tests {
             )],
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use App.Tiers.run_specs\n@spec {\n  <case name=\"quoted\"/>\n}\nfn add(a: int, b: int): int { return a + b }\necho add(1, 2)\n".to_string(),
@@ -2956,7 +2967,7 @@ mod tests {
             )],
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use App.Models.User;\nu = User { id: 1 }".to_string(),
@@ -3002,7 +3013,7 @@ mod tests {
         );
         let alpha_uri = path_to_uri(&dir.join("alpha.noe"));
         let beta_uri = path_to_uri(&dir.join("beta.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &alpha_uri,
             "namespace App.Alpha;\npub fn one(): int { return 1 }\n".to_string(),
@@ -3057,7 +3068,7 @@ mod tests {
         // (id/text updated in place) and only a genuinely new file gets a new input.
         let dir = temp_workspace("set_change_reuse", &[("main.noe", "echo 1\n")]);
         let main_uri = path_to_uri(&dir.join("main.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(&main_uri, "echo 1\n".to_string());
         let before = doc_program(&store, &main_uri);
         let workspace_before = store.doc_cache(&main_uri).unwrap().0.workspace;
@@ -3100,7 +3111,7 @@ mod tests {
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
         let models_uri = path_to_uri(&dir.join("models.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use App.Models.User;\nu = User { id: 1 }".to_string(),
@@ -3131,7 +3142,7 @@ mod tests {
     fn workspace_still_reports_the_entrys_own_error() {
         let dir = temp_workspace("import_err", &[]);
         let entry_uri = path_to_uri(&dir.join("main.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(&entry_uri, "count: int = \"lots\"".to_string());
         let (diags, _text) = store.diagnostics(&entry_uri).unwrap();
         assert!(
@@ -3142,7 +3153,7 @@ mod tests {
 
     #[test]
     fn clean_program_has_no_diagnostics() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///ok.noe", "echo 1".to_string());
         let (diags, _text) = store.diagnostics("file:///ok.noe").unwrap();
         assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
@@ -3150,7 +3161,7 @@ mod tests {
 
     #[test]
     fn type_error_is_reported() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         // A binding whose value violates its annotation — a check-stage mismatch (E0007).
         store.open("file:///bad.noe", "count: int = \"lots\"".to_string());
         let (diags, text) = store.diagnostics("file:///bad.noe").unwrap();
@@ -3164,13 +3175,13 @@ mod tests {
 
     #[test]
     fn diagnostics_for_unknown_document_is_none() {
-        let store = DocumentStore::default();
+        let store = test_store();
         assert!(store.diagnostics("file:///nope.noe").is_none());
     }
 
     #[test]
     fn hover_reports_expression_types() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///h.noe", "nums = [1, 2, 3]".to_string());
         let at = |c| {
             store
@@ -3190,7 +3201,7 @@ mod tests {
 
     #[test]
     fn hover_notes_packed_storage() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///p.noe",
             "@packed(layout: column) struct Vec3 { x: f32; y: f32; z: f32 }\n\
@@ -3225,7 +3236,7 @@ mod tests {
 
     #[test]
     fn hover_on_ordinary_types_has_no_layout_note() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///q.noe",
             "struct P { x: int; y: int }\np = P { x: 1, y: 2 }\nps = [p]\n".to_string(),
@@ -3245,7 +3256,7 @@ mod tests {
 
     #[test]
     fn hover_off_any_expression_is_none() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///h.noe", "nums = [1, 2, 3]".to_string());
         // Column 5 is the ` = ` gap — the binding's LHS name and the operator are not expressions,
         // so no `expr_types` span covers the cursor.
@@ -3262,7 +3273,7 @@ mod tests {
 
     #[test]
     fn goto_definition_jumps_from_a_call_to_the_fn() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///d.noe",
             "fn greet(): int { return 1 }\ntotal = greet()".to_string(),
@@ -3286,7 +3297,7 @@ mod tests {
 
     #[test]
     fn goto_definition_jumps_from_a_use_to_a_local_binding() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///d.noe", "total = 1 + 2\necho total".to_string());
         // Cursor on `total` in `echo total` (line 1) → jumps to the binding on line 0, column 0.
         let (_uri, range) = store
@@ -3305,7 +3316,7 @@ mod tests {
 
     #[test]
     fn goto_definition_resolves_a_field_access() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///m.noe",
             "struct Point { x: int }\no = Point { x: 1 }\nd = o.x".to_string(),
@@ -3328,7 +3339,7 @@ mod tests {
 
     #[test]
     fn goto_definition_resolves_a_method_call() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///m.noe",
             "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.get()".to_string(),
@@ -3360,7 +3371,7 @@ mod tests {
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
         let models_uri = path_to_uri(&dir.join("models.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use App.Models.User;\nu = User { id: 1 }".to_string(),
@@ -3405,7 +3416,7 @@ mod tests {
         let entry_uri = path_to_uri(&dir.join("main.noe"));
         let money_uri = path_to_uri(&dir.join("money.noe"));
         let geo_uri = path_to_uri(&dir.join("geo.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use App.Money.Amount as Money;\nuse App.Geo.Amount as Distance;\nm = Money { cents: 1 };\nd = Distance { meters: 2 }".to_string(),
@@ -3470,7 +3481,7 @@ mod tests {
         // The dependency's modules are addressed by their canonical path (the walk canonicalizes a
         // path dep's directory), so build the expected URI the same way.
         let hello_uri = path_to_uri(&lib.join("hello.noe").canonicalize().unwrap());
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use hi.hello.Greeter;\ng = Greeter { n: 1 }\n".to_string(),
@@ -3503,7 +3514,7 @@ mod tests {
         std::fs::write(app.join("noeta.toml"), "[dependencies]\ndep = 5\n").unwrap();
 
         let entry_uri = path_to_uri(&app.join("main.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(&entry_uri, "use dep.thing;\n".to_string());
 
         let (diags, _text) = store.diagnostics(&entry_uri).unwrap();
@@ -3541,7 +3552,7 @@ mod tests {
 
     #[test]
     fn goto_definition_off_a_known_name_is_none() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///d.noe", "total = 1 + 2".to_string());
         // `total` is a local binding, not a top-level definition — no jump (never a wrong one).
         assert!(
@@ -3560,7 +3571,7 @@ mod tests {
 
     #[test]
     fn document_symbols_builds_the_outline_with_ranges() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///o.noe",
             "struct Point {\n  x: int\n  fn norm(): int { return self.x }\n}\nfn main() {}"
@@ -3596,7 +3607,7 @@ mod tests {
 
     #[test]
     fn completions_offer_keywords_decls_and_scoped_locals() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///c.noe",
             "fn helper(): int { return 1 }\nfn main() {\n  total = 1\n  return total\n}"
@@ -3626,7 +3637,7 @@ mod tests {
 
     #[test]
     fn references_finds_all_uses_of_a_local() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///r.noe",
             "total = 1\necho total\necho total".to_string(),
@@ -3679,7 +3690,7 @@ mod tests {
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
         let util_uri = path_to_uri(&dir.join("util.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use App.Util.helper;\na = helper()\nb = helper()".to_string(),
@@ -3709,7 +3720,7 @@ mod tests {
 
     #[test]
     fn rename_edits_cover_every_occurrence() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///r.noe",
             "total = 1\necho total\necho total".to_string(),
@@ -3747,7 +3758,7 @@ mod tests {
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
         let util_uri = path_to_uri(&dir.join("util.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(&entry_uri, "use App.Util.helper;\na = helper()".to_string());
         let by_uri = store
             .rename_edits(
@@ -3769,7 +3780,7 @@ mod tests {
 
     #[test]
     fn prepare_rename_returns_the_symbol_range() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///r.noe", "total = 1\necho total".to_string());
         // On a use of `total` (line 1) → the range of that occurrence.
         let range = store
@@ -3801,7 +3812,7 @@ mod tests {
 
     #[test]
     fn rename_to_an_invalid_identifier_is_rejected() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///r.noe", "total = 1\necho total".to_string());
         for bad in ["1sum", "a b", "x+y", ""] {
             assert!(
@@ -3823,7 +3834,7 @@ mod tests {
 
     #[test]
     fn signature_help_shows_the_active_parameter() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///s.noe",
             "fn add(a: int, b: int): int { return a + b }\nx = add(1, ".to_string(),
@@ -3847,7 +3858,7 @@ mod tests {
 
     #[test]
     fn signature_help_resolves_a_method_call() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///s.noe",
             "class Calc { n: int\n  fn add(a: int, b: int): int { return a + b }\n}\nc = Calc { n: 0 }\nv = c.add(1, ".to_string(),
@@ -3871,7 +3882,7 @@ mod tests {
 
     #[test]
     fn signature_help_outside_a_call_is_none() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///s.noe",
             "fn f(a: int): int { return 1 }\ny = 2".to_string(),
@@ -3892,7 +3903,7 @@ mod tests {
 
     #[test]
     fn references_find_a_field_across_uses_not_a_namesake() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         // Two types with a same-named field `x`; a reference search on `Point`'s `x` must not sweep in
         // `Other`'s `x`.
         store.open(
@@ -3926,7 +3937,7 @@ mod tests {
 
     #[test]
     fn rename_a_method_updates_declaration_and_calls() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///m.noe",
             "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.get()".to_string(),
@@ -3959,7 +3970,7 @@ mod tests {
 
     #[test]
     fn prepare_rename_accepts_a_field() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///m.noe",
             "struct Point { x: int }\np = Point { x: 1 }\nd = p.x".to_string(),
@@ -3981,7 +3992,7 @@ mod tests {
 
     #[test]
     fn references_on_nothing_is_none() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///r.noe", "echo 1".to_string());
         assert!(
             store
@@ -4000,7 +4011,7 @@ mod tests {
 
     #[test]
     fn completions_after_a_dot_offer_the_receiver_type_members() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///m.noe",
             "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.ge".to_string(),
@@ -4042,7 +4053,7 @@ mod tests {
 
     #[test]
     fn completions_after_a_bare_dot_offer_the_receiver_type_members() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         // Trailing bare dot `c.` — does not parse into a statement; the munged re-check recovers
         // Counter as the receiver type.
         store.open(
@@ -4082,7 +4093,7 @@ mod tests {
         // `http.` — a namespace-group receiver (module-namespaces) has no value type, so completion
         // offers the group's submodules and types (`client`, `server`, `Response`), not a keyword or
         // scope list. Exercises both the group binding and the member-kinds.
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///a.noe", "use std.http\nx = http.".to_string());
         // Just after the trailing dot of `x = http.` (line 1, col 9).
         let items = store
@@ -4113,7 +4124,7 @@ mod tests {
     fn hover_describes_a_namespace_group() {
         // Hovering the group handle `http` (which has no value type) describes the group and lists
         // its members (module-namespaces).
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///a.noe",
             "use std.http\nx = http.client\n".to_string(),
@@ -4136,7 +4147,7 @@ mod tests {
     fn range_operator_is_not_mistaken_for_a_bare_dot() {
         // `0..` ends in a dot, but the preceding `.` marks a range — identifier completion, not
         // member completion (so keywords are present).
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///r.noe", "xs = [1, 2]\nfor i in 0..".to_string());
         let text = &store.buffers["file:///r.noe"];
         let last = text.lines().count() as u32 - 1;
@@ -4161,7 +4172,7 @@ mod tests {
 
     #[test]
     fn completions_in_a_type_annotation_offer_type_names_only() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         // A binding annotation with an empty type after the colon — the `.`-trigger case's cousin.
         store.open(
             "file:///t.noe",
@@ -4198,7 +4209,7 @@ mod tests {
 
     #[test]
     fn completions_in_a_value_position_are_not_type_names() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         // A binding *initializer* (right of `=`) is a value position — keywords/locals, not types.
         store.open(
             "file:///v.noe",
@@ -4228,7 +4239,7 @@ mod tests {
 
     #[test]
     fn completions_for_unknown_document_is_none() {
-        let store = DocumentStore::default();
+        let store = test_store();
         assert!(
             store
                 .completions(
@@ -4245,7 +4256,7 @@ mod tests {
 
     #[test]
     fn document_symbols_for_unknown_document_is_none() {
-        let store = DocumentStore::default();
+        let store = test_store();
         assert!(
             store
                 .document_symbols("file:///nope.noe", Encoding::Utf8)
@@ -4255,7 +4266,7 @@ mod tests {
 
     #[test]
     fn editing_rechecks_and_clears_the_error() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///f.noe", "count: int = \"lots\"".to_string());
         assert_eq!(store.diagnostics("file:///f.noe").unwrap().0.len(), 1);
         // Fix it — salsa re-runs the check on the mutated input and the error is gone.
@@ -4298,7 +4309,7 @@ echo handle(1)
 ";
 
     fn hier_store() -> DocumentStore {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///hier.noe", HIER_SRC.to_string());
         store
     }
@@ -4374,7 +4385,7 @@ echo handle(1)
 
     #[test]
     fn passing_a_function_shows_as_a_reference_site() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///cb.noe",
             "fn cb(n: int): int { return n }\nfn run(f: (int) -> int): int { return f(1) }\necho run(cb)\n"
@@ -4398,7 +4409,7 @@ echo handle(1)
             )],
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use App.Util.helper;\nfn work(): int { return helper() }\necho work()\n".to_string(),
@@ -4430,7 +4441,7 @@ echo handle(1)
         );
         let entry_uri = path_to_uri(&dir.join("main.noe"));
         let util_uri = path_to_uri(&dir.join("util.noe"));
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             &entry_uri,
             "use App.Util.helper;\nfn work(): int { return helper() }\necho work()\n".to_string(),
@@ -4541,7 +4552,7 @@ echo handle(1)
 
     #[test]
     fn tests_discovers_test_fns_with_their_metadata() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open(
             "file:///t.noe",
             "fn add(a: int, b: int): int { return a + b }\n\n@test {\n  fn adds(): void {\n    assert(add(1, 2) == 3)\n  }\n  #[Skip]\n  #[Name(\"slow one\")]\n  fn slow(): void {\n    assert(true)\n  }\n}\n"
@@ -4563,7 +4574,7 @@ echo handle(1)
 
     #[test]
     fn revision_bumps_on_every_document_mutation() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         let r0 = store.revision();
         store.open("file:///r.noe", "echo 1\n".to_string());
         let r1 = store.revision();
@@ -4596,7 +4607,7 @@ echo handle(1)
 
     #[test]
     fn snapshot_serves_the_same_reads_as_the_primary() {
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///s.noe", "count: int = \"lots\"\n".to_string());
         let snap = store.snapshot();
         let (primary, _) = store.diagnostics("file:///s.noe").unwrap();
@@ -4618,7 +4629,7 @@ echo handle(1)
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
 
-        let mut store = DocumentStore::default();
+        let mut store = test_store();
         store.open("file:///c.noe", "x = 0\necho x\n".to_string());
         let store = Arc::new(Mutex::new(store));
         let done = Arc::new(AtomicBool::new(false));
@@ -4658,7 +4669,7 @@ echo handle(1)
 
     #[test]
     fn call_hierarchy_for_unknown_document_is_none() {
-        let store = DocumentStore::default();
+        let store = test_store();
         let pos = Position::new(0, 0);
         assert!(
             store
