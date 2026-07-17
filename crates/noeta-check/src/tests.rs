@@ -2157,6 +2157,7 @@ fn entry_codes(session: &mut super::SessionChecker, id: u32, text: &str) -> Vec<
 
 #[test]
 fn a_session_entry_sees_what_earlier_entries_committed() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // Entry 1: a fn, a type, a binding — all clean.
     assert!(
@@ -2180,6 +2181,7 @@ fn a_session_entry_sees_what_earlier_entries_committed() {
 
 #[test]
 fn forward_references_work_within_an_entry_and_unknown_names_stay_runtime_deferred() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // Within one entry, a call may precede the declaration (collect runs first) — like any file.
     assert!(
@@ -2201,6 +2203,7 @@ fn forward_references_work_within_an_entry_and_unknown_names_stay_runtime_deferr
 
 #[test]
 fn mut_stability_rules_apply_across_entries() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     assert!(entry_codes(&mut session, 0, "mut n = 1\nfixed = 2\n").is_empty());
     // Compatible reassignment across the boundary: fine.
@@ -2216,6 +2219,7 @@ fn mut_stability_rules_apply_across_entries() {
 
 #[test]
 fn an_erroring_entry_leaves_the_session_usable_and_diagnostics_do_not_leak() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // A genuinely static error mid-entry (mut retype within the entry).
     assert_eq!(
@@ -2228,6 +2232,7 @@ fn an_erroring_entry_leaves_the_session_usable_and_diagnostics_do_not_leak() {
 
 #[test]
 fn reserved_names_refuse_in_a_session_entry() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // A prelude value name (E0046) and a reserved language-level type name (E0049) refuse, as in a
     // file. (A registered extern type like `Uuid` is no longer reserved — see the file-level test.)
@@ -2243,6 +2248,7 @@ fn reserved_names_refuse_in_a_session_entry() {
 
 #[test]
 fn destruct_reachability_refixpoints_over_the_accumulated_registry() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // Entry 1: a plain container — nothing destructor-bearing yet.
     assert!(
@@ -2274,6 +2280,7 @@ fn destruct_reachability_refixpoints_over_the_accumulated_registry() {
 
 #[test]
 fn an_erroring_entry_is_transactional_and_commits_nothing() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // The entry binds `fixed2` immutably AND then errors — the whole entry rolls back.
     assert_eq!(
@@ -2337,6 +2344,8 @@ fn legitimate_forward_and_nested_references_stay_clean() {
 #[test]
 fn a_repl_session_defers_unknown_names_to_a_later_entry() {
     // A session is the ONE place an unknown name stays deferred — a later entry may define it.
+    // Seed before construction: register_prelude resolves against the process-default registry.
+    seed_std();
     let mut session = super::SessionChecker::new();
     assert!(entry_codes(&mut session, 0, "echo later()\n").is_empty());
     assert!(entry_codes(&mut session, 1, "fn later(): int { return 3 }\n").is_empty());

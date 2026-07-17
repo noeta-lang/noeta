@@ -717,6 +717,7 @@ mod tests {
     use noeta_span::Source;
 
     fn sandbox_session() -> VmSession {
+        noeta_stdlib::registry::default_seeded();
         VmSession::new(Box::new(|| {
             (
                 Box::new(noeta_stdlib::SandboxHost::new()),
