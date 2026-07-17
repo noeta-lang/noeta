@@ -74,7 +74,7 @@ pub struct TierRegistry {
     /// single-registry CLI/IDE/MCP path — while an embed session whose own extension declares a
     /// `@tier` threads its assembled set via [`TierRegistry::collect_with_registry`]. Read through
     /// [`TierRegistry::reg`]; `Option` so `#[derive(Default)]` (a `&'static` has no default) holds.
-    registry: Option<&'static noeta_stdlib::registry::Registry>,
+    registry: Option<&'static noeta_native::registry::Registry>,
 }
 
 impl PartialEq for TierRegistry {
@@ -118,14 +118,14 @@ impl TierRegistry {
     /// process-global default. The checker builds its `tier_registry` this way from its own registry.
     pub fn collect_with_registry(
         program: &Program,
-        registry: &'static noeta_stdlib::registry::Registry,
+        registry: &'static noeta_native::registry::Registry,
     ) -> TierRegistry {
         TierRegistry::collect_with_registry_opt(program, Some(registry))
     }
 
     fn collect_with_registry_opt(
         program: &Program,
-        registry: Option<&'static noeta_stdlib::registry::Registry>,
+        registry: Option<&'static noeta_native::registry::Registry>,
     ) -> TierRegistry {
         let mut declared: std::collections::HashMap<String, Vec<DeclaredTier>> =
             std::collections::HashMap::new();
@@ -152,9 +152,9 @@ impl TierRegistry {
 
     /// The extension registry this name-space's extension tiers resolve against — the threaded one,
     /// or the process-global default (instance-registry IR4).
-    fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
+    fn reg(&self) -> &'static noeta_native::registry::Registry {
         self.registry
-            .unwrap_or_else(noeta_stdlib::registry::default_seeded)
+            .unwrap_or_else(noeta_native::registry::single_registry_process)
     }
 
     /// Whether `tier` names a known tier — extension-declared or program-declared.
@@ -356,7 +356,7 @@ pub fn synthesized_config_attr(attr_name: &str, args: &[AttrArg], tier_span: Spa
 /// registry declaration is the single source (the old hardcoded `builtin_attribute_shape`
 /// fallback is gone).
 pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
-    use noeta_stdlib::registry as ext;
+    use noeta_native::registry as ext;
     ext::ext_attributes()
         .map(|attr| noeta_ast::reflect::TypeInfo {
             name: attr.name.to_string(),
@@ -447,7 +447,7 @@ pub fn expr_tier_statement_diagnostic(tier: &str, span: Span) -> Diagnostic {
 /// session's registry, or the process-global default — so the suggestion matches what *this*
 /// name-space actually knows.
 pub fn unknown_tier_diagnostic(
-    reg: &noeta_stdlib::registry::Registry,
+    reg: &noeta_native::registry::Registry,
     tier: &str,
     span: Span,
 ) -> Diagnostic {
@@ -1137,14 +1137,14 @@ impl Checker {
     /// Recurses through nested packed fields, flattening them inline. `check_packed_struct` has
     /// already guaranteed every field of a packed struct is packable, so the field walk never bails on
     /// a well-typed program; the `?`s defend against a malformed registry (and an unpacked element).
-    /// Resolve a checker [`Type`] into a [`noeta_stdlib::TypeRecipe`] for call-site-typed
+    /// Resolve a checker [`Type`] into a [`noeta_native::TypeRecipe`] for call-site-typed
     /// deserialization (`json.parse::<T>`), or `None` if `T` has no JSON decoding: an enum or class
     /// (a reference/identity type, or a sum with no canonical JSON form), a tuple/set/result/`dyn`,
     /// a non-string-keyed map, a generic instantiation, or a struct with any such field. A struct
     /// records its fields in **declared order** (so the decoder emits them in the order the backend's
     /// registered type expects).
-    pub(crate) fn type_to_recipe(&self, ty: &Type) -> Option<noeta_stdlib::TypeRecipe> {
-        use noeta_stdlib::TypeRecipe;
+    pub(crate) fn type_to_recipe(&self, ty: &Type) -> Option<noeta_native::TypeRecipe> {
+        use noeta_native::TypeRecipe;
         Some(match ty {
             Type::Int => TypeRecipe::Int,
             Type::Float => TypeRecipe::Float,

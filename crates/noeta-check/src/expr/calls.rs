@@ -231,7 +231,7 @@ impl Checker {
                 // the group handle is not a value, so this must not fall through to the generic
                 // method path (which would synthesize `http` as an unknown name).
                 if let Some(prefix) = self.resolve_namespace_prefix(receiver, env) {
-                    use noeta_stdlib::registry::NsChild;
+                    use noeta_native::registry::NsChild;
                     self.finalize_closure_args(&[], args, arg_exprs, env);
                     if matches!(
                         self.reg().resolve_namespace_child(&prefix, name),
@@ -329,8 +329,8 @@ impl Checker {
                 // `WidthIntMethod`. Conversions (`IntMethod::Convert`, the `to_*` names) are already
                 // width-typed by name and stay ordinary methods. Signedness is irrelevant here.
                 if let Type::IntN { bits, .. } = recv
-                    && let Some(m) = noeta_stdlib::IntMethod::from_name(name)
-                    && !matches!(m, noeta_stdlib::IntMethod::Convert { .. })
+                    && let Some(m) = noeta_native::IntMethod::from_name(name)
+                    && !matches!(m, noeta_native::IntMethod::Convert { .. })
                 {
                     self.sites.width_sites.insert(call_span, (false, bits));
                 }

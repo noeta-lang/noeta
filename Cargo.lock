@@ -4002,6 +4002,7 @@ dependencies = [
  "noeta-diagnostics",
  "noeta-edition",
  "noeta-lexer",
+ "noeta-native",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",

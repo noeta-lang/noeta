@@ -19,6 +19,8 @@ use noeta_span::{Source, SourceId, Span};
 /// Run `entries` through a session AND the accumulated-source oracle, asserting the per-entry
 /// `(code, span)` diagnostics agree at every step.
 fn assert_session_matches_oracle(entries: &[&str]) {
+    // This oracle is its own assembling driver (audit-6 F2): seed the std units first.
+    noeta_stdlib::registry::default_seeded();
     let mut session = SessionChecker::new();
     let mut accumulated: Vec<noeta_ast::Stmt> = Vec::new();
     let mut accumulated_span = Span::empty_at(0);

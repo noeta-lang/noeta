@@ -3,6 +3,13 @@
 //! the end-to-end coverage; these pin specific rules in isolation.
 
 use super::{check, resolve_type_of_sites};
+
+/// Seed the process-default registry with the std units. Production drivers do this before the
+/// checker runs (audit-6 F2 — the checker consumes the registry as data and no longer links the
+/// std units); these tests are their own driver, so every funnel below seeds first. Idempotent.
+fn seed_std() {
+    noeta_stdlib::registry::default_seeded();
+}
 use noeta_ast::reflect::TypeRepr;
 use noeta_lexer::lex;
 use noeta_parser::parse;
@@ -11,6 +18,7 @@ use noeta_span::{Source, SourceId};
 /// Parse `text` and return the resolved full-fidelity `TypeRepr`s for its `type_of` sites, in no
 /// particular order (one program under test has a single site, so order is irrelevant).
 fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -22,6 +30,7 @@ fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
 
 /// Parse `text` and return the checker's diagnostic codes (wire form), in order.
 fn codes(text: &str) -> Vec<String> {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -1110,6 +1119,7 @@ fn attribute_argument_type_mismatch_is_reported() {
 /// Parse `__probe = <expr>;`, then check the binding's value against `expected`, returning the
 /// resulting diagnostic codes.
 fn check_value_against(expr: &str, expected: noeta_types::Type) -> Vec<String> {
+    seed_std();
     let text = format!("__probe = {expr};");
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
@@ -1759,6 +1769,7 @@ fn closure_default_may_reference_a_captured_variable() {
 
 /// Parse `text` and return the checker's per-binding destructor-relevance (Phase 3.2b).
 fn relevance(text: &str) -> super::DestructorRelevance {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -1926,6 +1937,7 @@ fn primitive_list_is_not_recorded() {
 
 /// Parse + check `text` and return how many `list[i].field` reads the checker marked fusable.
 fn index_field_count(text: &str) -> usize {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -1990,6 +2002,7 @@ fn indexed_method_call_is_not_fusable() {
 
 /// Parse + check `text` and return how many `map(...)` calls produce a packed result.
 fn map_packed_count(text: &str) -> usize {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -2039,6 +2052,7 @@ fn map_to_non_packed_struct_is_not_recorded() {
 
 /// Parse + check `text` and return the name→layout table the IDE reads.
 fn packed_layout_table(text: &str) -> std::collections::HashMap<String, PackedLayout> {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -2125,6 +2139,7 @@ fn function_returning_or_diverging_on_every_path_is_clean() {
 /// Parse one entry with its own `SourceId` (as the REPL/console assigns them) and check it against
 /// `session`, returning this entry's diagnostic codes.
 fn entry_codes(session: &mut super::SessionChecker, id: u32, text: &str) -> Vec<String> {
+    seed_std();
     let source = Source::new(SourceId(id), format!("<entry:{id}>"), text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
