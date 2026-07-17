@@ -90,11 +90,11 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
 /// truth the checker and IDE already consume (this crate used to re-derive it with private
 /// helpers, the third copy of the rules; a new import shape then had to be taught to three
 /// matchers, and a miss diverged checker-accepted programs from backend binding).
-fn binds_native_value(reg: &noeta_stdlib::registry::Registry, path: &[String], name: &str) -> bool {
+fn binds_native_value(reg: &noeta_native::registry::Registry, path: &[String], name: &str) -> bool {
     matches!(
         reg.classify_use(path, name),
-        noeta_stdlib::registry::UseKind::Module(_)
-            | noeta_stdlib::registry::UseKind::MemberFn { .. }
+        noeta_native::registry::UseKind::Module(_)
+            | noeta_native::registry::UseKind::MemberFn { .. }
     )
 }
 
@@ -118,7 +118,7 @@ pub struct CompileOptions {
     /// The extension registry `use`-import lowering and native-type narrowing resolve against
     /// (instance-registry IR5). The production/CLI path keeps the process-global default; an
     /// embed session threads its own assembled set.
-    pub registry: &'static noeta_stdlib::registry::Registry,
+    pub registry: &'static noeta_native::registry::Registry,
 }
 
 impl Default for CompileOptions {
@@ -126,7 +126,7 @@ impl Default for CompileOptions {
         CompileOptions {
             real_isolates: false,
             debug: false,
-            registry: noeta_stdlib::registry::single_registry_process(),
+            registry: noeta_native::registry::single_registry_process(),
         }
     }
 }
@@ -278,7 +278,7 @@ pub fn compile_with_sites_session_with_registry(
     sites: noeta_check::Sites,
     real_isolates: bool,
     debug: bool,
-    registry: &'static noeta_stdlib::registry::Registry,
+    registry: &'static noeta_native::registry::Registry,
 ) -> Result<(Module, SessionCompiler), Unsupported> {
     compile_session_with(
         program,
@@ -497,7 +497,7 @@ impl SessionCompiler {
             debug: false,
             // A fresh REPL session resolves native names against the process-global default; an
             // embed session that assembled its own set installs it explicitly (instance-registry IR5).
-            registry: noeta_stdlib::registry::single_registry_process(),
+            registry: noeta_native::registry::single_registry_process(),
         };
         SessionCompiler {
             mc,
@@ -799,7 +799,7 @@ struct ModuleCompiler {
     /// binding — resolves against it, so a session compiling with its own extension set binds
     /// imports to *its* registry. The production/CLI path holds the process-global default; an embed
     /// session threads its own assembled set. Returns `&'static`, so it outlives any borrow.
-    registry: &'static noeta_stdlib::registry::Registry,
+    registry: &'static noeta_native::registry::Registry,
 }
 
 impl ModuleCompiler {
@@ -1964,7 +1964,7 @@ impl<'m> FnCompiler<'m> {
                     // Classification is `classify_use` — the same source of truth the checker
                     // resolved this import against, so binding can never diverge from checking.
                     match self.module.registry.classify_use(path, &imported.name) {
-                        noeta_stdlib::registry::UseKind::Module(qualified) => {
+                        noeta_native::registry::UseKind::Module(qualified) => {
                             // The bound global keeps the imported name (the last segment); the
                             // module *value* carries the root-qualified identity so its member
                             // calls dispatch to the right module (`std.http.client` ≠ a
@@ -1975,7 +1975,7 @@ impl<'m> FnCompiler<'m> {
                             let global = self.module.intern_global(&imported.name);
                             self.code.push(Op::StoreGlobal { global, src: value });
                         }
-                        noeta_stdlib::registry::UseKind::MemberFn { module, func } => {
+                        noeta_native::registry::UseKind::MemberFn { module, func } => {
                             // `use std.math.sqrt` — bind `sqrt` to a `(std.math, sqrt)`
                             // module-function value. An unknown member is left unbound (the
                             // checker reports it); a bare call then raises E0005 like any

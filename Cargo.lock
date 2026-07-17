@@ -4065,6 +4065,7 @@ dependencies = [
  "noeta-ir",
  "noeta-ir-passes",
  "noeta-lexer",
+ "noeta-native",
  "noeta-object",
  "noeta-parser",
  "noeta-span",
