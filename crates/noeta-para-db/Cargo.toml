@@ -22,6 +22,18 @@ postgres = { version = "0.19", optional = true }
 # `BytesMut` — the wire buffer the `ToSql` trait writes into. Named only by the PG param adapter, so
 # it rides the same `ring-postgres` gate.
 bytes = { version = "1", optional = true }
+# TLS for Postgres — a pure-Rust rustls connector (ring provider, no OpenSSL/C build) with the
+# bundled Mozilla roots (`webpki-roots`, so no system trust store needed). The dsn's `sslmode`
+# governs whether it is used (default `prefer`: try TLS, fall back to plaintext). All ride
+# `ring-postgres`.
+tokio-postgres-rustls = { version = "0.14", optional = true }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+], optional = true }
+webpki-roots = { version = "1", optional = true }
 
 [features]
 # Default-on for local dev (so `cargo build`/`noeta run` get a working SQLite driver out of the box);
@@ -31,7 +43,13 @@ default = ["ring-sqlite"]
 ring-sqlite = ["dep:rusqlite"]
 # Opt-in: a build wanting a `postgres://` connection turns this on (e.g. `[targets]`/manifest feature
 # forwarding, or `--features`). SQLite-only builds never pull the PG client.
-ring-postgres = ["dep:postgres", "dep:bytes"]
+ring-postgres = [
+    "dep:postgres",
+    "dep:bytes",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls",
+    "dep:webpki-roots",
+]
 
 [lints]
 workspace = true

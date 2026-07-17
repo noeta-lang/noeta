@@ -12,14 +12,16 @@
 //!     column type).
 //!
 //! The synchronous `postgres::Client` (blocking, its own runtime) matches the sync `SqlDriver` trait
-//! exactly like `rusqlite`. TLS is not configured (`NoTls`) — fine for a local/dev server or one
-//! reached over a trusted network; a TLS connector is a later slice.
+//! exactly like `rusqlite`. **TLS** is a pure-Rust rustls connector (ring provider, bundled Mozilla
+//! roots) — whether it is *used* is governed by the dsn's `sslmode` (default `prefer`: negotiate TLS,
+//! fall back to plaintext), so a local server and a managed/hosted one both work from the same code.
 
 use std::error::Error;
+use std::sync::Arc;
 
 use bytes::BytesMut;
+use postgres::Client;
 use postgres::types::{IsNull, ToSql, Type, to_sql_checked};
-use postgres::{Client, NoTls};
 
 use crate::driver::{Row, SqlDriver, SqlValue};
 
@@ -37,12 +39,33 @@ impl std::fmt::Debug for PostgresDriver {
 
 impl PostgresDriver {
     /// Connect to the server named by `dsn` (a libpq connection string / URL, e.g.
-    /// `postgres://user:pass@host:5432/db`). No TLS (`NoTls`).
+    /// `postgres://user:pass@host:5432/db?sslmode=require`). A rustls TLS connector is always supplied;
+    /// the dsn's `sslmode` decides whether TLS is negotiated (default `prefer` → try TLS, fall back to
+    /// plaintext), so this connects to both a plaintext local server and a TLS-only managed one.
     pub fn connect(dsn: &str) -> Result<PostgresDriver, String> {
-        Client::connect(dsn, NoTls)
+        Client::connect(dsn, make_tls())
             .map(|client| PostgresDriver { client })
             .map_err(|e| e.to_string())
     }
+}
+
+/// Build the rustls TLS connector: the `ring` crypto provider (no OpenSSL / C build) and the bundled
+/// Mozilla root store (`webpki-roots`, so no system trust store is required), no client certificate.
+/// rustls **always verifies** the server certificate against these roots — so TLS is secure by
+/// default (a managed/hosted server with a real CA certificate works out of the box). A self-signed
+/// development server's certificate will not validate; use `sslmode=disable` (plaintext) or a trusted
+/// certificate for it. A libpq-style `require`-without-verification mode is a possible later slice.
+fn make_tls() -> tokio_postgres_rustls::MakeRustlsConnect {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring provider supports the default protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tokio_postgres_rustls::MakeRustlsConnect::new(config)
 }
 
 impl SqlDriver for PostgresDriver {
