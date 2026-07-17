@@ -764,6 +764,22 @@ impl DocumentStore {
         )
     }
 
+    /// Whether `uri`'s entry document currently lexes and parses without errors. The LSP uses this
+    /// to tell an *authoritative* empty result apart from a *transient* one: mid-keystroke the buffer
+    /// is often momentarily unparseable (typing `p.` before the member name exists), which collapses
+    /// `expr_types` and empties the inlay hints — the client would then clear every inline type and
+    /// re-show it one keystroke later (a flicker). When this returns `false`, the caller keeps the
+    /// last good hints instead of clearing them; when `true`, an empty result is real (a fully
+    /// annotated file has no hints) and supersedes the cache. `false` for an unknown document.
+    pub fn entry_parses_cleanly(&self, uri: &str) -> bool {
+        let Some((_, doc, _)) = self.doc_cache(uri) else {
+            return false;
+        };
+        let db = &self.db;
+        noeta_db::tokens(db, doc).0.diagnostics.is_empty()
+            && noeta_db::ast(db, doc).0.diagnostics.is_empty()
+    }
+
     /// The type at `position` for hover: the **smallest** `expr_types` span in the entry file that
     /// contains the cursor (the most specific expression under it), rendered plus its LSP range,
     /// plus the type's [`layout_note`] when its storage is non-default (`@packed` / flat list).

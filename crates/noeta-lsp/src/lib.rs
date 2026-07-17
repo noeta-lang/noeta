@@ -15,6 +15,7 @@
 //! **cancels** an in-flight run (salsa unwinds it) rather than queueing behind it, and a
 //! superseded result is never delivered (audit-4 finding 9).
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use noeta_ide::{DocumentStore, Encoding, LineIndex, TOP_LEVEL, completion, inlay, semtokens};
@@ -534,6 +535,10 @@ struct Backend {
     client: Client,
     store: Mutex<DocumentStore>,
     encoding: Mutex<Encoding>,
+    /// The last inlay hints computed over a *clean* parse, per document URI. Served back while the
+    /// buffer is momentarily unparseable mid-edit so the inline types hold steady instead of
+    /// flickering off and on with each keystroke (see [`Backend::inlay_hint`]).
+    inlay_cache: Mutex<HashMap<String, Vec<InlayHint>>>,
 }
 
 impl Backend {
@@ -543,6 +548,7 @@ impl Backend {
             store: Mutex::new(DocumentStore::default()),
             // Overwritten during `initialize`; UTF-16 is the protocol default until then.
             encoding: Mutex::new(Encoding::Utf16),
+            inlay_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -863,31 +869,55 @@ impl LanguageServer for Backend {
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri;
         let encoding = self.encoding();
-        let hints = {
+        // Fetch the fresh hints and the parse-clean signal under one lock, so they describe the same
+        // document revision.
+        let (raw, clean) = {
             let store = self.store.lock().expect("document store poisoned");
-            store.inlay_hints(uri.as_str(), ide_range(params.range), encoding)
+            (
+                store.inlay_hints(uri.as_str(), ide_range(params.range), encoding),
+                store.entry_parses_cleanly(uri.as_str()),
+            )
         };
-        Ok(hints.map(|hints| {
-            hints
-                .into_iter()
-                .map(|(position, label, kind)| InlayHint {
-                    position: wire_position(position),
-                    label: InlayHintLabel::String(label),
-                    kind: Some(match kind {
-                        inlay::HintKind::Type => InlayHintKind::TYPE,
-                        inlay::HintKind::Parameter => InlayHintKind::PARAMETER,
-                    }),
-                    text_edits: None,
-                    tooltip: None,
-                    // A type label starts `: ` glued to the name it follows; a parameter label
-                    // `n:` precedes its argument. Neither wants leading padding; both want a
-                    // space on the right.
-                    padding_left: Some(false),
-                    padding_right: Some(true),
-                    data: None,
-                })
-                .collect()
-        }))
+        let key = uri.as_str();
+        let Some(raw) = raw else {
+            // Unknown document — no hints, and drop any cache we held for it.
+            self.inlay_cache
+                .lock()
+                .expect("inlay cache poisoned")
+                .remove(key);
+            return Ok(None);
+        };
+        let hints: Vec<InlayHint> = raw
+            .into_iter()
+            .map(|(position, label, kind)| InlayHint {
+                position: wire_position(position),
+                label: InlayHintLabel::String(label),
+                kind: Some(match kind {
+                    inlay::HintKind::Type => InlayHintKind::TYPE,
+                    inlay::HintKind::Parameter => InlayHintKind::PARAMETER,
+                }),
+                text_edits: None,
+                tooltip: None,
+                // A type label starts `: ` glued to the name it follows; a parameter label
+                // `n:` precedes its argument. Neither wants leading padding; both want a
+                // space on the right.
+                padding_left: Some(false),
+                padding_right: Some(true),
+                data: None,
+            })
+            .collect();
+        let mut cache = self.inlay_cache.lock().expect("inlay cache poisoned");
+        if clean {
+            // Authoritative: the buffer parsed, so this set is correct even when empty (a fully
+            // annotated file genuinely has no hints) — it supersedes any stale entry.
+            cache.insert(key.to_string(), hints.clone());
+            Ok(Some(hints))
+        } else {
+            // The buffer is momentarily unparseable (typing `p.` before the member name exists),
+            // which collapses the inferred types. Keep showing the last good hints so the inline
+            // types don't flicker; fall back to the (empty) fresh set only if we have none cached.
+            Ok(Some(cache.get(key).cloned().unwrap_or(hints)))
+        }
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -1215,6 +1245,10 @@ impl LanguageServer for Backend {
             let mut store = self.store.lock().expect("document store poisoned");
             store.close(uri.as_str());
         }
+        self.inlay_cache
+            .lock()
+            .expect("inlay cache poisoned")
+            .remove(uri.as_str());
         // Clear any diagnostics the client is still showing for the now-closed document, then
         // refresh the rest (they may now be missing a module they imported).
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
