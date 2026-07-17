@@ -924,13 +924,14 @@ impl LanguageServer for Backend {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
         let position = ide_position(position_params.position);
-        let (found, doc, tier, namespace) = {
+        let (found, doc, tier, namespace, signature) = {
             let store = self.store.lock().expect("document store poisoned");
             (
                 store.hover_type(uri.as_str(), position, self.encoding()),
                 store.hover_doc(uri.as_str(), position, self.encoding()),
                 store.hover_tier(uri.as_str(), position, self.encoding()),
                 store.hover_namespace(uri.as_str(), position, self.encoding()),
+                store.hover_signature(uri.as_str(), position, self.encoding()),
             )
         };
         let markdown = |value: String| {
@@ -954,6 +955,19 @@ impl LanguageServer for Backend {
         if let Some((descriptor, range)) = namespace {
             return Ok(Some(Hover {
                 contents: markdown(descriptor),
+                range: Some(wire_range(range)),
+            }));
+        }
+        // Hovering a callable's *name* shows its declaration (`fn manhattan(): int`) plus any doc —
+        // ahead of the type hover, whose tightest span at a call is the result type alone (`int`).
+        if let Some((sig, range)) = signature {
+            let mut value = format!("```noeta\n{sig}\n```");
+            if let Some(doc) = doc {
+                value.push_str("\n\n---\n\n");
+                value.push_str(&doc);
+            }
+            return Ok(Some(Hover {
+                contents: markdown(value),
                 range: Some(wire_range(range)),
             }));
         }

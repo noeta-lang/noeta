@@ -812,6 +812,89 @@ impl DocumentStore {
         Some((repr.clone(), note, index.range(*span, encoding)))
     }
 
+    /// A **signature hover** for the callable name under the cursor: the declaration of the free
+    /// function, method, or associated function it refers to, rendered in surface syntax
+    /// (`fn manhattan(): int`) plus the name's LSP range. This is what a reader expects when hovering
+    /// a call — [`hover_type`] alone reports only the call *expression's* type (its return type,
+    /// e.g. `int`), never the parameters. The server shows this ahead of the type hover when it
+    /// resolves.
+    ///
+    /// Resolves three positions: a bare function name (`classify` — a call or a top-level `fn`
+    /// declaration name), a member method name (`p.manhattan` — the receiver's value type supplies
+    /// the owning type), and an associated-function name (`Point.origin` — the receiver is the type
+    /// itself). `None` when the cursor is not on a name that resolves to a function declaration in
+    /// this workspace (built-ins have no `FnDecl` to show).
+    ///
+    /// [`hover_type`]: Self::hover_type
+    pub fn hover_signature(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(String, Range)> {
+        let (cache, doc, source) = self.doc_cache(uri)?;
+        let db = &self.db;
+        let text = doc.text(db);
+        let index = LineIndex::new(text);
+        let offset = index.offset(position, encoding);
+
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+
+        // The identifier token under the cursor — the callable's name, and the range to underline.
+        let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|t| {
+            t.kind == TokenKind::Ident
+                && t.span.source == source
+                && t.span.start <= offset
+                && offset <= t.span.end
+        })?;
+
+        let def_use = resolve::DefUse::build(program);
+        let decl = if let Some((receiver_span, member)) = def_use.member_at(offset, source) {
+            // `recv.m` or `Type.f`: name the owning type, then find the method/associated fn on it.
+            let type_name =
+                self.receiver_type_name(program, cache.workspace, doc, text, receiver_span);
+            type_method(program, type_name.as_deref()?, member)?
+        } else {
+            // A bare name: a free function (call site or its own declaration name), else — if the
+            // cursor is on a method's declaration name — that method.
+            let name = &text[token.span.range()];
+            match top_level_fn(program, name) {
+                Some(decl) => decl,
+                None => method_decl_at(program, offset, source)?,
+            }
+        };
+        Some((render_fn_signature(decl), index.range(token.span, encoding)))
+    }
+
+    /// The nominal type name a member-access receiver refers to, for [`hover_signature`]. A receiver
+    /// that is itself a declared type name (`Point.origin`) names that type directly — an associated
+    /// function call; any other receiver is a value whose nominal type comes from the workspace type
+    /// index (`p.manhattan` where `p: Point`). `None` if the receiver has no nominal type.
+    fn receiver_type_name(
+        &self,
+        program: &noeta_ast::Program,
+        workspace: noeta_db::Workspace,
+        doc: SourceProgram,
+        text: &str,
+        receiver_span: Span,
+    ) -> Option<String> {
+        let recv = &text[receiver_span.range()];
+        if is_declared_type(program, recv) {
+            return Some(recv.to_string());
+        }
+        let checked = noeta_db::linked_checked_ide_from(&self.db, workspace, doc);
+        checked
+            .expr_types
+            .get(&receiver_span)
+            .and_then(nominal_name)
+            .map(str::to_string)
+    }
+
     /// A hover for a **namespace-group** binding (`http` from `use std.http`, module-namespaces):
     /// the group's qualified prefix and its members. A group is not a typed value, so [`hover_type`]
     /// returns nothing for it — this fills that gap. `None` unless the cursor's identifier is a group
@@ -2160,6 +2243,55 @@ fn top_level_fn<'a>(program: &'a noeta_ast::Program, name: &str) -> Option<&'a n
     })
 }
 
+/// Render a function/method declaration in Noeta surface syntax for a signature hover:
+/// `fn manhattan(): int`, `fn bump(by: int): void`, or `fn origin()` when the return type is
+/// unannotated. Parameters use the same `name: T` spelling as signature help and symbol detail.
+fn render_fn_signature(decl: &noeta_ast::FnDecl) -> String {
+    let params: Vec<String> = decl.params.iter().map(symbols::param_detail).collect();
+    let head = format!("fn {}({})", decl.name, params.join(", "));
+    match &decl.ret {
+        Some(ret) => format!("{head}: {}", symbols::render_type_ref(ret)),
+        None => head,
+    }
+}
+
+/// Whether `name` is a type declared in this program (a `struct`/`class`/`enum`) — the signal that a
+/// member-access receiver like `Point` in `Point.origin` is the type itself (an associated-function
+/// call) rather than a value.
+fn is_declared_type(program: &noeta_ast::Program, name: &str) -> bool {
+    program.stmts.iter().any(|stmt| {
+        matches!(stmt,
+            noeta_ast::Stmt::Struct(d) if d.name == name)
+            || matches!(stmt, noeta_ast::Stmt::Class(d) if d.name == name)
+            || matches!(stmt, noeta_ast::Stmt::Enum(d) if d.name == name)
+    })
+}
+
+/// The method/associated-function declaration whose **own name** covers `offset` in file `source`,
+/// scanning every type's methods — so a signature hover works on a method's declaration name
+/// (`fn manhattan` in `struct Point`), not only at call sites. `None` if no method name is under the
+/// cursor.
+fn method_decl_at(
+    program: &noeta_ast::Program,
+    offset: u32,
+    source: SourceId,
+) -> Option<&noeta_ast::FnDecl> {
+    let covers = |decl: &noeta_ast::FnDecl| {
+        decl.name_span.source == source
+            && decl.name_span.start <= offset
+            && offset <= decl.name_span.end
+    };
+    program.stmts.iter().find_map(|stmt| {
+        let methods = match stmt {
+            noeta_ast::Stmt::Struct(d) => &d.methods,
+            noeta_ast::Stmt::Class(d) => &d.methods,
+            noeta_ast::Stmt::Enum(d) => &d.methods,
+            _ => return None,
+        };
+        methods.iter().find(|m| covers(m))
+    })
+}
+
 /// The `(name, tier-name span)` of the `@<name> { … }` tier block/expression whose tier name
 /// covers `offset` in file `source`, if any (expr-tiers/text-tiers hover). Walks statement bodies
 /// and the expression positions a `TierExpr` can occupy — a block is usually a binding value,
@@ -3197,6 +3329,42 @@ mod tests {
         };
         assert_eq!(at(7).as_deref(), Some("List<int>")); // the `[1, 2, 3]` literal
         assert_eq!(at(8).as_deref(), Some("int")); // the `1` element
+    }
+
+    #[test]
+    fn hover_signature_shows_the_declaration_of_the_callable_under_the_cursor() {
+        let mut store = test_store();
+        let src = "fn add(a: int, b: int): int { return a + b }\n\
+                   struct Point {\n\
+                   \x20   x: int = 0\n\
+                   \x20   fn manhattan(): int { return self.x }\n\
+                   \x20   fn origin(): Point { return Point {} }\n\
+                   }\n\
+                   r = add(1, 2)\n\
+                   p = Point {}\n\
+                   m = p.manhattan()\n\
+                   o = Point.origin()\n";
+        store.open("file:///s.noe", src.to_string());
+        let sig = |line, character| {
+            store
+                .hover_signature(
+                    "file:///s.noe",
+                    Position { line, character },
+                    Encoding::Utf8,
+                )
+                .map(|(label, _range)| label)
+        };
+        // A plain call: the free function's full signature, not the call's `int` result type.
+        assert_eq!(sig(6, 5).as_deref(), Some("fn add(a: int, b: int): int"));
+        // An instance-method call `p.manhattan()`: resolved through the receiver's `Point` type.
+        assert_eq!(sig(8, 9).as_deref(), Some("fn manhattan(): int"));
+        // An associated-function call `Point.origin()`: the receiver is the type itself.
+        assert_eq!(sig(9, 12).as_deref(), Some("fn origin(): Point"));
+        // Also works on the declaration names themselves.
+        assert_eq!(sig(0, 4).as_deref(), Some("fn add(a: int, b: int): int"));
+        assert_eq!(sig(3, 10).as_deref(), Some("fn manhattan(): int"));
+        // A non-callable identifier (the binding `r`) has no signature — the type hover handles it.
+        assert_eq!(sig(6, 0), None);
     }
 
     #[test]
