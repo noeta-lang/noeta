@@ -19,6 +19,7 @@ use noeta_vm::VmBackend;
 
 /// Run `src` on both backends and return both tracebacks.
 fn both_traces(src: &str) -> (Vec<TraceFrame>, Vec<TraceFrame>, Source) {
+    noeta_conformance::ensure_std_registry();
     let source = Source::new(SourceId::FIRST, "trace.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);

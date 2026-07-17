@@ -16,6 +16,7 @@ use noeta_stdlib::{MetricData, MetricPoints, MetricValue, SandboxHost};
 use noeta_vm::VmBackend;
 
 fn compile(text: &str) -> noeta_bytecode::Module {
+    noeta_conformance::ensure_std_registry();
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, "metrics.noe", text);
     let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);

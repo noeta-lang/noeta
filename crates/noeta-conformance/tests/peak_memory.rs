@@ -62,6 +62,7 @@ fn vec3_list_src(n: usize, packed: bool) -> String {
 }
 
 fn parse_program(src: &str) -> noeta_ast::Program {
+    noeta_conformance::ensure_std_registry();
     let source = Source::new(SourceId::FIRST, "peak.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
