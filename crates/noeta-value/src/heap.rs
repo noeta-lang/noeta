@@ -883,13 +883,17 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => items.iter().copied().for_each(&mut push),
         // Sorted-key order: `children` feeds `release_value`'s destructor walk, and destruct order is
-        // observable, so it must be deterministic and match the tree-walker's sorted map (values that
-        // are immediates — e.g. every entry in an int-valued map — are excluded by `push`, so this
-        // sort only runs for maps that actually hold destructor-reachable references).
+        // observable, so it must be deterministic and match the tree-walker's sorted map. The sort is
+        // GUARDED on actually holding a pointer value: an all-immediate map (e.g. every
+        // Map<string, int>) has zero children, so ordering is unobservable and the O(n log n) sort
+        // over n string keys is pure teardown tax — perf-profiled at ~21% of the whole 300k-entry
+        // xlang assoc run before the guard.
         Payload::Map(entries) => {
-            let mut kv: Vec<(&MapKey, &Value)> = entries.iter().collect();
-            kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
-            kv.into_iter().for_each(|(_, &v)| push(v));
+            if entries.values().any(|v| v.is_pointer()) {
+                let mut kv: Vec<(&MapKey, &Value)> = entries.iter().collect();
+                kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                kv.into_iter().for_each(|(_, &v)| push(v));
+            }
         }
         Payload::Closure { upvalues, .. } => upvalues.iter().copied().for_each(&mut push),
         Payload::Cell(inner) => push(*inner),

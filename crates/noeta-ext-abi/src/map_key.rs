@@ -233,6 +233,10 @@ impl Eq for MapKey {}
 /// order in declaration order. Cross-kind `Int < Str < Extern < Packed` (arbitrary but fixed; a
 /// typed map never mixes kinds, so this only steadies `dyn` paths).
 impl Ord for MapKey {
+    // Inlined by request: the deterministic destructor-order sort compares millions of keys on
+    // big-map teardown, and the 4-variant match stopped inlining into the sort on its own —
+    // measured as ~+13% instructions on the 300k-entry assoc bench.
+    #[inline]
     fn cmp(&self, other: &MapKey) -> Ordering {
         // Cross-kind rank: Int(0) < Str(1) < Extern(2) < Packed(3).
         fn rank(k: &MapKey) -> u8 {
