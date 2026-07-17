@@ -22,6 +22,9 @@ cranelift-codegen = "0.133"
 cranelift-native = "0.133"
 
 [dev-dependencies]
+# Tests are their own assembling driver (audit-6 F2): they seed the process-default registry
+# with the std units before compiling through noeta-compiler's default options.
+noeta-stdlib = { workspace = true }
 noeta-span = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-lexer = { workspace = true }

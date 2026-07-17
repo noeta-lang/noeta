@@ -524,7 +524,12 @@ mod all_list_guard {
         );
         // And every ALL entry round-trips through its stable code.
         for c in DiagnosticCode::ALL {
-            assert_eq!(DiagnosticCode::from_code(c.code()), Some(*c), "{}", c.code());
+            assert_eq!(
+                DiagnosticCode::from_code(c.code()),
+                Some(*c),
+                "{}",
+                c.code()
+            );
         }
     }
 }

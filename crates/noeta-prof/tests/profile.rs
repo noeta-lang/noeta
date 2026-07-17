@@ -592,7 +592,6 @@ fn top_functions_ranks_the_hot_leaf_with_its_percentage() {
     );
 }
 
-
 /// The one-pipeline slice: the profiler resolves dependency packages exactly as `noeta run` does.
 /// Before the fix its loader saw siblings only, so a program with a path dependency profiled to an
 /// unresolved-import panic while running fine under `noeta run`.
@@ -627,6 +626,10 @@ fn profiles_a_program_with_a_path_dependency() {
     .unwrap();
 
     let report = noeta_prof::profile(&app.join("main.noe"), noeta_prof::Mode::Summary);
-    assert_eq!(report.exit_code, 0, "dep resolves under the profiler: {}", report.stderr);
+    assert_eq!(
+        report.exit_code, 0,
+        "dep resolves under the profiler: {}",
+        report.stderr
+    );
     assert_eq!(report.stdout, "got=42\n");
 }

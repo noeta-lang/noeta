@@ -8,6 +8,8 @@ use noeta_span::{Source, SourceId};
 
 /// Compile `text` through the salsa pipeline and wrap it as a `.noeb` bundle.
 fn build_bundle(text: &str) -> Vec<u8> {
+    // Own assembling driver (audit-6 F2): seed the std units before the front-end runs.
+    noeta_stdlib::registry::default_seeded();
     let db = noeta_db::LangDatabase::default();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let src = noeta_db::source_program(&db, &source, noeta_db::Edition::DEFAULT);

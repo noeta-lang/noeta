@@ -134,6 +134,7 @@ fn which(name: &str) -> Option<PathBuf> {
 /// runner and compare against the native VM. `Err` is a setup problem (missing tools), distinct
 /// from per-program divergences in the report.
 pub fn run_wasm_differential(root: &Path, only: Option<&Path>) -> Result<WasmDiffReport, String> {
+    crate::ensure_std_registry();
     let tools = discover_tools()?;
     let mut cases = Vec::new();
     collect_cases(root, &mut cases);

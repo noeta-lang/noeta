@@ -690,7 +690,8 @@ fn lex_program(
         .flat_map(|l| l.text_tier_decls.iter().cloned())
         .collect();
     declared.extend(
-        noeta_stdlib::registry::ext_verbatim_tier_names()
+        noeta_native::registry::single_registry_process()
+            .ext_verbatim_tier_names()
             .into_iter()
             .map(str::to_string),
     );
@@ -793,9 +794,10 @@ fn link_core(
     dep_drivers: &[&Program],
     retain: RetainPolicy,
 ) -> Result<Program, Vec<LoadDiagnostic>> {
-    // For the complete policy: the always-retained roots are the std extensions. The loader is
-    // already global-registry-coupled (verbatim-tier names below), so the default seed is the lens.
-    let reg = noeta_stdlib::registry::single_registry_process();
+    // For the complete policy: the always-retained roots are the installed extensions. The loader
+    // is already global-registry-coupled (verbatim-tier names below), so the process default —
+    // seeded by the assembling driver (audit-6 F2) — is the lens.
+    let reg = noeta_native::registry::single_registry_process();
     // A module contributes only if it declares a namespace to resolve against.
     let module_views: Vec<ModuleView> = pool
         .iter()
@@ -1303,6 +1305,31 @@ fn decl_name(stmt: &Stmt) -> Option<&str> {
 mod tests {
     use super::*;
     use noeta_ast::Expr;
+
+    /// Seeding wrappers: production drivers seed the process-default registry before the loader
+    /// runs (audit-6 F2 — the loader consumes the registry as data and does not link the std
+    /// units); these tests are their own driver, so the wrappers seed via the dev-dependency.
+    /// Local items shadow the `use super::*` glob, so every call below goes through them.
+    fn link(
+        entry_name: &str,
+        entry_text: &str,
+        root_edition: noeta_lexer::Edition,
+        siblings: &[RawModule],
+    ) -> Result<Linked, Vec<LoadDiagnostic>> {
+        noeta_stdlib::registry::default_seeded();
+        super::link(entry_name, entry_text, root_edition, siblings)
+    }
+
+    fn link_with_deps(
+        entry_name: &str,
+        entry_text: &str,
+        root_edition: noeta_lexer::Edition,
+        siblings: &[RawModule],
+        deps: &[DepPackage],
+    ) -> Result<Linked, Vec<LoadDiagnostic>> {
+        noeta_stdlib::registry::default_seeded();
+        super::link_with_deps(entry_name, entry_text, root_edition, siblings, deps)
+    }
 
     fn module(name: &str, text: &str) -> RawModule {
         RawModule {

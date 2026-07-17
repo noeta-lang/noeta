@@ -414,6 +414,7 @@ mod tests {
     use super::*;
 
     fn opened(source: &str) -> Opened {
+        noeta_stdlib::registry::default_seeded();
         open(&Some(source.to_string()), &None).unwrap()
     }
 

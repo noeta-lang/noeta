@@ -62,6 +62,7 @@ fn vec3_list_src(n: usize, packed: bool) -> String {
 }
 
 fn parse_program(src: &str) -> noeta_ast::Program {
+    noeta_conformance::ensure_std_registry();
     let source = Source::new(SourceId::FIRST, "peak.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -85,11 +86,8 @@ fn compile_program(src: &str) -> Module {
 /// 8000-element literal (which on the eval side would otherwise dominate and hide the win).
 fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::RunResult {
     let checked = noeta_check::check_all(&program);
-    let ir = noeta_ir::lower_with_sites(
-        &program,
-        noeta_ir::lowering_sites!(checked.sites),
-    )
-    .expect("Core-IR lowering is total over the parsed language");
+    let ir = noeta_ir::lower_with_sites(&program, noeta_ir::lowering_sites!(checked.sites))
+        .expect("Core-IR lowering is total over the parsed language");
     let relevance = noeta_ir_passes::Relevance {
         locals: checked.sites.destructor_relevance.locals.clone(),
         params: checked.sites.destructor_relevance.params.clone(),

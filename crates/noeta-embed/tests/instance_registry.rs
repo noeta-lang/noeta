@@ -204,7 +204,9 @@ fn hot_swap_checks_against_the_session_registry() {
     // able to hot-swap an edit to the same program — a swap wrongly checked against the default
     // registry fails with the unknown-tier error even though nothing about the tier changed.
     let v = |n: u8| {
-        format!("@audit {{\n  fn probe(): int {{ return 1; }}\n}}\nfn version(): int {{ return {n}; }}\n")
+        format!(
+            "@audit {{\n  fn probe(): int {{ return 1; }}\n}}\nfn version(): int {{ return {n}; }}\n"
+        )
     };
     let mut s = Session::builder()
         .with_extensions(vec![&PLUGIN])
@@ -236,7 +238,6 @@ fn the_checker_scopes_the_tier_namespace_to_the_session_registry() {
         other => panic!("the default session must reject the unknown `@audit` tier, got {other:?}"),
     }
 }
-
 
 #[test]
 fn a_mis_assembled_extension_set_is_an_error_not_a_panic() {

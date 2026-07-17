@@ -18,6 +18,7 @@ use noeta_vm::VmBackend;
 /// Compile a single-file program to a runnable module (panicking on any front-end diagnostic — the
 /// test programs are known-good).
 fn compile(text: &str) -> noeta_bytecode::Module {
+    noeta_conformance::ensure_std_registry();
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, "telemetry_serve.noe", text);
     let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);

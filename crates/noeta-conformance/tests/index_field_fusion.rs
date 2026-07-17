@@ -12,6 +12,7 @@ use noeta_span::{Source, SourceId};
 
 /// Lower `src` with the checker's site maps and return the pretty-printed Core IR.
 fn lowered_ir(src: &str) -> String {
+    noeta_conformance::ensure_std_registry();
     let source = Source::new(SourceId::FIRST, "fuse.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -26,11 +27,8 @@ fn lowered_ir(src: &str) -> String {
         "program must check cleanly: {:?}",
         checked.diagnostics
     );
-    let ir = noeta_ir::lower_with_sites(
-        &parsed.program,
-        noeta_ir::lowering_sites!(checked.sites),
-    )
-    .expect("lowering is total over the parsed language");
+    let ir = noeta_ir::lower_with_sites(&parsed.program, noeta_ir::lowering_sites!(checked.sites))
+        .expect("lowering is total over the parsed language");
     noeta_ir::dump(&ir)
 }
 

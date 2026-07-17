@@ -14,7 +14,7 @@ impl Checker {
     /// before the selective-function case: `use std.id.Uuid` names a *type* in the `id` unit, not a
     /// function, so it must not fall into the "module has no function" error.
     pub(crate) fn collect_imports(&mut self, program: &Program) {
-        use noeta_stdlib::registry::UseKind;
+        use noeta_native::registry::UseKind;
         for stmt in &program.stmts {
             let Stmt::Use { path, names, .. } = stmt else {
                 continue;
@@ -537,7 +537,7 @@ impl Checker {
     pub(crate) fn resolve_bundle_ref(
         &self,
         trait_name: &str,
-    ) -> Option<(String, &'static noeta_stdlib::ExtBundle)> {
+    ) -> Option<(String, &'static noeta_native::ExtBundle)> {
         let (module_ref, bundle_name) = trait_name.rsplit_once('.')?;
         let qualified = self.imports.modules.get(module_ref)?;
         let bundle = self.reg().find_bundle(qualified, bundle_name)?;

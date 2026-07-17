@@ -52,6 +52,8 @@ The DAG is genuinely acyclic and the two backends are genuinely siblings, as doc
 
 **Perf-regression risk:** none (build-graph only).
 
+**Disposition (RESOLVED, `stdlib-split` branch):** (a) landed as `f58e238c` (value/gc depend only on noeta-native). (b) landed without a metadata/body table split: reading the code showed the split already exists at the *value* level — all registration vocabulary and the registry mechanism (assembly, the process-default slot, every lookup) live in `noeta-native` since P-NATIVE/N3.0, and the front-end consumes the assembled `Registry` as **runtime data**. The only compile-time tie was the lazy std-seeding fallback, so: `noeta-native` gained the loud `registry::single_registry_process()` accessor (panics with instructions when unseeded) + `Registry::ext_verbatim_tier_names()`; `noeta-check`/`noeta-loader`/`noeta-compiler`/`noeta-ir`/`noeta-db` re-pointed at it and dropped their stdlib edges (stdlib is now a dev-dependency for their self-driving tests only); seeding responsibility moved to the assembling drivers (`run_cli`, `noeta-runner::load_project`, `noeta-embed`, `aot-runtime`, the conformance harness — all already linking stdlib). No table moves, no symbolic-id indirection, no derived projection to drift; the extension-author ABI and the differential-oracle dispatch flow are untouched. `touch crates/noeta-stdlib/src/datetime.rs && cargo build -p noeta-cli` now rebuilds 10 crates (stdlib, runtime, vm, ide, runner, dap, prof, mcp, lsp, cli) instead of 17 — the whole front-end (check/ir/ir-passes/loader/compiler/pm/db) stays cached.
+
 ---
 
 ## Finding 3 — Toolchain-side error handling is stringly-typed at crate boundaries (`noeta-pm`: 148 `Result<_, String>`s)

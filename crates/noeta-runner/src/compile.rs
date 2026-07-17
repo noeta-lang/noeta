@@ -217,6 +217,10 @@ impl Loaded {
 /// links to itself; dependency packages re-rooted under their keys) and activate the selected
 /// tiers. The back half of the pipeline behind [`compile_whole_file`]'s cache probe.
 pub fn load_project(file: &Path, facts: &FrontFacts) -> Result<Loaded, CompileFailure> {
+    // The front-end (loader/checker/compiler) consumes the extension registry as data and does not
+    // link the std units (audit-6 F2) — the assembling driver seeds. A composed binary's earlier
+    // explicit `install` wins; after any install this is a no-op.
+    noeta_stdlib::registry::default_seeded();
     let linked = load_linked(file, facts)?;
     let sources = linked.sources;
     let editions = linked.editions;

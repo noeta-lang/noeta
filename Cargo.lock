@@ -4002,6 +4002,7 @@ dependencies = [
  "noeta-diagnostics",
  "noeta-edition",
  "noeta-lexer",
+ "noeta-native",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
@@ -4064,6 +4065,7 @@ dependencies = [
  "noeta-ir",
  "noeta-ir-passes",
  "noeta-lexer",
+ "noeta-native",
  "noeta-object",
  "noeta-parser",
  "noeta-span",
@@ -4282,6 +4284,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
 ]
 
 [[package]]
@@ -4301,6 +4304,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
  "noeta-value",
  "object 0.37.3",
 ]
@@ -4330,6 +4334,7 @@ dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
  "noeta-lexer",
+ "noeta-native",
  "noeta-parser",
  "noeta-span",
  "noeta-stdlib",
@@ -4341,6 +4346,7 @@ version = "0.1.0"
 dependencies = [
  "noeta-diagnostics",
  "noeta-ide",
+ "noeta-stdlib",
  "serde",
  "serde_json",
  "tokio",

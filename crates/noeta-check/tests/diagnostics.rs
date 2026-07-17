@@ -25,6 +25,8 @@ fn render_checks(src: &str) -> String {
 
 #[test]
 fn checker_diagnostic_gallery() {
+    // This test is its own assembling driver (audit-6 F2): seed the std units first.
+    noeta_stdlib::registry::default_seeded();
     // One representative program per checker diagnostic. E0013 (unknown type) is deferred to
     // M1.9 and intentionally absent.
     let cases = [

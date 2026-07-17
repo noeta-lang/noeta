@@ -3,6 +3,13 @@
 //! the end-to-end coverage; these pin specific rules in isolation.
 
 use super::{check, resolve_type_of_sites};
+
+/// Seed the process-default registry with the std units. Production drivers do this before the
+/// checker runs (audit-6 F2 — the checker consumes the registry as data and no longer links the
+/// std units); these tests are their own driver, so every funnel below seeds first. Idempotent.
+fn seed_std() {
+    noeta_stdlib::registry::default_seeded();
+}
 use noeta_ast::reflect::TypeRepr;
 use noeta_lexer::lex;
 use noeta_parser::parse;
@@ -11,6 +18,7 @@ use noeta_span::{Source, SourceId};
 /// Parse `text` and return the resolved full-fidelity `TypeRepr`s for its `type_of` sites, in no
 /// particular order (one program under test has a single site, so order is irrelevant).
 fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -22,6 +30,7 @@ fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
 
 /// Parse `text` and return the checker's diagnostic codes (wire form), in order.
 fn codes(text: &str) -> Vec<String> {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -1110,6 +1119,7 @@ fn attribute_argument_type_mismatch_is_reported() {
 /// Parse `__probe = <expr>;`, then check the binding's value against `expected`, returning the
 /// resulting diagnostic codes.
 fn check_value_against(expr: &str, expected: noeta_types::Type) -> Vec<String> {
+    seed_std();
     let text = format!("__probe = {expr};");
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
@@ -1759,6 +1769,7 @@ fn closure_default_may_reference_a_captured_variable() {
 
 /// Parse `text` and return the checker's per-binding destructor-relevance (Phase 3.2b).
 fn relevance(text: &str) -> super::DestructorRelevance {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -1926,6 +1937,7 @@ fn primitive_list_is_not_recorded() {
 
 /// Parse + check `text` and return how many `list[i].field` reads the checker marked fusable.
 fn index_field_count(text: &str) -> usize {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -1990,6 +2002,7 @@ fn indexed_method_call_is_not_fusable() {
 
 /// Parse + check `text` and return how many `map(...)` calls produce a packed result.
 fn map_packed_count(text: &str) -> usize {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -2039,6 +2052,7 @@ fn map_to_non_packed_struct_is_not_recorded() {
 
 /// Parse + check `text` and return the name→layout table the IDE reads.
 fn packed_layout_table(text: &str) -> std::collections::HashMap<String, PackedLayout> {
+    seed_std();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -2125,6 +2139,7 @@ fn function_returning_or_diverging_on_every_path_is_clean() {
 /// Parse one entry with its own `SourceId` (as the REPL/console assigns them) and check it against
 /// `session`, returning this entry's diagnostic codes.
 fn entry_codes(session: &mut super::SessionChecker, id: u32, text: &str) -> Vec<String> {
+    seed_std();
     let source = Source::new(SourceId(id), format!("<entry:{id}>"), text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -2142,6 +2157,7 @@ fn entry_codes(session: &mut super::SessionChecker, id: u32, text: &str) -> Vec<
 
 #[test]
 fn a_session_entry_sees_what_earlier_entries_committed() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // Entry 1: a fn, a type, a binding — all clean.
     assert!(
@@ -2165,6 +2181,7 @@ fn a_session_entry_sees_what_earlier_entries_committed() {
 
 #[test]
 fn forward_references_work_within_an_entry_and_unknown_names_stay_runtime_deferred() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // Within one entry, a call may precede the declaration (collect runs first) — like any file.
     assert!(
@@ -2186,6 +2203,7 @@ fn forward_references_work_within_an_entry_and_unknown_names_stay_runtime_deferr
 
 #[test]
 fn mut_stability_rules_apply_across_entries() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     assert!(entry_codes(&mut session, 0, "mut n = 1\nfixed = 2\n").is_empty());
     // Compatible reassignment across the boundary: fine.
@@ -2201,6 +2219,7 @@ fn mut_stability_rules_apply_across_entries() {
 
 #[test]
 fn an_erroring_entry_leaves_the_session_usable_and_diagnostics_do_not_leak() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // A genuinely static error mid-entry (mut retype within the entry).
     assert_eq!(
@@ -2213,6 +2232,7 @@ fn an_erroring_entry_leaves_the_session_usable_and_diagnostics_do_not_leak() {
 
 #[test]
 fn reserved_names_refuse_in_a_session_entry() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // A prelude value name (E0046) and a reserved language-level type name (E0049) refuse, as in a
     // file. (A registered extern type like `Uuid` is no longer reserved — see the file-level test.)
@@ -2228,6 +2248,7 @@ fn reserved_names_refuse_in_a_session_entry() {
 
 #[test]
 fn destruct_reachability_refixpoints_over_the_accumulated_registry() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // Entry 1: a plain container — nothing destructor-bearing yet.
     assert!(
@@ -2259,6 +2280,7 @@ fn destruct_reachability_refixpoints_over_the_accumulated_registry() {
 
 #[test]
 fn an_erroring_entry_is_transactional_and_commits_nothing() {
+    seed_std();
     let mut session = super::SessionChecker::new();
     // The entry binds `fixed2` immutably AND then errors — the whole entry rolls back.
     assert_eq!(
@@ -2322,6 +2344,8 @@ fn legitimate_forward_and_nested_references_stay_clean() {
 #[test]
 fn a_repl_session_defers_unknown_names_to_a_later_entry() {
     // A session is the ONE place an unknown name stays deferred — a later entry may define it.
+    // Seed before construction: register_prelude resolves against the process-default registry.
+    seed_std();
     let mut session = super::SessionChecker::new();
     assert!(entry_codes(&mut session, 0, "echo later()\n").is_empty());
     assert!(entry_codes(&mut session, 1, "fn later(): int { return 3 }\n").is_empty());

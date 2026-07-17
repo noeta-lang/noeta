@@ -54,6 +54,7 @@ fn diagnostics(diags: &[Diagnostic]) -> &[Diagnostic] {
 
 /// Drive an identical script through both sessions and assert every step agrees.
 fn assert_sessions_agree(script: &[Step]) {
+    noeta_conformance::ensure_std_registry();
     let mut eval = EvalSession::new();
     let mut vm = VmSession::new(Box::new(|| {
         (

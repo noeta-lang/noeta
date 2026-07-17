@@ -1350,9 +1350,16 @@ async fn serve() {
 mod tests {
     use super::*;
 
+    /// Tests are their own assembling driver (audit-6 F2): seed the std units before the
+    /// document store's first check.
+    fn store() -> DocumentStore {
+        noeta_stdlib::registry::default_seeded();
+        DocumentStore::default()
+    }
+
     #[test]
     fn diagnostic_maps_to_lsp_wire_form() {
-        let mut store = DocumentStore::default();
+        let mut store = store();
         // A binding whose value violates its annotation — a check-stage mismatch (E0007).
         store.open("file:///bad.noe", "count: int = \"lots\"".to_string());
         let (diags, text) = store.diagnostics("file:///bad.noe").unwrap();
@@ -1380,7 +1387,7 @@ mod tests {
 
     #[test]
     fn call_hierarchy_maps_to_wire_items_with_roles_in_detail() {
-        let mut store = DocumentStore::default();
+        let mut store = store();
         store.open(
             "file:///h.noe",
             "@attribute\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\n\n#[Route(\"/x\")]\nfn handle(): int { return work() }\nfn work(): int { return 1 }\necho handle()\n"
@@ -1431,7 +1438,7 @@ mod tests {
 
     #[test]
     fn role_lenses_map_to_wire_code_lenses() {
-        let mut store = DocumentStore::default();
+        let mut store = store();
         store.open(
             "file:///l.noe",
             "@attribute\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\n\n#[Route(\"/x\")]\nfn handle(): int { return 1 }\n"
@@ -1459,7 +1466,7 @@ mod tests {
 
     #[test]
     fn document_symbols_map_to_nested_wire_symbols() {
-        let mut store = DocumentStore::default();
+        let mut store = store();
         store.open(
             "file:///s.noe",
             "struct Point { x: int; y: int }\n".to_string(),

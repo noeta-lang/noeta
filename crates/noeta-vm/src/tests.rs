@@ -154,6 +154,7 @@ fn fragment(src: &str) -> Program {
 /// alive (T3), the module arena'd, and the [`DebugSession`] installed — the debug console's
 /// launch shape. Returns the Vm ready to `run_top` entry 0.
 fn debug_session_vm<'a>(arena: &'a typed_arena::Arena<Module>, src: &str) -> Vm<'a> {
+    noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);

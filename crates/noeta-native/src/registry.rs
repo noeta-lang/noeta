@@ -1258,6 +1258,18 @@ impl Registry {
         self.ext_tiers().find(|t| t.name == name)
     }
 
+    /// Every installed extension's **verbatim-body** tier names — the text tiers (`doc` →
+    /// markdown) and expression tiers whose `@<name> { … }` bodies the lexer must capture
+    /// un-parsed. The front-end (loader, salsa db) seeds the lexer's `TextTiers` with these so a
+    /// native tier's bodies capture even though no `.noe` file declares them (a program
+    /// `@tier(…, text/expr)` is discovered by the lexer's own token scan instead).
+    pub fn ext_verbatim_tier_names(&self) -> Vec<&'static str> {
+        self.ext_tiers()
+            .filter(|t| t.text.is_some() || t.expr.is_some())
+            .map(|t| t.name)
+            .collect()
+    }
+
     /// Every installed extension's declared prelude attributes, in install order.
     pub fn ext_attributes(&self) -> impl Iterator<Item = &'static ExtAttribute> + '_ {
         self.units.iter().flat_map(|e| e.attributes().iter())
@@ -1498,6 +1510,30 @@ static DEFAULT: OnceLock<Registry> = OnceLock::new();
 /// seeding).
 pub fn default_registry() -> Option<&'static Registry> {
     DEFAULT.get()
+}
+
+/// The process-global default [`Registry`], named for what calling it MEANS: **this call site
+/// assumes a single-registry process** (cross-cutting audit finding 5). The front-end crates
+/// (checker, loader, IR lowering, bytecode compiler, salsa db) fall back to this when no
+/// per-session registry was threaded in — they consume the registry as *data* and deliberately do
+/// not link the crate that declares the units (audit-6 finding 2), so the **assembling binary owns
+/// seeding**: `noeta_cli::run_cli`, `noeta-runner`, and `noeta-embed` install at entry, and any
+/// other driver (a test suite, a bench, a new binary) must call
+/// `noeta_stdlib::registry::default_seeded()` (or `install`/`install_with_extras`) before its
+/// first front-end lookup.
+///
+/// Panics if nothing is installed — loudly, because the silent alternative is a checker that
+/// reports every `std.*` name as unknown.
+pub fn single_registry_process() -> &'static Registry {
+    default_registry().unwrap_or_else(|| {
+        panic!(
+            "no extension registry installed in this process — the assembling binary must seed \
+             the default registry before the first front-end lookup (call \
+             `noeta_stdlib::registry::default_seeded()` for the std units, or \
+             `install`/`install_with_extras` for a composed set), or thread a per-session \
+             registry through the options/`_with_registry` seams"
+        )
+    })
 }
 
 /// Install the binary's complete extension-unit list into the **default** registry — callable

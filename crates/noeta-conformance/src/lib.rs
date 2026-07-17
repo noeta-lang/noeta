@@ -179,8 +179,17 @@ fn expectation(d: &Diagnostic, at: noeta_span::LineCol) -> ErrorExpectation {
     }
 }
 
+/// Seed the process-default extension registry with the std units. The front-end
+/// (loader/checker/compiler/ir/db) consumes the registry as data and no longer links the std
+/// units (audit-6 F2), so every harness entry — and any test helper that calls
+/// `noeta_check`/`noeta_compiler`/`noeta_loader` directly — must seed first. Idempotent.
+pub fn ensure_std_registry() {
+    noeta_stdlib::registry::default_seeded();
+}
+
 /// Run a single named case (already-loaded source text) and compare it to its header.
 pub fn run_case(name: &str, text: &str, stage: Stage) -> CaseResult {
+    ensure_std_registry();
     let expectations = match Expectations::parse(text) {
         Ok(expectations) => expectations,
         Err(message) => return CaseResult::malformed(name, message),

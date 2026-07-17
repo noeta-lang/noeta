@@ -236,7 +236,8 @@ pub fn seed_ext_env(db: &mut dyn salsa::Database, verbatim_tier_names: Vec<Strin
 fn ext_verbatim_tier_names(db: &dyn salsa::Database) -> Vec<String> {
     match ExtEnv::try_get(db) {
         Some(env) => env.verbatim_tier_names(db).clone(),
-        None => noeta_stdlib::registry::ext_verbatim_tier_names()
+        None => noeta_native::registry::single_registry_process()
+            .ext_verbatim_tier_names()
             .into_iter()
             .map(str::to_string)
             .collect(),
@@ -747,7 +748,16 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> &Bytecode {
 mod tests {
     use super::*;
 
+    /// Seed the process-default registry with the std units — these tests are their own
+    /// assembling driver (audit-6 F2): an unseeded db falls back to the process default for the
+    /// extensions' verbatim-tier names, and the checker behind `checked`/`workspace_checked`
+    /// resolves std names against the same default.
+    fn seed_std() {
+        noeta_stdlib::registry::default_seeded();
+    }
+
     fn db_and_src(text: &str) -> (LangDatabase, SourceProgram) {
+        seed_std();
         let db = LangDatabase::default();
         let source = Source::new(SourceId::FIRST, "test.noe", text);
         let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
@@ -756,6 +766,7 @@ mod tests {
 
     #[test]
     fn the_ext_env_input_drives_workspace_text_tiers_and_invalidates() {
+        seed_std();
         // The extensions' verbatim-tier set is a real salsa INPUT: seeding it changes the
         // memoized answer, re-seeding invalidates. (Before, tracked queries read the process
         // global directly — a change could never invalidate a memoized parse.)

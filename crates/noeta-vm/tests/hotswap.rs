@@ -39,6 +39,7 @@ fn factory() -> noeta_vm::HostFactory {
 /// Launch `src` the way the CLI launch path does: checked compile, session adopted from it,
 /// entry 0 run to completion.
 fn boot(src: &str) -> VmSession {
+    noeta_stdlib::registry::default_seeded();
     let program = parse(src);
     let checked = noeta_check::check_all(&program);
     assert!(
@@ -66,6 +67,7 @@ fn apply(
     old_src: &str,
     new_src: &str,
 ) -> (SwapPlan, noeta_vm::SessionOutput) {
+    noeta_stdlib::registry::default_seeded();
     let checked = noeta_check::check_all(&parse(new_src));
     assert!(
         checked.diagnostics.is_empty(),
@@ -257,6 +259,7 @@ fn a_swap_lands_under_a_live_force_jit_engine() {
         )
     };
     let (v1, v2) = (v(1), v(2));
+    noeta_stdlib::registry::default_seeded();
     let program = parse(&v1);
     let checked = noeta_check::check_all(&program);
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);

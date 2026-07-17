@@ -11,6 +11,8 @@ noeta-ir = { workspace = true }
 noeta-span = { workspace = true }
 
 [dev-dependencies]
+# Tests seed the process-default registry (audit-6 F2); never part of the library build graph.
+noeta-stdlib = { workspace = true }
 noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
 

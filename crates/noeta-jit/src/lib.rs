@@ -3219,6 +3219,7 @@ mod tests {
     #[test]
     fn object_backend_compiles_the_same_bodies_into_an_object_file() {
         use noeta_compiler::compile;
+        noeta_stdlib::registry::default_seeded();
         use noeta_lexer::lex;
         use noeta_parser::parse;
         use noeta_span::{Source, SourceId};
@@ -3269,6 +3270,7 @@ mod tests {
     #[test]
     fn aot_compile_module_emits_every_native_proto_as_a_defined_symbol() {
         use noeta_compiler::compile;
+        noeta_stdlib::registry::default_seeded();
         use noeta_lexer::lex;
         use noeta_parser::parse;
         use noeta_span::{Source, SourceId};
