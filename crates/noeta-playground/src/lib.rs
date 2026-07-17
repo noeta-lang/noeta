@@ -24,10 +24,12 @@
 mod abi;
 mod browser_executor;
 mod browser_host;
+mod debug;
 mod ide;
 
 pub use browser_executor::BrowserExecutor;
 pub use browser_host::BrowserHost;
+pub use debug::debug_source;
 pub use ide::{complete_source, definition_source, hover_source, signature_source};
 
 use noeta_db::LangDatabase;

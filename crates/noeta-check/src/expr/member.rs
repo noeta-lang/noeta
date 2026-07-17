@@ -180,6 +180,14 @@ impl Checker {
         {
             return sig.ret.clone();
         }
+        // A method call on a trait object (L1 user traits, UT4) resolves against the trait's declared
+        // signatures — dispatched dynamically at runtime, but statically typed by the contract.
+        if let Type::DynTrait(tr) = recv
+            && let Some(decl) = self.symbols.user_traits.get(tr)
+            && let Some(m) = decl.methods.iter().find(|m| m.sig.name == name)
+        {
+            return field_type(&m.sig.ret, &self.imports.extern_types);
+        }
         if recv.defers_to_runtime() {
             return recv.clone();
         }

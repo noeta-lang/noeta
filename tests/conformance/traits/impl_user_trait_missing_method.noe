@@ -1,0 +1,6 @@
+// An `impl` of a user trait that omits a required method is rejected (L1, UT2). E0015.
+// expect: error E0015 at 6:6
+// expect: exit 1
+trait Greeter { fn greet(who: string): string }
+class Bad { x: int }
+impl Greeter for Bad { fn nope(): int { return 0 } }

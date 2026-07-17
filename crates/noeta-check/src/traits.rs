@@ -25,6 +25,12 @@ impl Checker {
         trait_span: Span,
         methods: &[FnDecl],
     ) {
+        // A user-defined trait (L1, UT2): validate conformance against its declared contract, then
+        // return before the built-in resolution below (which would otherwise report E0014).
+        if let Some(decl) = self.symbols.user_traits.get(trait_name).cloned() {
+            self.check_user_trait_impl(&decl, trait_span, methods);
+            return;
+        }
         let Some(t) = BuiltinTrait::from_name(trait_name) else {
             // A dotted path in an in-body impl is a method-bundle reference (kernel-methods K1)
             // used in the wrong position — bundles bind through the standalone form only.
@@ -97,8 +103,12 @@ impl Checker {
     /// [`Self::check_coherence`].
     pub(crate) fn check_standalone_impl(&mut self, decl: &ImplDecl) {
         // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
-        // validation — bundle resolution, packed-target + constraint checks, conflict rules.
-        if decl.trait_name.contains('.') {
+        // validation — bundle resolution, packed-target + constraint checks, conflict rules. But a
+        // cross-package **user trait** is *also* dotted once qualified (`para.aether.Store`), so a
+        // known user trait is never a bundle — check that first, or a dependency's standalone
+        // `impl Trait for T` would be misread as a bundle impl.
+        if decl.trait_name.contains('.') && !self.symbols.user_traits.contains_key(&decl.trait_name)
+        {
             self.check_bundle_impl(decl);
             return;
         }
@@ -119,11 +129,14 @@ impl Checker {
                      where the type is defined",
             );
         }
-        if !decl.methods.is_empty() {
+        // A standalone `impl` with a method body is supported for **user traits** (L1, UT2 — its
+        // methods are hoisted onto the target type by the loader). A built-in trait's standalone
+        // impl is still marker-only: its operator/protocol methods live in the type's own body.
+        if !decl.methods.is_empty() && !self.symbols.user_traits.contains_key(&decl.trait_name) {
             self.error(
                 DiagnosticCode::InvalidImpl,
                 decl.span,
-                "a standalone `impl` with methods is not yet supported",
+                "a standalone `impl` with methods is not yet supported for a built-in trait",
             )
             .help(
                 "only an empty-body capability impl (e.g. `impl Serialize for X {}`) is \
@@ -131,6 +144,172 @@ impl Checker {
             );
         }
         self.check_trait_impl(&decl.trait_name, decl.trait_span, &decl.methods);
+    }
+
+    /// Validate that an `impl` of a user trait provides its contract (L1, UT2): every **required**
+    /// (non-default) trait method must be present with matching arity and — when both sides annotate
+    /// them — matching parameter and return types. Default methods may be omitted (their fallback
+    /// body lands in UT5). Extra methods beyond the trait are allowed (inherent methods). Shares the
+    /// E0015 `InvalidImpl` code with the built-in path.
+    fn check_user_trait_impl(
+        &mut self,
+        decl: &noeta_ast::TraitDecl,
+        trait_span: Span,
+        methods: &[FnDecl],
+    ) {
+        for tm in &decl.methods {
+            if tm.has_default {
+                continue; // a default method is optional for an implementor
+            }
+            let req_name = &tm.sig.name;
+            let Some(m) = methods.iter().find(|m| &m.name == req_name) else {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    trait_span,
+                    format!("`impl {}` must define `fn {}`", decl.name, req_name),
+                )
+                .help(format!(
+                    "the `{}` trait requires `fn {}`",
+                    decl.name, req_name
+                ));
+                continue;
+            };
+            if m.params.len() != tm.sig.params.len() {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`{}` must take {} parameter(s) to satisfy trait `{}`, found {}",
+                        req_name,
+                        tm.sig.params.len(),
+                        decl.name,
+                        m.params.len()
+                    ),
+                );
+                continue;
+            }
+            for (i, (tp, ip)) in tm.sig.params.iter().zip(&m.params).enumerate() {
+                let want = field_type(&tp.ty, &self.imports.extern_types);
+                let got = field_type(&ip.ty, &self.imports.extern_types);
+                if !Self::sig_types_compatible(&want, &got) {
+                    self.error(
+                        DiagnosticCode::InvalidImpl,
+                        ip.name_span,
+                        format!(
+                            "parameter {} of `{}` is `{got}`, but trait `{}` declares `{want}`",
+                            i + 1,
+                            req_name,
+                            decl.name,
+                        ),
+                    );
+                }
+            }
+            let want_ret = field_type(&tm.sig.ret, &self.imports.extern_types);
+            let got_ret = field_type(&m.ret, &self.imports.extern_types);
+            if !Self::sig_types_compatible(&want_ret, &got_ret) {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`{}` returns `{got_ret}`, but trait `{}` declares `{want_ret}`",
+                        req_name, decl.name,
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Two signature types conform if either side is unannotated (`Unknown`) or `dyn` — those defer
+    /// — or they are equal. Deliberately structural-equality, not subtyping: a trait method's
+    /// contract is its exact signature (UT2).
+    fn sig_types_compatible(want: &Type, got: &Type) -> bool {
+        matches!(want, Type::Unknown | Type::Dyn)
+            || matches!(got, Type::Unknown | Type::Dyn)
+            || want == got
+    }
+
+    /// Validate a user-defined `trait` declaration (L1, UT1). The declaration was registered in
+    /// pass 1; here we reject a name that collides with a built-in trait, a declared type, or an
+    /// earlier `trait` of the same name, plus duplicated method signatures within the body. Default
+    /// method bodies are accepted syntactically but not yet type-checked (UT5).
+    pub(crate) fn check_trait_decl(&mut self, decl: &noeta_ast::TraitDecl) {
+        // A user trait may not shadow a built-in trait name — an `impl`/bound naming it would be
+        // ambiguous against the closed built-in set.
+        if BuiltinTrait::from_name(&decl.name).is_some() {
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                decl.name_span,
+                format!(
+                    "`{}` is a built-in trait and cannot be redeclared",
+                    decl.name
+                ),
+            );
+        } else if self.symbols.types.contains(&decl.name)
+            || self.symbols.records.contains_key(&decl.name)
+            || self.symbols.enums.contains_key(&decl.name)
+        {
+            // A trait and a type sharing a name would make `dyn {name}` / `{name}` ambiguous.
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                decl.name_span,
+                format!(
+                    "`{}` is already declared as a type; a trait cannot reuse the name",
+                    decl.name
+                ),
+            );
+        } else if self
+            .symbols
+            .user_traits
+            .get(&decl.name)
+            .is_some_and(|first| first.span != decl.span)
+        {
+            // A second `trait` of the same name; pass 1 kept the first.
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                decl.name_span,
+                format!("trait `{}` is declared more than once", decl.name),
+            );
+        }
+        // A trait accepts `#[...]` data attributes only; the `@`-directives are type-only and do not
+        // apply to a trait (UT6). Report the first offender.
+        let bad_directive = if !decl.derives.is_empty() {
+            Some("@derive")
+        } else if decl.attribute.is_some() {
+            Some("@attribute")
+        } else if decl.role.is_some() {
+            Some("@role")
+        } else if decl.semantic.is_some() {
+            Some("@semantic")
+        } else if decl.packed.is_some() {
+            Some("@packed")
+        } else {
+            None
+        };
+        if let Some(directive) = bad_directive {
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                decl.name_span,
+                format!("`{directive}` does not apply to a trait `{}`", decl.name),
+            )
+            .help(
+                "a trait accepts only `#[...]` data attributes; `@derive`/`@attribute`/`@role`/\
+                 `@semantic`/`@packed` are for data types",
+            );
+        }
+        // Duplicate method signatures within the trait body.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for m in &decl.methods {
+            if !seen.insert(m.sig.name.as_str()) {
+                self.error(
+                    DiagnosticCode::InvalidTraitDeclaration,
+                    m.sig.name_span,
+                    format!(
+                        "trait `{}` declares method `{}` more than once",
+                        decl.name, m.sig.name
+                    ),
+                );
+            }
+        }
     }
 
     /// Validate a method-bundle binding `impl <module>.<Bundle> for T {}` (kernel-methods K1).
@@ -347,7 +526,8 @@ impl Checker {
                     )
                     .help(
                         "derivable traits are `Equatable`, `Comparable`, `Display`, `Clone`, \
-                         `Serialize<Format>`; mark attribute records with the `@attribute` directive",
+                         `Serialize<Format>`, `Deserialize<Format>`; mark attribute records with the \
+                         `@attribute` directive",
                     );
                 continue;
             }
@@ -365,15 +545,44 @@ impl Checker {
                     )
                 };
                 self.error(DiagnosticCode::UnknownTrait, spec.span, msg).help(
-                        "`Serialize` is `@derive(Serialize<Json>)`; the other derivable traits take \
-                         no arguments",
+                        "`Serialize`/`Deserialize` are `@derive(Serialize<Json>)` / \
+                         `@derive(Deserialize<Json>)`; the other derivable traits take no arguments",
                     );
                 continue;
             }
-            // `Serialize`'s argument is a serialization **format** (a blessed token, not a general
-            // type), validated against the format vocabulary rather than the type namespace.
-            if spec.name == "Serialize" {
+            // `Serialize`/`Deserialize`'s argument is a serialization **format** (a blessed token, not a
+            // general type), validated against the format vocabulary rather than the type namespace.
+            if spec.name == "Serialize" || spec.name == "Deserialize" {
                 self.check_serialize_format(&spec.args[0]);
+            }
+            // `Deserialize<Json>` (L2.2 DI): the type must decode from JSON — a non-generic value struct
+            // all of whose fields are themselves decodable. `type_to_recipe` answers exactly that (it
+            // returns `None` for a class/enum/generic, or a struct with an undecodable field), so it is
+            // both the field-constraint check and the recipe the runtime registry needs. On success the
+            // `(type_name, recipe)` pair is recorded for the backends to bake; on failure it is E0050.
+            if spec.name == "Deserialize" {
+                match self.type_to_recipe(&Type::Named(type_name.to_string(), Vec::new())) {
+                    Some(recipe) => {
+                        self.sites
+                            .deserialize_recipes
+                            .push((type_name.to_string(), recipe));
+                    }
+                    None => {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            spec.span,
+                            format!(
+                                "cannot derive `Deserialize<Json>` for `{type_name}`: it has a \
+                                 field (or a shape) that cannot be decoded from JSON"
+                            ),
+                        )
+                        .help(
+                            "`Deserialize<Json>` is derivable for a value struct whose fields are all \
+                             JSON-decodable (numbers, `bool`, `string`, `Option`, `List`, \
+                             string-keyed `Map`, or another such struct)",
+                        );
+                    }
+                }
             }
             self.check_derive_field_constraint(type_name, t, spec.span);
         }
@@ -447,6 +656,7 @@ impl Checker {
         match ty {
             Type::Unknown
             | Type::Dyn
+            | Type::DynTrait(_)
             | Type::Int
             | Type::Float
             | Type::F32
@@ -668,8 +878,24 @@ impl Checker {
                 continue; // unconstrained by the arguments — nothing concrete to check against
             };
             for bound in bounds {
+                // A user-defined trait bound (L1, UT3): satisfied iff `concrete` has a recorded
+                // `impl` of it.
+                if self.symbols.user_traits.contains_key(bound) {
+                    if !self.satisfies_user_trait(concrete, bound) {
+                        self.error(
+                            DiagnosticCode::TraitBoundNotSatisfied,
+                            span,
+                            format!(
+                                "type `{concrete}` does not satisfy the bound `{bound}` on type \
+                                 parameter `{pname}` of `{name}`"
+                            ),
+                        )
+                        .help(format!("`{concrete}` must `impl {bound}` to be used here"));
+                    }
+                    continue;
+                }
                 // Bounds on a collected signature are validated trait names (E0014 otherwise); a
-                // non-built-in name is unreachable here, so skip rather than falsely report.
+                // non-built-in, non-user name is unreachable here, so skip rather than falsely report.
                 let Some(t) = BuiltinTrait::from_name(bound) else {
                     continue;
                 };
@@ -737,6 +963,24 @@ impl Checker {
             return true;
         }
         builtin_satisfies(ty, t)
+    }
+
+    /// Whether `ty` implements the user trait named `bound` (L1, UT3). Only a named user type can —
+    /// via a recorded in-body or standalone `impl` (`user_trait_impls`). A `dyn`/inference-hole
+    /// defers to runtime (never a false negative); a built-in/primitive type never implements a
+    /// user trait.
+    fn satisfies_user_trait(&self, ty: &Type, bound: &str) -> bool {
+        if ty.defers_to_runtime() {
+            return true;
+        }
+        match ty {
+            Type::Named(n, _) => self
+                .symbols
+                .user_trait_impls
+                .get(n)
+                .is_some_and(|s| s.contains(bound)),
+            _ => false,
+        }
     }
 
     /// Enforce the **trait bounds** on a registry function's bounded type variables (p2p P2): each

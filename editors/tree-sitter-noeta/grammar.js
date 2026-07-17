@@ -72,6 +72,7 @@ module.exports = grammar({
       $.struct_declaration,
       $.class_declaration,
       $.enum_declaration,
+      $.trait_declaration,
       $.impl_block,
       $.namespace_declaration,
       $.text_tier_block,
@@ -172,6 +173,27 @@ module.exports = grammar({
     struct_declaration: $ => seq(optional('pub'), 'struct', $._type_body_decl),
     class_declaration: $ => seq(optional('pub'), 'class', $._type_body_decl),
     enum_declaration: $ => seq(optional('pub'), 'enum', $._type_body_decl),
+
+    // A user-defined trait (L1): `pub? trait Name<T> { method-sigs }`. A trait method is a
+    // signature whose body is OPTIONAL — bodiless is a required method, a `{ … }` body a default —
+    // so it cannot reuse `function_declaration` (which requires a body).
+    trait_declaration: $ => seq(
+      optional('pub'),
+      'trait',
+      field('name', $.identifier),
+      optional($.type_parameters),
+      field('body', $.trait_body),
+    ),
+    trait_body: $ => seq('{', repeat($.trait_method), '}'),
+    trait_method: $ => seq(
+      optional('async'),
+      'fn',
+      field('name', $.identifier),
+      field('parameters', $.parameters),
+      optional(seq(':', field('return_type', $._type))),
+      optional(field('body', $.block)),
+      optional($._terminator),
+    ),
     _type_body_decl: $ => seq(
       field('name', $.identifier),
       optional($.type_parameters),
@@ -509,6 +531,7 @@ module.exports = grammar({
     // ------------------------------------------------------------------- types
     _type: $ => choice(
       $.primitive_type,
+      $.trait_object_type,
       $.generic_type,
       $.optional_type,
       $.union_type,
@@ -516,6 +539,9 @@ module.exports = grammar({
       $.function_type,
       $.identifier,
     ),
+    // `dyn Trait` (L1 UT4): the top type `dyn` followed by a trait name. Higher precedence than the
+    // bare `dyn` primitive so `dyn Foo` binds as one trait-object type, not primitive + stray name.
+    trait_object_type: $ => prec(1, seq('dyn', field('trait', $.identifier))),
     function_type: $ => prec.right(seq(
       '(', optional(commaSep($._type)), ')',
       '->', field('return', $._type),

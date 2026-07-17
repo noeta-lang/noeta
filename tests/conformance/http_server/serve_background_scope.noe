@@ -1,0 +1,55 @@
+// The background-task scope + scheduler run alongside `serve` in one nursery: the serve loop drives
+// sibling `spawn`ed tasks (its accept loop advances the task set each round), so a fire-and-forget
+// job queue (a handler enqueues a thunk, a worker runs it off the request path) and a scheduled
+// `sleep`-loop task both progress while the server accepts requests — no async-serve primitive. The
+// sandbox drives serve with a finite request script, then closes the listener. Both backends agree.
+// expect: stdout "queued /"
+// expect: stdout "[bg] ran a job"
+// expect: stdout "queued /health"
+// expect: stdout "[bg] ran a job"
+// expect: stdout "queued /echo"
+// expect: stdout "[bg] ran a job"
+// expect: stdout "queued /users/42"
+// expect: stdout "[bg] ran a job"
+// expect: stdout "queued /users/42"
+// expect: stdout "[bg] ran a job"
+// expect: stdout "queued /ws"
+// expect: stdout "[bg] ran a job"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+use std.task.{sleep}
+
+(tx, rx) = channel::<() -> void>(16)
+
+fn a_job(): void { echo "[bg] ran a job" }
+
+async fn handle(req: Request): Response {
+    echo "queued ${req.path()}"
+    tx.send(a_job).await
+    return server.response(202, "accepted")
+}
+
+async fn worker(): void {
+    mut going = true
+    while going {
+        job = rx.recv().await
+        if job == none {
+            going = false
+        } else {
+            f = job ?? a_job
+            f()
+        }
+    }
+}
+
+async fn main(): void {
+    concurrent {
+        spawn worker()
+        server.serve(8080, handle)
+        // On graceful shutdown (the listener closed), close the queue so the worker drains its
+        // backlog and exits — the nursery then joins cleanly instead of deadlocking on the worker.
+        tx.close()
+    }
+}
+main().await

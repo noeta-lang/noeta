@@ -275,6 +275,13 @@ impl<'m> Vm<'m> {
         let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
         let comparable_derives = module.comparable_derives.iter().cloned().collect();
         let tojson_derives = module.tojson_derives.iter().cloned().collect();
+        // Lift the `@derive(Deserialize<Json>)` decode recipes into a name→recipe map (L2.2 DI) so
+        // `Op::DecodeTyped` can look up a runtime type name in O(1).
+        let deserialize_recipes = module
+            .deserialize_recipes
+            .iter()
+            .cloned()
+            .collect::<HashMap<_, _>>();
         // P-PKEY: register each key-capable type's field names once, so a packed map key —
         // which carries only (type name, field values) — can derive its display on demand.
         // Over `persist.shapes` (idempotent, process-global), so a session entry that introduced
@@ -306,6 +313,7 @@ impl<'m> Vm<'m> {
             destruct_reachable,
             comparable_derives,
             tojson_derives,
+            deserialize_recipes,
             sched: SchedState {
                 scopes: Vec::new(),
                 ctx_current: Vec::new(),
@@ -753,6 +761,32 @@ impl<'m> Vm<'m> {
                         Value::string(&r.target),
                         make_role(&r.enum_name, &r.variant),
                     ],
+                )
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// Materialize a callable's declared parameter list from the module's reflection info into a
+    /// `List<ParamInfo>` — each `{ name: string, type: Type }`. `type` is the prelude `Type` ADT
+    /// value built from the parameter's declared type (the same `build_type_value` `type_of` uses).
+    /// The `ParamInfo` shape is built fresh; because shape equality is structural, it matches the
+    /// tree-walker's by construction. An unknown target yields an empty list.
+    pub(crate) fn materialize_params(&self, target: &str) -> Value {
+        let info_shape = noeta_object::intern_shape(Shape::object(
+            ShapeKind::Struct,
+            noeta_ast::reflect::PARAM_INFO,
+            vec!["name".to_string(), "type".to_string()],
+        ));
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .params_for(target)
+            .iter()
+            .map(|p| {
+                Value::object(
+                    info_shape,
+                    vec![Value::string(&p.name), build_type_value(&p.ty)],
                 )
             })
             .collect();

@@ -49,7 +49,8 @@ pub use noeta_ast::{BinaryOp, ForPattern, Pattern, TypeRef, UnaryOp};
 mod lower;
 mod pretty;
 pub use lower::{
-    LowerOptions, LoweringSites, Unsupported, lower, lower_with_sites, lower_with_sites_opts,
+    LowerOptions, LoweringSites, Unsupported, hoist_standalone_impl_methods, lower,
+    lower_with_sites, lower_with_sites_opts,
 };
 pub use pretty::dump;
 
@@ -485,6 +486,9 @@ pub enum Rvalue {
     /// `roles_of()` / `roles_of::<RoleEnum>()` — the `(declaration, Role)` index, optionally scoped
     /// to a single role enum.
     RolesOf { ty: Option<TypeRef>, span: Span },
+    /// `params_of(target)` — the declared parameter list of the fn/method named by the runtime
+    /// `target` string, materialized as `List<ParamInfo>`.
+    ParamsOf { target: Atom, span: Span },
     /// `invoke(recv, name, args)` — fallible by-name dispatch.
     Invoke {
         recv: Atom,
@@ -505,6 +509,12 @@ pub enum Rvalue {
         recipe: Option<noeta_ext_abi::TypeRecipe>,
         span: Span,
     },
+    /// The **router-facing** runtime JSON decode `json.decode_typed(name, text)` (L2.2 DI): decode
+    /// `text` into the type named by the runtime string `name`, using the recipe a
+    /// `@derive(Deserialize<Json>)` type registered (baked into the backend's per-type recipe
+    /// registry). Recoverable end to end — a malformed body **or** an unknown type name yields
+    /// `Result.Err(message)`, a successful decode `Result.Ok(value)`.
+    DecodeTyped { name: Atom, text: Atom, span: Span },
     /// A **native module function as a first-class value** (expr-tiers arc) — the same value a
     /// `use std.math.sqrt` binding holds (`Const::ModuleFn`), but produced from a compiler
     /// [`noeta_ast::Expr::NativeFnRef`] rather than a user import. The expression-tier desugar

@@ -56,7 +56,8 @@ pub fn reference_run_traced(
     // Thread reuse tokens identically to the bytecode pipeline so the reference and the VM consume
     // the same annotated IR (Phase 5).
     let ir = noeta_ir_passes::thread_reuse(&ir);
-    IrRefBackend::new().run_ir_traced(program, &ir, sites.type_of_sites)
+    let deserialize_recipes = sites.deserialize_recipes.iter().cloned().collect();
+    IrRefBackend::new().run_ir_traced(program, &ir, sites.type_of_sites, deserialize_recipes)
 }
 
 /// As [`reference_run`], but against a caller-provided [`noeta_stdlib::Host`] — the telemetry
@@ -75,7 +76,14 @@ pub fn reference_run_with_host(
     );
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&to_relevance(&sites.destructor_relevance)));
     let ir = noeta_ir_passes::thread_reuse(&ir);
-    IrRefBackend::new().run_ir_with_host(program, &ir, host, sites.type_of_sites)
+    let deserialize_recipes = sites.deserialize_recipes.iter().cloned().collect();
+    IrRefBackend::new().run_ir_with_host(
+        program,
+        &ir,
+        host,
+        sites.type_of_sites,
+        deserialize_recipes,
+    )
 }
 
 /// The drop pass's relevance form, copied from the checker's (identical sets). Mirrors the

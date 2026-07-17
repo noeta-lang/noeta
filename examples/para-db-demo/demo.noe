@@ -1,0 +1,23 @@
+// A demo of the first-party non-default `para/db` package (aether DB0) — the native SQLite driver.
+//
+//   noeta run examples/para-db-demo/demo.noe
+//
+// The `para.db` module resolves because this app depends on the `para-db` package (a native Rust
+// extension the app authorizes in `[trust]`). This proves the whole DB0 loop end to end:
+// connect -> create table -> insert (bound params) -> query -> read rows as `Map<string, dyn>`.
+use para.db
+
+conn = db.connect("sqlite::memory:")
+
+conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)", [])
+conn.execute("INSERT INTO users (name, age) VALUES (?, ?)", ["Ada", 36])
+conn.execute("INSERT INTO users (name, age) VALUES (?, ?)", ["Bob", 41])
+
+rows = conn.query("SELECT name, age FROM users ORDER BY age", [])
+for r in rows {
+    name = r["name"]
+    age = r["age"]
+    echo "${name} is ${age}"
+}
+
+conn.close()

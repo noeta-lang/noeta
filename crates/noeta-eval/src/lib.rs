@@ -99,7 +99,13 @@ impl Backend for IrRefBackend {
             Some(&relevance_of(&checked.sites.destructor_relevance)),
         );
         let ir = noeta_ir_passes::thread_reuse(&ir);
-        self.run_ir(program, &ir, checked.sites.type_of_sites)
+        let deserialize_recipes = checked.sites.deserialize_recipes.iter().cloned().collect();
+        self.run_ir(
+            program,
+            &ir,
+            checked.sites.type_of_sites,
+            deserialize_recipes,
+        )
     }
 }
 
@@ -1151,6 +1157,11 @@ struct Interpreter {
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
     /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
     type_of_sites: std::collections::HashMap<noeta_span::Span, noeta_ast::reflect::TypeRepr>,
+    /// The `@derive(Deserialize<Json>)` decode registry (L2.2 DI), keyed by type name — the
+    /// tree-walker twin of the VM's `deserialize_recipes`. Lifted from the checker's sites at
+    /// `run_ir` start; `Rvalue::DecodeTyped` (`json.decode_typed(name, text)`) looks a runtime type
+    /// name up here to decode a JSON body into that type. Empty on every run with no such derive.
+    deserialize_recipes: std::collections::HashMap<String, noeta_stdlib::TypeRecipe>,
     /// The live **call-site shadow stack**: one `(callee name, call-site span)` per function/method
     /// activation currently on the Rust call stack, pushed at each call boundary and popped on the
     /// way out (abort included). Only read when an abort snapshots [`Self::abort_trace`], so it
@@ -1247,6 +1258,7 @@ impl Interpreter {
             ext_state: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
+            deserialize_recipes: std::collections::HashMap::new(),
             call_sites: Vec::new(),
             abort_trace: Vec::new(),
             registry: None,
@@ -1677,6 +1689,30 @@ impl Interpreter {
                     builtin_enum(&r.enum_name, &r.variant, Vec::new()),
                 ];
                 Value::Object(Rc::new(ObjectValue::new(binding_def.clone(), slots)))
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// Materialize a callable's declared parameter list from the reflection info into a
+    /// `List<ParamInfo>` — each `{ name: string, type: Type }`. `type` is the prelude `Type` ADT
+    /// value built from the parameter's declared type (the same `build_type_value` `type_of` uses).
+    /// Builds a fresh `TypeDef`; the VM builds the matching shape the same way, so the values agree
+    /// by construction. An unknown target yields an empty list.
+    fn materialize_params(&self, target: &str) -> Value {
+        let info_def = Rc::new(fresh_type_def(
+            noeta_ast::reflect::PARAM_INFO,
+            &["name".to_string(), "type".to_string()],
+            true,
+        ));
+        let items: Vec<Value> = self
+            .reflection
+            .params_for(target)
+            .iter()
+            .map(|p| {
+                // `info_def` is `{ name, type }` — build the slots in that order.
+                let slots = vec![Value::Str(p.name.clone()), build_type_value(&p.ty)];
+                Value::Object(Rc::new(ObjectValue::new(info_def.clone(), slots)))
             })
             .collect();
         Value::list(items)
@@ -4420,6 +4456,7 @@ fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
             Value::Str(name.clone()),
             list(args.iter().map(build_type_value).collect()),
         ],
+        TypeRepr::DynTrait(name) => vec![Value::Str(name.clone())],
         TypeRepr::Fn(params, ret) => vec![
             list(params.iter().map(build_type_value).collect()),
             build_type_value(ret),
@@ -4539,6 +4576,9 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         TypeRef::Optional { .. } => {
             matches!(value, Value::Enum(e) if e.enum_name == "Option")
         }
+        // Narrowing to a trait object matches any value (the permissive over-approximation, matching
+        // the VM's `NarrowTarget::Dyn`); a precise implementor test is future work.
+        TypeRef::DynTrait { .. } => true,
         // A tuple target matches any tuple value — head-constructor only, arity/elements erased
         // (object-model slice 4), exactly like `List` ignoring its element type.
         TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),
@@ -4956,6 +4996,19 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
                     .collect(),
             )
         }
+        // An `Option` marshals **through** its payload (mirrors the VM's `to_native_deep`): the
+        // JSON-null convention and what a native consumer (a SQL bind parameter, `json.stringify`)
+        // means by an optional — `some(x)` is `x`, `none` is null/unit. Otherwise an `Option` would
+        // flatten to its variant *name* (`"some"`), a silently wrong bound value / serialization.
+        Value::Enum(e) if e.enum_name == "Option" => match e.variant.as_str() {
+            "some" => e
+                .data
+                .first()
+                .map(value_to_native_deep)
+                .unwrap_or(NativeValue::Unit),
+            _ => NativeValue::Unit,
+        },
+        // Any other enum marshals to its variant name (the tag).
         Value::Enum(e) => NativeValue::Str(e.variant.clone()),
         Value::Function(_)
         | Value::Builtin(_)

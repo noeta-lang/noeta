@@ -43,6 +43,12 @@ pub enum BuiltinTrait {
     Display,
     Clone,
     Serialize,
+    /// **Deserialize** (L2.2 DI) — the structural JSON *decode* capability, the mirror of
+    /// [`BuiltinTrait::Serialize`]. `@derive(Deserialize<Json>)` records the type's decode recipe into
+    /// a runtime registry keyed by type name, so a web framework's router can decode a request body
+    /// into a handler's declared type *at runtime* (`json.decode_typed(name, text)`). Parameterized by
+    /// the same serialization-format vocabulary as `Serialize` (arity 1, `Json` today).
+    Deserialize,
     Index,
     Length,
     Iterable,
@@ -98,6 +104,7 @@ impl BuiltinTrait {
             Display => ("Display", Some(("to_string", 0)), None, true),
             Clone => ("Clone", None, None, true),
             Serialize => ("Serialize", None, None, true),
+            Deserialize => ("Deserialize", None, None, true),
             Index => ("Index", Some(("get", 1)), None, false),
             Length => ("Length", Some(("len", 0)), None, false),
             Iterable => ("Iterable", Some(("iter", 0)), None, false),
@@ -158,7 +165,7 @@ impl BuiltinTrait {
     /// `Serialize<Format>` is parameterized today (arity 1); every other trait is nullary.
     pub fn generic_arity(self) -> usize {
         match self {
-            BuiltinTrait::Serialize => 1,
+            BuiltinTrait::Serialize | BuiltinTrait::Deserialize => 1,
             _ => 0,
         }
     }
@@ -191,6 +198,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     BuiltinTrait::Display,
     BuiltinTrait::Clone,
     BuiltinTrait::Serialize,
+    BuiltinTrait::Deserialize,
     BuiltinTrait::Index,
     BuiltinTrait::Length,
     BuiltinTrait::Iterable,

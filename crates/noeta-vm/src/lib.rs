@@ -559,6 +559,10 @@ struct Vm<'m> {
     /// Type names that `@derive(Serialize<Json>)` (without a hand-written `to_json`): `o.to_json()` on
     /// their instances synthesizes a structural JSON serializer.
     tojson_derives: HashSet<String>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI), keyed by type name — lifted from
+    /// [`noeta_bytecode::Module::deserialize_recipes`]. `Op::DecodeTyped` (`json.decode_typed(name,
+    /// text)`) looks up the runtime type name here to decode a JSON body into that type.
+    deserialize_recipes: HashMap<String, noeta_stdlib::TypeRecipe>,
     /// Async scheduler state — see [`SchedState`].
     sched: SchedState,
     /// Spare ctx slot tables (H5 perf): a ctx dispatch pops one instead of allocating, and its

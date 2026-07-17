@@ -558,11 +558,13 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 .into());
             };
             // Accept any handle that is a node over the shared graph: Signal, Computed, or a
-            // foreign node reached through the reactive seam — `para.synced`'s SyncedSignal IS a
-            // signal node (LiveView over synced state), recognized via the foreign extension's
-            // `ViewSourceExtract` capability. Resolved up front because the broker needs `ctx`,
-            // which `with_extern` borrows; `None` just means no installed extension provides one.
-            let foreign = noeta_ext_abi::capability::<dyn ViewSourceExtract, C>(ctx);
+            // foreign node reached through the reactive seam — `para.synced`'s SyncedSignal and
+            // `para.db`'s Watch ARE signal nodes (LiveView over synced/DB state), recognized via
+            // each foreign extension's `ViewSourceExtract` capability (the PLURAL broker lookup:
+            // one provider per foreign reactive-node extension). Resolved up front because the
+            // broker needs `ctx`, which `with_extern` borrows; empty just means no installed
+            // extension provides one.
+            let foreign = noeta_ext_abi::capabilities::<dyn ViewSourceExtract, C>(ctx);
             let mut found: Option<(NodeId, ViewSource)> = None;
             let _ = ctx.with_extern(args[1], &mut |e| {
                 if let Some(s) = e.as_any().downcast_ref::<SignalBox>() {
@@ -575,7 +577,7 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                             memo: c.memo,
                         },
                     ));
-                } else if let Some(hit) = foreign.as_ref().and_then(|f| f.extract(e.as_any())) {
+                } else if let Some(hit) = foreign.iter().find_map(|f| f.extract(e.as_any())) {
                     found = Some(hit);
                 }
             });

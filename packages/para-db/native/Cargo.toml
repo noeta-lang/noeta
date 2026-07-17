@@ -1,0 +1,29 @@
+# The native entry crate for the `para/db` package. Standalone (its own empty `[workspace]`) so the
+# composed toolchain can build it as a path dependency without the main workspace adopting it,
+# exactly like the generated shim and `para-p2p-native`. It re-exports the `noeta-para-db` crate's
+# extension slice under the fixed `NOETA_EXTENSIONS` convention.
+[package]
+name = "para-db-native"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+# In-tree, the impl crate is a monorepo path (so a fresh checkout of THIS repo builds the demo with
+# no network). A standalone clone would instead reference the impl by git on the toolchain repo +
+# `[patch]`, exactly like `para-p2p-native` (see `packages/README.md`).
+noeta-para-db = { path = "../../../crates/noeta-para-db", default-features = false }
+
+# The driver rings, each forwarded to the impl crate. `ring-sqlite` is on by default so `noeta run`
+# gets a working driver with no PG deps; `ring-postgres` is off by default (it pulls tokio + the PG
+# client) but is a declared `ring-*` feature, so the composed toolchain auto-enables it for full
+# runtime capability — a `noeta run` app can `db.connect("postgres://…")` with no flags — while a
+# `--native` footprint scan can still shed it. Mirrors `para-p2p-native`'s `ring-p2p`.
+[features]
+default = ["ring-sqlite"]
+ring-sqlite = ["noeta-para-db/ring-sqlite"]
+ring-postgres = ["noeta-para-db/ring-postgres"]
+
+[workspace]

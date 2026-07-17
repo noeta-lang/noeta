@@ -439,6 +439,7 @@ fn from_outline(node: &noeta_ide::symbols::SymbolNode, index: &LineIndex) -> Sym
         K::Field => "field",
         K::Method => "method",
         K::Interface => "impl",
+        K::Trait => "trait",
     };
     let detail = matches!(node.kind, K::Function | K::Method)
         .then(|| format!("fn {}({})", node.name, node.param_names.join(", ")));

@@ -401,6 +401,10 @@ impl Printer<'_> {
                 Some(ty) => format!("roles_of<{}>", type_ref(ty)),
                 None => "roles_of()".to_string(),
             },
+            Rvalue::ParamsOf { target, .. } => format!("params_of({})", atom(target)),
+            Rvalue::DecodeTyped { name, text, .. } => {
+                format!("decode_typed({}, {})", atom(name), atom(text))
+            }
             Rvalue::Invoke {
                 recv, name, args, ..
             } => format!("invoke({}, {}, {})", atom(recv), atom(name), atom(args)),
@@ -489,6 +493,7 @@ fn pattern_str(pattern: &crate::Pattern) -> String {
 
 fn type_ref(ty: &TypeRef) -> String {
     match ty {
+        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
         TypeRef::Named { name, args, .. } => {
             if args.is_empty() {
                 name.clone()

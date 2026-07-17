@@ -263,10 +263,36 @@ impl Checker {
     /// the rule composes (`List<WebRole> <: List<Enum>`); every non-kind case delegates to the pure
     /// lattice. This is the single funnel for assignment, argument, return, and field checks.
     pub(crate) fn assignable(&self, actual: &Type, expected: &Type) -> bool {
+        // A **trait object** `dyn Trait` (L1 user traits, UT4) — a registry-dependent membership rule
+        // like `Kind`, decided here rather than in the pure lattice. An implementor widens into it; a
+        // `dyn`/hole defers; a `dyn Trait` widens into bare `dyn` (or the same trait object). This is
+        // the direct/element-wise coercion the common cases (a `dyn Trait` parameter, an annotated
+        // `List<dyn Trait>` literal checked element-by-element) go through.
+        if let Type::DynTrait(tr) = expected {
+            return match actual {
+                Type::DynTrait(a) => a == tr,
+                Type::Named(n, _) => self.type_impls_trait(n, tr),
+                other => other.defers_to_runtime(),
+            };
+        }
+        if let Type::DynTrait(_) = actual {
+            return matches!(expected, Type::Dyn)
+                || actual == expected
+                || expected.defers_to_runtime();
+        }
         // The pure subtype lattice, plus the one registry-dependent rule it defers: whether a
         // `Named(n)` is a member of an abstract `Kind(k)`. Threading it through [`Type::subtype_with`]
         // reaches every nested covariant position without re-implementing the variance walk here.
         Type::subtype_with(actual, expected, &|n, k| self.is_of_kind(n, k))
+    }
+
+    /// Whether the named type `n` implements the user trait `tr` (L1, UT4) — a recorded in-body or
+    /// standalone `impl`. The membership rule behind `dyn Trait` coercion.
+    fn type_impls_trait(&self, n: &str, tr: &str) -> bool {
+        self.symbols
+            .user_trait_impls
+            .get(n)
+            .is_some_and(|s| s.contains(tr))
     }
 
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware
@@ -994,6 +1020,23 @@ impl Checker {
                     Vec::new(),
                 )))
             }
+            Expr::ParamsOf { target, span } => {
+                // The compiler-built parameter index, surfaced as `List<ParamInfo>`. The `target`
+                // operand is a runtime `string` naming a fn or method (a bare name or `Type.method`).
+                let target_ty = self.synth(target, env);
+                if !matches!(target_ty, Type::String) && !target_ty.defers_to_runtime() {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`params_of` expects a `string` target, found `{target_ty}`"),
+                    )
+                    .help("pass a fn name or `Type.method` string");
+                }
+                Type::List(Box::new(Type::Named(
+                    noeta_ast::reflect::PARAM_INFO.to_string(),
+                    Vec::new(),
+                )))
+            }
             Expr::FromBytes { ty, blob, span } => {
                 // The operand must be a `bytes` buffer (gradual holes tolerated).
                 let blob_ty = self.synth(blob, env);
@@ -1065,13 +1108,16 @@ impl Checker {
                 // The only call-site-typed native function today is `json.parse::<T>(text)`. (When
                 // more land, this resolves through the registry's `RetTy::TypeArg` functions; the
                 // dynamic `json.parse(s)` keeps its own path, so the shared name does not collide.)
-                if module == "json" && func == "parse" {
+                // `json.parse::<T>` (aborting) and `json.decode::<T>` (recoverable → `Result<T, string>`,
+                // L2 DI) are the call-site-typed native functions.
+                let recoverable_decode = module == "json" && func == "decode";
+                if module == "json" && (func == "parse" || recoverable_decode) {
                     if arg_types.len() != 1 {
                         self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
                             format!(
-                                "`json.parse::<T>` takes 1 argument, found {}",
+                                "`json.{func}::<T>` takes 1 argument, found {}",
                                 arg_types.len()
                             ),
                         );
@@ -1081,7 +1127,7 @@ impl Checker {
                         self.error(
                             DiagnosticCode::TypeMismatch,
                             args[0].span(),
-                            format!("`json.parse` expects a `string`, found `{}`", arg_types[0]),
+                            format!("`json.{func}` expects a `string`, found `{}`", arg_types[0]),
                         );
                     }
                 } else {
@@ -1105,11 +1151,17 @@ impl Checker {
                         self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
-                            format!("`{t}` cannot be deserialized from JSON with `json.parse`"),
+                            format!("`{t}` cannot be deserialized from JSON with `json.{func}`"),
                         );
                     }
                 }
-                t
+                // `json.decode::<T>` is recoverable — it yields `Result<T, string>` so a malformed
+                // body is a catchable error, not a program abort (unlike `json.parse::<T>`).
+                if recoverable_decode {
+                    Type::Result(Box::new(t), Box::new(Type::String))
+                } else {
+                    t
+                }
             }
             Expr::Invoke {
                 recv, name, args, ..

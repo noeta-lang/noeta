@@ -576,6 +576,13 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. }
         | Rvalue::MaskWidth { operand, .. } => f(operand),
+        // `params_of(target)` reads its runtime target-string operand.
+        Rvalue::ParamsOf { target, .. } => f(target),
+        // `decode_typed(name, text)` reads its runtime type-name and JSON-text operands.
+        Rvalue::DecodeTyped { name, text, .. } => {
+            f(name);
+            f(text);
+        }
         // The generator desugar's `make_gen(step)` reads its step-closure operand (Track G.1b).
         Rvalue::MakeGen { step, .. } => f(step),
         Rvalue::MakeFuture { thunk, .. } => f(thunk),

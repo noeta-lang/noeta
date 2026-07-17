@@ -40,6 +40,7 @@ const { registerTrace } = require("./trace");
 const { registerArchitecture } = require("./architecture");
 const { registerDocs } = require("./docs");
 const { registerTests } = require("./tests");
+const { registerTierHighlighting } = require("./tierHighlighting");
 const { noetaCommand } = require("./toolchain");
 
 /** @type {import("vscode-languageclient/node").LanguageClient | undefined} */
@@ -306,6 +307,12 @@ function activate(context) {
 
   // The profiler UI: `Noeta: Profile File` commands + the flame-graph view for `*.noeprof.json`.
   registerProfiling(context);
+
+  // Declaration-driven highlighting for CUSTOM-named embedded-language tiers (`@tier(spec, text:
+  // "xml")`): regenerates an injection grammar from the workspace's `@tier(…, text: "…")` declarations
+  // and prompts for a reload when it changes. Well-known-named tiers (`@sql`/`@html`/…) are already
+  // covered by the statically-bundled `tier-languages` grammar.
+  registerTierHighlighting(context);
 
   // The role-trace view (ide-ui U2): the CodeLens-invoked `noeta.showTrace` command + the
   // read-only `noeta-trace:` document it opens (served by the language server's `noeta/trace`).

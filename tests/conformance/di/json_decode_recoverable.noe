@@ -1,0 +1,21 @@
+// `json.decode::<T>(text)` (L2 DI) is the recoverable sibling of `json.parse::<T>`: it yields
+// `Result<T, string>`, so a malformed or shape-mismatched body is a catchable `Err` — a web
+// framework turns that into a 400 instead of crashing. Runs identically on both backends.
+// expect: stdout "ok: Ada is 36"
+// expect: stdout "bad-json"
+// expect: stdout "bad-shape"
+// expect: exit 0
+use std.json
+
+struct User { name: string  age: int }
+
+fn outcome(r: Result<User, string>, on_err: string): string {
+    return match r {
+        Ok(u) => "ok: ${u.name} is ${u.age}",
+        Err(e) => on_err,
+    }
+}
+
+echo outcome(json.decode::<User>("{\"name\": \"Ada\", \"age\": 36}"), "unreached")
+echo outcome(json.decode::<User>("{ not json"), "bad-json")
+echo outcome(json.decode::<User>("{\"name\": \"Bob\"}"), "bad-shape")

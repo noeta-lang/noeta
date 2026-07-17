@@ -135,6 +135,27 @@ impl Checker {
                 ("role".to_string(), Type::Kind(noeta_types::TypeKind::Enum)),
             ],
         );
+        // `ParamInfo { name: string, type: Type }` — the element type of `params_of()`'s result.
+        // `type` is the prelude `Type` enum (the same ADT `type_of` returns), built from the
+        // parameter's declared type annotation. Registered like any prelude struct, so a user
+        // declaration of the same name shadows it.
+        self.symbols.type_kinds.insert(
+            noeta_ast::reflect::PARAM_INFO.to_string(),
+            noeta_types::TypeKind::Struct,
+        );
+        self.symbols
+            .types
+            .insert(noeta_ast::reflect::PARAM_INFO.to_string());
+        self.symbols.records.insert(
+            noeta_ast::reflect::PARAM_INFO.to_string(),
+            vec![
+                ("name".to_string(), Type::String),
+                (
+                    "type".to_string(),
+                    Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new()),
+                ),
+            ],
+        );
     }
 
     /// Register the prelude `TierRoot` struct (tier-providers T2) — the element type of the roots
@@ -219,6 +240,12 @@ impl Checker {
         variants.push(VariantInfo {
             name: "Union".to_string(),
             fields: vec![list_of_ty()],
+        });
+        // A trait object `dyn Trait` carries its trait name — so `params_of` can recover the interface
+        // a parameter is bound to (service injection). A bare `dyn` param is still `Type.Dyn`.
+        variants.push(VariantInfo {
+            name: "DynTrait".to_string(),
+            fields: vec![Type::String],
         });
         self.symbols.types.insert("Type".to_string());
         self.symbols.enums.insert("Type".to_string(), variants);

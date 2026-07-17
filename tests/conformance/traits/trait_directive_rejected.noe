@@ -1,0 +1,8 @@
+// The `@`-directives are type-only and do not apply to a trait (L1 user traits, UT6): `@derive` on
+// a trait is a declaration error. E0053.
+// expect: error E0053 at 6:7
+// expect: exit 1
+@derive(Clone)
+trait Foo {
+    fn a(): int
+}

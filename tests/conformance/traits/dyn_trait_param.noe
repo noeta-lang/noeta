@@ -1,0 +1,22 @@
+// A `dyn Trait` trait object (L1 user traits, UT4): a parameter typed `dyn Greeter` accepts any
+// implementor, and a method call on it is typed by the trait's contract (precise return) yet
+// dispatched dynamically on the value's concrete type. Runs on both backends.
+// expect: stdout "hello Ada"
+// expect: exit 0
+trait Greeter {
+    fn greet(who: string): string
+}
+
+class En {
+    fn new(): En { return En {} }
+}
+
+impl Greeter for En {
+    fn greet(who: string): string { return "hello " ~ who }
+}
+
+fn welcome(g: dyn Greeter): string {
+    return g.greet("Ada")
+}
+
+echo welcome(En.new())

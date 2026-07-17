@@ -32,6 +32,16 @@ pub struct Sites {
     /// [`noeta_ext_abi::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
     /// program, like the other site maps.
     pub typed_module_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): each deriving **struct**'s type name
+    /// paired with the [`noeta_ext_abi::TypeRecipe`] the checker resolved from its fields, in declaration
+    /// order. Baked into a per-type runtime registry both backends lift, so `json.decode_typed(name,
+    /// text)` can decode a JSON body into the type named by a runtime string. A pure function of the
+    /// program, like the other site maps.
+    pub deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
+    /// `json.decode_typed(name, text)` call spans (L2.2 DI): the router-facing runtime decode. Lowering
+    /// reads this to emit an [`Rvalue::DecodeTyped`](noeta_ir::Rvalue) at these spans instead of a
+    /// generic method call. A pure function of the program.
+    pub decode_typed_sites: HashSet<Span>,
     /// `map(...)` call spans whose result element type is packed → the result element's layout. The
     /// VM's `map` builtin builds a flat result at these sites (P-PACK 2.6 category B); invisible to
     /// `RunResult`, so the eval reference may ignore it and stay boxed.
@@ -109,6 +119,11 @@ pub(crate) struct SiteMaps {
     /// span → the turbofish `T` resolved into a [`noeta_ext_abi::TypeRecipe`]. Both backends harvest
     /// this on the same program, so the lowering bakes identical recipes into `Rvalue::TypedModuleCall`.
     pub(crate) typed_module_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI) — see [`Sites::deserialize_recipes`].
+    /// Accumulated as each deriving struct is validated in `check_derives`.
+    pub(crate) deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
+    /// `json.decode_typed(name, text)` call spans (L2.2 DI) — see [`Sites::decode_typed_sites`].
+    pub(crate) decode_typed_sites: HashSet<Span>,
     /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
     /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
     /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
@@ -156,6 +171,8 @@ impl SiteMaps {
             construction_sites: self.construction_sites,
             packed_list_sites: self.packed_list_sites,
             typed_module_call_sites: self.typed_module_call_sites,
+            deserialize_recipes: self.deserialize_recipes,
+            decode_typed_sites: self.decode_typed_sites,
             map_packed_sites: self.map_packed_sites,
             index_field_sites: self.index_field_sites,
             for_stream_sites: self.for_stream_sites,

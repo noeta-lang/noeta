@@ -7,7 +7,8 @@
 
 use crate::{
     AttrArg, AttrValue, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern,
-    ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef,
+    ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TypeParam,
+    TypeRef,
 };
 use noeta_span::Span;
 
@@ -96,6 +97,7 @@ impl Pretty for Stmt {
             Stmt::Struct(decl) => decl.pretty(out, level),
             Stmt::Class(decl) => decl.pretty(out, level),
             Stmt::Impl(decl) => decl.pretty(out, level),
+            Stmt::Trait(decl) => decl.pretty(out, level),
             Stmt::Namespace { path, span: s } => {
                 indent(out, level);
                 out.push_str(&format!("(namespace {} {})", path.join("."), span(*s)));
@@ -466,6 +468,18 @@ impl Pretty for ImplDecl {
     }
 }
 
+impl Pretty for TraitDecl {
+    fn pretty(&self, out: &mut String, level: usize) {
+        indent(out, level);
+        out.push_str(&format!("(trait {} {}", self.name, span(self.span)));
+        for method in &self.methods {
+            out.push('\n');
+            method.sig.pretty(out, level + 1);
+        }
+        out.push(')');
+    }
+}
+
 impl Pretty for ObjectLit {
     fn pretty(&self, out: &mut String, level: usize) {
         // The header line is already indented by the caller (`Expr::pretty` emits the
@@ -797,6 +811,11 @@ impl Pretty for Expr {
                 Some(ty) => out.push_str(&format!("(roles_of {} {})", type_ref_str(ty), span(*s))),
                 None => out.push_str(&format!("(roles_of {})", span(*s))),
             },
+            Expr::ParamsOf { target, span: s } => {
+                out.push_str(&format!("(params_of {}\n", span(*s)));
+                target.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::TypedModuleCall {
                 recv,
                 func,
@@ -878,6 +897,7 @@ impl Pretty for Expr {
 fn type_ref_str(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Optional { inner, .. } => format!("?{}", type_ref_str(inner)),
+        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
         TypeRef::Named { name, args, .. } if args.is_empty() => name.clone(),
         TypeRef::Named { name, args, .. } => {
             let args: Vec<String> = args.iter().map(type_ref_str).collect();

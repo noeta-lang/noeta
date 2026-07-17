@@ -331,6 +331,7 @@ pub(crate) fn conditional_await_span(e: &Expr) -> Option<Span> {
         | Expr::As { expr, .. }
         | Expr::TypeTest { expr, .. }
         | Expr::TypeOf { value: expr, .. }
+        | Expr::ParamsOf { target: expr, .. }
         | Expr::FromBytes { blob: expr, .. } => conditional_await_span(expr),
         Expr::Channel { capacity, .. } => conditional_await_span(capacity),
         Expr::Binary { lhs, rhs, .. }

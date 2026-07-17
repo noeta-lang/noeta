@@ -214,6 +214,31 @@ impl Checker {
                 }
                 .or_else(|| self.resolve_namespace_module(receiver, env));
                 if let Some(qm) = module_id {
+                    // The router-facing runtime decode `json.decode_typed(name, text)` (L2.2 DI): a
+                    // 2-string-arg call whose result is `Result<dyn, string>` (it decodes a JSON body
+                    // into the type named by a *runtime* string, recoverably). It is not a registered
+                    // native signature — `Result` has no `SigType` — so it is typed here directly, its
+                    // call span recorded so lowering emits the dedicated `Rvalue::DecodeTyped`.
+                    if name == "decode_typed"
+                        && self.reg().find_module(&qm).map(|m| m.name) == Some("json")
+                    {
+                        self.finalize_closure_args(
+                            &[Type::String, Type::String],
+                            args,
+                            arg_exprs,
+                            env,
+                        );
+                        self.check_args(
+                            &[Type::String, Type::String],
+                            2,
+                            args,
+                            arg_exprs,
+                            span,
+                            name,
+                        );
+                        self.sites.decode_typed_sites.insert(call_span);
+                        return Type::Result(Box::new(Type::Dyn), Box::new(Type::String));
+                    }
                     if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
                         let required =
                             stdlib::module_required(self.reg(), &qm, name).unwrap_or(params.len());

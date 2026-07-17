@@ -35,7 +35,7 @@ pub mod telemetry;
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
     Cap, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, FutureTracing, HotReload, NativeCtx,
-    PackedField, PackedView, Retained, Slot, TaskContext, capability, ctx_arity,
+    PackedField, PackedView, Retained, Slot, TaskContext, capabilities, capability, ctx_arity,
 };
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};

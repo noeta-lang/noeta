@@ -304,6 +304,18 @@ impl NativeCtx for EvalCtx<'_> {
         Some((decl.build)(state))
     }
 
+    fn capabilities(&mut self, id: std::any::TypeId) -> Vec<Box<dyn std::any::Any>> {
+        // Mirror of the VM's plural broker (differential parity): every provider, in order.
+        let decls: Vec<_> = self.interp.reg().find_capabilities(id).collect();
+        decls
+            .into_iter()
+            .map(|decl| {
+                let state = self.state(decl.state_key, decl.init);
+                (decl.build)(state)
+            })
+            .collect()
+    }
+
     fn retain(&mut self, slot: Slot) -> CtxResult<noeta_stdlib::Retained> {
         let value = self.get(slot)?.clone();
         Ok(if let Some(index) = self.interp.ext_arena_free.pop() {

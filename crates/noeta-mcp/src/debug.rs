@@ -343,10 +343,14 @@ impl McpDebugger {
                         let _ = reply.send(DebugEvalOutcome::Error(message));
                         continue;
                     }
+                    // The frame's in-scope names, source-map-resolved (line-granular), bound by the
+                    // VM as the wrapper's parameters — see `DebugEvalRequest::scope`.
+                    let scope = frame_param_names(view, frame, &self.sources).unwrap_or_default();
                     return DebugAction::Evaluate(DebugEvalRequest {
                         program,
                         text,
                         frame,
+                        scope,
                         allow_calls: true,
                         reply,
                     });
@@ -365,7 +369,7 @@ impl McpDebugger {
         frame: usize,
         view: &DebugView,
     ) -> Result<(), String> {
-        let params = frame_param_names(view, frame)?;
+        let params = frame_param_names(view, frame, &self.sources)?;
         let errors: Vec<String> = self
             .checker
             .check_closure_fragment(program, &params)

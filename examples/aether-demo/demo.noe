@@ -1,0 +1,48 @@
+// A noeta-aether app assembled from a service provider: the provider wires the controller and app
+// config, the app autodiscovers routes, and requests are dispatched with dependency-injected bodies.
+use para.aether.{App, Get, Post, ServiceProvider}
+use std.json
+
+@derive(Deserialize<Json>)
+struct CreateUser {
+    name: string
+    age: int
+}
+
+class UsersController {
+    fn new(): UsersController {
+        return UsersController {}
+    }
+
+    #[Post("/users")]
+    fn create(body: CreateUser): string {
+        return "created ${body.name} (${body.age})"
+    }
+
+    #[Get("/health")]
+    fn health(): string {
+        return "ok"
+    }
+}
+
+// A service provider modularizing the "users" feature: registers its controller and config.
+class UsersProvider {
+    fn new(): UsersProvider {
+        return UsersProvider {}
+    }
+    impl ServiceProvider {
+        fn register(app: App): void {
+            app.register("UsersController", UsersController.new())
+            app.configure("users.max", "100")
+        }
+    }
+}
+
+app = App.new()
+app.provider(UsersProvider.new())
+app.discover()
+
+echo app.handle("POST", "/users", "{\"name\":\"Ada\",\"age\":36}")
+echo app.handle("GET", "/health", "")
+max = app.setting("users.max", "?")
+echo "config users.max=${max}"

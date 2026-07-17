@@ -48,6 +48,8 @@ fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
                 q_typeref(a, visit);
             }
         }
+        // A trait object qualifies its trait name like any nominal leaf.
+        TypeRef::DynTrait { trait_name, .. } => visit(trait_name),
         TypeRef::Optional { inner, .. } => q_typeref(inner, visit),
         TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
         TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_typeref(e, visit)),
@@ -204,6 +206,14 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             }
         }
         Stmt::Impl(decl) => q_impl_decl(decl, visit),
+        Stmt::Trait(decl) => {
+            // A trait's name qualifies like a type's (cross-module `dyn Trait` / `impl` resolution);
+            // its method signatures name types in this module, so qualify them in lockstep.
+            visit(&mut decl.name);
+            for m in &mut decl.methods {
+                q_fn(&mut m.sig, visit);
+            }
+        }
         // No type references: control-flow leaves, namespace/use (paths handled by the linker).
         Stmt::Namespace { .. } | Stmt::Use { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }
@@ -257,14 +267,19 @@ fn q_variant(variant: &mut VariantDecl, visit: &mut NameVisitor) {
 }
 
 fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
-    // The trait name is a built-in capability, not a namespaced user type — left as-is.
+    // The trait name qualifies iff it is a user-defined trait (L1) — `visit` only rewrites names in
+    // the module map (local/imported user traits); a built-in trait (`Add`, `Clone`) is absent from
+    // it and left as-is.
+    visit(&mut b.trait_name);
     for m in &mut b.methods {
         q_fn(m, visit);
     }
 }
 
 fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
-    // The `impl Trait for Target` target names a user type in this module → visit it.
+    // The `impl Trait for Target` target names a user type in this module → visit it. The trait name
+    // qualifies iff it is a user trait (built-ins are absent from the module map).
+    visit(&mut decl.trait_name);
     visit(&mut decl.target);
     for m in &mut decl.methods {
         q_fn(m, visit);
@@ -416,6 +431,8 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(fallback, visit);
         }
         Expr::TypeOf { value, .. } => q_expr(value, visit),
+        // The target is a runtime string, not a type, so nothing to qualify beyond the operand expr.
+        Expr::ParamsOf { target, .. } => q_expr(target, visit),
         Expr::Invoke {
             recv, name, args, ..
         } => {

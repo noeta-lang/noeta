@@ -1,0 +1,28 @@
+// `params_of(target)` surfaces the compiler-built parameter index as a `List<ParamInfo>` — one
+// `{ name: string, type: Type }` per declared parameter of the fn/method named by the runtime
+// `target` string (a bare fn name, or a qualified `Type.method`). The index is resolved at compile
+// time from the declared parameter annotations, and both backends materialize identical `ParamInfo`
+// values (the `type` being the same `Type` ADT `type_of` returns) from the shared reflection
+// artifact — so the query agrees across the differential by construction. An unknown target yields
+// an empty list.
+// expect: stdout "req: Type.String"
+// expect: stdout "count: Type.Int"
+// expect: stdout "greet/name: Type.String"
+// expect: stdout "greet/times: Type.Int"
+// expect: stdout "unknown=0"
+// expect: exit 0
+class UsersController {
+    fn new(): UsersController { return UsersController {} }
+    fn create(req: string, count: int): string { return "ok" }
+}
+
+fn greet(name: string, times: int): string { return name }
+
+for p in params_of("UsersController.create") {
+    echo "${p.name}: ${p.type}";
+}
+for p in params_of("greet") {
+    echo "greet/${p.name}: ${p.type}";
+}
+unknown = params_of("nope").len();
+echo "unknown=${unknown}";

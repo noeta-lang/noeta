@@ -78,6 +78,11 @@ pub enum Stmt {
     /// {...}`) declares a capability such as `impl Serialize for Route {}`; it works uniformly
     /// for classes too. The target must be a type declared in the same module (the orphan rule).
     Impl(ImplDecl),
+    /// A user-defined trait declaration: `trait Name { fn sig(...): T }` (L1 user traits). Declares a
+    /// named contract of method signatures a type can `impl`, usable as a generic bound (`<T: Name>`)
+    /// and as a trait object (`dyn Name`). A method with a body is a *default*; a bodiless one is
+    /// *required*.
+    Trait(TraitDecl),
     /// `namespace App.Orders;` — declares the file's namespace. M0 records the path but
     /// otherwise treats it as a no-op (real module scoping is M1).
     Namespace { path: Vec<String>, span: Span },
@@ -176,6 +181,7 @@ impl Stmt {
             Stmt::Struct(decl) => decl.span,
             Stmt::Class(decl) => decl.span,
             Stmt::Impl(decl) => decl.span,
+            Stmt::Trait(decl) => decl.span,
         }
     }
 }
@@ -428,6 +434,43 @@ pub struct ImplBlock {
     pub trait_span: Span,
     pub methods: Vec<FnDecl>,
     pub span: Span,
+}
+
+/// A user-defined trait declaration (L1): `trait Name<T> { fn sig(...): R  fn other(...) { default } }`.
+/// The named contract a type implements via `impl Name for Type { ... }` (or an in-body `impl Name`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDecl {
+    pub name: String,
+    pub name_span: Span,
+    /// Whether the trait is `pub` (exported for `use`).
+    pub is_public: bool,
+    /// Generic type parameters (`trait Serialize<Fmt>`); empty for the common case.
+    pub type_params: Vec<TypeParam>,
+    /// The trait's method contract, in source order.
+    pub methods: Vec<TraitMethod>,
+    /// Leading `#[...]` data attributes on the trait (L1 UT6) — reflected via `attributes_of`
+    /// keyed by the trait name, like a type's.
+    pub attrs: Vec<Attribute>,
+    /// `@role(Enum.Variant, …)` tags on the trait (UT6) — surfaced via `roles_of`.
+    pub role: Option<Vec<RoleTag>>,
+    /// A `@derive(...)` on a trait — always a checker error (a trait is not a data type); carried
+    /// so the error can be reported at the site.
+    pub derives: Vec<DeriveSpec>,
+    /// A misplaced `@attribute` directive on a trait (attributes are structs only); checker error.
+    pub attribute: Option<Vec<(String, Span)>>,
+    /// A misplaced `@semantic` directive on a trait (marks enums); checker error.
+    pub semantic: Option<Span>,
+    /// A misplaced `@packed` directive on a trait (marks structs); checker error.
+    pub packed: Option<PackedDirective>,
+    pub span: Span,
+}
+
+/// One method in a [`TraitDecl`]. `sig.body` holds the default implementation when `has_default`;
+/// a **required** method has `has_default == false` and an empty `sig.body`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethod {
+    pub sig: FnDecl,
+    pub has_default: bool,
 }
 
 /// A standalone `impl Trait for Type { ... }` declaration (top-level, not inside a class body).
@@ -706,6 +749,10 @@ pub enum TypeRef {
         args: Vec<TypeRef>,
         span: Span,
     },
+    /// A **trait object** `dyn Trait` (L1 user traits, UT4): a value of any type that `impl`s
+    /// `trait_name`, dispatched dynamically on its runtime type. The typed counterpart of the bare
+    /// `dyn` top type — method calls resolve against the trait's declared signatures.
+    DynTrait { trait_name: String, span: Span },
     /// `?T`, sugar for `Option<T>`. Kept as its own node (not desugared) so M1 can
     /// produce precise diagnostics on the nullability surface.
     Optional { inner: Box<TypeRef>, span: Span },
@@ -731,6 +778,7 @@ impl TypeRef {
     pub fn span(&self) -> Span {
         match self {
             TypeRef::Named { span, .. }
+            | TypeRef::DynTrait { span, .. }
             | TypeRef::Optional { span, .. }
             | TypeRef::Union { span, .. }
             | TypeRef::Tuple { span, .. }
@@ -942,6 +990,12 @@ pub enum Expr {
     /// `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only bindings whose role is a
     /// `Semantic` variant; bare `roles_of()` (`ty = None`) returns the whole index.
     RolesOf { ty: Option<TypeRef>, span: Span },
+    /// The reflection query `params_of(target)` — a callable's declared parameter list, returned as a
+    /// `List<ParamInfo>` (each `{ name: string, type: Type }`). `target` is a runtime `string`
+    /// naming a function or method (a bare fn name, or a qualified `Type.method`), the same target
+    /// keying the attribute manifest. Built from the same compiler-built parameter index both
+    /// backends read; surfaces a controller method's declared parameter types for dependency injection.
+    ParamsOf { target: Box<Expr>, span: Span },
     /// The reflection invocation `invoke(recv, name, args)` — fallible by-name dispatch. `recv` is a
     /// value (→ instance method) or a bare type name (→ associated function); `name` is a runtime
     /// `string`; `args` is a runtime `List`. Evaluates to `Result<dyn, dyn>` — `Ok(retval)` on a
@@ -1153,6 +1207,7 @@ impl Stmt {
             | Stmt::Struct(_)
             | Stmt::Class(_)
             | Stmt::Impl(_)
+            | Stmt::Trait(_)
             | Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }
@@ -1197,6 +1252,7 @@ impl Expr {
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
             | Expr::RolesOf { span, .. }
+            | Expr::ParamsOf { span, .. }
             | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. }
             | Expr::FieldSet { span, .. }
@@ -1285,6 +1341,7 @@ impl Expr {
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::ParamsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
             Expr::Invoke {
@@ -1375,6 +1432,7 @@ impl Expr {
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::ParamsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
             Expr::Invoke {

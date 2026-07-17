@@ -582,6 +582,8 @@ fn type_to_repr(
     use noeta_ast::reflect::TypeRepr;
     let rec = |t: &Type| type_to_repr(t, kinds);
     match ty {
+        // A trait object reflects as the dynamic top — the value carries its own concrete type.
+        Type::DynTrait(_) => TypeRepr::Dyn,
         Type::Int => TypeRepr::Int,
         Type::Float => TypeRepr::Float,
         Type::F32 => TypeRepr::F32,
@@ -719,6 +721,15 @@ struct Symbols {
     /// or `impl`s. The basis (with the built-in-type table in [`Checker::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
     trait_impls: HashMap<String, HashSet<BuiltinTrait>>,
+    /// User-defined traits (L1 user traits), by name → its declaration. Populated in pass 1
+    /// (`collect`) so forward references resolve. The basis for `impl` conformance (UT2),
+    /// `<T: UserTrait>` generic bounds (UT3), and `dyn UserTrait` trait-object dispatch (UT4). A name
+    /// here is a legal trait in an `impl`/bound alongside the closed [`BuiltinTrait`] set.
+    user_traits: HashMap<String, noeta_ast::TraitDecl>,
+    /// Which user traits each type implements: type name → set of user-trait names it `impl`s
+    /// (in-body or standalone). The user-trait analogue of [`Self::trait_impls`]; the basis for
+    /// UT3 generic-bound satisfaction and UT4 `dyn Trait` coercion. Populated in pass 1.
+    user_trait_impls: HashMap<String, HashSet<String>>,
     /// The subset of [`Checker::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
@@ -1450,7 +1461,17 @@ impl Checker {
                         let expected = self.coloring.current_ret.clone();
                         self.check(value, &expected, env)
                     }
-                    None => Type::Unit,
+                    None => {
+                        // A bare `return` yields unit. When the function has a *known* declared
+                        // return (`current_ret` is `Unknown` only while inferring a closure, where
+                        // the collected returns are joined instead), unit must be assignable to it —
+                        // otherwise `return;` silently escapes a non-`void` function without a value.
+                        if !matches!(self.coloring.current_ret, Type::Unknown) {
+                            let expected = self.coloring.current_ret.clone();
+                            self.subsume(&Type::Unit, &expected, *span);
+                        }
+                        Type::Unit
+                    }
                 };
                 if let Some(returns) = &mut self.coloring.collected_returns {
                     returns.push(ty);
@@ -1596,6 +1617,7 @@ impl Checker {
                 self.check_enum(e, env)
             }
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
+            Stmt::Trait(decl) => self.check_trait_decl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
             // A dev-tier block reaching the checker is an *inactive* residual (object-model
             // slice 6): the strip pass already spliced any *active* block's items into the

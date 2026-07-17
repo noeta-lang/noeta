@@ -1,0 +1,22 @@
+// A `trait` carries `#[...]` data attributes like a type (L1 user traits, UT6): they surface via
+// `attributes_of::<T>()` keyed by the trait name, so a framework can reflect over its trait
+// contracts (e.g. tag `Controller`/`Middleware` with metadata). `pub` and the attribute compose.
+// expect: stdout "Service: svc"
+// expect: stdout "Controller: a contract"
+// expect: exit 0
+@attribute
+struct Tag { name: string }
+
+#[Tag("svc")]
+trait Service {
+    fn run(): void
+}
+
+#[Tag("a contract")]
+pub trait Controller {
+    fn routes(): void
+}
+
+for t in attributes_of::<Tag>() {
+    echo "${t.target}: ${t.value.name}"
+}

@@ -1,0 +1,6 @@
+// An `impl` whose method return type differs from the trait's is rejected (L1, UT2). E0015.
+// expect: error E0015 at 6:28
+// expect: exit 1
+trait Greeter { fn greet(who: string): string }
+class Bad3 { x: int }
+impl Greeter for Bad3 { fn greet(who: string): int { return 1 } }

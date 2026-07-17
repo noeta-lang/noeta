@@ -34,6 +34,8 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "Type",
     "Semantic",
     "RoleBinding",
+    // The parameter-list element `params_of()` returns (`{ name: string, type: Type }`).
+    "ParamInfo",
     // The roots-list element a declared tier's runner receives (tier-providers T2).
     "TierRoot",
     // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
@@ -306,6 +308,7 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         // reaching here — no primitive is ever `Mergeable`.
         Bt::Clone
         | Bt::Serialize
+        | Bt::Deserialize
         | Bt::Index
         | Bt::Length
         | Bt::Iterable

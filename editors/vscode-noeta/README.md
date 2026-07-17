@@ -152,11 +152,28 @@ highlighting via the built-in grammar), brace counting matches the compiler exac
 `\{`/`\}` are literal braces, `\\` a literal backslash), and prose punctuation can no longer leak
 string scopes into the code below the block.
 
-A **third-party package** declaring its own text tier (`@tier(spec, text: "xml")`) ships a VS Code
-extension with one *injection grammar* targeting `L:source.noeta` — a `begin`/`end` rule of the same
-shape as this grammar's `text-tier-blocks` (copy it, swap the tier name and the embedded-language
-include). That is the whole mechanism: no cooperation from this extension needed, and the tier's
-bodies highlight in its declared language for every user of the package's extension.
+**Well-known languages highlight automatically.** This extension bundles a second injection grammar
+(`syntaxes/tier-languages.tmLanguage.json`, scope `inline.noeta.tier-languages`) that lights up any
+tier **named after a well-known language** — `@sql`, `@html`, `@css`, `@json`, `@yaml`, `@xml`,
+`@graphql`, `@markdown`, `@javascript`, `@python`, `@shell`, `@toml` — injecting that language into the
+`@<name> { … }` body and scoping `${…}` holes (expression tiers) back to Noeta. Because a first-party
+tier's name *is* its declared `text:` language (`@tier(sql, text: "sql", …)`), the common case needs
+no per-package grammar at all — a package that declares `@sql`/`@html` just works for every user of
+this extension. (VS Code loads TextMate grammars statically, so this is a fixed bundled set, not a
+per-project one generated from `text:` declarations.)
+
+**A tier whose name differs from its language** (`@tier(spec, text: "xml")`) is picked up
+**automatically** too: the extension scans the workspace's `.noe` files for `@tier(<name>, … text:
+"<lang>")` declarations and regenerates an injection grammar for them (on activation and on `.noe`
+changes). Because VS Code loads TextMate grammars only at window load, a newly declared custom tier
+takes effect after a reload — the extension shows a one-time toast offering **Reload Window** when the
+generated set changes (or run **Noeta: Refresh Embedded-Language Tier Highlighting**). The grammar
+persists, so later sessions start correct.
+
+That covers workspace-declared tiers; a tier declared only in a **published dependency** (whose name
+already equals its language, so the bundled set handles it) needs nothing. A package that wants to
+guarantee highlighting for a custom-named tier in *any* editor can still ship its own one-rule
+injection grammar (`injectTo: ["source.noeta"]`, the same shape as `text-tier-blocks`).
 
 ## Roadmap
 

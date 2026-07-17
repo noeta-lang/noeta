@@ -368,6 +368,15 @@ pub enum Dependency {
         package: Option<PackageName>,
         req: semver::VersionReq,
     },
+    /// A **scope** dependency — `para = [ { path = … }, { path = … } ]` — several packages that share
+    /// one namespace scope, bound under one import-root key. This is what lets an app depend on more
+    /// than one package of the same scope (`para/aether` *and* `para/db`) without two colliding TOML
+    /// keys: the key is the shared scope root, and each member is a package under it. Every member
+    /// package must share a single `company` segment (the scope), and that scope re-roots to the key —
+    /// so the members address as `<key>.<member-package>.…` in the flat link pool (an identity re-root
+    /// when the key already *is* the scope, the usual case; an alias otherwise). A member is any
+    /// non-scope source (`path`/`git`/`version`); scopes do not nest.
+    Scope(Vec<Dependency>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -576,6 +585,38 @@ pub fn root_edition(entry: &Path) -> crate::edition::Edition {
         // bad edition value never reaches here — `Manifest::parse` hard-errors on it.
         Err(_) => crate::edition::Edition::DEFAULT,
     }
+}
+
+/// The extra native driver **rings** a `noeta build --native` binary should include beyond its import
+/// footprint — `[native] rings = ["ring-postgres"]`. A native package with several drivers behind one
+/// module (e.g. `para/db`'s SQLite + PostgreSQL) picks the driver at runtime from the dsn, which the
+/// static footprint scan cannot see; so a **non-default** driver is requested here explicitly. The
+/// composer enables only rings an entry crate actually declares, so an unknown/undeclared name is
+/// harmlessly ignored. Empty when there is no manifest or no `[native]` table (today's behavior — the
+/// default `ring-sqlite` driver still rides the entry crate's own defaults). A standalone read (like
+/// [`root_edition`]) so it stays a cheap manifest peek, not a graph walk.
+pub fn native_rings(entry: &Path) -> Vec<String> {
+    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    let Some(path) = find(dir) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    table
+        .get("native")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("rings"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The `[package] name` of a **cargo** manifest — what a composed-toolchain shim writes into its
@@ -1181,6 +1222,31 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
             format!("dependency `{key}` version requirement `{req}` is not valid SemVer: {err}")
         })?;
         return Ok(Dependency::Registry { package: None, req });
+    }
+    // An array value is a **scope** dependency: several packages sharing the scope `key`, each an
+    // ordinary (non-array) source. Empty arrays and nested scopes are rejected so the shape stays a
+    // flat list of member packages.
+    if let Some(array) = value.as_array() {
+        if array.is_empty() {
+            return Err(format!(
+                "dependency `{key}` is an empty array — a scope dependency must list at least one \
+                 member package (`{key} = [ {{ path = … }}, … ]`)"
+            ));
+        }
+        let mut members = Vec::with_capacity(array.len());
+        for element in array {
+            if element.is_array() {
+                return Err(format!(
+                    "dependency `{key}`: a scope dependency's members must be package sources \
+                     (`{{ path/git/version = … }}`), not nested arrays"
+                ));
+            }
+            match parse_dependency(key, element)? {
+                Dependency::Scope(_) => unreachable!("a nested array was already rejected"),
+                member => members.push(member),
+            }
+        }
+        return Ok(Dependency::Scope(members));
     }
     let table = value.as_table().ok_or_else(|| {
         format!(
@@ -1914,6 +1980,65 @@ mod tests {
         // A second add of the same key is rejected (and a non-identifier key too).
         assert!(add_dependency(&path, "http", "\"^1\"").is_err());
         assert!(add_dependency(&path, "bad-key", "\"^1\"").is_err());
+    }
+
+    #[test]
+    fn native_rings_reads_the_native_table() {
+        let dir = std::env::temp_dir().join("noeta_native_rings_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(MANIFEST_NAME),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [native]\nrings = [\"ring-postgres\"]\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.noe");
+        std::fs::write(&entry, "echo 1\n").unwrap();
+        assert_eq!(native_rings(&entry), vec!["ring-postgres".to_string()]);
+
+        // No `[native]` table → no extra rings (today's default behavior).
+        std::fs::write(
+            dir.join(MANIFEST_NAME),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert!(native_rings(&entry).is_empty());
+    }
+
+    #[test]
+    fn parses_a_scope_dependency_array() {
+        let m = Manifest::parse(
+            "[dependencies]\n\
+             para = [ { path = \"../para-aether\" }, { path = \"../para-db\" } ]\n",
+        )
+        .expect("valid");
+        match &m.dependencies()["para"] {
+            Dependency::Scope(members) => {
+                assert_eq!(members.len(), 2);
+                assert!(matches!(members[0], Dependency::Path { .. }));
+                assert!(matches!(members[1], Dependency::Path { .. }));
+            }
+            other => panic!("expected a scope dependency, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_scope_dependency_rejects_empty_and_nested_arrays() {
+        // An empty scope names no member packages.
+        assert!(
+            Manifest::parse("[dependencies]\npara = []\n")
+                .unwrap_err()
+                .message()
+                .contains("at least one")
+        );
+        // A scope's members are package sources, not nested scopes.
+        assert!(
+            Manifest::parse("[dependencies]\npara = [ [ { path = \"x\" } ] ]\n")
+                .unwrap_err()
+                .message()
+                .contains("nested")
+        );
     }
 
     #[test]

@@ -291,7 +291,7 @@ fn console_fragment_evaluation_is_bounded() {
     let text = "mut i = 0\nwhile true { i = i + 1 }";
     let program = fragment(text);
     let DebugEvalOutcome::Error(message) =
-        vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
     else {
         panic!("a runaway fragment must be stopped, not hang");
     };
@@ -301,7 +301,7 @@ fn console_fragment_evaluation_is_bounded() {
     let text = "base + 1";
     let program = fragment(text);
     let DebugEvalOutcome::Value { text: v, .. } =
-        vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
     else {
         panic!("the session must survive a budget trip");
     };
@@ -333,7 +333,7 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
     let text = "twice(base) + 1";
     let program = fragment(text);
     let DebugEvalOutcome::Value { text: v1, .. } =
-        vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
     else {
         panic!("first eval should succeed");
     };
@@ -343,7 +343,7 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
 
     // Same text, same scope shape → memo hit: nothing appends, the value is fresh.
     let DebugEvalOutcome::Value { text: v2, .. } =
-        vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
     else {
         panic!("second eval should succeed");
     };
@@ -362,7 +362,7 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
     // Different text → a fresh compile (the memo is per-expression, not a single slot).
     let other = fragment("twice(base) + 2");
     let DebugEvalOutcome::Value { text: v3, .. } =
-        vm.debug_eval_fragment(&other, 0, false, "twice(base) + 2", &frames, &regs)
+        vm.debug_eval_fragment(&other, 0, &[], false, "twice(base) + 2", &frames, &regs)
     else {
         panic!("third eval should succeed");
     };

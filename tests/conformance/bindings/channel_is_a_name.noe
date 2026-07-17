@@ -1,0 +1,23 @@
+// `channel` is a CONTEXTUAL keyword, not a reserved one: it is special ONLY as `channel::<T>(…)`
+// (the bounded-channel constructor — see async/channel.noe), so it stays free as an ordinary field /
+// variable / parameter name everywhere else. It is far too common a name to reserve.
+// expect: stdout "news"
+// expect: stdout "42"
+// expect: exit 0
+class Topic {
+    channel: string
+
+    fn new(channel: string): Topic {
+        return Topic { channel: channel }
+    }
+
+    fn name(): string {
+        return self.channel
+    }
+}
+
+topic = Topic.new("news")
+echo topic.name()
+
+channel = 42
+echo "${channel}"

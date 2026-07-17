@@ -721,6 +721,14 @@ pub enum Op {
         dst: Reg,
         role_enum: Option<NameId>,
     },
+    /// `params_of(target)`: `dst = List<ParamInfo>` — the declared parameter list of the fn/method
+    /// named by the runtime `string` in `src`, each materialized into a `ParamInfo { name, type }`
+    /// from the module's reflection info. The `type` is the `Type` ADT value built from the
+    /// parameter's declared type. An unknown target yields an empty list. Reads `Module::reflection`.
+    ParamsOf {
+        dst: Reg,
+        src: Reg,
+    },
     /// `type_of(value)`: `dst = Type` — the runtime [`noeta_ast::reflect`] head-constructor descriptor
     /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
     /// runtime, so element/argument types collapse to `Dyn` at this fidelity.
@@ -788,6 +796,25 @@ pub enum Op {
         /// Boxed (P-VMT-OPSZ): a `TypeRecipe` is 48 bytes and only a call-site-typed native call
         /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
         recipe: Option<Box<noeta_ext_abi::TypeRecipe>>,
+        /// `Result.Ok` / `Result.Err` shape indices — used by the **recoverable** decode variant
+        /// (`json.decode::<T>` → `Result<T, string>`, L2 DI): a decode failure lands as `Result.Err`
+        /// instead of aborting. `json.parse::<T>` ignores them (it aborts on failure).
+        ok_shape: u32,
+        err_shape: u32,
+        span: Span,
+    },
+    /// The **router-facing** runtime JSON decode (`json.decode_typed(name, text)` → `Result<dyn,
+    /// string>`, L2.2 DI): decode the JSON in register `text` into the type named by the runtime
+    /// string in register `name`, using the recipe registered for a `@derive(Deserialize<Json>)`
+    /// type (baked into [`Module::deserialize_recipes`]). Fully recoverable — a malformed body **or**
+    /// an unknown/unregistered type name lands as `Result.Err` (`err_shape`); a successful decode as
+    /// `Result.Ok` (`ok_shape`) wrapping the materialized value.
+    DecodeTyped {
+        dst: Reg,
+        name: Reg,
+        text: Reg,
+        ok_shape: u32,
+        err_shape: u32,
         span: Span,
     },
     /// A **method-bundle** method call (kernel-methods K2/K3): `recv.method(args)` statically
@@ -1212,6 +1239,11 @@ pub struct Module {
     /// Type names that `@derive(ToJson)` without a hand-written `to_json` method — the VM
     /// synthesizes a structural JSON serializer for `o.to_json()`.
     pub tojson_derives: Vec<String>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): each deriving struct's type name paired
+    /// with the [`noeta_ext_abi::TypeRecipe`] the checker resolved from its fields. The VM lifts this
+    /// into a name→recipe map so `json.decode_typed(name, text)` decodes a JSON body into the type
+    /// named by a runtime string. Empty for a program with no `@derive(Deserialize<Json>)`.
+    pub deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
     /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
     /// transitively-owned field / variant-payload / collection element (the checker's
     /// destruct-reachability fixpoint). The VM's **container-before-contained field-walk gate**
@@ -1651,6 +1683,7 @@ fn op_repr(
             Some(e) => format!("RolesOf     r{dst} <- roles_of::<{}>()", n(e)),
             None => format!("RolesOf     r{dst} <- roles_of()"),
         },
+        Op::ParamsOf { dst, src } => format!("ParamsOf    r{dst} <- params_of(r{src})"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FromBytes {
             dst, src, schema, ..
@@ -1681,6 +1714,9 @@ fn op_repr(
                 args.join(", ")
             )
         }
+        Op::DecodeTyped {
+            dst, name, text, ..
+        } => format!("DecodeTyped r{dst} <- json.decode_typed(r{name}, r{text})"),
         Op::BundleMethod {
             dst,
             recv,

@@ -2121,6 +2121,23 @@ fn non_void_function_that_can_fall_through_is_e0048() {
 }
 
 #[test]
+fn bare_return_in_a_non_void_function_is_a_type_mismatch() {
+    // A bare `return;` yields unit, which a non-`void` return type does not admit — the
+    // statement escapes the function without the promised value. (`can-fall-through` E0048 is a
+    // *separate* check for reaching the end with no `return` at all; here the `return` is present
+    // but valueless, so it is a plain E0007 `expected int, found void`.)
+    assert_eq!(codes("fn f(n: int): int { return }\n"), ["E0007"]);
+    // Reachable behind a branch, too — the mismatch is at the `return`, not the fall-through.
+    assert_eq!(
+        codes("fn g(n: int): int { if n > 0 { return } return n }\n"),
+        ["E0007"]
+    );
+    // A `void` function's bare `return` is exactly right; `dyn` admits unit as well.
+    assert!(codes("fn v(): void { return }\n").is_empty());
+    assert!(codes("fn d(): dyn { return }\n").is_empty());
+}
+
+#[test]
 fn function_returning_or_diverging_on_every_path_is_clean() {
     // An explicit `return`, or an `if`/`else` where both arms return.
     assert!(codes("fn r(n: int): int { return n + 1 }\n").is_empty());

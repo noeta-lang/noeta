@@ -118,6 +118,7 @@ fn to_completion_item(candidate: &completion::Candidate) -> CompletionItem {
         CandidateKind::Method => CompletionItemKind::METHOD,
         CandidateKind::EnumMember => CompletionItemKind::ENUM_MEMBER,
         CandidateKind::Type => CompletionItemKind::INTERFACE,
+        CandidateKind::Trait => CompletionItemKind::INTERFACE,
         CandidateKind::Module => CompletionItemKind::MODULE,
     };
     CompletionItem {
@@ -140,6 +141,7 @@ fn to_document_symbol(symbol: noeta_ide::DocumentSymbol) -> DocumentSymbol {
         noeta_ide::SymbolKind::Field => SymbolKind::FIELD,
         noeta_ide::SymbolKind::Method => SymbolKind::METHOD,
         noeta_ide::SymbolKind::Interface => SymbolKind::INTERFACE,
+        noeta_ide::SymbolKind::Trait => SymbolKind::INTERFACE,
     };
     #[allow(deprecated)]
     // `deprecated` is a required struct field, not a value we set meaningfully.

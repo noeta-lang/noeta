@@ -236,6 +236,7 @@ fn compile_inner(
         field_defaults: module.field_defaults,
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
+        deserialize_recipes: module.deserialize_recipes,
         destruct_reachable,
         cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
@@ -346,8 +347,14 @@ fn compile_to_mc(
         registry,
     } = opts;
     // `sites` stays whole through lowering (`lowering_sites!` is THE one projection); the owned
-    // maps the compiler keeps (`type_of`, `map_packed`) move out afterwards.
+    // maps the compiler keeps (`type_of`, `map_packed`, `deserialize_recipes`) move out afterwards.
 
+    // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so the surface
+    // pass-1 (`register_types`) and the IR pass-2 (`compile_methods`) agree on the method set. The
+    // helper is idempotent, so the lowering below re-hoisting is a no-op; rebinds only when such an
+    // impl exists.
+    let hoisted = noeta_ir::hoist_standalone_impl_methods(program);
+    let program: &Program = hoisted.as_ref().unwrap_or(program);
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
     // precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use death
@@ -382,6 +389,7 @@ fn compile_to_mc(
         field_defaults: Vec::new(),
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
+        deserialize_recipes: sites.deserialize_recipes,
         structural_eq_types: HashSet::new(),
         packed_fields: HashMap::new(),
         key_capable_types: HashSet::new(),
@@ -485,6 +493,7 @@ impl SessionCompiler {
             field_defaults: Vec::new(),
             comparable_derives: Vec::new(),
             tojson_derives: Vec::new(),
+            deserialize_recipes: Vec::new(),
             structural_eq_types: HashSet::new(),
             packed_fields: HashMap::new(),
             key_capable_types: HashSet::new(),
@@ -539,6 +548,10 @@ impl SessionCompiler {
         entry: &Program,
         sites: Option<&Sites>,
     ) -> Result<Module, Unsupported> {
+        // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so surface
+        // registration and IR compilation agree; idempotent, so lowering re-hoisting is a no-op.
+        let hoisted = noeta_ir::hoist_standalone_impl_methods(entry);
+        let entry: &Program = hoisted.as_ref().unwrap_or(entry);
         // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
         // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The
         // conservative path's `insert_drops(_, None)` marks every value destructor-relevant;
@@ -657,6 +670,7 @@ impl SessionCompiler {
             field_defaults: self.mc.field_defaults.clone(),
             comparable_derives: self.mc.comparable_derives.clone(),
             tojson_derives: self.mc.tojson_derives.clone(),
+            deserialize_recipes: self.mc.deserialize_recipes.clone(),
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
             reflection: self.reflection.clone(),
@@ -745,6 +759,9 @@ struct ModuleCompiler {
     field_defaults: Vec<(String, String, u32)>,
     comparable_derives: Vec<String>,
     tojson_derives: Vec<String>,
+    /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI), taken verbatim from the checker's
+    /// [`noeta_check::Sites::deserialize_recipes`] and copied onto [`Module::deserialize_recipes`].
+    deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
@@ -2196,8 +2213,8 @@ impl<'m> FnCompiler<'m> {
         self.loops.push(LoopCtx::default());
         let result = (|| {
             match pattern {
-                ForPattern::Single { name, .. } => {
-                    self.bind_loop_var(name, element);
+                ForPattern::Single { name, name_span } => {
+                    self.bind_loop_var(name, element, *name_span);
                 }
                 // A tuple for-pattern is desugared to a `Single` hidden var + `.N` projections in
                 // lowering (object-model slice 4b), so it never reaches the compiler.
@@ -2275,8 +2292,8 @@ impl<'m> FnCompiler<'m> {
         }
         let result = (|| {
             match pattern {
-                ForPattern::Single { name, .. } => {
-                    self.bind_loop_var(name, elem);
+                ForPattern::Single { name, name_span } => {
+                    self.bind_loop_var(name, elem, *name_span);
                 }
                 // A tuple for-pattern is desugared to a `Single` hidden var + `.N` projections in
                 // lowering (object-model slice 4b), so it never reaches the compiler.
@@ -2350,12 +2367,24 @@ impl<'m> FnCompiler<'m> {
     /// Register an already-populated register as an immutable loop-body binding. Unlike
     /// [`FnCompiler::declare_local`] this emits no `Move`: the element/destructure op has
     /// already written the value into `reg`.
-    fn bind_loop_var(&mut self, name: &str, reg: Reg) {
+    fn bind_loop_var(&mut self, name: &str, reg: Reg, def_span: Span) {
         let celled = self.celled.contains(name);
         // A captured loop variable is boxed in place; the `MakeCell` sits inside the loop body, so
         // each iteration captures a distinct cell (matching the tree-walker's per-iteration scope).
         if celled {
             self.code.push(Op::MakeCell { dst: reg, src: reg });
+        }
+        // In a debug compile a loop/match binding is a named local the debugger's Variables view
+        // should see, like any `declare_local` binding. Deliberately NOT added to `frame_locals`:
+        // that list is also the panic-teardown list, and a debug compile must not change which
+        // destructors fire. Its register is pinned through coalescing via `debug_locals` itself
+        // (see regalloc's debug-locals pin), so the 1:1 `reg → name` contract still holds.
+        if self.module.debug {
+            self.debug_locals.push(LocalDebug {
+                name: name.to_string(),
+                reg,
+                def_span,
+            });
         }
         self.scopes.last_mut().unwrap().insert(
             name.to_string(),
@@ -3354,6 +3383,13 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::RolesOf { dst, role_enum });
                 Ok(())
             }
+            Rvalue::ParamsOf { target, .. } => {
+                // The target is a runtime string; the VM reads the matching parameter records from
+                // `Module::reflection` and materializes them. Load the operand into a register.
+                let src = self.atom_reg(target)?;
+                self.code.push(Op::ParamsOf { dst, src });
+                Ok(())
+            }
             Rvalue::Invoke {
                 recv,
                 name,
@@ -3370,12 +3406,34 @@ impl<'m> FnCompiler<'m> {
                 let args = self.atom_regs(args)?;
                 let module_id = self.module.intern_name(module);
                 let func_id = self.module.intern_name(func);
+                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
+                let err_shape = self.module.builtin_enum_shape("Result", "Err");
                 self.code.push(Op::TypedModuleCall {
                     dst,
                     module: module_id,
                     func: func_id,
                     args,
                     recipe: recipe.clone().map(Box::new),
+                    ok_shape,
+                    err_shape,
+                    span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::DecodeTyped { name, text, span } => {
+                // The router-facing runtime decode (L2.2 DI): load the type-name and JSON-text
+                // operands into registers and carry the `Result.Ok`/`Result.Err` shapes (as
+                // `Op::Invoke`/`TypedModuleCall` do) — the VM wraps a decode / lookup outcome in one.
+                let name = self.atom_reg(name)?;
+                let text = self.atom_reg(text)?;
+                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
+                let err_shape = self.module.builtin_enum_shape("Result", "Err");
+                self.code.push(Op::DecodeTyped {
+                    dst,
+                    name,
+                    text,
+                    ok_shape,
+                    err_shape,
                     span: *span,
                 });
                 Ok(())
@@ -4245,7 +4303,7 @@ impl<'m> FnCompiler<'m> {
     fn emit_pattern(&mut self, pattern: &Pattern, reg: Reg, fail_jumps: &mut Vec<usize>) {
         match pattern {
             Pattern::Wildcard { .. } => {}
-            Pattern::Binding { name, .. } => self.bind_loop_var(name, reg),
+            Pattern::Binding { name, span } => self.bind_loop_var(name, reg, *span),
             Pattern::Int { value, .. } => {
                 fail_jumps.push(self.code.len());
                 self.code.push(Op::MatchInt {
@@ -4454,6 +4512,9 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             NarrowTarget::AnyOf(members.iter().map(narrow_target).collect())
         }
         TypeRef::Optional { .. } => NarrowTarget::Named("Option".to_string()),
+        // Narrowing to a trait object reduces to the dynamic top (a permissive over-approximation;
+        // `x.as<dyn Trait>()` is a rare corner and a precise implementor test is future work).
+        TypeRef::DynTrait { .. } => NarrowTarget::Dyn,
         TypeRef::Tuple { .. } => NarrowTarget::Tuple,
         // Function types are erased: narrowing to one is a head-constructor "is callable" test
         // (params/return dropped), matching any function/closure value — like `List` ignoring its
@@ -4647,6 +4708,45 @@ mod tests {
                 .any(|c| c.name.as_deref() == Some("Point.mag")),
             "expected a proto named Point.mag; names: {:?}",
             m.protos.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn loop_and_match_bindings_are_named_locals_in_a_debug_compile() {
+        // A `for` variable and a match-arm binding bind through `bind_loop_var`, not
+        // `declare_local` — both must still reach the Variables view, each 1:1 on its own
+        // register (pinned via `debug_locals` itself, NOT the panic-teardown list).
+        let m = compile_dbg(
+            "fn f(values: List<int>): int {\n  mut total = 0;\n  for v in values {\n    total = total + v;\n  }\n  return match total { n => n }\n}\nf([1, 2]);\n",
+        );
+        let f = m
+            .protos
+            .iter()
+            .find(|c| c.name.as_deref() == Some("f"))
+            .expect("a proto named f");
+        let names: Vec<&str> = f.debug_locals.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.contains(&"v"), "missing loop var v: {names:?}");
+        assert!(names.contains(&"n"), "missing match binding n: {names:?}");
+        // The loop var holds a fresh element register — it must keep a slot of its own. (The
+        // match binding `n` is different: it *aliases* the scrutinee's register by design, so
+        // sharing `total`'s slot is truthful, not a coalescing collapse.)
+        let reg_of = |name: &str| f.debug_locals.iter().find(|l| l.name == name).unwrap().reg;
+        let v_reg = reg_of("v");
+        for other in ["values", "total", "n"] {
+            assert_ne!(v_reg, reg_of(other), "v shares a register with {other}");
+        }
+        assert_eq!(reg_of("n"), reg_of("total"), "n aliases its scrutinee");
+        // The loop var is a named local, not a teardown register: the teardown list is behavior
+        // (which destructors fire on a panic) and a debug compile must not change it.
+        let v_reg = f
+            .debug_locals
+            .iter()
+            .find(|l| l.name == "v")
+            .expect("v recorded")
+            .reg;
+        assert!(
+            !f.frame_locals.contains(&v_reg),
+            "loop var leaked into the panic-teardown list"
         );
     }
 

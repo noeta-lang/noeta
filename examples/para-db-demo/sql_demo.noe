@@ -1,0 +1,19 @@
+// The @sql block tier (DB4): a typed SQL statement with `${…}` param holes, run on the native driver.
+use para.db
+use para.db.sql.{sql, query, execute}
+
+conn = db.connect("sqlite::memory:")
+execute(conn, @sql { CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER) })
+
+execute(conn, @sql { INSERT INTO users (name, age) VALUES (${"Ada"}, ${36}) })
+execute(conn, @sql { INSERT INTO users (name, age) VALUES (${"Bob"}, ${41}) })
+
+min_age = 30
+stmt = @sql { SELECT name, age FROM users WHERE age > ${min_age} ORDER BY age }
+echo "sql: ${stmt.text}"
+rows = query(conn, stmt)
+for r in rows {
+    name = r["name"]
+    age = r["age"]
+    echo "${name} is ${age}"
+}

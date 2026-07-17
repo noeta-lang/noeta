@@ -265,6 +265,16 @@ pub trait NativeCtx {
     /// the linear provider scan and the boxing are not on any hot loop.
     fn capability(&mut self, id: std::any::TypeId) -> Option<Box<dyn Any>>;
 
+    /// The **plural** capability broker: every registered provider of the capability trait, in
+    /// unit-registration order (each an erased handle exactly as [`NativeCtx::capability`] mints).
+    /// Most capability traits have a single provider by nature; a *recognition* capability like
+    /// `ViewSourceExtract` is provided once per foreign reactive-node extension, and its consumer
+    /// tries each. The default covers hosts with at most one provider; the two backends override
+    /// it with a full registry walk. Consumers use the typed front door [`capabilities`].
+    fn capabilities(&mut self, id: std::any::TypeId) -> Vec<Box<dyn Any>> {
+        self.capability(id).into_iter().collect()
+    }
+
     /// Move a slot's value into the per-run **retained arena** — the extension now owns one
     /// reference to it across dispatches (the slot itself stays valid and table-owned). The
     /// arena is a root set the backend enumerates: the cycle collector traces it, teardown
@@ -613,4 +623,23 @@ where
     // The provider boxed a `Box<dyn T>` (a sized fat pointer) inside the `Box<dyn Any>`; recover it.
     let handle: Box<Box<T>> = erased.downcast().ok()?;
     Some(Cap { inner: *handle })
+}
+
+/// Obtain **every** per-run provider of a capability trait — the plural twin of [`capability`],
+/// for recognition capabilities that legitimately have one provider per extension (e.g.
+/// `ViewSourceExtract`: `para.synced` recognizes a `SyncedSignal`, `para.db` a `Watch`; the
+/// reactive engine's `view.expose` tries each in unit-registration order). Empty when no installed
+/// extension provides the trait.
+pub fn capabilities<T, C>(ctx: &mut C) -> Vec<Cap<T>>
+where
+    T: ?Sized + 'static,
+    C: NativeCtx + ?Sized,
+{
+    ctx.capabilities(std::any::TypeId::of::<T>())
+        .into_iter()
+        .filter_map(|erased| {
+            let handle: Box<Box<T>> = erased.downcast().ok()?;
+            Some(Cap { inner: *handle })
+        })
+        .collect()
 }

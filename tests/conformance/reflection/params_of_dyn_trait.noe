@@ -1,0 +1,34 @@
+// A `dyn Trait` parameter reflects as `Type.DynTrait(name)` — carrying the trait name, so reflection
+// (`params_of`) can recover which interface a parameter is bound to. This is what a framework needs to
+// inject a service by its interface (`fn handler(svc: dyn Store)`). A bare `dyn` parameter still
+// reflects as `Type.Dyn`. Both backends materialize the same `Type` value from the shared reflection
+// artifact, so the query agrees across the differential.
+// expect: stdout "count=2"
+// expect: stdout "svc -> Store"
+// expect: stdout "raw -> plain-dyn"
+// expect: exit 0
+trait Store {
+    fn load(id: string): dyn
+}
+
+fn handler(svc: dyn Store, raw: dyn): string {
+    return "ok"
+}
+
+ps = params_of("handler")
+echo "count=${ps.len()}"
+
+// The trait bound is recoverable — the reflected type is `DynTrait("Store")`, not a bare `Dyn`.
+svc_kind = match ps[0].type {
+    DynTrait(n) => n,
+    _ => "not-a-trait",
+}
+echo "svc -> ${svc_kind}"
+
+// A bare `dyn` parameter stays `Type.Dyn` (no bound to recover).
+raw_kind = match ps[1].type {
+    DynTrait(n) => "trait-${n}",
+    Dyn => "plain-dyn",
+    _ => "other",
+}
+echo "raw -> ${raw_kind}"

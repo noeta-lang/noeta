@@ -23,9 +23,11 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use std::collections::HashMap as StdHashMap;
+
 use noeta_ast::{
-    BinaryOp, Expr, ForPattern as AstForPattern, Param, Program as AstProgram, Stmt as AstStmt,
-    StrPart, TypeRef,
+    BinaryOp, Expr, FnDecl, ForPattern as AstForPattern, Param, Program as AstProgram,
+    Stmt as AstStmt, StrPart, TypeRef,
 };
 use noeta_span::Span;
 
@@ -82,6 +84,9 @@ pub struct LoweringSites<'a> {
     pub index_field_sites: &'a HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::TypedModuleCall`].
     pub typed_module_call_sites: &'a HashMap<Span, noeta_ext_abi::TypeRecipe>,
+    /// `json.decode_typed(name, text)` call spans (L2.2 DI) → lowered to [`Rvalue::DecodeTyped`]
+    /// instead of a generic method call, routing to the runtime decode-by-type registry.
+    pub decode_typed_sites: &'a HashSet<Span>,
     /// `for` spans whose iterable is statically an `Iterator<T>` → the lowered [`Stmt::For`] streams
     /// via `next()` rather than snapshotting a list (Track I.2).
     pub for_stream_sites: &'a HashSet<Span>,
@@ -127,6 +132,7 @@ impl LoweringSites<'static> {
             packed_list_sites: PACKED.get_or_init(HashMap::new),
             index_field_sites: SPANS.get_or_init(HashSet::new),
             typed_module_call_sites: RECIPES.get_or_init(HashMap::new),
+            decode_typed_sites: SPANS.get_or_init(HashSet::new),
             for_stream_sites: SPANS.get_or_init(HashSet::new),
             width_sites: WIDTHS.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
@@ -154,6 +160,7 @@ macro_rules! lowering_sites {
             packed_list_sites: &$s.packed_list_sites,
             index_field_sites: &$s.index_field_sites,
             typed_module_call_sites: &$s.typed_module_call_sites,
+            decode_typed_sites: &$s.decode_typed_sites,
             for_stream_sites: &$s.for_stream_sites,
             width_sites: &$s.width_sites,
             construction_sites: &$s.construction_sites,
@@ -227,6 +234,53 @@ pub fn lower_with_sites(
     lower_with_sites_opts(program, sites, LowerOptions::default())
 }
 
+/// Copy a standalone `impl Trait for T { methods }`'s method bodies onto the target type `T`'s own
+/// method table (L1 user traits, UT2), so both backends' `(type, method)` dispatch resolves them —
+/// the same flattening the parser already performs for in-body `impl` blocks. Returns a modified
+/// clone only when at least one standalone impl contributes a method the target does not already
+/// carry; otherwise `None` (use the original by reference — zero cost for the common case).
+///
+/// **Idempotent**: a method whose name already exists on the target is skipped, so applying this to
+/// an already-hoisted program is a no-op. That lets the VM compiler hoist the AST `entry` for its
+/// surface-reading pass-1 (`register_types`) while the shared lowering below hoists again for the
+/// IR — both converge without duplicating a method. The IR interpreter (reference/eval) has no such
+/// split, so the lowering call alone covers it.
+pub fn hoist_standalone_impl_methods(program: &AstProgram) -> Option<AstProgram> {
+    let mut additions: StdHashMap<String, Vec<FnDecl>> = StdHashMap::new();
+    for stmt in &program.stmts {
+        if let AstStmt::Impl(decl) = stmt
+            && !decl.methods.is_empty()
+        {
+            additions
+                .entry(decl.target.clone())
+                .or_default()
+                .extend(decl.methods.iter().cloned());
+        }
+    }
+    if additions.is_empty() {
+        return None;
+    }
+    let mut changed = false;
+    let mut cloned = program.clone();
+    for stmt in &mut cloned.stmts {
+        let (name, methods) = match stmt {
+            AstStmt::Struct(d) => (&d.name, &mut d.methods),
+            AstStmt::Class(d) => (&d.name, &mut d.methods),
+            AstStmt::Enum(d) => (&d.name, &mut d.methods),
+            _ => continue,
+        };
+        if let Some(add) = additions.get(name) {
+            for m in add {
+                if !methods.iter().any(|existing| existing.name == m.name) {
+                    methods.push(m.clone());
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed.then_some(cloned)
+}
+
 /// As [`lower_with_sites`], but against explicit [`LowerOptions`] — the single configurable entry
 /// the other `lower*` functions are thin presets of.
 pub fn lower_with_sites_opts(
@@ -238,6 +292,10 @@ pub fn lower_with_sites_opts(
         real_isolates,
         registry,
     } = opts;
+    // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) before lowering,
+    // so `(type, method)` dispatch resolves them. Only rebinds when such an impl exists.
+    let hoisted = hoist_standalone_impl_methods(program);
+    let program: &AstProgram = hoisted.as_ref().unwrap_or(program);
     let mut lowerer = Lowerer {
         temps: 0,
         sites,
@@ -379,6 +437,8 @@ impl Lowerer<'_> {
                 inner: Box::new(self.resolve_type_aliases(inner)),
                 span: *span,
             },
+            // A trait object's trait name is not an import alias — narrowing never targets it.
+            TypeRef::DynTrait { .. } => ty.clone(),
         }
     }
 
@@ -705,7 +765,9 @@ impl Lowerer<'_> {
             }
             // A standalone `impl` and a `namespace` have no runtime effect in the tree-walker
             // (both are `Ok(Flow::Normal)` no-ops), so they lower to nothing.
-            AstStmt::Impl(_) | AstStmt::Namespace { .. } => Ok(()),
+            // A `trait` declaration (L1) has no runtime footprint of its own — its methods reach the
+            // backends only as flattened impls on concrete types (UT2).
+            AstStmt::Impl(_) | AstStmt::Trait(_) | AstStmt::Namespace { .. } => Ok(()),
             // `concurrent { }` (Track A.3b) lowers to a scope-bracketed body: `ScopeBegin`, the body
             // statements (their `spawn`s register tasks; their `.await`s drive the scope), then
             // `ScopeEnd` (which joins every remaining task). The body runs inline in the enclosing
@@ -1187,6 +1249,24 @@ impl Lowerer<'_> {
                     ..
                 } = callee.as_ref()
                 {
+                    // Router-facing runtime decode `json.decode_typed(name, text)` (L2.2 DI): the
+                    // checker recorded this call span. Emit the dedicated op over the two argument
+                    // atoms — the receiver (the `json` module handle) is not a runtime value, so it is
+                    // not lowered.
+                    if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
+                        let mut arg_atoms = self.lower_args(args, out)?;
+                        let text = arg_atoms.pop().expect("decode_typed takes 2 args");
+                        let name = arg_atoms.pop().expect("decode_typed takes 2 args");
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::DecodeTyped {
+                                name,
+                                text,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
                     let receiver = self.lower_expr(receiver, out)?;
                     let arg_atoms = self.lower_args(args, out)?;
                     // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
@@ -1633,6 +1713,17 @@ impl Lowerer<'_> {
                 },
                 *span,
             )),
+            Expr::ParamsOf { target, span } => {
+                let target = self.lower_expr(target, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::ParamsOf {
+                        target,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::Invoke {
                 recv,
                 name,
@@ -1738,6 +1829,26 @@ impl Lowerer<'_> {
                     ..
                 } = callee.as_ref()
                 {
+                    // Router-facing runtime decode via a pipe (`name |> json.decode_typed(text)`,
+                    // L2.2 DI): `left` threads in as the leading (`name`) argument. Emit the dedicated
+                    // op; the receiver (the `json` module handle) is not a runtime value.
+                    if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
+                        let mut arg_atoms = vec![left_atom];
+                        for a in args {
+                            arg_atoms.push(self.lower_expr(a, out)?);
+                        }
+                        let text = arg_atoms.pop().expect("decode_typed takes 2 args");
+                        let name = arg_atoms.pop().expect("decode_typed takes 2 args");
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::DecodeTyped {
+                                name,
+                                text,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
                     let receiver = self.lower_expr(receiver, out)?;
                     let mut arg_atoms = vec![left_atom];
                     for a in args {

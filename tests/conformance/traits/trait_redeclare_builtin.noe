@@ -1,0 +1,7 @@
+// A user `trait` may not reuse a built-in trait's name (L1, UT1) — an `impl`/bound naming it would
+// be ambiguous against the closed built-in set. E0053.
+// expect: error E0053 at 5:7
+// expect: exit 1
+trait Clone {
+    fn c(): int
+}

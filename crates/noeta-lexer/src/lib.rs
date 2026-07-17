@@ -101,6 +101,10 @@ pub enum TokenKind {
     DestructKw,
     #[token("impl")]
     ImplKw,
+    /// User-defined trait declaration: `trait Name { fn sig(...): T }`. A keyword so `trait` in
+    /// declaration position is unambiguous against an identifier.
+    #[token("trait")]
+    TraitKw,
     #[token("namespace")]
     NamespaceKw,
     #[token("use")]
@@ -134,17 +138,21 @@ pub enum TokenKind {
     /// as `List<RoleBinding>`. A keyword for symmetry with `attributes_of`/`type_of`.
     #[token("roles_of")]
     RolesOfKw,
+    /// The reflection keyword `params_of(target)` — a callable's declared parameter list, returned as
+    /// `List<ParamInfo>`. Takes a runtime `string` target (a bare fn name or `Type.method`). A keyword
+    /// for symmetry with `type_of`/`roles_of`/`attributes_of`.
+    #[token("params_of")]
+    ParamsOfKw,
     /// The reflection keyword `invoke(recv, name, args)` — the fallible by-name invocation
     /// primitive: dispatch a method (on a value) or an associated function (on a type) by a
     /// runtime string name, returning `Result`. A keyword for symmetry with the other reflection
     /// surfaces and so the one surviving runtime-dispatch site is lexically visible.
     #[token("invoke")]
     InvokeKw,
-    /// `channel::<T>(capacity)` — construct a bounded, typed channel, yielding the split-endpoint
-    /// pair `(Sender<T>, Receiver<T>)` (isolates milestone I.1). A keyword so the turbofish type
-    /// argument parses unambiguously, mirroring `from_bytes`/`attributes_of`.
-    #[token("channel")]
-    ChannelKw,
+    // `channel::<T>(capacity)` — the bounded-channel constructor (isolates I.1) — is deliberately NOT a
+    // keyword: `channel` is a very common identifier (a field/variable name), and the construct only
+    // ever appears in turbofish position. The parser recognizes it *contextually* (a `channel` ident
+    // immediately followed by `::<T>(…)`), so `channel` stays free as an ordinary name everywhere else.
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
@@ -375,6 +383,7 @@ impl TokenKind {
             TokenKind::ClassKw => "ClassKw",
             TokenKind::DestructKw => "DestructKw",
             TokenKind::ImplKw => "ImplKw",
+            TokenKind::TraitKw => "TraitKw",
             TokenKind::NamespaceKw => "NamespaceKw",
             TokenKind::UseKw => "UseKw",
             TokenKind::PubKw => "PubKw",
@@ -384,8 +393,8 @@ impl TokenKind {
             TokenKind::TypeOfKw => "TypeOfKw",
             TokenKind::FromBytesKw => "FromBytesKw",
             TokenKind::RolesOfKw => "RolesOfKw",
+            TokenKind::ParamsOfKw => "ParamsOfKw",
             TokenKind::InvokeKw => "InvokeKw",
-            TokenKind::ChannelKw => "ChannelKw",
             TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
@@ -481,6 +490,7 @@ impl TokenKind {
             TokenKind::ClassKw => "`class`",
             TokenKind::DestructKw => "`destruct`",
             TokenKind::ImplKw => "`impl`",
+            TokenKind::TraitKw => "`trait`",
             TokenKind::NamespaceKw => "`namespace`",
             TokenKind::UseKw => "`use`",
             TokenKind::PubKw => "`pub`",
@@ -490,8 +500,8 @@ impl TokenKind {
             TokenKind::TypeOfKw => "`type_of`",
             TokenKind::FromBytesKw => "`from_bytes`",
             TokenKind::RolesOfKw => "`roles_of`",
+            TokenKind::ParamsOfKw => "`params_of`",
             TokenKind::InvokeKw => "`invoke`",
-            TokenKind::ChannelKw => "`channel`",
             TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",

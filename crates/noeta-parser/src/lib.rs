@@ -33,8 +33,8 @@ use chumsky::prelude::*;
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
     FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, PackedDirective,
-    PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TypeParam, TypeRef,
-    UnaryOp, UseName, VariantDecl,
+    PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TraitDecl,
+    TraitMethod, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -544,6 +544,17 @@ fn attach_decorators(
             e.packed = packed;
             Stmt::Enum(e)
         }
+        Stmt::Trait(mut t) => {
+            // A trait accepts `#[...]` data attributes and `@role`; `@derive`/`@attribute`/
+            // `@semantic`/`@packed` do not apply to a trait and are carried for the checker (UT6).
+            t.attrs = attrs;
+            t.role = role;
+            t.derives = derives;
+            t.attribute = attribute;
+            t.semantic = semantic;
+            t.packed = packed;
+            Stmt::Trait(t)
+        }
         other => other,
     }
 }
@@ -567,6 +578,10 @@ fn set_public(stmt: Stmt, is_public: bool) -> Stmt {
         Stmt::Fn(mut d) => {
             d.is_public = is_public;
             Stmt::Fn(d)
+        }
+        Stmt::Trait(mut d) => {
+            d.is_public = is_public;
+            Stmt::Trait(d)
         }
         other => other,
     }
@@ -1001,6 +1016,16 @@ where
                 }
                 name
             });
+        // `dyn Trait` — a trait object (L1 user traits, UT4): the identifier `dyn` immediately
+        // followed by a (possibly dotted) trait name. Tried before `named` in the `base` choice; a
+        // bare `dyn` (no following type name) fails here and falls through to `named` as the top type.
+        let dyn_trait = ident_parser(ctx)
+            .filter(|(name, _): &(String, Span)| name == "dyn")
+            .ignore_then(dotted_name.clone())
+            .map_with(move |trait_name, e| TypeRef::DynTrait {
+                trait_name,
+                span: ctx.to_span(e.span()),
+            });
         let named = dotted_name
             .then(
                 type_
@@ -1061,7 +1086,14 @@ where
                     inner: Box::new(inner),
                     span: ctx.to_span(e.span()),
                 });
-            choice((optional, fn_type.clone(), tuple_type.clone(), named.clone())).boxed()
+            choice((
+                optional,
+                fn_type.clone(),
+                tuple_type.clone(),
+                dyn_trait.clone(),
+                named.clone(),
+            ))
+            .boxed()
         });
         // A union is the loosest type combinator: `base (| base)*`. A lone base is returned bare,
         // so any non-union annotation parses byte-identically to before.
@@ -1302,10 +1334,13 @@ where
         // are the exception — they have dedicated `.as<T>()` / `.await` postfixes registered ahead
         // of the member postfix, so they must NOT be admitted here.) Add a keyword to the choice
         // when a stdlib/user method needs its spelling.
-        let member_name = choice((just(T::Ident), just(T::SpawnKw))).map_with(move |_, e| {
-            let span = ctx.to_span(e.span());
-            (ctx.source.slice(span).to_string(), span)
-        });
+        // `type` is admitted so the reflection prelude's `ParamInfo { name, type }` field is
+        // reachable as `p.type` (the `params_of()` result); after a `.` the keyword is unambiguous.
+        let member_name =
+            choice((just(T::Ident), just(T::SpawnKw), just(T::TypeKw))).map_with(move |_, e| {
+                let span = ctx.to_span(e.span());
+                (ctx.source.slice(span).to_string(), span)
+            });
 
         // Literals.
         let int = just(T::IntLit).map_with(move |_, e| {
@@ -1674,9 +1709,14 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `channel::<T>(capacity)` — construct a bounded, typed channel (isolates I.1). Same shape as
-        // `from_bytes`: a turbofish message type followed by a parenthesized operand (the buffer size).
-        let channel = just(T::ChannelKw)
+        // `channel::<T>(capacity)` — construct a bounded, typed channel (isolates I.1). A turbofish
+        // message type followed by a parenthesized operand (the buffer size), like `from_bytes`.
+        // `channel` is a CONTEXTUAL keyword, not a reserved one (it is far too common a field/variable
+        // name to reserve): the `channel` identifier is recognized here only when immediately followed
+        // by `::<T>(…)`; anything else — a bare `channel` read, a `channel` field — fails this rule and
+        // falls through to the ordinary identifier atom below.
+        let channel = ident_parser(ctx)
+            .filter(|(name, _)| name == "channel")
             .ignore_then(just(T::ColonColon))
             .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
             .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
@@ -1739,6 +1779,16 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `params_of(target)` — the parameter-list reflection query. A keyword + parenthesized
+        // operand (like `type_of`); the operand is a runtime `string` naming a fn or method. Yields
+        // `List<ParamInfo>`.
+        let params_of = just(T::ParamsOfKw)
+            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |target, e| Expr::ParamsOf {
+                target: Box::new(target),
+                span: ctx.to_span(e.span()),
+            });
+
         // `invoke(recv, name, args)` — the fallible by-name invocation primitive. A keyword + three
         // parenthesized, comma-separated operands (receiver, method-name string, argument list),
         // yielding `Result<dyn, dyn>`.
@@ -1777,6 +1827,7 @@ where
             from_bytes,
             channel,
             roles_of,
+            params_of,
             invoke,
             typed_module_call,
             list,
@@ -2654,6 +2705,72 @@ where
                     })
                 },
             );
+        // A trait-method signature (L1 user traits): `#[...]? async? fn name(params): Ret` with an
+        // OPTIONAL body. A bodiless signature is a *required* method; a `{ ... }` body is a *default*
+        // implementation an `impl` may omit.
+        let trait_method = attr_decl
+            .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(just(T::AsyncKw).or_not())
+            .then_ignore(just(T::FnKw))
+            .then(id.clone())
+            .then(params_parser(ctx, expr.clone(), true))
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(block.clone().or_not())
+            .map_with(
+                move |(((((attrs, async_kw), name_pair), params), ret), body), e| {
+                    let has_default = body.is_some();
+                    TraitMethod {
+                        sig: FnDecl {
+                            name: name_pair.0,
+                            name_span: name_pair.1,
+                            is_public: false,
+                            type_params: Vec::new(),
+                            params,
+                            ret,
+                            attrs,
+                            is_dev_tier: false,
+                            tier: None,
+                            is_async: async_kw.is_some(),
+                            body: body.unwrap_or_default(),
+                            span: ctx.to_span(e.span()),
+                        },
+                        has_default,
+                    }
+                },
+            );
+        // `trait Name<T> { method-sigs }` — a user-defined trait declaration (L1). Names a contract
+        // of method signatures a type `impl`s; usable as a `<T: Name>` bound and a `dyn Name` trait
+        // object. The bare body only — leading `pub` and `#[...]`/`@role`/… decorators are applied by
+        // `attributed_type_decl` (UT6), the same uniform path structs/classes/enums take.
+        let trait_decl = just(T::TraitKw)
+            .ignore_then(id.clone())
+            .then(type_params.clone())
+            .then(
+                trait_method
+                    // Absorb the synthetic `;` between members on separate lines (slice 7).
+                    .then_ignore(just(T::Semicolon).repeated())
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(move |((name_pair, type_params), methods), e| {
+                Stmt::Trait(TraitDecl {
+                    name: name_pair.0,
+                    name_span: name_pair.1,
+                    is_public: false,
+                    type_params,
+                    methods,
+                    attrs: Vec::new(),
+                    role: None,
+                    derives: Vec::new(),
+                    attribute: None,
+                    semantic: None,
+                    packed: None,
+                    span: ctx.to_span(e.span()),
+                })
+            });
         // A struct declaration: `struct Name<T> { fields; methods; impl Trait { ... } }` — the value
         // kind. The **same unified body grammar** as a class, minus `destruct` (pure data has no
         // destructor — that capability is class-only). Replaces the retired `struct X { ... }` form.
@@ -3160,7 +3277,7 @@ where
             .repeated()
             .collect::<Vec<_>>()
             .then(just(T::PubKw).or_not())
-            .then(choice((enum_decl, struct_decl, class_decl)))
+            .then(choice((enum_decl, struct_decl, class_decl, trait_decl)))
             .map(move |((decorators, pub_kw), stmt)| {
                 let mut derives: Vec<DeriveSpec> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();

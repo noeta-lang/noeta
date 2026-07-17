@@ -950,13 +950,30 @@ impl Registry {
 
     /// Find the capability provider for a trait type id, across every registered unit (the
     /// capability-broker seam). Cold path — capabilities are resolved on orchestration ops, never in
-    /// hot loops — so a linear scan is right. First declaration wins; a program that installs two
-    /// providers for one capability trait is a configuration error the first one silently shadows.
+    /// hot loops — so a linear scan is right. First declaration wins; a consumer that must see
+    /// *every* provider (a plural recognition capability like `ViewSourceExtract`, provided by both
+    /// `para.synced` and `para.db`'s `Watch`) walks [`Registry::find_capabilities`] instead.
     pub fn find_capability(&self, id: std::any::TypeId) -> Option<&'static ExtCapability> {
         self.units
             .iter()
             .flat_map(|e| e.capabilities())
             .find(|c| (c.id)() == id)
+    }
+
+    /// All providers of a capability trait, in unit-registration order — the **plural** lookup of
+    /// the capability-broker seam. Most capability traits have one provider by nature (there is one
+    /// reactive engine); a *recognition* capability like `ViewSourceExtract` is legitimately
+    /// provided by every foreign reactive-node extension in the registry, and its consumer tries
+    /// each in turn. This is the broker-native growth path the seam documented for a second foreign
+    /// reactive extension — registry-scoped and declaration-driven, never a process-global list.
+    pub fn find_capabilities(
+        &self,
+        id: std::any::TypeId,
+    ) -> impl Iterator<Item = &'static ExtCapability> + '_ {
+        self.units
+            .iter()
+            .flat_map(|e| e.capabilities())
+            .filter(move |c| (c.id)() == id)
     }
 
     /// Find a registered module by its identity string — a **root-qualified path** (`"std.math"`,
@@ -1676,24 +1693,29 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             ));
         }
     }
-    // Capability providers dedupe by trait `TypeId` (the lookup key `find_capability` scans).
-    let mut caps: Vec<(std::any::TypeId, &str, &str)> = units
-        .iter()
-        .flat_map(|e| {
-            e.capabilities()
-                .iter()
-                .map(|c| ((c.id)(), c.state_key, e.name()))
-        })
-        .collect();
-    caps.sort_unstable_by_key(|(id, _, _)| *id);
-    for w in caps.windows(2) {
-        if w[0].0 == w[1].0 {
-            return Err(format!(
-                "duplicate capability provider (state keys `{}` and `{}`, units `{}` and `{}`): \
-                 two extensions provide the same capability trait, and lookup would silently \
-                 shadow one",
-                w[0].1, w[1].1, w[0].2, w[1].2
-            ));
+    // Capability providers: DISTINCT units may legitimately provide the same capability trait —
+    // a plural *recognition* capability like `ViewSourceExtract` has one provider per foreign
+    // reactive-node extension (`para.synced`, `para.db`'s `Watch`), and its consumer walks them
+    // all via `find_capabilities`. What is still a configuration error is one unit declaring the
+    // same trait twice (a copy-paste bug — the second declaration is unreachable through the
+    // singular lookup and indistinguishable through the plural one).
+    for e in units {
+        let mut ids: Vec<(std::any::TypeId, &str)> = e
+            .capabilities()
+            .iter()
+            .map(|c| ((c.id)(), c.state_key))
+            .collect();
+        ids.sort_unstable_by_key(|(id, _)| *id);
+        for w in ids.windows(2) {
+            if w[0].0 == w[1].0 {
+                return Err(format!(
+                    "duplicate capability provider inside unit `{}` (state keys `{}` and `{}`): \
+                     one extension declares the same capability trait twice",
+                    e.name(),
+                    w[0].1,
+                    w[1].1
+                ));
+            }
         }
     }
     for module in units.iter().flat_map(|e| e.modules()) {

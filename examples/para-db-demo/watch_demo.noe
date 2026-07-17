@@ -1,0 +1,47 @@
+// LEVEL 2 — an EXTERNAL write (another connection/process) flows to a reactive query via Postgres
+// LISTEN/NOTIFY. `db.watch(conn, channel)` is a node in the std.reactive graph; a `computed` that
+// reads it and re-queries the DB re-runs when the app pumps the watch and a NOTIFY has fired. The
+// same reactive value is what a LiveView `view.expose(...)` diffs to the browser.
+//
+//   docker run -d --rm -e POSTGRES_PASSWORD=test -e POSTGRES_DB=testdb -p 5433:5432 postgres:16-alpine
+//   noeta run examples/para-db-demo/watch_demo.noe
+use para.db
+use std.reactive.{computed, effect}
+
+conn = db.connect("postgres://postgres:test@127.0.0.1:5433/testdb")
+conn.execute("DROP TABLE IF EXISTS live_users", [])
+conn.execute("CREATE TABLE live_users (id INT PRIMARY KEY, name TEXT)", [])
+
+// The reactive DB source: a revision signal that wakes on a NOTIFY to the "live_users" channel.
+watch = db.watch(conn, "live_users")
+
+// A reactive query over it — re-runs whenever the watch wakes.
+live_count = computed(fn() {
+    watch.get()
+    rows = conn.query("SELECT COUNT(*) AS c FROM live_users", [])
+    return rows[0]["c"]
+})
+
+// The "UI" — re-renders automatically when the query changes.
+effect(fn() {
+    n = live_count.get()
+    echo "UI sees ${n} user(s)"
+})
+
+// An EXTERNAL writer on a SEPARATE connection changes the table and notifies (a real deployment uses
+// a trigger so ANY writer fires it; here we notify explicitly to keep the demo self-contained).
+other = db.connect("postgres://postgres:test@127.0.0.1:5433/testdb")
+other.execute("INSERT INTO live_users (id, name) VALUES (1, 'Ada')", [])
+other.execute("INSERT INTO live_users (id, name) VALUES (2, 'Bob')", [])
+other.execute("NOTIFY live_users", [])
+
+// Pump the watch from the app loop — the external change wakes the reactive query, re-runs the effect.
+mut woke = false
+mut tries = 0
+while !woke && tries < 100 {
+    woke = watch.pump()
+    tries = tries + 1
+}
+
+conn.close()
+other.close()

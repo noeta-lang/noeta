@@ -1,0 +1,33 @@
+// End-to-end dependency injection (L2, Option A): a GENERIC router reflects a handler's declared
+// parameter types (`params_of`), materializes the request body into the typed struct by its runtime
+// type (`json.decode_typed`, backed by `@derive(Deserialize<Json>)`), and dispatches by name
+// (`invoke`) — Laravel-style method injection with zero per-handler glue. Runs on both backends.
+// expect: stdout "created Ada (36)"
+// expect: exit 0
+use std.json
+
+@derive(Deserialize<Json>)
+struct CreateUser { name: string  age: int }
+
+class UsersController {
+    fn new(): UsersController { return UsersController {} }
+    fn create(body: CreateUser): string { return "created ${body.name} (${body.age})" }
+}
+
+fn arg_for(p: ParamInfo, raw_body: string): dyn {
+    name = match p.type { Struct(n, _) => n, Named(n, _) => n, _ => "dyn" }
+    return match json.decode_typed(name, raw_body) {
+        Ok(v) => v,
+        Err(e) => panic("400: ${e}"),
+    }
+}
+
+fn dispatch(controller: dyn, target: string, raw_body: string): string {
+    args = params_of(target).map(fn(p) => arg_for(p, raw_body))
+    return match invoke(controller, "create", args) {
+        Ok(r) => r.as<string>() ?? "?",
+        Err(e) => "500",
+    }
+}
+
+echo dispatch(UsersController.new(), "UsersController.create", "{\"name\":\"Ada\",\"age\":36}")

@@ -203,6 +203,20 @@ pub fn coalesce(chunk: &mut Chunk) {
             }
         }
     }
+    // Pin every debug-locals register the same way. `declare_local` bindings are already covered
+    // (their registers sit in `frame_locals` on a debug compile), but loop/match bindings are
+    // deliberately NOT teardown-listed (a debug compile must not change which destructors fire on
+    // a panic) — this pin keeps their `reg → name` 1:1 and their value readable at any pause,
+    // without touching the teardown list. Empty on non-debug compiles, so a no-op there.
+    for local in &chunk.debug_locals {
+        let r = local.reg as usize;
+        for other in 0..n {
+            if other != r {
+                interfere[r].insert(other);
+                interfere[other].insert(r);
+            }
+        }
+    }
     let colors = color(&interfere, n, chunk.num_params as usize);
 
     let new_count = colors.iter().copied().max().map_or(0, |c| c + 1);
@@ -223,10 +237,12 @@ pub fn coalesce(chunk: &mut Chunk) {
             true
         }
     });
-    // Remap the debugger's `reg → name` records through the same colouring (also metadata). In a
-    // debug compile every named local's register is in `frame_locals`, hence pinned to its own
-    // colour above, so the map stays a clean 1:1 — no two names collapse onto one register. In a
-    // non-debug compile `debug_locals` is empty and this is a no-op.
+    // Remap the debugger's `reg → name` records through the same colouring (also metadata).
+    // Every debug-locals register is pinned to its own colour above, so coalescing never
+    // collapses two *distinct* locals onto one register; a match binding that deliberately
+    // ALIASES its scrutinee's register shares a slot before and after — two names for one
+    // register there is the truth, not a collapse. In a non-debug compile `debug_locals` is
+    // empty and this is a no-op.
     for local in &mut chunk.debug_locals {
         local.reg = colors[local.reg as usize] as u16;
     }
@@ -471,6 +487,10 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => f.def = Some(*dst),
         Op::RolesOf { dst, .. } => f.def = Some(*dst),
+        Op::ParamsOf { dst, src } => {
+            f.def = Some(*dst);
+            f.uses.push(*src);
+        }
         Op::TypeOf { dst, src } => {
             f.def = Some(*dst);
             f.uses.push(*src);
@@ -542,6 +562,13 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::TypedModuleCall { dst, args, .. } => {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
+        }
+        Op::DecodeTyped {
+            dst, name, text, ..
+        } => {
+            f.def = Some(*dst);
+            f.uses.push(*name);
+            f.uses.push(*text);
         }
         Op::BundleMethod {
             dst, recv, args, ..
@@ -950,6 +977,10 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => m(dst),
         Op::RolesOf { dst, .. } => m(dst),
+        Op::ParamsOf { dst, src } => {
+            m(dst);
+            m(src);
+        }
         Op::TypeOf { dst, src } => {
             m(dst);
             m(src);
@@ -1011,6 +1042,13 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             for r in args.iter_mut() {
                 m(r);
             }
+        }
+        Op::DecodeTyped {
+            dst, name, text, ..
+        } => {
+            m(dst);
+            m(name);
+            m(text);
         }
         Op::BundleMethod {
             dst, recv, args, ..

@@ -252,7 +252,10 @@ impl Checker {
     pub(crate) fn check_type_param_bounds(&mut self, params: &[TypeParam]) {
         for p in params {
             for bound in &p.bounds {
-                if BuiltinTrait::from_name(bound).is_none() {
+                // A bound may name a built-in trait or a user-defined one (L1, UT3).
+                if BuiltinTrait::from_name(bound).is_none()
+                    && !self.symbols.user_traits.contains_key(bound)
+                {
                     self.error(
                         DiagnosticCode::UnknownTrait,
                         p.span,
@@ -262,8 +265,8 @@ impl Checker {
                         ),
                     )
                     .help(
-                        "a bound must name a built-in trait, e.g. `Comparable`, `Equatable`, \
-                             or `Display`",
+                        "a bound must name a built-in trait (e.g. `Comparable`, `Equatable`, \
+                             `Display`) or a `trait` you declare",
                     );
                 }
             }
@@ -298,6 +301,19 @@ impl Checker {
                 self.check_type_ref(ret);
             }
             TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
+            // `dyn Trait` — the trait must resolve to a built-in or user-defined trait (L1, UT4).
+            TypeRef::DynTrait { trait_name, span } => {
+                if BuiltinTrait::from_name(trait_name).is_none()
+                    && !self.symbols.user_traits.contains_key(trait_name)
+                {
+                    self.error(
+                        DiagnosticCode::UnknownTrait,
+                        *span,
+                        format!("unknown trait `{trait_name}` in `dyn {trait_name}`"),
+                    )
+                    .help("`dyn` must be followed by a built-in trait or a `trait` you declare");
+                }
+            }
             TypeRef::Named { name, args, span } => {
                 if !Type::is_builtin_name(name)
                     && !PRELUDE_TYPES.contains(&name.as_str())

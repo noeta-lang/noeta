@@ -1,0 +1,389 @@
+// para.aether — a first-party web framework for Noeta.
+//
+// Controllers are classes whose methods are tagged `#[Get("/path")]` / `#[Post("/path")]`. The `App`
+// autodiscovers those routes by reflection (`attributes_of`), and for each request it reflects the
+// handler's parameters (`params_of`) and INJECTS each one by its declared type — a request body
+// materialized into a typed struct (`json.decode_typed`, backed by `@derive(Deserialize<Json>)`) —
+// then dispatches by name (`invoke`). Laravel-style method injection, zero per-handler glue.
+//
+// This module is the routing + dependency-injection core. Middleware, service providers, the config
+// registry, and the background-task scope layer on top of it.
+
+namespace para.aether
+
+use std.http.server
+use std.http.{Request, Response}
+use std.json
+use std.task.sleep
+
+// --- Route attributes: users tag controller methods with these. -------------------------------
+
+@attribute(Method)
+pub struct Get {
+    path: string
+}
+
+@attribute(Method)
+pub struct Post {
+    path: string
+}
+
+// --- A resolved route in the table. -----------------------------------------------------------
+
+struct Route {
+    method: string // "GET" / "POST"
+    path: string // "/users"
+    controller: string // "UsersController"
+    action: string // "create"
+}
+
+// The controller + action a `"Controller.action"` target names.
+fn split_target(target: string): Route {
+    parts = target.split(".")
+    controller = if parts.len() > 0 then parts[0] else ""
+    action = if parts.len() > 1 then parts[1] else ""
+    return Route { method: "", path: "", controller: controller, action: action }
+}
+
+// --- Route path matching (with `{param}` capture). ---------------------------------------------
+
+// Match a route pattern (`/users/{id}`) against a concrete request path (`/users/7`): `none` if it
+// does not match, else `some(id)` where `id` is the captured `{…}` segment (the empty string for a
+// pattern with no parameter). A single positional capture is enough for route-model binding; richer
+// capture (named params, multiple) is a later slice.
+fn path_match(pattern: string, path: string): ?string {
+    pp = pattern.split("/")
+    ap = path.split("/")
+    if pp.len() != ap.len() {
+        return none
+    }
+    mut id = ""
+    mut i = 0
+    for seg in pp {
+        actual = ap[i]
+        if seg.starts_with("{") {
+            id = actual
+        } else {
+            if seg != actual {
+                return none
+            }
+        }
+        i = i + 1
+    }
+    return some(id)
+}
+
+// --- Background task scope & scheduler. --------------------------------------------------------
+//
+// The serve loop drives sibling `spawn`ed tasks (its accept loop calls `advance_tasks` each round),
+// so a `concurrent { spawn work(rx); spawn every(...); serve(port, app.route) }` nursery runs the
+// server, a background-job worker, and scheduled tasks together on one heap — no async-serve
+// primitive needed. A handler "fires and forgets" by enqueuing a thunk onto the job channel and
+// returning immediately; the worker runs it off the request path.
+
+fn noop(): void {}
+
+// The background worker: drain the job queue, running each enqueued thunk. Spawn one per app.
+pub async fn work(rx: Receiver<() -> void>): void {
+    mut going = true
+    while going {
+        job = rx.recv().await
+        if job == none {
+            going = false
+        } else {
+            f = job ?? noop
+            f()
+        }
+    }
+}
+
+// Enqueue a fire-and-forget background job — the handler returns without waiting for it to run.
+pub async fn background(tx: Sender<() -> void>, job: () -> void): void {
+    tx.send(job).await
+}
+
+// A scheduled task: run `action` every `ms` milliseconds, forever. Spawn one per schedule.
+pub async fn every(ms: int, action: () -> void): void {
+    mut running = true
+    while running {
+        sleep(ms).await
+        action()
+    }
+}
+
+// --- Middleware. -------------------------------------------------------------------------------
+//
+// A middleware runs before the route handler and may short-circuit the request. `before` returns
+// `some(response)` to stop the pipeline and reply immediately (auth reject, cached hit, CORS
+// preflight), or `none` to let the request continue to the next middleware / the handler. This is
+// the L1 `dyn Trait` machinery: middlewares are `dyn Middleware` in a pipeline, dispatched
+// dynamically on their concrete type.
+
+pub trait Middleware {
+    fn before(req: Request): ?Response
+}
+
+// Run the before-pipeline: the first middleware that returns a response short-circuits; otherwise
+// `none` lets the request proceed to the route handler.
+fn run_before(pipeline: List<dyn Middleware>, req: Request): ?Response {
+    for mw in pipeline {
+        short = mw.before(req)
+        if short != none {
+            return short
+        }
+    }
+    return none
+}
+
+// --- Configuration registry. ------------------------------------------------------------------
+//
+// An app-wide key/value store (`std.cell`-style shared state via the class's reference identity):
+// service providers write it during setup, handlers read it. Values are strings — the caller parses
+// richer shapes (a port to `int`, a JSON blob via `json.decode`).
+
+pub class Config {
+    mut values: Map<string, string>
+
+    fn new(): Config {
+        return Config { values: {} }
+    }
+
+    fn set(key: string, value: string): void {
+        self.values = self.values.set(key, value)
+    }
+
+    fn get(key: string, fallback: string): string {
+        return self.values.get_or(key, fallback)
+    }
+
+    fn has(key: string): bool {
+        return self.values.has(key)
+    }
+}
+
+// --- The data store seam (route-model binding + unit-of-work). ---------------------------------
+//
+// aether is deliberately database-agnostic: it depends on this `Store` interface, NOT on any concrete
+// driver. An app backs it with whatever it likes — `para.db` over SQLite, an in-memory fake in tests,
+// a remote service — and wires the implementation in with `app.set_store(...)`. This is the seam the
+// dependency-injection layer uses for the two Laravel-style features:
+//   - **route-model binding**: a handler parameter whose type is a `bind_model`'d model is loaded by
+//     the route's `{id}` via `Store.load(model, id)` and injected, instead of decoded from the body.
+//   - **unit-of-work**: a handler stages writes with `Store.stage(...)` during the request; aether
+//     calls `Store.flush()` once, after the response is produced, so a request's writes commit as one
+//     batch (the repository/unit-of-work pattern, kept off the hot path).
+
+pub trait Store {
+    // Load a bound model instance of type `model` by its route id (route-model binding).
+    fn load(model: string, id: string): dyn
+    // Stage a write (`data` is JSON) into the request's unit-of-work; committed on `flush`.
+    fn stage(model: string, data: string): void
+    // Commit every staged write — called once by aether at end-of-request.
+    fn flush(): void
+}
+
+// The store an app gets before it configures one: a no-op unit-of-work. `flush`/`stage` do nothing;
+// `load` refuses (a route bound a model but no store was wired to load it from). So aether always has
+// a `Store` to call — no per-request `none`-checks on the hot path.
+class NullStore {
+    fn new(): NullStore {
+        return NullStore {}
+    }
+}
+
+impl Store for NullStore {
+    fn load(model: string, id: string): dyn {
+        return panic("no store configured — call `app.set_store(...)` to load model ${model}")
+    }
+
+    fn stage(model: string, data: string): void {}
+
+    fn flush(): void {}
+}
+
+// --- Service providers. -----------------------------------------------------------------------
+//
+// A service provider modularizes application setup: its `register(app)` wires controllers, config,
+// and middleware into the app. Registering a provider runs its `register` immediately (Laravel's
+// deferred `boot` phase awaits trait default methods — UT5). Providers are `dyn ServiceProvider`
+// (L1), so an app composes features by registering a list of them.
+
+pub trait ServiceProvider {
+    fn register(app: App): void
+}
+
+// --- The application. -------------------------------------------------------------------------
+
+pub class App {
+    mut routes: List<Route>
+    mut controllers: Map<string, dyn>
+    mut middleware: List<dyn Middleware>
+    mut bound: List<string> // model type names that are route-bound (loaded from the store by id)
+    mut store: dyn Store // the data-store seam (a NullStore until an app configures one)
+    config: Config
+
+    fn new(): App {
+        return App { routes: [], controllers: {}, middleware: [], bound: [], store: NullStore.new(), config: Config.new() }
+    }
+
+    // Wire in the data store an app's models load/persist through (its `para.db`-backed impl, a test
+    // fake, …). Injected handler parameters and the end-of-request flush dispatch through it.
+    fn set_store(s: dyn Store): void {
+        self.store = s
+    }
+
+    // Mark a model type as **route-bound**: a handler parameter of this type is loaded from the store
+    // by the route's `{id}` (Laravel implicit binding), instead of being decoded from the request body.
+    fn bind_model(name: string): void {
+        self.bound = self.bound ~ [name]
+    }
+
+    // Whether `name` names a route-bound model.
+    fn is_bound(name: string): bool {
+        for b in self.bound {
+            if b == name {
+                return true
+            }
+        }
+        return false
+    }
+
+    // Run a service provider's setup against this app (register controllers, config, middleware).
+    fn provider(p: dyn ServiceProvider): void {
+        p.register(self)
+    }
+
+    // Set an app configuration value (providers write it during setup).
+    fn configure(key: string, value: string): void {
+        self.config.set(key, value)
+    }
+
+    // Read an app configuration value, or `fallback` if unset.
+    fn setting(key: string, fallback: string): string {
+        return self.config.get(key, fallback)
+    }
+
+    // Add a middleware to the pipeline (run in registration order before every handler).
+    fn use_middleware(mw: dyn Middleware): void {
+        self.middleware = self.middleware ~ [mw]
+    }
+
+    // Register a controller instance under its type name (the leading segment of its route targets).
+    fn register(name: string, controller: dyn): void {
+        self.controllers = self.controllers.set(name, controller)
+    }
+
+    // Build the route table from every `#[Get]` / `#[Post]` in the program.
+    fn discover(): void {
+        mut table: List<Route> = self.routes
+        for a in attributes_of::<Get>() {
+            t = split_target(a.target)
+            table = table ~ [Route { method: "GET", path: a.value.path, controller: t.controller, action: t.action }]
+        }
+        for a in attributes_of::<Post>() {
+            t = split_target(a.target)
+            table = table ~ [Route { method: "POST", path: a.value.path, controller: t.controller, action: t.action }]
+        }
+        self.routes = table
+    }
+
+    // The testable dispatch core: resolve a route (matching `{param}` patterns and capturing the id),
+    // inject its handler's parameters by reflected type, invoke, and return the response body. `body`
+    // is the raw request body (JSON).
+    fn handle(method: string, path: string, body: string): string {
+        for r in self.routes {
+            if r.method == method {
+                m = path_match(r.path, path)
+                if m != none {
+                    id = m ?? ""
+                    return self.dispatch(r, id, body)
+                }
+            }
+        }
+        return "404 Not Found"
+    }
+
+    // Dispatch a matched route: look up its controller instance and invoke the action with the
+    // captured route id in scope (for route-model binding).
+    fn dispatch(r: Route, id: string, body: string): string {
+        if self.controllers.has(r.controller) {
+            return self.invoke_action(self.controllers[r.controller], r, id, body)
+        }
+        return "500 no controller ${r.controller}"
+    }
+
+    // Invoke a controller action with its injected arguments; render the string result.
+    fn invoke_action(ctrl: dyn, r: Route, id: string, body: string): string {
+        target = "${r.controller}.${r.action}"
+        args = self.build_args(target, id, body)
+        return match invoke(ctrl, r.action, args) {
+            Ok(result) => result.as<string>() ?? "200 OK",
+            Err(e) => "500 ${e}",
+        }
+    }
+
+    // Build the handler's argument list by reflecting its parameters (`params_of`) and injecting each
+    // one by its declared type — a for-loop, not `.map`, because the injection reads `self`.
+    fn build_args(target: string, id: string, body: string): List<dyn> {
+        mut args: List<dyn> = []
+        for p in params_of(target) {
+            args = args ~ [self.arg_for(p, id, body)]
+        }
+        return args
+    }
+
+    // Inject one parameter by its reflected type:
+    //   - `dyn Trait`  → the registered store service (service injection by interface),
+    //   - a nominal type → route-model binding (if `bind_model`'d) else request-body decode.
+    fn arg_for(p: ParamInfo, id: string, body: string): dyn {
+        return match p.type {
+            DynTrait(_) => self.store,
+            Struct(n, _) => self.materialize(n, id, body),
+            Class(n, _) => self.materialize(n, id, body),
+            Named(n, _) => self.materialize(n, id, body),
+            _ => panic("400 cannot inject a parameter of this type"),
+        }
+    }
+
+    // A nominal parameter is either a route-bound model (loaded from the store by the route id) or a
+    // request body materialized into a typed struct via `@derive(Deserialize<Json>)`.
+    fn materialize(name: string, id: string, body: string): dyn {
+        if self.is_bound(name) {
+            return self.store.load(name, id)
+        }
+        return match json.decode_typed(name, body) {
+            Ok(v) => v,
+            Err(e) => panic("400 ${e}"),
+        }
+    }
+
+    // The HTTP adapter: run the middleware pipeline (short-circuit if any responds), otherwise
+    // dispatch to the routed handler and reply — flushing the request's unit-of-work afterwards.
+    fn route(req: Request): Response {
+        return match run_before(self.middleware, req) {
+            some(resp) => resp,
+            none => self.serve_request(req),
+        }
+    }
+
+    // The string-testable request cycle: dispatch to the routed handler, then commit the request's
+    // unit-of-work (a no-op if nothing was staged). The same sequence `serve_request` runs for a live
+    // HTTP request, without the `Request`/`Response` wrappers — so an app can test its whole DI +
+    // route-model-binding + flush path with plain string calls (no server, no sockets).
+    fn dispatch_request(method: string, path: string, body: string): string {
+        out = self.handle(method, path, body)
+        self.store.flush()
+        return out
+    }
+
+    // Dispatch one live HTTP request to its handler, then commit the unit-of-work.
+    fn serve_request(req: Request): Response {
+        body = self.dispatch_request(req.method(), req.path(), req.body())
+        return server.response(200, body)
+    }
+
+    // Run the app on `port`, dispatching each request through the router.
+    fn serve(port: int): void {
+        server.serve(port, self.route)
+    }
+}

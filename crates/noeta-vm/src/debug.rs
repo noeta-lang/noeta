@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use noeta_bytecode::Module;
-use noeta_span::SourceMap;
+use noeta_span::{SourceMap, Span};
 
 use crate::DebugView;
 
@@ -178,11 +178,35 @@ pub struct VarInfo {
     pub ty: String,
 }
 
+/// Whether a local declared at `def_span` is **in scope** at the paused instruction spanning
+/// `here` — i.e. its initializing store has already executed.
+///
+/// A pause always lands at the *start of a source line* (a breakpoint resolves to the line's first
+/// pc; a landed step stops when the source line changes), so none of the current line's bindings
+/// have run yet: a local is in scope exactly when its declaration is on an *earlier* line. This is
+/// deliberately line-granular rather than a raw byte-offset test, which mis-orders a binding whose
+/// value expression sits to the right of its name — in `b = f(x)` the name `b` is at an earlier
+/// offset than the `f(x)` the pause resolves to, yet `b` is not stored until the line completes, so
+/// a byte test would surface `b` (as its pre-store `unit`) while stopped on its own line.
+fn local_in_scope(def_span: Span, here: Option<Span>, sources: &SourceMap) -> bool {
+    match here {
+        // Same source (a frame's locals and its paused span always are): earlier line ⇒ declared.
+        Some(h) if def_span.source == h.source => {
+            sources
+                .source(def_span.source)
+                .line_col(def_span.start)
+                .line
+                < sources.source(h.source).line_col(h.start).line
+        }
+        // No paused span (a spanless prologue), or the defensive cross-file case: keep the local.
+        _ => true,
+    }
+}
+
 /// Snapshot the live [`DebugView`] into an owned [`PausedState`]. Walks the frame stack innermost
 /// first; for each frame records its name, source position, and the locals that are *in scope at
-/// the pause* — those whose binding begins before the instruction about to run. A local declared
-/// later in the function has a pinned-but-unassigned register, so filtering by declaration span
-/// keeps the yet-to-exist names out of the view.
+/// the pause* ([`local_in_scope`]) — a local declared later (or by the very line we're stopped on)
+/// has a pinned-but-unassigned register, so filtering keeps the yet-to-exist names out of the view.
 pub fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
     let mut frames = Vec::with_capacity(view.depth());
     for i in (0..view.depth()).rev() {
@@ -198,14 +222,7 @@ pub fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
         };
         let locals = frame
             .locals()
-            .filter(|(_, def_span, _)| match line_span {
-                // In scope iff its binding begins strictly before the paused instruction. Strict, so a
-                // local being introduced by the very instruction we're stopped before isn't shown as
-                // bound yet.
-                Some(here) => def_span.start < here.start,
-                // No paused span to compare against: show every named local rather than hide them all.
-                None => true,
-            })
+            .filter(|(_, def_span, _)| local_in_scope(*def_span, line_span, sources))
             .map(|(name, _, value)| VarInfo {
                 name: name.to_string(),
                 value: value.display(),
@@ -228,17 +245,21 @@ pub fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
 /// The in-scope local *names* of snapshot frame `frame` (innermost-first indexing, as debuggers
 /// number stack frames) — the parameter list a console fragment is checked against before it runs
 /// (session-checker C3; the checking itself lives with the checker, keeping the VM checker-free).
-pub fn frame_param_names(view: &DebugView, frame: usize) -> Result<Vec<String>, String> {
+/// Uses the same [`local_in_scope`] rule as [`capture`], so the console sees exactly the names the
+/// Variables panel shows — a name declared by the paused line (not yet stored) is not a parameter,
+/// and referencing it is an ordinary undefined-name error rather than an `int`-and-`unit` confusion.
+pub fn frame_param_names(
+    view: &DebugView,
+    frame: usize,
+    sources: &SourceMap,
+) -> Result<Vec<String>, String> {
     let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
         return Err(format!("no frame {frame} in the paused stack"));
     };
     let f = view.frame(view_idx);
     let here = f.line_span();
     Ok(f.locals()
-        .filter(|(_, def_span, _)| match here {
-            Some(h) => def_span.start < h.start,
-            None => true,
-        })
+        .filter(|(_, def_span, _)| local_in_scope(*def_span, here, sources))
         .map(|(name, _, _)| name.to_string())
         .collect())
 }

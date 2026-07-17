@@ -131,6 +131,7 @@ fn kind_word(kind: CandidateKind) -> &'static str {
         CandidateKind::Method => "method",
         CandidateKind::EnumMember => "enum-member",
         CandidateKind::Type => "type",
+        CandidateKind::Trait => "trait",
         CandidateKind::Module => "module",
     }
 }

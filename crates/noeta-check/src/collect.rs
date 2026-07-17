@@ -499,7 +499,44 @@ impl Checker {
                         .or_default()
                         .push((decl.trait_name.clone(), decl.trait_span));
                 }
+                // A user-defined trait (L1) is registered up front so forward references (an `impl`
+                // or `<T: Trait>` bound textually above the `trait`) resolve. A duplicate declaration
+                // keeps the first; pass 2 (`check_trait_decl`) reports the collision.
+                Stmt::Trait(t) => {
+                    self.symbols
+                        .user_traits
+                        .entry(t.name.clone())
+                        .or_insert_with(|| t.clone());
+                }
                 _ => {}
+            }
+        }
+        // Record which user traits each type implements (L1, UT2), from both standalone and in-body
+        // `impl`s. Done after the main walk so every `trait` is registered regardless of source
+        // order. The basis for UT3 bound satisfaction and UT4 `dyn Trait` coercion.
+        for stmt in &program.stmts {
+            let (type_name, impls): (&str, &[noeta_ast::ImplBlock]) = match stmt {
+                Stmt::Impl(decl) if self.symbols.user_traits.contains_key(&decl.trait_name) => {
+                    self.symbols
+                        .user_trait_impls
+                        .entry(decl.target.clone())
+                        .or_default()
+                        .insert(decl.trait_name.clone());
+                    continue;
+                }
+                Stmt::Struct(d) => (&d.name, &d.impls),
+                Stmt::Class(d) => (&d.name, &d.impls),
+                Stmt::Enum(d) => (&d.name, &d.impls),
+                _ => continue,
+            };
+            for b in impls {
+                if self.symbols.user_traits.contains_key(&b.trait_name) {
+                    self.symbols
+                        .user_trait_impls
+                        .entry(type_name.to_string())
+                        .or_default()
+                        .insert(b.trait_name.clone());
+                }
             }
         }
         // Method-bundle bindings (kernel-methods K1) resolve after the whole collect walk, so a

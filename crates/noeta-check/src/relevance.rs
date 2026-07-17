@@ -25,7 +25,7 @@ pub(crate) fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
         | Type::String
         | Type::Bytes => false,
         // Missing information / the dynamic top / an abstract kind / a function value: assume relevant.
-        Type::Unknown | Type::Dyn | Type::Kind(_) | Type::Fn { .. } => true,
+        Type::Unknown | Type::Dyn | Type::DynTrait(_) | Type::Kind(_) | Type::Fn { .. } => true,
         // Aggregates are relevant exactly when a part they own is.
         Type::List(e) | Type::Set(e) | Type::Option(e) => type_relevant(e, reachable),
         Type::Map(k, v) => type_relevant(k, reachable) || type_relevant(v, reachable),

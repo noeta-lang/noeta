@@ -301,6 +301,7 @@ impl<'m> Vm<'m> {
                                     program,
                                     text,
                                     frame,
+                                    scope,
                                     allow_calls,
                                     reply,
                                 } = req;
@@ -312,6 +313,7 @@ impl<'m> Vm<'m> {
                                     self.debug_eval_fragment(
                                         &program,
                                         frame,
+                                        &scope,
                                         !allow_calls,
                                         &text,
                                         &frames[..],
@@ -333,6 +335,7 @@ impl<'m> Vm<'m> {
                                     name,
                                     value,
                                     frame,
+                                    scope,
                                     reply,
                                 } = req;
                                 let outcome = if self.debug_session.is_some() {
@@ -340,6 +343,7 @@ impl<'m> Vm<'m> {
                                         &name,
                                         &value,
                                         frame,
+                                        &scope,
                                         &frames[..],
                                         &mut regs[..],
                                     )
@@ -654,14 +658,15 @@ impl<'m> Vm<'m> {
                         func: func_id,
                         args,
                         recipe,
+                        ok_shape,
+                        err_shape,
                         span,
                     } => {
                         // Resolve the interned module/func names (`module` is the outer loop-local
                         // `&Module`, so bind the op's ids under different names to avoid shadowing it).
                         let mod_name = module.name(*mod_id);
                         let func = module.name(*func_id);
-                        // A call-site-typed native module call (`json.parse::<T>(s)`). The recipe is
-                        // required; its absence was already reported by the checker.
+                        // The recipe is required; its absence was already reported by the checker.
                         let Some(recipe) = recipe else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
@@ -671,8 +676,10 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        // The only call-site-typed native function today is `json.parse::<T>(text)`.
-                        if mod_name == "json" && func == "parse" {
+                        // The call-site-typed native functions: `json.parse::<T>` (aborting) and the
+                        // recoverable `json.decode::<T>` → `Result<T, string>` (L2 DI).
+                        let recoverable = func == "decode";
+                        if mod_name == "json" && (func == "parse" || recoverable) {
                             let text = args
                                 .first()
                                 .map(|r| regs[fbase + *r as usize])
@@ -681,13 +688,30 @@ impl<'m> Vm<'m> {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
-                                    "`json.parse` expects a `string` argument".to_string(),
+                                    format!("`json.{func}` expects a `string` argument"),
                                 ));
                             };
                             match noeta_stdlib::json::parse_typed(&text, recipe) {
                                 Ok(out) => {
                                     let value = materialize_recipe(out);
+                                    let value = if recoverable {
+                                        Value::enum_value(
+                                            self.persist.shapes[*ok_shape as usize],
+                                            vec![value],
+                                        )
+                                    } else {
+                                        value
+                                    };
                                     set_reg(regs, fbase, *dst, value);
+                                }
+                                Err(error) if recoverable => {
+                                    // A decode failure is a recoverable `Result.Err(message)`.
+                                    let msg = Value::string(&error.message);
+                                    let err = Value::enum_value(
+                                        self.persist.shapes[*err_shape as usize],
+                                        vec![msg],
+                                    );
+                                    set_reg(regs, fbase, *dst, err);
                                 }
                                 Err(error) => {
                                     return Err(self.error(
@@ -706,6 +730,47 @@ impl<'m> Vm<'m> {
                             ),
                         ));
                         }
+                        pc += 1;
+                    }
+                    Op::DecodeTyped {
+                        dst,
+                        name,
+                        text,
+                        ok_shape,
+                        err_shape,
+                        span,
+                    } => {
+                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown type
+                        // name, a non-string operand, or a malformed body all land as `Result.Err`; a
+                        // good decode is `Result.Ok(value)` wrapping the materialized struct. Mirrors
+                        // the recoverable `json.decode::<T>` branch above, but the recipe is looked up by
+                        // runtime type name rather than baked at the call site.
+                        let err = |vm: &Self, msg: String| {
+                            Value::enum_value(
+                                vm.persist.shapes[*err_shape as usize],
+                                vec![Value::string(&msg)],
+                            )
+                        };
+                        let name_val = regs[fbase + *name as usize].as_string();
+                        let text_val = regs[fbase + *text as usize].as_string();
+                        let (Some(type_name), Some(text)) = (name_val, text_val) else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "`json.decode_typed` expects two `string` arguments".to_string(),
+                            ));
+                        };
+                        let value = match self.deserialize_recipes.get(&type_name) {
+                            None => err(self, format!("unknown deserializable type `{type_name}`")),
+                            Some(recipe) => match noeta_stdlib::json::parse_typed(&text, recipe) {
+                                Ok(out) => Value::enum_value(
+                                    self.persist.shapes[*ok_shape as usize],
+                                    vec![materialize_recipe(out)],
+                                ),
+                                Err(error) => err(self, error.message),
+                            },
+                        };
+                        set_reg(regs, fbase, *dst, value);
                         pc += 1;
                     }
                     Op::BundleMethod {
@@ -2328,6 +2393,13 @@ impl<'m> Vm<'m> {
                     Op::RolesOf { dst, role_enum } => {
                         let filter = role_enum.map(|e| module.name(e));
                         let result = self.materialize_roles(filter);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::ParamsOf { dst, src } => {
+                        // The runtime target string names a fn or method; materialize its params.
+                        let target = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_params(&target);
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }

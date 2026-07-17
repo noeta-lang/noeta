@@ -1,0 +1,77 @@
+// Inline event binding, exercised without a browser. `page()` builds an `@html` value whose buttons,
+// input, and per-row `<li>`s each bind their handler *inline* with `on_click`/`on_input`; the `@html`
+// handler registers every closure in `page.handlers` under an auto id and emits the matching
+// `data-live-*` marker. `fire` simulates a client event by looking the closure up by id and running
+// it with the event payload — exactly what the websocket `session` does. Run:
+//
+//   cd examples/liveview-events && noeta run events_demo.noe
+//
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "2"
+// expect: stdout "0"
+// expect: stdout "Ada"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+use para.html.{render, Html, keyed, on_click, on_input}
+use std.reactive.signal
+
+count = signal(0)
+name = signal("")
+
+struct Item {
+    id: int
+    label: string
+    done: bool
+}
+
+items = signal([
+    Item { id: 1, label: "a", done: false },
+    Item { id: 2, label: "b", done: false },
+])
+
+fn toggle(id: int): void {
+    items.update(fn(xs) => xs.map(fn(x) => if x.id == id then Item { id: x.id, label: x.label, done: !x.done } else x))
+}
+
+// A per-row `<li>` binds its own click — the closure captures *this* row's id. `keyed` hoists it into
+// the page table under the row's key (`<id>-e0`), so a per-item handler routes correctly.
+fn row(it: Item): Html {
+    return @html { <li ${on_click(fn() => toggle(it.id))}>${it.label}</li> }
+}
+
+fn page(): Html {
+    return @html {
+        <button ${on_click(fn() => count.update(fn(n) => n + 1))}>+1</button>
+        <button ${on_click(fn() => count.set(0))}>reset</button> <input ${on_input(fn(v) => name.set(v))} placeholder="name">
+        <ul>${keyed(items, fn(x) => "${x.id}", row)}</ul>
+    }
+}
+
+// Simulate one client event: look up the element's inline handler by id, run it with the payload.
+fn fire(p: Html, id: string, value: string): void {
+    p.handlers.get_or(id, fn(_: string) {})(value)
+}
+
+fn main(): void {
+    p = page()
+    // Top-level bindings: +1 = e0, reset = e1, input = e2 (by hole order); markers are emitted.
+    echo p.skeleton.contains("data-live-click=\"e0\"")
+    echo p.skeleton.contains("data-live-input=\"e2\"")
+    fire(p, "e0", "")
+    fire(p, "e0", "")
+    echo count.get()
+    fire(p, "e1", "")
+    echo count.get()
+    fire(p, "e2", "Ada")
+    echo name.get()
+    // Keyed per-row binding: the row for id=1 registers its click under "1-e0".
+    echo p.skeleton.contains("data-live-click=\"1-e0\"")
+    fire(p, "1-e0", "")
+    echo items.get()[0].done
+    echo items.get()[1].done
+}
+
+main()

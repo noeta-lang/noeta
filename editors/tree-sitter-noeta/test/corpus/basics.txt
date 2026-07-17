@@ -191,3 +191,55 @@ echo 1
   (shebang)
   (echo_statement
     (integer_literal)))
+
+================================================================================
+Trait declaration
+================================================================================
+
+trait Greeter {
+    fn greet(who: string): string
+    fn label(): string { return "g" }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (trait_declaration
+    name: (identifier)
+    body: (trait_body
+      (trait_method
+        name: (identifier)
+        parameters: (parameters
+          (parameter name: (identifier) type: (primitive_type)))
+        return_type: (primitive_type))
+      (trait_method
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (primitive_type)
+        body: (block
+          (return_statement (string_literal)))))))
+
+================================================================================
+Dyn trait type
+================================================================================
+
+fn welcome(g: dyn Greeter): string {
+    return g.greet()
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (trait_object_type trait: (identifier))))
+    return_type: (primitive_type)
+    body: (block
+      (return_statement
+        (method_call_expression
+          object: (identifier)
+          method: (identifier)
+          arguments: (arguments))))))

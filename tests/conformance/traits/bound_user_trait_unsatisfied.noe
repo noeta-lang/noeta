@@ -1,0 +1,15 @@
+// Calling a `<G: Greeter>`-bounded function with a type that does not `impl Greeter` is a bound
+// violation (L1, UT3). E0025.
+// expect: error E0025 at 15:6
+// expect: exit 1
+trait Greeter {
+    fn greet(who: string): string
+}
+
+class Plain {
+    fn new(): Plain { return Plain {} }
+}
+
+fn welcome<G: Greeter>(g: G): string { return "x" }
+
+echo welcome(Plain.new())

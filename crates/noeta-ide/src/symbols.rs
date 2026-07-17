@@ -29,6 +29,8 @@ pub enum SymbolKind {
     Field,
     Method,
     Interface,
+    /// A user-defined `trait` declaration (L1 user traits).
+    Trait,
 }
 
 /// One resolved node of the document outline — [`SymbolNode`] with its two spans mapped to
@@ -94,6 +96,20 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
             }),
             Stmt::Enum(decl) => symbols.push(enum_symbol(decl)),
             Stmt::Impl(decl) => symbols.push(impl_symbol(decl)),
+            Stmt::Trait(decl) => symbols.push(SymbolNode {
+                name: decl.name.clone(),
+                detail: None,
+                kind: SymbolKind::Trait,
+                full_span: decl.span,
+                name_span: decl.name_span,
+                param_names: Vec::new(),
+                // The trait's method signatures, as `METHOD` children (bodiless required or default).
+                children: decl
+                    .methods
+                    .iter()
+                    .map(|m| fn_symbol(&m.sig, SymbolKind::Method))
+                    .collect(),
+            }),
             _ => {}
         }
     }
@@ -231,6 +247,7 @@ pub fn render_type_ref(ty: &TypeRef) -> String {
                 format!("{}<{}>", name, join(args))
             }
         }
+        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
         TypeRef::Optional { inner, .. } => format!("?{}", render_type_ref(inner)),
         TypeRef::Union { members, .. } => members
             .iter()

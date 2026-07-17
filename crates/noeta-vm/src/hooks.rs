@@ -54,10 +54,30 @@ const DEBUG_EVAL_CLOCK_INTERVAL: u64 = 4_096;
 /// never breaks inside `f`.
 pub(crate) struct EvalBudget {
     pub(crate) steps: u64,
-    pub(crate) deadline: std::time::Instant,
+    /// `None` where the platform has no monotonic clock (wasm32-unknown-unknown —
+    /// `Instant::now()` panics there); the step cap alone bounds the run then.
+    pub(crate) deadline: Option<std::time::Instant>,
     /// Set on a trip so the caller can distinguish "the budget stopped it" from an ordinary
     /// fragment abort (the terminate surfaces as `Err(Abort)` either way).
     pub(crate) tripped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl EvalBudget {
+    /// The wall-clock deadline, where the platform can sample one. A browser tab (the playground
+    /// debug console) gets `None` — its embedder already enforces its own wall-clock guard, and
+    /// the deterministic step cap stays as the in-VM backstop.
+    pub(crate) fn deadline() -> Option<std::time::Instant> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            None
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            )
+        }
+    }
 }
 
 impl Debugger for EvalBudget {
@@ -65,7 +85,9 @@ impl Debugger for EvalBudget {
         self.steps += 1;
         if self.steps > DEBUG_EVAL_MAX_STEPS
             || (self.steps.is_multiple_of(DEBUG_EVAL_CLOCK_INTERVAL)
-                && std::time::Instant::now() >= self.deadline)
+                && self
+                    .deadline
+                    .is_some_and(|deadline| std::time::Instant::now() >= deadline))
         {
             self.tripped
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -111,6 +133,15 @@ pub struct DebugEvalRequest {
     pub text: String,
     /// Which paused frame's scope to evaluate against, as the client numbers frames (innermost first).
     pub frame: usize,
+    /// The frame's **in-scope local names** — the ones the fragment's wrapper binds as parameters,
+    /// with their live values read from the frame registers. Computed by the debugger, which owns
+    /// the [`SourceMap`](noeta_span::SourceMap) needed to resolve a *source-line-granular* scope
+    /// (`noeta_vm::debug::frame_param_names`): a pause lands at a line's start, so a local declared
+    /// by that very line is not yet stored and is excluded. The VM has no `SourceMap`, so it takes
+    /// this list verbatim rather than re-deriving scope from raw byte offsets (which mis-orders a
+    /// binding whose value expression sits to the right of its name). Same names the checker gate
+    /// used, so a fragment referencing an out-of-scope name is already refused before it reaches here.
+    pub scope: Vec<String>,
     /// Whether the fragment may run **code** (calls, closures, statements). `false` for a hover — a
     /// hover must stay side-effect-free, so it evaluates paths/operators only and refuses a call.
     pub allow_calls: bool,
@@ -143,6 +174,9 @@ pub struct DebugSetRequest {
     pub value: Program,
     /// Which paused frame, as the client numbers frames (innermost first).
     pub frame: usize,
+    /// The frame's in-scope local names — see [`DebugEvalRequest::scope`]. Both the write target
+    /// `name` and any name the replacement fragment reads are resolved against this set.
+    pub scope: Vec<String>,
     /// The rendered outcome (the new value on success), back to the adapter thread.
     pub reply: Sender<DebugEvalOutcome>,
 }

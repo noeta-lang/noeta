@@ -401,6 +401,19 @@ impl NativeCtx for VmCtx<'_, '_> {
         Some((decl.build)(state))
     }
 
+    fn capabilities(&mut self, id: std::any::TypeId) -> Vec<Box<dyn std::any::Any>> {
+        // The plural broker: every provider, in unit-registration order (a recognition capability
+        // like `ViewSourceExtract` has one provider per foreign reactive-node extension).
+        let decls: Vec<_> = self.vm.reg().find_capabilities(id).collect();
+        decls
+            .into_iter()
+            .map(|decl| {
+                let state = self.state(decl.state_key, decl.init);
+                (decl.build)(state)
+            })
+            .collect()
+    }
+
     fn retain(&mut self, slot: Slot) -> CtxResult<noeta_stdlib::Retained> {
         let value = self.get(slot)?;
         // The arena takes its own reference; the slot stays table-owned.

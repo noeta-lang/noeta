@@ -1,0 +1,15 @@
+// Passing a type that does not `impl Greeter` where `dyn Greeter` is expected is a type error
+// (L1 user traits, UT4): trait-object coercion is gated on a real `impl`.
+// expect: error E0007 at 15:6
+// expect: exit 1
+trait Greeter {
+    fn greet(): string
+}
+
+class Plain {
+    fn new(): Plain { return Plain {} }
+}
+
+fn welcome(g: dyn Greeter): string { return "x" }
+
+echo welcome(Plain.new())

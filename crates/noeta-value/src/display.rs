@@ -237,6 +237,21 @@ impl Value {
                 | Payload::MethodHandle { .. }
                 | Payload::BoundMethod { .. } => NativeValue::Str("<fn>".to_string()),
                 Payload::Cell(inner) => inner.to_native_deep(),
+                // An `Option` marshals **through** its payload — the JSON-null convention, and what a
+                // native consumer (a SQL bind parameter, `json.stringify`) means by an optional value:
+                // `some(x)` is `x`, `none` is null/unit. Without this an `Option` would flatten to its
+                // variant *name* (`"some"`) — a silently wrong bound value / serialization.
+                Payload::Enum { shape, data } if shape.name == "Option" => {
+                    match shape.variant.as_deref() {
+                        Some("some") => data
+                            .first()
+                            .map(|v| v.to_native_deep())
+                            .unwrap_or(noeta_ext_abi::NativeValue::Unit),
+                        _ => noeta_ext_abi::NativeValue::Unit,
+                    }
+                }
+                // Any other enum marshals to its variant name (the tag) — the JSON convention for a
+                // nominal sum type.
                 Payload::Enum { shape, .. } => {
                     NativeValue::Str(shape.variant.as_deref().unwrap_or(&shape.name).to_string())
                 }

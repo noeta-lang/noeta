@@ -2,7 +2,7 @@
   "name": "noeta",
   "displayName": "Noeta",
   "description": "Language support for the Noeta programming language (.noe): syntax highlighting, the noeta lsp language server (diagnostics, hover, inlay type hints, go-to-definition, outline, completion, formatting with format-on-save/on-type), the noeta dap debugger (breakpoints, stepping, variables), run/build tasks (noeta run and noeta build --native, with Run/Build buttons on the editor title bar), the noeta profile flame-graph view with hot-line annotations, and the noeta mcp server auto-registered for the editor's AI agents.",
-  "version": "0.8.1",
+  "version": "0.9.1",
   "publisher": "noeta",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -47,6 +47,46 @@
         "path": "./syntaxes/noeta.tmLanguage.json",
         "embeddedLanguages": {
           "meta.embedded.block.markdown": "markdown"
+        }
+      },
+      {
+        "scopeName": "inline.noeta.tier-languages",
+        "path": "./syntaxes/tier-languages.tmLanguage.json",
+        "injectTo": ["source.noeta"],
+        "embeddedLanguages": {
+          "meta.embedded.block.sql": "sql",
+          "meta.embedded.block.html": "html",
+          "meta.embedded.block.css": "css",
+          "meta.embedded.block.json": "json",
+          "meta.embedded.block.yaml": "yaml",
+          "meta.embedded.block.xml": "xml",
+          "meta.embedded.block.graphql": "graphql",
+          "meta.embedded.block.markdown": "markdown",
+          "meta.embedded.block.javascript": "javascript",
+          "meta.embedded.block.python": "python",
+          "meta.embedded.block.shell": "shellscript",
+          "meta.embedded.block.toml": "toml",
+          "meta.embedded.block.sparql": "sparql"
+        }
+      },
+      {
+        "scopeName": "inline.noeta.generated-tiers",
+        "path": "./syntaxes/generated-tiers.tmLanguage.json",
+        "injectTo": ["source.noeta"],
+        "embeddedLanguages": {
+          "meta.embedded.block.sql": "sql",
+          "meta.embedded.block.html": "html",
+          "meta.embedded.block.css": "css",
+          "meta.embedded.block.json": "json",
+          "meta.embedded.block.yaml": "yaml",
+          "meta.embedded.block.xml": "xml",
+          "meta.embedded.block.graphql": "graphql",
+          "meta.embedded.block.markdown": "markdown",
+          "meta.embedded.block.javascript": "javascript",
+          "meta.embedded.block.python": "python",
+          "meta.embedded.block.shell": "shellscript",
+          "meta.embedded.block.toml": "toml",
+          "meta.embedded.block.sparql": "sparql"
         }
       }
     ],
@@ -172,6 +212,11 @@
       {
         "command": "noeta.restartServer",
         "title": "Restart Language Server",
+        "category": "Noeta"
+      },
+      {
+        "command": "noeta.refreshTierHighlighting",
+        "title": "Refresh Embedded-Language Tier Highlighting",
         "category": "Noeta"
       },
       {

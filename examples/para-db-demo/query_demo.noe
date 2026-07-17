@@ -1,0 +1,25 @@
+// The para.db query builder (DB1) over the native SQLite driver: compose typed SELECT/INSERT with
+// bound parameters (no string-splicing), then run them on a connection.
+use para.db
+use para.db.query.{table, run, exec}
+
+conn = db.connect("sqlite::memory:")
+conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)", [])
+
+// INSERT via the builder.
+ins = table("users").insert(["name", "age"], ["Ada", 36])
+exec(conn, ins)
+ins2 = table("users").insert(["name", "age"], ["Bob", 41])
+exec(conn, ins2)
+ins3 = table("users").insert(["name", "age"], ["Cy", 24])
+exec(conn, ins3)
+
+// SELECT with filter + order + limit via the builder.
+q = table("users").filter("age", ">", 30).order("age", "asc").limit(10).select("name, age")
+echo "sql: ${q.sql}"
+rows = run(conn, q)
+for r in rows {
+    name = r["name"]
+    age = r["age"]
+    echo "${name} is ${age}"
+}

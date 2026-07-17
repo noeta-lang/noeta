@@ -20,6 +20,11 @@ pub struct ReflectionInfo {
     /// This is the labeled dependency graph `roles_of()` surfaces — built beside the attribute
     /// manifest from the same AST, so both backends agree by construction.
     pub roles: Vec<RoleRecord>,
+    /// Every callable's declared parameter list, keyed by its target (a top-level fn's bare name,
+    /// a method's qualified `Type.method` name — the same target keying the attribute manifest).
+    /// This is what `params_of(target)` surfaces for a web framework's dependency injection, built
+    /// beside the attribute manifest from the same AST so both backends agree by construction.
+    pub params: Vec<ParamRecord>,
 }
 
 impl ReflectionInfo {
@@ -45,10 +50,37 @@ impl ReflectionInfo {
             .retain(|a| !redeclared.contains(a.target.as_str()));
         self.roles
             .retain(|r| !redeclared.contains(r.target.as_str()));
+        // Param records are keyed by a callable's target (`fn` or `Type.method`); a redeclared
+        // callable purges its old params. A plain fn or method carries no attribute, so its target
+        // is not in `redeclared` (which is built from type names + attribute/role targets) — key the
+        // purge on the target's declaration base (the type name before `.`, or the bare fn name) and
+        // on the incoming fragment's own param targets, so redefining a callable supersedes its old
+        // parameter list even when it bears no attribute.
+        let param_bases: std::collections::HashSet<&str> = fragment
+            .params
+            .iter()
+            .map(|p| param_base(&p.target))
+            .collect();
+        self.params.retain(|p| {
+            let base = param_base(&p.target);
+            !redeclared.contains(base) && !param_bases.contains(base)
+        });
         drop(redeclared);
+        drop(param_bases);
         self.types.extend(fragment.types);
         self.manifest.extend(fragment.manifest);
         self.roles.extend(fragment.roles);
+        self.params.extend(fragment.params);
+    }
+
+    /// The parameter list declared for `target`, or empty if the target names no known callable — the
+    /// projection `params_of(target)` materializes for dependency injection.
+    pub fn params_for(&self, target: &str) -> &[ParamSig] {
+        self.params
+            .iter()
+            .find(|p| p.target == target)
+            .map(|p| p.params.as_slice())
+            .unwrap_or(&[])
     }
 
     /// The data attributes attached to `target`, in source order — the manifest query tooling and
@@ -126,6 +158,32 @@ pub struct RoleRecord {
     pub variant: String,
 }
 
+/// One callable's declared parameter list — a top-level fn or a method — keyed by the same target
+/// convention as the attribute manifest (a bare fn name, or a qualified `Type.method`). `params_of()`
+/// materializes each into a `List<ParamInfo>` (each `{ name: string, type: Type }`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ParamRecord {
+    /// The callable's target: a top-level fn's bare name, or a method's qualified `Type.method` name.
+    pub target: String,
+    /// The declared parameters, in source order.
+    pub params: Vec<ParamSig>,
+}
+
+/// One declared parameter — its name and the reflection [`TypeRepr`] of its annotated type. An
+/// unannotated parameter's type is [`TypeRepr::Dyn`]. `params_of()` materializes each into a
+/// `ParamInfo { name: string, type: Type }` whose `type` is the `Type` ADT value `type_of` builds.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ParamSig {
+    pub name: String,
+    pub ty: TypeRepr,
+}
+
+/// The declaration base a param record's target keys on for latest-wins purging: the type name
+/// before the `.` of a `Type.method` target, or the whole name for a bare top-level fn.
+fn param_base(target: &str) -> &str {
+    target.split_once('.').map(|(ty, _)| ty).unwrap_or(target)
+}
+
 /// The kind of a declared type.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
@@ -165,6 +223,9 @@ pub struct VariantInfo {
 pub fn build(program: &Program) -> ReflectionInfo {
     let mut manifest = Vec::new();
     let mut types = Vec::new();
+    // Every callable's declared parameter list, keyed by target (bare fn name or `Type.method`) — the
+    // index `params_of(target)` surfaces, built in source order alongside the attribute manifest.
+    let mut params: Vec<ParamRecord> = Vec::new();
     // Attribute name → its `@role(Enum.Variant)` tags, harvested from the attribute records
     // themselves; joined with the manifest below so every *use* of a role-tagged attribute is
     // indexed. One entry per (attribute, role) pair — an attribute may carry several roles.
@@ -185,6 +246,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                         ));
                     }
                 }
+                for method in &decl.methods {
+                    params.push(ParamRecord {
+                        target: format!("{}.{}", decl.name, method.name),
+                        params: param_sigs(&method.params),
+                    });
+                }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Struct,
@@ -201,6 +268,10 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
+                    params.push(ParamRecord {
+                        target,
+                        params: param_sigs(&method.params),
+                    });
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -212,7 +283,30 @@ pub fn build(program: &Program) -> ReflectionInfo {
             }
             // A top-level function carries attributes too (keyed by its bare name); it is not a
             // declared *type*, so it contributes to the manifest only, not the type registry.
-            Stmt::Fn(decl) => push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs),
+            Stmt::Fn(decl) => {
+                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
+                params.push(ParamRecord {
+                    target: decl.name.clone(),
+                    params: param_sigs(&decl.params),
+                });
+            }
+            // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
+            // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
+            // role-bearing attribute). It is not a data type, so it adds no `TypeInfo`; its abstract
+            // method signatures are not scanned (route/metadata attributes live on the concrete
+            // `impl` methods, scanned via the class/struct arms). A direct `@role`/`@derive`/… on a
+            // trait is a checker error, so a runnable program never carries one here.
+            Stmt::Trait(decl) => {
+                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
+                // A trait's abstract method signatures carry declared parameters too, keyed by the
+                // `Trait.method` convention — surfaced via `params_of` like a concrete method's.
+                for method in &decl.methods {
+                    params.push(ParamRecord {
+                        target: format!("{}.{}", decl.name, method.sig.name),
+                        params: param_sigs(&method.sig.params),
+                    });
+                }
+            }
             Stmt::Enum(decl) => {
                 push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
                 // A variant's attributes are keyed by its qualified `Enum.Variant` name, mirroring
@@ -226,6 +320,10 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
+                    params.push(ParamRecord {
+                        target,
+                        params: param_sigs(&method.params),
+                    });
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -266,7 +364,22 @@ pub fn build(program: &Program) -> ReflectionInfo {
         manifest,
         types,
         roles,
+        params,
     }
+}
+
+/// Project a callable's declared parameters onto their reflection [`ParamSig`]s — each parameter's
+/// name paired with the [`TypeRepr`] of its annotated type (an unannotated parameter is
+/// [`TypeRepr::Dyn`]). Shared by every callable arm of [`build`] so a fn, method, and trait method
+/// sig all surface their parameters identically.
+fn param_sigs(params: &[crate::Param]) -> Vec<ParamSig> {
+    params
+        .iter()
+        .map(|p| ParamSig {
+            name: p.name.clone(),
+            ty: p.ty.as_ref().map(typeref_to_repr).unwrap_or(TypeRepr::Dyn),
+        })
+        .collect()
 }
 
 /// Compute each field's literal default (object-model slice 6i), parallel to the field list: `Some`
@@ -397,6 +510,11 @@ pub enum TypeRepr {
     Bytes,
     Unit,
     Dyn,
+    /// A **trait object** `dyn Trait` — the dynamic top *refined by a trait bound*, carrying the trait
+    /// name. Distinct from bare `Dyn` so reflection (`params_of`) can recover which trait a parameter
+    /// is bound to — what a framework needs to inject a service by its interface (`fn(store: dyn
+    /// Store)`). The runtime value still carries its own concrete type; this is the declared bound.
+    DynTrait(String),
     List(Box<TypeRepr>),
     Set(Box<TypeRepr>),
     Option(Box<TypeRepr>),
@@ -461,6 +579,7 @@ impl TypeRepr {
             TypeRepr::Bytes => "Bytes",
             TypeRepr::Unit => "Unit",
             TypeRepr::Dyn => "Dyn",
+            TypeRepr::DynTrait(_) => "DynTrait",
             TypeRepr::List(_) => "List",
             TypeRepr::Set(_) => "Set",
             TypeRepr::Option(_) => "Option",
@@ -492,6 +611,7 @@ impl std::fmt::Display for TypeRepr {
             TypeRepr::Bytes => f.write_str("bytes"),
             TypeRepr::Unit => f.write_str("void"),
             TypeRepr::Dyn => f.write_str("dyn"),
+            TypeRepr::DynTrait(name) => write!(f, "dyn {name}"),
             TypeRepr::List(t) => write!(f, "List<{t}>"),
             TypeRepr::Set(t) => write!(f, "Set<{t}>"),
             TypeRepr::Option(t) => write!(f, "?{t}"),
@@ -562,6 +682,9 @@ pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
             TypeRepr::Union(members.iter().map(typeref_to_repr).collect())
         }
         TypeRef::Optional { inner, .. } => TypeRepr::Option(boxed(inner)),
+        // A trait object reflects as `DynTrait(name)` — the dynamic top refined by its trait bound, so
+        // reflection can recover which trait a parameter is bound to (service injection by interface).
+        TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.clone()),
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
         TypeRef::Fn { params, ret, .. } => TypeRepr::Fn(
             params.iter().map(typeref_to_repr).collect(),
@@ -606,6 +729,7 @@ pub fn arg_matches(expected: &TypeRepr, actual: &TypeRepr) -> bool {
         | (Str, Str)
         | (Bytes, Bytes)
         | (Unit, Unit) => true,
+        (DynTrait(e), DynTrait(a)) => e == a,
         (Union(es), a) => es.iter().any(|e| arg_matches(e, a)),
         (e, Union(as_)) => as_.iter().any(|a| arg_matches(e, a)),
         // A nominal type matches by name (kind-tolerant: a `Named` target vs a `Struct`/`Class`/`Enum`
@@ -646,6 +770,11 @@ pub const SEMANTIC_ENUM: &str = "Semantic";
 /// `roles_of()`'s result list. `role` is typed as the abstract `Enum` kind because a binding's role
 /// may be any `@semantic` enum (the built-in `Semantic` or a user one), not a single fixed type.
 pub const ROLE_BINDING: &str = "RoleBinding";
+
+/// The `ParamInfo` prelude struct's name — `{ name: string, type: Type }`, the element type of
+/// `params_of()`'s result list. `type` is the reflection `Type` ADT value (the same ADT `type_of`
+/// returns), built from the parameter's declared type annotation.
+pub const PARAM_INFO: &str = "ParamInfo";
 
 /// The built-in **test-metadata attributes** (object-model slice 6h) — prelude `@attribute` structs
 /// the test runner reads off a `@test`/`@bench` fn: `#[Skip]` (zero fields, mark as skipped),

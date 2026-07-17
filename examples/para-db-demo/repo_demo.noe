@@ -1,0 +1,84 @@
+// The para.db repository + unit-of-work (DB2), pure Noeta over the DB1 query builder and the DB0
+// native SQLite driver. A `Repository` maps rows <-> a typed model struct by reflection over JSON,
+// stages inserts/updates/deletes during a request, and flushes them as one batch in a transaction.
+//
+//   noeta run examples/para-db-demo/repo_demo.noe
+use para.db
+use para.db.repo.Repository
+
+// The model: deriving BOTH Serialize<Json> (model -> columns) and Deserialize<Json> (row -> model).
+@derive(Serialize<Json>, Deserialize<Json>)
+struct User {
+    id: int
+    name: string
+    age: int
+}
+
+// Name of a `?dyn` result narrowed to `User`, or a fallback string.
+fn name_of(found: ?dyn): string {
+    return match found {
+        some(u) => match u.as<User>() {
+            some(user) => user.name,
+            none => "<malformed>",
+        },
+        none => "none",
+    }
+}
+
+// One-line description of a `dyn` row narrowed to `User`.
+fn describe(e: dyn): string {
+    return match e.as<User>() {
+        some(user) => "  #${user.id} ${user.name} (${user.age})",
+        none => "  <malformed>",
+    }
+}
+
+conn = db.connect("sqlite::memory:")
+conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)", [])
+
+// Construct the repository over the model's runtime type NAME (generics are erased), its table, and
+// its primary-key column.
+users = Repository.new("User", "users", "id")
+
+// --- Unit of work: stage two inserts, then flush them as one batch in a single transaction. -----
+users.add(User { id: 1, name: "Ada", age: 36 })
+users.add(User { id: 2, name: "Bob", age: 41 })
+n = users.flush(conn)
+echo "flushed ${n} statements"
+
+// --- Read one back by primary key (find -> ?dyn; narrow to User). --------------------------------
+found = users.find(conn, 1)
+found_name = name_of(found)
+echo "find(1) -> ${found_name}"
+
+// --- Read all, mapped to the model. --------------------------------------------------------------
+everyone = users.all(conn)
+count = everyone.len()
+echo "all() -> ${count} users"
+for e in everyone {
+    echo describe(e)
+}
+
+// --- Update via the unit of work: stage a save, flush, read back. --------------------------------
+users.save(User { id: 2, name: "Bob", age: 42 })
+users.flush(conn)
+bob = users.find(conn, 2)
+bob_age = match bob {
+    some(u) => match u.as<User>() {
+        some(user) => user.age,
+        none => 0,
+    },
+    none => 0,
+}
+echo "after save, #2 age -> ${bob_age}"
+
+// --- Delete via the unit of work: stage a remove, flush, confirm gone. ----------------------------
+users.remove(1)
+users.flush(conn)
+gone = users.find(conn, 1)
+gone_name = name_of(gone)
+echo "after remove, find(1) -> ${gone_name}"
+final = users.all(conn).len()
+echo "final count -> ${final}"
+
+conn.close()

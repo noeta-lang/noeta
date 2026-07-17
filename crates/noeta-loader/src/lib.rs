@@ -988,6 +988,38 @@ fn link_core(
         }
     }
 
+    // A standalone `impl Trait for T {}` in a pooled module (a sibling, or a dependency's own module)
+    // has no import name, so the `use`-driven merge above never pulls it — yet coherence requires an
+    // impl to travel with its target type (a `dyn Trait` coercion or a bound check needs to see it).
+    // An **inline** impl rides on its type's `class`/`struct` declaration and is already merged with it;
+    // this closes the **standalone** case. Merge each pooled standalone impl whose (qualified) target
+    // type was itself merged — so the impl only lands when the type it refers to is present — deduped
+    // by (target, trait) so a module reachable two ways contributes each impl once.
+    let merged_types: HashSet<String> = imported
+        .iter()
+        .filter_map(decl_name)
+        .map(str::to_string)
+        .collect();
+    let mut seen_impls: HashSet<(String, String)> = HashSet::new();
+    for mv in &module_views {
+        let Some(map) = module_maps.get(&mv.namespace) else {
+            continue;
+        };
+        for stmt in mv.stmts {
+            if !matches!(stmt, Stmt::Impl(_)) {
+                continue;
+            }
+            let mut cloned = stmt.clone();
+            qualify::qualify_stmt(&mut cloned, map);
+            if let Stmt::Impl(decl) = &cloned
+                && merged_types.contains(&decl.target)
+                && seen_impls.insert((decl.target.clone(), decl.trait_name.clone()))
+            {
+                imported.push(cloned);
+            }
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -1040,6 +1072,11 @@ fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
         Stmt::Struct(decl) => Some(&decl.name),
         Stmt::Enum(decl) => Some(&decl.name),
         Stmt::Fn(decl) => Some(&decl.name),
+        // A user-defined trait is a qualifiable declaration (L1): a `dyn Trait` type, a `<T: Trait>`
+        // bound, or an `impl Trait for T` referencing a module-local trait drags its declaration into
+        // the merged program via the cross-module closure — without this a package-local trait
+        // (e.g. aether's `Middleware`) is "unknown" once the package is linked as a dependency.
+        Stmt::Trait(decl) => Some(&decl.name),
         _ => None,
     }
 }
@@ -1285,6 +1322,7 @@ fn decl_is_public(stmt: &Stmt) -> bool {
         Stmt::Struct(d) => d.is_public,
         Stmt::Enum(d) => d.is_public,
         Stmt::Fn(d) => d.is_public,
+        Stmt::Trait(d) => d.is_public,
         _ => false,
     }
 }
@@ -1297,6 +1335,9 @@ fn decl_name(stmt: &Stmt) -> Option<&str> {
         Stmt::Struct(decl) => Some(&decl.name),
         Stmt::Enum(decl) => Some(&decl.name),
         Stmt::Fn(decl) => Some(&decl.name),
+        // A user-defined trait is an importable name (L1) — `use pkg.mod.{MyTrait}` brings it into
+        // scope for `dyn MyTrait`, a `<T: MyTrait>` bound, or an `impl MyTrait for T`.
+        Stmt::Trait(decl) => Some(&decl.name),
         _ => None,
     }
 }
