@@ -1,7 +1,7 @@
 // K5 gate: column dot in METHOD form (2048 elements × 3000 calls) vs pm-native/v_dot_col.noe.
 use std.{vec}
 
-@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
+@packed(Layout.Column) struct V3 { x: f32; y: f32; z: f32 }
 impl vec.Kernels for V3 {}
 
 mut xs = [V3 { x: 1.5f32, y: 2.5f32, z: 3.5f32 }]

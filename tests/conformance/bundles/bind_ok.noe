@@ -7,7 +7,7 @@
 use std.{vec}
 
 @packed struct V3 { x: f32; y: f32; z: f32 }
-@packed(layout: column) struct C3 { x: f32; y: f32; z: f32 }
+@packed(Layout.Column) struct C3 { x: f32; y: f32; z: f32 }
 
 impl vec.Kernels for V3 {}
 impl vec.Kernels for C3 {}

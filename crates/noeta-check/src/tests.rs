@@ -2068,7 +2068,7 @@ fn packed_layout_table(text: &str) -> std::collections::HashMap<String, PackedLa
 fn packed_layouts_index_every_packed_struct_by_name() {
     let table = packed_layout_table(
         "@packed struct Vec3 { x: f32; y: f32; z: f32 }\n\
-         @packed(layout: column) struct Particle { n: int; alive: bool }\n\
+         @packed(Layout.Column) struct Particle { n: int; alive: bool }\n\
          struct Boxed { s: string }\n\
          echo 1\n",
     );

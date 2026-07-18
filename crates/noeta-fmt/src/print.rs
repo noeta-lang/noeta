@@ -907,7 +907,7 @@ impl Printer<'_> {
             d.attribute.as_deref(),
             d.role.as_deref(),
             d.semantic.is_some(),
-            d.packed.is_some(),
+            d.packed,
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -927,7 +927,7 @@ impl Printer<'_> {
             d.attribute.as_deref(),
             d.role.as_deref(),
             d.semantic.is_some(),
-            d.packed.is_some(),
+            d.packed,
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1075,7 +1075,7 @@ impl Printer<'_> {
             d.attribute.as_deref(),
             d.role.as_deref(),
             d.semantic.is_some(),
-            d.packed.is_some(),
+            d.packed,
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1130,7 +1130,7 @@ impl Printer<'_> {
             None,
             None,
             d.semantic.is_some(),
-            d.packed.is_some(),
+            d.packed,
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1218,7 +1218,7 @@ impl Printer<'_> {
         attribute: Option<&[(String, Span)]>,
         role: Option<&[RoleTag]>,
         semantic: bool,
-        packed: bool,
+        packed: Option<noeta_ast::PackedDirective>,
     ) -> Result<Vec<Doc>, FmtError> {
         let mut lines: Vec<Doc> = Vec::new();
         if !derives.is_empty() {
@@ -1254,8 +1254,14 @@ impl Printer<'_> {
                 .collect::<Vec<_>>();
             lines.push(Doc::text(format!("@role({})", each.join(", "))));
         }
-        if packed {
-            lines.push(Doc::text("@packed"));
+        if let Some(packed) = packed {
+            // `Row` is the bare-`@packed` default, so an explicit `@packed(Layout.Row)`
+            // canonicalizes to the bare form; `Column` must be emitted or fmt would silently
+            // change the storage layout.
+            lines.push(Doc::text(match packed.layout {
+                noeta_ast::PackedLayout::Row => "@packed".to_string(),
+                noeta_ast::PackedLayout::Column => "@packed(Layout.Column)".to_string(),
+            }));
         }
         for a in attrs {
             lines.push(self.attribute(a)?);

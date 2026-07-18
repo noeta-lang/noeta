@@ -1,4 +1,4 @@
-// P-SIMD C3: the bulk `vec.*_all` kernels on a `@packed(layout: column)` Vec3 list. A column buffer's
+// P-SIMD C3: the bulk `vec.*_all` kernels on a `@packed(Layout.Column)` Vec3 list. A column buffer's
 // bytes are already the SoA columns, so the kernels take the fast autovectorized `soa_*` path — but
 // the result is **bit-identical** to the row layout (element-wise per-lane; reductions keep the
 // `(x·bx + y·by) + z·bz` order). The producing kernels return a column list; the reducing kernels an
@@ -13,7 +13,7 @@
 // expect: exit 0
 use std.{vec}
 
-@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
+@packed(Layout.Column) struct V3 { x: f32; y: f32; z: f32 }
 
 ps = [V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }, V3 { x: 1.0f32, y: 2.0f32, z: 2.0f32 }]
 qs = [V3 { x: 1.0f32, y: 0.0f32, z: 0.0f32 }, V3 { x: 0.0f32, y: 3.0f32, z: 4.0f32 }]

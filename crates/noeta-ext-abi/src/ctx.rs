@@ -90,7 +90,7 @@ pub struct PackedView {
     /// Bytes per element (an `f32` field is 4, `int`/`float` 8, `bool` 1).
     pub byte_size: usize,
     /// Whether the buffer is stored **column-major** (SoA: `[f0×n][f1×n]…`) rather than row-major
-    /// (AoS: each element's fields contiguous) — `@packed(layout: column)`. Kernels must respect
+    /// (AoS: each element's fields contiguous) — `@packed(Layout.Column)`. Kernels must respect
     /// it: element-wise math is layout-agnostic over the flat primitive array, per-element reads
     /// are not.
     pub column: bool,

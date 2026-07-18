@@ -1188,7 +1188,7 @@ pub struct PackedSchemaDef {
     /// Bytes per element (the per-element stride into the flat byte buffer; P-PACK 3.2b — an `f32`
     /// field is 4 bytes, the other primitives 8).
     pub byte_size: u32,
-    /// Whether the list is stored column-major (`@packed(layout: column)`, P-SIMD C2). Pure-data
+    /// Whether the list is stored column-major (`@packed(Layout.Column)`, P-SIMD C2). Pure-data
     /// mirror of `noeta_object::PackedSchema::column`.
     pub column: bool,
 }

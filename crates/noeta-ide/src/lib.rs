@@ -3680,7 +3680,7 @@ mod tests {
         store.open(
             "file:///packed.noe",
             "@packed struct Vec3 { x: f32; y: f32; z: f32 }\n\
-             @packed(layout: column) struct Cell { n: int; on: bool }\n\
+             @packed(Layout.Column) struct Cell { n: int; on: bool }\n\
              v = Vec3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }\n\
              vs = [v]\n\
              cs = [Cell { n: 1, on: true }]\n\
@@ -4195,7 +4195,7 @@ mod tests {
         let mut store = test_store();
         store.open(
             "file:///p.noe",
-            "@packed(layout: column) struct Vec3 { x: f32; y: f32; z: f32 }\n\
+            "@packed(Layout.Column) struct Vec3 { x: f32; y: f32; z: f32 }\n\
              v = Vec3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }\n\
              vs = [v]\n"
                 .to_string(),

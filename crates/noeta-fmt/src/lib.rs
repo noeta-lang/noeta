@@ -674,6 +674,19 @@ mod tests {
     }
 
     #[test]
+    fn packed_layout_is_preserved_and_row_canonicalizes_bare() {
+        // `@packed(Layout.Column)` must survive formatting — dropping the argument silently
+        // changes the storage layout (the pre-enum formatter did exactly that).
+        let col = fmt("@packed(Layout.Column) struct V { x: f32; y: f32 }\n").unwrap();
+        assert!(col.contains("@packed(Layout.Column)"), "got:\n{col}");
+        assert_eq!(fmt(&col).unwrap(), col, "column form is idempotent");
+        // `Row` is the bare-`@packed` default, so the explicit spelling canonicalizes away.
+        let row = fmt("@packed(Layout.Row) struct V { x: f32; y: f32 }\n").unwrap();
+        assert!(row.contains("@packed\n"), "got:\n{row}");
+        assert!(!row.contains("Layout.Row"), "got:\n{row}");
+    }
+
+    #[test]
     fn indentation_width_tabs_and_final_newline_are_configurable() {
         let src = "fn f(): int {\nreturn 1\n}\n";
         let two = format_source(

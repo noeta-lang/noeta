@@ -1,4 +1,4 @@
-//! Does the `@packed(layout: column)` reduction win generalize past `f32`? (P-SIMD, exploratory.)
+//! Does the `@packed(Layout.Column)` reduction win generalize past `f32`? (P-SIMD, exploratory.)
 //!
 //! The C3 win comes from reading each contiguous column as a *typed* slice so LLVM autovectorizes the
 //! reduction across elements — the AoS/row layout strides one field every `k` elements, which stays

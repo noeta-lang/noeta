@@ -197,7 +197,7 @@ fn decorator_detail(name: &str) -> &'static str {
         "attribute" => "@attribute(…) — declare this struct as a data attribute",
         "role" => "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles",
         "semantic" => "@semantic — mark an enum's variants as role names",
-        "packed" => "@packed(layout: row|column) — flat value-struct layout",
+        "packed" => "@packed(Layout.Row|Layout.Column) — flat value-struct layout",
         "tier" => "@tier(name, …) — declare a dev-tier and its runner",
         _ => "decorator directive",
     }

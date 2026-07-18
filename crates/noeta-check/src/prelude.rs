@@ -156,6 +156,27 @@ impl Checker {
                 ),
             ],
         );
+        // `Layout { Row, Column }` — the storage-layout vocabulary `@packed(Layout.…)` names.
+        // Directive vocabulary like `Semantic` (the parser resolves the argument syntactically);
+        // registered so hover/completion/docs see one authoritative enum, and shadowable like any
+        // prelude type. Not role-eligible: it stays out of `semantic_enums`.
+        let layout_variants = noeta_ast::reflect::LAYOUT_VARIANTS
+            .iter()
+            .map(|name| VariantInfo {
+                name: name.to_string(),
+                fields: Vec::new(),
+            })
+            .collect();
+        self.symbols
+            .types
+            .insert(noeta_ast::reflect::LAYOUT_ENUM.to_string());
+        self.symbols
+            .enums
+            .insert(noeta_ast::reflect::LAYOUT_ENUM.to_string(), layout_variants);
+        self.symbols.type_kinds.insert(
+            noeta_ast::reflect::LAYOUT_ENUM.to_string(),
+            noeta_types::TypeKind::Enum,
+        );
     }
 
     /// Register the prelude `TierRoot` struct (tier-providers T2) — the element type of the roots
