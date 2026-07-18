@@ -129,6 +129,11 @@ pub enum TokenKind {
     /// reflection surface is lexically distinct.
     #[token("type_of")]
     TypeOfKw,
+    /// The reflection keyword `fields_of(value)` — a struct/class instance's fields as
+    /// `List<FieldEntry>` (`{ name: string, value: dyn }`), the value-level counterpart of
+    /// `type_of` (derive layer 3). A keyword for symmetry with the other reflection surfaces.
+    #[token("fields_of")]
+    FieldsOfKw,
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer back into a `List<T>` (P-PACK 4.4). A
     /// keyword so the turbofish type argument parses unambiguously; generic over any declared
     /// `@packed` struct (no hardcoded type list — extension-friendly).
@@ -391,6 +396,7 @@ impl TokenKind {
             TokenKind::IsKw => "IsKw",
             TokenKind::AttributesOfKw => "AttributesOfKw",
             TokenKind::TypeOfKw => "TypeOfKw",
+            TokenKind::FieldsOfKw => "FieldsOfKw",
             TokenKind::FromBytesKw => "FromBytesKw",
             TokenKind::RolesOfKw => "RolesOfKw",
             TokenKind::ParamsOfKw => "ParamsOfKw",
@@ -498,6 +504,7 @@ impl TokenKind {
             TokenKind::IsKw => "`is`",
             TokenKind::AttributesOfKw => "`attributes_of`",
             TokenKind::TypeOfKw => "`type_of`",
+            TokenKind::FieldsOfKw => "`fields_of`",
             TokenKind::FromBytesKw => "`from_bytes`",
             TokenKind::RolesOfKw => "`roles_of`",
             TokenKind::ParamsOfKw => "`params_of`",

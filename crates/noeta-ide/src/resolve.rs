@@ -771,6 +771,7 @@ impl Resolver {
             | Expr::As { expr, .. } => self.walk_expr(expr),
             Expr::Spawn { future, .. } => self.walk_expr(future),
             Expr::TypeOf { value, .. } => self.walk_expr(value),
+            Expr::FieldsOf { value, .. } => self.walk_expr(value),
             Expr::ParamsOf { target, .. } => self.walk_expr(target),
             Expr::FromBytes { blob, .. } => self.walk_expr(blob),
             Expr::Channel { capacity, .. } => self.walk_expr(capacity),

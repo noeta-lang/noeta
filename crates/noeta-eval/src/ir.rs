@@ -1335,6 +1335,10 @@ impl Interpreter {
                     None => Ok(crate::build_type_value(&crate::eval_type_repr(&v))),
                 }
             }
+            noeta_ir::Rvalue::FieldsOf { operand, .. } => {
+                let v = self.eval_ir_atom(operand, frame)?;
+                Ok(self.materialize_fields(&v))
+            }
             noeta_ir::Rvalue::FromBytes { blob, layout, span } => {
                 // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): resolve T's schema,
                 // then wrap the raw bytes as a packed list — the inverse of `to_bytes`, an O(n) copy.

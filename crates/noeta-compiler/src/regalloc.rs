@@ -491,7 +491,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
-        Op::TypeOf { dst, src } => {
+        Op::TypeOf { dst, src } | Op::FieldsOf { dst, src } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -981,7 +981,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(src);
         }
-        Op::TypeOf { dst, src } => {
+        Op::TypeOf { dst, src } | Op::FieldsOf { dst, src } => {
             m(dst);
             m(src);
         }

@@ -156,6 +156,22 @@ impl Checker {
                 ),
             ],
         );
+        // `FieldEntry { name: string, value: dyn }` — the element type of `fields_of()`'s result
+        // (derive layer 3). Registered like `ParamInfo`; shadowable like any prelude type.
+        self.symbols.type_kinds.insert(
+            noeta_ast::reflect::FIELD_ENTRY.to_string(),
+            noeta_types::TypeKind::Struct,
+        );
+        self.symbols
+            .types
+            .insert(noeta_ast::reflect::FIELD_ENTRY.to_string());
+        self.symbols.records.insert(
+            noeta_ast::reflect::FIELD_ENTRY.to_string(),
+            vec![
+                ("name".to_string(), Type::String),
+                ("value".to_string(), Type::Dyn),
+            ],
+        );
         // `Layout { Row, Column }` — the storage-layout vocabulary `@packed(Layout.…)` names.
         // Directive vocabulary like `Semantic` (the parser resolves the argument syntactically);
         // registered so hover/completion/docs see one authoritative enum, and shadowable like any

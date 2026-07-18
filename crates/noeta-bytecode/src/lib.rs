@@ -736,6 +736,13 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `fields_of(value)`: `dst = List<FieldEntry>` — the struct/class instance in `src` read as
+    /// `{ name, value }` pairs in declaration order (derive layer 3); the empty list for any other
+    /// value.
+    FieldsOf {
+        dst: Reg,
+        src: Reg,
+    },
     /// `from_bytes::<T>(blob)` — deserialize the `bytes` in `src` into a flat `List<T>` (P-PACK 4.4).
     /// `schema` is element `T`'s interned [`PackedSchemaDef`] index; the VM wraps the raw buffer as a
     /// packed list (validating the length is a whole number of elements). The inverse of `to_bytes`.
@@ -1685,6 +1692,7 @@ fn op_repr(
         },
         Op::ParamsOf { dst, src } => format!("ParamsOf    r{dst} <- params_of(r{src})"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
+        Op::FieldsOf { dst, src } => format!("FieldsOf    r{dst} <- fields_of(r{src})"),
         Op::FromBytes {
             dst, src, schema, ..
         } => {

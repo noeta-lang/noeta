@@ -3362,6 +3362,11 @@ impl<'m> FnCompiler<'m> {
                 }
                 Ok(())
             }
+            Rvalue::FieldsOf { operand, .. } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::FieldsOf { dst, src });
+                Ok(())
+            }
             Rvalue::AttributesOf { ty, .. } => {
                 // The attribute type is resolved at compile time (closed-world); the VM reads the
                 // matching manifest entries from `Module::reflection` and materializes them.

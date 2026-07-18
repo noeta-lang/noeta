@@ -1733,6 +1733,17 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            Expr::FieldsOf { value, span } => {
+                let operand = self.lower_expr(value, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::FieldsOf {
+                        operand,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::FromBytes { blob, span, .. } => {
                 let blob = self.lower_expr(blob, out)?;
                 // The element layout was recorded by the checker at this span in the same channel

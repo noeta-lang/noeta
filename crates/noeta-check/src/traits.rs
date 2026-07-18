@@ -535,12 +535,12 @@ impl Checker {
             // Layer-2 delegation on a built-in (`@derive(Comparable, via: amount)`): validated by
             // the shared template planner; the field-wise recipe machinery (arity, formats, the
             // E0050 field constraint) does not apply — the synthesized method carries the behavior.
-            if spec.via.is_some() {
+            if let Some((via_name, via_span)) = &spec.via {
                 if generic_type {
                     self.error(
                         DiagnosticCode::UnderivableTrait,
                         spec.span,
-                        format!("`via:` delegation is not supported on a generic type"),
+                        "`via:` delegation is not supported on a generic type".to_string(),
                     )
                     .help("write an explicit `impl` inside the generic type instead");
                 } else if let Err(e) =
@@ -554,7 +554,6 @@ impl Checker {
                     // The forward is `self.f.compare(other.f)` — a via field whose type can
                     // NEVER order (the same judgement the field-wise recipe applies) would only
                     // fail at the first runtime comparison; reject it at the declaration.
-                    let (via_name, via_span) = spec.via.as_ref().expect("checked above");
                     let field_ty = self
                         .symbols
                         .records

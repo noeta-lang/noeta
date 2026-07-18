@@ -1802,6 +1802,15 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `fields_of(value)` — the value-level reflection query (derive layer 3): a struct/class
+        // instance's fields as `List<FieldEntry>`. Same surface shape as `type_of`.
+        let fields_of = just(T::FieldsOfKw)
+            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |value, e| Expr::FieldsOf {
+                value: Box::new(value),
+                span: ctx.to_span(e.span()),
+            });
+
         // `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>`. Combines the
         // turbofish type argument (like `attributes_of`) with a parenthesized operand (like
         // `type_of`); the element type must be named because the byte buffer is opaque.
@@ -1929,7 +1938,9 @@ where
             if_then_else,
             match_,
             attributes_of,
-            type_of,
+            // One choice-tuple slot for the two value-reflection queries (the tuple is at its
+            // arity cap): same surface shape, disjoint keywords.
+            type_of.or(fields_of),
             from_bytes,
             channel,
             roles_of,
@@ -4244,7 +4255,10 @@ mod tests {
         assert_eq!(s.derives[0].bindings[0].target, "amount");
         assert!(s.derives[0].via.is_none());
         assert_eq!(s.derives[1].name, "Greet");
-        assert_eq!(s.derives[1].via.as_ref().map(|(f, _)| f.as_str()), Some("inner"));
+        assert_eq!(
+            s.derives[1].via.as_ref().map(|(f, _)| f.as_str()),
+            Some("inner")
+        );
         // A named argument with no preceding trait is E0037.
         let bad = parse_str("@derive(value: amount)\nstruct M { amount: int }\n");
         assert!(

@@ -94,6 +94,7 @@ fn is_keyword(kind: TokenKind) -> bool {
             | IsKw
             | AttributesOfKw
             | TypeOfKw
+            | FieldsOfKw
             | FromBytesKw
             | RolesOfKw
             | ParamsOfKw

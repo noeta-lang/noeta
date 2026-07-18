@@ -101,7 +101,14 @@ pub fn plan_user_trait_derive(
         }
         // An explicit binding always wins; it may target a field or an existing method.
         if let Some(binding) = spec.bindings.iter().find(|b| b.member == m.name) {
-            out.push(bridge_to_target(m, fields, existing, &binding.target, spec.span, &tr.name)?);
+            out.push(bridge_to_target(
+                m,
+                fields,
+                existing,
+                &binding.target,
+                spec.span,
+                &tr.name,
+            )?);
             continue;
         }
         if tm.has_default {
@@ -147,11 +154,7 @@ fn plan_user_trait_via(
                     &m.name,
                     spec.span,
                 )),
-                args: m
-                    .params
-                    .iter()
-                    .map(|p| ident(&p.name, spec.span))
-                    .collect(),
+                args: m.params.iter().map(|p| ident(&p.name, spec.span)).collect(),
                 span: spec.span,
             };
             synth_fn(m, ret_stmt(call, spec.span), spec.span)

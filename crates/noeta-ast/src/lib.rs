@@ -993,6 +993,12 @@ pub enum Expr {
     /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
     /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
     TypeOf { value: Box<Expr>, span: Span },
+    /// The reflection query `fields_of(value)` — a struct/class instance's fields as
+    /// `List<FieldEntry>` (`{ name: string, value: dyn }`, declaration order), the value-level
+    /// counterpart of `type_of` (derive layer 3): what lets a fully-defaulted trait implement
+    /// structural behavior over `self` without a macro system. A non-object value yields the
+    /// empty list.
+    FieldsOf { value: Box<Expr>, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>` (P-PACK 4.4). `ty` is
     /// the element type (turbofish; must be a `@packed` struct), `blob` the `bytes` operand. The byte
     /// buffer is opaque, so the element type must be named at the call site.
@@ -1289,6 +1295,7 @@ impl Expr {
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
             | Expr::TypeOf { span, .. }
+            | Expr::FieldsOf { span, .. }
             | Expr::FromBytes { span, .. }
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
@@ -1382,6 +1389,7 @@ impl Expr {
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::FieldsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
@@ -1473,6 +1481,7 @@ impl Expr {
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::FieldsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
