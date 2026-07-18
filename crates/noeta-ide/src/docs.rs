@@ -872,10 +872,8 @@ fn dep_module_entry(env: Option<&dyn DocEnv>, prefix: &str, dep: &DepDoc) -> Mod
             title: dep.module_name.clone(),
             kind: DocKind::Module,
             detail: None,
-            has_page: !docs
-                .module
-                .get(&dep.source)
-                .is_none_or(|p| p.trim().is_empty()),
+            // A module always opens an overview page (prose and/or a contents list).
+            has_page: true,
             expandable: !decls.is_empty() || !sections.is_empty(),
             location: None,
         },
@@ -1016,7 +1014,9 @@ impl ProjectTree {
     fn page_of(&self, id: &DocId) -> Option<DocPage> {
         for m in &self.modules {
             if m.node.id == *id {
-                return Some(page_from(&m.node, None, &m.prose));
+                // A module always opens an overview: its `@doc` prose (if any) followed by a
+                // contents list of its declarations — so clicking a source file is never a dead end.
+                return Some(page_from(&m.node, None, &module_overview(m)));
             }
             for d in &m.decls {
                 if d.node.id == *id {
@@ -1141,11 +1141,38 @@ impl ProjectTree {
                 }
             }
             m.node.expandable = !m.decls.is_empty() || !m.sections.is_empty();
-            m.node.has_page = !m.prose.trim().is_empty();
+            // A module always opens an overview page (prose and/or a contents list).
+            m.node.has_page = true;
         }
 
         ProjectTree { modules }
     }
+}
+
+/// A module's overview page body: its `@doc` prose (when present) followed by a "Contents" list of
+/// its declarations with their signature detail — so a module row always opens something useful,
+/// even when the file carries no module-level `@doc`.
+fn module_overview(m: &ModuleEntry) -> String {
+    let mut md = String::new();
+    if !m.prose.trim().is_empty() {
+        md.push_str(m.prose.trim());
+        md.push_str("\n\n");
+    }
+    if !m.decls.is_empty() {
+        md.push_str("### Contents\n\n");
+        for d in &m.decls {
+            let kind = d.node.kind.as_str();
+            match &d.node.detail {
+                Some(detail) => {
+                    md.push_str(&format!("- `{}` {} — `{}`\n", d.node.title, kind, detail))
+                }
+                None => md.push_str(&format!("- `{}` {}\n", d.node.title, kind)),
+            }
+        }
+    } else if m.prose.trim().is_empty() {
+        md.push_str("_This module has no documented declarations._");
+    }
+    md
 }
 
 /// Build a [`DocPage`] from a tree node plus its (already-resolved) signature and prose.
@@ -1562,7 +1589,10 @@ mod tests {
         let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
         assert!(modules[0].has_page);
         let page = page(&DocCtx::new(&env, &program), &modules[0].id).unwrap();
-        assert_eq!(page.markdown, "The geometry module.");
+        // The module overview leads with its `@doc` prose, then a contents list of its decls.
+        assert!(page.markdown.starts_with("The geometry module."));
+        assert!(page.markdown.contains("### Contents"));
+        assert!(page.markdown.contains("`f` function"));
         assert_eq!(page.kind, DocKind::Module);
     }
 

@@ -1,0 +1,36 @@
+@doc {
+  # Geometry primitives
+
+  A small, dependency-free vector package used by the demo `app`. It exists so the
+  editor's **Dependencies** docs corpus has a real source package to browse — every
+  declaration below carries its own `@doc`.
+}
+namespace geometry.vec
+
+use std.math.abs
+
+@doc {
+  A 2-D vector with integer components.
+
+  Construct one with field names — `Vec2 { x: 3, y: 4 }` — or start from `zero()`.
+}
+pub struct Vec2 {
+    x: int = 0
+    y: int = 0
+
+    @doc { The origin vector `(0, 0)`. }
+    fn zero(): Vec2 { return Vec2 {} }
+
+    @doc { The Manhattan length, `|x| + |y|`. }
+    fn manhattan(): int { return abs(self.x) + abs(self.y) }
+}
+
+@doc { Add two vectors component-wise. }
+pub fn add(a: Vec2, b: Vec2): Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+@doc { Scale a vector by an integer factor. }
+pub fn scale(v: Vec2, factor: int): Vec2 {
+    return Vec2 { x: v.x * factor, y: v.y * factor }
+}

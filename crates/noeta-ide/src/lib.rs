@@ -1958,7 +1958,9 @@ impl DocumentStore {
                     .collect();
                 let mut deps = Vec::new();
                 for (i, ast) in dep_asts.iter().enumerate() {
-                    let root = cache.dep_modules[i].root(db).clone();
+                    // A dep module's `key` is its consumer-facing import root (what the manifest
+                    // names); `root` is the package's own namespace segment.
+                    let root = cache.dep_modules[i].key(db).clone();
                     if !direct.contains(&root) {
                         continue;
                     }
@@ -2378,15 +2380,18 @@ impl StoreDocEnv<'_> {
             .collect()
     }
 
-    /// The distinct import roots of every dependency module linked into the program (direct and
-    /// transitive) — the query-free "has source" set. Callers intersect with the manifest's direct
-    /// keys to keep the dependencies corpus to direct deps only (never shadow deps).
+    /// The distinct import **keys** of every dependency module linked into the program (direct and
+    /// transitive) — the query-free "has source" set. A [`DepModule`]'s `key` is the consumer-facing
+    /// import root (the dependency-table key it was re-rooted to), which is what the manifest names;
+    /// its `root` is the package's *own* namespace segment (e.g. `vec`), which the manifest does not.
+    /// Callers intersect with the manifest's direct keys to keep the dependencies corpus to direct
+    /// deps only (never shadow deps).
     fn source_dep_roots(&self) -> Vec<String> {
         let mut roots: Vec<String> = self
             .cache
             .dep_modules
             .iter()
-            .map(|d| d.root(&self.store.db).clone())
+            .map(|d| d.key(&self.store.db).clone())
             .collect();
         roots.sort();
         roots.dedup();

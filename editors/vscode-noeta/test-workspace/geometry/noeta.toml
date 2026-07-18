@@ -1,0 +1,3 @@
+[package]
+name = "geometry/vec"
+version = "0.1.0"

@@ -1,0 +1,7 @@
+[package]
+name = "acme/app"
+version = "0.1.0"
+
+[dependencies]
+# A local source dependency — browsable in full in the editor's Dependencies docs corpus.
+geometry = { path = "../geometry" }
