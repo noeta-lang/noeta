@@ -4069,7 +4069,10 @@ mod tests {
         assert!(pretty("pub struct Pair { a: int }").contains("(struct pub Pair ["));
         assert!(pretty("pub enum Color { Red; }").contains("(enum pub Color ["));
         assert!(pretty("pub fn helper(): int { return 1; }").contains("(fn pub helper ["));
-        assert!(pretty("@derive(Comparable) pub struct V { n: int }").contains("(struct pub V ["));
+        assert!(
+            pretty("@derive(Comparable) pub struct V { n: int }")
+                .contains("(struct @derive(Comparable) pub V [")
+        );
         // A module-private declaration renders exactly as before.
         assert!(pretty("class P { x: int }").contains("(class P ["));
     }

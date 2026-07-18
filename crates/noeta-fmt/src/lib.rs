@@ -694,6 +694,48 @@ mod tests {
     }
 
     #[test]
+    fn safety_gate_distinguishes_decorators() {
+        // The gate compares the structural pretty output — decorators are rendered into it, so a
+        // formatter dropping one (the pre-hardening blind spot that let `@packed(layout: column)`
+        // silently become row-major) is a DETECTED program change. Each pair below differs only in
+        // a decorator detail and must compare unequal.
+        let parse = |src: &str| {
+            let source = noeta_span::Source::new(SourceId::FIRST, "t.noe", src);
+            let lexed = noeta_lexer::lex(&source);
+            noeta_parser::parse(&source, &lexed.tokens).program
+        };
+        let gate = |a: &str, b: &str| safety::ast_equal_modulo_spans(&parse(a), &parse(b));
+        assert!(gate(
+            "@derive(Comparable) struct P { x: int }",
+            "@derive(Comparable) struct P { x: int }"
+        ));
+        for (a, b) in [
+            (
+                "@derive(Comparable) struct P { x: int }",
+                "struct P { x: int }",
+            ),
+            (
+                "@packed(Layout.Column) struct P { x: f32 }",
+                "@packed struct P { x: f32 }",
+            ),
+            (
+                "@derive(T, via: x)\nstruct P { x: int }",
+                "@derive(T)\nstruct P { x: int }",
+            ),
+            (
+                "@derive(T, value: x)\nstruct P { x: int }",
+                "@derive(T, value: y)\nstruct P { x: int; y: int }",
+            ),
+            ("#[Entity]\nstruct P { x: int }", "struct P { x: int }"),
+        ] {
+            assert!(
+                !gate(a, b),
+                "gate blind to the decorator difference:\n{a}\nvs\n{b}"
+            );
+        }
+    }
+
+    #[test]
     fn derive_bindings_and_via_are_preserved_and_idempotent() {
         // Derive layers 1+2: `member: target` bindings and `via:` delegation must survive
         // formatting — dropping either silently changes which implementation the derive
