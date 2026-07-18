@@ -1,24 +1,15 @@
 # Working in this repository (a guide for AI agents)
 
-This is a **Noeta** project. Noeta is a general-purpose programming language: source
-files end in `.noe`, the whole toolchain is the single `noeta` binary, and the manifest
-is `noeta.toml`.
+This is a **Noeta** project. Noeta is a general-purpose programming language: source files end in `.noe`, the whole toolchain is the single `noeta` binary, and the manifest is `noeta.toml`.
 
-> **If you are not fluent in Noeta, read [SYNTAX.md](SYNTAX.md) before writing any
-> code.** It is the complete language reference — generated from the toolchain's own
-> embedded documentation, so it matches the installed compiler exactly. Do not guess
-> syntax or standard-library calls from other languages.
+> **If you are not fluent in Noeta, read [SYNTAX.md](SYNTAX.md) before writing any code.** It is the complete language reference — generated from the toolchain's own embedded documentation, so it matches the installed compiler exactly. Do not guess syntax or standard-library calls from other languages.
 
 ## Project layout
 
-- `src/main.noe` — the entry point. Top-level statements execute top to bottom (there
-  is no `main` function). Sibling `.noe` files next to the entry are linkable modules.
+- `src/main.noe` — the entry point. Top-level statements execute top to bottom (there is no `main` function). Sibling `.noe` files next to the entry are linkable modules.
 - `noeta.toml` — the manifest: package identity, dependencies, and build targets.
 - `noeta.lock` — pinned dependency resolution. **Commit it.**
-- Tests, benchmarks, docs, and debug code live *inside* the source files as tier
-  blocks (`@test { … }`, `@bench { … }`, `@doc { … }`, `@debug { … }`) — there is no
-  separate test directory. A normal build strips every tier block; the matching tool
-  (or a `--target`) activates them.
+- Tests, benchmarks, docs, and debug code live *inside* the source files as tier blocks (`@test { … }`, `@bench { … }`, `@doc { … }`, `@debug { … }`) — there is no separate test directory. A normal build strips every tier block; the matching tool (or a `--target`) activates them.
 
 ## The feedback loop (CLI)
 
@@ -38,21 +29,15 @@ Use these constantly; they are fast:
 
 Exit codes: `0` success, `1` diagnostics/runtime failure, `2` unreadable input.
 
-Build targets (from `noeta.toml`): the **baseline** (no `--target`) ships no tiers and
-is the production shape; `--target development` layers the std dev tiers back in;
-`--target production` is an explicit name for the baseline.
+Build targets (from `noeta.toml`): the **baseline** (no `--target`) ships no tiers and is the production shape; `--target development` layers the std dev tiers back in; `--target production` is an explicit name for the baseline.
 
 ## The agent surface (`noeta mcp`)
 
-The toolchain ships an MCP server — the same compiler queries the IDE uses, exposed as
-tools. If your harness supports MCP, register it (for Claude Code:
-`claude mcp add noeta -- noeta mcp`) and prefer these tools over guessing:
+The toolchain ships an MCP server — the same compiler queries the IDE uses, exposed as tools. If your harness supports MCP, register it (for Claude Code: `claude mcp add noeta -- noeta mcp`) and prefer these tools over guessing:
 
 **Understand the language and libraries**
-- `docs_search` / `docs_get` — search and read the embedded language guide. First stop
-  before writing unfamiliar Noeta.
-- `stdlib_api` — enumerate the *real* standard-library surface. Use instead of
-  inventing stdlib calls; the signatures are ground truth.
+- `docs_search` / `docs_get` — search and read the embedded language guide. First stop before writing unfamiliar Noeta.
+- `stdlib_api` — enumerate the *real* standard-library surface. Use instead of inventing stdlib calls; the signatures are ground truth.
 - `examples_find` — real, runnable example programs for a feature or concept.
 - `explain_diagnostic` — what an `E0xxx` code means, with programs that trigger it.
 
@@ -73,15 +58,12 @@ tools. If your harness supports MCP, register it (for Claude Code:
 - `format` — canonical formatting.
 
 **Debug interactively**
-- `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — a full
-  breakpoint debugger over the production VM.
+- `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — a full breakpoint debugger over the production VM.
 
 ## Ground rules
 
-1. **Never claim Noeta code compiles without running `noeta check`** (or the MCP
-   `check` tool) on it.
-2. **Verify behavior with `noeta test`** — add or extend a `@test` block beside the
-   code you change.
+1. **Never claim Noeta code compiles without running `noeta check`** (or the MCP `check` tool) on it.
+2. **Verify behavior with `noeta test`** — add or extend a `@test` block beside the code you change.
 3. **Don't invent APIs.** Look them up: `stdlib_api`, `docs_search`, or SYNTAX.md.
 4. Run `noeta fmt .` before finishing; the formatter is safe and idempotent.
 5. `noeta.lock` changes only through `noeta add` / `noeta update`.
