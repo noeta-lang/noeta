@@ -121,6 +121,8 @@ fn to_completion_item(candidate: &completion::Candidate) -> CompletionItem {
         CandidateKind::Type => CompletionItemKind::INTERFACE,
         CandidateKind::Trait => CompletionItemKind::INTERFACE,
         CandidateKind::Module => CompletionItemKind::MODULE,
+        // A decorator/tier directive completed after `@` — KEYWORD for the language-surface icon.
+        CandidateKind::Directive => CompletionItemKind::KEYWORD,
     };
     CompletionItem {
         label: candidate.label.clone(),
@@ -894,7 +896,7 @@ impl LanguageServer for Backend {
                 // Completion: invoked explicitly, as the user types a name, or on `.` — the trigger
                 // that fires member completion at a bare receiver dot (`c.`).
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".to_string()]),
+                    trigger_characters: Some(vec![".".to_string(), "@".to_string()]),
                     ..Default::default()
                 }),
                 // Call hierarchy (ide-ui U1) over the shared static call graph — the same

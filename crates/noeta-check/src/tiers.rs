@@ -173,6 +173,23 @@ impl TierRegistry {
             .unwrap_or(&[])
     }
 
+    /// The extension-declared half of the name-space: every installed extension's [`ExtTier`]
+    /// (`test`/`bench`/`doc`/`debug` plus any native package's tiers), resolved against this
+    /// registry's extension set. With [`TierRegistry::declared_tiers`] this enumerates exactly the
+    /// names [`TierRegistry::is_known`] accepts — what IDE completion offers after `@`.
+    pub fn extension_tiers(
+        &self,
+    ) -> impl Iterator<Item = &'static noeta_ext_abi::registry::ExtTier> + '_ {
+        self.reg().ext_tiers()
+    }
+
+    /// The program-declared half of the name-space: every `@tier` declaration collected from the
+    /// (linked) program, one entry per declaration (a name several packages provide appears once
+    /// per provider). Counterpart of [`TierRegistry::extension_tiers`].
+    pub fn declared_tiers(&self) -> impl Iterator<Item = &DeclaredTier> {
+        self.declared.values().flat_map(|v| v.iter())
+    }
+
     /// The **default-provider** declaration for `tier`: the first program/package declaration —
     /// what resolution falls back to when no target selects a provider and no extension declares
     /// the name. `None` for a purely-extension tier.

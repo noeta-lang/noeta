@@ -1625,7 +1625,8 @@ impl DocumentStore {
     /// a *bare* dot (`c.`, the `.`-trigger case) does not parse, so a lightly-munged buffer is
     /// re-checked off the salsa graph to recover the receiver type (C2.1). Otherwise the completions
     /// are the language keywords, the top-level declarations, and the value bindings in scope at the
-    /// cursor (**identifier completion**, C1).
+    /// cursor (**identifier completion**, C1). An `@` prefix instead offers the decorator directives
+    /// and the tier name-space (**directive completion**, C4).
     ///
     /// A best-effort read of the mid-edit document: it relies on the recovering parser and the
     /// client's prefix filtering. `None` if the document is not open.
@@ -1649,6 +1650,13 @@ impl DocumentStore {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
+
+        // Directive completion (`@|`, `@te|` — the `@`-trigger case, C4): the decorator directives
+        // and the tier name-space. Detected textually (a dangling `@` never parses), before the
+        // member branches — an `@` prefix is never a member access.
+        if completion::is_directive_position(entry_text, offset) {
+            return Some(completion::directives(program));
+        }
 
         // Member completion, partial form: the parser produced a `receiver.member` access under the
         // cursor. A namespace-group receiver (`http.cl`) has no value type, so it is resolved first
@@ -4616,6 +4624,33 @@ mod tests {
         assert!(has("helper", completion::CandidateKind::Function));
         assert!(has("total", completion::CandidateKind::Variable));
         assert!(has("return", completion::CandidateKind::Keyword));
+    }
+
+    #[test]
+    fn completions_after_an_at_offer_directives() {
+        let mut store = test_store();
+        // A dangling `@te` mid-edit — nothing after the `@` parses, yet the directive names come.
+        store.open("file:///d.noe", "fn f() {}\n@te".to_string());
+        let items = store
+            .completions(
+                "file:///d.noe",
+                Position {
+                    line: 1,
+                    character: 3,
+                },
+                Encoding::Utf8,
+            )
+            .expect("open document offers completions");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"test"), "got {labels:?}");
+        assert!(labels.contains(&"doc"), "got {labels:?}");
+        assert!(labels.contains(&"derive"), "got {labels:?}");
+        assert!(
+            items
+                .iter()
+                .all(|i| i.kind == completion::CandidateKind::Directive),
+            "an @ prefix offers directives only"
+        );
     }
 
     #[test]
