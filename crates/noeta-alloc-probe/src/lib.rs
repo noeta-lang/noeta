@@ -6,38 +6,61 @@
 //! to learn the peak heap a piece of work touched. This is how the P-PACK memory-density wins are
 //! measured (flat `Vec<u64>` buffers vs N boxed objects) — a number the time benchmarks cannot see.
 //!
-//! It is deliberately a standalone crate (depended on only as a `dev-dependency`) so that the
-//! `unsafe` it needs to implement [`GlobalAlloc`] stays out of the production runtime crates, and so
-//! the workspace `unsafe_code = "forbid"` quarantine is relaxed in exactly one extra, test-only place.
+//! It is deliberately a standalone crate so that the `unsafe` it needs to implement
+//! [`GlobalAlloc`] stays out of the runtime crates, and so the workspace `unsafe_code = "forbid"`
+//! quarantine is relaxed in exactly one extra place. Tests use it as a dev-dependency; the `noeta`
+//! **binary** also registers it, so the allocation profiler (`noeta profile --alloc`) can read
+//! [`thread_allocated`] — a per-thread *cumulative* allocated-bytes counter — and attribute each
+//! per-op delta to the interpreter's live call stack. The whole cost is two relaxed atomic ops and
+//! one thread-local add per allocation, pass-through otherwise.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+thread_local! {
+    /// Cumulative bytes this thread has allocated (monotonic; frees do not subtract). Const-
+    /// initialized so reading it inside the allocator never itself allocates.
+    static THREAD_ALLOCATED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Cumulative bytes allocated **by the calling thread** since it started (monotonic — frees are
+/// not subtracted, so a delta between two reads is "bytes allocated in between"). Thread-local, so
+/// an interpreter thread's reads are undisturbed by host/runtime threads. Always 0 unless the
+/// process registered [`TrackingAlloc`] as its `#[global_allocator]` (the `noeta` binary does).
+pub fn thread_allocated() -> u64 {
+    THREAD_ALLOCATED.with(|c| c.get())
+}
 
 /// Currently-live bytes (sum of outstanding allocation sizes).
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 /// High-water mark of [`LIVE`] since the last [`peak_during`] reset.
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 
-/// A `#[global_allocator]`-ready system allocator that tracks live bytes and their high-water mark.
-/// The default [`GlobalAlloc::realloc`] is composed from `alloc`/`dealloc`, so resizes are counted.
+/// A `#[global_allocator]`-ready counting allocator wrapping any inner [`GlobalAlloc`] (the system
+/// allocator by default — the test probe; the `noeta` binary wraps its mimalloc). The default
+/// [`GlobalAlloc::realloc`] is composed from `alloc`/`dealloc`, so resizes are counted.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct TrackingAlloc;
+pub struct TrackingAlloc<A: GlobalAlloc = System>(pub A);
 
-// SAFETY: every call forwards directly to the system allocator with the same layout; the atomic
-// bookkeeping only reads/writes counters and never touches the returned memory.
-unsafe impl GlobalAlloc for TrackingAlloc {
+// SAFETY: every call forwards directly to the inner allocator with the same layout; the atomic and
+// thread-local bookkeeping only reads/writes counters and never touches the returned memory.
+unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAlloc<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { System.alloc(layout) };
+        let ptr = unsafe { self.0.alloc(layout) };
         if !ptr.is_null() {
             let now = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
             PEAK.fetch_max(now, Ordering::Relaxed);
+            // `try_with`: during thread teardown the TLS slot may already be destroyed while the
+            // allocator is still called — skip the bump rather than abort.
+            let _ = THREAD_ALLOCATED.try_with(|c| c.set(c.get() + layout.size() as u64));
         }
         ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
-        unsafe { System.dealloc(ptr, layout) };
+        unsafe { self.0.dealloc(ptr, layout) };
     }
 }
 

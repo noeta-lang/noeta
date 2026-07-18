@@ -26,7 +26,7 @@ use noeta_vm::VmBackend;
 /// The tracking allocator must be registered as this test binary's global allocator for
 /// [`peak_during`] to see any allocations.
 #[global_allocator]
-static GLOBAL: TrackingAlloc = TrackingAlloc;
+static GLOBAL: TrackingAlloc = TrackingAlloc(std::alloc::System);
 
 /// The allocator's peak counter is process-wide, so two peak tests running on parallel test threads
 /// would corrupt each other's high-water measurement. Each test holds this lock for its whole body

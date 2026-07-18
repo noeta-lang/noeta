@@ -5,16 +5,21 @@ table or a flamegraph. Like the debugger, it is a dev-time tool over the **produ
 `load → check → compile → run` pipeline `noeta run` uses, with the JIT unarmed so every frame is
 observable. What you profile is what ships (see [*Tier-0, and what it means*](#tier-0-and-what-it-means)).
 
-## Two profilers
+## Three profilers
 
 | Mode | Flag | What it measures | Exact? |
 |---|---|---|---|
 | **Sampling** (default) | *(none)*, `--hz`, `--every` | A periodic snapshot of the call stack → a **flamegraph** of where wall-time goes. | No — statistical |
-| **Instrumenting** | `--instrument` | Every call observed: exact per-function **call counts** and **self / total time**. | Yes — exact |
+| **Instrumenting** | `--instrument` | Every call observed: exact per-function **call counts** and **self / total time** — and the exact call tree, so it renders a flamegraph too (nanosecond-weighted). | Yes — exact |
+| **Allocation** | `--alloc` | Every **byte allocated**, attributed to the call path that allocated it — a memory flamegraph. Answers *"who allocates"* (churn/pressure); frees are ignored, so it is not a retention snapshot. | Yes — exact |
 
 Reach for **sampling** to see the shape of a run (which paths dominate) at low overhead; reach for
 **instrumenting** when you need exact counts or precise self-time and can afford to observe every
-call.
+call; reach for **allocation** when the cost you are hunting is memory churn — a wall-time
+flamegraph actively hides it (allocation's price is paid later, in the allocator and the collector).
+
+A flamegraph is stacks × a *weight*: wall samples, executed ops (`--every`), exact nanoseconds
+(`--instrument`), or allocated bytes (`--alloc`) — same picture, four different questions.
 
 The program's own stdout is always forwarded untouched — the profile report goes to **stderr** (or a
 file with `-o`), so a program you profile stays pipeable.

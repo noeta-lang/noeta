@@ -90,9 +90,11 @@ pub(crate) fn cmd_mcp() -> ExitCode {
 /// Sampling (wall-time flamegraph) is the default; `--instrument` selects the exact per-function
 /// profiler; `--every N` makes sampling deterministic (op-weighted).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // a straight CLI-flag pass-through
 pub(crate) fn cmd_profile(
     file: &std::path::Path,
     instrument: bool,
+    alloc: bool,
     hz: Option<u32>,
     every: Option<u64>,
     format: Option<&str>,
@@ -101,6 +103,8 @@ pub(crate) fn cmd_profile(
 ) -> ExitCode {
     let mode = if instrument {
         noeta_prof::Mode::Instrument
+    } else if alloc {
+        noeta_prof::Mode::Alloc
     } else if let Some(every) = every {
         noeta_prof::Mode::Sample {
             clock: noeta_prof::SampleClock::Ops { every },

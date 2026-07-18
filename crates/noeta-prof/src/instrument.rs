@@ -48,8 +48,9 @@ pub struct RawTreeNode {
     pub proto: u32,
     /// Activations that took exactly this path.
     pub calls: u64,
-    /// Nanoseconds measured with this path's leaf as the executing frame (exclusive of callees).
-    pub self_ns: u64,
+    /// The path's own weight — nanoseconds measured with this path's leaf as the executing frame
+    /// (the instrumenting collector), or bytes allocated there (the allocation collector).
+    pub weight: u64,
 }
 
 /// Per-function accumulator, keyed by prototype index (into `Module::protos`).
@@ -102,7 +103,7 @@ impl InstrumentCollector {
                 parent: (parent != ROOT).then_some(parent),
                 proto,
                 calls: 0,
-                self_ns: 0,
+                weight: 0,
             });
             (nodes.len() - 1) as u32
         });
@@ -126,7 +127,7 @@ impl InstrumentCollector {
         let this_self = elapsed.saturating_sub(child_ns);
         let i = proto as usize;
         self.self_ns[i] += this_self;
-        self.nodes[node as usize].self_ns += this_self;
+        self.nodes[node as usize].weight += this_self;
         self.active[i] -= 1;
         if self.active[i] == 0 {
             self.total_ns[i] += elapsed;

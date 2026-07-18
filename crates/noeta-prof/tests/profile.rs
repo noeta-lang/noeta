@@ -4,6 +4,12 @@
 
 use std::path::PathBuf;
 
+/// The counting allocator the `noeta` binary registers — the alloc-profile test needs the same
+/// thread-local allocated-bytes counter present in THIS test binary, or the collector reads 0.
+#[global_allocator]
+static ALLOC: noeta_alloc_probe::TrackingAlloc =
+    noeta_alloc_probe::TrackingAlloc(std::alloc::System);
+
 /// Write a one-off program into its own private temp *directory* and return its path. Each program
 /// gets its own directory because the loader treats the containing directory as the module directory
 /// (M1.9), so sibling test files must not share one.
@@ -693,5 +699,66 @@ fn instrument_carries_an_exact_call_tree_flamegraph() {
     assert_eq!(
         v["profiles"][0]["unit"], "nanoseconds",
         "speedscope stacks present, ns unit"
+    );
+}
+
+#[test]
+fn alloc_mode_attributes_bytes_to_the_allocating_paths() {
+    // `build_lists` allocates a fresh list per iteration; `lean_math` is pure arithmetic. The
+    // memory flamegraph must weight the allocating path FAR above the arithmetic one — that
+    // discrimination is the whole point ("who allocates", which a wall-time graph hides).
+    let src = "fn build_lists(rounds: int): int {\n\
+               \x20   mut total = 0\n\
+               \x20   for i in 0..rounds {\n\
+               \x20       mut xs = [i, i + 1, i + 2, i + 3]\n\
+               \x20       total = total + xs.len()\n\
+               \x20   }\n\
+               \x20   return total\n\
+               }\n\
+               fn lean_math(rounds: int): int {\n\
+               \x20   mut acc = 0\n\
+               \x20   mut i = 0\n\
+               \x20   while i < rounds { acc = acc + i * 3; i = i + 1 }\n\
+               \x20   return acc\n\
+               }\n\
+               fn root(): int { return build_lists(20000) + lean_math(20000) }\n\
+               echo root()\n";
+    let path = fixture("alloc", src);
+    let report = noeta_prof::profile(&path, noeta_prof::Mode::Alloc);
+    assert_eq!(report.exit_code, 0, "{}", report.stderr);
+
+    let flame = report
+        .flamegraph
+        .as_ref()
+        .expect("alloc mode carries a flamegraph");
+    assert_eq!(flame.unit, noeta_prof::FlameUnit::Bytes);
+    assert!(
+        report.functions.is_none(),
+        "alloc mode has no function table"
+    );
+    assert!(flame.total > 0, "bytes were counted (allocator registered)");
+
+    let weight_of = |needle: &str| -> u64 {
+        flame
+            .stacks
+            .iter()
+            .filter(|s| {
+                flame
+                    .labels(s)
+                    .collect::<Vec<_>>()
+                    .join(";")
+                    .contains(needle)
+            })
+            .map(|s| s.count)
+            .sum()
+    };
+    let lists = weight_of("root;build_lists");
+    let math = weight_of("root;lean_math");
+    assert!(lists > 0, "the allocating path carries bytes");
+    // 20k list allocations vs a pure-arithmetic loop: orders of magnitude apart. A 20x margin is
+    // far below reality (measured ~15000x) but robust against interpreter-internal noise.
+    assert!(
+        lists > math.max(1) * 20,
+        "allocating path dominates: build_lists={lists} lean_math={math}"
     );
 }

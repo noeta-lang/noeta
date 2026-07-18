@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
+mod alloc;
 mod instrument;
 mod render;
 mod sample;
@@ -33,6 +34,11 @@ pub enum Mode {
     Summary,
     /// Exact per-function call counts + self/total time (the instrumenting profiler).
     Instrument,
+    /// Exact allocated-bytes attribution over the call tree (the memory flamegraph): every byte
+    /// the interpreter thread allocates is banked to the executing call path, via the binary's
+    /// counting global allocator. Frees are ignored — this answers "who allocates", not "who
+    /// retains".
+    Alloc,
     /// Periodic stack sampling → a folded-stack flamegraph. `lines` attributes the leaf frame to its
     /// current source line (`fn:line` in the folded labels) rather than just the function.
     Sample { clock: SampleClock, lines: bool },
@@ -91,6 +97,7 @@ pub struct Report {
 pub enum FlameUnit {
     Samples,
     Nanoseconds,
+    Bytes,
 }
 
 impl FlameUnit {
@@ -99,6 +106,7 @@ impl FlameUnit {
         match self {
             FlameUnit::Samples => "samples",
             FlameUnit::Nanoseconds => "ns",
+            FlameUnit::Bytes => "bytes",
         }
     }
     /// The speedscope-schema `unit` string.
@@ -106,6 +114,7 @@ impl FlameUnit {
         match self {
             FlameUnit::Samples => "none",
             FlameUnit::Nanoseconds => "nanoseconds",
+            FlameUnit::Bytes => "bytes",
         }
     }
 }
@@ -196,12 +205,28 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
                     let (stats, tree) = collector.finish();
                     (
                         Some(resolve_functions(stats, &compiled)),
-                        Some(resolve_tree_flamegraph(tree, &compiled)),
+                        Some(resolve_tree_flamegraph(
+                            tree,
+                            &compiled,
+                            FlameUnit::Nanoseconds,
+                        )),
                     )
                 }
                 None => (None, None),
             };
             report_from(out, functions, flamegraph)
+        }
+        Mode::Alloc => {
+            let hook = Box::new(alloc::AllocCollector::new());
+            let (out, hook) = session::run(&compiled, Some(hook));
+            let flamegraph = hook.map(|hook| {
+                let collector = *hook
+                    .into_any()
+                    .downcast::<alloc::AllocCollector>()
+                    .expect("the alloc mode installs an AllocCollector");
+                resolve_tree_flamegraph(collector.finish(), &compiled, FlameUnit::Bytes)
+            });
+            report_from(out, None, flamegraph)
         }
         Mode::Sample { clock, lines } => {
             // Wall-clock sampling needs a timer thread bumping a shared atomic; op-clock is
@@ -391,6 +416,7 @@ fn resolve_flamegraph(
 fn resolve_tree_flamegraph(
     tree: Vec<instrument::RawTreeNode>,
     compiled: &session::Compiled,
+    unit: FlameUnit,
 ) -> Flamegraph {
     let mut frame_index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut frames: Vec<FrameInfo> = Vec::new();
@@ -417,19 +443,19 @@ fn resolve_tree_flamegraph(
     let mut total = 0u64;
     let mut merged: std::collections::HashMap<Vec<u32>, u64> = std::collections::HashMap::new();
     for (node, path) in tree.iter().zip(&paths) {
-        if node.self_ns == 0 {
-            continue; // an interior path with no own time — its children carry the weight
+        if node.weight == 0 {
+            continue; // an interior path with no own weight — its children carry it
         }
-        total += node.self_ns;
+        total += node.weight;
         let indices: Vec<u32> = path
             .iter()
             .map(|&proto| intern(proto_frame(compiled, proto)))
             .collect();
         // Distinct paths can share a label chain (e.g. two anonymous protos resolving to one
         // label), so merge by the interned chain exactly as the sampler does.
-        *merged.entry(indices).or_insert(0) += node.self_ns;
+        *merged.entry(indices).or_insert(0) += node.weight;
     }
-    finalize_flamegraph(total, FlameUnit::Nanoseconds, frames, merged)
+    finalize_flamegraph(total, unit, frames, merged)
 }
 
 /// Order and pack an assembled flamegraph: heaviest stacks first (label-chain tiebreak for a
@@ -594,9 +620,9 @@ fn default_format(mode: Mode) -> Option<Format> {
     match mode {
         Mode::Summary => None,
         Mode::Instrument => Some(Format::Table),
-        // Sampling's default human view is the top-N summary printed by `run`, not a folded dump; a
-        // machine artifact is emitted only when `--format` is given explicitly.
-        Mode::Sample { .. } => None,
+        // Sampling's (and alloc's) default human view is the top-N summary printed by `run`, not a
+        // folded dump; a machine artifact is emitted only when `--format` is given explicitly.
+        Mode::Sample { .. } | Mode::Alloc => None,
     }
 }
 
@@ -607,6 +633,8 @@ fn format_fits(mode: Mode, format: Format) -> bool {
         // The instrumenting run carries the exact call tree, so the stack-shaped formats
         // (folded/svg/speedscope) render from it too — every format fits.
         Mode::Instrument => true,
+        // The alloc run is stack-shaped only (no function table).
+        Mode::Alloc => format.is_sampling(),
         Mode::Summary => false,
     }
 }
@@ -649,6 +677,25 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
                 report.functions.as_ref().map_or(0, |f| f.len()),
                 report.wall
             );
+        }
+        Mode::Alloc => {
+            let flame = report.flamegraph.as_ref();
+            let _ = writeln!(
+                err,
+                "noeta profile: {} bytes allocated over {} stacks, program ran in {:.3?} \
+                 (tier-0, alloc)",
+                flame.map_or(0, |f| f.total),
+                flame.map_or(0, |f| f.stacks.len()),
+                report.wall,
+            );
+            if flame.map_or(0, |f| f.total) == 0 {
+                let _ = writeln!(
+                    err,
+                    "noeta profile: no allocation counter present — the alloc profile needs the \
+                     stock `noeta` binary (its global allocator counts bytes); a composed \
+                     toolchain without it reports zero"
+                );
+            }
         }
         Mode::Sample { clock, .. } => {
             let flame = report.flamegraph.as_ref();

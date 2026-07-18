@@ -4062,6 +4062,7 @@ dependencies = [
  "clap",
  "ed25519-dalek 2.2.0",
  "mimalloc",
+ "noeta-alloc-probe",
  "noeta-ast",
  "noeta-backend",
  "noeta-bundle",
@@ -4574,6 +4575,7 @@ name = "noeta-prof"
 version = "0.1.0"
 dependencies = [
  "inferno",
+ "noeta-alloc-probe",
  "noeta-ast",
  "noeta-bytecode",
  "noeta-check",

@@ -77,7 +77,9 @@ async function runProfile(mode, focus) {
   const args =
     mode === "instrument"
       ? ["profile", "--instrument", "--format", "json", "-o", artifact, program]
-      : ["profile", "--hz", String(hz), "--lines", "--format", "speedscope", "-o", artifact, program];
+      : mode === "alloc"
+        ? ["profile", "--alloc", "--format", "speedscope", "-o", artifact, program]
+        : ["profile", "--hz", String(hz), "--lines", "--format", "speedscope", "-o", artifact, program];
 
   const out = profileChannel();
   out.appendLine(`> ${noetaCommand()} ${args.join(" ")}`);
@@ -384,6 +386,7 @@ function registerProfiling(context) {
   context.subscriptions.push(
     commands.registerCommand("noeta.profileFile", () => runProfile("sampling")),
     commands.registerCommand("noeta.profileFileInstrumented", () => runProfile("instrument")),
+    commands.registerCommand("noeta.profileFileAlloc", () => runProfile("alloc")),
     commands.registerCommand("noeta.clearProfileHeat", () => {
       heatByFile.clear();
       decorateVisibleEditors();

@@ -15,8 +15,15 @@
   // What one stack weight means: sample counts (sampling) or exact nanoseconds (the instrumenting
   // call tree). Drives every weight rendering — flame tooltips, crumbs, and table cells.
   let weightUnit = "samples";
-  const fmtWeight = (n) => (weightUnit === "ns" ? fmtNs(n) : fmtInt(n));
-  const fmtWeightLong = (n) => (weightUnit === "ns" ? fmtNs(n) : fmtInt(n) + " samples");
+  function fmtBytes(n) {
+    if (n < 1024) return fmtInt(n) + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+    return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  }
+  const fmtWeight = (n) =>
+    weightUnit === "ns" ? fmtNs(n) : weightUnit === "bytes" ? fmtBytes(n) : fmtInt(n);
+  const fmtWeightLong = (n) => (weightUnit === "samples" ? fmtInt(n) + " samples" : fmtWeight(n));
   let meta = { summary: "", program: "" };
 
   // ---- formatting --------------------------------------------------------------------------
@@ -521,7 +528,8 @@
     // Sampling: speedscope JSON — one "sampled" profile over a shared frame table.
     const frames = message.profile.shared?.frames ?? [];
     const profile = (message.profile.profiles ?? [])[0];
-    weightUnit = profile?.unit === "nanoseconds" ? "ns" : "samples";
+    weightUnit =
+      profile?.unit === "nanoseconds" ? "ns" : profile?.unit === "bytes" ? "bytes" : "samples";
     const allSamples = profile?.samples ?? [];
     const allWeights = profile?.weights ?? [];
     if (allSamples.length === 0) {

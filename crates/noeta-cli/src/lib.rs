@@ -15,8 +15,12 @@
 // `Obj`), so the toolchain binary uses mimalloc instead of the system allocator. Correctness is
 // unaffected (the leak oracle counts live objects, not allocator behavior); it is a throughput win
 // on allocation-bound programs.
+// Wrapped in the counting tracker so `noeta profile --alloc` can attribute allocated bytes to the
+// interpreter's call stacks (a thread-local cumulative counter; two relaxed atomics + one TLS add
+// per allocation — mimalloc still does all the real work).
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: noeta_alloc_probe::TrackingAlloc<mimalloc::MiMalloc> =
+    noeta_alloc_probe::TrackingAlloc(mimalloc::MiMalloc);
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -324,6 +328,12 @@ enum Command {
         /// self/total time (a table on stderr). Takes precedence over the sampling flags.
         #[arg(long)]
         instrument: bool,
+        /// Run the **allocation** profiler: attribute every byte the program allocates to the call
+        /// path that allocated it — an exact, bytes-weighted memory flamegraph ("who allocates";
+        /// frees are ignored). Takes precedence over the sampling flags; ignored with
+        /// `--instrument`.
+        #[arg(long)]
+        alloc: bool,
         /// Sampling rate in Hz for the wall-time flamegraph (default 1000). Ignored with
         /// `--instrument` or `--every`.
         #[arg(long)]
@@ -723,12 +733,22 @@ pub fn run_cli(
         Command::Profile {
             file,
             instrument,
+            alloc,
             hz,
             every,
             format,
             out,
             lines,
-        } => cmd_profile(&file, instrument, hz, every, format.as_deref(), out, lines),
+        } => cmd_profile(
+            &file,
+            instrument,
+            alloc,
+            hz,
+            every,
+            format.as_deref(),
+            out,
+            lines,
+        ),
         Command::Cache { action } => cmd_cache(&action),
         Command::Fmt {
             files,

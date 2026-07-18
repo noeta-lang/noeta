@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+noeta-alloc-probe = { workspace = true }
 # The profiler drives the *production* compile+run pipeline (the same path `noeta run` takes), but
 # tier-0 (JIT unarmed) so every frame is interpreter-executed and observable — exactly the tier
 # decision `noeta dap` makes. Mirrors the DAP crate's dependency set (reuses the loader, checker,
@@ -31,3 +32,7 @@ inferno = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The alloc-profile test registers the counting allocator (the noeta binary does the same).
+noeta-alloc-probe = { workspace = true }

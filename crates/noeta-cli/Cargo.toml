@@ -17,6 +17,7 @@ name = "noeta"
 path = "src/main.rs"
 
 [dependencies]
+noeta-alloc-probe = { workspace = true }
 mimalloc = { version = "0.1", default-features = false }
 # The SIGINT graceful-drain handler (server-hmr S0) awaits `tokio::signal::ctrl_c` on its own
 # tiny runtime; `signal` is the only feature the CLI needs directly.
