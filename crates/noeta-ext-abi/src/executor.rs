@@ -66,6 +66,8 @@ impl std::fmt::Debug for RealBody {
 pub enum FsIo {
     /// `fs.read_async(path)` → the file's text.
     Read(String),
+    /// `fs.read_bytes_async(path)` → the file's raw bytes (A.10 residue).
+    ReadBytes(String),
     /// `fs.write_async(path, content)` → unit.
     Write(String, String),
     /// `fs.append_async(path, content)` → unit.
@@ -76,12 +78,17 @@ pub enum FsIo {
     Remove(String),
     /// `fs.list_async()` / `fs.list_async(dir)` → the listing (extern-types X6).
     List(Option<String>),
+    /// `fs.mkdir_async(path)` → unit; creates the directory and any missing ancestors (A.10 residue).
+    Mkdir(String),
+    /// `fs.is_dir_async(path)` → bool; whether `path` names a directory (A.10 residue).
+    IsDir(String),
 }
 
 impl ExternIo for FsIo {
     fn run_sync(&mut self, host: &mut dyn Host) -> Result<crate::NativeOut, StdError> {
         match self {
             FsIo::Read(path) => host.fs_read(path).map(crate::NativeOut::Str),
+            FsIo::ReadBytes(path) => host.fs_read_bytes(path).map(crate::NativeOut::Bytes),
             FsIo::Write(path, content) => host
                 .fs_write(path, content)
                 .map(|()| crate::NativeOut::Unit),
@@ -101,6 +108,10 @@ impl ExternIo for FsIo {
             .map(|paths| {
                 crate::NativeOut::List(paths.into_iter().map(crate::NativeOut::Str).collect())
             }),
+            FsIo::Mkdir(path) => host.fs_mkdir(path).map(|()| crate::NativeOut::Unit),
+            FsIo::IsDir(path) => Ok(crate::NativeOut::Scalar(crate::Scalar::Bool(
+                host.fs_is_dir(path),
+            ))),
         }
     }
 
@@ -109,7 +120,10 @@ impl ExternIo for FsIo {
         // fallback runs `run_sync` against the RealHost at spawn — exact sync semantics by
         // construction (these are cheap point ops), and the degradation path every extension
         // gets for free stays exercised. Content IO below keeps its concurrent bodies.
-        if matches!(self, FsIo::Exists(_) | FsIo::Remove(_) | FsIo::List(_)) {
+        if matches!(
+            self,
+            FsIo::Exists(_) | FsIo::Remove(_) | FsIo::List(_) | FsIo::Mkdir(_) | FsIo::IsDir(_)
+        ) {
             return None;
         }
         let io_error = |message: String| StdError {
@@ -121,6 +135,9 @@ impl ExternIo for FsIo {
         Some(RealBody::Blocking(Box::new(move || match taken {
             FsIo::Read(path) => std::fs::read_to_string(&path)
                 .map(crate::NativeOut::Str)
+                .map_err(|e| io_error(format!("cannot read `{path}`: {e}"))),
+            FsIo::ReadBytes(path) => std::fs::read(&path)
+                .map(crate::NativeOut::Bytes)
                 .map_err(|e| io_error(format!("cannot read `{path}`: {e}"))),
             FsIo::Write(path, content) => std::fs::write(&path, content)
                 .map(|()| crate::NativeOut::Unit)
@@ -138,7 +155,7 @@ impl ExternIo for FsIo {
                     })
                     .map(|()| crate::NativeOut::Unit)
             }
-            FsIo::Exists(_) | FsIo::Remove(_) | FsIo::List(_) => {
+            FsIo::Exists(_) | FsIo::Remove(_) | FsIo::List(_) | FsIo::Mkdir(_) | FsIo::IsDir(_) => {
                 unreachable!("metadata twins returned None above")
             }
         })))

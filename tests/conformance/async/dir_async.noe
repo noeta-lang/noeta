@@ -1,0 +1,21 @@
+// A.10 residue — the async directory twins mirror the sync directory surface: `fs.mkdir_async`
+// (a `Future<void>`), `fs.is_dir_async` (a `Future<bool>`), and `fs.list_async(dir)` (already the
+// twin of `list(dir)`). On the sandbox VFS they resolve deterministically at spawn (in-oracle, both
+// backends agree). A directory is made, probed, populated, and listed — all through the async surface.
+// expect: stdout "missing-is-dir=false"
+// expect: stdout "made=true"
+// expect: stdout "file-is-dir=false"
+// expect: stdout "listing=[\"a.txt\", \"b.txt\"]"
+// expect: exit 0
+use std.{fs}
+
+async fn run(): void {
+    echo "missing-is-dir=" ~ fs.is_dir_async("logs").await
+    fs.mkdir_async("logs").await
+    echo "made=" ~ fs.is_dir_async("logs").await
+    fs.write_async("logs/a.txt", "alpha").await
+    fs.write_async("logs/b.txt", "beta").await
+    echo "file-is-dir=" ~ fs.is_dir_async("logs/a.txt").await
+    echo "listing=" ~ fs.list_async("logs").await
+}
+run().await

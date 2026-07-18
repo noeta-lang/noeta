@@ -1,0 +1,35 @@
+// A.10 residue — `fs.read_bytes_async(path)` is the async twin of `fs.read_bytes`, a
+// `Future<bytes>` an async context awaits. On the sandbox VFS it resolves deterministically at spawn
+// (in-oracle, both backends agree); on the real executor (CLI) the read runs concurrently on tokio.
+// Two packed buffers are written with `write_bytes`, then read back concurrently and awaited — the
+// round-trip is byte-exact, so equality/len/hex all pin.
+// expect: stdout "a-ok=true"
+// expect: stdout "b-ok=true"
+// expect: stdout "a-hex=0100000000000000"
+// expect: stdout "b-len=8"
+// expect: stdout "done"
+// expect: exit 0
+use std.{fs}
+
+@packed struct W { v: int }
+
+async fn load(path: string): bytes {
+    return fs.read_bytes_async(path).await
+}
+
+a = [W { v: 1 }].to_bytes()
+b = [W { v: 2 }].to_bytes()
+fs.write_bytes("a.bin", a)
+fs.write_bytes("b.bin", b)
+
+concurrent {
+    fa = spawn load("a.bin")
+    fb = spawn load("b.bin")
+    ra = fa.await
+    rb = fb.await
+    echo "a-ok=" ~ (ra == a)
+    echo "b-ok=" ~ (rb == b)
+    echo "a-hex=" ~ ra.to_hex()
+    echo "b-len=" ~ rb.len()
+}
+echo "done"

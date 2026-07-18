@@ -175,8 +175,8 @@ File IO. Under `noeta run` this is real disk; the conformance sandbox uses an in
 | `mkdir` | `mkdir(path: string) -> void` (creates ancestors, like `mkdir -p`) |
 | `list` | `list() -> List<string>` / `list(dir: string) -> List<string>` |
 | `open` | `open(path: string, mode: string) -> FileHandle` |
-| `read_async` / `write_async` / `append_async` | the `Future`-returning variants (see [Concurrency](Concurrency)) |
-| `exists_async` / `remove_async` / `list_async` | async metadata twins — same semantics as their sync forms, awaited |
+| `read_async` / `read_bytes_async` / `write_async` / `append_async` | the `Future`-returning variants (see [Concurrency](Concurrency)) |
+| `exists_async` / `remove_async` / `list_async` / `is_dir_async` / `mkdir_async` | async metadata & directory twins — same semantics as their sync forms, awaited |
 
 ### File handles
 
