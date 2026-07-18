@@ -114,6 +114,31 @@ impl Checker {
             }
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
+                // A local binding that names — or shadows — a callable value takes precedence over
+                // a same-named free function, so the call position agrees with value position
+                // (which already prefers the local). With a concrete `Fn` type — a bare `fn`
+                // reference bound to a name (`d = double; d(3)`), or a `(A) -> R` parameter that
+                // shadows a free `fn` — the call is arity/type-checked against those params rather
+                // than silently deferred or misrouted to the free function's signature. A
+                // `dyn`/`Unknown` local (an untyped closure value) stays deferred, its arguments
+                // unchecked as before.
+                if let Some(Type::Fn { params, ret }) = lookup(env, name) {
+                    let params = params.clone();
+                    let ret = (**ret).clone();
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
+                    // A selectively-imported module function bound to a name (`f = sqrt`) erases to
+                    // `fn() -> dyn` — its real, often-variadic signature can't be a fixed param
+                    // list — so that placeholder carries no checkable arity and its call stays
+                    // deferred (as it was before this branch existed). Every other function value
+                    // is checked: too many arguments, or a supplied argument of the wrong type, is
+                    // caught. Arity's *lower* bound is not enforced — a function value does not
+                    // record which of its parameters carry defaults, so `required` is `0`.
+                    let erased_import = params.is_empty() && matches!(ret, Type::Dyn);
+                    if !erased_import {
+                        self.check_args(&params, 0, args, arg_exprs, span, name);
+                    }
+                    return ret;
+                }
                 if let Some(sig) = self.symbols.functions.get(name) {
                     let required = sig.required;
                     // A generic function is instantiated per call: bind its type parameters from the

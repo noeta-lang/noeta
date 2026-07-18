@@ -1,0 +1,7 @@
+// A bare-`fn` value's argument types survive too: calling `d` (bound to `double`, which takes an
+// `int`) with a string is a static type mismatch through the local binding (http-server S5).
+// expect: error E0007 at 7:6
+// expect: exit 1
+fn double(x: int): int { return x * 2; }
+d = double;
+echo d("nope");
