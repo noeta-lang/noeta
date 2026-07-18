@@ -26,8 +26,9 @@ A flamegraph is stacks × a *weight*: wall samples, executed ops (`--every`), ex
 Async tasks (`spawn` / `concurrent`) are cooperative and always profile into the main flamegraph.
 **Worker isolates** (`isolate f(args)`) run on their own OS threads and get their **own profile
 each**, named `isolate <fn> #<n>` — every mode produces one per isolate alongside `main`'s. A
-speedscope artifact carries them as separate profiles (tabs in the viewer); the folded/SVG forms
-root each isolate's stacks at its name.
+speedscope artifact carries them as separate profiles — the VS Code view shows a **thread picker**
+in the header (and speedscope.app its own profile selector) whenever a run spawned isolates; the
+folded/SVG forms root each isolate's stacks at its name.
 
 The program's own stdout is always forwarded untouched — the profile report goes to **stderr** (or a
 file with `-o`), so a program you profile stays pipeable.
@@ -82,7 +83,33 @@ main               1     480.173µs        1.480s    0.0%  (app.noe:1)
 - **total** — inclusive time (the function and everything it called), counted at the outermost
   activation so recursion is not double-counted.
 
-`--format json` emits the same rows as JSON (`-o rows.json` to a file).
+The instrumenting run also records the **exact call tree**, so it renders a flamegraph too —
+weighted by measured self-nanoseconds rather than sample counts, every call accounted, tiny
+programs included. `--format json` emits one artifact carrying both the table rows *and* the
+speedscope-shaped stacks (what the VS Code view renders as Flame Graph | Functions); the stack
+formats work directly as well: `--format svg` / `folded` / `speedscope`, counters labeled `ns`.
+
+## Allocation — the memory flamegraph
+
+```console
+$ noeta profile app.noe --alloc
+noeta profile: 6721576 bytes allocated over 4 stacks, program ran in 342.403ms (tier-0, alloc)
+```
+
+Every byte the program allocates is attributed — **exactly, not sampled** — to the call path that
+allocated it: the binary's counting allocator maintains a per-thread cumulative byte counter, and
+the profiler banks each delta onto the executing stack. The result answers *"who allocates"* — the
+churn/pressure question a wall-time flamegraph actively hides, because allocation's price is paid
+later (in the allocator and the collector). Frees are deliberately ignored: this is not a retention
+snapshot.
+
+The stack formats apply as in sampling (`--format svg` / `folded` / `speedscope` — weights in
+bytes); there is no function table (stacks are the whole story). Notes:
+
+- Only the interpreter thread's allocations are attributed to `main`'s stacks; each **isolate** has
+  its own counter and its own profile (see [Threads](#threads)).
+- A [composed toolchain](Native-Extensions) binary that doesn't register the counting allocator
+  reports zero bytes — the summary says so explicitly rather than showing an empty graph.
 
 ## In VS Code
 
@@ -92,8 +119,10 @@ the result in a **flame graph view** — click to zoom, double-click (or ctrl/cm
 jump to its source, with a sortable per-function table on the second tab. The profiled program's
 own output streams to the *Noeta Profile* output channel, and the hot **source lines get annotated
 in place** with their share of samples (cleared on edit, or with *Noeta: Clear Profile Line
-Annotations*). **Noeta: Profile File (Instrumenting)** shows the exact calls/self/total table in
-the same view.
+Annotations*). **Noeta: Profile File (Instrumenting)** opens the same Flame Graph | Functions pair
+with the *exact* call tree and table, and **Noeta: Profile File (Allocations, memory flamegraph)**
+opens the bytes-weighted view. When the profiled program spawned isolates, a **thread picker** in
+the view's header switches between `main` and each `isolate <fn> #<n>` profile.
 
 The view is a renderer for the standard artifacts above: it opens any `*.noeprof.json` file —
 speedscope JSON (whose frames carry structured `file`/`line`/`col`) or the instrumenting JSON — so
@@ -112,8 +141,11 @@ build (the JIT changes constants, not shape). Call counts are tier-independent a
 
 ## Under the hood (short version)
 
-Both profilers ride **one seam**: a hook the VM consults before each instruction (the cheaper twin
-of the debugger's pause seam), free when no profiler is attached. The instrumenting collector diffs
+Every profiler rides **one seam**: a hook the VM consults before each instruction (the cheaper
+twin of the debugger's pause seam), free when no profiler is attached. The allocation collector
+adds one ingredient: the binary's global allocator counts bytes per thread, and the hook banks each
+per-op delta onto the executing stack — the allocator is the single choke point, so native
+builtins' allocations are counted too. The instrumenting collector diffs
 the live frame stack to detect call enter/exit and times each; the sampler snapshots the live stack
 at a safe point when a tick is pending — **cooperative sampling**, so the timer thread never races
 the interpreter's stack. Function names and source lines come from the **always-emitted line tables**
@@ -124,6 +156,7 @@ on every compiled chunk, so no special debug build is needed. The profiler is a 
 
 - **Tier-0 only** — the JIT-compiled tier is not sampled (its absolute wall-time isn't reflected);
   see above. Sampling the JIT tier is a future add.
-- **Single isolate / main thread** — cross-`isolate` (multi-OS-thread) profiles are not merged yet.
+- **Isolate profiles are separate, not merged** — each worker isolate gets its own named profile
+  (see [Threads](#threads)); there is no combined cross-thread view or merged function table yet.
 - **Per-line self-time** in the instrumenting table is function-granular today (line attribution is
   a sampling feature via `--lines`).
