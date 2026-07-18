@@ -812,6 +812,11 @@ impl Pretty for Expr {
                 value.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::FieldsOf { value, span: s } => {
+                out.push_str(&format!("(fields_of {}\n", span(*s)));
+                value.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::FromBytes { ty, blob, span: s } => {
                 out.push_str(&format!("(from_bytes {} {}\n", type_ref_str(ty), span(*s)));
                 blob.pretty(out, level + 1);
@@ -913,7 +918,7 @@ impl Pretty for Expr {
 }
 
 /// Render a [`TypeRef`] back to its surface spelling (`int`, `List<int>`, `?User`) for snapshots.
-fn type_ref_str(ty: &TypeRef) -> String {
+pub(crate) fn type_ref_str(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Optional { inner, .. } => format!("?{}", type_ref_str(inner)),
         TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),

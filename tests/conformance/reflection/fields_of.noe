@@ -1,0 +1,31 @@
+// `fields_of(value)` (derive layer 3): a struct/class instance's fields as `List<FieldEntry>`
+// (`{ name: string, value: dyn }`, declaration order); any other value yields the empty list.
+// The payoff: a fully-defaulted trait implementing structural behavior over `self` — reflectively,
+// with no macro system — and then derived onto a type.
+// expect: stdout "x = 1"
+// expect: stdout "y = 2"
+// expect: stdout "0"
+// expect: stdout "{ name: Ada, id: 7 }"
+// expect: exit 0
+struct Point { x: int; y: int }
+p = Point { x: 1, y: 2 }
+for f in fields_of(p) {
+    echo f.name ~ " = " ~ f.value
+}
+echo fields_of(42).len()
+
+trait Inspectable {
+    fn inspect(): string {
+        mut out = "{"
+        mut first = true
+        for f in fields_of(self) {
+            if !first { out = out ~ "," }
+            out = out ~ " " ~ f.name ~ ": " ~ f.value
+            first = false
+        }
+        return out ~ " }"
+    }
+}
+@derive(Inspectable)
+struct User { name: string; id: int }
+echo User { name: "Ada", id: 7 }.inspect()

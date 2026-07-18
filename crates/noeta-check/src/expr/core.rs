@@ -995,6 +995,15 @@ impl Checker {
                 }
                 Type::Named("Type".to_string(), Vec::new())
             }
+            Expr::FieldsOf { value, .. } => {
+                // The value-level counterpart of `type_of` (derive layer 3): a struct/class
+                // instance's fields as `List<FieldEntry>`; any other value is the empty list.
+                self.synth(value, env);
+                Type::List(Box::new(Type::Named(
+                    noeta_ast::reflect::FIELD_ENTRY.to_string(),
+                    Vec::new(),
+                )))
+            }
             Expr::RolesOf { ty, span } => {
                 // The compiler-built role index, surfaced as `List<RoleBinding>`. The optional
                 // turbofish scopes the query to one role enum, which — like `attributes_of`'s

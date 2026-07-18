@@ -831,6 +831,29 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
+    /// Materialize a struct/class instance's fields into a `List<FieldEntry>` (`{ name, value }`,
+    /// declaration order) — the value-level reflection `fields_of` (derive layer 3). Any other
+    /// value yields the empty list. The shape is built fresh (structural equality matches the
+    /// tree-walker's by construction); each carried field value is retained since the new entry
+    /// object holds a fresh reference.
+    pub(crate) fn materialize_fields(&self, value: Value) -> Value {
+        let entry_shape = noeta_object::intern_shape(Shape::object(
+            ShapeKind::Struct,
+            noeta_ast::reflect::FIELD_ENTRY,
+            vec!["name".to_string(), "value".to_string()],
+        ));
+        let items: Vec<Value> = value
+            .object_fields_for_reflection()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, field_value)| {
+                noeta_gc::retain(field_value);
+                Value::object(entry_shape, vec![Value::string(&name), field_value])
+            })
+            .collect();
+        Value::list(items)
+    }
+
     /// Record a runtime diagnostic and produce the unwind token.
     pub(crate) fn error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Abort {
         self.out

@@ -2409,6 +2409,11 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    Op::FieldsOf { dst, src } => {
+                        let result = self.materialize_fields(regs[fbase + *src as usize]);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::TypeOfStatic { dst, repr } => {
                         let result = build_type_value(repr);
                         set_reg(regs, fbase, *dst, result);

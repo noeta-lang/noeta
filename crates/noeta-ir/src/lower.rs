@@ -251,6 +251,18 @@ pub fn lower_with_sites(
 /// IR — both converge without duplicating a method. The IR interpreter (reference/eval) has no such
 /// split, so the lowering call alone covers it.
 pub fn hoist_standalone_impl_methods(program: &AstProgram) -> Option<AstProgram> {
+    // The process-global registry when one is seeded (`None` in registry-less unit tests — native
+    // derives simply don't materialize there, exactly as they don't check).
+    hoist_impl_methods_with_registry(program, noeta_ext_abi::registry::default_registry())
+}
+
+/// As [`hoist_standalone_impl_methods`], against an explicit extension registry — the
+/// instance-registry seam: native derive recipes (`ExtDerive`, derive layer 4) resolve against
+/// `registry`, so an embed session's own extensions' derives materialize.
+pub fn hoist_impl_methods_with_registry(
+    program: &AstProgram,
+    registry: Option<&'static noeta_ext_abi::registry::Registry>,
+) -> Option<AstProgram> {
     // The trait declarations by name, for default-method fallback (UT5). Only a NON-generic
     // trait's defaults hoist — a generic trait's default body would need type-parameter
     // substitution per implementor, which is deferred with the rest of generic-trait derivation.
@@ -302,31 +314,82 @@ pub fn hoist_standalone_impl_methods(program: &AstProgram) -> Option<AstProgram>
         AstStmt::Enum(d) => body_references_trait(&d.impls, &d.derives),
         _ => false,
     });
+    // A builtin `via:` derive (`@derive(Comparable, via: amount)`) and a native derive recipe
+    // (`@derive(Inspect)`, layer 4) synthesize methods even with no user trait in the program.
+    let derive_needs = |derives: &[noeta_ast::DeriveSpec]| {
+        derives.iter().any(|d| {
+            d.via.is_some() || registry.is_some_and(|r| r.find_ext_derive(&d.name).is_some())
+        })
+    };
+    let body_needs = body_needs
+        || program.stmts.iter().any(|s| match s {
+            AstStmt::Struct(d) => derive_needs(&d.derives),
+            AstStmt::Class(d) => derive_needs(&d.derives),
+            AstStmt::Enum(d) => derive_needs(&d.derives),
+            _ => false,
+        });
     if additions.is_empty() && !body_needs {
         return None;
     }
     let mut changed = false;
     let mut cloned = program.clone();
     for stmt in &mut cloned.stmts {
-        let (name, methods, impls, derives) = match stmt {
-            AstStmt::Struct(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
-            AstStmt::Class(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
-            AstStmt::Enum(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
+        let (name, methods, fields, impls, derives) = match stmt {
+            AstStmt::Struct(d) => (
+                &d.name,
+                &mut d.methods,
+                d.fields.as_slice(),
+                &d.impls,
+                &d.derives,
+            ),
+            AstStmt::Class(d) => (
+                &d.name,
+                &mut d.methods,
+                d.fields.as_slice(),
+                &d.impls,
+                &d.derives,
+            ),
+            AstStmt::Enum(d) => (
+                &d.name,
+                &mut d.methods,
+                &[] as &[noeta_ast::FieldDecl],
+                &d.impls,
+                &d.derives,
+            ),
             _ => continue,
         };
-        // UT5 for the unified body: an in-body `impl Trait { … }` block's omitted defaults, and a
-        // `@derive(UserTrait)` (which adopts every default — the checker enforces the trait is
-        // fully defaulted). The parser already copied an in-body impl's OWN methods into
-        // `methods`, so the name-skip makes provided overrides win here too.
-        let mut defaults: Vec<FnDecl> = Vec::new();
+        // UT5 for the unified body: an in-body `impl Trait { … }` block's omitted defaults, plus a
+        // derive's *planned* methods (derive layers 1+2 — defaults adopted, required members
+        // bridged onto fields/methods, `via:` forwards, builtin `via:` templates) from the shared
+        // planner the checker validates with. A plan error contributes nothing here — the checker
+        // reports it and the program does not run. The parser already copied an in-body impl's OWN
+        // methods into `methods`, so the name-skip makes provided overrides win here too.
+        let mut synthesized: Vec<FnDecl> = Vec::new();
         for block in impls {
-            defaults.extend(omitted_defaults(&block.trait_name, methods));
+            synthesized.extend(omitted_defaults(&block.trait_name, methods));
         }
         for spec in derives {
-            defaults.extend(omitted_defaults(&spec.name, methods));
+            let planned = if let Some(t) = traits.get(spec.name.as_str()) {
+                noeta_ast::derive::plan_user_trait_derive(t, fields, methods, spec)
+            } else if spec.via.is_some() {
+                noeta_ast::derive::plan_builtin_via(&spec.name, name, fields, spec)
+            } else if let Some(d) = registry.and_then(|r| r.find_ext_derive(&spec.name)) {
+                // A native derive recipe (layer 4): forwards into the extension's handlers.
+                let methods: Vec<(String, usize, String)> = d
+                    .methods
+                    .iter()
+                    .map(|m| (m.name.to_string(), m.arity, m.handler.to_string()))
+                    .collect();
+                Ok(noeta_ast::derive::plan_native_derive(&methods, spec.span))
+            } else {
+                continue;
+            };
+            if let Ok(planned) = planned {
+                synthesized.extend(planned);
+            }
         }
         let add = additions.get(name.as_str()).cloned().unwrap_or_default();
-        for m in add.into_iter().chain(defaults) {
+        for m in add.into_iter().chain(synthesized) {
             if !methods.iter().any(|existing| existing.name == m.name) {
                 methods.push(m);
                 changed = true;
@@ -348,8 +411,9 @@ pub fn lower_with_sites_opts(
         registry,
     } = opts;
     // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) before lowering,
-    // so `(type, method)` dispatch resolves them. Only rebinds when such an impl exists.
-    let hoisted = hoist_standalone_impl_methods(program);
+    // so `(type, method)` dispatch resolves them — against THIS lowering's registry, so an embed
+    // session's native derives (layer 4) materialize. Only rebinds when something hoists.
+    let hoisted = hoist_impl_methods_with_registry(program, Some(registry));
     let program: &AstProgram = hoisted.as_ref().unwrap_or(program);
     let mut lowerer = Lowerer {
         temps: 0,
@@ -1688,6 +1752,17 @@ impl Lowerer<'_> {
                 Ok(self.emit(
                     out,
                     Rvalue::TypeOf {
+                        operand,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::FieldsOf { value, span } => {
+                let operand = self.lower_expr(value, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::FieldsOf {
                         operand,
                         span: *span,
                     },

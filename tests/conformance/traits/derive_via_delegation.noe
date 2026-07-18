@@ -1,0 +1,25 @@
+// Derive layer 2 — `via:` delegation. A built-in trait forwards through the field (`Comparable`
+// compares the fields; the operator traits unwrap-op-rewrap on a single-field type), and a user
+// trait forwards every method into the field's own implementation.
+// expect: stdout "true"
+// expect: stdout "341"
+// expect: stdout "US$"
+// expect: exit 0
+@derive(Comparable, via: cents)
+@derive(Add, via: cents)
+struct Price { cents: int }
+
+trait Currency {
+    fn symbol(): string { return "?" }
+}
+struct Usd {
+    impl Currency {
+        fn symbol(): string { return "US$" }
+    }
+}
+@derive(Currency, via: unit)
+struct Wallet { unit: Usd }
+
+echo Price { cents: 300 } < Price { cents: 500 }
+echo (Price { cents: 300 } + Price { cents: 41 }).cents
+echo Wallet { unit: Usd {} }.symbol()

@@ -1718,6 +1718,32 @@ impl Interpreter {
         Value::list(items)
     }
 
+    /// Materialize a struct/class instance's fields into a `List<FieldEntry>` (`{ name, value }`,
+    /// declaration order) — the value-level reflection `fields_of` (derive layer 3). Any other
+    /// value yields the empty list. Builds a fresh `TypeDef`; the VM builds the matching shape
+    /// the same way, so the values agree by construction.
+    fn materialize_fields(&self, value: &Value) -> Value {
+        let entry_def = Rc::new(fresh_type_def(
+            noeta_ast::reflect::FIELD_ENTRY,
+            &["name".to_string(), "value".to_string()],
+            true,
+        ));
+        let items: Vec<Value> = match value {
+            Value::Object(obj) => obj
+                .def
+                .fields
+                .iter()
+                .zip(obj.slots.borrow().iter())
+                .map(|(field, field_value)| {
+                    let slots = vec![Value::Str(field.name.clone()), field_value.clone()];
+                    Value::Object(Rc::new(ObjectValue::new(entry_def.clone(), slots)))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Value::list(items)
+    }
+
     /// Build a struct/class instance from already-evaluated field values and an optional
     /// already-evaluated `..` spread base. The full-initialization choke point, shared by the
     /// AST walker's [`Self::eval_object`] and the Core-IR interpreter so both agree by

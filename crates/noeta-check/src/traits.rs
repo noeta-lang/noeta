@@ -508,14 +508,54 @@ impl Checker {
     /// arguments must resolve. The compiler synthesizes the listed impls from the type's fields,
     /// parameterized by the arguments (e.g. `Serialize<Json>`'s format). The only parameterized
     /// derivable trait today is `Serialize<Format>`.
-    pub(crate) fn check_derives(&mut self, type_name: &str, derives: &[DeriveSpec]) {
+    pub(crate) fn check_derives(
+        &mut self,
+        type_name: &str,
+        derives: &[DeriveSpec],
+        fields: &[noeta_ast::FieldDecl],
+        type_methods: &[FnDecl],
+        generic_type: bool,
+    ) {
         for spec in derives {
             let Some(t) = BuiltinTrait::from_name(&spec.name) else {
-                // A USER trait derives by adopting its default methods wholesale (UT5): valid
-                // exactly when every method has a default body — the same impl an explicit empty
-                // `impl Trait for T {}` would produce, with the defaults hoisted by the backends.
+                // A USER trait derives through the shared planner (UT5 + bridging + `via:`
+                // delegation): defaults adopted wholesale, required members bridged onto the
+                // type's own fields/methods, or the whole trait forwarded through a field.
                 if let Some(decl) = self.symbols.user_traits.get(&spec.name).cloned() {
-                    self.check_user_trait_derive(spec, &decl);
+                    self.check_user_trait_derive(spec, &decl, fields, type_methods);
+                    continue;
+                }
+                // A NATIVE derive recipe (layer 4, `ExtDerive`): synthesizes handler forwards —
+                // no bindings/via surface, plus the recipe's own optional shape validation.
+                if let Some(ext) = self.reg().find_ext_derive(&spec.name) {
+                    if let Some(b) = spec.bindings.first() {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            b.span,
+                            format!(
+                                "`{}: {}` — `{}` is a native derive with a fixed recipe; it takes \
+                                 no member bindings",
+                                b.member, b.target, spec.name
+                            ),
+                        );
+                    } else if let Some((_, via_span)) = &spec.via {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            *via_span,
+                            format!("`{}` is a native derive; `via:` does not apply", spec.name),
+                        );
+                    } else if let Some(validate) = ext.validate {
+                        let shape: Vec<(String, String)> = fields
+                            .iter()
+                            .map(|f| {
+                                let ty = field_type(&f.ty, &self.imports.extern_types);
+                                (f.name.clone(), ty.to_string())
+                            })
+                            .collect();
+                        if let Some(message) = validate(type_name, &shape) {
+                            self.error(DiagnosticCode::UnderivableTrait, spec.span, message);
+                        }
+                    }
                     continue;
                 }
                 self.error(
@@ -525,6 +565,60 @@ impl Checker {
                 );
                 continue;
             };
+            // Layer-2 delegation on a built-in (`@derive(Comparable, via: amount)`): validated by
+            // the shared template planner; the field-wise recipe machinery (arity, formats, the
+            // E0050 field constraint) does not apply — the synthesized method carries the behavior.
+            if let Some((via_name, via_span)) = &spec.via {
+                if generic_type {
+                    self.error(
+                        DiagnosticCode::UnderivableTrait,
+                        spec.span,
+                        "`via:` delegation is not supported on a generic type".to_string(),
+                    )
+                    .help("write an explicit `impl` inside the generic type instead");
+                } else if let Err(e) =
+                    noeta_ast::derive::plan_builtin_via(&spec.name, type_name, fields, spec)
+                {
+                    let d = self.error(DiagnosticCode::UnderivableTrait, spec.span, e.message);
+                    if let Some(h) = e.help {
+                        d.help(h);
+                    }
+                } else if t == BuiltinTrait::Comparable {
+                    // The forward is `self.f.compare(other.f)` — a via field whose type can
+                    // NEVER order (the same judgement the field-wise recipe applies) would only
+                    // fail at the first runtime comparison; reject it at the declaration.
+                    let field_ty = self
+                        .symbols
+                        .records
+                        .get(type_name)
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == via_name))
+                        .map(|(_, ty)| ty.clone());
+                    if let Some(ty) = field_ty
+                        && !self.type_orderable(&ty, &mut Vec::new())
+                    {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            *via_span,
+                            format!("`via: {via_name}` has no ordering (`{ty}`)"),
+                        )
+                        .help("delegate `Comparable` through a field whose type orders");
+                    }
+                }
+                continue;
+            }
+            if let Some(b) = spec.bindings.first() {
+                self.error(
+                    DiagnosticCode::UnderivableTrait,
+                    b.span,
+                    format!(
+                        "`{}: {}` — member bindings apply to user-trait derives; `{}` is a \
+                         built-in with a fixed recipe",
+                        b.member, b.target, spec.name
+                    ),
+                )
+                .help("use `via: <field>` to delegate a built-in trait through a field");
+                continue;
+            }
             if !t.derivable() {
                 self.error(
                         DiagnosticCode::UnknownTrait,
@@ -595,12 +689,18 @@ impl Checker {
         }
     }
 
-    /// Validate a `@derive(<UserTrait>)` (UT5): deriving a user trait means adopting every default
-    /// method — the same registration an explicit empty `impl Trait for T {}` produces (`collect`
-    /// already recorded the membership; the backends hoist the default bodies). Valid only for a
-    /// non-generic trait whose every method has a default; anything else is an E0050 naming what is
-    /// missing, with the explicit-impl route as the help.
-    fn check_user_trait_derive(&mut self, spec: &DeriveSpec, decl: &noeta_ast::TraitDecl) {
+    /// Validate a `@derive(<UserTrait>)` through the shared planner (UT5 + derive layers 1+2):
+    /// defaults adopt, explicit `member: target` bindings and name/unique-type deduction bridge the
+    /// required methods, `via: field` forwards the whole trait. A plan failure is an E0050 carrying
+    /// the planner's candidate list; a `via:` field whose type does not itself implement the trait
+    /// is also E0050 (the forward would dispatch into nothing).
+    fn check_user_trait_derive(
+        &mut self,
+        spec: &DeriveSpec,
+        decl: &noeta_ast::TraitDecl,
+        fields: &[noeta_ast::FieldDecl],
+        type_methods: &[FnDecl],
+    ) {
         if !spec.args.is_empty() {
             self.error(
                 DiagnosticCode::UnderivableTrait,
@@ -609,40 +709,42 @@ impl Checker {
             );
             return;
         }
-        if !decl.type_params.is_empty() {
-            self.error(
-                DiagnosticCode::UnderivableTrait,
-                spec.span,
-                format!("generic trait `{}` cannot be derived", spec.name),
-            )
-            .help("write an explicit `impl` for the instantiation you need");
+        if let Err(e) = noeta_ast::derive::plan_user_trait_derive(decl, fields, type_methods, spec)
+        {
+            let d = self.error(DiagnosticCode::UnderivableTrait, spec.span, e.message);
+            if let Some(h) = e.help {
+                d.help(h);
+            }
             return;
         }
-        let required: Vec<&str> = decl
-            .methods
-            .iter()
-            .filter(|tm| !tm.has_default)
-            .map(|tm| tm.sig.name.as_str())
-            .collect();
-        if !required.is_empty() {
-            self.error(
-                DiagnosticCode::UnderivableTrait,
-                spec.span,
-                format!(
-                    "cannot derive `{}`: it has method(s) without a default body — {}",
-                    decl.name,
-                    required
-                        .iter()
-                        .map(|n| format!("`fn {n}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )
-            .help(format!(
-                "a user trait is derivable when every method has a default; implement the \
-                 required methods with `impl {} for <Type> {{ … }}` instead",
-                decl.name
-            ));
+        // `via:` forwards into the field's own implementation — that implementation must exist.
+        if let Some((via, via_span)) = &spec.via
+            && let Some(f) = fields.iter().find(|f| f.name == *via)
+        {
+            let satisfied = match &f.ty {
+                Some(noeta_ast::TypeRef::Named { name, .. }) => self
+                    .symbols
+                    .user_trait_impls
+                    .get(name)
+                    .is_some_and(|traits| traits.contains(&decl.name)),
+                Some(noeta_ast::TypeRef::DynTrait { trait_name, .. }) => trait_name == &decl.name,
+                _ => false,
+            };
+            if !satisfied {
+                self.error(
+                    DiagnosticCode::UnderivableTrait,
+                    *via_span,
+                    format!(
+                        "`via: {via}` forwards `{}` calls to the field, but its type does not \
+                         implement `{}`",
+                        decl.name, decl.name
+                    ),
+                )
+                .help(format!(
+                    "the field's type needs an `impl {} …` (or a `dyn {}` field type)",
+                    decl.name, decl.name
+                ));
+            }
         }
     }
 

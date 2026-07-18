@@ -1230,6 +1230,28 @@ impl Value {
         }
     }
 
+    /// The object's `(field name, value)` pairs in shape (declaration) order — the reflection
+    /// read `fields_of(value)` materializes (derive layer 3). The returned values share the
+    /// object's references (NOT retained); the caller retains whatever it stores. `None` for a
+    /// non-object (enums and scalars included).
+    pub fn object_fields_for_reflection(self) -> Option<Vec<(String, Value)>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Object { shape, slots } => Some(
+                    shape
+                        .fields
+                        .iter()
+                        .cloned()
+                        .zip(slots.iter().copied())
+                        .collect(),
+                ),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// The value in object slot `index` (shape order), if this is an object with that slot. Like
     /// [`Value::field`] the returned value shares the object's reference (not retained). Lets a
     /// resolved/cached slot index be read directly, skipping the `slot_of` field-name scan.

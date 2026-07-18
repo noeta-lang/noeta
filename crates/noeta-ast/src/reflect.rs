@@ -830,6 +830,11 @@ pub const ATTRIBUTE_TARGET_KINDS: &[&str] = &[
     "Struct", "Class", "Enum", "Function", "Method", "Field", "Variant",
 ];
 
+/// The prelude `FieldEntry` struct — the element type of `fields_of(value)`'s result (derive
+/// layer 3): `{ name: string, value: dyn }`, one per field of a struct/class instance, in
+/// declaration order. Registered like `ParamInfo`; both backends materialize the matching shape.
+pub const FIELD_ENTRY: &str = "FieldEntry";
+
 /// The prelude `Layout` enum's name — the storage-layout vocabulary `@packed` takes
 /// (`@packed(Layout.Column)`). Like [`SEMANTIC_ENUM`] it is directive vocabulary, not a runtime
 /// value: the parser resolves the argument syntactically, and the prelude registers the enum so

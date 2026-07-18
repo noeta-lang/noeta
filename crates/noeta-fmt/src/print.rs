@@ -1274,19 +1274,30 @@ impl Printer<'_> {
     }
 
     fn derive_spec(&self, d: &DeriveSpec) -> Result<Doc, FmtError> {
-        if d.args.is_empty() {
-            Ok(Doc::text(d.name.clone()))
+        let head = if d.args.is_empty() {
+            Doc::text(d.name.clone())
         } else {
             let mut args = Vec::new();
             for a in &d.args {
                 args.push(self.type_ref(a)?);
             }
-            Ok(Doc::concat([
+            Doc::concat([
                 Doc::text(format!("{}<", d.name)),
                 Doc::join(args, Doc::text(", ")),
                 Doc::text(">"),
-            ]))
+            ])
+        };
+        // The trait's named configuration rides after it (derive layers 1+2): `via: field`
+        // delegation or `member: target` bindings — dropped output would silently change which
+        // implementation the derive synthesizes.
+        let mut parts = vec![head];
+        if let Some((via, _)) = &d.via {
+            parts.push(Doc::text(format!(", via: {via}")));
         }
+        for b in &d.bindings {
+            parts.push(Doc::text(format!(", {}: {}", b.member, b.target)));
+        }
+        Ok(Doc::concat(parts))
     }
 
     /// Leading `#[...]` attributes as their own lines (for fn/field/variant leaders).
@@ -1751,6 +1762,9 @@ impl Printer<'_> {
             ]),
             Expr::TypeOf { value, .. } => {
                 Doc::concat([Doc::text("type_of("), self.expr(value)?, Doc::text(")")])
+            }
+            Expr::FieldsOf { value, .. } => {
+                Doc::concat([Doc::text("fields_of("), self.expr(value)?, Doc::text(")")])
             }
             Expr::ParamsOf { target, .. } => {
                 Doc::concat([Doc::text("params_of("), self.expr(target)?, Doc::text(")")])

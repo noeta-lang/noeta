@@ -468,6 +468,9 @@ pub enum Rvalue {
     },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
+    /// `fields_of(value)` — a struct/class instance's fields as `List<FieldEntry>` (derive
+    /// layer 3); the empty list for any other value.
+    FieldsOf { operand: Atom, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).
     /// `blob` is the byte operand; `layout` is element `T`'s packed layout (looked up by the lowering
     /// in the `packed_list_sites` channel — the same one list literals use). `None` if the checker

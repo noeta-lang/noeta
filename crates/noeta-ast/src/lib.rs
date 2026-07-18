@@ -10,6 +10,7 @@
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
+pub mod derive;
 pub mod desugar;
 mod pretty;
 pub mod reflect;
@@ -360,6 +361,22 @@ pub struct DeriveSpec {
     pub name: String,
     /// Generic type arguments (`<Json>`); empty for a nullary derive.
     pub args: Vec<TypeRef>,
+    /// Explicit required-member bindings (`@derive(Ordered, value: amount)`, derive layer 1): the
+    /// trait's required method name → the deriving type's member to bridge it to. Empty for the
+    /// common unbound derive (deduction covers it).
+    pub bindings: Vec<MemberBinding>,
+    /// Whole-trait delegation (`@derive(Comparable, via: amount)`, derive layer 2): forward the
+    /// trait through this field. Mutually exclusive with `bindings`.
+    pub via: Option<(String, Span)>,
+    pub span: Span,
+}
+
+/// One `member: target` pair on a derive (`@derive(Ordered, value: amount)`): bridge the trait's
+/// required `member` to the deriving type's `target` field or method.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberBinding {
+    pub member: String,
+    pub target: String,
     pub span: Span,
 }
 
@@ -976,6 +993,12 @@ pub enum Expr {
     /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
     /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
     TypeOf { value: Box<Expr>, span: Span },
+    /// The reflection query `fields_of(value)` — a struct/class instance's fields as
+    /// `List<FieldEntry>` (`{ name: string, value: dyn }`, declaration order), the value-level
+    /// counterpart of `type_of` (derive layer 3): what lets a fully-defaulted trait implement
+    /// structural behavior over `self` without a macro system. A non-object value yields the
+    /// empty list.
+    FieldsOf { value: Box<Expr>, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>` (P-PACK 4.4). `ty` is
     /// the element type (turbofish; must be a `@packed` struct), `blob` the `bytes` operand. The byte
     /// buffer is opaque, so the element type must be named at the call site.
@@ -1272,6 +1295,7 @@ impl Expr {
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
             | Expr::TypeOf { span, .. }
+            | Expr::FieldsOf { span, .. }
             | Expr::FromBytes { span, .. }
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
@@ -1365,6 +1389,7 @@ impl Expr {
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::FieldsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
@@ -1456,6 +1481,7 @@ impl Expr {
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::FieldsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),

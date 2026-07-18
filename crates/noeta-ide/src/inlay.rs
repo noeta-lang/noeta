@@ -298,6 +298,7 @@ impl Walker<'_> {
                 self.expr(fallback);
             }
             Expr::TypeOf { value, .. } => self.expr(value),
+            Expr::FieldsOf { value, .. } => self.expr(value),
             Expr::ParamsOf { target, .. } => self.expr(target),
             Expr::FromBytes { blob, .. } => self.expr(blob),
             Expr::Channel { capacity, .. } => self.expr(capacity),

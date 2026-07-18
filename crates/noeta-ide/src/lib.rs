@@ -2834,6 +2834,7 @@ fn tier_name_at(
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::FieldsOf { value: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => in_expr(expr, offset, source),
             _ => None,
         }

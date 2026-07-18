@@ -290,4 +290,63 @@ mod tests {
         assert!(BuiltinTrait::from_name("Add").is_some_and(|t| !t.derivable()));
         assert!(BuiltinTrait::from_name("Nonexistent").is_none());
     }
+
+    #[test]
+    fn via_templates_are_in_lockstep_with_the_trait_table() {
+        // `noeta_ast::derive::plan_builtin_via`'s template table must synthesize exactly the
+        // required method this table declares, for every trait it supports — and reject the rest
+        // with its "does not support" error (never silently mis-forward).
+        use noeta_ast::{DeriveSpec, FieldDecl};
+        use noeta_span::Span;
+        let span = Span::new(0, 0);
+        let field = FieldDecl {
+            name: "f".to_string(),
+            name_span: span,
+            mut_field: false,
+            is_public: false,
+            ty: None,
+            default: None,
+            attrs: Vec::new(),
+            span,
+        };
+        let spec = DeriveSpec {
+            name: String::new(),
+            args: Vec::new(),
+            bindings: Vec::new(),
+            via: Some(("f".to_string(), span)),
+            span,
+        };
+        const SUPPORTED: &[&str] = &[
+            "Equatable",
+            "Comparable",
+            "Display",
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+            "Concat",
+        ];
+        for t in BUILTIN_TRAITS {
+            let plan = noeta_ast::derive::plan_builtin_via(
+                t.name(),
+                "T",
+                std::slice::from_ref(&field),
+                &spec,
+            );
+            if SUPPORTED.contains(&t.name()) {
+                let methods = plan.unwrap_or_else(|e| panic!("{}: {}", t.name(), e.message));
+                let (required, _) = t
+                    .required_method()
+                    .expect("every supported via trait has a required method");
+                assert_eq!(
+                    methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+                    vec![required],
+                    "template for {}",
+                    t.name()
+                );
+            } else {
+                assert!(plan.is_err(), "`via:` must reject {}", t.name());
+            }
+        }
+    }
 }

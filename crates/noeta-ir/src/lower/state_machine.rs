@@ -1010,6 +1010,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::As { expr, .. }
         | Expr::TypeTest { expr, .. }
         | Expr::TypeOf { value: expr, .. }
+        | Expr::FieldsOf { value: expr, .. }
         | Expr::ParamsOf { target: expr, .. }
         | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr),
         Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr),

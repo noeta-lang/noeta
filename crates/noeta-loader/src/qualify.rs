@@ -431,6 +431,7 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(fallback, visit);
         }
         Expr::TypeOf { value, .. } => q_expr(value, visit),
+        Expr::FieldsOf { value, .. } => q_expr(value, visit),
         // The target is a runtime string, not a type, so nothing to qualify beyond the operand expr.
         Expr::ParamsOf { target, .. } => q_expr(target, visit),
         Expr::Invoke {
