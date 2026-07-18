@@ -134,6 +134,23 @@ class DocsViewProvider {
       case "open":
         await this.openPage(msg.id, this.uri());
         break;
+      case "summary": {
+        // The hover tooltip's text: the node's page fetched on demand (the page IS the
+        // canonical @doc prose — no separate summary plumbing), reduced to its first
+        // paragraph. The webview caches per node id, so each node fetches at most once.
+        if (!client) return this.post({ type: "summary", id: msg.id, text: "" });
+        try {
+          const reply = await client.sendRequest("noeta/docsPage", { uri: this.uri(), id: msg.id });
+          this.post({
+            type: "summary",
+            id: msg.id,
+            text: firstParagraph((reply && reply.markdown) || ""),
+          });
+        } catch {
+          this.post({ type: "summary", id: msg.id, text: "" });
+        }
+        break;
+      }
       case "source":
         await commands.executeCommand("vscode.open", Uri.parse(msg.uri), {
           selection: new Range(
@@ -144,6 +161,46 @@ class DocsViewProvider {
         break;
     }
   }
+}
+
+/**
+ * The first prose paragraph of a page's markdown, flattened to plain text — the docs tree's
+ * hover-summary. Skips headings and fenced code blocks, takes the first run of ordinary lines,
+ * strips the light inline markdown the pages use (emphasis, inline code, links), and caps the
+ * length so the tooltip stays a glance, not a page.
+ */
+function firstParagraph(markdown) {
+  const lines = String(markdown).split("\n");
+  const para = [];
+  let inFence = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith("```")) {
+      inFence = !inFence;
+      if (para.length) break; // a fence ends the paragraph
+      continue;
+    }
+    if (inFence) continue;
+    if (!line) {
+      if (para.length) break; // blank line ends the paragraph
+      continue;
+    }
+    if (line.startsWith("#")) {
+      if (para.length) break; // a heading ends the paragraph
+      continue; // leading headings (the page title) are not prose
+    }
+    para.push(line);
+  }
+  const text = para
+    .join(" ")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // [label](target) → label
+    .replace(/(\*\*|__)(.*?)\1/g, "$2") // bold
+    .replace(/(\*|_)(.*?)\1/g, "$2") // emphasis
+    .replace(/`([^`]*)`/g, "$1") // inline code
+    .replace(/\s+/g, " ")
+    .trim();
+  const MAX = 280;
+  return text.length > MAX ? `${text.slice(0, MAX - 1).trimEnd()}…` : text;
 }
 
 /**

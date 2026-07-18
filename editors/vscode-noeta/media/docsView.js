@@ -60,6 +60,57 @@
   // Pending children requests: id → the child-container element to fill when the reply arrives.
   const pending = new Map();
 
+  // ---- Hover summary (linger on a row → its page's first @doc paragraph, native-hover style) ----
+  const HOVER_DELAY = 500; // ms — the native tree/hover linger
+  const summaries = new Map(); // node id → summary text ("" = the page has no prose)
+  let tip = null; // the visible tooltip element
+  let hoverTimer = 0;
+  let hoverId = null; // the node id whose summary fetch is in flight for the hovered row
+
+  function hideTip() {
+    clearTimeout(hoverTimer);
+    hoverId = null;
+    if (tip) {
+      tip.remove();
+      tip = null;
+    }
+  }
+
+  /** Show `text` in a hover widget anchored under `row` (above when there is no room below). */
+  function showTip(row, text) {
+    if (tip) {
+      tip.remove();
+      tip = null;
+    }
+    if (!text || !row.isConnected) return;
+    tip = el("div", "doc-tooltip", esc(text));
+    document.body.append(tip);
+    const r = row.getBoundingClientRect();
+    const pad = 4;
+    const left = Math.max(pad, Math.min(r.left + 20, window.innerWidth - tip.offsetWidth - pad));
+    let top = r.bottom + 3;
+    if (top + tip.offsetHeight > window.innerHeight - pad) top = r.top - tip.offsetHeight - 3;
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+
+  /** Arm the linger timer for `row`; fires a cached summary immediately or asks the host once. */
+  function armHover(row, node) {
+    hideTip();
+    if (!node.hasPage) return; // nothing to summarize
+    hoverTimer = setTimeout(() => {
+      if (summaries.has(node.id)) {
+        showTip(row, summaries.get(node.id));
+      } else {
+        hoverId = node.id;
+        vscode.postMessage({ type: "summary", id: node.id });
+      }
+    }, HOVER_DELAY);
+  }
+
+  // Any scroll invalidates the tooltip's anchor.
+  window.addEventListener("scroll", hideTip, true);
+
   /** A tree row for `node`, plus its (initially empty, structurally-indented) child container. */
   function makeRow(node) {
     const wrap = el("div", "node");
@@ -77,7 +128,10 @@
     const kids = el("div", "children");
     wrap.append(row, kids);
 
+    row.addEventListener("mouseenter", () => armHover(row, node));
+    row.addEventListener("mouseleave", hideTip);
     row.addEventListener("click", (e) => {
+      hideTip();
       select(row);
       // A click on the twisty (or anywhere on an expandable non-page row) toggles; otherwise open.
       const onTwisty = e.target.closest(".twisty");
@@ -113,6 +167,7 @@
   }
 
   function renderRoots(nodes) {
+    hideTip(); // the hovered row may be replaced under the cursor
     tree.textContent = "";
     for (const n of nodes) tree.append(makeRow(n));
   }
@@ -131,6 +186,7 @@
 
   // ---- Filter: a flat, ranked results list -------------------------------------------------- */
   function renderResults(query, hits) {
+    hideTip(); // the hovered row may be replaced under the cursor
     tree.textContent = "";
     count.textContent = `${hits.length} match${hits.length === 1 ? "" : "es"}`;
     if (!hits.length) {
@@ -230,6 +286,16 @@
         count.textContent = "";
         showMessage(msg.text || "");
         break;
+      case "summary": {
+        summaries.set(msg.id, msg.text || "");
+        // Show only if the cursor still rests on the row that asked.
+        if (hoverId === msg.id) {
+          hoverId = null;
+          const row = tree.querySelector(`.row[data-id="${CSS.escape(msg.id)}"]`);
+          if (row && row.matches(":hover")) showTip(row, msg.text || "");
+        }
+        break;
+      }
     }
   });
 
