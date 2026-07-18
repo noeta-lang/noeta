@@ -17,4 +17,4 @@ Everything lives behind the `jit` cargo feature: a `--no-default-features` build
 
 `NOETA_JIT_DISASM=1` dumps each compiled prototype's final machine code to stderr — the native analogue of `noeta dump`.
 
-The milestone records (with measurements, dead ends, and the soundness episodes) are `plans/jit/*.md`, especially `plans/jit/ssa.md`. Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).
+The milestone records (with measurements, dead ends, and the soundness episodes) are the JIT arc ledgers in `plans/` git history, especially the SSA milestone. Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).

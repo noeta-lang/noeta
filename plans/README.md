@@ -8,13 +8,12 @@ The language is built almost entirely by AI agents over a multi-year effort. Wor
 
 ## Layout
 
-- `roadmap.md` — the milestone map (M0–M3) and the single source of "what's next / what's done". Re-scan it at the start of every work session to pick the next unit.
-- `deferred.md` — the cross-milestone **deferral registry**: every non-gate item a done slice pushed to later, with its source slice and a concrete trigger. Scan it when planning a new pass so nothing slips between milestones.
-- `m0/`, `m1/`, `m2/` — one file per work unit (a "slice"), grouped by milestone. Each slice is a vertical cut through the pipeline that is independently testable. M0, M1, and M2 cluster 1 (host IO & async foundation) are complete; later M2 clusters await their own planning passes.
-- `types/` — the milestone-scale **inferred-static type-system track** (redirecting the checker from gradual to inferred-static + explicit `dyn`; bidirectional checking, not HM). See `types/README.md` for the slice map; gates the later packed-types/SIMD perf work.
-- `followups/` — cross-milestone slices that close items from `deferred.md` (e.g. `slice-f1-upvalues.md` adds the VM upvalue machinery deferred since M1.2). Same slice shape as the milestone folders.
-- `code-quality/` — the **architectural-cleanup track**: findings from a whole-codebase review. The bounded/medium items were done on the `code-quality-cleanup` branch; this folder scopes the four remaining large, entangled, *behavior-neutral* refactors (splitting the VM / checker / parser god files, and the BuiltinTrait-enum conversion), one file each. Pure structural work — the differential oracle is the gate, so each is safe but voluminous. See `code-quality/README.md`.
-- `done/` — completed slice files are moved here once their definition-of-done is met (and recorded in `roadmap.md`). Keep the trail; do not delete.
+- `roadmap.md` — where the project stands and what the good next picks are. Re-scan it at the start of every work session.
+- `backlog.md` — the single registry of everything open: deferred items, scope cuts, and design proposals, each with its source and a concrete trigger. Scan it when planning a new pass so nothing slips.
+- `backend-mirror.md` — the standing VM ↔ reference-interpreter mirror inventory & policy (which duplicated logic is irreducible vs liftable). A living reference, not a plan.
+- `<arc>/` — an active arc in flight gets its own directory: a `README.md` ledger (status header + slice table) and per-slice files as needed.
+
+**Completed work is deleted, not archived.** When an arc ships, strike its backlog rows, move any new deferrals into `backlog.md` in the same commit, and delete its directory — the slice ledgers and design rationale stay available in git history. `plans/` only ever describes work that is open. (What the *product* does belongs in the wiki and `ARCHITECTURE.md`, never here.)
 
 ## Slice file shape
 
@@ -33,12 +32,12 @@ Status: todo | in-progress | done
 - Out: ...
 
 ## Checklist (vertical slice)
-- [ ] Grammar / AST (lang-ast, lang-lexer, lang-parser)
-- [ ] Checker rule        (n/a in M0 — no type checker yet)
-- [ ] Bytecode            (n/a in M0 — tree-walker only)
-- [ ] Eval op             (lang-eval)
+- [ ] Grammar / AST (noeta-ast, noeta-lexer, noeta-parser)
+- [ ] Checker rule        (noeta-check)
+- [ ] IR / bytecode       (noeta-ir, noeta-compiler)
+- [ ] Both backends       (noeta-vm + noeta-eval, differential-covered)
 - [ ] Conformance cases   (tests/conformance/...)
-- [ ] Snapshots           (insta; reviewed, never blind-accepted)
+- [ ] Docs                (the relevant wiki page)
 
 ## Definition of done
 <concrete, checkable>
@@ -46,13 +45,13 @@ Status: todo | in-progress | done
 
 ## The iron rule
 
-**Every feature or fix lands with a conformance corpus entry.** A change to behavior that does not add or update a `tests/conformance/**.lang` case is incomplete. This is what lets an agent verify a change end-to-end without human judgment.
+**Every feature or fix lands with a conformance corpus entry.** A change to behavior that does not add or update a `tests/conformance/**.noe` case is incomplete. This is what lets an agent verify a change end-to-end without human judgment.
 
 ## Working discipline
 
-1. Pick the lowest-numbered `todo` slice from `roadmap.md`.
-2. Set its status to `in-progress`.
-3. Implement it as a vertical slice; add conformance cases and snapshots.
-4. Run `lang test` (or `cargo test`) green; `cargo fmt --all` and `cargo clippy --all-targets -- -D warnings` clean.
-5. Mark the slice `done`, update `roadmap.md`, commit code + task file together (conventional-commit title).
+1. Pick an *(active)* backlog row (or a trigger that has fired) via `roadmap.md`.
+2. For multi-slice work, open a `plans/<arc>/` directory with a ledger; for a small item, the backlog row is the tracker.
+3. Implement as a vertical slice; add conformance cases; keep the differential oracle and leak gate green.
+4. Run the tests green; `cargo fmt --all` and `cargo clippy --all-targets -- -D warnings` clean.
+5. Update `backlog.md` (and the arc ledger) in the same commit as the code; on arc completion, delete the arc directory.
 6. Work on a branch / worktree to avoid conflicts with parallel agents.

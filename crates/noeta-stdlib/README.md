@@ -61,4 +61,4 @@ Later milestones grew this crate well past the M1.10 baseline above; all of the 
 - **`vec`/`quat`** — scalar 3D math plus the autovectorized `soa_*`/`*_all` bulk kernels over packed buffers.
 - **The native-extension registry** (`registry.rs`) — the neutral `NativeValue` marshalling seam through which `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` are registered as the dogfooded "std" extension, with one shared dispatch function per module so the differential holds by construction. `json.parse::<T>` decodes into a call-site-named type.
 
-See `plans/m1/slice-10-stdlib.md`, `plans/m2/`, and `plans/native-extensions/`.
+See the wiki's [Standard-Library Modules](../../docs/Standard-Library-Modules.md) and [Native Extensions](../../docs/Native-Extensions.md) pages; the original arc ledgers live in `plans/` git history.
