@@ -1,0 +1,24 @@
+// Track A.6b-residual — `.await` in an `if…then…else` arm (which desugars to a two-arm `match`). Each
+// branch's await runs only when that branch is taken; the untaken branch's await never runs.
+// expect: stdout "then 10"
+// expect: stdout "got 10"
+// expect: stdout "else 20"
+// expect: stdout "got 20"
+// expect: exit 0
+use std.task.{sleep}
+async fn tap(tag: string, v: int): int {
+    sleep(1).await
+    echo "${tag} ${v}"
+    return v
+}
+async fn choose(flag: bool): int {
+    return if flag then tap("then", 10).await else tap("else", 20).await
+}
+async fn run(): int {
+    a = choose(true).await
+    echo "got ${a}"
+    b = choose(false).await
+    echo "got ${b}"
+    return a + b
+}
+z = run().await

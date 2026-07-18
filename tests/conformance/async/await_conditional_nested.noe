@@ -1,0 +1,41 @@
+// Track A.6b-residual — nested combinations of conditionally-evaluated awaits: a `??` fallback whose
+// value is itself an awaited `match` arm, a `match` arm holding a `??`-with-await, and a short-circuit
+// `&&` whose awaited RHS sits inside a `match` arm. The desugars compose recursively; only the taken
+// paths' awaits run.
+// expect: stdout "n1 1"
+// expect: stdout "fb 99"
+// expect: stdout "n2 99"
+// expect: stdout "g 1"
+// expect: stdout "n3 1"
+// expect: exit 0
+use std.task.{sleep}
+async fn f(tag: string, n: int): int {
+    sleep(1).await
+    echo "${tag} ${n}"
+    return n
+}
+async fn combo(opt: ?int, alt: ?int): int {
+    // a `match` arm whose body is a `??` whose fallback awaits.
+    return match opt {
+        some(v) => v,
+        none => (alt ?? f("fb", 99).await),
+    }
+}
+async fn guard(flag: bool): bool {
+    // an awaited RHS of `&&` inside a `match` arm body.
+    return match flag {
+        true => flag && f("g", 1).await > 0,
+        false => false,
+    }
+}
+async fn run(): int {
+    a = combo(some(1), none).await
+    echo "n1 ${a}"
+    b = combo(none, none).await
+    echo "n2 ${b}"
+    ok = guard(true).await
+    c = if ok then 1 else 0
+    echo "n3 ${c}"
+    return a + b + c
+}
+z = run().await

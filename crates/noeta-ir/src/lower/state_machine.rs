@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 
 use noeta_ast::{
-    BinaryOp, ClosureBody, Expr, ForPattern as AstForPattern, Param, Stmt as AstStmt, StrPart,
-    UnaryOp,
+    BinaryOp, ClosureBody, Expr, ForPattern as AstForPattern, MatchArm, Param, Stmt as AstStmt,
+    StrPart, UnaryOp,
 };
 use noeta_span::Span;
 
@@ -786,9 +786,16 @@ fn value_replace_await(value: &Expr, aw: &str) -> Expr {
 /// heads, so those never reach here; this pass mirrors that by not recursing into them.
 fn hoist_await_body(stmts: &[AstStmt]) -> Vec<AstStmt> {
     let mut ctr = 0u32;
+    hoist_await_body_ctr(stmts, &mut ctr)
+}
+
+/// [`hoist_await_body`] threading an existing synthetic-name counter, so a body hoisted *inside* an
+/// ongoing rewrite (a `??`/`match` arm-body desugar) keeps its `$hw`/`$sc`/… names globally unique
+/// rather than restarting at `0` and colliding with the outer pass's cells.
+fn hoist_await_body_ctr(stmts: &[AstStmt], ctr: &mut u32) -> Vec<AstStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
-        hoist_await_stmt(stmt, &mut ctr, &mut out);
+        hoist_await_stmt(stmt, ctr, &mut out);
     }
     out
 }
@@ -957,8 +964,18 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
             hoist_in_expr(left, pre, ctr);
             hoist_in_expr(right, pre, ctr);
         }
-        // `??`: the value is unconditional; the fallback is conditional (skip).
-        Expr::Coalesce { value, .. } => hoist_in_expr(value, pre, ctr),
+        // `??`: the value is evaluated unconditionally (hoist its awaits); the fallback is
+        // conditionally-evaluated (only on the `none`/`Err` path). A fallback holding an await becomes
+        // control flow (Track A.6b-residual) so the guarded await runs only when `??` would evaluate it.
+        Expr::Coalesce {
+            value, fallback, ..
+        } => {
+            hoist_in_expr(value, pre, ctr);
+            if fallback.has_await() {
+                desugar_coalesce_await(e, pre, ctr);
+            }
+            // else: an await-free fallback stays lazy at runtime with no suspension inside it.
+        }
         Expr::Index {
             receiver, index, ..
         } => {
@@ -995,8 +1012,18 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
                 }
             }
         }
-        // The scrutinee is unconditional; arm bodies are conditional (skip).
-        Expr::Match { scrutinee, .. } => hoist_in_expr(scrutinee, pre, ctr),
+        // The scrutinee is evaluated unconditionally (hoist its awaits); each arm body is
+        // conditionally-evaluated (only when its arm is selected). An arm body holding an await becomes
+        // control flow (Track A.6b-residual) so the guarded await runs only when its arm is taken.
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            hoist_in_expr(scrutinee, pre, ctr);
+            if arms.iter().any(|a| a.body.has_await()) {
+                desugar_match_await(e, pre, ctr);
+            }
+            // else: no arm awaits — the match runs whole within one state (emitted verbatim).
+        }
         Expr::Object(lit) => {
             for f in &mut lit.fields {
                 hoist_in_expr(&mut f.value, pre, ctr);
@@ -1201,6 +1228,231 @@ fn desugar_short_circuit_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u
         else_body: None,
         span,
     });
+}
+
+/// Track A.6b-residual — rewrite a `value ?? fallback` whose **fallback** holds an `.await` into control
+/// flow, so the guarded await runs only on the `none`/`Err` path (exactly when `??` evaluates the
+/// fallback). `e` is the `Coalesce` (its `value`'s awaits already hoisted by the caller); it is replaced
+/// with a reference to the result cell `$coN` and the prelude is appended to `pre`:
+///
+/// ```text
+/// x = value ?? fallback.await
+/// ───────────────────────────
+/// mut $mdN = 0
+/// mut $coN = value ?? match 0 { _ => { $mdN = 1 } }   // success: $co = unwrapped; failure: $md=1, $co=unit
+/// if $mdN == 1 { $coN = fallback.await }              // statement position → poll-state
+/// x = $coN
+/// ```
+///
+/// The Phase-1 `??` keeps the language's Option/Result-aware unwrap (success yields the unwrapped
+/// value); its fallback is now a side-effecting `match` that only flips the discriminant, so no await
+/// remains inside it — laziness holds by construction (the flip, and hence the real fallback, run only
+/// when `??` takes the fallback path). The real fallback then runs in statement position, where the
+/// flattener turns its await into a poll-state.
+fn desugar_coalesce_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+    let span = e.span();
+    let n = *ctr;
+    *ctr += 1;
+    let md = format!("$md{n}");
+    let co = format!("$co{n}");
+    let (value, fallback) = match std::mem::replace(e, ident(&co, span)) {
+        Expr::Coalesce {
+            value, fallback, ..
+        } => (*value, *fallback),
+        _ => unreachable!("caller guarantees a Coalesce"),
+    };
+    pre.push(mut_binding(&md, int_expr(0, span), span));
+    // mut $co = value ?? (match 0 { _ => { $md = 1 } })  — the fallback only flips the discriminant.
+    let flip = ClosureBody::Block(vec![bare_assign_expr(&md, int_expr(1, span), span)]);
+    pre.push(mut_binding(
+        &co,
+        Expr::Coalesce {
+            value: Box::new(value),
+            fallback: Box::new(block_arm_expr(flip, span)),
+            span,
+        },
+        span,
+    ));
+    // if $md == 1 { $co = <fallback, awaits hoisted to statement position> }
+    let guarded = hoist_await_body_ctr(&[bare_assign_expr(&co, fallback, span)], ctr);
+    pre.push(AstStmt::If {
+        cond: eq_int(&md, 1, span),
+        then_body: guarded,
+        else_body: None,
+        span,
+    });
+}
+
+/// Track A.6b-residual — rewrite a `match` whose arm body/bodies hold an `.await` into a discriminant
+/// dispatch plus guarded awaits, so each arm's await runs only when that arm is selected (in statement
+/// position, where the flattener turns it into a poll-state). `if…then…else` desugars to a two-arm
+/// `match` (parser), so this covers it too. `e` is the `Match` (its `scrutinee`'s awaits already hoisted
+/// by the caller); it is replaced with a reference to the result cell `$mrN` and the prelude appended:
+///
+/// ```text
+/// x = match scrut { p1 => a1, some(v) => f(v).await, p3 => a3 }
+/// ────────────────────────────────────────────────────────────
+/// mut $mrN = none                        // result cell (placeholder; the match is exhaustive so it
+/// mut $mdN = 0                           //   is always reassigned). $md=0 ⇒ a non-awaiting arm ran.
+/// match scrut {
+///     p1 => { $mrN = a1 }                // non-awaiting arm: compute the value in place
+///     some(v) => { $mb… = v; $mdN = 2 }  // awaiting arm: capture its bindings, then select it
+///     p3 => { $mrN = a3 }
+/// }
+/// if $mdN == 2 { mut v = $mb…; $mrN = f(v).await }   // the selected awaiting arm, awaits hoisted
+/// x = $mrN
+/// ```
+///
+/// A non-awaiting arm keeps its body verbatim (it runs whole within one state). An awaiting arm binds
+/// nothing in Phase-1 beyond capturing its pattern bindings into `$`-cells and flipping the
+/// discriminant to its 1-based index; the real body runs guarded in statement position, its bindings
+/// rebound from the cells so its references resolve unchanged, and any nested await (including a further
+/// short-circuit / `??` / `match` await) is desugared recursively by the hoist. Laziness holds: only the
+/// selected arm's guard fires, so only its await runs.
+fn desugar_match_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+    let span = e.span();
+    let n = *ctr;
+    *ctr += 1;
+    let mr = format!("$mr{n}");
+    let md = format!("$md{n}");
+    let (scrutinee, arms) = match std::mem::replace(e, ident(&mr, span)) {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => (*scrutinee, arms),
+        _ => unreachable!("caller guarantees a Match"),
+    };
+    pre.push(mut_binding(&mr, none_expr(span), span));
+    pre.push(mut_binding(&md, int_expr(0, span), span));
+
+    let mut phase1_arms = Vec::with_capacity(arms.len());
+    let mut phase2 = Vec::new();
+    for (i, arm) in arms.into_iter().enumerate() {
+        let arm_span = arm.span;
+        if !arm.body.has_await() {
+            // Non-awaiting arm: assign its value to the result cell, verbatim (no await inside).
+            phase1_arms.push(MatchArm {
+                pattern: arm.pattern,
+                body: ClosureBody::Block(arm_body_to_result(&mr, arm.body, arm_span)),
+                span: arm_span,
+            });
+            continue;
+        }
+        // Awaiting arm: capture its pattern bindings into cells, select it by discriminant.
+        let disc = (i + 1) as i64;
+        let mut names = Vec::new();
+        pattern_bound_names(&arm.pattern, &mut names);
+        let mut select = Vec::new();
+        let mut rebind = Vec::new();
+        for (bname, bspan) in &names {
+            let cell = format!("$mb{}", *ctr);
+            *ctr += 1;
+            // Declare the capture cell at the flattened level so it becomes a hoisted cell the
+            // guarded Phase-2 body can read; the in-arm write is then a bare reassignment of it (a
+            // fresh local written inside the verbatim Phase-1 match would not survive to Phase-2).
+            pre.push(mut_binding(&cell, none_expr(*bspan), *bspan));
+            select.push(bare_assign_expr(&cell, ident(bname, *bspan), *bspan));
+            rebind.push(mut_binding(bname, ident(&cell, *bspan), *bspan));
+        }
+        select.push(bare_assign_expr(&md, int_expr(disc, arm_span), arm_span));
+        phase1_arms.push(MatchArm {
+            pattern: arm.pattern,
+            body: ClosureBody::Block(select),
+            span: arm_span,
+        });
+        // Phase-2 guarded body: rebind the captured pattern names, then the arm body assigning $mr.
+        let mut guarded = rebind;
+        guarded.extend(arm_body_to_result(&mr, arm.body, arm_span));
+        phase2.push(AstStmt::If {
+            cond: eq_int(&md, disc, arm_span),
+            then_body: hoist_await_body_ctr(&guarded, ctr),
+            else_body: None,
+            span: arm_span,
+        });
+    }
+    // Phase-1 match: no awaits remain in any arm, so the flattener emits it verbatim (one state).
+    pre.push(AstStmt::Expr {
+        expr: Expr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms: phase1_arms,
+            span,
+        },
+        span,
+    });
+    pre.extend(phase2);
+}
+
+/// The statements that assign a match arm body's value to the result cell `mr`. An expression arm
+/// yields its value (`$mr = expr`); a statement-block arm (aether F1) runs its statements in the same
+/// frame and yields unit (`stmts…; $mr = unit`).
+fn arm_body_to_result(mr: &str, body: ClosureBody, span: Span) -> Vec<AstStmt> {
+    match body {
+        ClosureBody::Expr(e) => vec![bare_assign_expr(mr, *e, span)],
+        ClosureBody::Block(mut stmts) => {
+            stmts.push(bare_assign_expr(mr, unit_expr(span), span));
+            stmts
+        }
+    }
+}
+
+/// Collect the names a pattern binds, in source order — the values that must survive from an awaiting
+/// arm's selection to its guarded body (captured into `$`-cells). `Binding` binds its name; `Variant`
+/// and `Tuple` recurse into their sub-patterns; the rest (`Wildcard`/literals/`IsType`) bind nothing —
+/// an `IsType` only narrows an existing scrutinee identifier, which stays in scope in the guarded body.
+fn pattern_bound_names(pat: &noeta_ast::Pattern, out: &mut Vec<(String, Span)>) {
+    match pat {
+        noeta_ast::Pattern::Binding { name, span } => out.push((name.clone(), *span)),
+        noeta_ast::Pattern::Variant { bindings, .. } => {
+            for b in bindings {
+                pattern_bound_names(b, out);
+            }
+        }
+        noeta_ast::Pattern::Tuple { elements, .. } => {
+            for el in elements {
+                pattern_bound_names(el, out);
+            }
+        }
+        noeta_ast::Pattern::Wildcard { .. }
+        | noeta_ast::Pattern::Int { .. }
+        | noeta_ast::Pattern::Str { .. }
+        | noeta_ast::Pattern::Bool { .. }
+        | noeta_ast::Pattern::IsType { .. } => {}
+    }
+}
+
+/// `n` — an integer literal expression.
+fn int_expr(value: i64, span: Span) -> Expr {
+    Expr::Int { value, span }
+}
+
+/// `lhs == k` — an equality test of the discriminant cell `name` against an integer literal.
+fn eq_int(name: &str, k: i64, span: Span) -> Expr {
+    Expr::Binary {
+        op: BinaryOp::Eq,
+        lhs: Box::new(ident(name, span)),
+        rhs: Box::new(int_expr(k, span)),
+        span,
+    }
+}
+
+/// `match 0 { _ => <body> }` — a single-wildcard `match` used as a side-effecting expression whose value
+/// is `body`'s (unit for a block body). Reused as `??`'s discriminant-flip fallback and as the `unit`
+/// literal the AST otherwise lacks.
+fn block_arm_expr(body: ClosureBody, span: Span) -> Expr {
+    Expr::Match {
+        scrutinee: Box::new(int_expr(0, span)),
+        arms: vec![MatchArm {
+            pattern: noeta_ast::Pattern::Wildcard { span },
+            body,
+            span,
+        }],
+        span,
+    }
+}
+
+/// `unit` — the unit value, expressed as an empty block arm (`match 0 { _ => {} }`), since the surface
+/// AST has no unit literal node. Used where a desugared block arm's value must flow into the result cell.
+fn unit_expr(span: Span) -> Expr {
+    block_arm_expr(ClosureBody::Block(Vec::new()), span)
 }
 
 /// `mut name = value` — a fresh declaration (used for a block-local-eligible binding, e.g. a `for`
