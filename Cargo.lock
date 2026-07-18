@@ -4204,6 +4204,7 @@ dependencies = [
 name = "noeta-db"
 version = "0.1.0"
 dependencies = [
+ "noeta-alloc-probe",
  "noeta-ast",
  "noeta-bytecode",
  "noeta-check",

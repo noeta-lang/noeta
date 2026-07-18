@@ -75,7 +75,7 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | MCP: prompts, semantic/embedding retrieval, long-lived analysis sessions, TCP transport | mcp deferred |
 | `noeta fmt`: width-wrapping of long binary/method chains and unions; `--diff`; `// fmt: off`; broader `[fmt]` config | fmt deferred (optional by design) |
 | REPL: JIT at the prompt | repl-on-vm follow-on. Trigger: demand |
-| Salsa: deleted-file inputs are never freed (growth stopped, memory not reclaimed); intra-check cancellation granularity (a token poll inside `noeta-check`) | audit F9 residuals |
+| Salsa: a deleted file's **fixed-size input struct** cannot be freed — salsa 0.27 has no public input-delete API (append-only input table; `evict_lru`/revision-GC act only on LRU tracked functions). Mitigated, not fully closed: on deletion `noeta_db::release_source` reclaims all *unbounded* content (input text + downstream `ast`/`Sites`/`Module` memos, overwritten with empty-program equivalents) and `WorkspaceCache` reuses tombstoned slots for the next new file, so the input table is bounded by the *concurrent* file high-water mark. Remaining residual: N distinct files created-then-deleted with no later adds leaves N small empty input slots. Closes if salsa gains real input deletion (upstream) or we switch to an interned-path input keyed by a reusable id. | audit F9 residual a (partial) |
 
 ## Performance
 
