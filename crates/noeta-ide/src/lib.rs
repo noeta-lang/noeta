@@ -1263,10 +1263,101 @@ impl DocumentStore {
             }
             (Some(ty), None) => format!("expression tier `@{tier}` — evaluates to `{ty}`"),
             (None, Some(lang)) => format!("text tier `@{tier}` — `{lang}` body"),
-            // A code tier (or an unknown one): no embedded-language body to describe.
-            (None, None) => return None,
+            // A **code tier**: no embedded-language body, but the directive itself deserves a
+            // hover — the built-ins get tailored prose, a `@tier(...)`-declared one a generic
+            // descriptor (with its knob type when it has one). Unknown names stay silent (they
+            // are an E0036 anyway).
+            (None, None) => match tier.as_str() {
+                "test" => format!(
+                    "dev tier `@{tier}` — compiled and run only under `noeta test`; the annotated \
+                     fn (or each fn in the block) is a test root"
+                ),
+                "bench" => format!(
+                    "dev tier `@{tier}` — compiled and run only under `noeta bench`; the annotated \
+                     fn is a benchmark root"
+                ),
+                "debug" => format!(
+                    "dev tier `@{tier}` — compiled only when the debug tier is active; stripped \
+                     otherwise"
+                ),
+                _ if registry.is_known(&tier) => {
+                    let knobs = registry
+                        .declared(&tier)
+                        .and_then(|d| d.config.as_deref())
+                        .map(|c| format!(" — knobs: `{c}`"))
+                        .unwrap_or_default();
+                    format!("dev tier `@{tier}`{knobs}")
+                }
+                _ => return None,
+            },
         };
         Some((descriptor, index.range(tier_span, encoding)))
+    }
+
+    /// A hover for the built-in **decorator directives** — the closed set that prefixes a *type*
+    /// declaration (`@derive`, `@attribute`, `@role`, `@semantic`, `@packed`; the tier directives
+    /// are [`Self::hover_tier`]'s). Token-level: fires when the cursor is on the `@` or the name it
+    /// introduces, wherever the directive sits. The set and its meanings are core language
+    /// (mirrors the parser's `is_decorator_directive`).
+    pub fn hover_directive(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(String, Range)> {
+        let (_cache, doc, source) = self.doc_cache(uri)?;
+        let db = &self.db;
+        let text = doc.text(db);
+        let index = LineIndex::new(text);
+        let offset = index.offset(position, encoding);
+        let toks = noeta_db::tokens(db, doc);
+        let tokens = &toks.0.tokens;
+        let i = tokens.iter().position(|t| {
+            t.span.source == source && t.span.start <= offset && offset <= t.span.end
+        })?;
+        let (at, name_tok) = match tokens[i].kind {
+            TokenKind::Ident if i > 0 && tokens[i - 1].kind == TokenKind::At => {
+                (&tokens[i - 1], &tokens[i])
+            }
+            TokenKind::At if tokens.get(i + 1).map(|t| t.kind) == Some(TokenKind::Ident) => {
+                (&tokens[i], &tokens[i + 1])
+            }
+            _ => return None,
+        };
+        let descriptor = match &text[name_tok.span.range()] {
+            "derive" => {
+                "codegen directive `@derive(Trait, …)` — generates built-in trait \
+                 implementations (`Equatable`, `Comparable`, `Printable`, `Serialize<…>`, …) for \
+                 this type"
+            }
+            "attribute" => {
+                "declares this struct as a **metadata attribute**: instances attach to \
+                 declarations as `#[Name(args)]` and are read back with `attributes_of::<Name>()`. \
+                 An optional site argument (`@attribute(Function)`) restricts what it may annotate"
+            }
+            "role" => {
+                "architectural-role directive: every declaration this attribute annotates is \
+                 bound to the named role (`@role(Enum.Variant)` — a variant of a `@semantic` \
+                 enum). The compile-time role index powers `roles_of()`, the Architecture view, \
+                 and `noeta trace`"
+            }
+            "semantic" => {
+                "marks this enum as **role-eligible**: its variants can be conferred on \
+                 declarations as architectural roles, via `@role(ThisEnum.Variant)` on an \
+                 attribute"
+            }
+            "packed" => {
+                "storage directive: a **packed value struct** — fields lay out flat (no boxing), \
+                 and a `List` of a packed struct is one contiguous buffer"
+            }
+            _ => return None,
+        };
+        let span = Span {
+            start: at.span.start,
+            end: name_tok.span.end,
+            source,
+        };
+        Some((descriptor.to_string(), index.range(span, encoding)))
     }
 
     /// Resolve the definition of the reference at `position` for go-to-definition, as a `(URI,
@@ -2850,6 +2941,13 @@ fn tier_name_at(
     ) -> Option<(String, Span)> {
         stmts.iter().find_map(|s| in_stmt(s, offset, source))
     }
+    fn in_fn(f: &noeta_ast::FnDecl, offset: u32, source: SourceId) -> Option<(String, Span)> {
+        f.directives
+            .iter()
+            .find(|dir| covers(dir.name_span, offset, source))
+            .map(|dir| (dir.name.clone(), dir.name_span))
+            .or_else(|| in_stmts(&f.body, offset, source))
+    }
     fn in_stmt(stmt: &noeta_ast::Stmt, offset: u32, source: SourceId) -> Option<(String, Span)> {
         use noeta_ast::Stmt;
         match stmt {
@@ -2867,7 +2965,12 @@ fn tier_name_at(
             | Stmt::Yield { value, .. }
             | Stmt::Expr { expr: value, .. } => in_expr(value, offset, source),
             Stmt::Return { value, .. } => value.as_ref().and_then(|v| in_expr(v, offset, source)),
-            Stmt::Fn(f) => in_stmts(&f.body, offset, source),
+            Stmt::Fn(f) => in_fn(f, offset, source),
+            // A type declaration: its methods may carry leading `@<tier>` directives
+            // (directive-sites arc) — the tier name there hovers like any other tier position.
+            Stmt::Struct(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
+            Stmt::Class(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
+            Stmt::Enum(d) => d.methods.iter().find_map(|m| in_fn(m, offset, source)),
             Stmt::If {
                 cond,
                 then_body,
@@ -3132,6 +3235,40 @@ mod tests {
             .find(|d| d.code == noeta_diagnostics::DiagnosticCode::UnresolvedImport)
             .expect("an E0019 for the unresolved import");
         assert_eq!(unresolved.help.as_deref(), Some("did you mean `http`?"));
+    }
+
+    #[test]
+    fn hovering_directives_describes_them() {
+        let mut store = test_store();
+        store.open(
+            "file:///a.noe",
+            "@semantic\nenum L { A; }\n@attribute\n@role(L.A)\nstruct M { x: int }\n@test\nfn t(): void { assert(true, \"ok\") }\necho 1\n"
+                .to_string(),
+        );
+        let enc = Encoding::Utf16;
+        let dir = |line, ch| {
+            store
+                .hover_directive("file:///a.noe", Position::new(line, ch), enc)
+                .map(|(v, _)| v)
+        };
+        assert!(
+            dir(0, 3).is_some_and(|v| v.contains("role-eligible")),
+            "@semantic"
+        );
+        assert!(
+            dir(2, 3).is_some_and(|v| v.contains("metadata attribute")),
+            "@attribute"
+        );
+        assert!(
+            dir(3, 2).is_some_and(|v| v.contains("architectural-role")),
+            "@role"
+        );
+        // `@test` is a tier, not a decorator — the tier hover describes it (code-tier arm).
+        assert!(dir(5, 2).is_none());
+        let (tier, _) = store
+            .hover_tier("file:///a.noe", Position::new(5, 2), enc)
+            .expect("@test hovers as a dev tier");
+        assert!(tier.contains("noeta test"), "got: {tier}");
     }
 
     #[test]

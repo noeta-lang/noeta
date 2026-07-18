@@ -980,12 +980,13 @@ impl LanguageServer for Backend {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
         let position = ide_position(position_params.position);
-        let (found, doc, tier, use_stmt, namespace, signature, type_def) = {
+        let (found, doc, tier, directive, use_stmt, namespace, signature, type_def) = {
             let store = self.store.lock().expect("document store poisoned");
             (
                 store.hover_type(uri.as_str(), position, self.encoding()),
                 store.hover_doc(uri.as_str(), position, self.encoding()),
                 store.hover_tier(uri.as_str(), position, self.encoding()),
+                store.hover_directive(uri.as_str(), position, self.encoding()),
                 store.hover_use(uri.as_str(), position, self.encoding()),
                 store.hover_namespace(uri.as_str(), position, self.encoding()),
                 store.hover_signature(uri.as_str(), position, self.encoding()),
@@ -1005,6 +1006,14 @@ impl LanguageServer for Backend {
         if let Some((descriptor, range)) = tier {
             return Ok(Some(Hover {
                 contents: markdown(descriptor),
+                range: Some(wire_range(range)),
+            }));
+        }
+        // A decorator directive (`@attribute`, `@role`, `@semantic`, `@packed`, `@derive`) —
+        // described in place; the tier directives are the tier hover's.
+        if let Some((value, range)) = directive {
+            return Ok(Some(Hover {
+                contents: markdown(value),
                 range: Some(wire_range(range)),
             }));
         }
