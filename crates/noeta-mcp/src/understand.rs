@@ -231,18 +231,31 @@ fn basename(name: &str) -> String {
     name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
 }
 
-/// The linked workspace program (entry + linked modules), falling back to the entry file's bare
-/// parse when linking fails — so the docs browser works on work-in-progress code, exactly as
-/// [`project_docs`] does.
-fn linked_program(p: &Prepared) -> Program {
-    let linked = noeta_db::linked(&p.db, p.ws);
-    match &linked.0 {
-        Ok(program) => program.clone(),
-        Err(_) => noeta_db::ast(&p.db, analyze::entry_program(p))
-            .0
-            .program
-            .clone(),
-    }
+/// Every workspace member's own program — the project corpus documents the whole workspace
+/// (a sibling the entry never imports included), each module from its own parse. Bare parses,
+/// so the docs browser works on work-in-progress code, exactly as [`project_docs`] does.
+fn member_programs(p: &Prepared) -> Vec<(noeta_span::SourceId, Program)> {
+    p.ws
+        .members(&p.db)
+        .iter()
+        .map(|&sp| {
+            (
+                noeta_span::SourceId(sp.id(&p.db)),
+                noeta_db::ast_in(&p.db, p.ws, sp).0.program.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Borrow `member_programs`' output as the [`model::MemberDoc`] list a [`model::DocCtx`] takes.
+fn member_docs(owned: &[(noeta_span::SourceId, Program)]) -> Vec<model::MemberDoc<'_>> {
+    owned
+        .iter()
+        .map(|(source, program)| model::MemberDoc {
+            source: *source,
+            program,
+        })
+        .collect()
 }
 
 /// One node of the doc tree for the agent: a navigation row plus its 1-based source line.
@@ -314,9 +327,9 @@ pub struct DocPageOutput {
 /// Browse one level of the project's doc tree: the corpus roots when `id` is omitted, else the
 /// children of `id` (root → modules → declarations → members).
 pub fn doc_browse(p: &Prepared, id: Option<&str>) -> DocBrowseOutput {
-    let program = linked_program(p);
+    let owned = member_programs(p);
     let env = PreparedDocEnv { p };
-    let ctx = model::DocCtx::new(&env, &program);
+    let ctx = model::DocCtx::new(&env, member_docs(&owned));
     let nodes = match id {
         None => model::roots(),
         Some(id) => model::children(&ctx, &model::DocId(id.to_string())),
@@ -328,9 +341,9 @@ pub fn doc_browse(p: &Prepared, id: Option<&str>) -> DocBrowseOutput {
 
 /// The rendered page (signature + `@doc` prose + location) for a node `id`.
 pub fn doc_page(p: &Prepared, id: &str) -> DocPageOutput {
-    let program = linked_program(p);
+    let owned = member_programs(p);
     let env = PreparedDocEnv { p };
-    let ctx = model::DocCtx::new(&env, &program);
+    let ctx = model::DocCtx::new(&env, member_docs(&owned));
     match model::page(&ctx, &model::DocId(id.to_string())) {
         Some(page) => DocPageOutput {
             found: true,

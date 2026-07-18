@@ -2205,22 +2205,32 @@ impl DocumentStore {
         f: impl FnOnce(&docs::DocCtx) -> R,
     ) -> R {
         match self.workspace_of(uri) {
-            Some((cache, entry, _)) => {
+            Some((cache, _entry, _)) => {
                 let db = &self.db;
-                let linked = noeta_db::linked_from(db, cache.workspace, entry);
-                let entry_ast = noeta_db::ast(db, entry);
-                let program = match &linked.0 {
-                    Ok(program) => program,
-                    Err(_) => &entry_ast.0.program,
-                };
                 let env = StoreDocEnv {
                     store: self,
                     cache,
                     encoding,
                 };
+                // Every workspace member's own program (workspace-aware parse, so cross-file text
+                // tiers hold): the project corpus documents the WHOLE directory — a sibling the
+                // current file never imports is still a source file worth documenting — never
+                // just one entry's import closure (which hid `hotpath.noe` next to `main.noe`).
+                let member_asts: Vec<_> = cache
+                    .programs
+                    .iter()
+                    .map(|sp| (*sp, noeta_db::ast_in(db, cache.workspace, *sp)))
+                    .collect();
+                let members: Vec<docs::MemberDoc> = member_asts
+                    .iter()
+                    .map(|(sp, ast)| docs::MemberDoc {
+                        source: SourceId(sp.id(db)),
+                        program: &ast.0.program,
+                    })
+                    .collect();
                 // Thread each direct **source** dependency module's own program in — a dependency
-                // module is a separate salsa input, not merged into `program`, so the deps corpus
-                // must walk its AST directly. Filtered to direct manifest keys (never shadow deps).
+                // module is a separate salsa input, so the deps corpus must walk its AST
+                // directly. Filtered to direct manifest keys (never shadow deps).
                 let direct = env.direct_source_dep_keys();
                 let dep_asts: Vec<_> = cache
                     .dep_programs
@@ -2242,7 +2252,7 @@ impl DocumentStore {
                         program: &ast.0.program,
                     });
                 }
-                f(&docs::DocCtx::with_deps(&env, program, deps))
+                f(&docs::DocCtx::with_deps(&env, members, deps))
             }
             None => f(&docs::DocCtx::empty()),
         }
@@ -2289,18 +2299,27 @@ impl DocumentStore {
         let (cache, doc, source) = self.doc_cache(uri)?;
         let def_span = self.definition_name_span(cache, doc, source, position, encoding)?;
         let db = &self.db;
-        let linked = noeta_db::linked_from(db, cache.workspace, doc);
-        let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
-            Ok(program) => program,
-            Err(_) => &entry_ast.0.program,
-        };
         let env = StoreDocEnv {
             store: self,
             cache,
             encoding,
         };
-        docs::id_for_name_span(&env, program, def_span)
+        // The same per-member corpus `with_doc_ctx` serves: the definition's name span carries
+        // its member's SourceId, and the member's own AST preserves those spans, so the lookup
+        // lands on the same node the tree shows.
+        let member_asts: Vec<_> = cache
+            .programs
+            .iter()
+            .map(|sp| (*sp, noeta_db::ast_in(db, cache.workspace, *sp)))
+            .collect();
+        let members: Vec<docs::MemberDoc> = member_asts
+            .iter()
+            .map(|(sp, ast)| docs::MemberDoc {
+                source: SourceId(sp.id(db)),
+                program: &ast.0.program,
+            })
+            .collect();
+        docs::id_for_name_span(&env, &members, def_span)
     }
 
     /// The `@test` fns declared in `uri` (ide-ui U3), in source order — what the editor's test
@@ -3843,6 +3862,55 @@ mod tests {
         assert!(
             diags.is_empty(),
             "imported name should resolve; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn the_project_docs_corpus_spans_unimported_siblings() {
+        // The project corpus documents the WHOLE workspace: a sibling module the entry never
+        // imports (a `hotpath.noe` next to `main.noe`) is still a project source file — it must
+        // appear as its own module row with its own decls and `@doc` prose. (It used to be built
+        // from the entry's linked program, which silently hid every unimported sibling.)
+        let dir = temp_workspace(
+            "docs_unimported_sibling",
+            &[(
+                "hotpath.noe",
+                "namespace App.Hot;\n@doc {\n  The hot path.\n}\npub fn simulate(n: int): int { return n * 2 }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = test_store();
+        // NOTE: main.noe does NOT import App.Hot.
+        store.open(
+            &entry_uri,
+            "fn add(a: int, b: int): int { return a + b }\necho add(1, 2)\n".to_string(),
+        );
+        let modules = store.doc_children(&entry_uri, "project", Encoding::Utf16);
+        let titles: Vec<&str> = modules.iter().map(|m| m.title.as_str()).collect();
+        assert!(
+            titles.iter().any(|t| t.contains("hotpath")),
+            "the unimported sibling must be a project module; got {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("main")),
+            "the entry stays a project module; got {titles:?}"
+        );
+        // The sibling's own subtree resolves: its decl is listed and its page carries the prose.
+        let hot = modules
+            .iter()
+            .find(|m| m.title.contains("hotpath"))
+            .unwrap();
+        let decls = store.doc_children(&entry_uri, hot.id.as_str(), Encoding::Utf16);
+        let simulate = decls
+            .iter()
+            .find(|d| d.title == "simulate")
+            .expect("the sibling's fn is documented");
+        let page = store
+            .doc_page(&entry_uri, simulate.id.as_str(), Encoding::Utf16)
+            .expect("the sibling fn's page renders");
+        assert!(
+            page.markdown.contains("hot path") || page.signature.is_some(),
+            "the page carries substance: {page:?}"
         );
     }
 

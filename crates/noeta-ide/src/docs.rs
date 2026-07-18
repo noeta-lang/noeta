@@ -245,14 +245,26 @@ pub struct DepDoc<'a> {
     pub program: &'a Program,
 }
 
-/// The context a doc request resolves in: the workspace's [`DocEnv`] and linked [`Program`] when a
-/// workspace is open, or `None` for both when nothing is open, plus the direct source dependencies'
-/// own programs. The **project** corpus needs the env+program (it yields nothing without them); the
-/// **dependencies** corpus needs `deps`; the **language guide** corpus is workspace-independent and
-/// is served in either case — so the guide is always browsable, even with no `.noe` file open.
+/// One workspace member module in a [`DocCtx`]: its own (unlinked) program, whose spans carry
+/// the member's [`SourceId`]. The project corpus documents **every member**, each from its own
+/// AST — not the current entry's import closure, which would hide any sibling the entry happens
+/// not to import (a `hotpath.noe` next to `main.noe`). The same per-module shape the
+/// dependencies corpus ([`DepDoc`]) always had.
+#[derive(Debug)]
+pub struct MemberDoc<'a> {
+    pub source: SourceId,
+    pub program: &'a Program,
+}
+
+/// The context a doc request resolves in: the workspace's [`DocEnv`] and its member modules when
+/// a workspace is open (empty otherwise), plus the direct source dependencies' own programs. The
+/// **project** corpus needs the env+members (it yields nothing without them); the
+/// **dependencies** corpus needs `deps`; the **language guide** corpus is workspace-independent
+/// and is served in either case — so the guide is always browsable, even with no `.noe` file
+/// open.
 pub struct DocCtx<'a> {
     pub env: Option<&'a dyn DocEnv>,
-    pub program: Option<&'a Program>,
+    pub members: Vec<MemberDoc<'a>>,
     pub deps: Vec<DepDoc<'a>>,
 }
 
@@ -267,19 +279,23 @@ impl std::fmt::Debug for DocCtx<'_> {
 
 impl<'a> DocCtx<'a> {
     /// A context backed by an open workspace, with no dependency modules.
-    pub fn new(env: &'a dyn DocEnv, program: &'a Program) -> Self {
+    pub fn new(env: &'a dyn DocEnv, members: Vec<MemberDoc<'a>>) -> Self {
         DocCtx {
             env: Some(env),
-            program: Some(program),
+            members,
             deps: Vec::new(),
         }
     }
 
     /// A context backed by an open workspace, including its direct source dependencies' programs.
-    pub fn with_deps(env: &'a dyn DocEnv, program: &'a Program, deps: Vec<DepDoc<'a>>) -> Self {
+    pub fn with_deps(
+        env: &'a dyn DocEnv,
+        members: Vec<MemberDoc<'a>>,
+        deps: Vec<DepDoc<'a>>,
+    ) -> Self {
         DocCtx {
             env: Some(env),
-            program: Some(program),
+            members,
             deps,
         }
     }
@@ -288,14 +304,14 @@ impl<'a> DocCtx<'a> {
     pub fn empty() -> Self {
         DocCtx {
             env: None,
-            program: None,
+            members: Vec::new(),
             deps: Vec::new(),
         }
     }
 
-    /// The `(env, program)` pair when a workspace is open, for the project corpus arms.
-    fn workspace(&self) -> Option<(&'a dyn DocEnv, &'a Program)> {
-        Some((self.env?, self.program?))
+    /// The `(env, members)` pair when a workspace is open, for the project corpus arms.
+    fn project(&self) -> Option<(&'a dyn DocEnv, &[MemberDoc<'a>])> {
+        Some((self.env?, self.members.as_slice()))
     }
 }
 
@@ -359,10 +375,10 @@ pub fn children(ctx: &DocCtx, id: &DocId) -> Vec<DocNode> {
     if id.root() != PROJECT_ROOT {
         return Vec::new();
     }
-    let Some((env, program)) = ctx.workspace() else {
+    let Some((env, members)) = ctx.project() else {
         return Vec::new(); // the project corpus needs an open workspace
     };
-    let tree = ProjectTree::build(env, program);
+    let tree = ProjectTree::build(env, members);
     let seg = id.segments();
     match seg.as_slice() {
         [_root] => tree.modules.iter().map(|m| m.node.clone()).collect(),
@@ -397,8 +413,8 @@ pub fn page(ctx: &DocCtx, id: &DocId) -> Option<DocPage> {
     if id.root() != PROJECT_ROOT {
         return None;
     }
-    let (env, program) = ctx.workspace()?; // the project corpus needs an open workspace
-    ProjectTree::build(env, program).page_of(id)
+    let (env, members) = ctx.project()?; // the project corpus needs an open workspace
+    ProjectTree::build(env, members).page_of(id)
 }
 
 /// Rank every project node by how well it matches `query` (case-insensitive): a title hit scores
@@ -410,8 +426,8 @@ pub fn search(ctx: &DocCtx, query: &str) -> Vec<DocHit> {
     }
     let mut hits: Vec<DocHit> = Vec::new();
     // The project and dependency corpora contribute only when a workspace is open.
-    if let Some((env, program)) = ctx.workspace() {
-        score_tree_into(&ProjectTree::build(env, program), &needle, &mut hits);
+    if let Some((env, members)) = ctx.project() {
+        score_tree_into(&ProjectTree::build(env, members), &needle, &mut hits);
         // Source dependencies: the browse-able `.noe` packages threaded in as `ctx.deps`. Group by
         // root so each dependency contributes one tree (a dep may span several modules).
         let mut roots: Vec<&str> = ctx.deps.iter().map(|d| d.root.as_str()).collect();
@@ -465,8 +481,8 @@ fn score_tree_into(tree: &ProjectTree, needle: &str, hits: &mut Vec<DocHit>) {
 /// The [`DocId`] documenting the declaration whose name span is `name_span`, if it is a project
 /// node — the bridge for "show docs for the symbol under the cursor" (the store resolves the
 /// cursor to a name span; this maps that span to its doc node).
-pub fn id_for_name_span(env: &impl DocEnv, program: &Program, name_span: Span) -> Option<DocId> {
-    let tree = ProjectTree::build(env, program);
+pub fn id_for_name_span(env: &impl DocEnv, members: &[MemberDoc], name_span: Span) -> Option<DocId> {
+    let tree = ProjectTree::build(env, members);
     let mut found = None;
     tree.for_each_with_span(&mut |node: &DocNode, span: Option<Span>| {
         if span == Some(name_span) {
@@ -831,25 +847,33 @@ fn dep_tree(ctx: &DocCtx, root: &str) -> ProjectTree {
         .deps
         .iter()
         .filter(|d| d.root == root)
-        .map(|d| dep_module_entry(ctx.env, &prefix, d))
+        .map(|d| module_entry(ctx.env, &prefix, d.source, d.module_name.clone(), d.program))
         .collect();
     ProjectTree { modules }
 }
 
-/// One dependency module as a [`ModuleEntry`]: outline its own program's declarations, attach its
-/// `@doc` prose and sections, keyed by `deps/<root>/<source-id>`.
-fn dep_module_entry(env: Option<&dyn DocEnv>, prefix: &str, dep: &DepDoc) -> ModuleEntry {
-    let docs = ResolvedDocs::collect(dep.program);
-    let key = dep.source.0.to_string();
+/// One module as a [`ModuleEntry`] — the shared builder behind the project AND dependency
+/// corpora: outline the module's own program's declarations, attach its `@doc` prose and
+/// sections, keyed by `<prefix>/<source-id>` (`project/…` or `deps/<root>/…`). One builder means
+/// a project module and a dependency module render identically.
+fn module_entry(
+    env: Option<&dyn DocEnv>,
+    prefix: &str,
+    source: SourceId,
+    title: String,
+    program: &Program,
+) -> ModuleEntry {
+    let docs = ResolvedDocs::collect(program);
+    let key = source.0.to_string();
     let module_id = format!("{prefix}/{key}");
-    let decls: Vec<DeclEntry> = outline(dep.program)
+    let decls: Vec<DeclEntry> = outline(program)
         .iter()
-        .filter(|sym| sym.name_span.source == dep.source)
+        .filter(|sym| sym.name_span.source == source)
         .map(|sym| decl_entry(env, prefix, &key, sym, &docs))
         .collect();
     let sections: Vec<SectionEntry> = docs
         .sections
-        .get(&dep.source)
+        .get(&source)
         .into_iter()
         .flatten()
         .enumerate()
@@ -869,7 +893,7 @@ fn dep_module_entry(env: Option<&dyn DocEnv>, prefix: &str, dep: &DepDoc) -> Mod
     ModuleEntry {
         node: DocNode {
             id: DocId::new(module_id),
-            title: dep.module_name.clone(),
+            title,
             kind: DocKind::Module,
             detail: None,
             // A module always opens an overview page (prose and/or a contents list).
@@ -877,7 +901,7 @@ fn dep_module_entry(env: Option<&dyn DocEnv>, prefix: &str, dep: &DepDoc) -> Mod
             expandable: !decls.is_empty() || !sections.is_empty(),
             location: None,
         },
-        prose: docs.module.get(&dep.source).cloned().unwrap_or_default(),
+        prose: docs.module.get(&source).cloned().unwrap_or_default(),
         key,
         decls,
         sections,
@@ -887,7 +911,7 @@ fn dep_module_entry(env: Option<&dyn DocEnv>, prefix: &str, dep: &DepDoc) -> Mod
 /// The children of a `deps` id: the root lists the direct dependencies; a source dependency lists
 /// its modules → declarations → members exactly like the project tree.
 fn deps_children(ctx: &DocCtx, id: &DocId) -> Vec<DocNode> {
-    let Some((env, _program)) = ctx.workspace() else {
+    let Some(env) = ctx.env else {
         return Vec::new(); // the dependencies corpus needs an open workspace
     };
     let seg = id.segments();
@@ -917,7 +941,7 @@ fn deps_children(ctx: &DocCtx, id: &DocId) -> Vec<DocNode> {
 /// The page for a `deps` id: a package's overview/placeholder for a two-segment id, or a
 /// module/declaration/member page (via the dependency tree) for a deeper id.
 fn deps_page(ctx: &DocCtx, id: &DocId) -> Option<DocPage> {
-    let (env, _program) = ctx.workspace()?;
+    let env = ctx.env?;
     match id.segments().as_slice() {
         [_root, root] => dep_overview_page(ctx, env, root),
         [_root, root, ..] => dep_tree(ctx, root).page_of(id),
@@ -1071,80 +1095,25 @@ impl ProjectTree {
     }
 
     /// The project tree: modules named by [`DocEnv::source_name`], rooted at `project`.
-    fn build(env: &dyn DocEnv, program: &Program) -> ProjectTree {
-        Self::build_scoped(env, program, PROJECT_ROOT, &|source| {
-            env.source_name(source)
-        })
-    }
-
-    /// The generic builder behind both the project and dependency corpora: `name_of` decides which
-    /// sources belong (and their display names), and `prefix` roots every id (`project`, or
-    /// `deps/<root>`). Keeping one builder means a dependency's `.noe` API renders — signatures,
-    /// `@doc` prose, sections, go-to-source — identically to the project's own.
-    fn build_scoped(
-        env: &dyn DocEnv,
-        program: &Program,
-        prefix: &str,
-        name_of: &dyn Fn(SourceId) -> Option<String>,
-    ) -> ProjectTree {
-        let docs = ResolvedDocs::collect(program);
-        let mut modules: Vec<ModuleEntry> = Vec::new();
-
-        for sym in outline(program) {
-            let source = sym.name_span.source;
-            let Some(module_name) = name_of(source) else {
-                continue; // not a source of this corpus
-            };
-            let key = source.0.to_string();
-            let mod_idx = match modules.iter().position(|m| m.key == key) {
-                Some(i) => i,
-                None => {
-                    modules.push(ModuleEntry {
-                        key: key.clone(),
-                        node: DocNode {
-                            id: DocId::new(format!("{prefix}/{key}")),
-                            title: module_name,
-                            kind: DocKind::Module,
-                            detail: None,
-                            has_page: false,
-                            expandable: false,
-                            location: None,
-                        },
-                        prose: docs.module.get(&source).cloned().unwrap_or_default(),
-                        decls: Vec::new(),
-                        sections: Vec::new(),
-                    });
-                    modules.len() - 1
-                }
-            };
-            let decl = decl_entry(Some(env), prefix, &key, &sym, &docs);
-            modules[mod_idx].decls.push(decl);
-        }
-
-        // Attach each source's section prose and finalize module page/expandable flags.
-        for m in &mut modules {
-            let source = SourceId(m.key.parse().unwrap_or(0));
-            if let Some(sections) = docs.sections.get(&source) {
-                for (i, (span, text)) in sections.iter().enumerate() {
-                    m.sections.push(SectionEntry {
-                        node: DocNode {
-                            id: DocId::new(format!("{}/~{i}", m.node.id.as_str())),
-                            title: section_title(text),
-                            kind: DocKind::Section,
-                            detail: None,
-                            has_page: true,
-                            expandable: false,
-                            location: env.locate(*span),
-                        },
-                        prose: text.clone(),
-                    });
-                }
-            }
-            m.node.expandable = !m.decls.is_empty() || !m.sections.is_empty();
-            // A module always opens an overview page (prose and/or a contents list).
-            m.node.has_page = true;
-        }
-
+    /// The project corpus: one module row per **workspace member**, each documented from its own
+    /// program — the whole project, not any one entry's import closure (a sibling the current
+    /// file never imports is still a source file worth documenting). Shares [`module_entry`]
+    /// with the dependencies corpus, so a project module renders — signatures, `@doc` prose,
+    /// sections, go-to-source — identically to a dependency's.
+    fn build(env: &dyn DocEnv, members: &[MemberDoc]) -> ProjectTree {
+        let modules = members
+            .iter()
+            .filter_map(|m| {
+                let title = env.source_name(m.source)?;
+                Some(module_entry(
+                    Some(env),
+                    PROJECT_ROOT,
+                    m.source,
+                    title,
+                    m.program,
+                ))
+            })
+            .collect();
         ProjectTree { modules }
     }
 }
@@ -1313,6 +1282,14 @@ mod tests {
         parse(&source, &lexed.tokens).program
     }
 
+    /// The one-module member list most tests need: `program` as the workspace's only member.
+    fn one_member(program: &Program) -> Vec<MemberDoc<'_>> {
+        vec![MemberDoc {
+            source: SourceId::FIRST,
+            program,
+        }]
+    }
+
     #[test]
     fn the_roots_are_project_deps_guide_api() {
         let roots = roots();
@@ -1365,7 +1342,7 @@ mod tests {
             source: SourceId::FIRST,
             program: &program,
         }];
-        let ctx = DocCtx::with_deps(&env, &program, deps);
+        let ctx = DocCtx::with_deps(&env, Vec::new(), deps); // dep-only: no project members
 
         // Root: one row per direct dependency.
         let deps = children(&ctx, &DocId::new("deps"));
@@ -1481,7 +1458,7 @@ mod tests {
         let program = program_of("fn f() {}");
         let env = StubEnv;
         // The guide corpus is workspace-independent — env/program are ignored for guide ids.
-        let pages = children(&DocCtx::new(&env, &program), &DocId::new("guide"));
+        let pages = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("guide"));
         assert!(pages.len() > 5, "guide root lists the wiki pages");
         assert!(
             pages
@@ -1489,11 +1466,11 @@ mod tests {
                 .all(|p| p.kind == DocKind::Guide && p.has_page && !p.expandable)
         );
         let page_node = &pages[0];
-        let page = page(&DocCtx::new(&env, &program), &page_node.id).expect("a guide page renders");
+        let page = page(&DocCtx::new(&env, one_member(&program)), &page_node.id).expect("a guide page renders");
         assert_eq!(page.kind, DocKind::Guide);
         assert!(!page.markdown.is_empty());
         // A guide page is a leaf.
-        assert!(children(&DocCtx::new(&env, &program), &page_node.id).is_empty());
+        assert!(children(&DocCtx::new(&env, one_member(&program)), &page_node.id).is_empty());
     }
 
     #[test]
@@ -1520,13 +1497,13 @@ mod tests {
         // `Widget` exists only in the project; a common guide term surfaces guide hits too.
         let program = program_of("struct Widget { size: int }");
         let env = StubEnv;
-        let project_hit = search(&DocCtx::new(&env, &program), "Widget");
+        let project_hit = search(&DocCtx::new(&env, one_member(&program)), "Widget");
         assert!(
             project_hit
                 .iter()
                 .any(|h| h.kind == DocKind::Struct && h.title == "Widget")
         );
-        let guide_hits = search(&DocCtx::new(&env, &program), "standard library");
+        let guide_hits = search(&DocCtx::new(&env, one_member(&program)), "standard library");
         assert!(
             guide_hits.iter().any(|h| h.kind == DocKind::Guide),
             "a guide-only query returns guide hits"
@@ -1541,14 +1518,14 @@ mod tests {
         let env = StubEnv;
 
         // Level 1: one module for the single source.
-        let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
+        let modules = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project"));
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].kind, DocKind::Module);
         assert_eq!(modules[0].title, "t.noe");
         assert!(modules[0].expandable);
 
         // Level 2: the module's declarations.
-        let decls = children(&DocCtx::new(&env, &program), &modules[0].id);
+        let decls = children(&DocCtx::new(&env, one_member(&program)), &modules[0].id);
         let names: Vec<&str> = decls.iter().map(|d| d.title.as_str()).collect();
         assert_eq!(names, vec!["greet", "Point"]);
         let point = decls.iter().find(|d| d.title == "Point").unwrap();
@@ -1556,7 +1533,7 @@ mod tests {
         assert!(point.expandable);
 
         // Level 3: the struct's fields.
-        let fields = children(&DocCtx::new(&env, &program), &point.id);
+        let fields = children(&DocCtx::new(&env, one_member(&program)), &point.id);
         let fnames: Vec<&str> = fields.iter().map(|f| f.title.as_str()).collect();
         assert_eq!(fnames, vec!["x", "y"]);
         assert_eq!(fields[0].kind, DocKind::Field);
@@ -1569,11 +1546,11 @@ mod tests {
             "@doc {\n  Greets a person by name.\n}\nfn greet(name: str): str { return name }",
         );
         let env = StubEnv;
-        let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
-        let decls = children(&DocCtx::new(&env, &program), &modules[0].id);
+        let modules = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project"));
+        let decls = children(&DocCtx::new(&env, one_member(&program)), &modules[0].id);
         let greet = &decls[0];
 
-        let page = page(&DocCtx::new(&env, &program), &greet.id).unwrap();
+        let page = page(&DocCtx::new(&env, one_member(&program)), &greet.id).unwrap();
         assert_eq!(page.title, "greet");
         assert_eq!(page.kind, DocKind::Function);
         assert_eq!(page.markdown, "Greets a person by name.");
@@ -1586,9 +1563,9 @@ mod tests {
         // not a declaration's doc — the adjacency rule in `resolve_texts`.
         let program = program_of("@doc {\n  The geometry module.\n}\nuse std.math\nfn f() {}");
         let env = StubEnv;
-        let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
+        let modules = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project"));
         assert!(modules[0].has_page);
-        let page = page(&DocCtx::new(&env, &program), &modules[0].id).unwrap();
+        let page = page(&DocCtx::new(&env, one_member(&program)), &modules[0].id).unwrap();
         // The module overview leads with its `@doc` prose, then a contents list of its decls.
         assert!(page.markdown.starts_with("The geometry module."));
         assert!(page.markdown.contains("### Contents"));
@@ -1601,7 +1578,7 @@ mod tests {
         let program =
             program_of("@doc {\n  A helper about widgets.\n}\nfn helper() {}\nfn widget() {}");
         let env = StubEnv;
-        let hits = search(&DocCtx::new(&env, &program), "widget");
+        let hits = search(&DocCtx::new(&env, one_member(&program)), "widget");
         // `widget` (name match) outranks `helper` (prose-only match), and both appear.
         assert!(hits.len() >= 2);
         assert_eq!(hits[0].title, "widget");
@@ -1615,7 +1592,7 @@ mod tests {
         let env = StubEnv;
         // The name span of `greet` is where the identifier sits in source.
         let greet_span = outline(&program)[0].name_span;
-        let id = id_for_name_span(&env, &program, greet_span).unwrap();
+        let id = id_for_name_span(&env, &one_member(&program), greet_span).unwrap();
         assert_eq!(id.as_str(), "project/0/greet");
     }
 
@@ -1627,11 +1604,11 @@ mod tests {
             "@doc {\n  Module intro.\n}\nuse std.math\nfn a() {}\n@doc {\n  ## Notes\n  Some free prose.\n}\nuse std.list\nfn b() {}",
         );
         let env = StubEnv;
-        let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
-        let kids = children(&DocCtx::new(&env, &program), &modules[0].id);
+        let modules = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project"));
+        let kids = children(&DocCtx::new(&env, one_member(&program)), &modules[0].id);
         let section = kids.iter().find(|k| k.kind == DocKind::Section).unwrap();
         assert_eq!(section.title, "Notes");
-        let page = page(&DocCtx::new(&env, &program), &section.id).unwrap();
+        let page = page(&DocCtx::new(&env, one_member(&program)), &section.id).unwrap();
         assert!(page.markdown.contains("Some free prose."));
     }
 
@@ -1639,8 +1616,8 @@ mod tests {
     fn unknown_id_yields_no_children_and_no_page() {
         let program = program_of("fn f() {}");
         let env = StubEnv;
-        assert!(children(&DocCtx::new(&env, &program), &DocId::new("project/99/nope")).is_empty());
-        assert!(page(&DocCtx::new(&env, &program), &DocId::new("guide/whatever")).is_none());
-        assert!(page(&DocCtx::new(&env, &program), &DocId::new("project/0/nope")).is_none());
+        assert!(children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project/99/nope")).is_empty());
+        assert!(page(&DocCtx::new(&env, one_member(&program)), &DocId::new("guide/whatever")).is_none());
+        assert!(page(&DocCtx::new(&env, one_member(&program)), &DocId::new("project/0/nope")).is_none());
     }
 }
