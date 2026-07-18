@@ -163,10 +163,15 @@ impl Checker {
                     // registered; prelude-redesign EX.2 needs the classification for all kinds).
                     let tps: HashSet<String> =
                         r.type_params.iter().map(|p| p.name.clone()).collect();
-                    let struct_generics: Vec<(String, Vec<String>)> = r
+                    let struct_generics: Vec<(String, Vec<BoundReq>)> = r
                         .type_params
                         .iter()
-                        .map(|p| (p.name.clone(), p.bounds.clone()))
+                        .map(|p| {
+                            (
+                                p.name.clone(),
+                                bound_reqs(&p.bounds, &self.imports.extern_types),
+                            )
+                        })
                         .collect();
                     let methods = r
                         .methods
@@ -286,10 +291,15 @@ impl Checker {
                     // A generic class's type parameters + bounds, shared by every method's
                     // `GenericInfo` so a call instantiates the class's `T` from the arguments and
                     // enforces its bounds (S4.3b) — the class-level mirror of a generic function.
-                    let class_generics: Vec<(String, Vec<String>)> = c
+                    let class_generics: Vec<(String, Vec<BoundReq>)> = c
                         .type_params
                         .iter()
-                        .map(|p| (p.name.clone(), p.bounds.clone()))
+                        .map(|p| {
+                            (
+                                p.name.clone(),
+                                bound_reqs(&p.bounds, &self.imports.extern_types),
+                            )
+                        })
                         .collect();
                     self.symbols.generic_types.insert(
                         c.name.clone(),
@@ -389,10 +399,15 @@ impl Checker {
                     // to a concrete type. The enum's generic parameters are erased to `dyn`.
                     let tps: HashSet<String> =
                         e.type_params.iter().map(|p| p.name.clone()).collect();
-                    let enum_generics: Vec<(String, Vec<String>)> = e
+                    let enum_generics: Vec<(String, Vec<BoundReq>)> = e
                         .type_params
                         .iter()
-                        .map(|p| (p.name.clone(), p.bounds.clone()))
+                        .map(|p| {
+                            (
+                                p.name.clone(),
+                                bound_reqs(&p.bounds, &self.imports.extern_types),
+                            )
+                        })
                         .collect();
                     for m in &e.methods {
                         self.symbols.method_instance.insert(
@@ -464,7 +479,12 @@ impl Checker {
                         params: f
                             .type_params
                             .iter()
-                            .map(|p| (p.name.clone(), p.bounds.clone()))
+                            .map(|p| {
+                                (
+                                    p.name.clone(),
+                                    bound_reqs(&p.bounds, &self.imports.extern_types),
+                                )
+                            })
                             .collect(),
                         raw_params,
                         raw_ret,
@@ -520,11 +540,17 @@ impl Checker {
             let (type_name, impls, derives): (&str, &[noeta_ast::ImplBlock], &[DeriveSpec]) =
                 match stmt {
                     Stmt::Impl(decl) if self.symbols.user_traits.contains_key(&decl.trait_name) => {
+                        let args: Vec<Type> = decl
+                            .trait_args
+                            .iter()
+                            .map(|t| from_ref_q(t, &self.imports.extern_types))
+                            .collect();
                         self.symbols
                             .user_trait_impls
                             .entry(decl.target.clone())
                             .or_default()
-                            .insert(decl.trait_name.clone());
+                            .entry(decl.trait_name.clone())
+                            .or_insert(args);
                         continue;
                     }
                     Stmt::Struct(d) => (&d.name, &d.impls, &d.derives),
@@ -532,17 +558,22 @@ impl Checker {
                     Stmt::Enum(d) => (&d.name, &d.impls, &d.derives),
                     _ => continue,
                 };
-            for trait_name in impls
+            for (trait_name, trait_args) in impls
                 .iter()
-                .map(|b| &b.trait_name)
-                .chain(derives.iter().map(|d| &d.name))
+                .map(|b| (&b.trait_name, b.trait_args.as_slice()))
+                .chain(derives.iter().map(|d| (&d.name, d.args.as_slice())))
             {
                 if self.symbols.user_traits.contains_key(trait_name) {
+                    let args: Vec<Type> = trait_args
+                        .iter()
+                        .map(|t| from_ref_q(t, &self.imports.extern_types))
+                        .collect();
                     self.symbols
                         .user_trait_impls
                         .entry(type_name.to_string())
                         .or_default()
-                        .insert(trait_name.clone());
+                        .entry(trait_name.clone())
+                        .or_insert(args);
                 }
             }
         }
@@ -646,7 +677,7 @@ impl Checker {
         // defaults are excluded (per-implementor substitution — deferred with generic-trait
         // derivation).
         for (type_name, trait_names) in self.symbols.user_trait_impls.clone() {
-            for trait_name in trait_names {
+            for trait_name in trait_names.into_keys() {
                 let Some(decl) = self.symbols.user_traits.get(&trait_name).cloned() else {
                     continue;
                 };

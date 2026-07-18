@@ -7,8 +7,8 @@
 
 use crate::{
     AttrArg, AttrValue, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern,
-    ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TypeParam,
-    TypeRef,
+    ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitBound, TraitDecl,
+    TypeParam, TypeRef,
 };
 use noeta_span::Span;
 
@@ -468,11 +468,22 @@ fn type_params_str(params: &[TypeParam]) -> String {
                 if p.bounds.is_empty() {
                     p.name.clone()
                 } else {
-                    format!("{}: {}", p.name, p.bounds.join(" + "))
+                    let bounds: Vec<String> = p.bounds.iter().map(trait_bound_str).collect();
+                    format!("{}: {}", p.name, bounds.join(" + "))
                 }
             })
             .collect();
         format!("<{}>", parts.join(", "))
+    }
+}
+
+/// Render one trait bound: the bare name, or `Name<args>` for an instantiated bound.
+fn trait_bound_str(b: &TraitBound) -> String {
+    if b.args.is_empty() {
+        b.name.clone()
+    } else {
+        let args: Vec<String> = b.args.iter().map(type_ref_str).collect();
+        format!("{}<{}>", b.name, args.join(", "))
     }
 }
 

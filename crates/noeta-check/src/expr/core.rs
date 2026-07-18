@@ -292,7 +292,7 @@ impl Checker {
         self.symbols
             .user_trait_impls
             .get(n)
-            .is_some_and(|s| s.contains(tr))
+            .is_some_and(|s| s.contains_key(tr))
     }
 
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware

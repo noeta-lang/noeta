@@ -758,10 +758,13 @@ struct Symbols {
     /// `<T: UserTrait>` generic bounds (UT3), and `dyn UserTrait` trait-object dispatch (UT4). A name
     /// here is a legal trait in an `impl`/bound alongside the closed [`BuiltinTrait`] set.
     user_traits: HashMap<String, noeta_ast::TraitDecl>,
-    /// Which user traits each type implements: type name → set of user-trait names it `impl`s
-    /// (in-body or standalone). The user-trait analogue of [`Self::trait_impls`]; the basis for
-    /// UT3 generic-bound satisfaction and UT4 `dyn Trait` coercion. Populated in pass 1.
-    user_trait_impls: HashMap<String, HashSet<String>>,
+    /// Which user traits each type implements: type name → user-trait name → the instantiation's
+    /// type arguments (`impl Keyed<int> for Door` → `{"Door": {"Keyed": [int]}}`; empty args for
+    /// a non-generic trait). From in-body/standalone `impl`s and `@derive`s. The user-trait
+    /// analogue of [`Self::trait_impls`]; the basis for UT3 generic-bound satisfaction (including
+    /// an instantiated bound `T: Keyed<int>`) and UT4 `dyn Trait` coercion. Populated in pass 1;
+    /// coherence (one impl per trait per type) keeps a single entry per pair honest.
+    user_trait_impls: HashMap<String, HashMap<String, Vec<Type>>>,
     /// The subset of [`Checker::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
@@ -1778,14 +1781,18 @@ impl Checker {
         // Bring the function's own generic parameters into scope for its body (a free function may
         // be generic; a method is generic over its class's parameters, already in scope, and
         // carries none of its own). Union with the current set so a method does not lose the
-        // class's parameters; restored after the body. Bounds are validated here too.
-        self.check_type_param_bounds(&decl.type_params);
+        // class's parameters; restored after the body. Bounds are validated AFTER the parameters
+        // enter scope — a bound argument may name a sibling parameter (`<K, T: Keyed<K>>`).
         let saved_type_params = self.coloring.type_params.clone();
-        self.coloring.type_params.extend(
-            decl.type_params
-                .iter()
-                .map(|p| (p.name.clone(), p.bounds.clone())),
-        );
+        self.coloring
+            .type_params
+            .extend(decl.type_params.iter().map(|p| {
+                (
+                    p.name.clone(),
+                    p.bounds.iter().map(|b| b.name.clone()).collect(),
+                )
+            }));
+        self.check_type_param_bounds(&decl.type_params);
         for p in &decl.params {
             self.check_type_opt(&p.ty);
         }

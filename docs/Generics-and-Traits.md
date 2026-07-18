@@ -39,6 +39,31 @@ Bounds are enforced statically at both ends:
 - **Call-site check** — instantiating with a type that does not satisfy the bound is E0025. The first argument pins `T`; later arguments are checked against that substitution (E0007 on mismatch).
 - An unknown bound name is E0014.
 
+**Instantiated bounds.** A bound on a *generic user trait* may demand a specific instantiation: `<T: Keyed<int>>` is satisfied only by a type with an `impl Keyed<int>` (an `impl Keyed<string>` fails the bound, E0025 naming `Keyed<int>`). A bare `<T: Keyed>` accepts any instantiation. A bound argument may name a sibling parameter — `<K, T: Keyed<K>>` ties the two together, with `K` pinned by the call's arguments:
+
+```noeta check
+trait Keyed<K> {
+    fn key(): K
+    fn same(other: K): bool {
+        return self.key() == other
+    }
+}
+struct Door {
+    code: int
+    impl Keyed<int> {
+        fn key(): int {
+            return self.code
+        }
+    }
+}
+fn matches<K, T: Keyed<K>>(item: T, k: K): bool {
+    return item.same(k)
+}
+echo matches(Door { code: 7 }, 7)     // true
+```
+
+An instantiated bound must match the trait's arity (`T: Keyed<int, string>` on a one-parameter trait is E0014), and built-in traits take no bound arguments.
+
 ## The built-in traits
 
 Traits are a **fixed built-in set** — naming an unknown one is E0014. Operators dispatch to a trait's method:

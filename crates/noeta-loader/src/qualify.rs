@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl, Param,
-    Pattern, Stmt, StrPart, TypeRef, VariantDecl,
+    Pattern, Stmt, StrPart, TypeParam, TypeRef, VariantDecl,
 };
 
 /// A module's qualification map: a **local** type name (an in-module declaration's short name, or an
@@ -158,6 +158,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         }
         Stmt::Class(decl) => {
             visit(&mut decl.name);
+            q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
             }
@@ -176,6 +177,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         }
         Stmt::Struct(decl) => {
             visit(&mut decl.name);
+            q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
             }
@@ -191,6 +193,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         }
         Stmt::Enum(decl) => {
             visit(&mut decl.name);
+            q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
             }
@@ -210,6 +213,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             // A trait's name qualifies like a type's (cross-module `dyn Trait` / `impl` resolution);
             // its method signatures name types in this module, so qualify them in lockstep.
             visit(&mut decl.name);
+            q_type_params(&mut decl.type_params, visit);
             for m in &mut decl.methods {
                 q_fn(&mut m.sig, visit);
             }
@@ -230,11 +234,26 @@ fn q_fn(decl: &mut FnDecl, visit: &mut NameVisitor) {
     for a in &mut decl.attrs {
         q_attr(a, visit);
     }
+    q_type_params(&mut decl.type_params, visit);
     for p in &mut decl.params {
         q_param(p, visit);
     }
     q_opt_typeref(&mut decl.ret, visit);
     q_body(&mut decl.body, visit);
+}
+
+/// Qualify each type parameter's trait bounds: a bound NAME is a trait reference (a cross-module
+/// user trait qualifies exactly like a type name), and an instantiated bound's type arguments
+/// (`T: Keyed<geo.Point>`) are ordinary type references.
+fn q_type_params(params: &mut [TypeParam], visit: &mut NameVisitor) {
+    for p in params {
+        for b in &mut p.bounds {
+            visit(&mut b.name);
+            for a in &mut b.args {
+                q_typeref(a, visit);
+            }
+        }
+    }
 }
 
 fn q_param(p: &mut Param, visit: &mut NameVisitor) {

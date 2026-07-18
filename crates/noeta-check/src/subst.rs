@@ -537,6 +537,22 @@ pub(crate) fn from_ref_q(ty: &TypeRef, xt: &HashMap<String, String>) -> Type {
     qualify_externs(Type::from_ref(ty), xt)
 }
 
+/// Convert a declaration's surface trait bounds into their checker-side [`BoundReq`]s: names
+/// carried through, each bound argument converted with the same extern qualification every other
+/// annotation gets.
+pub(crate) fn bound_reqs(
+    bounds: &[noeta_ast::TraitBound],
+    xt: &HashMap<String, String>,
+) -> Vec<crate::env::BoundReq> {
+    bounds
+        .iter()
+        .map(|b| crate::env::BoundReq {
+            name: b.name.clone(),
+            args: b.args.iter().map(|t| from_ref_q(t, xt)).collect(),
+        })
+        .collect()
+}
+
 /// Recursively rewrite imported extern-type names inside a [`Type`] to their qualified identity via
 /// the import map `xt`. Idempotent: an already-qualified identity (`std.id.Uuid`) is not a local
 /// import key, so it is left unchanged.

@@ -39,9 +39,19 @@ pub(crate) struct FnSig {
 #[derive(Clone)]
 pub(crate) struct GenericInfo {
     /// `(type-parameter name, trait bounds)` in declaration order.
-    pub(crate) params: Vec<(String, Vec<String>)>,
+    pub(crate) params: Vec<(String, Vec<BoundReq>)>,
     pub(crate) raw_params: Vec<Type>,
     pub(crate) raw_ret: Type,
+}
+
+/// One demanded trait bound, checker-side: the trait name plus the demanded instantiation's type
+/// arguments (`T: Keyed<int>` → `args = [int]`; empty for a bare bound, which a generic trait
+/// satisfies at ANY instantiation). An argument may mention a sibling type parameter
+/// (`<K, T: Keyed<K>>`) — the call-site enforcement substitutes before matching.
+#[derive(Clone)]
+pub(crate) struct BoundReq {
+    pub(crate) name: String,
+    pub(crate) args: Vec<Type>,
 }
 
 /// One binding in a scope frame: its inferred type and whether it was declared `mut`. The `mutable`

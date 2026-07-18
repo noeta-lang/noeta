@@ -448,14 +448,25 @@ pub fn key_capable_packed(
 }
 
 /// A generic type parameter on a declaration: a name and its trait **bounds** (`<T: Comparable>`,
-/// `<T: Comparable + Display>`). Bounds are built-in trait names the checker validates and (S4.2)
-/// enforces where the generic is instantiated; an empty `bounds` is an unbounded `<T>`. Erased at
-/// runtime exactly like the parameter it constrains.
+/// `<T: Comparable + Display>`, `<T: Keyed<int>>`). Bounds name built-in or user traits — the
+/// checker validates them and (S4.2) enforces them where the generic is instantiated; an empty
+/// `bounds` is an unbounded `<T>`. Erased at runtime exactly like the parameter it constrains.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
     pub name: String,
     /// Trait bounds, in source order; empty for an unbounded parameter.
-    pub bounds: Vec<String>,
+    pub bounds: Vec<TraitBound>,
+    pub span: Span,
+}
+
+/// One trait bound on a type parameter. A GENERIC user trait may be demanded at a specific
+/// instantiation (`T: Keyed<int>` — only an `impl Keyed<int>` satisfies it); a bare bound on a
+/// generic trait accepts any instantiation. Built-in traits take no bound arguments.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitBound {
+    pub name: String,
+    /// The demanded instantiation's type arguments; empty for a bare bound.
+    pub args: Vec<TypeRef>,
     pub span: Span,
 }
 

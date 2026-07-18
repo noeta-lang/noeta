@@ -886,13 +886,30 @@ impl Printer<'_> {
         if tps.is_empty() {
             return Ok(Doc::nil());
         }
-        let docs = tps.iter().map(|tp| {
-            if tp.bounds.is_empty() {
-                Doc::text(tp.name.clone())
-            } else {
-                Doc::text(format!("{}: {}", tp.name, tp.bounds.join(" + ")))
-            }
-        });
+        let docs = tps
+            .iter()
+            .map(|tp| {
+                if tp.bounds.is_empty() {
+                    return Ok(Doc::text(tp.name.clone()));
+                }
+                let bounds = tp
+                    .bounds
+                    .iter()
+                    .map(|b| {
+                        // An instantiated bound (`T: Keyed<int>`) renders its arguments through
+                        // the ordinary type printer; a bare bound is just the name.
+                        Ok(Doc::concat([
+                            Doc::text(b.name.clone()),
+                            self.trait_args_doc(&b.args)?,
+                        ]))
+                    })
+                    .collect::<Result<Vec<_>, FmtError>>()?;
+                Ok(Doc::concat([
+                    Doc::text(format!("{}: ", tp.name)),
+                    Doc::join(bounds, Doc::text(" + ")),
+                ]))
+            })
+            .collect::<Result<Vec<_>, FmtError>>()?;
         Ok(Doc::concat([
             Doc::text("<"),
             Doc::join(docs, Doc::text(", ")),

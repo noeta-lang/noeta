@@ -34,7 +34,7 @@ use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
     FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, MethodDirective, ObjectLit,
     PackedDirective, PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl,
-    TraitDecl, TraitMethod, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    TraitBound, TraitDecl, TraitMethod, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -2477,16 +2477,33 @@ where
         });
 
         // Optional generic type parameters on a declaration: `<T>`, `<A, B>`, `<T: Comparable>`,
-        // `<T: Comparable + Display>`. Bounds are built-in trait names (validated + enforced by the
-        // checker); erased at runtime. In declaration position a `<` right after the type name is
-        // unambiguous — no comparison expression can appear there.
+        // `<T: Comparable + Display>`, `<T: Keyed<int>>`. Bounds name built-in or user traits,
+        // optionally at an instantiation (validated + enforced by the checker); erased at runtime.
+        // In declaration position a `<` right after the type name is unambiguous — no comparison
+        // expression can appear there. (`>` always lexes singly, so a nested close like
+        // `<T: Keyed<int>>` ends both delimiters exactly as `List<List<int>>` does.)
+        let trait_bound = id
+            .clone()
+            .then(
+                type_parser(ctx)
+                    .separated_by(just(T::Comma))
+                    .at_least(1)
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::Lt), just(T::Gt))
+                    .or_not()
+                    .map(Option::unwrap_or_default),
+            )
+            .map_with(move |((name, _name_span), args), e| TraitBound {
+                name,
+                args,
+                span: ctx.to_span(e.span()),
+            });
         let type_param = id
             .clone()
             .then(
                 just(T::Colon)
                     .ignore_then(
-                        id.clone()
-                            .map(|(name, _span)| name)
+                        trait_bound
                             .separated_by(just(T::Plus))
                             .at_least(1)
                             .collect::<Vec<_>>(),

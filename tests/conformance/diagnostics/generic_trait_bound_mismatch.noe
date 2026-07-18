@@ -1,0 +1,34 @@
+// Instantiated-bound enforcement and well-formedness: an impl at the WRONG instantiation fails
+// the bound (E0025, naming the demanded instantiation) — directly (`T: Keyed<int>` vs `impl
+// Keyed<string>`) and through a sibling parameter (`<K, T: Keyed<K>>` with `K = int`); a bound
+// must match the trait's generic arity, and a built-in bound takes no arguments (E0014).
+// expect: error E0014 at 27:17
+// expect: error E0014 at 30:19
+// expect: error E0025 at 33:6
+// expect: error E0025 at 34:6
+// expect: exit 1
+trait Keyed<K> {
+    fn key(): K
+}
+struct Tag {
+    name: string
+    impl Keyed<string> {
+        fn key(): string {
+            return self.name
+        }
+    }
+}
+fn open_with<T: Keyed<int>>(item: T): bool {
+    return true
+}
+fn matches<K, T: Keyed<K>>(item: T, k: K): bool {
+    return true
+}
+fn bad_arity<T: Keyed<int, string>>(x: T): bool {
+    return true
+}
+fn bad_builtin<T: Comparable<int>>(x: T): bool {
+    return true
+}
+echo open_with(Tag { name: "x" })
+echo matches(Tag { name: "x" }, 3)

@@ -236,39 +236,86 @@ impl Checker {
         &mut self,
         params: &[TypeParam],
     ) -> HashMap<String, Vec<String>> {
-        self.check_type_param_bounds(params);
-        std::mem::replace(
+        let saved = std::mem::replace(
             &mut self.coloring.type_params,
             params
                 .iter()
-                .map(|p| (p.name.clone(), p.bounds.clone()))
+                .map(|p| {
+                    // Body-side licensing (S4.3c) is by trait NAME — an instantiated bound
+                    // (`T: Keyed<int>`) licenses the same operations; its arguments are enforced
+                    // at the call site (S4.2), not here.
+                    (
+                        p.name.clone(),
+                        p.bounds.iter().map(|b| b.name.clone()).collect(),
+                    )
+                })
                 .collect(),
-        )
+        );
+        // Validated AFTER the parameters enter scope: a bound argument may name a sibling
+        // parameter (`<K, T: Keyed<K>>`), which is a legal annotation referent here.
+        self.check_type_param_bounds(params);
+        saved
     }
 
-    /// Validate each type parameter's trait bounds: a bound must name a built-in trait, else
-    /// `E0014 UnknownTrait` (reusing the `impl`/`@derive` name-validation path). The bound names
-    /// are what S4.2 enforces at instantiation; here we only check they refer to real traits.
+    /// Validate each type parameter's trait bounds: a bound must name a built-in trait or a user
+    /// trait, else `E0014 UnknownTrait` (reusing the `impl`/`@derive` name-validation path); an
+    /// instantiated bound (`T: Keyed<int>`) must match the trait's generic arity — built-ins take
+    /// no bound arguments, a generic user trait takes exactly its parameter count (a BARE bound on
+    /// a generic trait stays legal and accepts any instantiation). What the bounds demand is what
+    /// S4.2 enforces at instantiation; here we only check they are well-formed.
     pub(crate) fn check_type_param_bounds(&mut self, params: &[TypeParam]) {
         for p in params {
             for bound in &p.bounds {
                 // A bound may name a built-in trait or a user-defined one (L1, UT3).
-                if BuiltinTrait::from_name(bound).is_none()
-                    && !self.symbols.user_traits.contains_key(bound)
-                {
-                    self.error(
-                        DiagnosticCode::UnknownTrait,
-                        p.span,
-                        format!(
-                            "unknown trait `{bound}` in bound on type parameter `{}`",
-                            p.name
-                        ),
-                    )
-                    .help(
-                        "a bound must name a built-in trait (e.g. `Comparable`, `Equatable`, \
-                             `Display`) or a `trait` you declare",
-                    );
+                if let Some(decl) = self.symbols.user_traits.get(&bound.name) {
+                    let arity = decl.type_params.len();
+                    if !bound.args.is_empty() && bound.args.len() != arity {
+                        let msg = if arity == 0 {
+                            format!(
+                                "`{}` is not generic; the bound takes no type arguments",
+                                bound.name
+                            )
+                        } else {
+                            format!(
+                                "generic trait `{}` takes {arity} type argument(s), the bound names {}",
+                                bound.name,
+                                bound.args.len()
+                            )
+                        };
+                        self.error(DiagnosticCode::UnknownTrait, bound.span, msg)
+                            .help(
+                                "write the bound bare (`T: Trait`, any instantiation) or at the \
+                             trait's full arity (`T: Trait<...>`)",
+                            );
+                    }
+                    for arg in &bound.args {
+                        self.check_type_ref(arg);
+                    }
+                    continue;
                 }
+                if BuiltinTrait::from_name(&bound.name).is_some() {
+                    if !bound.args.is_empty() {
+                        self.error(
+                            DiagnosticCode::UnknownTrait,
+                            bound.span,
+                            format!("built-in trait `{}` takes no bound arguments", bound.name),
+                        )
+                        .help("only a generic user trait is bounded at an instantiation");
+                    }
+                    continue;
+                }
+                self.error(
+                    DiagnosticCode::UnknownTrait,
+                    p.span,
+                    format!(
+                        "unknown trait `{}` in bound on type parameter `{}`",
+                        bound.name, p.name
+                    ),
+                )
+                .help(
+                    "a bound must name a built-in trait (e.g. `Comparable`, `Equatable`, \
+                         `Display`) or a `trait` you declare",
+                );
             }
         }
     }

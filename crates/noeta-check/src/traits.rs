@@ -766,7 +766,7 @@ impl Checker {
                     .symbols
                     .user_trait_impls
                     .get(name)
-                    .is_some_and(|traits| traits.contains(&decl.name)),
+                    .is_some_and(|traits| traits.contains_key(&decl.name)),
                 Some(noeta_ast::TypeRef::DynTrait { trait_name, .. }) => trait_name == &decl.name,
                 _ => false,
             };
@@ -1079,26 +1079,36 @@ impl Checker {
             };
             for bound in bounds {
                 // A user-defined trait bound (L1, UT3): satisfied iff `concrete` has a recorded
-                // `impl` of it.
-                if self.symbols.user_traits.contains_key(bound) {
-                    if !self.satisfies_user_trait(concrete, bound) {
+                // `impl` of it — and, for an INSTANTIATED bound (`T: Keyed<int>`), an impl at that
+                // instantiation. A bound argument may mention a sibling parameter (`<K, T:
+                // Keyed<K>>`), so the call's own substitution applies first; a parameter the
+                // arguments leave unbound erases to `dyn` and defers.
+                if self.symbols.user_traits.contains_key(&bound.name) {
+                    let want: Vec<Type> = bound
+                        .args
+                        .iter()
+                        .map(|a| erase_type_params(apply_subst(a, &subst), &tps))
+                        .collect();
+                    if !self.satisfies_user_trait(concrete, &bound.name, &want) {
+                        let shown = bound_display(&bound.name, &want);
                         self.error(
                             DiagnosticCode::TraitBoundNotSatisfied,
                             span,
                             format!(
-                                "type `{concrete}` does not satisfy the bound `{bound}` on type \
+                                "type `{concrete}` does not satisfy the bound `{shown}` on type \
                                  parameter `{pname}` of `{name}`"
                             ),
                         )
-                        .help(format!("`{concrete}` must `impl {bound}` to be used here"));
+                        .help(format!("`{concrete}` must `impl {shown}` to be used here"));
                     }
                     continue;
                 }
                 // Bounds on a collected signature are validated trait names (E0014 otherwise); a
                 // non-built-in, non-user name is unreachable here, so skip rather than falsely report.
-                let Some(t) = BuiltinTrait::from_name(bound) else {
+                let Some(t) = BuiltinTrait::from_name(&bound.name) else {
                     continue;
                 };
+                let bound = &bound.name;
                 if !self.satisfies(concrete, t) {
                     let help = if t.intrinsic() {
                         format!(
@@ -1200,28 +1210,49 @@ impl Checker {
         Some(apply_subst(&ty, &subst))
     }
 
-    /// Whether `ty` implements the user trait named `bound` (L1, UT3). Only a named user type can —
-    /// via a recorded in-body or standalone `impl` (`user_trait_impls`). A `dyn`/inference-hole
-    /// defers to runtime (never a false negative); a built-in/primitive type never implements a
-    /// user trait.
-    fn satisfies_user_trait(&self, ty: &Type, bound: &str) -> bool {
-        self.satisfies_user_trait_inner(ty, bound, &mut Vec::new())
+    /// Whether `ty` implements the user trait named `bound` (L1, UT3) — and, when `want` is
+    /// non-empty, at that demanded instantiation (`T: Keyed<int>` is satisfied only by an `impl
+    /// Keyed<int>`; an empty `want` is a bare bound, any instantiation). Only a named user type
+    /// can — via a recorded in-body or standalone `impl` (`user_trait_impls`). A
+    /// `dyn`/inference-hole defers to runtime (never a false negative); a built-in/primitive type
+    /// never implements a user trait.
+    fn satisfies_user_trait(&self, ty: &Type, bound: &str, want: &[Type]) -> bool {
+        self.satisfies_user_trait_inner(ty, bound, want, &mut Vec::new())
     }
 
     /// The recursive worker: `visited` guards a recursive nominal reached through a `via:` chain
     /// (covered by the outer frame — the same convention as [`Self::type_orderable`]).
-    fn satisfies_user_trait_inner(&self, ty: &Type, bound: &str, visited: &mut Vec<String>) -> bool {
+    fn satisfies_user_trait_inner(
+        &self,
+        ty: &Type,
+        bound: &str,
+        want: &[Type],
+        visited: &mut Vec<String>,
+    ) -> bool {
         if ty.defers_to_runtime() {
             return true;
         }
         match ty {
+            // A trait object carries the trait, not an instantiation — permissive on `want`
+            // (dispatch is by name at runtime; there is nothing static to hold the args against).
             Type::DynTrait(t) => t == bound,
             Type::Named(n, args) => {
-                if !self
+                let Some(impl_args) = self
                     .symbols
                     .user_trait_impls
                     .get(n)
-                    .is_some_and(|s| s.contains(bound))
+                    .and_then(|impls| impls.get(bound))
+                else {
+                    return false;
+                };
+                // An instantiated bound demands an impl at that instantiation (argument-wise,
+                // with `dyn`/holes deferring on either side).
+                if !want.is_empty()
+                    && (impl_args.len() != want.len()
+                        || impl_args
+                            .iter()
+                            .zip(want)
+                            .any(|(a, b)| !bound_arg_matches(a, b)))
                 {
                     return false;
                 }
@@ -1235,7 +1266,7 @@ impl Checker {
                     && let Some(ft) = self.field_type_at(n, args, field.as_str())
                 {
                     visited.push(n.clone());
-                    let ok = self.satisfies_user_trait_inner(&ft, bound, visited);
+                    let ok = self.satisfies_user_trait_inner(&ft, bound, want, visited);
                     visited.pop();
                     return ok;
                 }
@@ -1278,5 +1309,21 @@ impl Checker {
             )
             .help(help);
         }
+    }
+}
+
+/// Whether a recorded impl argument satisfies a demanded bound argument: exact type equality,
+/// with a `dyn`/inference-hole on either side deferring to the runtime (never a false negative).
+fn bound_arg_matches(have: &Type, want: &Type) -> bool {
+    have.defers_to_runtime() || want.defers_to_runtime() || have == want
+}
+
+/// Render a bound for a diagnostic: the bare name, or `Name<args>` for an instantiated bound.
+fn bound_display(name: &str, args: &[Type]) -> String {
+    if args.is_empty() {
+        name.to_string()
+    } else {
+        let args: Vec<String> = args.iter().map(Type::to_string).collect();
+        format!("{name}<{}>", args.join(", "))
     }
 }

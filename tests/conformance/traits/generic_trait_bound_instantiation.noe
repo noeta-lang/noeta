@@ -1,0 +1,43 @@
+// Instantiation-carrying trait bounds: `<T: Keyed<int>>` demands an impl AT that instantiation
+// (`impl Keyed<int>`), a bare `<T: Keyed>` accepts any instantiation, and a bound argument may
+// name a sibling parameter (`<K, T: Keyed<K>>`) — bound from the call's own arguments.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+trait Keyed<K> {
+    fn key(): K
+    fn same(other: K): bool {
+        return self.key() == other
+    }
+}
+struct Door {
+    code: int
+    impl Keyed<int> {
+        fn key(): int {
+            return self.code
+        }
+    }
+}
+struct Tag {
+    name: string
+    impl Keyed<string> {
+        fn key(): string {
+            return self.name
+        }
+    }
+}
+fn open_with<T: Keyed<int>>(item: T, code: int): bool {
+    return item.same(code)
+}
+fn is_keyed<T: Keyed>(item: T): bool {
+    return true
+}
+fn matches<K, T: Keyed<K>>(item: T, k: K): bool {
+    return item.same(k)
+}
+echo open_with(Door { code: 7 }, 7)
+echo is_keyed(Door { code: 1 })
+echo is_keyed(Tag { name: "x" })
+echo matches(Tag { name: "x" }, "x")
