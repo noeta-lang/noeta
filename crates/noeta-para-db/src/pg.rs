@@ -13,15 +13,23 @@
 //!
 //! The synchronous `postgres::Client` (blocking, its own runtime) matches the sync `SqlDriver` trait
 //! exactly like `rusqlite`. **TLS** is a pure-Rust rustls connector (ring provider, bundled Mozilla
-//! roots) — whether it is *used* is governed by the dsn's `sslmode` (default `prefer`: negotiate TLS,
-//! fall back to plaintext), so a local server and a managed/hosted one both work from the same code.
+//! roots). The dsn's `sslmode` ([`SslMode`], modeled after libpq) governs both *whether* TLS is used
+//! and *whether the server certificate is authenticated*: `prefer` (the default) verifies against the
+//! bundled roots and falls back to plaintext; `require` encrypts but does **not** verify the
+//! certificate (libpq parity — see [`SslMode::Require`]); `verify-ca`/`verify-full` require verified
+//! TLS. So a local server and a managed/hosted one both work from the same code.
 
 use std::error::Error;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use bytes::BytesMut;
 use postgres::Client;
 use postgres::types::{IsNull, ToSql, Type, to_sql_checked};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
 
 use crate::driver::{Row, SqlDriver, SqlValue};
 
@@ -39,33 +47,234 @@ impl std::fmt::Debug for PostgresDriver {
 
 impl PostgresDriver {
     /// Connect to the server named by `dsn` (a libpq connection string / URL, e.g.
-    /// `postgres://user:pass@host:5432/db?sslmode=require`). A rustls TLS connector is always supplied;
-    /// the dsn's `sslmode` decides whether TLS is negotiated (default `prefer` → try TLS, fall back to
-    /// plaintext), so this connects to both a plaintext local server and a TLS-only managed one.
+    /// `postgres://user:pass@host:5432/db?sslmode=require`). The dsn's `sslmode` ([`SslMode`]) selects
+    /// the TLS behavior: whether TLS is negotiated (default `prefer` → try TLS, fall back to plaintext)
+    /// and whether the server certificate is verified — so this connects to a plaintext local server, a
+    /// verified managed one, or (with `sslmode=require`) an encrypted-but-unverified one from the same
+    /// code. An unknown `sslmode` value is a clear error before any connection is attempted.
     pub fn connect(dsn: &str) -> Result<PostgresDriver, String> {
-        Client::connect(dsn, make_tls())
+        let mode = ssl_mode_of(dsn)?;
+        let client_dsn = dsn_for_client(dsn, mode);
+        Client::connect(&client_dsn, make_tls(mode))
             .map(|client| PostgresDriver { client })
             .map_err(|e| e.to_string())
     }
 }
 
-/// Build the rustls TLS connector: the `ring` crypto provider (no OpenSSL / C build) and the bundled
-/// Mozilla root store (`webpki-roots`, so no system trust store is required), no client certificate.
-/// rustls **always verifies** the server certificate against these roots — so TLS is secure by
-/// default (a managed/hosted server with a real CA certificate works out of the box). A self-signed
-/// development server's certificate will not validate; use `sslmode=disable` (plaintext) or a trusted
-/// certificate for it. A libpq-style `require`-without-verification mode is a possible later slice.
-fn make_tls() -> tokio_postgres_rustls::MakeRustlsConnect {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("ring provider supports the default protocol versions")
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+/// How the Postgres driver treats TLS for a connection — the value parsed out of the dsn's `sslmode`
+/// parameter, modeling libpq's SSL modes. Two independent security properties vary across the
+/// variants: whether the connection **must** be encrypted, and whether the server's certificate is
+/// **authenticated** (verified against a trust store). Encryption without authentication (see
+/// [`SslMode::Require`]) stops passive eavesdropping but NOT an active man-in-the-middle who can
+/// present any certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SslMode {
+    /// `disable` — never negotiate TLS; the connection is always plaintext. No encryption and no
+    /// authentication; use only over an already-trusted local socket.
+    Disable,
+    /// `prefer` (the **default**) — negotiate TLS when the server offers it and verify the server
+    /// certificate against the bundled roots, otherwise fall back to a plaintext connection. The safe
+    /// default: encrypted-and-authenticated when possible, never a hard failure against a plaintext
+    /// local server.
+    #[default]
+    Prefer,
+    /// `require` — TLS is **mandatory**, but the server certificate is **not verified**. The
+    /// connection is encrypted (safe against passive eavesdropping) yet NOT authenticated, so it does
+    /// not defend against an active man-in-the-middle who substitutes their own certificate. This is
+    /// libpq's `sslmode=require`, deliberately distinct from `verify-ca`/`verify-full`: use it only
+    /// where the network path to the server is already trusted (e.g. a private link) but the server
+    /// presents a self-signed or otherwise unverifiable certificate.
+    Require,
+    /// `verify-ca` — TLS mandatory and the server certificate verified against the bundled roots.
+    /// (This driver verifies the full certificate chain, so in practice it is at least as strict as
+    /// libpq's CA-only check.)
+    VerifyCa,
+    /// `verify-full` — TLS mandatory and the server certificate fully verified (chain, validity, and
+    /// hostname) against the bundled roots. The strongest mode.
+    VerifyFull,
+}
+
+impl SslMode {
+    /// Whether this mode authenticates the server certificate against the trust store. `false` only
+    /// for [`SslMode::Require`] (encrypted-but-unauthenticated) and [`SslMode::Disable`] (no TLS).
+    fn verifies_certificate(self) -> bool {
+        matches!(
+            self,
+            SslMode::Prefer | SslMode::VerifyCa | SslMode::VerifyFull
+        )
+    }
+
+    /// The `sslmode` token `tokio-postgres` itself understands (it parses only `disable`/`prefer`/
+    /// `require`; the `verify-*` distinction is realized entirely by the certificate verifier this
+    /// driver installs, so `verify-ca`/`verify-full` both require mandatory TLS at the transport —
+    /// i.e. `require`).
+    fn client_token(self) -> &'static str {
+        match self {
+            SslMode::Disable => "disable",
+            SslMode::Prefer => "prefer",
+            SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => "require",
+        }
+    }
+}
+
+impl FromStr for SslMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "" | "prefer" => SslMode::Prefer,
+            "disable" => SslMode::Disable,
+            "require" => SslMode::Require,
+            "verify-ca" => SslMode::VerifyCa,
+            "verify-full" => SslMode::VerifyFull,
+            other => {
+                return Err(format!(
+                    "para.db (postgres): unknown sslmode `{other}` (expected one of: disable, \
+                     prefer, require, verify-ca, verify-full)"
+                ));
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for SslMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SslMode::Disable => "disable",
+            SslMode::Prefer => "prefer",
+            SslMode::Require => "require",
+            SslMode::VerifyCa => "verify-ca",
+            SslMode::VerifyFull => "verify-full",
+        })
+    }
+}
+
+/// Parse the `sslmode` out of a libpq dsn's query string (`…?sslmode=…&…`), defaulting to
+/// [`SslMode::Prefer`] when the parameter is absent. Case-insensitive on both the key and the value.
+fn ssl_mode_of(dsn: &str) -> Result<SslMode, String> {
+    let Some((_, query)) = dsn.split_once('?') else {
+        return Ok(SslMode::default());
+    };
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key.eq_ignore_ascii_case("sslmode") {
+            return value.parse();
+        }
+    }
+    Ok(SslMode::default())
+}
+
+/// The dsn to hand to `tokio-postgres`, whose parser understands only `disable`/`prefer`/`require`.
+/// For `verify-ca`/`verify-full` the `sslmode` token is rewritten to `require` (mandatory TLS at the
+/// transport); the certificate verification those modes ask for is provided by [`make_tls`]. Every
+/// other dsn is passed through unchanged.
+fn dsn_for_client(dsn: &str, mode: SslMode) -> String {
+    match mode {
+        SslMode::VerifyCa | SslMode::VerifyFull => rewrite_sslmode(dsn, mode.client_token()),
+        SslMode::Disable | SslMode::Prefer | SslMode::Require => dsn.to_string(),
+    }
+}
+
+/// Rewrite the value of the dsn's `sslmode` query parameter to `token`, preserving the connection's
+/// base and every other parameter (and their order). Only called when the parameter is present.
+fn rewrite_sslmode(dsn: &str, token: &str) -> String {
+    let Some((base, query)) = dsn.split_once('?') else {
+        return dsn.to_string();
+    };
+    let rewritten = query
+        .split('&')
+        .map(|pair| {
+            let (key, _) = pair.split_once('=').unwrap_or((pair, ""));
+            if key.eq_ignore_ascii_case("sslmode") {
+                format!("{key}={token}")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base}?{rewritten}")
+}
+
+/// Build the rustls TLS connector for `mode`. The `ring` crypto provider is used in every case (no
+/// OpenSSL / C build). For an authenticating mode ([`SslMode::verifies_certificate`]) the server
+/// certificate is checked against the bundled Mozilla root store (`webpki-roots`, so no system trust
+/// store is required); for [`SslMode::Require`] a [`NoCertificateVerification`] verifier is installed
+/// instead — it encrypts the connection but performs **no** certificate authentication (libpq
+/// `sslmode=require` parity; see that variant's security note). No client certificate is presented.
+fn make_tls(mode: SslMode) -> tokio_postgres_rustls::MakeRustlsConnect {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("ring provider supports the default protocol versions");
+    let config = if mode.verifies_certificate() {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        builder.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification(provider)))
+            .with_no_client_auth()
+    };
     tokio_postgres_rustls::MakeRustlsConnect::new(config)
+}
+
+/// A rustls [`ServerCertVerifier`] that **accepts any server certificate** without checking its
+/// chain, validity, or hostname. The transport is still encrypted — the handshake signature is
+/// verified against the crypto provider's algorithms, so the peer proves possession of the presented
+/// key — but the certificate is **not authenticated**, so an active man-in-the-middle presenting a
+/// substitute certificate is not detected. Installed only for [`SslMode::Require`] (libpq
+/// `sslmode=require`: encrypted, not authenticated); the `prefer`/`verify-*` modes verify against the
+/// bundled roots instead.
+#[derive(Debug)]
+struct NoCertificateVerification(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        // Deliberately unconditional: this is the encrypt-without-authenticate mode. The security
+        // tradeoff is documented on the type and on `SslMode::Require`.
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
 }
 
 impl SqlDriver for PostgresDriver {
@@ -286,6 +495,118 @@ fn to_dollar_placeholders(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssl_mode_defaults_to_prefer_when_absent() {
+        // Prefer is the safe default: verified TLS when offered, plaintext fallback otherwise.
+        assert_eq!(SslMode::default(), SslMode::Prefer);
+        assert_eq!(ssl_mode_of("postgres://u@h/db").unwrap(), SslMode::Prefer);
+        assert_eq!(
+            ssl_mode_of("postgres://u@h/db?connect_timeout=5").unwrap(),
+            SslMode::Prefer
+        );
+    }
+
+    #[test]
+    fn ssl_mode_parses_every_libpq_mode_case_insensitively() {
+        let cases = [
+            ("disable", SslMode::Disable),
+            ("prefer", SslMode::Prefer),
+            ("require", SslMode::Require),
+            ("verify-ca", SslMode::VerifyCa),
+            ("VERIFY-FULL", SslMode::VerifyFull),
+        ];
+        for (token, expected) in cases {
+            let dsn = format!("postgres://u@h/db?sslmode={token}");
+            assert_eq!(ssl_mode_of(&dsn).unwrap(), expected, "sslmode={token}");
+        }
+        // The parameter key is matched case-insensitively too, and among other params.
+        assert_eq!(
+            ssl_mode_of("postgres://u@h/db?connect_timeout=5&SslMode=require").unwrap(),
+            SslMode::Require
+        );
+    }
+
+    #[test]
+    fn an_unknown_ssl_mode_is_a_clear_error() {
+        let err = ssl_mode_of("postgres://u@h/db?sslmode=insecure").unwrap_err();
+        assert!(err.contains("unknown sslmode"), "{err}");
+        assert!(err.contains("insecure"), "{err}");
+    }
+
+    #[test]
+    fn only_require_and_disable_skip_certificate_verification() {
+        assert!(!SslMode::Disable.verifies_certificate());
+        assert!(SslMode::Prefer.verifies_certificate());
+        assert!(!SslMode::Require.verifies_certificate());
+        assert!(SslMode::VerifyCa.verifies_certificate());
+        assert!(SslMode::VerifyFull.verifies_certificate());
+    }
+
+    #[test]
+    fn client_token_maps_verify_modes_onto_require() {
+        // tokio-postgres only understands disable/prefer/require; verify-* ride `require` transport
+        // and get their verification from the installed verifier.
+        assert_eq!(SslMode::Disable.client_token(), "disable");
+        assert_eq!(SslMode::Prefer.client_token(), "prefer");
+        assert_eq!(SslMode::Require.client_token(), "require");
+        assert_eq!(SslMode::VerifyCa.client_token(), "require");
+        assert_eq!(SslMode::VerifyFull.client_token(), "require");
+    }
+
+    #[test]
+    fn ssl_mode_display_round_trips_through_parse() {
+        for mode in [
+            SslMode::Disable,
+            SslMode::Prefer,
+            SslMode::Require,
+            SslMode::VerifyCa,
+            SslMode::VerifyFull,
+        ] {
+            assert_eq!(mode.to_string().parse::<SslMode>().unwrap(), mode);
+        }
+    }
+
+    #[test]
+    fn verify_modes_rewrite_the_dsn_sslmode_to_require_for_the_client() {
+        // verify-full → require for the transport, other params preserved in order.
+        assert_eq!(
+            dsn_for_client(
+                "postgres://u:p@h:5432/db?sslmode=verify-full&connect_timeout=5",
+                SslMode::VerifyFull
+            ),
+            "postgres://u:p@h:5432/db?sslmode=require&connect_timeout=5"
+        );
+        assert_eq!(
+            dsn_for_client("postgres://h/db?sslmode=verify-ca", SslMode::VerifyCa),
+            "postgres://h/db?sslmode=require"
+        );
+        // disable/prefer/require pass through untouched — tokio-postgres already understands them.
+        assert_eq!(
+            dsn_for_client("postgres://h/db?sslmode=require", SslMode::Require),
+            "postgres://h/db?sslmode=require"
+        );
+        assert_eq!(
+            dsn_for_client("postgres://h/db", SslMode::Prefer),
+            "postgres://h/db"
+        );
+    }
+
+    #[test]
+    fn a_tls_connector_is_constructible_for_every_mode() {
+        // Exercises verifier construction at the seam without a live server: the verifying path
+        // builds the root store; the `require` path builds the no-verify verifier over the ring
+        // provider. A panic here (e.g. an unsupported provider/protocol combination) would fail.
+        for mode in [
+            SslMode::Disable,
+            SslMode::Prefer,
+            SslMode::Require,
+            SslMode::VerifyCa,
+            SslMode::VerifyFull,
+        ] {
+            let _connector = make_tls(mode);
+        }
+    }
 
     #[test]
     fn placeholders_become_positional_dollars() {
