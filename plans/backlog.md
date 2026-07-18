@@ -44,7 +44,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | **In-run safepoint cycle collection** — both cycle reapers run only at clean exit; a program building cycles in a loop has unbounded peak residency | memory-management 6.x *(active — the main GC follow-up)* |
 | Intrusive free-list registry — closes the trace collector's ~10% acyclic overhead on alloc-churn micro-benches | memory-management 6.4 |
 | DAP: debug worker isolates (adapter reports a single hardcoded thread; workers run undebugged). Also: conditional/hit-count breakpoints, reverse debugging | debug-adapter deferred |
-| Postgres TLS: a libpq-style `require`-without-verify mode | aether F9 sub-item |
 
 ## Reactivity & web
 

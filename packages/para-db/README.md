@@ -13,6 +13,37 @@ repository / unit-of-work, and a typed `@sql` block tier.
   (stage writes during a request, flush them as one batch); `@sql { … }` — a typed SQL statement with
   `${…}` bound-param holes.
 
+## TLS (PostgreSQL)
+
+The Postgres driver uses a pure-Rust rustls connector (the `ring` crypto provider — no OpenSSL / C
+build — and the bundled Mozilla root store, so no system trust store is needed). The connection URL's
+`sslmode` parameter selects the behavior, mirroring libpq. Two independent security properties vary:
+whether the connection **must** be encrypted, and whether the server's certificate is **authenticated**
+(verified against the trust store).
+
+| `sslmode` | Encrypted? | Certificate verified? | Notes |
+| --- | --- | --- | --- |
+| `disable` | ❌ | — | Always plaintext. Use only over an already-trusted local socket. |
+| `prefer` *(default)* | when offered | ✅ (when TLS negotiated) | Try TLS and verify against the bundled roots, else fall back to plaintext. The safe default. |
+| `require` | ✅ | ❌ | **Encrypted but NOT authenticated** — libpq parity. See the warning below. |
+| `verify-ca` | ✅ | ✅ | Mandatory TLS, certificate verified against the bundled roots. |
+| `verify-full` | ✅ | ✅ (incl. hostname) | Mandatory TLS, full certificate verification. The strongest mode. |
+
+```noe
+conn = db.connect("postgres://user:pass@host:5432/db?sslmode=require")
+```
+
+> **`sslmode=require` is encrypted, not authenticated.** It negotiates TLS (so a passive
+> eavesdropper on the wire sees only ciphertext) but does **not** verify the server's certificate —
+> so it does **not** defend against an active man-in-the-middle who substitutes their own
+> certificate. This matches libpq's `sslmode=require`, and is deliberately distinct from `verify-ca`
+> / `verify-full`. Reach for it only when the network path to the server is already trusted (e.g. a
+> private link) but the server presents a self-signed or otherwise unverifiable certificate. When the
+> server has a real CA-issued certificate, prefer `verify-full`; the default `prefer` already verifies
+> whenever TLS is negotiated.
+
+An unrecognized `sslmode` value is a clear error before any connection is attempted.
+
 ## Reactive queries — keep the UI in sync with the database
 
 `para.db` integrates with `std.reactive`, so a query can be a **reactive value**: when the data
