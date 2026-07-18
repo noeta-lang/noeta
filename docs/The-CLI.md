@@ -4,6 +4,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 
 | Command | Purpose |
 |---|---|
+| [`noeta init`](#noeta-init) | Scaffold a new project — manifest, entry file, editor profiles, agent docs. |
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
 | [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
@@ -31,6 +32,46 @@ Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
 > [!NOTE]
 > The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
+
+## `noeta init`
+
+Scaffolds a new project, ready to run before you edit a line:
+
+```text
+noeta init [PATH]            # default: the current directory (created if missing)
+      --name company/package # default: local/<directory-name>
+      --no-git               # skip `git init`
+```
+
+What it writes — never overwriting a file that already exists, so it is safe in a non-empty directory:
+
+- **`noeta.toml`** — package identity plus two build targets: `development` wires the four std dev tiers (`@test`, `@bench`, `@doc`, `@debug`) live, and `production` is an explicit name for the tier-free baseline (see [build targets](Documentation-and-Tiers#build-targets--noetatoml)).
+- **`src/main.noe`** — a fmt-canonical entry file exercising every tier: a documented function with a `@debug` trace, a two-case `@test` block, and a `@bench`.
+- **`.vscode/`** — the run/debug profiles the [Noeta extension](Editor-and-AI-Tooling) picks up (F5 debugging over `noeta dap`), plus the extension recommendation.
+- **`.gitignore`** — build/profiler artifacts ignored; `noeta.lock` deliberately not (commit it).
+- **`AGENTS.md`** — how an AI agent should drive this project: the CLI feedback loop and the [`noeta mcp`](Editor-and-AI-Tooling) tool surface.
+- **`SYNTAX.md`** — the full language reference, assembled from the same embedded guide `noeta mcp`'s `docs_search` serves, so it always matches the installed compiler. Delete and re-run `noeta init` after upgrading to refresh it.
+
+A fresh directory also gets `git init` (skipped inside an existing repository, or with `--no-git`). A directory that already holds a `noeta.toml` is refused.
+
+```console
+$ noeta init webapp
+  created noeta.toml
+  created src/main.noe
+  created .gitignore
+  created .vscode/launch.json
+  created .vscode/extensions.json
+  created AGENTS.md
+  created SYNTAX.md
+  created git repository
+initialized Noeta package `local/webapp` in webapp
+$ noeta test webapp/src/main.noe
+running 2 tests on 2 threads
+  ok    greets
+  ok    greets_noeta
+
+2 passed, 0 failed, 2 total
+```
 
 ## `noeta fmt`
 

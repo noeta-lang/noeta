@@ -14,6 +14,7 @@ mod build;
 mod check;
 mod doc;
 mod fmt;
+mod init;
 mod isolates;
 mod namespace;
 mod pm;

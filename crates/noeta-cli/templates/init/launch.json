@@ -1,0 +1,24 @@
+{
+    // Run/debug profiles for the Noeta VS Code extension: each launches the program
+    // under `noeta dap` (the Noeta debug adapter) — breakpoints, stepping, and
+    // variable inspection over the production VM. Pressing F5 with a `.noe` file
+    // focused also works with no launch.json at all: the extension synthesizes a
+    // configuration for the active file.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "noeta",
+            "request": "launch",
+            "name": "Debug main.noe",
+            "program": "${workspaceFolder}/src/main.noe",
+            "stopOnEntry": false
+        },
+        {
+            "type": "noeta",
+            "request": "launch",
+            "name": "Debug current .noe file",
+            "program": "${file}",
+            "stopOnEntry": false
+        }
+    ]
+}

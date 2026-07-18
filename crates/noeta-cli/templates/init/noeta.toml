@@ -1,0 +1,34 @@
+# The package manifest. `name` is `company/package`: the `company` half is your registry
+# scope (change `local` before publishing); the `package` half is the root namespace
+# segment consumers import this package under.
+[package]
+name = "@PACKAGE_NAME@"
+version = "0.1.0"
+
+# Dependencies live here — add one with `noeta add` (see `noeta add --help`).
+# The table key is the local import root; the source can be a registry version,
+# a git tag, or a path:
+#
+# [dependencies]
+# http = { registry = "acme/http" }
+# geometry = { path = "../geometry" }
+
+# Build targets are named recipes deciding which dev tiers (`@test`, `@bench`, `@doc`,
+# `@debug`) are live. The baseline — any command with no `--target` — ships **no** tiers:
+# it is already the minimal, production shape. `development` layers the std-provided
+# tiers back in:
+#
+#   noeta run src/main.noe --target development    # @debug blocks execute
+#   noeta check . --target development             # checks inside every tier block
+#
+# (`noeta test`/`bench`/`doc` always activate their own tier; under `--target` they run
+# only if that target makes their tier live.)
+[targets.development.tiers]
+test = "std"
+bench = "std"
+doc = "std"
+debug = "std"
+
+# An explicit name for the baseline: no tiers live. Handy as a stable label for CI and
+# release builds — `noeta build src/main.noe --target production`.
+[targets.production]
