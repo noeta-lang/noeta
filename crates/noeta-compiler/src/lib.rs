@@ -1561,7 +1561,15 @@ struct GlobalInfo {
 /// A nested closure's resolved captures: its ordered upvalue list (each name and whether it is
 /// mutable, for the child's reassignment check) paired with the `CaptureFrom` source the building
 /// frame uses to supply each cell. The two vectors are index-aligned.
-type CaptureLayout = (Vec<(String, bool)>, Vec<CaptureFrom>);
+type CaptureLayout = (Vec<(String, bool)>, Vec<PendingCapture>);
+
+/// A capture source before emission: a ready [`CaptureFrom`], or the method receiver — which has
+/// no celled register of its own and is boxed into a fresh cell at closure creation
+/// ([`Compiler::emit_captures`]). `self` is immutable, so a per-closure cell aliases nothing.
+enum PendingCapture {
+    From(CaptureFrom),
+    SelfCell,
+}
 
 /// How a name resolves at a use site.
 enum Resolved {
@@ -1791,18 +1799,30 @@ impl<'m> FnCompiler<'m> {
         let mut upvalues = Vec::with_capacity(free.len());
         let mut captures = Vec::with_capacity(free.len());
         for name in free {
+            // The method receiver captures like an (immutable) local: boxed into a fresh cell at
+            // closure creation (aether F3 — this was the long-standing VM `Unsupported`; the
+            // reference interpreter always supported it). Inside the closure, `self` then
+            // resolves as an ordinary upvalue, and `self.field` reads go through it.
+            if name == "self" && self.method.is_some() {
+                upvalues.push((name, false));
+                captures.push(PendingCapture::SelfCell);
+                continue;
+            }
             if self.forbidden.contains(&name) {
-                return unsupported("a closure inside a method capturing `self` or a field");
+                // A bare FIELD name inside a method-nested closure stays unsupported: the walker
+                // binds fields into the method scope while bare names elsewhere are locals or
+                // globals, so compiling it either way risks a semantic drift — skip, don't guess.
+                return unsupported("a closure inside a method capturing a bare field name");
             }
             if let Some(var) = self.lookup_local(&name) {
                 if !var.celled {
                     return unsupported("a forward capture of a not-yet-celled local");
                 }
                 upvalues.push((name, var.mutable));
-                captures.push(CaptureFrom::Local(var.reg));
+                captures.push(PendingCapture::From(CaptureFrom::Local(var.reg)));
             } else if let Some(&index) = self.upvalue_index.get(&name) {
                 upvalues.push((name, self.upvalue_mut[index as usize]));
-                captures.push(CaptureFrom::Upvalue(index));
+                captures.push(PendingCapture::From(CaptureFrom::Upvalue(index)));
             } else {
                 // A free name the analysis flagged but that is neither a live celled local nor an
                 // upvalue here (e.g. captured before its binding was lowered) — skip the program.
@@ -1810,6 +1830,23 @@ impl<'m> FnCompiler<'m> {
             }
         }
         Ok((upvalues, captures))
+    }
+
+    /// Materialize a pending capture list into the wire [`CaptureFrom`]s, emitting the
+    /// receiver-boxing `MakeCell` (register 0 → a fresh cell) for each [`PendingCapture::SelfCell`]
+    /// immediately before the `MakeClosure` that consumes it.
+    fn emit_captures(&mut self, pending: Vec<PendingCapture>) -> Vec<CaptureFrom> {
+        pending
+            .into_iter()
+            .map(|c| match c {
+                PendingCapture::From(from) => from,
+                PendingCapture::SelfCell => {
+                    let t = self.alloc_reg();
+                    self.code.push(Op::MakeCell { dst: t, src: 0 });
+                    CaptureFrom::Local(t)
+                }
+            })
+            .collect()
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), Unsupported> {
@@ -2065,10 +2102,11 @@ impl<'m> FnCompiler<'m> {
             .module
             .add_function(func, upvalues, enclosing, Some(name.to_string()))?;
         let t = self.alloc_reg();
+        let captures = self.emit_captures(captures).into_boxed_slice();
         self.code.push(Op::MakeClosure {
             dst: t,
             proto,
-            captures: captures.into_boxed_slice(),
+            captures,
         });
         if celled {
             self.code.push(Op::CellSet { cell: reg, src: t });
@@ -3195,10 +3233,11 @@ impl<'m> FnCompiler<'m> {
                 let proto =
                     self.module
                         .add_function(func, upvalues, enclosing, func.name.clone())?;
+                let captures = self.emit_captures(captures).into_boxed_slice();
                 self.code.push(Op::MakeClosure {
                     dst,
                     proto,
-                    captures: captures.into_boxed_slice(),
+                    captures,
                 });
                 Ok(())
             }

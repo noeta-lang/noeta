@@ -1,0 +1,37 @@
+// A closure inside a method capturing `self` (aether F3 — was a VM `Unsupported`; the reference
+// interpreter always ran it): the receiver captures like an immutable local (boxed into a fresh
+// cell at closure creation), so `self.field` reads work inside the closure, closures escape the
+// method, and nested closures forward the capture.
+// expect: stdout "[5, 10, 15]"
+// expect: stdout "17"
+// expect: stdout "30"
+// expect: stdout "30"
+// expect: stdout "12"
+// expect: exit 0
+struct Counter {
+    n: int
+    fn doubled_list(): List<int> {
+        return [1, 2, 3].map(fn(x) => x * self.n)
+    }
+    fn via_local(): int {
+        base = self.n
+        add = fn(x: int) => x + base
+        return add(10)
+    }
+    fn escaping(): (int) -> int {
+        return fn(x: int) => x * self.n
+    }
+    fn nested(): int {
+        outer = fn(): int {
+            inner = fn(): int { return self.n + 2 }
+            return inner()
+        }
+        return outer()
+    }
+}
+echo Counter { n: 5 }.doubled_list()
+echo Counter { n: 7 }.via_local()
+f = Counter { n: 10 }.escaping()
+echo f(3)
+echo f(3)
+echo Counter { n: 10 }.nested()
