@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.1
+## 0.14.1
 
 Fixes auto-indent after a **multi-line tier block** (`@doc { ... }`, `@sql { ... }`, ...): pressing
 Enter after the closing `}` indented the next line to the block *body's* level. VS Code evaluates
