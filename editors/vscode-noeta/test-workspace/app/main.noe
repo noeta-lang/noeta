@@ -22,7 +22,9 @@ struct Marker {
     y: int = 0
 
     @doc { A marker at the origin with the given `label`. }
-    fn at_origin(label: string): Marker { return Marker { label: label } }
+    fn at_origin(label: string): Marker {
+        return Marker { label: label }
+    }
 
     @doc { Move the marker by `(dx, dy)`, returning a new marker. }
     fn shifted(dx: int, dy: int): Marker {
@@ -31,31 +33,48 @@ struct Marker {
 }
 
 @doc {
-  A mutable click tally backed by a fixed-width integer.
+  #A mutable click tally backed by a fixed-width integer.
 
   A reference type: all handles observe the same count.
 }
+@role()
 class Tally {
     mut n: u64 = 0u64
 
-    @doc { Increment the tally by `by`. }
-    fn bump(by: int): void { self.n = self.n + by.to_u64() }
+    @doc {
+        Increment the tally by `by`. 
+    }
+    fn bump(by: int): void {
+        self.n = self.n + by.to_u64()
+    }
 
     @doc { The current count. }
-    fn count(): u64 { return self.n }
+    fn count(): u64 {
+        return self.n
+    }
+
+    @test
+    fn mytest(): void {
+        assert(1 == 1)
+    }
 }
 
 @doc { A drawable figure carrying associated data. }
 enum Figure {
-    Circle(float);
-    Rect(int, int);
+    Circle(float)
+    Rect(int, int)
+
+    @test
+    fn my_testasd(): void {
+        assert(1 == 1)
+    }
 
     @doc { The area of the figure. }
     fn area(): float {
         return match self {
             Figure.Circle(r) => 3.14159 * r * r,
             Figure.Rect(w, h) => (w * h).to_float(),
-        };
+        }
     }
 }
 
@@ -63,22 +82,32 @@ enum Figure {
 
 @doc { The layers of the demo's request flow, used as architectural roles. }
 @semantic
-enum Layer { Handler; Service; Store; }
+enum Layer {
+    Handler
+    Service
+    Store
+}
 
 @doc { Marks an inbound request handler (the entry layer). }
 @attribute(Function)
 @role(Layer.Handler)
-struct Handler { route: string }
+struct Handler {
+    route: string
+}
 
 @doc { Marks a service-layer function (business logic). }
 @attribute(Function)
 @role(Layer.Service)
-struct Service { name: string }
+struct Service {
+    name: string
+}
 
 @doc { Marks a store-layer function (data access). }
 @attribute(Function)
 @role(Layer.Store)
-struct Store { table: string }
+struct Store {
+    table: string
+}
 
 // ---- The flow: handler -> service -> store. ----
 
@@ -111,6 +140,11 @@ fn visit_count(): int {
     a = Vec2 { x: 1, y: 2 }
     b = Vec2 { x: 3, y: 4 }
     return add(a, b).manhattan()
+}
+
+@test
+fn my_test(): void {
+    assert(1 == 1)
 }
 
 echo handle_greet("world")
