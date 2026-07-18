@@ -51,6 +51,26 @@ pub fn resolve_breakpoints(
     stops
 }
 
+/// Every `(proto, pc)` that begins a source statement — the instruction positions a breakpoint can
+/// resolve to and a landed step stops on, taken straight from each prototype's debug **line table**
+/// ([`Chunk::line_table`], one entry per statement).
+///
+/// These are the only pcs at which a pause sees every in-scope local **materialized** in its
+/// register. Mid-statement, a named local can be caught in the window between the `Drop` that frees
+/// its old value and the `Move` that writes its new one — its pinned register momentarily reads
+/// `unit`. Breakpoints and steps never land off a statement start, so they never observe this; a
+/// resume-budget (`limit`) pause, which would otherwise trip at an arbitrary op, defers to the next
+/// member of this set for exactly the same guarantee.
+pub fn statement_starts(module: &Module) -> HashSet<(u32, usize)> {
+    let mut starts = HashSet::new();
+    for (proto_idx, chunk) in module.protos.iter().enumerate() {
+        for entry in &chunk.line_table {
+            starts.insert((proto_idx as u32, entry.pc as usize));
+        }
+    }
+    starts
+}
+
 /// Whether `line` in the file named `source_name` is a requested breakpoint. Matches the editor's
 /// path against the compiler's source name exactly, by canonical path, or (last resort) by file name.
 fn line_requested(requested: &HashMap<String, Vec<u32>>, source_name: &str, line: u32) -> bool {

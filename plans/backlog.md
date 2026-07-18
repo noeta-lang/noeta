@@ -81,7 +81,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | `noeta fmt`: width-wrapping of long binary/method chains and unions; `--diff`; `// fmt: off`; broader `[fmt]` config | fmt deferred (optional by design) |
 | REPL: JIT at the prompt | repl-on-vm follow-on. Trigger: demand |
 | Salsa: deleted-file inputs are never freed (growth stopped, memory not reclaimed); intra-check cancellation granularity (a token poll inside `noeta-check`) | audit F9 residuals |
-| Flaky tests (pre-existing, timing-under-load): `noeta-dap` `set_variable_writes_a_frame_local…`; MCP `runaway_continue` | audit final verification. Worth a dedicated session *(active, small)* |
 
 ## Performance
 

@@ -299,6 +299,15 @@ impl Debugger for DapDebugger {
         }
         DebugAction::Continue
     }
+
+    /// After the VM writes a paused frame's register (`setVariable`), re-publish the captured stack
+    /// *before* the response unblocks the client — so a `variables`/`stackTrace` that races in right
+    /// behind it reads the new value rather than the stale pause-time snapshot. (The `mid_pause`
+    /// re-entry in [`Self::before_op`] also re-captures, but only after the reply has already gone
+    /// out, which is the window this closes.)
+    fn after_side_effect(&mut self, view: &DebugView) {
+        *self.paused.lock().unwrap() = Some(capture(view, &self.sources));
+    }
 }
 
 /// Parse a console fragment (statements allowed; a trailing bare expression is its value); `None`
