@@ -626,6 +626,33 @@ mod tests {
     }
 
     #[test]
+    fn method_directives_are_preserved_and_idempotent() {
+        // A method's leading `@<tier>` directives (`@doc { … }`, `@test`, `@bench(1000)`) must
+        // survive formatting — dropping one silently discards a test root or a doc block.
+        let src = "struct Point {\n    \
+                   x: int = 0\n    \
+                   @doc { Distance from the origin. }\n    \
+                   @bench(1000)\n    \
+                   @test\n    \
+                   fn manhattan(): int { return self.x }\n\
+                   }\n";
+        let out = fmt(src).unwrap();
+        assert!(
+            out.contains("@doc { Distance from the origin. }"),
+            "got:\n{out}"
+        );
+        assert!(out.contains("@bench(1000)"), "got:\n{out}");
+        assert!(out.contains("@test"), "got:\n{out}");
+        assert!(out.contains("fn manhattan(): int"), "got:\n{out}");
+        // Formatting is idempotent over the directives.
+        assert_eq!(
+            fmt(&out).unwrap(),
+            out,
+            "method-directive formatting is not idempotent"
+        );
+    }
+
+    #[test]
     fn indentation_width_tabs_and_final_newline_are_configurable() {
         let src = "fn f(): int {\nreturn 1\n}\n";
         let two = format_source(

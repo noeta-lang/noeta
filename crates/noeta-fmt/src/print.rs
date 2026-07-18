@@ -11,9 +11,9 @@
 
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
-    FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, ObjectLit, Param, Pattern,
-    Program, RoleTag, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeParam, TypeRef,
-    UseName, VariantDecl,
+    FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, ObjectLit,
+    Param, Pattern, Program, RoleTag, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeParam,
+    TypeRef, UseName, VariantDecl,
 };
 use std::cell::Cell;
 
@@ -776,6 +776,13 @@ impl Printer<'_> {
             parts.push(Doc::text(format!("@tier({})", args.join(", "))));
             parts.push(Doc::hardline());
         }
+        // Leading `@<tier>` method directives (`@test`, `@doc { … }`) — each on its own line above
+        // the header, in source order. Dropping one would silently discard a test root or doc block
+        // (the safety gate catches it via the pretty skeleton, but emitting them is the fix).
+        for dir in &decl.directives {
+            parts.push(self.method_directive(dir)?);
+            parts.push(Doc::hardline());
+        }
         parts.extend(self.attrs(&decl.attrs)?);
         if decl.is_public {
             parts.push(Doc::text("pub "));
@@ -794,6 +801,47 @@ impl Printer<'_> {
         parts.push(Doc::text(" "));
         parts.push(self.block(&decl.body, decl.name_span.end, decl.span.end)?);
         Ok(Doc::concat(parts))
+    }
+
+    /// Print a `@<tier>` directive leading a method — the annotation form (`@test`, `@bench(1000)`)
+    /// or a text-tier body (`@doc { … }`). Mirrors the top-level [`Stmt::TierBlock`] printing: the
+    /// head is `@name` or `@name(args)`, and a text body is re-emitted **verbatim from the raw
+    /// source** between the braces (so `\{`/`\}` escapes survive, as `doc_text` is the unescaped
+    /// view).
+    fn method_directive(&self, dir: &MethodDirective) -> Result<Doc, FmtError> {
+        let head = if dir.args.is_empty() {
+            Doc::text(format!("@{}", dir.name))
+        } else {
+            let mut ds = Vec::new();
+            for a in &dir.args {
+                ds.push(self.attr_arg(a)?);
+            }
+            Doc::concat([
+                Doc::text(format!("@{}(", dir.name)),
+                Doc::join(ds, Doc::text(", ")),
+                Doc::text(")"),
+            ])
+        };
+        match &dir.doc_text {
+            Some(text) => {
+                let raw_body = self
+                    .source
+                    .get(dir.span.start as usize..dir.span.end as usize)
+                    .and_then(|s| {
+                        let open = s.find('{')?;
+                        let close = s.rfind('}')?;
+                        (open < close).then(|| s[open + 1..close].to_string())
+                    })
+                    .unwrap_or_else(|| text.clone());
+                Ok(Doc::concat([
+                    head,
+                    Doc::text(" {"),
+                    Doc::raw_text(raw_body),
+                    Doc::text("}"),
+                ]))
+            }
+            None => Ok(head),
+        }
     }
 
     fn params(&self, params: &[Param]) -> Result<Doc, FmtError> {
