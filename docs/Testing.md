@@ -87,6 +87,7 @@ noeta test [OPTIONS] <FILE>
 | `--name <NAME>` | Run only the test function(s) with this exact name. Repeatable; composes with `--group`. (This is the seam the editor test explorer uses.) |
 | `--json` | Emit a single machine-readable JSON report on stdout instead of the human table (per-test stdout captured, not interleaved) — for CI and editors. |
 | `--target <NAME>` | Only run when the `test` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. |
+| `--watch` | Rerun on every save, narrowed to the tests the edit actually affected. See [Watch mode](#watch-mode). |
 
 ### Report format
 
@@ -104,6 +105,17 @@ running <N> tests on <J> threads[, <K> skipped]
 ### Exit codes
 
 `0` only when nothing failed and nothing was left un-run (a `#[Skip]` never fails the suite); `1` otherwise. `no tests found` (or an empty `--group`) exits `0`; a file that cannot be read exits `2`.
+
+## Watch mode
+
+`noeta test --watch app.noe` keeps running and reruns on every save — and it does not blindly rerun everything. Each save is diffed against the sources the previous run observed, the changed definitions are walked backwards through the project's call graph, and **only the impacted tests** rerun (through the same `--name` filter above):
+
+- Edit a leaf function and exactly the tests that transitively call it rerun; edit one test's body and only that test reruns.
+- This works **across module boundaries**: edit a function in an imported module and the entry's tests that reach it rerun — and an edit to a module function nothing imports reruns nothing at all.
+- An **inert** edit — reformatting between declarations, a comment — runs nothing.
+- Edits the engine cannot attribute to specific declarations fall back to a full rerun, with the reason printed: a signature or layout change, a changed top-level statement (globals and fixtures live there), a new or deleted `.noe` file, a manifest/lockfile change, or code that does not type-check.
+
+The reachability analysis is static, so tests reached only through dynamic dispatch are matched best-effort (a method call on an untyped receiver is over-approximated by name); rerun without `--watch` occasionally if you lean heavily on reflection-driven dispatch. `--watch` is not specific to `test` — it works on any command (`noeta run --watch`, `noeta bench --watch`, `noeta serve --watch`); see [The CLI](The-CLI) for the full watch story.
 
 ## See also
 
