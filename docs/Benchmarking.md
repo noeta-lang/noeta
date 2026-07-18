@@ -49,7 +49,7 @@ The reported unit adapts to the magnitude: `ns`, `µs`, `ms`, or `s`.
 
 ## Command reference
 
-```
+```text
 noeta bench [OPTIONS] <FILE>
 ```
 
@@ -65,7 +65,7 @@ noeta bench [OPTIONS] <FILE>
 
 ### Output and exit codes
 
-```
+```text
 running <N> benchmarks
   <name>                    <value>/iter  (<N> iterations)
   <name>                    FAILED: <message>

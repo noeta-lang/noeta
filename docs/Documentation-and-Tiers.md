@@ -43,7 +43,7 @@ $ noeta doc adder.noe
 - Each block is **dedented** (leading/trailing blank lines dropped, common indentation stripped) and prefixed with an HTML-comment source header (`<!-- file:line -->`, plus `· symbol` for an attached block), which is valid Markdown that renders to nothing.
 - No `@doc` blocks → a notice on stderr, exit `0`.
 
-```
+```text
 noeta doc [OPTIONS] <FILE>
 ```
 

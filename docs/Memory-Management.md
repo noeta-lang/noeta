@@ -12,7 +12,7 @@ The motivating case is `acc ~= [x]` in a loop: if every append copied, it would 
 
 A dedicated IR pass (`noeta-ir-passes`, `reuse.rs`) recognizes **self-updates** — a binding rebound to a value computed from its own old contents — and marks the constructor with an *in-place-reuse token*:
 
-```
+```text
 acc = Type { ...acc, f: v }      →  Object { spread: acc, reuse: true }
 acc = acc ~ rhs   (from ~=)       →  Binary { op: Concat, lhs: acc, reuse: true }
 m   = m.set(k, v) (from m[k]=v)   →  CallMethod { reuse: true }

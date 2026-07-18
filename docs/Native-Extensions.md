@@ -36,7 +36,7 @@ Two per-backend functions, written once each — `marshal_native_arg(&Value) -> 
 
 Registration is declarative:
 
-```
+```rust
 trait Extension {
     name;
     root() -> &str;              // namespace root; defaults to name(). Module identity is

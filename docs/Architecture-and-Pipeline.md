@@ -6,7 +6,7 @@ The implementation is a workspace of ~40 small Rust crates forming a strict depe
 
 ## The pipeline
 
-```
+```text
 source (.noe)
    │  noeta-lexer (logos)
    ▼

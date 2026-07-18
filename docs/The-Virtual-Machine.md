@@ -28,7 +28,7 @@ The payoff is both smaller per-activation register arrays and *prompt* reclamati
 
 Every runtime value is a single 64-bit word — `struct Value(u64)` in `noeta-value`. Doubles are stored natively; everything else is encoded in the payload of a quiet NaN with a small type tag, and heap pointers live in the low 48 bits:
 
-```
+```text
 float      : any bits where (bits & QNAN) != QNAN     (a real double)
 pointer    : SIGN_BIT | QNAN | addr48                 (a refcounted heap object)
 small int  : QNAN | INT_TAG | payload48 (sign-ext)    (immediate, ±2^47)

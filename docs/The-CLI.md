@@ -36,7 +36,7 @@ Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
 Formats `.noe` source into the canonical style — the same layout no matter how the code was written (like `gofmt`/`rustfmt`). It is a **canonical reformatter** guarded by a safety check: the formatted output is re-parsed and compared to the original, so formatting can never change what a program means; if anything looks off, the file is left untouched.
 
-```
+```text
 noeta fmt [PATHS...]   # format files, or every .noe under a directory, in place (atomic)
 noeta fmt --check ...  # write nothing; list any file that is not already formatted, exit 1 (CI)
 noeta fmt --stdin      # read source on stdin, write the formatted result to stdout (format-on-save)
@@ -62,7 +62,7 @@ With `wrap = false` (the default) the formatter preserves the line breaks you wr
 
 ## `noeta run`
 
-```
+```text
 noeta run [OPTIONS] <FILE> [-- <ARGS>...]
 ```
 
@@ -108,7 +108,7 @@ hello
 
 ## `noeta build`
 
-```
+```text
 noeta build [OPTIONS] <FILE>
 ```
 
@@ -136,7 +136,7 @@ Which of your dependencies' code is present is governed by [`noeta.toml` targets
 
 ## `noeta check`
 
-```
+```text
 noeta check [PATH]
 ```
 
@@ -235,7 +235,7 @@ Cached artifacts live under `~/.cache/noeta/` (XDG: `$XDG_CACHE_HOME/noeta/`; ma
 
 ### `noeta cache`
 
-```
+```text
 noeta cache <path|info|clear>
 ```
 
@@ -261,7 +261,7 @@ The cache never grows without bound: once it exceeds `NOETA_CACHE_MAX_BYTES`, th
 
 ## `noeta repl`
 
-```
+```text
 noeta repl [--no-check] [--load <FILE>]
 ```
 
@@ -299,7 +299,7 @@ Bindings persist across entries (unlike a compiled program, where a value is des
 
 ## `noeta dump`
 
-```
+```text
 noeta dump [OPTIONS] <FILE>
 ```
 
@@ -403,7 +403,7 @@ The **dependency key** (`util`, `http`, …) is the import root you address the 
 
 ### `noeta publish`
 
-```
+```text
 noeta publish --git <URL> [--tag <TAG>] [--key | --interactive [--oob]]
 ```
 
@@ -423,7 +423,7 @@ A published version is **immutable** — re-publishing the same version with dif
 
 ### `noeta audit`
 
-```
+```text
 noeta audit [PATH]
 ```
 
@@ -431,7 +431,7 @@ Answers *"what am I actually running?"* for the resolved dependency tree: every 
 
 ### `noeta key`
 
-```
+```text
 noeta key new [--out <PATH>]
 ```
 

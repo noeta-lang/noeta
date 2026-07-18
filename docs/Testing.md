@@ -75,7 +75,7 @@ Notes on `#[Data]`:
 
 ## Command reference
 
-```
+```text
 noeta test [OPTIONS] <FILE>
 ```
 
@@ -90,7 +90,7 @@ noeta test [OPTIONS] <FILE>
 
 ### Report format
 
-```
+```text
 running <N> tests on <J> threads[, <K> skipped]
   ok    <name>
   FAIL  <name>
