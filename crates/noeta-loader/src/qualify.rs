@@ -36,20 +36,45 @@ pub type QMap = HashMap<String, String>;
 /// type). The walk is shared by two clients so they can never drift: [`qualify_stmt`] passes a
 /// visitor that *rewrites* the name through a [`QMap`], and [`referenced_names`] passes one that
 /// *collects* it. Both see the exact same positions.
-type NameVisitor<'a> = dyn FnMut(&mut String) + 'a;
+///
+/// Returns whether the name **matched** a known qualifiable declaration (a [`QMap`] hit for the
+/// rewriter; always `false` for the collector). The member-chain collapse below keys on this — a
+/// hit may be an identity rewrite (`geometry.vec.add` → itself), which a string-changed test would
+/// miss.
+type NameVisitor<'a> = dyn FnMut(&mut String, NameKind) -> bool + 'a;
+
+/// Where a visited name sits, so the rewriter can apply position-appropriate shadowing rules.
+/// Type positions (annotations, literal heads, pattern heads, decl names) share no namespace with
+/// value bindings, so they always resolve; a **value** member chain (`vec.add(…)`) does collide
+/// with local bindings — a local named like a module alias must keep meaning the local.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameKind {
+    /// A type position — an annotation leaf, an object-literal head, a pattern's variant type, a
+    /// declaration's own name, an `impl` target… Never shadowed by value bindings.
+    Type,
+    /// A bare identifier in expression position (`User.new(…)`'s base, `E.Empty`'s base, a type
+    /// used as a first-class value).
+    Value,
+    /// A dotted member-chain candidate in expression position (`vec.add`, `gv.Shape`) — the only
+    /// kind the local-binding suppression applies to, because module aliases are lowercase and
+    /// collide with ordinary locals.
+    ValueChain,
+}
 
 /// Rewrite every named type inside a [`TypeRef`], recursively — so `List<User>`, `?User`,
 /// `A | B`, `(A, B)`, and `(A) -> B` all qualify their nominal leaves.
 fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
     match ty {
         TypeRef::Named { name, args, .. } => {
-            visit(name);
+            visit(name, NameKind::Type);
             for a in args {
                 q_typeref(a, visit);
             }
         }
         // A trait object qualifies its trait name like any nominal leaf.
-        TypeRef::DynTrait { trait_name, .. } => visit(trait_name),
+        TypeRef::DynTrait { trait_name, .. } => {
+            visit(trait_name, NameKind::Type);
+        }
         TypeRef::Optional { inner, .. } => q_typeref(inner, visit),
         TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
         TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_typeref(e, visit)),
@@ -70,12 +95,39 @@ fn q_opt_typeref(ty: &mut Option<TypeRef>, visit: &mut NameVisitor) {
 /// it and its nested expressions/bodies carry, through `map`. A no-op when the map is empty (a
 /// non-namespaced file stays byte-identical).
 pub fn qualify_stmt(stmt: &mut Stmt, map: &QMap) {
+    qualify_stmt_scoped(stmt, map, &HashSet::new());
+}
+
+/// [`qualify_stmt`] with **additional surrounding value bindings**: the entry program's tail runs
+/// as one flat scope, so a top-level `vec = …` in one statement shadows a `vec` module alias in a
+/// *later* statement — the caller passes the program-wide bound set here. A lone declaration
+/// (imports, closures) needs only its own bindings, which are always collected.
+pub fn qualify_stmt_scoped(stmt: &mut Stmt, map: &QMap, outer_bound: &HashSet<String>) {
     if map.is_empty() {
         return;
     }
-    walk_stmt(stmt, &mut |name| {
+    // Every value name this statement binds anywhere (params, `x = …`, destructures, `for` vars,
+    // closure params, pattern bindings), plus the caller's surrounding bindings. A dotted value
+    // chain whose root is one of these is a field/method access on the local, not a
+    // module-qualified reference — locals win. Collected per whole statement (not per lexical
+    // scope): coarser than true scoping, but deterministic, and the suppressed rewrite is exactly
+    // the pre-existing meaning of the chain.
+    let mut bound = bound_value_names(stmt);
+    bound.extend(outer_bound.iter().cloned());
+    walk_stmt(stmt, &mut |name, kind| {
+        if kind == NameKind::ValueChain
+            && name
+                .split('.')
+                .next()
+                .is_some_and(|root| bound.contains(root))
+        {
+            return false;
+        }
         if let Some(qualified) = map.get(name.as_str()) {
             *name = qualified.clone();
+            true
+        } else {
+            false
         }
     });
 }
@@ -90,10 +142,285 @@ pub fn referenced_names(stmt: &Stmt) -> HashSet<String> {
     let mut names = HashSet::new();
     // The walk needs `&mut` (it is shared with the rewriter); clone so the source is untouched.
     let mut scratch = stmt.clone();
-    walk_stmt(&mut scratch, &mut |name| {
+    walk_stmt(&mut scratch, &mut |name, _kind| {
         names.insert(name.clone());
+        // Never a "match": the collector has no QMap, so the member-chain collapse stays inert
+        // and the walk keeps its shape (the collected dotted candidates are a harmless superset).
+        false
     });
     names
+}
+
+/// Every **value name** a statement binds anywhere inside it: `x = …` bindings, destructure
+/// targets, `for` variables, function/method/closure parameters, match-pattern bindings, and
+/// nested/local function names. Feeds the [`NameKind::ValueChain`] suppression in
+/// [`qualify_stmt`] — a dotted chain rooted at any of these is member access on the local, not a
+/// module-qualified reference. Deliberately whole-statement coarse (no lexical scoping): the
+/// suppressed rewrite is exactly the chain's pre-existing meaning, so over-suppression can only
+/// fall back to it.
+pub fn bound_value_names(stmt: &Stmt) -> HashSet<String> {
+    let mut names = HashSet::new();
+    bound_in_stmt(stmt, &mut names);
+    names
+}
+
+fn bound_in_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
+    let each = |body: &[Stmt], names: &mut HashSet<String>| {
+        for s in body {
+            bound_in_stmt(s, names);
+        }
+    };
+    match stmt {
+        Stmt::Binding { name, value, .. } => {
+            names.insert(name.clone());
+            bound_in_expr(value, names);
+        }
+        Stmt::Destructure { targets, value, .. } => {
+            names.extend(targets.iter().map(|(n, _)| n.clone()));
+            bound_in_expr(value, names);
+        }
+        Stmt::For {
+            pattern,
+            iterable,
+            body,
+            ..
+        } => {
+            match pattern {
+                noeta_ast::ForPattern::Single { name, .. } => {
+                    names.insert(name.clone());
+                }
+                noeta_ast::ForPattern::Tuple { names: ns, .. } => {
+                    names.extend(ns.iter().map(|(n, _)| n.clone()));
+                }
+            }
+            bound_in_expr(iterable, names);
+            each(body, names);
+        }
+        Stmt::Echo { value, .. } | Stmt::Yield { value, .. } | Stmt::Expr { expr: value, .. } => {
+            bound_in_expr(value, names)
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                bound_in_expr(v, names);
+            }
+        }
+        Stmt::Concurrent { body, .. } | Stmt::TierBlock { items: body, .. } => each(body, names),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            bound_in_expr(cond, names);
+            each(then_body, names);
+            if let Some(b) = else_body {
+                each(b, names);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            bound_in_expr(cond, names);
+            each(body, names);
+        }
+        Stmt::Fn(decl) => {
+            // A function name is a value binding too (`fn vec(…)` shadows a `vec` module alias).
+            names.insert(decl.name.clone());
+            bound_in_fn(decl, names);
+        }
+        Stmt::Class(decl) => {
+            for m in &decl.methods {
+                bound_in_fn(m, names);
+            }
+            for b in &decl.impls {
+                for m in &b.methods {
+                    bound_in_fn(m, names);
+                }
+            }
+            if let Some(body) = &decl.destructor {
+                each(body, names);
+            }
+        }
+        Stmt::Struct(decl) => {
+            for m in &decl.methods {
+                bound_in_fn(m, names);
+            }
+            for b in &decl.impls {
+                for m in &b.methods {
+                    bound_in_fn(m, names);
+                }
+            }
+        }
+        Stmt::Enum(decl) => {
+            for m in &decl.methods {
+                bound_in_fn(m, names);
+            }
+            for b in &decl.impls {
+                for m in &b.methods {
+                    bound_in_fn(m, names);
+                }
+            }
+        }
+        Stmt::Impl(decl) => {
+            for m in &decl.methods {
+                bound_in_fn(m, names);
+            }
+        }
+        Stmt::Trait(_)
+        | Stmt::Namespace { .. }
+        | Stmt::Use { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
+    }
+}
+
+fn bound_in_fn(decl: &FnDecl, names: &mut HashSet<String>) {
+    names.extend(decl.params.iter().map(|p| p.name.clone()));
+    for s in &decl.body {
+        bound_in_stmt(s, names);
+    }
+}
+
+fn bound_in_pattern(p: &Pattern, names: &mut HashSet<String>) {
+    match p {
+        Pattern::Binding { name, .. } => {
+            names.insert(name.clone());
+        }
+        Pattern::Variant { bindings, .. } => {
+            bindings.iter().for_each(|b| bound_in_pattern(b, names))
+        }
+        Pattern::Tuple { elements, .. } => {
+            elements.iter().for_each(|e| bound_in_pattern(e, names))
+        }
+        Pattern::Wildcard { .. }
+        | Pattern::Int { .. }
+        | Pattern::Str { .. }
+        | Pattern::Bool { .. }
+        | Pattern::IsType { .. } => {}
+    }
+}
+
+/// Reach every nested binder inside an expression — closures (params), `match` (arm patterns), and
+/// the statement bodies they carry. Container variants recurse; leaves bind nothing.
+fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
+    match e {
+        Expr::Closure {
+            params, ret: _, body, ..
+        } => {
+            names.extend(params.iter().map(|p| p.name.clone()));
+            match body {
+                ClosureBody::Expr(e) => bound_in_expr(e, names),
+                ClosureBody::Block(stmts) => {
+                    for s in stmts {
+                        bound_in_stmt(s, names);
+                    }
+                }
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            bound_in_expr(scrutinee, names);
+            for arm in arms {
+                bound_in_pattern(&arm.pattern, names);
+                match &arm.body {
+                    ClosureBody::Expr(e) => bound_in_expr(e, names),
+                    ClosureBody::Block(stmts) => {
+                        for s in stmts {
+                            bound_in_stmt(s, names);
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Object(lit) => {
+            for f in &lit.fields {
+                bound_in_expr(&f.value, names);
+            }
+            if let Some(s) = &lit.spread {
+                bound_in_expr(s, names);
+            }
+        }
+        Expr::Unary { operand: inner, .. }
+        | Expr::Member { receiver: inner, .. }
+        | Expr::TupleIndex { receiver: inner, .. }
+        | Expr::Try { expr: inner, .. }
+        | Expr::Await { expr: inner, .. }
+        | Expr::Spawn { future: inner, .. }
+        | Expr::TypeOf { value: inner, .. }
+        | Expr::FieldsOf { value: inner, .. }
+        | Expr::ParamsOf { target: inner, .. }
+        | Expr::As { expr: inner, .. }
+        | Expr::TypeTest { expr: inner, .. }
+        | Expr::FromBytes { blob: inner, .. }
+        | Expr::Channel {
+            capacity: inner, ..
+        } => bound_in_expr(inner, names),
+        Expr::Binary { lhs: a, rhs: b, .. }
+        | Expr::Pipeline {
+            left: a, right: b, ..
+        }
+        | Expr::Range { start: a, end: b, .. }
+        | Expr::Index {
+            receiver: a,
+            index: b,
+            ..
+        }
+        | Expr::Coalesce {
+            value: a,
+            fallback: b,
+            ..
+        }
+        | Expr::FieldSet {
+            receiver: a,
+            value: b,
+            ..
+        } => {
+            bound_in_expr(a, names);
+            bound_in_expr(b, names);
+        }
+        Expr::Call { callee, args, .. } => {
+            bound_in_expr(callee, names);
+            args.iter().for_each(|a| bound_in_expr(a, names));
+        }
+        Expr::TypedModuleCall { recv, args, .. } => {
+            bound_in_expr(recv, names);
+            args.iter().for_each(|a| bound_in_expr(a, names));
+        }
+        Expr::Invoke {
+            recv, name, args, ..
+        } => {
+            bound_in_expr(recv, names);
+            bound_in_expr(name, names);
+            bound_in_expr(args, names);
+        }
+        Expr::List { items, .. } | Expr::Tuple { items, .. } => {
+            items.iter().for_each(|i| bound_in_expr(i, names))
+        }
+        Expr::Map { entries, .. } => {
+            for (k, v) in entries {
+                bound_in_expr(k, names);
+                bound_in_expr(v, names);
+            }
+        }
+        Expr::Interp { parts, .. } => {
+            for part in parts {
+                if let StrPart::Hole(e) = part {
+                    bound_in_expr(e, names);
+                }
+            }
+        }
+        Expr::TierExpr { holes, .. } => holes.iter().for_each(|h| bound_in_expr(h, names)),
+        Expr::Ident { .. }
+        | Expr::NativeFnRef { .. }
+        | Expr::AttributesOf { .. }
+        | Expr::RolesOf { .. }
+        | Expr::Str { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::F32 { .. }
+        | Expr::F64 { .. }
+        | Expr::IntN { .. }
+        | Expr::Bool { .. } => {}
+    }
 }
 
 /// The shared AST walk: apply `v` at every position that names a qualifiable declaration. Both
@@ -140,7 +467,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             // A **top-level** function's own name qualifies (like a type's); a method's does not —
             // methods resolve through their type, so `q_fn` (shared with methods) never touches the
             // name, and the rewrite lives here on the `Stmt::Fn` arm only.
-            visit(&mut decl.name);
+            visit(&mut decl.name, NameKind::Type);
             // A `@tier(…, config: T)` / `@tier(…, expr: T)` declaration's type names a type in this
             // module — visit it like any type reference, so it qualifies in lockstep with the
             // handler's return (`q_fn` below): else E0051's expr-tier return-match compares `T`
@@ -148,16 +475,16 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             // drag the type's declaration into the merged program (cross-module linker fix).
             if let Some(tier) = &mut decl.tier {
                 if let Some((config, _)) = &mut tier.config {
-                    visit(config);
+                    visit(config, NameKind::Type);
                 }
                 if let Some((expr, _)) = &mut tier.expr {
-                    visit(expr);
+                    visit(expr, NameKind::Type);
                 }
             }
             q_fn(decl, visit);
         }
         Stmt::Class(decl) => {
-            visit(&mut decl.name);
+            visit(&mut decl.name, NameKind::Type);
             q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
@@ -176,7 +503,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             }
         }
         Stmt::Struct(decl) => {
-            visit(&mut decl.name);
+            visit(&mut decl.name, NameKind::Type);
             q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
@@ -192,7 +519,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             }
         }
         Stmt::Enum(decl) => {
-            visit(&mut decl.name);
+            visit(&mut decl.name, NameKind::Type);
             q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
@@ -212,7 +539,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Trait(decl) => {
             // A trait's name qualifies like a type's (cross-module `dyn Trait` / `impl` resolution);
             // its method signatures name types in this module, so qualify them in lockstep.
-            visit(&mut decl.name);
+            visit(&mut decl.name, NameKind::Type);
             q_type_params(&mut decl.type_params, visit);
             for m in &mut decl.methods {
                 q_fn(&mut m.sig, visit);
@@ -248,7 +575,7 @@ fn q_fn(decl: &mut FnDecl, visit: &mut NameVisitor) {
 fn q_type_params(params: &mut [TypeParam], visit: &mut NameVisitor) {
     for p in params {
         for b in &mut p.bounds {
-            visit(&mut b.name);
+            visit(&mut b.name, NameKind::Type);
             for a in &mut b.args {
                 q_typeref(a, visit);
             }
@@ -289,7 +616,7 @@ fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
     // The trait name qualifies iff it is a user-defined trait (L1) — `visit` only rewrites names in
     // the module map (local/imported user traits); a built-in trait (`Add`, `Clone`) is absent from
     // it and left as-is.
-    visit(&mut b.trait_name);
+    visit(&mut b.trait_name, NameKind::Type);
     for m in &mut b.methods {
         q_fn(m, visit);
     }
@@ -298,8 +625,8 @@ fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
 fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
     // The `impl Trait for Target` target names a user type in this module → visit it. The trait name
     // qualifies iff it is a user trait (built-ins are absent from the module map).
-    visit(&mut decl.trait_name);
-    visit(&mut decl.target);
+    visit(&mut decl.trait_name, NameKind::Type);
+    visit(&mut decl.target, NameKind::Type);
     for m in &mut decl.methods {
         q_fn(m, visit);
     }
@@ -308,7 +635,7 @@ fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
 /// Walk a `#[Attr(...)]` data attribute: its name is a `@attribute` struct, and its literal
 /// arguments may themselves name nominal types (a struct/enum/type-ref literal).
 fn q_attr(a: &mut Attribute, visit: &mut NameVisitor) {
-    visit(&mut a.name);
+    visit(&mut a.name, NameKind::Type);
     for arg in &mut a.args {
         q_attr_value(&mut arg.value, visit);
     }
@@ -325,16 +652,18 @@ fn q_attr_value(av: &mut AttrValue, visit: &mut NameVisitor) {
         AttrValue::Enum {
             enum_name, args, ..
         } => {
-            visit(enum_name);
+            visit(enum_name, NameKind::Type);
             args.iter_mut().for_each(|a| q_attr_value(a, visit));
         }
         AttrValue::Struct { type_name, fields } => {
-            visit(type_name);
+            visit(type_name, NameKind::Type);
             fields
                 .iter_mut()
                 .for_each(|(_, val)| q_attr_value(val, visit));
         }
-        AttrValue::TypeRef(name) => visit(name),
+        AttrValue::TypeRef(name) => {
+            visit(name, NameKind::Type);
+        }
         AttrValue::Str(_) | AttrValue::Int(_) | AttrValue::Float(_) | AttrValue::Bool(_) => {}
     }
 }
@@ -346,9 +675,11 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         // enum-path base (`E.Empty`), or a type used as a first-class value — is a `Var` atom at
         // runtime bound under the (now-qualified) type name, so it must qualify too. Only names the
         // map holds (type names) are touched; ordinary bindings pass through.
-        Expr::Ident { name, .. } => visit(name),
+        Expr::Ident { name, .. } => {
+            visit(name, NameKind::Value);
+        }
         Expr::Object(lit) => {
-            visit(&mut lit.type_name);
+            visit(&mut lit.type_name, NameKind::Type);
             for f in &mut lit.fields {
                 q_expr(&mut f.value, visit);
             }
@@ -417,7 +748,17 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
                 q_expr(v, visit);
             }
         }
-        Expr::Member { receiver, .. } => q_expr(receiver, visit),
+        // A member chain may spell a **qualified reference**: `vec.add(…)`, `gv.Shape.Circle(…)`,
+        // `geometry.vec.add` — a dotted module path whose collapse hands the backends the same flat
+        // `Ident(FQN)` an imported short name rewrites to. Try that first; a plain field/method
+        // chain matches no QMap key and recurses as before.
+        Expr::Member { .. } => {
+            if !collapse_qualified_chain(e, visit)
+                && let Expr::Member { receiver, .. } = e
+            {
+                q_expr(receiver, visit);
+            }
+        }
         Expr::Index {
             receiver, index, ..
         } => {
@@ -498,6 +839,74 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
     }
 }
 
+/// The dotted segments of a **pure identifier chain** — `Member(Member(Ident(a), b), c)` →
+/// `[(a, span_a), (b, span_b), (c, span_c)]` — or `None` when any link is not a plain
+/// ident/member (a call, an index, a literal receiver…). Only such a chain can spell a
+/// module-qualified reference.
+fn chain_segments(e: &Expr) -> Option<Vec<(String, noeta_span::Span)>> {
+    match e {
+        Expr::Ident { name, span } => Some(vec![(name.clone(), *span)]),
+        Expr::Member {
+            receiver,
+            name,
+            name_span,
+            ..
+        } => {
+            let mut segments = chain_segments(receiver)?;
+            segments.push((name.clone(), *name_span));
+            Some(segments)
+        }
+        _ => None,
+    }
+}
+
+/// Collapse the longest leading dotted prefix of a member chain that names a qualifiable
+/// declaration (a [`QMap`] key — a module-import alias like `vec.add`, or a spelled-out FQN like
+/// `geometry.vec.add`) into a single `Ident(FQN)`, keeping any trailing members (`gv.Shape.Circle`
+/// keeps `.Circle` on the collapsed enum head). Returns whether a collapse happened; `false` leaves
+/// the chain to the ordinary member walk. Prefixes need ≥ 2 segments — a bare ident is the
+/// existing `Expr::Ident` visit. Longest-first keeps `geometry.vec.add` from stopping at a
+/// shorter accidental key.
+fn collapse_qualified_chain(e: &mut Expr, visit: &mut NameVisitor) -> bool {
+    let Some(segments) = chain_segments(e) else {
+        return false;
+    };
+    for k in (2..=segments.len()).rev() {
+        let mut dotted = segments[..k]
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        if !visit(&mut dotted, NameKind::ValueChain) {
+            continue;
+        }
+        let mut collapsed = Expr::Ident {
+            name: dotted,
+            span: noeta_span::Span {
+                start: segments[0].1.start,
+                end: segments[k - 1].1.end,
+                source: segments[0].1.source,
+            },
+        };
+        for (name, name_span) in &segments[k..] {
+            let span = noeta_span::Span {
+                start: segments[0].1.start,
+                end: name_span.end,
+                source: segments[0].1.source,
+            };
+            collapsed = Expr::Member {
+                receiver: Box::new(collapsed),
+                name: name.clone(),
+                name_span: *name_span,
+                span,
+            };
+        }
+        *e = collapsed;
+        return true;
+    }
+    false
+}
+
 fn q_pattern(p: &mut Pattern, visit: &mut NameVisitor) {
     match p {
         Pattern::Variant {
@@ -506,7 +915,7 @@ fn q_pattern(p: &mut Pattern, visit: &mut NameVisitor) {
             ..
         } => {
             if let Some(n) = type_name {
-                visit(n);
+                visit(n, NameKind::Type);
             }
             bindings.iter_mut().for_each(|b| q_pattern(b, visit));
         }
