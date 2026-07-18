@@ -97,10 +97,10 @@ impl Checker {
     /// Validate a standalone `impl Trait for T {}` declaration. Two checks beyond the shared
     /// trait-side validation ([`Self::check_trait_impl`], also run): the **orphan rule** — `T` must
     /// be a struct/class/enum declared in this module, not a built-in or a `use`-imported name
-    /// (E0013) — and the **pass-1 body restriction** — only empty-body marker/capability impls are
-    /// supported (a body with methods needs runtime dispatch in both backends, a later slice).
-    /// Coherence is enforced together with the target's `@derive`s/in-body impls in
-    /// [`Self::check_coherence`].
+    /// (E0013) — and the **built-in body restriction** — a *user* trait's standalone impl may
+    /// carry method bodies (hoisted onto the target), but a built-in trait's must stay an
+    /// empty-body marker (E0015). Coherence is enforced together with the target's
+    /// `@derive`s/in-body impls in [`Self::check_coherence`].
     pub(crate) fn check_standalone_impl(&mut self, decl: &ImplDecl) {
         // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
         // validation — bundle resolution, packed-target + constraint checks, conflict rules. But a
