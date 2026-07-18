@@ -3022,6 +3022,14 @@ impl Interpreter {
                     .cloned()
                     .unwrap_or_else(|| args[1].clone()))
             }
+            noeta_stdlib::MapMethod::Get => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let key = self.expect_map_key(name, &args[0], span)?;
+                Ok(match entries.get(&key) {
+                    Some(value) => builtin_enum("Option", "some", vec![value.clone()]),
+                    None => builtin_enum("Option", "none", Vec::new()),
+                })
+            }
         }
     }
 

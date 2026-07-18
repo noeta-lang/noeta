@@ -1,0 +1,6 @@
+// `get(key)` takes the map's own key type `K` — a wrong-typed key is a static E0007, caught by the
+// checker before either backend runs (here `int` against a `Map<string, int>`'s `string` key).
+// expect: error E0007 at 6:6
+// expect: exit 1
+m = {"a": 1}
+echo m.get(5)
