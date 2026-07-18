@@ -302,14 +302,28 @@ pub(crate) fn is_tier_setup(stmt: &Stmt) -> bool {
 }
 
 /// A statement that calls fn `name` with `args`: `name(args…);`. Zero `args` is the ordinary
-/// test/bench call; a single arg is a `#[Data]` row.
+/// test/bench call; a single arg is a `#[Data]` row. A **method** root is named `Type.method` — it
+/// is called as an associated function `Type.method(args…)` (a bare-type-name receiver the compiler
+/// resolves to an associated call, invoked with no receiver); a plain name is a top-level call.
 pub(crate) fn call_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
-    Stmt::Expr {
-        expr: Expr::Call {
-            callee: Box::new(Expr::Ident {
-                name: name.to_string(),
+    let callee = match name.split_once('.') {
+        Some((type_name, method)) => Expr::Member {
+            receiver: Box::new(Expr::Ident {
+                name: type_name.to_string(),
                 span,
             }),
+            name: method.to_string(),
+            name_span: span,
+            span,
+        },
+        None => Expr::Ident {
+            name: name.to_string(),
+            span,
+        },
+    };
+    Stmt::Expr {
+        expr: Expr::Call {
+            callee: Box::new(callee),
             args,
             span,
         },

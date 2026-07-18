@@ -726,6 +726,49 @@ pub fn activate_tiers_with(
             }
         }
     }
+    // Method-level `@test`/`@bench` directives (directive attachment sites): a method carrying one
+    // becomes a runnable root named `Type.method` — an associated function the runner invokes with
+    // no receiver (E0054 guarantees a `@test`/`@bench` method reads no `self`). It is collected only
+    // when the tier is active, mirroring the top-level block, and marked `is_dev_tier` for the same
+    // white-box field access a lifted top-level tier fn gets.
+    for stmt in &mut stmts {
+        let (type_name, methods) = match stmt {
+            Stmt::Struct(d) => (d.name.clone(), &mut d.methods),
+            Stmt::Class(d) => (d.name.clone(), &mut d.methods),
+            Stmt::Enum(d) => (d.name.clone(), &mut d.methods),
+            _ => continue,
+        };
+        for method in methods.iter_mut() {
+            let mut make_test = false;
+            let mut make_bench = false;
+            for dir in &method.directives {
+                match dir.name.as_str() {
+                    "test" if active.contains(&"test") => make_test = true,
+                    "bench" if active.contains(&"bench") => make_bench = true,
+                    _ => {}
+                }
+            }
+            if !make_test && !make_bench {
+                continue;
+            }
+            method.is_dev_tier = true;
+            let name = format!("{type_name}.{}", method.name);
+            if make_test {
+                roots.tests.push(TierFn {
+                    name: name.clone(),
+                    span: method.name_span,
+                    attrs: method.attrs.clone(),
+                });
+            }
+            if make_bench {
+                roots.benches.push(TierFn {
+                    name,
+                    span: method.name_span,
+                    attrs: method.attrs.clone(),
+                });
+            }
+        }
+    }
     Activated {
         program: Program {
             stmts,
@@ -1328,6 +1371,36 @@ mod tests {
             "fixture must parse cleanly"
         );
         parsed.program
+    }
+
+    /// A method carrying a `@test` directive is discovered as a root named `Type.method` (an
+    /// associated function the runner calls with no receiver) and marked `is_dev_tier`.
+    #[test]
+    fn method_test_directive_becomes_a_qualified_root() {
+        noeta_stdlib::registry::default_seeded();
+        let program = parse_program(
+            "struct Point {\n    \
+             x: int = 0\n    \
+             @test\n    \
+             fn is_zero() { assert(Point {}.x == 0); }\n\
+             }\n",
+        );
+        let out = activate_tiers(&program, &["test"]);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert_eq!(
+            out.tests
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Point.is_zero"]
+        );
+        let Stmt::Struct(d) = &out.program.stmts[0] else {
+            panic!("expected a struct");
+        };
+        assert!(
+            d.methods[0].is_dev_tier,
+            "the test method is marked is_dev_tier"
+        );
     }
 
     /// An active `@test` block inlines its fns as top-level decls and surfaces them as tests; the
