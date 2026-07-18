@@ -602,6 +602,49 @@ impl TypeRepr {
 /// Variables view) so a type reads the same everywhere.
 impl std::fmt::Display for TypeRepr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The fully-qualified nominal name, verbatim — the disambiguating form hover and the
+        // debugger want.
+        self.fmt_spelling(f, &|name| name)
+    }
+}
+
+impl TypeRepr {
+    /// The surface spelling with every nominal name shortened to its final `.`-segment — the
+    /// in-scope short name a developer actually wrote (`geometry.vec.Vec2` → `Vec2`, recursively
+    /// through type arguments: `List<geometry.vec.Vec2>` → `List<Vec2>`). Inlay type hints use this
+    /// because they sit right next to source that already spells the type by its imported short
+    /// name; [`Display`](std::fmt::Display) keeps the fully-qualified form for hover/debugger, where
+    /// there is no adjacent code to disambiguate against.
+    pub fn display_short(&self) -> String {
+        struct Short<'a>(&'a TypeRepr);
+        impl std::fmt::Display for Short<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0
+                    .fmt_spelling(f, &|name| name.rsplit('.').next().unwrap_or(name))
+            }
+        }
+        Short(self).to_string()
+    }
+
+    /// Render the Noeta surface spelling, mapping every nominal name (nominal types and `dyn Trait`)
+    /// through `name`. The single source of truth for [`Display`] (identity mapping) and
+    /// [`display_short`](Self::display_short) (final-segment mapping); all container/generic/function
+    /// nesting recurses through here so the mapping reaches type arguments too.
+    fn fmt_spelling(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        name: &dyn Fn(&str) -> &str,
+    ) -> std::fmt::Result {
+        // Comma-join a nested type list (`<…>` arguments, `(…)` parameters) under the same mapping.
+        let join = |f: &mut std::fmt::Formatter<'_>, types: &[TypeRepr]| -> std::fmt::Result {
+            for (i, t) in types.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                t.fmt_spelling(f, name)?;
+            }
+            Ok(())
+        };
         match self {
             TypeRepr::Int => f.write_str("int"),
             TypeRepr::Float => f.write_str("float"),
@@ -611,43 +654,64 @@ impl std::fmt::Display for TypeRepr {
             TypeRepr::Bytes => f.write_str("bytes"),
             TypeRepr::Unit => f.write_str("void"),
             TypeRepr::Dyn => f.write_str("dyn"),
-            TypeRepr::DynTrait(name) => write!(f, "dyn {name}"),
-            TypeRepr::List(t) => write!(f, "List<{t}>"),
-            TypeRepr::Set(t) => write!(f, "Set<{t}>"),
-            TypeRepr::Option(t) => write!(f, "?{t}"),
-            TypeRepr::Map(k, v) => write!(f, "Map<{k}, {v}>"),
-            TypeRepr::Result(o, e) => write!(f, "Result<{o}, {e}>"),
-            TypeRepr::Enum(name, args)
-            | TypeRepr::Struct(name, args)
-            | TypeRepr::Class(name, args)
-            | TypeRepr::Named(name, args) => {
-                f.write_str(name)?;
+            TypeRepr::DynTrait(t) => write!(f, "dyn {}", name(t)),
+            TypeRepr::List(t) => {
+                f.write_str("List<")?;
+                t.fmt_spelling(f, name)?;
+                f.write_str(">")
+            }
+            TypeRepr::Set(t) => {
+                f.write_str("Set<")?;
+                t.fmt_spelling(f, name)?;
+                f.write_str(">")
+            }
+            TypeRepr::Option(t) => {
+                f.write_str("?")?;
+                t.fmt_spelling(f, name)
+            }
+            TypeRepr::Map(k, v) => {
+                f.write_str("Map<")?;
+                k.fmt_spelling(f, name)?;
+                f.write_str(", ")?;
+                v.fmt_spelling(f, name)?;
+                f.write_str(">")
+            }
+            TypeRepr::Result(o, e) => {
+                f.write_str("Result<")?;
+                o.fmt_spelling(f, name)?;
+                f.write_str(", ")?;
+                e.fmt_spelling(f, name)?;
+                f.write_str(">")
+            }
+            TypeRepr::Enum(n, args)
+            | TypeRepr::Struct(n, args)
+            | TypeRepr::Class(n, args)
+            | TypeRepr::Named(n, args) => {
+                f.write_str(name(n))?;
                 if !args.is_empty() {
-                    write!(f, "<{}>", join_types(args))?;
+                    f.write_str("<")?;
+                    join(f, args)?;
+                    f.write_str(">")?;
                 }
                 Ok(())
             }
-            TypeRepr::Fn(params, ret) => write!(f, "({}) -> {ret}", join_types(params)),
+            TypeRepr::Fn(params, ret) => {
+                f.write_str("(")?;
+                join(f, params)?;
+                f.write_str(") -> ")?;
+                ret.fmt_spelling(f, name)
+            }
             TypeRepr::Union(members) => {
                 for (i, m) in members.iter().enumerate() {
                     if i > 0 {
                         f.write_str(" | ")?;
                     }
-                    write!(f, "{m}")?;
+                    m.fmt_spelling(f, name)?;
                 }
                 Ok(())
             }
         }
     }
-}
-
-/// Comma-join a type list for `<…>` arguments and `(…)` parameters.
-fn join_types(types: &[TypeRepr]) -> String {
-    types
-        .iter()
-        .map(TypeRepr::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Project a surface [`TypeRef`] onto a reflection [`TypeRepr`], **without kind information** (runtime
@@ -994,6 +1058,47 @@ mod tests {
         assert_eq!(
             TypeRepr::Union(vec![TypeRepr::Int, TypeRepr::Str]).to_string(),
             "int | string"
+        );
+    }
+
+    #[test]
+    fn display_short_drops_the_qualifier() {
+        // A bare nominal loses its module prefix; scalars and keywords are untouched.
+        assert_eq!(
+            TypeRepr::Struct("geometry.vec.Vec2".to_string(), vec![]).display_short(),
+            "Vec2"
+        );
+        assert_eq!(TypeRepr::Int.display_short(), "int");
+        // Display keeps the fully-qualified form for hover/debugger.
+        assert_eq!(
+            TypeRepr::Struct("geometry.vec.Vec2".to_string(), vec![]).to_string(),
+            "geometry.vec.Vec2"
+        );
+    }
+
+    #[test]
+    fn display_short_reaches_nested_type_arguments() {
+        // Shortening recurses through containers, generics, function types and unions.
+        let vec2 = || TypeRepr::Struct("geometry.vec.Vec2".to_string(), vec![]);
+        assert_eq!(
+            TypeRepr::List(boxed(vec2())).display_short(),
+            "List<Vec2>"
+        );
+        assert_eq!(
+            TypeRepr::Map(boxed(TypeRepr::Str), boxed(vec2())).display_short(),
+            "Map<string, Vec2>"
+        );
+        assert_eq!(
+            TypeRepr::Class("pkg.Box".to_string(), vec![vec2()]).display_short(),
+            "Box<Vec2>"
+        );
+        assert_eq!(
+            TypeRepr::Fn(vec![vec2()], boxed(TypeRepr::Option(boxed(vec2())))).display_short(),
+            "(Vec2) -> ?Vec2"
+        );
+        assert_eq!(
+            TypeRepr::Union(vec![vec2(), TypeRepr::Int]).display_short(),
+            "Vec2 | int"
         );
     }
 }

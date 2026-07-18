@@ -103,7 +103,7 @@ impl Walker<'_> {
                 {
                     self.hints.push(TypeHint {
                         offset: name_span.end,
-                        label: format!(": {repr}{}", self.storage_suffix(repr)),
+                        label: format!(": {}{}", repr.display_short(), self.storage_suffix(repr)),
                         kind: HintKind::Type,
                     });
                 }
@@ -214,7 +214,7 @@ impl Walker<'_> {
                         {
                             self.hints.push(TypeHint {
                                 offset: param.name_span.end,
-                                label: format!(": {ty}{}", self.storage_suffix(ty)),
+                                label: format!(": {}{}", ty.display_short(), self.storage_suffix(ty)),
                                 kind: HintKind::Type,
                             });
                         }
