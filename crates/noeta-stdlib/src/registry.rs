@@ -56,6 +56,20 @@ macro_rules! std_unit {
 /// declares the built-in dev-tiers and their attributes (tier-extensions port, `crate::tiers`).
 #[derive(Debug, Clone, Copy)]
 pub struct CoreExtension;
+/// std's native derive recipes (derive layer 4) — the dogfood proving the `ExtDerive` seam the
+/// way core modules prove the module ABI. `@derive(Inspect)` gives a type
+/// `fn inspect(): dyn` forwarding into `json.stringify(self)` — a structural dump via the native
+/// JSON renderer, no macro and no per-type codegen.
+static STD_DERIVES: &[noeta_ext_abi::registry::ExtDerive] = &[noeta_ext_abi::registry::ExtDerive {
+    name: "Inspect",
+    methods: &[noeta_ext_abi::registry::ExtDeriveMethod {
+        name: "inspect",
+        arity: 0,
+        handler: "json.stringify",
+    }],
+    validate: None,
+}];
+
 impl Extension for CoreExtension {
     fn name(&self) -> &'static str {
         "std.core"
@@ -74,6 +88,9 @@ impl Extension for CoreExtension {
     }
     fn attributes(&self) -> &'static [noeta_ext_abi::registry::ExtAttribute] {
         crate::tiers::ATTRIBUTES
+    }
+    fn derives(&self) -> &'static [noeta_ext_abi::registry::ExtDerive] {
+        STD_DERIVES
     }
     fn body_formatters(&self) -> &'static [noeta_ext_abi::registry::BodyFormatter] {
         crate::tiers::BODY_FORMATTERS

@@ -415,6 +415,49 @@ pub fn plan_builtin_via(
     }
 }
 
+/// The methods a **native** (extension-registered) derive synthesizes (derive layer 4): each is a
+/// forward into its native handler — `fn m(a1: dyn, …): dyn { return <handler>(self, a1, …) }`,
+/// the handler resolved like an expression tier's (`Expr::NativeFnRef`, no user import). Given as
+/// plain `(name, arity, handler)` tuples so this crate stays free of the extension ABI; the
+/// checker and the hoist both project `ExtDeriveMethod` onto this shape.
+pub fn plan_native_derive(methods: &[(String, usize, String)], span: Span) -> Vec<FnDecl> {
+    methods
+        .iter()
+        .map(|(name, arity, handler)| {
+            let params: Vec<Param> = (0..*arity)
+                .map(|i| Param {
+                    name: format!("a{i}"),
+                    name_span: span,
+                    ty: Some(named("dyn", span)),
+                    default: None,
+                    span,
+                })
+                .collect();
+            let callee = match handler.rsplit_once('.') {
+                Some((module, func)) => Expr::NativeFnRef {
+                    module: module.to_string(),
+                    func: func.to_string(),
+                    span,
+                },
+                None => ident(handler, span),
+            };
+            let call = Expr::Call {
+                callee: Box::new(callee),
+                args: std::iter::once(ident("self", span))
+                    .chain(params.iter().map(|p| ident(&p.name, span)))
+                    .collect(),
+                span,
+            };
+            let template = FnDecl {
+                params,
+                ret: Some(named("dyn", span)),
+                ..empty_fn(name, span)
+            };
+            synth_fn(&template, ret_stmt(call, span), span)
+        })
+        .collect()
+}
+
 // ---- synthesis helpers ---------------------------------------------------------------------
 
 fn require_field<'f>(

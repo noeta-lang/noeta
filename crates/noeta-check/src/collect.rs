@@ -570,6 +570,17 @@ impl Checker {
                     noeta_ast::derive::plan_user_trait_derive(&tr, fields, methods, spec)
                 } else if spec.via.is_some() {
                     noeta_ast::derive::plan_builtin_via(&spec.name, type_name, fields, spec)
+                } else if let Some(ext) = self.reg().find_ext_derive(&spec.name) {
+                    // A native derive recipe (layer 4): register its handler-forward signatures.
+                    let ext_methods: Vec<(String, usize, String)> = ext
+                        .methods
+                        .iter()
+                        .map(|m| (m.name.to_string(), m.arity, m.handler.to_string()))
+                        .collect();
+                    Ok(noeta_ast::derive::plan_native_derive(
+                        &ext_methods,
+                        spec.span,
+                    ))
                 } else {
                     continue;
                 };

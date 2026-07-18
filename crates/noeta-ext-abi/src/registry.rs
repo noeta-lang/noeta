@@ -756,6 +756,39 @@ pub struct ExtTier {
     pub handler: Option<&'static str>,
 }
 
+/// An extension-declared **derive recipe** (derive layer 4) — the native counterpart of deriving
+/// a fully-defaulted user trait: `@derive(<Name>)` on a type synthesizes, for each declared
+/// method, a forward into the extension's registered module function —
+/// `fn <name>(a1: dyn, …): dyn { return <handler>(self, a1, …) }` — resolved like an expression
+/// tier's native handler (an `Expr::NativeFnRef`, no user import needed). The handler's own
+/// registered signature is the typing authority at the call; the recipe does its real work
+/// natively (typically via reflection over the value), so this is the proc-macro power tier
+/// without codegen opacity: what the derive adds is a visible, checkable forward.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtDerive {
+    /// The name programs write in `@derive(...)`. Resolved after built-in traits and the
+    /// program's user traits, so it can never shadow either.
+    pub name: &'static str,
+    /// The methods the derive synthesizes onto the deriving type.
+    pub methods: &'static [ExtDeriveMethod],
+    /// Optional compile-time shape validation: given the deriving type's name and its
+    /// `(field name, field type spelling)` pairs, return `Some(message)` to reject the derive at
+    /// the declaration (E0050). `None` (the field or the result) accepts.
+    #[allow(clippy::type_complexity)]
+    pub validate: Option<fn(&str, &[(String, String)]) -> Option<String>>,
+}
+
+/// One method an [`ExtDerive`] synthesizes.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtDeriveMethod {
+    /// The synthesized method's name on the deriving type.
+    pub name: &'static str,
+    /// Its parameter count EXCLUDING the receiver (each parameter is `dyn` at the surface).
+    pub arity: usize,
+    /// The qualified native handler, `"module.func"`, called with `(self, args…)`.
+    pub handler: &'static str,
+}
+
 /// A native **tier-body formatter** for `noeta fmt`, keyed by body **language** (extension-driven
 /// tier-body formatting). It is `(body, indent, sub) -> Option<reflowed>`:
 /// - `body` is the foreign text with each `${…}` hole represented as a single NUL (`\0`) placeholder;
@@ -807,6 +840,11 @@ pub trait Extension: Sync {
     }
     /// The extension's declared prelude attributes (tier knobs and metadata). Default empty.
     fn attributes(&self) -> &'static [ExtAttribute] {
+        &[]
+    }
+    /// The extension's declared **derive recipes** (derive layer 4 — see [`ExtDerive`]). Default
+    /// empty; a defaulted trait method keeps every existing extension source-compatible.
+    fn derives(&self) -> &'static [ExtDerive] {
         &[]
     }
     /// The extension's **tier-body formatters** for `noeta fmt`, keyed by body language (extension-
@@ -1312,6 +1350,16 @@ impl Registry {
     /// Every installed extension's declared prelude attributes, in install order.
     pub fn ext_attributes(&self) -> impl Iterator<Item = &'static ExtAttribute> + '_ {
         self.units.iter().flat_map(|e| e.attributes().iter())
+    }
+
+    /// Every installed extension's derive recipes (derive layer 4), in install order.
+    pub fn ext_derives(&self) -> impl Iterator<Item = &'static ExtDerive> + '_ {
+        self.units.iter().flat_map(|e| e.derives().iter())
+    }
+
+    /// The installed derive recipe named `name`, if any.
+    pub fn find_ext_derive(&self, name: &str) -> Option<&'static ExtDerive> {
+        self.ext_derives().find(|d| d.name == name)
     }
 
     /// Every installed extension's tier-body formatters `(language, fn)`, in install order.

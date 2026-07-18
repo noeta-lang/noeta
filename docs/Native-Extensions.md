@@ -263,3 +263,7 @@ The motivating consumer is a native function that builds a value of a type named
 
 - [Standard-Library Modules](Standard-Library-Modules) — the modules registered through this seam.
 - [Concurrency Internals](Concurrency-Internals) — the `Host` capability's role in the deterministic/real split.
+
+## Derive recipes (`ExtDerive`)
+
+An extension can register **derive recipes**: `Extension::derives()` returns `ExtDerive { name, methods, validate }` entries, and `@derive(<Name>)` on a type synthesizes each declared method as a forward into the extension's registered module function — `fn <name>(a1: dyn, …): dyn { return <handler>(self, a1, …) }`, resolved like an expression tier's native handler (no user import). The handler does its real work natively (typically reflecting over the value); the optional `validate` hook can reject unsuitable type shapes at check time (E0050). std's own `Inspect` (`inspect()` → `json.stringify(self)`) is the dogfood. Names resolve after built-in traits and the program's user traits, so a recipe can never shadow either.

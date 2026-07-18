@@ -440,6 +440,20 @@ fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candi
             });
         }
     }
+    // Native derive recipes (layer 4): extension-registered, synthesizing handler forwards.
+    for d in noeta_stdlib::registry::single_registry_process().ext_derives() {
+        let methods = d
+            .methods
+            .iter()
+            .map(|m| format!("{}()", m.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        candidates.push(Candidate {
+            label: d.name.to_string(),
+            kind: CandidateKind::Trait,
+            detail: Some(format!("native derive — synthesizes {methods}")),
+        });
+    }
     dedupe_by_label(candidates)
 }
 

@@ -1,0 +1,14 @@
+// Derive layer 4 — a NATIVE derive recipe (`ExtDerive`): std registers `Inspect`, whose
+// `@derive(Inspect)` synthesizes `fn inspect(): dyn` forwarding into `json.stringify(self)` —
+// resolved like an expression tier's native handler, no import needed.
+// expect: stdout "{\"name\":\"Ada\",\"id\":7}"
+// expect: stdout "{\"cents\":300}"
+// expect: exit 0
+@derive(Inspect)
+struct User { name: string; id: int }
+
+@derive(Inspect)
+struct Price { cents: int }
+
+echo User { name: "Ada", id: 7 }.inspect()
+echo Price { cents: 300 }.inspect()

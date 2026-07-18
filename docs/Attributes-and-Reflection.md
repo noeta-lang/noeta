@@ -64,6 +64,22 @@ Two more directive families use the `@` sigil but are not decorators in this fou
 
 ## The reflection surface
 
+### `fields_of(value)` — value-level field reflection
+
+`fields_of(value)` returns a struct/class instance's fields as `List<FieldEntry>` — each `{ name: string, value: dyn }`, in declaration order (any other value yields the empty list). It is the value-level counterpart of `type_of`, and what lets a fully-defaulted trait implement *structural* behavior over `self` in pure Noeta — no macro system:
+
+```noeta check
+trait Inspectable {
+    fn inspect(): string {
+        mut out = "{"
+        for f in fields_of(self) { out = out ~ " " ~ f.name ~ ": " ~ f.value }
+        return out ~ " }"
+    }
+}
+@derive(Inspectable)
+struct User { name: string; id: int }
+```
+
 A handful of prelude functions expose type and metadata at runtime.
 
 ### `type_of(value): Type`

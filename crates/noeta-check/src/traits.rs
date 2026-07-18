@@ -525,6 +525,39 @@ impl Checker {
                     self.check_user_trait_derive(spec, &decl, fields, type_methods);
                     continue;
                 }
+                // A NATIVE derive recipe (layer 4, `ExtDerive`): synthesizes handler forwards —
+                // no bindings/via surface, plus the recipe's own optional shape validation.
+                if let Some(ext) = self.reg().find_ext_derive(&spec.name) {
+                    if let Some(b) = spec.bindings.first() {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            b.span,
+                            format!(
+                                "`{}: {}` — `{}` is a native derive with a fixed recipe; it takes \
+                                 no member bindings",
+                                b.member, b.target, spec.name
+                            ),
+                        );
+                    } else if let Some((_, via_span)) = &spec.via {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            *via_span,
+                            format!("`{}` is a native derive; `via:` does not apply", spec.name),
+                        );
+                    } else if let Some(validate) = ext.validate {
+                        let shape: Vec<(String, String)> = fields
+                            .iter()
+                            .map(|f| {
+                                let ty = field_type(&f.ty, &self.imports.extern_types);
+                                (f.name.clone(), ty.to_string())
+                            })
+                            .collect();
+                        if let Some(message) = validate(type_name, &shape) {
+                            self.error(DiagnosticCode::UnderivableTrait, spec.span, message);
+                        }
+                    }
+                    continue;
+                }
                 self.error(
                     DiagnosticCode::UnknownTrait,
                     spec.span,
