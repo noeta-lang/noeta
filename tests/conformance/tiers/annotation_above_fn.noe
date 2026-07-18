@@ -1,0 +1,20 @@
+// A dev-tier directive on its **own line above** a top-level `fn` — the same shape a method's
+// directive takes inside a struct/class/enum — is the annotation form with the woven newline
+// boundary absorbed, desugaring to the identical one-item TierBlock as `@test fn …` on one line.
+// On a normal run both annotated fns are stripped before lowering (inactive tiers), so the
+// program's output is unchanged and the differential agrees by construction.
+// expect: stdout "12"
+// expect: exit 0
+fn triple(n: int): int { return n * 3 }
+
+@test
+fn triple_triples(): void {
+    assert(triple(2) == 6, "3 * 2")
+}
+
+@bench
+fn triple_bench(): void {
+    triple(7)
+}
+
+echo triple(4)

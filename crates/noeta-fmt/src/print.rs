@@ -625,11 +625,20 @@ impl Printer<'_> {
                         ]))
                     }
                     // A code tier (`@test`/`@bench`/`@debug`): its items are ordinary statements.
-                    None => Ok(Doc::concat([
-                        head,
-                        Doc::text(" "),
-                        self.block(items, span.start, span.end)?,
-                    ])),
+                    // A single wrapped `fn` — the annotation form (`@test fn …` desugars to this) —
+                    // canonicalizes to the directive on its own line above the declaration, the
+                    // same shape a method's directive formats to; a block with several items (or a
+                    // test-only type) keeps its braces.
+                    None => match items.as_slice() {
+                        [item @ Stmt::Fn(_)] => {
+                            Ok(Doc::concat([head, Doc::hardline(), self.stmt(item)?]))
+                        }
+                        _ => Ok(Doc::concat([
+                            head,
+                            Doc::text(" "),
+                            self.block(items, span.start, span.end)?,
+                        ])),
+                    },
                 }
             }
         }

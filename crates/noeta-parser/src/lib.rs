@@ -3514,10 +3514,14 @@ where
         // `fn` (the `@test fn` case); test-only *types* use the block form. The follow token
         // disambiguates cleanly: `@test {` opens a block (no `fn`, so this fails over to
         // `tier_block`), and `@derive(...) struct` finds no `fn` after the directive and backtracks
-        // to the decorator path.
+        // to the decorator path. The directive may sit on its **own line above** the `fn` — the
+        // woven newline-boundary `;` between them is absorbed, exactly as a method's directive
+        // (slice 7) and a decorator ahead of a type decl absorb theirs — so the top-level form and
+        // the member form read identically.
         let tier_annotation = just(T::At)
             .ignore_then(tier_name.clone())
             .then(tier_args.clone())
+            .then_ignore(just(T::Semicolon).repeated())
             .then(fn_decl.clone())
             .map_with(
                 move |(((tier, tier_span), args), item), e| Stmt::TierBlock {
@@ -3544,6 +3548,8 @@ where
             .collect::<Vec<_>>()
             .then(just(T::At).ignore_then(tier_name.clone()))
             .then(tier_args.clone())
+            // As in `tier_annotation`: the directive may sit on its own line above the `fn`.
+            .then_ignore(just(T::Semicolon).repeated())
             .then(fn_decl.clone())
             .map_with(move |(((attrs, (tier, tier_span)), args), item), e| {
                 let mut item = item;
