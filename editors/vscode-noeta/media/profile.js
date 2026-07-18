@@ -436,7 +436,7 @@
     const rows = new Map();
     const rowFor = (frame) => {
       const fn = fnName(frame);
-      const key = fn + " " + (frame.file ?? "");
+      const key = fn + " " + (frame.file ?? "");
       let row = rows.get(key);
       if (!row) {
         row = { fn, file: frame.file, line: frame.line, col: frame.col, loc: locText(frame.file, frame.line), self: 0, total: 0, hottest: -1 };
