@@ -130,8 +130,10 @@ pub fn run_compiled(compiled: Compiled, debugger: Option<Box<dyn Debugger>>) -> 
         });
     }
     // The abort's stack trace, after the diagnostic it belongs to (same rendering + same "only when
-    // there is a call chain" rule as `noeta run`).
-    if trace.len() >= 2 {
+    // there is a call chain" rule as `noeta run`). A **user-requested stop** (the debug UI's stop
+    // button → `DebugAction::Terminate`) unwinds with NO diagnostic recorded — an orphan trace
+    // there reads as a crash, so a trace only ever accompanies its diagnostic.
+    if !result.diagnostics.is_empty() && trace.len() >= 2 {
         chunks.push(OutputChunk {
             category: "stderr",
             text: noeta_vm::render_trace(&trace, &compiled.sources),

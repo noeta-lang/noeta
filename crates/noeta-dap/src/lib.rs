@@ -65,6 +65,10 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
 
     let mut program: Option<PathBuf> = None;
     let mut stop_on_entry = false;
+    // DAP `noDebug` (the client's "Run Without Debugging"): launch the program with NO debug hook
+    // at all — it runs exactly as `noeta run` does; breakpoints and stop-on-entry are ignored by
+    // contract.
+    let mut no_debug = false;
     // Requested breakpoints, keyed by the editor's source path → 1-based lines.
     let mut breakpoints: HashMap<String, Vec<u32>> = HashMap::new();
     // Present once a run is launched: `resume_tx` unblocks a paused worker; `terminate` abandons a
@@ -86,6 +90,7 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
             "launch" => {
                 program = launch_program(&request);
                 stop_on_entry = launch_flag(&request, "stopOnEntry");
+                no_debug = launch_flag(&request, "noDebug");
                 let _ = tx.send(response(&request, json!({})));
             }
             "setBreakpoints" => {
@@ -123,6 +128,7 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                             path,
                             breakpoints.clone(),
                             stop_on_entry,
+                            no_debug,
                             term,
                             paused_state,
                             r_rx,
@@ -231,6 +237,7 @@ fn spawn_run(
     path: PathBuf,
     breakpoints: HashMap<String, Vec<u32>>,
     stop_on_entry: bool,
+    no_debug: bool,
     terminate: Arc<AtomicBool>,
     paused: Paused,
     resume: mpsc::Receiver<Resume>,
@@ -242,6 +249,8 @@ fn spawn_run(
             json!({ "reason": "started", "threadId": MAIN_THREAD_ID }),
         ));
         let run = match session::compile_file(&path) {
+            // Run Without Debugging: no hook, no breakpoints — the plain-run fast path.
+            Ok(compiled) if no_debug => session::run_compiled(compiled, None),
             Ok(mut compiled) => {
                 let stops = resolve_breakpoints(&compiled.module, &compiled.sources, &breakpoints);
                 // The launch's session checker moves into the debugger (C3): console fragments
