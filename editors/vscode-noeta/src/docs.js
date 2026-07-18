@@ -70,7 +70,7 @@ class DocsViewProvider {
   <button id="collapse" class="icon-btn" title="Collapse all" aria-label="Collapse all"></button>
 </div>
 <div id="count" aria-live="polite"></div>
-<div id="tree"></div>
+<div id="tree" tabindex="-1"></div>
 <script nonce="${n}" src="${scriptUri}"></script>
 </body>
 </html>`;

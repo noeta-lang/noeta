@@ -106,6 +106,10 @@
     if (selected) selected.classList.remove("selected");
     selected = row;
     row.classList.add("selected");
+    // Hold focus on the tree container so the selection shows the ACTIVE native styling
+    // (:focus-within in the stylesheet); it dims to the inactive state when focus moves to
+    // the filter or leaves the view — exactly the native list behavior.
+    tree.focus({ preventScroll: true });
   }
 
   function renderRoots(nodes) {

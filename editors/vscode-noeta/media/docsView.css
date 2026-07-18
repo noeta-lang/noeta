@@ -96,7 +96,24 @@ body {
   overflow: hidden;
 }
 .row:hover { background: var(--vscode-list-hoverBackground); }
-.row.selected { background: var(--vscode-list-inactiveSelectionBackground); }
+/* Selection mirrors the native tree's two states: ACTIVE (view focused — the strong themed
+   background, selection foreground, and focus outline) and INACTIVE (focus elsewhere — the
+   muted background). Clicking a row focuses #tree (tabindex=-1), so :focus-within holds
+   exactly while the user is interacting with the tree, like a native list. */
+.row.selected {
+  background: var(--vscode-list-inactiveSelectionBackground);
+  color: var(--vscode-list-inactiveSelectionForeground, inherit);
+}
+#tree:focus { outline: none; } /* the selected row's outline is the focus indicator */
+#tree:focus-within .row.selected {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+  outline: 1px solid var(--vscode-list-focusOutline, transparent);
+  outline-offset: -1px;
+}
+#tree:focus-within .row.selected .twisty {
+  color: var(--vscode-list-activeSelectionIconForeground, var(--vscode-list-activeSelectionForeground));
+}
 
 /* The twisty (chevron) — rotated when expanded; a spacer when the node is a leaf. */
 .twisty {
