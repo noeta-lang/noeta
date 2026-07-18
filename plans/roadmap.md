@@ -34,11 +34,11 @@ trigger-gated. The standouts, roughly by leverage:
    push policy), then mechanical follow-through.
 2. **`@derive(FromJson)`** — now unblocked by the type-system track; the acceptance test for
    "the type is the schema".
-3. **The small-language-follow-ups cluster** — match-arm blocks, `Map.get`, closure-in-method VM
-   capture, generic-enum match-payload bug: each small, each user-visible.
+3. **The small-language-follow-ups cluster** — `Map.get`, match-arm block *values* in expression
+   position: small, user-visible. (Match-arm blocks, closure-in-method VM capture, generic-enum
+   match-payload, and generic-trait defaults have since shipped.)
 4. **In-run safepoint cycle collection** — the one GC story gap (peak residency of cycle-building
    loops).
-5. **Generic traits' default methods** — the natural next traits slice after UT5.
 
 ## Working discipline (unchanged)
 
