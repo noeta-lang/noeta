@@ -279,12 +279,26 @@ fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
 /// A directory that cannot be read yields no modules; unreadable files are skipped — both
 /// matching [`read_siblings`]'s tolerance (it is this scan minus the entry).
 pub fn read_dir_modules(dir: &Path) -> Vec<RawModule> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    // A bare relative entry (`noeta test app.noe`) has parent `""` — the current directory —
+    // but `read_dir("")` errors, which silently dropped every sibling: an E0019 from the very
+    // directory the user stands in, while the byte-equivalent `./app.noe` linked fine. Scan `.`
+    // instead, but keep the produced paths rooted at the ORIGINAL (empty) prefix, so module
+    // names stay byte-equal to how the invocation addresses the entry (`m.noe`, not `./m.noe`)
+    // — `noeta check`'s entry-to-pool index match compares those names.
+    let bare = dir.as_os_str().is_empty();
+    let scan: &Path = if bare { Path::new(".") } else { dir };
+    let Ok(entries) = std::fs::read_dir(scan) else {
         return Vec::new();
     };
     let mut paths: Vec<std::path::PathBuf> = entries
         .flatten()
-        .map(|e| e.path())
+        .map(|e| {
+            if bare {
+                std::path::PathBuf::from(e.file_name())
+            } else {
+                e.path()
+            }
+        })
         .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "noe"))
         .collect();
     paths.sort();
