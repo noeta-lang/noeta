@@ -60,6 +60,12 @@ pub const GUIDE_ROOT: &str = "guide";
 /// [`crate::api`]). Like the guide, workspace-independent.
 pub const API_ROOT: &str = "api";
 
+/// The root of the dependencies corpus: the project's **direct** third-party packages, read from
+/// the manifest's `[dependencies]` (never transitive/shadow deps — those are not in the table).
+/// Workspace-dependent: a source dependency's `.noe` API is browsed from the linked program; a
+/// native or not-yet-fetched dependency shows a placeholder pointing at `noeta doc`.
+pub const DEPS_ROOT: &str = "deps";
+
 /// The kind of a doc node — its icon and how an adapter presents it. Spans every corpus; the
 /// project corpus uses the declaration kinds, later corpora add [`DocKind::Guide`] and friends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +88,8 @@ pub enum DocKind {
     Section,
     /// A language-guide page (a `docs/*.md` wiki page).
     Guide,
+    /// A dependency package (a direct entry of the manifest's `[dependencies]`).
+    Package,
 }
 
 impl DocKind {
@@ -101,6 +109,7 @@ impl DocKind {
             DocKind::Trait => "trait",
             DocKind::Section => "section",
             DocKind::Guide => "guide",
+            DocKind::Package => "package",
         }
     }
 
@@ -180,24 +189,71 @@ pub struct DocHit {
     pub score: i32,
 }
 
+/// How a direct dependency's API is available to the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepKind {
+    /// A `.noe` source package whose modules are linked into the program — its API is browsed in
+    /// full, offline.
+    Source,
+    /// A native (Rust-backed) package: its API is generated at publish time and lives on the
+    /// registry, not in the local store, so the editor can only point at `noeta doc`.
+    Native,
+    /// Declared in the manifest but not resolved on disk yet (not fetched / a resolution error).
+    Unresolved,
+}
+
+/// One direct dependency of the project (a `[dependencies]` entry): the import root it is used
+/// under, a short human detail (its source/version), and how its API is available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepInfo {
+    /// The dependency-table key — the root a consumer writes `use <root>.…` under.
+    pub root: String,
+    /// A dim detail for the row (e.g. `path ../geom`, `git …@v1`, `^1.2`), with a kind hint.
+    pub detail: String,
+    pub kind: DepKind,
+}
+
 /// The host seam the pure assembly resolves through: map a declaration [`Span`] to an editor
-/// [`DocLoc`], and name a project source (returning `None` for a source that should not appear in
-/// the project corpus — e.g. a dependency module, excluded in this slice). The
+/// [`DocLoc`], name a project source, and (for the dependencies corpus) enumerate the direct
+/// dependencies and name a dependency module's source. The
 /// [`DocumentStore`](crate::DocumentStore) implements this over its salsa database; tests stub it.
 pub trait DocEnv {
     fn locate(&self, span: Span) -> Option<DocLoc>;
     /// The display name of a project source (a file basename), or `None` if the source is not part
-    /// of the project corpus (excluded from the tree).
+    /// of the project corpus (a dependency module, excluded from the project tree — it appears
+    /// under the dependencies corpus instead).
     fn source_name(&self, source: SourceId) -> Option<String>;
+
+    /// The project's direct dependencies (manifest `[dependencies]`), for the dependencies corpus
+    /// root — every direct entry, whatever its kind. Empty by default (stubs / no workspace). A
+    /// source dependency's browsable modules are supplied separately, as [`DocCtx::deps`].
+    fn dependencies(&self) -> Vec<DepInfo> {
+        Vec::new()
+    }
+}
+
+/// One direct **source** dependency module: its own parsed [`Program`] (a dependency module is a
+/// separate salsa input, not merged into the workspace program, so it must be threaded in
+/// explicitly), the import `root` it is used under, its display name, and its [`SourceId`] (for
+/// stable ids and go-to-source). The store supplies these; the pure model walks them exactly like a
+/// project module.
+#[derive(Debug)]
+pub struct DepDoc<'a> {
+    pub root: String,
+    pub module_name: String,
+    pub source: SourceId,
+    pub program: &'a Program,
 }
 
 /// The context a doc request resolves in: the workspace's [`DocEnv`] and linked [`Program`] when a
-/// workspace is open, or `None` for both when nothing is open. The **project** corpus needs both
-/// (it yields nothing without them); the **language guide** corpus is workspace-independent and is
-/// served in either case — so the guide is always browsable, even with no `.noe` file open.
+/// workspace is open, or `None` for both when nothing is open, plus the direct source dependencies'
+/// own programs. The **project** corpus needs the env+program (it yields nothing without them); the
+/// **dependencies** corpus needs `deps`; the **language guide** corpus is workspace-independent and
+/// is served in either case — so the guide is always browsable, even with no `.noe` file open.
 pub struct DocCtx<'a> {
     pub env: Option<&'a dyn DocEnv>,
     pub program: Option<&'a Program>,
+    pub deps: Vec<DepDoc<'a>>,
 }
 
 impl std::fmt::Debug for DocCtx<'_> {
@@ -210,11 +266,21 @@ impl std::fmt::Debug for DocCtx<'_> {
 }
 
 impl<'a> DocCtx<'a> {
-    /// A context backed by an open workspace.
+    /// A context backed by an open workspace, with no dependency modules.
     pub fn new(env: &'a dyn DocEnv, program: &'a Program) -> Self {
         DocCtx {
             env: Some(env),
             program: Some(program),
+            deps: Vec::new(),
+        }
+    }
+
+    /// A context backed by an open workspace, including its direct source dependencies' programs.
+    pub fn with_deps(env: &'a dyn DocEnv, program: &'a Program, deps: Vec<DepDoc<'a>>) -> Self {
+        DocCtx {
+            env: Some(env),
+            program: Some(program),
+            deps,
         }
     }
 
@@ -223,6 +289,7 @@ impl<'a> DocCtx<'a> {
         DocCtx {
             env: None,
             program: None,
+            deps: Vec::new(),
         }
     }
 
@@ -239,6 +306,15 @@ pub fn roots() -> Vec<DocNode> {
         DocNode {
             id: DocId::new(PROJECT_ROOT),
             title: "Project".to_string(),
+            kind: DocKind::Root,
+            detail: None,
+            has_page: false,
+            expandable: true,
+            location: None,
+        },
+        DocNode {
+            id: DocId::new(DEPS_ROOT),
+            title: "Dependencies".to_string(),
             kind: DocKind::Root,
             detail: None,
             has_page: false,
@@ -277,6 +353,9 @@ pub fn children(ctx: &DocCtx, id: &DocId) -> Vec<DocNode> {
     if id.root() == API_ROOT {
         return api_children(id);
     }
+    if id.root() == DEPS_ROOT {
+        return deps_children(ctx, id);
+    }
     if id.root() != PROJECT_ROOT {
         return Vec::new();
     }
@@ -312,61 +391,14 @@ pub fn page(ctx: &DocCtx, id: &DocId) -> Option<DocPage> {
     if id.root() == API_ROOT {
         return api_page(id);
     }
+    if id.root() == DEPS_ROOT {
+        return deps_page(ctx, id);
+    }
     if id.root() != PROJECT_ROOT {
         return None;
     }
     let (env, program) = ctx.workspace()?; // the project corpus needs an open workspace
-    let tree = ProjectTree::build(env, program);
-    let seg = id.segments();
-    // A section node's id is `project/{source}/~{index}` — dispatch it before the decl arm, which
-    // it would otherwise shadow (both are three segments).
-    if seg.last().is_some_and(|last| last.starts_with('~')) {
-        return section_page(&tree, &seg);
-    }
-    let (node, signature, markdown) = match seg.as_slice() {
-        [_root, s] => {
-            let m = tree.module(s)?;
-            (&m.node, None, m.prose.clone())
-        }
-        [_root, s, decl] => {
-            let d = tree.module(s)?.decl(decl)?;
-            (&d.node, d.node.detail.clone(), d.prose.clone())
-        }
-        [_root, s, decl, member] => {
-            let m = tree.module(s)?.decl(decl)?.member(member)?;
-            (&m.node, m.node.detail.clone(), m.prose.clone())
-        }
-        _ => return None,
-    };
-    Some(DocPage {
-        id: node.id.clone(),
-        title: node.title.clone(),
-        kind: node.kind,
-        signature,
-        markdown,
-        location: node.location.clone(),
-        xrefs: Vec::new(),
-    })
-}
-
-fn section_page(tree: &ProjectTree, seg: &[&str]) -> Option<DocPage> {
-    let [_root, s, _sec] = seg else {
-        return None;
-    };
-    let module = tree.module(s)?;
-    let section = module
-        .sections
-        .iter()
-        .find(|x| x.node.id.segments() == *seg)?;
-    Some(DocPage {
-        id: section.node.id.clone(),
-        title: section.node.title.clone(),
-        kind: DocKind::Section,
-        signature: None,
-        markdown: section.prose.clone(),
-        location: section.node.location.clone(),
-        xrefs: Vec::new(),
-    })
+    ProjectTree::build(env, program).page_of(id)
 }
 
 /// Rank every project node by how well it matches `query` (case-insensitive): a title hit scores
@@ -377,43 +409,57 @@ pub fn search(ctx: &DocCtx, query: &str) -> Vec<DocHit> {
         return Vec::new();
     }
     let mut hits: Vec<DocHit> = Vec::new();
-    // The project corpus contributes only when a workspace is open.
+    // The project and dependency corpora contribute only when a workspace is open.
     if let Some((env, program)) = ctx.workspace() {
-        let tree = ProjectTree::build(env, program);
-        tree.for_each(&mut |node: &DocNode, prose: &str| {
-            let title_l = node.title.to_lowercase();
-            let detail_l = node.detail.as_deref().unwrap_or("").to_lowercase();
-            let prose_l = prose.to_lowercase();
-            let mut score = 0;
-            if title_l == needle {
-                score += 100;
-            } else if title_l.contains(&needle) {
-                score += 40;
-            }
-            if detail_l.contains(&needle) {
-                score += 8;
-            }
-            if prose_l.contains(&needle) {
-                score += 5;
-            }
-            if score > 0 {
-                hits.push(DocHit {
-                    id: node.id.clone(),
-                    title: node.title.clone(),
-                    kind: node.kind,
-                    snippet: snippet_of(prose, node.detail.as_deref()),
-                    score,
-                });
-            }
-        });
+        score_tree_into(&ProjectTree::build(env, program), &needle, &mut hits);
+        // Source dependencies: the browse-able `.noe` packages threaded in as `ctx.deps`. Group by
+        // root so each dependency contributes one tree (a dep may span several modules).
+        let mut roots: Vec<&str> = ctx.deps.iter().map(|d| d.root.as_str()).collect();
+        roots.sort_unstable();
+        roots.dedup();
+        for root in roots {
+            score_tree_into(&dep_tree(ctx, root), &needle, &mut hits);
+        }
     }
-    // Merge in the language-guide and API-reference corpora so one search spans all three. Scores
+    // Merge in the language-guide and API-reference corpora so one search spans every corpus. Scores
     // are on each ranker's own scale; close enough for a combined best-first order at this size.
     hits.extend(guide_search(query));
     hits.extend(api_search(&needle));
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
     hits.truncate(SEARCH_LIMIT);
     hits
+}
+
+/// Rank every node of one built tree (project or a dependency) against `needle` (already
+/// lowercased): a title hit outscores a detail hit outscores a prose hit. Pushes matches into
+/// `hits`. Shared by the project and dependency corpora so both rank identically.
+fn score_tree_into(tree: &ProjectTree, needle: &str, hits: &mut Vec<DocHit>) {
+    tree.for_each(&mut |node: &DocNode, prose: &str| {
+        let title_l = node.title.to_lowercase();
+        let detail_l = node.detail.as_deref().unwrap_or("").to_lowercase();
+        let prose_l = prose.to_lowercase();
+        let mut score = 0;
+        if title_l == needle {
+            score += 100;
+        } else if title_l.contains(needle) {
+            score += 40;
+        }
+        if detail_l.contains(needle) {
+            score += 8;
+        }
+        if prose_l.contains(needle) {
+            score += 5;
+        }
+        if score > 0 {
+            hits.push(DocHit {
+                id: node.id.clone(),
+                title: node.title.clone(),
+                kind: node.kind,
+                snippet: snippet_of(prose, node.detail.as_deref()),
+                score,
+            });
+        }
+    });
 }
 
 /// The [`DocId`] documenting the declaration whose name span is `name_span`, if it is a project
@@ -549,7 +595,8 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
                     title: m.qualified,
                     kind: DocKind::Module,
                     detail: None,
-                    has_page: false,
+                    // A module opens an overview page (its function list), like docs.rs.
+                    has_page: true,
                     expandable: true,
                     location: None,
                 })
@@ -559,7 +606,7 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
                 title: t.qualified,
                 kind: DocKind::Struct,
                 detail: None,
-                has_page: false,
+                has_page: true,
                 expandable: true,
                 location: None,
             }));
@@ -585,13 +632,60 @@ fn api_children(id: &DocId) -> Vec<DocNode> {
     }
 }
 
-/// The page for an `api/<module>/<fn>` or `api/<type>/<method>` id: the rendered signature, its
-/// prose, and cross-references to guide pages that mention it.
+/// The page for an API id: a module/type **overview** for a two-segment id (`api/std.math`), or a
+/// single function/method page for a three-segment id (`api/std.math/sqrt`).
 fn api_page(id: &DocId) -> Option<DocPage> {
-    let segments = id.segments();
-    let [_root, qualified, name] = segments.as_slice() else {
+    match id.segments().as_slice() {
+        [_root, qualified] => api_overview_page(qualified),
+        [_root, qualified, name] => api_member_page(id, qualified, name),
+        _ => None,
+    }
+}
+
+/// A module's (or extern type's) overview page: its members listed with signatures and one-line
+/// summaries, like a docs.rs module page. Gives the tree's module/type rows something to open and
+/// gives a module-name search hit a destination.
+fn api_overview_page(qualified: &str) -> Option<DocPage> {
+    let (kind, members): (DocKind, Vec<api::ApiFn>) = if let Some(m) = api::module(qualified) {
+        (DocKind::Module, m.functions)
+    } else if let Some(t) = api::type_(qualified) {
+        (DocKind::Struct, t.methods)
+    } else {
         return None;
     };
+    let noun = if kind == DocKind::Module {
+        "Functions"
+    } else {
+        "Methods"
+    };
+    let mut markdown = String::new();
+    if members.is_empty() {
+        markdown.push_str(&format!("_No {}._", noun.to_lowercase()));
+    } else {
+        markdown.push_str(&format!("### {noun}\n\n"));
+        for f in &members {
+            let summary = f.doc.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            if summary.is_empty() {
+                markdown.push_str(&format!("- `{}`\n", f.signature));
+            } else {
+                markdown.push_str(&format!("- `{}` — {}\n", f.signature, summary.trim()));
+            }
+        }
+    }
+    Some(DocPage {
+        id: DocId::new(format!("{API_ROOT}/{qualified}")),
+        title: qualified.to_string(),
+        kind,
+        signature: None,
+        markdown,
+        location: None,
+        xrefs: Vec::new(),
+    })
+}
+
+/// A single function/method page: the rendered signature, its prose, and cross-references to guide
+/// pages that mention it.
+fn api_member_page(id: &DocId, qualified: &str, name: &str) -> Option<DocPage> {
     let (f, kind) = match api::function(qualified, name) {
         Some(f) => (f, DocKind::Function),
         None => (api::method(qualified, name)?, DocKind::Method),
@@ -643,16 +737,47 @@ fn api_score_into(
     }
 }
 
-/// API-reference search: rank module functions and type methods by name (highest), signature, and
-/// prose. `needle` is already lowercased.
+/// Score an API module/type container by its qualified name, so filtering or searching a module
+/// name (`crypto` → `std.crypto`) surfaces the module itself — not only its functions, whose names
+/// rarely repeat the module name. Pushes the container's overview node as a hit when it matches.
+fn api_container_score_into(qualified: &str, kind: DocKind, needle: &str, hits: &mut Vec<DocHit>) {
+    let q = qualified.to_lowercase();
+    // Match against the short segment (`crypto`) and the whole qualified name (`std.crypto`).
+    let short = qualified
+        .rsplit('.')
+        .next()
+        .unwrap_or(qualified)
+        .to_lowercase();
+    let score = if short == needle || q == needle {
+        90
+    } else if short.contains(needle) || q.contains(needle) {
+        35
+    } else {
+        0
+    };
+    if score > 0 {
+        hits.push(DocHit {
+            id: DocId::new(format!("{API_ROOT}/{qualified}")),
+            title: qualified.to_string(),
+            kind,
+            snippet: String::new(),
+            score,
+        });
+    }
+}
+
+/// API-reference search: rank module/type containers by their qualified name, and their member
+/// functions/methods by name (highest), signature, and prose. `needle` is already lowercased.
 fn api_search(needle: &str) -> Vec<DocHit> {
     let mut hits = Vec::new();
     for m in api::modules() {
+        api_container_score_into(&m.qualified, DocKind::Module, needle, &mut hits);
         for f in &m.functions {
             api_score_into(&m.qualified, f, DocKind::Function, needle, &mut hits);
         }
     }
     for t in api::types() {
+        api_container_score_into(&t.qualified, DocKind::Struct, needle, &mut hits);
         for f in &t.methods {
             api_score_into(&t.qualified, f, DocKind::Method, needle, &mut hits);
         }
@@ -676,6 +801,169 @@ fn snippet_of(prose: &str, detail: Option<&str>) -> String {
     } else {
         one_line.to_string()
     }
+}
+
+// ---- The dependencies corpus dispatch (docs-browser-ui). Workspace-dependent. -----------------
+
+/// A dependency package row under the `deps` root.
+fn dep_node(info: DepInfo) -> DocNode {
+    // A source package expands to its modules; a native/unresolved package is a leaf that opens a
+    // placeholder page explaining how to reach its API.
+    let expandable = info.kind == DepKind::Source;
+    DocNode {
+        id: DocId::new(format!("{DEPS_ROOT}/{}", info.root)),
+        title: info.root,
+        kind: DocKind::Package,
+        detail: Some(info.detail),
+        has_page: true,
+        expandable,
+        location: None,
+    }
+}
+
+/// The declaration tree of one **source** dependency: the same [`ModuleEntry`]/[`DeclEntry`] shape
+/// as the project corpus (so pages, prose, sections and go-to-source render identically), assembled
+/// from the dependency's own module programs (threaded in as [`DocCtx::deps`]) and rooted at
+/// `deps/<root>`.
+fn dep_tree(ctx: &DocCtx, root: &str) -> ProjectTree {
+    let prefix = format!("{DEPS_ROOT}/{root}");
+    let modules = ctx
+        .deps
+        .iter()
+        .filter(|d| d.root == root)
+        .map(|d| dep_module_entry(ctx.env, &prefix, d))
+        .collect();
+    ProjectTree { modules }
+}
+
+/// One dependency module as a [`ModuleEntry`]: outline its own program's declarations, attach its
+/// `@doc` prose and sections, keyed by `deps/<root>/<source-id>`.
+fn dep_module_entry(env: Option<&dyn DocEnv>, prefix: &str, dep: &DepDoc) -> ModuleEntry {
+    let docs = ResolvedDocs::collect(dep.program);
+    let key = dep.source.0.to_string();
+    let module_id = format!("{prefix}/{key}");
+    let decls: Vec<DeclEntry> = outline(dep.program)
+        .iter()
+        .filter(|sym| sym.name_span.source == dep.source)
+        .map(|sym| decl_entry(env, prefix, &key, sym, &docs))
+        .collect();
+    let sections: Vec<SectionEntry> = docs
+        .sections
+        .get(&dep.source)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(i, (span, text))| SectionEntry {
+            node: DocNode {
+                id: DocId::new(format!("{module_id}/~{i}")),
+                title: section_title(text),
+                kind: DocKind::Section,
+                detail: None,
+                has_page: true,
+                expandable: false,
+                location: env.and_then(|e| e.locate(*span)),
+            },
+            prose: text.clone(),
+        })
+        .collect();
+    ModuleEntry {
+        node: DocNode {
+            id: DocId::new(module_id),
+            title: dep.module_name.clone(),
+            kind: DocKind::Module,
+            detail: None,
+            has_page: !docs
+                .module
+                .get(&dep.source)
+                .is_none_or(|p| p.trim().is_empty()),
+            expandable: !decls.is_empty() || !sections.is_empty(),
+            location: None,
+        },
+        prose: docs.module.get(&dep.source).cloned().unwrap_or_default(),
+        key,
+        decls,
+        sections,
+    }
+}
+
+/// The children of a `deps` id: the root lists the direct dependencies; a source dependency lists
+/// its modules → declarations → members exactly like the project tree.
+fn deps_children(ctx: &DocCtx, id: &DocId) -> Vec<DocNode> {
+    let Some((env, _program)) = ctx.workspace() else {
+        return Vec::new(); // the dependencies corpus needs an open workspace
+    };
+    let seg = id.segments();
+    match seg.as_slice() {
+        [_root] => env.dependencies().into_iter().map(dep_node).collect(),
+        [_root, root] => dep_tree(ctx, root)
+            .modules
+            .iter()
+            .map(|m| m.node.clone())
+            .collect(),
+        [_root, root, s] => match dep_tree(ctx, root).module(s) {
+            Some(m) => {
+                let mut kids: Vec<DocNode> = m.decls.iter().map(|d| d.node.clone()).collect();
+                kids.extend(m.sections.iter().map(|s| s.node.clone()));
+                kids
+            }
+            None => Vec::new(),
+        },
+        [_root, root, s, decl] => match dep_tree(ctx, root).module(s).and_then(|m| m.decl(decl)) {
+            Some(d) => d.members.iter().map(|m| m.node.clone()).collect(),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// The page for a `deps` id: a package's overview/placeholder for a two-segment id, or a
+/// module/declaration/member page (via the dependency tree) for a deeper id.
+fn deps_page(ctx: &DocCtx, id: &DocId) -> Option<DocPage> {
+    let (env, _program) = ctx.workspace()?;
+    match id.segments().as_slice() {
+        [_root, root] => dep_overview_page(ctx, env, root),
+        [_root, root, ..] => dep_tree(ctx, root).page_of(id),
+        _ => None, // the bare `deps` root has no page
+    }
+}
+
+/// A dependency's landing page: a source package lists its modules; a native/unresolved package
+/// explains, honestly, where its API is and is not available.
+fn dep_overview_page(ctx: &DocCtx, env: &dyn DocEnv, root: &str) -> Option<DocPage> {
+    let info = env.dependencies().into_iter().find(|d| d.root == root)?;
+    let markdown = match info.kind {
+        DepKind::Source => {
+            let tree = dep_tree(ctx, root);
+            if tree.modules.is_empty() {
+                "_This package contributes no browsable modules._".to_string()
+            } else {
+                let mut md = String::from("### Modules\n\n");
+                for m in &tree.modules {
+                    md.push_str(&format!("- `{}`\n", m.node.title));
+                }
+                md
+            }
+        }
+        DepKind::Native => format!(
+            "**Native package.** Its API reference is generated when the package is published and \
+             lives on the registry, not in the local store — so the editor can't browse it here. \
+             View it with:\n\n```\nnoeta doc {root}\n```",
+        ),
+        DepKind::Unresolved => format!(
+            "**Not resolved yet.** `{root}` is declared in `[dependencies]` but its source isn't on \
+             disk — build the project (or run `noeta doc {root}`) to fetch it, then reopen the \
+             docs.",
+        ),
+    };
+    Some(DocPage {
+        id: DocId::new(format!("{DEPS_ROOT}/{root}")),
+        title: root.to_string(),
+        kind: DocKind::Package,
+        signature: None,
+        markdown,
+        location: None,
+        xrefs: Vec::new(),
+    })
 }
 
 // ---- The eagerly-built project tree (one pass per request, like the Architecture view). --------
@@ -711,14 +999,6 @@ struct ProjectTree {
     modules: Vec<ModuleEntry>,
 }
 
-impl DeclEntry {
-    fn member(&self, name: &str) -> Option<&MemberEntry> {
-        self.members
-            .iter()
-            .find(|m| last_segment(&m.node.id) == name)
-    }
-}
-
 impl ModuleEntry {
     fn decl(&self, name: &str) -> Option<&DeclEntry> {
         self.decls.iter().find(|d| last_segment(&d.node.id) == name)
@@ -728,6 +1008,33 @@ impl ModuleEntry {
 impl ProjectTree {
     fn module(&self, key: &str) -> Option<&ModuleEntry> {
         self.modules.iter().find(|m| m.key == key)
+    }
+
+    /// The rendered page for `id`, found by id-equality over the tree (works for any root prefix —
+    /// project or a dependency). A module page is prose-only; a declaration/member page carries its
+    /// signature detail; a section page is its prose. `None` if the tree has no such node.
+    fn page_of(&self, id: &DocId) -> Option<DocPage> {
+        for m in &self.modules {
+            if m.node.id == *id {
+                return Some(page_from(&m.node, None, &m.prose));
+            }
+            for d in &m.decls {
+                if d.node.id == *id {
+                    return Some(page_from(&d.node, d.node.detail.clone(), &d.prose));
+                }
+                for mem in &d.members {
+                    if mem.node.id == *id {
+                        return Some(page_from(&mem.node, mem.node.detail.clone(), &mem.prose));
+                    }
+                }
+            }
+            for s in &m.sections {
+                if s.node.id == *id {
+                    return Some(page_from(&s.node, None, &s.prose));
+                }
+            }
+        }
+        None
     }
 
     /// Visit every node paired with its prose (for search).
@@ -763,14 +1070,30 @@ impl ProjectTree {
         }
     }
 
+    /// The project tree: modules named by [`DocEnv::source_name`], rooted at `project`.
     fn build(env: &dyn DocEnv, program: &Program) -> ProjectTree {
+        Self::build_scoped(env, program, PROJECT_ROOT, &|source| {
+            env.source_name(source)
+        })
+    }
+
+    /// The generic builder behind both the project and dependency corpora: `name_of` decides which
+    /// sources belong (and their display names), and `prefix` roots every id (`project`, or
+    /// `deps/<root>`). Keeping one builder means a dependency's `.noe` API renders — signatures,
+    /// `@doc` prose, sections, go-to-source — identically to the project's own.
+    fn build_scoped(
+        env: &dyn DocEnv,
+        program: &Program,
+        prefix: &str,
+        name_of: &dyn Fn(SourceId) -> Option<String>,
+    ) -> ProjectTree {
         let docs = ResolvedDocs::collect(program);
         let mut modules: Vec<ModuleEntry> = Vec::new();
 
         for sym in outline(program) {
             let source = sym.name_span.source;
-            let Some(module_name) = env.source_name(source) else {
-                continue; // not a project source (e.g. a dependency module)
+            let Some(module_name) = name_of(source) else {
+                continue; // not a source of this corpus
             };
             let key = source.0.to_string();
             let mod_idx = match modules.iter().position(|m| m.key == key) {
@@ -779,7 +1102,7 @@ impl ProjectTree {
                     modules.push(ModuleEntry {
                         key: key.clone(),
                         node: DocNode {
-                            id: DocId::new(format!("{PROJECT_ROOT}/{key}")),
+                            id: DocId::new(format!("{prefix}/{key}")),
                             title: module_name,
                             kind: DocKind::Module,
                             detail: None,
@@ -794,7 +1117,7 @@ impl ProjectTree {
                     modules.len() - 1
                 }
             };
-            let decl = decl_entry(env, &key, &sym, &docs);
+            let decl = decl_entry(Some(env), prefix, &key, &sym, &docs);
             modules[mod_idx].decls.push(decl);
         }
 
@@ -825,8 +1148,27 @@ impl ProjectTree {
     }
 }
 
-fn decl_entry(env: &dyn DocEnv, mod_key: &str, sym: &SymbolNode, docs: &ResolvedDocs) -> DeclEntry {
-    let id = DocId::new(format!("{PROJECT_ROOT}/{mod_key}/{}", sym.name));
+/// Build a [`DocPage`] from a tree node plus its (already-resolved) signature and prose.
+fn page_from(node: &DocNode, signature: Option<String>, markdown: &str) -> DocPage {
+    DocPage {
+        id: node.id.clone(),
+        title: node.title.clone(),
+        kind: node.kind,
+        signature,
+        markdown: markdown.to_string(),
+        location: node.location.clone(),
+        xrefs: Vec::new(),
+    }
+}
+
+fn decl_entry(
+    env: Option<&dyn DocEnv>,
+    prefix: &str,
+    mod_key: &str,
+    sym: &SymbolNode,
+    docs: &ResolvedDocs,
+) -> DeclEntry {
+    let id = DocId::new(format!("{prefix}/{mod_key}/{}", sym.name));
     let members: Vec<MemberEntry> = sym
         .children
         .iter()
@@ -838,7 +1180,7 @@ fn decl_entry(env: &dyn DocEnv, mod_key: &str, sym: &SymbolNode, docs: &Resolved
                 detail: child.detail.clone(),
                 has_page: true,
                 expandable: false,
-                location: env.locate(child.name_span),
+                location: env.and_then(|e| e.locate(child.name_span)),
             },
             name_span: child.name_span,
             prose: docs.decl.get(&child.name_span).cloned().unwrap_or_default(),
@@ -852,7 +1194,7 @@ fn decl_entry(env: &dyn DocEnv, mod_key: &str, sym: &SymbolNode, docs: &Resolved
             detail: sym.detail.clone(),
             has_page: true,
             expandable: !members.is_empty(),
-            location: env.locate(sym.name_span),
+            location: env.and_then(|e| e.locate(sym.name_span)),
         },
         name_span: sym.name_span,
         prose: docs.decl.get(&sym.name_span).cloned().unwrap_or_default(),
@@ -945,16 +1287,98 @@ mod tests {
     }
 
     #[test]
-    fn the_roots_are_project_guide_api() {
+    fn the_roots_are_project_deps_guide_api() {
         let roots = roots();
-        assert_eq!(roots.len(), 3);
+        assert_eq!(roots.len(), 4);
         assert_eq!(roots[0].id.as_str(), "project");
-        assert_eq!(roots[1].id.as_str(), "guide");
-        assert_eq!(roots[2].id.as_str(), "api");
+        assert_eq!(roots[1].id.as_str(), "deps");
+        assert_eq!(roots[2].id.as_str(), "guide");
+        assert_eq!(roots[3].id.as_str(), "api");
         assert!(
             roots
                 .iter()
                 .all(|r| r.kind == DocKind::Root && r.expandable)
+        );
+    }
+
+    /// A stub env with no project sources of its own — the dependencies corpus is driven by the
+    /// `DepInfo` list here plus the dependency programs threaded through [`DocCtx::with_deps`].
+    struct DepEnv;
+    impl DocEnv for DepEnv {
+        fn locate(&self, _span: Span) -> Option<DocLoc> {
+            None
+        }
+        fn source_name(&self, _source: SourceId) -> Option<String> {
+            None // nothing in the project corpus
+        }
+        fn dependencies(&self) -> Vec<DepInfo> {
+            vec![
+                DepInfo {
+                    root: "geom".to_string(),
+                    detail: "path ../geom".to_string(),
+                    kind: DepKind::Source,
+                },
+                DepInfo {
+                    root: "imgfx".to_string(),
+                    detail: "^1.0 · native".to_string(),
+                    kind: DepKind::Native,
+                },
+            ]
+        }
+    }
+
+    #[test]
+    fn the_deps_corpus_browses_a_source_package_and_placeholders_a_native_one() {
+        let program = program_of("@doc { A point. }\nstruct Point {\n  x: int\n  y: int\n}");
+        // The dep module `geom/shapes.noe` is the parsed program above, attributed to its source.
+        let env = DepEnv;
+        let deps = vec![DepDoc {
+            root: "geom".to_string(),
+            module_name: "shapes.noe".to_string(),
+            source: SourceId::FIRST,
+            program: &program,
+        }];
+        let ctx = DocCtx::with_deps(&env, &program, deps);
+
+        // Root: one row per direct dependency.
+        let deps = children(&ctx, &DocId::new("deps"));
+        let names: Vec<&str> = deps.iter().map(|d| d.title.as_str()).collect();
+        assert_eq!(names, vec!["geom", "imgfx"]);
+        let geom = &deps[0];
+        assert_eq!(geom.kind, DocKind::Package);
+        assert!(geom.expandable, "a source package expands");
+        let imgfx = &deps[1];
+        assert!(!imgfx.expandable, "a native package is a leaf");
+
+        // A source package unfolds to modules → decls → members, like the project corpus.
+        let modules = children(&ctx, &geom.id);
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].title, "shapes.noe");
+        let decls = children(&ctx, &modules[0].id);
+        let point = decls.iter().find(|d| d.title == "Point").expect("Point");
+        assert_eq!(point.kind, DocKind::Struct);
+        let fields = children(&ctx, &point.id);
+        assert_eq!(
+            fields.iter().map(|f| f.title.as_str()).collect::<Vec<_>>(),
+            vec!["x", "y"]
+        );
+
+        // The decl page carries its dependency `@doc` prose.
+        let decl_page = page(&ctx, &point.id).expect("dep decl page");
+        assert_eq!(decl_page.title, "Point");
+        assert_eq!(decl_page.markdown, "A point.");
+
+        // The native package's page is an honest placeholder pointing at `noeta doc`.
+        let native_page = page(&ctx, &imgfx.id).expect("native placeholder page");
+        assert_eq!(native_page.kind, DocKind::Package);
+        assert!(native_page.markdown.contains("noeta doc imgfx"));
+
+        // Search spans the dependency corpus (a source dep's decls are searchable).
+        let hits = search(&ctx, "Point");
+        assert!(
+            hits.iter()
+                .any(|h| h.id.as_str() == "deps/geom/0/Point" && h.title == "Point"),
+            "dependency decl is a search hit"
         );
     }
 
@@ -968,7 +1392,14 @@ mod tests {
             .iter()
             .find(|m| m.title == "std.math")
             .expect("std.math is a module");
-        assert!(math.expandable && !math.has_page);
+        // A module is expandable AND opens an overview page (its function list).
+        assert!(math.expandable && math.has_page);
+        let overview = page(&ctx, &math.id).expect("the module overview renders");
+        assert_eq!(overview.kind, DocKind::Module);
+        assert!(
+            overview.markdown.contains("sqrt"),
+            "overview lists functions"
+        );
 
         let fns = children(&ctx, &math.id);
         let sqrt = fns.iter().find(|f| f.title == "sqrt").expect("math.sqrt");
@@ -983,6 +1414,14 @@ mod tests {
         // Search spans the API corpus.
         let hits = search(&ctx, "sqrt");
         assert!(hits.iter().any(|h| h.id.as_str() == "api/std.math/sqrt"));
+
+        // A module-name query surfaces the module container itself (its functions rarely repeat the
+        // module name), so the tree filter can narrow to a whole module.
+        let math_hits = search(&ctx, "math");
+        assert!(
+            math_hits.iter().any(|h| h.id.as_str() == "api/std.math"),
+            "the std.math container is a hit for `math`"
+        );
     }
 
     #[test]
