@@ -3,7 +3,7 @@
 [![CI](https://github.com/nsrosenqvist/noeta/actions/workflows/ci.yml/badge.svg)](https://github.com/nsrosenqvist/noeta/actions/workflows/ci.yml)
 
 > **AI-native, human-first.**
-> A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.
+> A general-purpose language that makes machine-written code checkable and human-readable — strong static types, an agent-native toolchain, single-binary output.
 
 Noeta is a new, general-purpose programming language built from scratch in Rust — currently **pre-alpha**. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
 
