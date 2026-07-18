@@ -1,0 +1,68 @@
+// Match arms with statement-BLOCK bodies (aether F1): `pattern => { stmts }` — side-effectful
+// arms without an artificial expression; the arm's value is `unit`. A `return` inside a block arm
+// returns from the ENCLOSING function (arms lower in the same frame, not as closures). `{ … }`
+// still parses as an EXPRESSION first, so `=> {"k": v}` map literals and `=> {}` keep their
+// meaning.
+// expect: stdout "inc"
+// expect: stdout "2"
+// expect: stdout "dec"
+// expect: stdout "4"
+// expect: stdout "n=9"
+// expect: stdout "9"
+// expect: stdout "early"
+// expect: stdout "fall"
+// expect: stdout "late"
+// expect: stdout "1"
+// expect: stdout "0"
+// expect: exit 0
+enum Cmd {
+    Inc
+    Dec
+    Report
+}
+
+fn apply(c: Cmd, n: int): int {
+    mut total = n
+    match c {
+        Cmd.Inc => {
+            echo "inc"
+            total = total + 1
+        },
+        Cmd.Dec => {
+            echo "dec"
+            total = total - 1
+        },
+        Cmd.Report => {
+            echo "n=" ~ total
+        },
+    }
+    return total
+}
+echo apply(Cmd.Inc, 1)
+echo apply(Cmd.Dec, 5)
+echo apply(Cmd.Report, 9)
+
+// return inside a block arm exits the ENCLOSING function.
+fn pick(c: Cmd): string {
+    match c {
+        Cmd.Inc => {
+            return "early"
+        },
+        _ => {
+            echo "fall"
+        },
+    }
+    return "late"
+}
+echo pick(Cmd.Inc)
+echo pick(Cmd.Dec)
+
+// Back-compat: map/set literals in arm position keep their meaning.
+fn tbl(c: Cmd): Map<string, int> {
+    return match c {
+        Cmd.Inc => {"a": 1},
+        _ => {},
+    }
+}
+echo tbl(Cmd.Inc)["a"]
+echo tbl(Cmd.Dec).len()

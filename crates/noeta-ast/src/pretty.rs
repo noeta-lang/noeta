@@ -294,8 +294,13 @@ impl Pretty for FnDecl {
                 format!("@{}{args}{body} ", d.name)
             })
             .collect();
+        let attrs: String = self
+            .attrs
+            .iter()
+            .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
+            .collect();
         out.push_str(&format!(
-            "({tier}{directives}{}fn {}{}{} [{}] {}",
+            "({tier}{directives}{attrs}{}fn {}{}{} [{}] {}",
             if self.is_async { "async " } else { "" },
             pub_str(self.is_public),
             self.name,
@@ -331,7 +336,15 @@ impl Pretty for EnumDecl {
             })
             .collect();
         out.push_str(&format!(
-            "({kind} {}{}{} [{}] {}",
+            "({kind} {}{}{}{} [{}] {}",
+            decorators_str(
+                &self.derives,
+                &self.attrs,
+                None,
+                None,
+                self.semantic.is_some(),
+                self.packed.as_ref(),
+            ),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -346,6 +359,88 @@ impl Pretty for EnumDecl {
             method.pretty(out, level + 1);
         }
         out.push(')');
+    }
+}
+
+/// The leading decorators of a type declaration, rendered into the structural snapshot — the fmt
+/// safety gate compares this output, so a formatter dropping a decorator (a whole `@derive`, one
+/// of its `member: target` bindings or `via:`, a `@packed` layout, an `@attribute`/`@role` tag, a
+/// `#[...]` data attribute) is a DETECTED program change, not a silent one. Empty when the
+/// declaration is undecorated, so existing snapshots are untouched.
+fn decorators_str(
+    derives: &[crate::DeriveSpec],
+    attrs: &[crate::Attribute],
+    attribute: Option<&[(String, noeta_span::Span)]>,
+    role: Option<&[crate::RoleTag]>,
+    semantic: bool,
+    packed: Option<&crate::PackedDirective>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for d in derives {
+        let mut s = d.name.clone();
+        if !d.args.is_empty() {
+            s.push_str(&format!(
+                "<{}>",
+                d.args
+                    .iter()
+                    .map(type_ref_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some((via, _)) = &d.via {
+            s.push_str(&format!(", via: {via}"));
+        }
+        for b in &d.bindings {
+            s.push_str(&format!(", {}: {}", b.member, b.target));
+        }
+        parts.push(format!("@derive({s})"));
+    }
+    if let Some(kinds) = attribute {
+        if kinds.is_empty() {
+            parts.push("@attribute".to_string());
+        } else {
+            parts.push(format!(
+                "@attribute({})",
+                kinds
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    if let Some(tags) = role {
+        parts.push(format!(
+            "@role({})",
+            tags.iter()
+                .map(|t| if t.enum_name.is_empty() {
+                    t.variant.clone()
+                } else {
+                    format!("{}.{}", t.enum_name, t.variant)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if semantic {
+        parts.push("@semantic".to_string());
+    }
+    if let Some(p) = packed {
+        parts.push(match p.layout {
+            crate::PackedLayout::Row => "@packed".to_string(),
+            crate::PackedLayout::Column => "@packed(Layout.Column)".to_string(),
+        });
+    }
+    for a in attrs {
+        parts.push(format!("#[{}{}]", a.name, attr_args_str(&a.args)));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        let mut s = parts.join(" ");
+        s.push(' ');
+        s
     }
 }
 
@@ -440,13 +535,28 @@ impl Pretty for StructDecl {
         indent(out, level);
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
-            "(struct {}{}{} [{}] {})",
+            "(struct {}{}{}{} [{}] {}",
+            decorators_str(
+                &self.derives,
+                &self.attrs,
+                self.attribute.as_deref(),
+                self.role.as_deref(),
+                self.semantic.is_some(),
+                self.packed.as_ref(),
+            ),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
             fields.join(" "),
             span(self.span)
         ));
+        // A struct body may carry methods (the unified body) — print them like a class's, so a
+        // formatter dropping one is a detected change. A field-only struct prints as before.
+        for method in &self.methods {
+            out.push('\n');
+            method.pretty(out, level + 1);
+        }
+        out.push(')');
     }
 }
 
@@ -455,7 +565,15 @@ impl Pretty for ClassDecl {
         indent(out, level);
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
-            "(class {}{}{} [{}] {}",
+            "(class {}{}{}{} [{}] {}",
+            decorators_str(
+                &self.derives,
+                &self.attrs,
+                self.attribute.as_deref(),
+                self.role.as_deref(),
+                self.semantic.is_some(),
+                self.packed.as_ref(),
+            ),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -473,8 +591,20 @@ impl Pretty for ClassDecl {
 impl Pretty for ImplDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
+        let args = if self.trait_args.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<{}>",
+                self.trait_args
+                    .iter()
+                    .map(type_ref_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         out.push_str(&format!(
-            "(impl {} for {} {}",
+            "(impl {}{args} for {} {}",
             self.trait_name,
             self.target,
             span(self.span)
@@ -753,7 +883,18 @@ impl Pretty for Expr {
                     out.push('\n');
                     indent(out, level + 1);
                     out.push_str(&format!("(arm {}\n", pattern_str(&arm.pattern)));
-                    arm.body.pretty(out, level + 2);
+                    match &arm.body {
+                        ClosureBody::Expr(e) => e.pretty(out, level + 2),
+                        ClosureBody::Block(stmts) => {
+                            indent(out, level + 2);
+                            out.push_str("(block");
+                            for stmt in stmts {
+                                out.push('\n');
+                                stmt.pretty(out, level + 3);
+                            }
+                            out.push(')');
+                        }
+                    }
                     out.push(')');
                 }
                 out.push(')');

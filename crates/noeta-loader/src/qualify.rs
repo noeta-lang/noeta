@@ -418,7 +418,10 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             q_expr(scrutinee, visit);
             for arm in arms {
                 q_pattern(&mut arm.pattern, visit);
-                q_expr(&mut arm.body, visit);
+                match &mut arm.body {
+                    ClosureBody::Expr(e) => q_expr(e, visit),
+                    ClosureBody::Block(stmts) => q_body(stmts, visit),
+                }
             }
         }
         Expr::Try { expr, .. } | Expr::Await { expr, .. } | Expr::Spawn { future: expr, .. } => {

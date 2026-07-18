@@ -1,0 +1,35 @@
+// Generic-trait default methods (the UT5 exclusion, lifted): an impl names an instantiation
+// (`impl Keyed<int>`) and the trait's defaults substitute the type parameters through their
+// signatures and bodies before hoisting — for in-body impls, standalone impls, and
+// `@derive(Keyed<string>)` (whose required method still bridges by deduction).
+// expect: stdout "key=7"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "key=x"
+// expect: stdout "false"
+// expect: exit 0
+trait Keyed<K> {
+    fn key(): K
+    fn describe(): string { return "key=" ~ self.key() }
+    fn same(other: K): bool { return self.key() == other }
+}
+
+struct Door {
+    code: int
+    impl Keyed<int> {
+        fn key(): int { return self.code }
+    }
+}
+echo Door { code: 7 }.describe()
+echo Door { code: 7 }.same(7)
+
+struct Tag { name: string }
+impl Keyed<string> for Tag {
+    fn key(): string { return self.name }
+}
+echo Tag { name: "a" }.same("a")
+
+@derive(Keyed<string>)
+struct Label { text: string }
+echo Label { text: "x" }.describe()
+echo Label { text: "x" }.same("y")

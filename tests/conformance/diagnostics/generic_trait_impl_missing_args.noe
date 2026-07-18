@@ -1,0 +1,17 @@
+// A generic trait must be implemented (and derived) at an instantiation — a bare `impl Keyed`
+// is E0015 naming the arity; a bare `@derive(Keyed)` is E0050.
+// expect: error E0015 at 11:10
+// expect: error E0050 at 15:9
+// expect: exit 1
+trait Keyed<K> {
+    fn key(): K
+}
+struct A {
+    x: int
+    impl Keyed {
+        fn key(): int { return self.x }
+    }
+}
+@derive(Keyed)
+struct B { x: int }
+echo "unreached"

@@ -453,13 +453,30 @@ impl Interpreter {
                     child.declare(name, bound, false);
                 }
                 let saved = std::mem::replace(&mut self.scope, child);
-                let result = self.eval_ir_block_value(&arm.body, frame, arm.span);
+                // A statement-BLOCK arm (aether F1) may carry non-local flow — a `return` exits
+                // the enclosing function, a `break`/`continue` the enclosing loop — so the arm
+                // body's flow propagates instead of being a value-position invariant (the VM's
+                // inline codegen gets the same behavior from its jump targets).
+                let result = (|| -> Eval<(Flow, Option<Value>)> {
+                    match self.exec_ir_stmts(&arm.body.stmts, frame)? {
+                        Flow::Normal => {}
+                        flow => return Ok((flow, None)),
+                    }
+                    let v = match &arm.body.tail {
+                        Some(atom) => Some(self.eval_ir_atom(atom, frame)?),
+                        None => None,
+                    };
+                    Ok((Flow::Normal, v))
+                })();
                 if matches!(result, Err(Unwind::Abort)) {
                     self.fire_aborted_scope();
                 }
                 self.scope = saved;
-                let v = result?;
-                if let Some(dst) = dst {
+                let (flow, v) = result?;
+                if !matches!(flow, Flow::Normal) {
+                    return Ok(flow);
+                }
+                if let (Some(dst), Some(v)) = (dst, v) {
                     frame.set(dst, v);
                 }
                 return Ok(Flow::Normal);

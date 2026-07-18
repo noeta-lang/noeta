@@ -393,7 +393,15 @@ pub(crate) fn expr_diverges(expr: &Expr) -> bool {
         Expr::Call { callee, .. } => {
             matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "panic")
         }
-        Expr::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| expr_diverges(&a.body)),
+        Expr::Match { arms, .. } => {
+            !arms.is_empty()
+                && arms.iter().all(|a| match &a.body {
+                    noeta_ast::ClosureBody::Expr(e) => expr_diverges(e),
+                    // A statement-block arm stays conservative (a `return` there EXITS, but this
+                    // helper answers "diverges", and false only weakens the analysis).
+                    noeta_ast::ClosureBody::Block(_) => false,
+                })
+        }
         _ => false,
     }
 }

@@ -263,30 +263,36 @@ pub fn hoist_impl_methods_with_registry(
     program: &AstProgram,
     registry: Option<&'static noeta_ext_abi::registry::Registry>,
 ) -> Option<AstProgram> {
-    // The trait declarations by name, for default-method fallback (UT5). Only a NON-generic
-    // trait's defaults hoist — a generic trait's default body would need type-parameter
-    // substitution per implementor, which is deferred with the rest of generic-trait derivation.
+    // The trait declarations by name, for default-method fallback (UT5) — generic traits
+    // included: an impl at an instantiation (`impl Cache<string>`) substitutes the arguments
+    // through the defaults before they hoist.
     let traits: StdHashMap<&str, &noeta_ast::TraitDecl> = program
         .stmts
         .iter()
         .filter_map(|s| match s {
-            AstStmt::Trait(t) if t.type_params.is_empty() => Some((t.name.as_str(), t)),
+            AstStmt::Trait(t) => Some((t.name.as_str(), t)),
             _ => None,
         })
         .collect();
-    // A trait's default methods that `provided` does not override, in declaration order.
-    let omitted_defaults = |trait_name: &str, provided: &[FnDecl]| -> Vec<FnDecl> {
-        traits
-            .get(trait_name)
-            .map(|t| {
-                t.methods
-                    .iter()
-                    .filter(|tm| tm.has_default && !provided.iter().any(|m| m.name == tm.sig.name))
-                    .map(|tm| tm.sig.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
+    // A trait's default methods that `provided` does not override, in declaration order —
+    // instantiated at `trait_args` when the trait is generic. An arity mismatch (including a
+    // generic trait implemented with no arguments) contributes nothing; the checker reports it.
+    let omitted_defaults =
+        |trait_name: &str, trait_args: &[noeta_ast::TypeRef], provided: &[FnDecl]| -> Vec<FnDecl> {
+            let Some(t) = traits.get(trait_name) else {
+                return Vec::new();
+            };
+            let instantiated = match noeta_ast::derive::instantiate_trait(t, trait_args) {
+                Ok(concrete) => concrete,
+                Err(_) => return Vec::new(),
+            };
+            let t = instantiated.as_ref().unwrap_or(t);
+            t.methods
+                .iter()
+                .filter(|tm| tm.has_default && !provided.iter().any(|m| m.name == tm.sig.name))
+                .map(|tm| tm.sig.clone())
+                .collect()
+        };
 
     let mut additions: StdHashMap<String, Vec<FnDecl>> = StdHashMap::new();
     for stmt in &program.stmts {
@@ -295,7 +301,11 @@ pub fn hoist_impl_methods_with_registry(
             entry.extend(decl.methods.iter().cloned());
             // Default-method fallback (UT5): the impl'd trait's omitted defaults ride along,
             // after the impl's own methods so a provided override wins the name-skip below.
-            entry.extend(omitted_defaults(&decl.trait_name, &decl.methods));
+            entry.extend(omitted_defaults(
+                &decl.trait_name,
+                &decl.trait_args,
+                &decl.methods,
+            ));
         }
     }
     additions.retain(|_, v| !v.is_empty());
@@ -366,7 +376,11 @@ pub fn hoist_impl_methods_with_registry(
         // methods into `methods`, so the name-skip makes provided overrides win here too.
         let mut synthesized: Vec<FnDecl> = Vec::new();
         for block in impls {
-            synthesized.extend(omitted_defaults(&block.trait_name, methods));
+            synthesized.extend(omitted_defaults(
+                &block.trait_name,
+                &block.trait_args,
+                methods,
+            ));
         }
         for spec in derives {
             let planned = if let Some(t) = traits.get(spec.name.as_str()) {
@@ -1618,7 +1632,24 @@ impl Lowerer<'_> {
                 let scrut = self.lower_expr(scrutinee, out)?;
                 let mut ir_arms = Vec::with_capacity(arms.len());
                 for arm in arms {
-                    let body = self.lower_value_block(&arm.body)?;
+                    // An expression arm's value block yields its value; a statement-block arm
+                    // (aether F1) lowers its statements in the SAME frame (so `return` exits the
+                    // enclosing function) and yields `unit`.
+                    let body = match &arm.body {
+                        noeta_ast::ClosureBody::Expr(e) => self.lower_value_block(e)?,
+                        noeta_ast::ClosureBody::Block(stmts) => {
+                            let mut out = Vec::new();
+                            for stmt in stmts {
+                                self.lower_stmt(stmt, &mut out)?;
+                            }
+                            // A block arm's value is `unit` — an explicit tail atom, so both
+                            // backends' "arm writes the match result" paths stay uniform.
+                            Block {
+                                stmts: out,
+                                tail: Some(Atom::Const(Const::Unit)),
+                            }
+                        }
+                    };
                     ir_arms.push(crate::Arm {
                         pattern: arm.pattern.clone(),
                         body,

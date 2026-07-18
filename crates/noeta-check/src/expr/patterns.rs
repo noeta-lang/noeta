@@ -27,7 +27,17 @@ impl Checker {
             if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern) {
                 bind(env, name, from_ref_q(ty, &self.imports.extern_types));
             }
-            let t = self.synth(&arm.body, env);
+            let t = match &arm.body {
+                noeta_ast::ClosureBody::Expr(e) => self.synth(e, env),
+                // A statement-block arm (aether F1): check its statements in the arm scope; the
+                // arm's value is `unit`.
+                noeta_ast::ClosureBody::Block(stmts) => {
+                    for stmt in stmts {
+                        self.check_stmt(stmt, env);
+                    }
+                    Type::Unit
+                }
+            };
             env.pop();
             if result.is_gradual() {
                 result = t;

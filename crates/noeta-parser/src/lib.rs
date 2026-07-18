@@ -744,12 +744,12 @@ fn desugar_if_then_else(cond: Expr, then_expr: Expr, else_expr: Expr, span: Span
         arms: vec![
             MatchArm {
                 pattern: then_pat,
-                body: then_expr,
+                body: noeta_ast::ClosureBody::Expr(Box::new(then_expr)),
                 span,
             },
             MatchArm {
                 pattern: else_pat,
-                body: else_expr,
+                body: noeta_ast::ClosureBody::Expr(Box::new(else_expr)),
                 span,
             },
         ],
@@ -1639,10 +1639,19 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `match scrutinee { pattern => body, ... }`.
+        // `match scrutinee { pattern => body, ... }`. An arm body is a value EXPRESSION first —
+        // so `=> {}` / `=> {"k": v}` keep their map/set-literal meaning — and only a brace body
+        // that is not an expression parses as a statement BLOCK (aether F1: side-effectful arms,
+        // value `unit`; `return` inside returns from the enclosing function).
+        let arm_body = sub
+            .clone()
+            .map(|e| noeta_ast::ClosureBody::Expr(Box::new(e)))
+            .or(recovering_list(stmt.clone())
+                .delimited_by(just(T::LBrace), just(T::RBrace))
+                .map(noeta_ast::ClosureBody::Block));
         let arm = pattern_parser(ctx)
             .then_ignore(just(T::FatArrow))
-            .then(sub.clone())
+            .then(arm_body)
             .map_with(move |(pattern, body), e| MatchArm {
                 pattern,
                 body,
@@ -2769,8 +2778,18 @@ where
             });
         // `impl Trait { fn ... }` — implementing a built-in trait lights up its operator/protocol.
         // The body is just methods; they are flattened into the class's method table below.
+        // A generic trait implements at an instantiation: `impl Cache<string> { … }` — the
+        // arguments substitute through the trait's default methods (generic-trait UT5).
+        let trait_args = type_parser(ctx)
+            .separated_by(just(T::Comma))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::Lt), just(T::Gt))
+            .or_not()
+            .map(Option::unwrap_or_default);
         let class_impl = just(T::ImplKw)
             .ignore_then(trait_path.clone())
+            .then(trait_args.clone())
             .then(
                 method
                     .clone()
@@ -2781,14 +2800,17 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(move |((trait_name, trait_span), methods), e| {
-                ClassMember::Impl(ImplBlock {
-                    trait_name,
-                    trait_span,
-                    methods,
-                    span: ctx.to_span(e.span()),
-                })
-            });
+            .map_with(
+                move |(((trait_name, trait_span), trait_args), methods), e| {
+                    ClassMember::Impl(ImplBlock {
+                        trait_name,
+                        trait_span,
+                        trait_args,
+                        methods,
+                        span: ctx.to_span(e.span()),
+                    })
+                },
+            );
         // An `enum` body (object-model slice 3): variants plus the unified body's methods and
         // `impl Trait { ... }` blocks. `impl`/`fn` open a method or impl; anything else is a variant
         // (which begins with `#[...]?` then an uppercase name). The `choice` tries the keyword-led
@@ -2858,6 +2880,7 @@ where
         // above. The checker requires `Type` to be declared in the same module (orphan rule).
         let standalone_impl = just(T::ImplKw)
             .ignore_then(trait_path.clone())
+            .then(trait_args.clone())
             .then_ignore(just(T::ForKw))
             .then(id.clone())
             .then(
@@ -2871,10 +2894,15 @@ where
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
             .map_with(
-                move |(((trait_name, trait_span), (target, target_span)), methods), e| {
+                move |(
+                    (((trait_name, trait_span), trait_args), (target, target_span)),
+                    methods,
+                ),
+                      e| {
                     Stmt::Impl(noeta_ast::ImplDecl {
                         trait_name,
                         trait_span,
+                        trait_args,
                         target,
                         target_span,
                         methods,
@@ -4069,7 +4097,10 @@ mod tests {
         assert!(pretty("pub struct Pair { a: int }").contains("(struct pub Pair ["));
         assert!(pretty("pub enum Color { Red; }").contains("(enum pub Color ["));
         assert!(pretty("pub fn helper(): int { return 1; }").contains("(fn pub helper ["));
-        assert!(pretty("@derive(Comparable) pub struct V { n: int }").contains("(struct pub V ["));
+        assert!(
+            pretty("@derive(Comparable) pub struct V { n: int }")
+                .contains("(struct @derive(Comparable) pub V [")
+        );
         // A module-private declaration renders exactly as before.
         assert!(pretty("class P { x: int }").contains("(class P ["));
     }
