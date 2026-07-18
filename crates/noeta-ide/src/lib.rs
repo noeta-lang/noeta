@@ -1887,7 +1887,29 @@ impl DocumentStore {
                     cache,
                     encoding,
                 };
-                f(&docs::DocCtx::new(&env, program))
+                // Thread each direct **source** dependency module's own program in — a dependency
+                // module is a separate salsa input, not merged into `program`, so the deps corpus
+                // must walk its AST directly. Filtered to direct manifest keys (never shadow deps).
+                let direct = env.direct_source_dep_keys();
+                let dep_asts: Vec<_> = cache
+                    .dep_programs
+                    .iter()
+                    .map(|sp| noeta_db::ast(db, *sp))
+                    .collect();
+                let mut deps = Vec::new();
+                for (i, ast) in dep_asts.iter().enumerate() {
+                    let root = cache.dep_modules[i].root(db).clone();
+                    if !direct.contains(&root) {
+                        continue;
+                    }
+                    deps.push(docs::DepDoc {
+                        root,
+                        module_name: basename(&cache.dep_uris[i]),
+                        source: SourceId((cache.programs.len() + i) as u32),
+                        program: &ast.0.program,
+                    });
+                }
+                f(&docs::DocCtx::with_deps(&env, program, deps))
             }
             None => f(&docs::DocCtx::empty()),
         }
@@ -2227,6 +2249,135 @@ impl docs::DocEnv for StoreDocEnv<'_> {
             return None;
         }
         self.cache.source_uris.get(idx).map(|uri| basename(uri))
+    }
+
+    fn dependencies(&self) -> Vec<docs::DepInfo> {
+        let Some(manifest) = self.load_manifest() else {
+            return Vec::new();
+        };
+        let source = self.source_dep_roots();
+        let keys: Vec<String> = manifest.dependencies().keys().cloned().collect();
+        // Native classification needs the resolved graph; if it can't resolve (network/IO), those
+        // deps simply read as unresolved rather than failing the whole listing.
+        let native = self.native_dep_keys(&keys);
+        manifest
+            .dependencies()
+            .iter()
+            .map(|(root, dep)| {
+                let base = describe_dep(dep);
+                // A key with linked `.noe` modules is browsable source; else a resolved native
+                // package is a placeholder; else it isn't on disk yet.
+                let (detail, kind) = if source.iter().any(|r| r == root) {
+                    (base, docs::DepKind::Source)
+                } else if native.iter().any(|r| r == root) {
+                    (format!("{base} · native"), docs::DepKind::Native)
+                } else {
+                    (format!("{base} · not fetched"), docs::DepKind::Unresolved)
+                };
+                docs::DepInfo {
+                    root: root.clone(),
+                    detail,
+                    kind,
+                }
+            })
+            .collect()
+    }
+}
+
+impl StoreDocEnv<'_> {
+    /// The workspace's entry file path (the first member), for manifest discovery and dependency
+    /// resolution.
+    fn entry_path(&self) -> Option<PathBuf> {
+        self.cache
+            .source_uris
+            .first()
+            .and_then(|uri| uri_to_path(uri))
+    }
+
+    /// Load the workspace's `noeta.toml`, if one exists at or above the entry directory.
+    fn load_manifest(&self) -> Option<noeta_pm::manifest::Manifest> {
+        let entry = self.entry_path()?;
+        let dir = entry.parent()?;
+        let manifest_path = noeta_pm::manifest::find(dir)?;
+        noeta_pm::manifest::load(&manifest_path).ok()
+    }
+
+    /// The **direct** dependency import roots that resolved to `.noe` **source** modules — the
+    /// manifest's own keys (never transitive/shadow deps) intersected with the roots that have
+    /// linked modules. Scopes the dependencies corpus and its search to direct source packages.
+    fn direct_source_dep_keys(&self) -> Vec<String> {
+        let Some(manifest) = self.load_manifest() else {
+            return Vec::new();
+        };
+        let source = self.source_dep_roots();
+        manifest
+            .dependencies()
+            .keys()
+            .filter(|k| source.iter().any(|r| r == *k))
+            .cloned()
+            .collect()
+    }
+
+    /// The distinct import roots of every dependency module linked into the program (direct and
+    /// transitive) — the query-free "has source" set. Callers intersect with the manifest's direct
+    /// keys to keep the dependencies corpus to direct deps only (never shadow deps).
+    fn source_dep_roots(&self) -> Vec<String> {
+        let mut roots: Vec<String> = self
+            .cache
+            .dep_modules
+            .iter()
+            .map(|d| d.root(&self.store.db).clone())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    /// Which of `keys` (the manifest's direct import roots) name a **native** package, from the
+    /// side-effect-free resolve graph's native entry crates. A pure-native package ships no `.noe`
+    /// modules, so it never appears in the linked program — only here. A native crate's identity is
+    /// `company/package`; a consumer keys it by the shared **scope** (`para` ⊃ `para/p2p`, so the
+    /// key equals the company) or, for a single package, by its **root** segment (the `package`
+    /// half), so we match a key against either. Empty on any resolution failure — such deps then
+    /// read as unresolved rather than failing the whole listing.
+    fn native_dep_keys(&self, keys: &[String]) -> Vec<String> {
+        let Some(entry) = self.entry_path() else {
+            return Vec::new();
+        };
+        let Ok(graph) = noeta_pm::graph::resolve_graph_query(&entry) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for nc in &graph.native_crates {
+            let (company, package) = nc.identity.split_once('/').unwrap_or(("", &nc.identity));
+            for key in keys {
+                if (key == company || key == package) && !out.contains(key) {
+                    out.push(key.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A dim, human detail for a dependency row — its source and (for a registry dep) version.
+fn describe_dep(dep: &noeta_pm::manifest::Dependency) -> String {
+    use noeta_pm::manifest::Dependency;
+    match dep {
+        Dependency::Path { path } => format!("path {}", path.display()),
+        Dependency::Git { url, git_ref } => {
+            let name = url
+                .rsplit('/')
+                .next()
+                .unwrap_or(url)
+                .trim_end_matches(".git");
+            format!("git {name}@{}", git_ref.describe())
+        }
+        Dependency::Registry { package, req } => match package {
+            Some(p) => format!("{}/{} {req}", p.company, p.package),
+            None => req.to_string(),
+        },
+        Dependency::Scope(members) => format!("scope · {} packages", members.len()),
     }
 }
 
@@ -2632,12 +2783,15 @@ mod tests {
         let uri = "file:///widgets.noe";
         let enc = Encoding::Utf16;
 
-        // The roots are the project corpus, the language guide, and the API reference.
+        // The roots are the project corpus, the dependencies, the language guide, and the API ref.
         let roots = store.doc_index(uri);
-        assert_eq!(roots.len(), 3);
+        assert_eq!(roots.len(), 4);
         assert_eq!(roots[0].id.as_str(), "project");
-        assert_eq!(roots[1].id.as_str(), "guide");
-        assert_eq!(roots[2].id.as_str(), "api");
+        assert_eq!(roots[1].id.as_str(), "deps");
+        assert_eq!(roots[2].id.as_str(), "guide");
+        assert_eq!(roots[3].id.as_str(), "api");
+        // With no manifest, the dependencies corpus is empty (no direct deps to list).
+        assert!(store.doc_children(uri, "deps", enc).is_empty());
 
         // Expand: root → module (named by file basename) → declarations.
         let modules = store.doc_children(uri, "project", enc);
