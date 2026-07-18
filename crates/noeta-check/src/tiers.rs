@@ -583,6 +583,33 @@ pub fn resolve_texts(program: &Program) -> Vec<TextBlock> {
             target,
         });
     }
+    // Method-level text-tier directives (`@doc { … }` leading a method): a method has no top-level
+    // statement to document by adjacency, so its directive rides on `FnDecl.directives`. Emit a
+    // `Decl` target keyed by the method's own `name_span` — every consumer (hover, the docs browser,
+    // the `#[Doc]` stamp) already resolves prose by `name_span` and already visits member name-spans,
+    // so a method's `@doc` lights up the same paths as a top-level one with no consumer change.
+    for stmt in &program.stmts {
+        let methods = match stmt {
+            Stmt::Struct(d) => &d.methods,
+            Stmt::Class(d) => &d.methods,
+            Stmt::Enum(d) => &d.methods,
+            _ => continue,
+        };
+        for method in methods {
+            for dir in &method.directives {
+                let Some(text) = &dir.doc_text else { continue };
+                docs.push(TextBlock {
+                    tier: dir.name.clone(),
+                    text: text.clone(),
+                    span: dir.span,
+                    target: DocTarget::Decl {
+                        name: method.name.clone(),
+                        name_span: method.name_span,
+                    },
+                });
+            }
+        }
+    }
     docs
 }
 

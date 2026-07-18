@@ -1017,6 +1017,23 @@ impl DocumentStore {
                 })?;
                 resolve::Definitions::collect(program).resolve(&entry_text[token.span.range()])
             })
+            // A method's declaration name (`fn manhattan`) — not a top-level definition, so resolve
+            // it directly to the method's own name-span (the key a method's `@doc` is stored under).
+            .or_else(|| method_decl_at(program, offset, cursor).map(|m| m.name_span))
+            // A method/associated call name (`p.manhattan`, `Point.origin`) — resolve the receiver's
+            // type and look the method up, so hovering a call surfaces the method's `@doc` too.
+            .or_else(|| {
+                let def_use = resolve::DefUse::build(program);
+                let (receiver_span, member) = def_use.member_at(offset, cursor)?;
+                let ty = self.receiver_type_name(
+                    program,
+                    cache.workspace,
+                    doc,
+                    entry_text,
+                    receiver_span,
+                )?;
+                type_method(program, &ty, member).map(|m| m.name_span)
+            })
     }
 
     pub fn hover_doc(&self, uri: &str, position: Position, encoding: Encoding) -> Option<String> {
@@ -2771,6 +2788,36 @@ mod tests {
         assert_eq!(
             store.hover_doc("file:///a.noe", Position::new(2, 10), Encoding::Utf16),
             None
+        );
+    }
+
+    #[test]
+    fn hover_doc_surfaces_a_methods_directive() {
+        let mut store = test_store();
+        store.open(
+            "file:///m.noe",
+            "struct Point {\n    \
+             x: int = 0\n    \
+             @doc { Distance from origin. }\n    \
+             fn manhattan(): int { return self.x }\n\
+             }\n\
+             p = Point {}\n\
+             echo p.manhattan()\n"
+                .to_string(),
+        );
+        // On the method's declaration name (line 3, within `manhattan`).
+        assert_eq!(
+            store
+                .hover_doc("file:///m.noe", Position::new(3, 8), Encoding::Utf16)
+                .as_deref(),
+            Some("Distance from origin.")
+        );
+        // On the call site `p.manhattan()` (line 6, within `manhattan`).
+        assert_eq!(
+            store
+                .hover_doc("file:///m.noe", Position::new(6, 9), Encoding::Utf16)
+                .as_deref(),
+            Some("Distance from origin.")
         );
     }
 
