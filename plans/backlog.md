@@ -17,9 +17,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| **Generic traits' default methods + generic-trait derive** — a generic user trait's defaults need per-implementor type substitution; today they are excluded (derive → E0050, defaults not hoisted: `noeta-check/collect.rs`, `noeta-ir/lower.rs`) | UT5 scope cut. Trigger: a generic trait wants defaults *(active — the natural next traits slice)* |
-| **Match arms take expressions only** — block/statement bodies in a `match` arm don't parse | aether F1 *(active)* |
-| **Closure inside a method capturing `self`/a field** — VM codegen gap (the reference interpreter handles it) | aether F3, deferred since M1.2. Trigger: any method-context closure *(active — user-visible backend asymmetry)* |
 | Forward / mutual capture among nested `fn`s (a closure capturing a local declared after it) | slice F1 residue. Trigger: a program with forward references between nested closures |
 | **`obj.f(args)` on a closure-valued field** — parsed unconditionally as method dispatch (E0005); needs the field-access-then-call desugar. With it: the `Callable`/`Members` protocols | M1.8 tail + coroutines Track-I. Trigger: member-handles / user iterators holding a `next` closure |
 | **`.await` in the remaining conditional positions** — `??` fallback (needs Option-aware unwrap desugar) and `match`/`if…then…else` arm bodies. Condition/loop heads stay rejected by design | A.6b residual (E0040) |
@@ -32,7 +29,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | **Editions S3/S4** — the first real edition-gated behavior (S3, pending a deliberate language divergence) and edition-aware diagnostics + a `noeta fix` migrator (S4, depends on S3) | editions arc. Trigger: a breaking language change we want to ship |
 | **`@derive(FromJson)` — typed JSON deserialization** (the type declaration as the parsing spec; `Result<T, JsonError>` with path-carrying errors; missing `Option<T>` → `none`, missing `T` → error). Was gated on the inferred-static type system — **that landed, so this is now buildable.** Open decisions: Ring 2 vs Ring 3 placement; shape-only vs validating-constructor hook | design proposal (2026-06). *(active — the acceptance test for the type-system track)* |
 | Const generics → explicit SIMD (`Simd<T, N>`) | bitwise Tier P. Trigger: user-code SIMD demand the columnar/autovectorization path can't meet |
-| Generic-enum match-payload binding mistyped (E0007) — **bug**, known open | generics follow-ups (2026-07) *(active, small)* |
 | Range-*checked* narrowing conversions (`checked_to_u8(): u8?`) alongside the wrapping casts | bitwise W4 note. Trigger: first fallible-narrowing use case |
 | E7 — editor injection for `${…}` holes inside foreign-language expr-tier bodies | expr-tiers, gated on the text-tiers editor grammar slices |
 
