@@ -360,8 +360,11 @@ enum Color { Red; Green }
     fn ast_pretty_prints_with_spans() {
         let out = ast(&prep());
         assert!(out.ast.starts_with("(program @0.."));
-        assert!(out.ast.contains("(fn handle"));
-        assert!(out.ast.contains("(struct Route"));
+        // The pretty-printer emits data attributes before the declaration head
+        // (`(#[Route("/x")] fn handle`), so match the fn head without anchoring to `(`.
+        assert!(out.ast.contains("fn handle"));
+        assert!(out.ast.contains("#[Route"));
+        assert!(out.ast.contains("struct Route"));
     }
 
     #[test]
