@@ -861,10 +861,15 @@ impl DocumentStore {
                 self.receiver_type_name(program, cache.workspace, doc, text, receiver_span);
             type_method(program, type_name.as_deref()?, member)?
         } else {
-            // A bare name: a free function (call site or its own declaration name), else — if the
-            // cursor is on a method's declaration name — that method.
+            // A bare name: a free function (call site or its own declaration name), an **imported**
+            // function (the entry's `use` binds the local name — alias included — to the qualified
+            // identity the linker rewrote the merged declaration to), else — if the cursor is on a
+            // method's declaration name — that method.
             let name = &text[token.span.range()];
-            match top_level_fn(program, name) {
+            match top_level_fn(program, name).or_else(|| {
+                let qualified = resolve::import_targets(&entry_ast.0.program).remove(name)?;
+                top_level_fn(program, &qualified)
+            }) {
                 Some(decl) => decl,
                 None => method_decl_at(program, offset, source)?,
             }
@@ -935,7 +940,13 @@ impl DocumentStore {
                 && offset <= t.span.end
         })?;
         let name = &text[token.span.range()];
-        let rendered = render_type_definition(program, name, text, source)?;
+        // An imported type's merged declaration is linker-qualified (`geometry.vec.Vec2`), so a
+        // bare reference (`Vec2 {}`) resolves through the entry's `use` bindings when the direct
+        // lookup misses.
+        let rendered = render_type_definition(program, name, text, source).or_else(|| {
+            let qualified = resolve::import_targets(&entry_ast.0.program).remove(name)?;
+            render_type_definition(program, &qualified, text, source)
+        })?;
         Some((rendered, index.range(token.span, encoding)))
     }
 
@@ -975,6 +986,39 @@ impl DocumentStore {
         };
         let value = format!("namespace group `{name}` → `{prefix}`{members}");
         Some((value, index.range(token.span, encoding)))
+    }
+
+    /// The `@doc` prose of a **dependency** declaration named by a `use` (`path` is the use path,
+    /// `leaf` the imported name): the linker merges a dep's declarations without their doc blocks,
+    /// so the prose comes from the dep module's own AST — filtered to the dependency whose import
+    /// key is the path's first segment, where the decl still carries its bare (pre-qualification)
+    /// name. The same source the Dependencies docs corpus reads.
+    fn dep_import_prose(
+        &self,
+        cache: &WorkspaceCache,
+        path: &[String],
+        leaf: &str,
+    ) -> Option<String> {
+        let key = path.first()?;
+        let db = &self.db;
+        for (i, sp) in cache.dep_programs.iter().enumerate() {
+            if cache.dep_modules.get(i)?.key(db) != key {
+                continue;
+            }
+            let ast = noeta_db::ast(db, *sp);
+            let program = &ast.0.program;
+            let span = program.stmts.iter().find_map(|s| match s {
+                noeta_ast::Stmt::Fn(d) if d.name == leaf => Some(d.name_span),
+                noeta_ast::Stmt::Struct(d) if d.name == leaf => Some(d.name_span),
+                noeta_ast::Stmt::Class(d) if d.name == leaf => Some(d.name_span),
+                noeta_ast::Stmt::Enum(d) if d.name == leaf => Some(d.name_span),
+                _ => None,
+            });
+            if let Some(prose) = span.and_then(|span| doc_prose_at(program, span)) {
+                return Some(prose);
+            }
+        }
+        None
     }
 
     /// The `@doc` prose attached to the declaration the cursor's identifier resolves to, if any —
@@ -1049,14 +1093,131 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
 
-        noeta_check::resolve_docs(program)
-            .into_iter()
-            .find_map(|doc| match doc.target {
-                noeta_check::DocTarget::Decl { name_span, .. } if name_span == def_span => {
-                    Some(noeta_check::dedent_doc(&doc.text).trim().to_string())
+        doc_prose_at(program, def_span)
+    }
+
+    /// A hover for any element of a **`use` statement** — none of which is a typed expression, so
+    /// every other hover has nothing to say there. An imported *item* (`Vec2`, `add` — or its
+    /// alias) hovers as the declaration it binds: a source function's signature, a source type's
+    /// definition, or a native item's registry signature, each with its doc prose; a grouped module
+    /// import (`use std.{math, json}`) and the *path segments* (`geometry`, `vec`) hover as the
+    /// module they name, with its members.
+    pub fn hover_use(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(String, Range)> {
+        let (cache, doc, source) = self.doc_cache(uri)?;
+        let db = &self.db;
+        let text = doc.text(db);
+        let index = LineIndex::new(text);
+        let offset = index.offset(position, encoding);
+
+        // The `use` statement under the cursor — from the entry parse (its `use`s live here).
+        let entry_ast = noeta_db::ast(db, doc);
+        let (path, names) = entry_ast.0.program.stmts.iter().find_map(|s| match s {
+            noeta_ast::Stmt::Use { path, names, span }
+                if span.source == source && span.start <= offset && offset <= span.end =>
+            {
+                Some((path, names))
+            }
+            _ => None,
+        })?;
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let prefix = path.join(".");
+
+        // On an imported name (or the alias it binds): the item hover.
+        if let Some(n) = names
+            .iter()
+            .find(|n| n.span.start <= offset && offset <= n.span.end)
+        {
+            let qualified = format!("{prefix}.{}", n.name);
+            let mut value = if let Some(decl) = top_level_fn(program, &qualified) {
+                // A source function merged from the project or a dependency (linker-qualified).
+                // Prose: the merged program carries a project decl's `@doc`; a dependency's doc
+                // blocks are NOT merged (only its decls are), so fall back to the dep module's own
+                // AST — the same source the Dependencies docs corpus reads.
+                let mut v = format!("```noeta\n{}\n```", render_fn_signature(decl));
+                if let Some(prose) = doc_prose_at(program, decl.name_span)
+                    .or_else(|| self.dep_import_prose(cache, path, &n.name))
+                {
+                    v.push_str("\n\n---\n\n");
+                    v.push_str(&prose);
                 }
-                _ => None,
-            })
+                v
+            } else if let Some(def) = render_type_definition(program, &qualified, text, source) {
+                // A source type: its full definition, plus its `@doc` prose when present.
+                let mut v = format!("```noeta\n{def}\n```");
+                let merged_prose = resolve::Definitions::collect(program)
+                    .resolve(&qualified)
+                    .and_then(|span| doc_prose_at(program, span));
+                if let Some(prose) =
+                    merged_prose.or_else(|| self.dep_import_prose(cache, path, &n.name))
+                {
+                    v.push_str("\n\n---\n\n");
+                    v.push_str(&prose);
+                }
+                v
+            } else if let Some(f) = api::function(&prefix, &n.name) {
+                // A native function (`use std.math.abs`): the registry's signature and prose.
+                let mut v = format!("```noeta\n{}\n```", f.signature);
+                if !f.doc.is_empty() {
+                    v.push_str("\n\n---\n\n");
+                    v.push_str(&f.doc);
+                }
+                v
+            } else if let Some(t) = api::type_(&qualified) {
+                // A native extern type (`use std.id.Uuid`): name it and list its methods.
+                let methods = t
+                    .methods
+                    .iter()
+                    .map(|m| format!("`{}`", m.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if methods.is_empty() {
+                    format!("extern type `{qualified}`")
+                } else {
+                    format!("extern type `{qualified}`\n\nMethods: {methods}")
+                }
+            } else {
+                // A grouped module import (`use std.{math, json}`) or an unresolved name: describe
+                // the module when the registry or the program knows it, else just name the import.
+                let members = module_members(program, &qualified);
+                if members.is_empty() {
+                    format!("import `{qualified}`")
+                } else {
+                    format!("module `{qualified}`\n\nMembers: {}", members.join(", "))
+                }
+            };
+            if let Some(alias) = &n.alias {
+                value.push_str(&format!("\n\nimported as `{alias}`"));
+            }
+            return Some((value, index.range(n.span, encoding)));
+        }
+
+        // On a path segment (`geometry`, `vec`, `std`, …): the module prefix up to that segment.
+        // Segments carry no individual spans, so find the identifier token and match its text.
+        let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|t| {
+            t.kind == TokenKind::Ident
+                && t.span.source == source
+                && t.span.start <= offset
+                && offset <= t.span.end
+        })?;
+        let word = &text[token.span.range()];
+        let idx = path.iter().position(|s| s == word)?;
+        let module = path[..=idx].join(".");
+        let members = module_members(program, &module);
+        let value = if members.is_empty() {
+            format!("module `{module}`")
+        } else {
+            format!("module `{module}`\n\nMembers: {}", members.join(", "))
+        };
+        Some((value, index.range(token.span, encoding)))
     }
 
     /// The **tier-body descriptor** for an embedded-language block under the cursor (text-tiers /
@@ -2460,6 +2621,54 @@ fn top_level_fn<'a>(program: &'a noeta_ast::Program, name: &str) -> Option<&'a n
     })
 }
 
+/// The `@doc` prose attached to the declaration whose name span is `name_span`, dedented — the
+/// body every doc-bearing hover appends. Adjacency-resolved from the merged program (see
+/// [`noeta_check::resolve_docs`]).
+fn doc_prose_at(program: &noeta_ast::Program, name_span: Span) -> Option<String> {
+    noeta_check::resolve_docs(program)
+        .into_iter()
+        .find_map(|doc| match doc.target {
+            noeta_check::DocTarget::Decl {
+                name_span: span, ..
+            } if span == name_span => Some(noeta_check::dedent_doc(&doc.text).trim().to_string()),
+            _ => None,
+        })
+}
+
+/// The members of module `prefix`, for a `use`-path hover: the registry's namespace children
+/// (native modules and types) unioned with the merged program's own declarations exactly one
+/// segment below the prefix (a source dependency's fns/types). Sorted, deduped, backticked.
+fn module_members(program: &noeta_ast::Program, prefix: &str) -> Vec<String> {
+    let mut members: Vec<String> =
+        noeta_stdlib::registry::single_registry_process().namespace_children(prefix);
+    // A native module's functions (`std.math` → sqrt, pow, …): namespace_children lists only
+    // submodules and extern types, but for a leaf module the functions ARE the members.
+    if let Some(module) = api::module(prefix) {
+        members.extend(module.functions.iter().map(|f| f.name.clone()));
+    }
+    let dotted = format!("{prefix}.");
+    let mut push_leaf = |name: &str| {
+        if let Some(rest) = name.strip_prefix(&dotted)
+            && !rest.is_empty()
+            && !rest.contains('.')
+        {
+            members.push(rest.to_string());
+        }
+    };
+    for stmt in &program.stmts {
+        match stmt {
+            noeta_ast::Stmt::Fn(decl) => push_leaf(&decl.name),
+            noeta_ast::Stmt::Struct(decl) => push_leaf(&decl.name),
+            noeta_ast::Stmt::Class(decl) => push_leaf(&decl.name),
+            noeta_ast::Stmt::Enum(decl) => push_leaf(&decl.name),
+            _ => {}
+        }
+    }
+    members.sort();
+    members.dedup();
+    members.into_iter().map(|m| format!("`{m}`")).collect()
+}
+
 /// Render a function/method declaration in Noeta surface syntax for a signature hover:
 /// `fn manhattan(): int`, `fn bump(by: int): void`, or `fn origin()` when the return type is
 /// unannotated. Parameters use the same `name: T` spelling as signature help and symbol detail.
@@ -2923,6 +3132,33 @@ mod tests {
             .find(|d| d.code == noeta_diagnostics::DiagnosticCode::UnresolvedImport)
             .expect("an E0019 for the unresolved import");
         assert_eq!(unresolved.help.as_deref(), Some("did you mean `http`?"));
+    }
+
+    #[test]
+    fn hovering_use_elements_describes_what_they_name() {
+        let mut store = test_store();
+        store.open(
+            "file:///a.noe",
+            "use std.math.sqrt\necho sqrt(4.0)\n".to_string(),
+        );
+        let enc = Encoding::Utf16;
+        // The imported native function: its registry signature (and prose follows after a rule).
+        let (item, _) = store
+            .hover_use("file:///a.noe", Position::new(0, 14), enc)
+            .expect("hover on the imported name");
+        assert!(item.contains("fn sqrt(float): float"), "got: {item}");
+        // A path segment: the module it names, with members.
+        let (module, _) = store
+            .hover_use("file:///a.noe", Position::new(0, 9), enc)
+            .expect("hover on the `math` segment");
+        assert!(module.starts_with("module `std.math`"), "got: {module}");
+        assert!(module.contains("`sqrt`"), "members listed: {module}");
+        // Outside a use statement, this hover stays silent (the others take over).
+        assert!(
+            store
+                .hover_use("file:///a.noe", Position::new(1, 6), enc)
+                .is_none()
+        );
     }
 
     #[test]
