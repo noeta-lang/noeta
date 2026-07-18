@@ -27,6 +27,8 @@ salsa = { workspace = true }
 # Tests are their own assembling driver: they seed the process-default registry with the std
 # units (a dev-dep never re-enters the library build graph).
 noeta-stdlib = { workspace = true }
+# The heap-residency probe for the deleted-input reclamation test (audit F9 residual a).
+noeta-alloc-probe = { workspace = true }
 
 [lints.rust]
 missing_debug_implementations = "warn"
