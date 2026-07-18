@@ -68,7 +68,10 @@ pub fn directive_signature(
                 })
                 .collect::<Vec<_>>()
                 .join(" | ");
-            Some(one(&format!("@derive(Trait, …) — {traits}"), "Trait"))
+            Some(one(
+                &format!("@derive(Trait, …) — {traits} | a fully-defaulted user trait"),
+                "Trait",
+            ))
         }
         "role" => Some(one(
             &format!(

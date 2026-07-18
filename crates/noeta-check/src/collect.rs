@@ -511,31 +511,85 @@ impl Checker {
                 _ => {}
             }
         }
-        // Record which user traits each type implements (L1, UT2), from both standalone and in-body
-        // `impl`s. Done after the main walk so every `trait` is registered regardless of source
-        // order. The basis for UT3 bound satisfaction and UT4 `dyn Trait` coercion.
+        // Record which user traits each type implements (L1, UT2), from standalone `impl`s,
+        // in-body `impl`s, and `@derive(UserTrait)` (a fully-defaulted trait adopted wholesale —
+        // `check_derives` enforces the fully-defaulted part). Done after the main walk so every
+        // `trait` is registered regardless of source order. The basis for UT3 bound satisfaction
+        // and UT4 `dyn Trait` coercion.
         for stmt in &program.stmts {
-            let (type_name, impls): (&str, &[noeta_ast::ImplBlock]) = match stmt {
-                Stmt::Impl(decl) if self.symbols.user_traits.contains_key(&decl.trait_name) => {
-                    self.symbols
-                        .user_trait_impls
-                        .entry(decl.target.clone())
-                        .or_default()
-                        .insert(decl.trait_name.clone());
-                    continue;
-                }
-                Stmt::Struct(d) => (&d.name, &d.impls),
-                Stmt::Class(d) => (&d.name, &d.impls),
-                Stmt::Enum(d) => (&d.name, &d.impls),
-                _ => continue,
-            };
-            for b in impls {
-                if self.symbols.user_traits.contains_key(&b.trait_name) {
+            let (type_name, impls, derives): (&str, &[noeta_ast::ImplBlock], &[DeriveSpec]) =
+                match stmt {
+                    Stmt::Impl(decl) if self.symbols.user_traits.contains_key(&decl.trait_name) => {
+                        self.symbols
+                            .user_trait_impls
+                            .entry(decl.target.clone())
+                            .or_default()
+                            .insert(decl.trait_name.clone());
+                        continue;
+                    }
+                    Stmt::Struct(d) => (&d.name, &d.impls, &d.derives),
+                    Stmt::Class(d) => (&d.name, &d.impls, &d.derives),
+                    Stmt::Enum(d) => (&d.name, &d.impls, &d.derives),
+                    _ => continue,
+                };
+            for trait_name in impls
+                .iter()
+                .map(|b| &b.trait_name)
+                .chain(derives.iter().map(|d| &d.name))
+            {
+                if self.symbols.user_traits.contains_key(trait_name) {
                     self.symbols
                         .user_trait_impls
                         .entry(type_name.to_string())
                         .or_default()
-                        .insert(b.trait_name.clone());
+                        .insert(trait_name.clone());
+                }
+            }
+        }
+        // Default-method fallback (UT5): a trait method the implementor omits falls back to the
+        // trait's default body (the backends hoist it via `hoist_standalone_impl_methods`), so its
+        // SIGNATURE registers here — member calls on the implementing type resolve and type it. A
+        // method the type provides itself wins (already registered above); a generic trait's
+        // defaults are excluded (per-implementor substitution — deferred with generic-trait
+        // derivation).
+        for (type_name, trait_names) in self.symbols.user_trait_impls.clone() {
+            for trait_name in trait_names {
+                let Some(decl) = self.symbols.user_traits.get(&trait_name).cloned() else {
+                    continue;
+                };
+                if !decl.type_params.is_empty() {
+                    continue;
+                }
+                for tm in decl.methods.iter().filter(|tm| tm.has_default) {
+                    let key = (type_name.clone(), tm.sig.name.clone());
+                    if self.symbols.methods.contains_key(&key) {
+                        continue;
+                    }
+                    let m = &tm.sig;
+                    let params: Vec<Type> = m
+                        .params
+                        .iter()
+                        .map(|p| param_type(p, &self.imports.extern_types))
+                        .collect();
+                    let ret = async_return(
+                        m.ret
+                            .as_ref()
+                            .map(|t| from_ref_q(t, &self.imports.extern_types))
+                            .unwrap_or(Type::Unknown),
+                        m.is_async,
+                    );
+                    self.symbols
+                        .method_instance
+                        .insert(key.clone(), m.body.iter().any(|s| s.mentions("self")));
+                    self.symbols.methods.insert(
+                        key,
+                        FnSig {
+                            params,
+                            ret,
+                            required: required_params(&m.params),
+                            generic: None,
+                        },
+                    );
                 }
             }
         }

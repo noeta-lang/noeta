@@ -1,0 +1,23 @@
+// Default-method fallback (L1, UT5): a trait method the impl omits falls back to the trait's
+// default body, hoisted onto the implementing type — for a standalone impl here. An instance
+// default (`greet_all`, mentions `self`) dispatches on a value and may call the impl's required
+// method; a self-less default (`shout`) is an associated fn, called on the type.
+// expect: stdout "hi all"
+// expect: stdout "HELLO"
+// expect: exit 0
+trait Greeter {
+    fn greet(who: string): string
+    fn greet_all(): string { return self.greet("all") }
+    fn shout(): string { return "HELLO" }
+}
+
+class Casual {
+    fn new(): Casual { return Casual {} }
+}
+
+impl Greeter for Casual {
+    fn greet(who: string): string { return "hi " ~ who }
+}
+
+echo Casual.new().greet_all()
+echo Casual.shout()

@@ -511,6 +511,13 @@ impl Checker {
     pub(crate) fn check_derives(&mut self, type_name: &str, derives: &[DeriveSpec]) {
         for spec in derives {
             let Some(t) = BuiltinTrait::from_name(&spec.name) else {
+                // A USER trait derives by adopting its default methods wholesale (UT5): valid
+                // exactly when every method has a default body — the same impl an explicit empty
+                // `impl Trait for T {}` would produce, with the defaults hoisted by the backends.
+                if let Some(decl) = self.symbols.user_traits.get(&spec.name).cloned() {
+                    self.check_user_trait_derive(spec, &decl);
+                    continue;
+                }
                 self.error(
                     DiagnosticCode::UnknownTrait,
                     spec.span,
@@ -585,6 +592,57 @@ impl Checker {
                 }
             }
             self.check_derive_field_constraint(type_name, t, spec.span);
+        }
+    }
+
+    /// Validate a `@derive(<UserTrait>)` (UT5): deriving a user trait means adopting every default
+    /// method — the same registration an explicit empty `impl Trait for T {}` produces (`collect`
+    /// already recorded the membership; the backends hoist the default bodies). Valid only for a
+    /// non-generic trait whose every method has a default; anything else is an E0050 naming what is
+    /// missing, with the explicit-impl route as the help.
+    fn check_user_trait_derive(&mut self, spec: &DeriveSpec, decl: &noeta_ast::TraitDecl) {
+        if !spec.args.is_empty() {
+            self.error(
+                DiagnosticCode::UnderivableTrait,
+                spec.span,
+                format!("`{}` takes no type arguments in `@derive(...)`", spec.name),
+            );
+            return;
+        }
+        if !decl.type_params.is_empty() {
+            self.error(
+                DiagnosticCode::UnderivableTrait,
+                spec.span,
+                format!("generic trait `{}` cannot be derived", spec.name),
+            )
+            .help("write an explicit `impl` for the instantiation you need");
+            return;
+        }
+        let required: Vec<&str> = decl
+            .methods
+            .iter()
+            .filter(|tm| !tm.has_default)
+            .map(|tm| tm.sig.name.as_str())
+            .collect();
+        if !required.is_empty() {
+            self.error(
+                DiagnosticCode::UnderivableTrait,
+                spec.span,
+                format!(
+                    "cannot derive `{}`: it has method(s) without a default body — {}",
+                    decl.name,
+                    required
+                        .iter()
+                        .map(|n| format!("`fn {n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .help(format!(
+                "a user trait is derivable when every method has a default; implement the \
+                 required methods with `impl {} for <Type> {{ … }}` instead",
+                decl.name
+            ));
         }
     }
 

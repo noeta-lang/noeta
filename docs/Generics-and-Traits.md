@@ -81,6 +81,8 @@ echo (Money.new(3) < Money.new(5))   // true
 
 There is also a **standalone** `impl Trait for T { }` (marker/empty-body only for now), which must target a type declared in the same module — an orphan target is E0013, a wrong or missing method is E0015.
 
+**Default methods fall back.** A user trait's method *with* a body is a **default**: an implementor may omit it, and the omitted method falls back to the trait's default body — hoisted onto the implementing type, so it dispatches like any method (a default that mentions `self` is an instance method and may call the trait's required methods; a self-less default is an associated fn, called on the type). A method the impl provides always overrides its default. Generic traits' defaults are excluded for now (they would need per-implementor substitution).
+
 ## `@derive` — synthesized implementations
 
 `@derive(...)` generates trait impls from a type's shape. It is a *codegen* directive, distinct from `#[...]` data attributes (see [Attributes & Reflection](Attributes-and-Reflection)).
@@ -105,6 +107,18 @@ echo Point.new(1, 2) < Point.new(1, 3)   // true
 @derive(Serialize<Json>)
 class User { name: string  id: int  active: bool }
 echo User.new("Ada", 7, true).to_json()  // {"name":"Ada","id":7,"active":true}
+```
+
+**Deriving a user trait.** `@derive(<UserTrait>)` is valid when the trait is non-generic and **every** method has a default body — the derive adopts the defaults wholesale, exactly like an empty `impl Trait for T {}`, and registers the trait membership (so the type satisfies `T: Trait` bounds and coerces to `dyn Trait`). A trait with a required (default-less) method cannot be derived — E0050 names the missing methods; write the explicit `impl`. Because Noeta is reflection-first, a fully-defaulted trait can still do real per-type work: its default bodies can reflect over `self` (`type_of`, `attributes_of`) rather than needing a macro system.
+
+```noeta check
+trait Describable {
+    fn label(): string { return "thing" }
+    fn describe(): string { return "a " ~ self.label() ~ "!" }
+}
+@derive(Describable)
+struct Point { x: int }
+echo Point { x: 1 }.describe()   // a thing!
 ```
 
 Errors: deriving a non-derivable trait (`@derive(Add)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. The old `#[derive(...)]` spelling is E0017.

@@ -1,0 +1,27 @@
+// Default-method fallback (UT5) for the unified body: an in-body `impl Trait { … }` that omits a
+// defaulted method still gets the default, and a provided method overrides its default.
+// expect: stdout "a point!"
+// expect: stdout "P1"
+// expect: exit 0
+trait Describable {
+    fn label(): string { return "thing" }
+    fn describe(): string { return "a " ~ self.label() ~ "!" }
+}
+
+struct Point {
+    x: int
+    impl Describable {
+        fn label(): string { return "point" }
+    }
+}
+
+struct Plain {
+    x: int
+    impl Describable {
+        // Both defaults adopted; `describe` overridden.
+        fn describe(): string { return "P" ~ self.x }
+    }
+}
+
+echo Point { x: 1 }.describe()
+echo Plain { x: 1 }.describe()
