@@ -328,6 +328,9 @@
 
     if (trace.boundaries.length) {
       const rail = el("div", "boundaries");
+      // With a boundary toggled on, mute its siblings — the active/filter state reads at a glance
+      // (and signals that the pills are toggles at all).
+      if (activeBoundary) rail.classList.add("filtering");
       for (const b of trace.boundaries) {
         const chip = el("button", "boundary");
         chip.style.setProperty("--role-c", roleColor(b.role));

@@ -72,6 +72,9 @@ body {
   background: color-mix(in srgb, var(--role-c) 14%, transparent);
   outline: 1px solid var(--role-c);
 }
+/* One pill toggled on ⇒ the others mute (hover un-mutes, hinting they toggle too). */
+.boundaries.filtering .boundary:not(.active) { opacity: 0.35; }
+.boundaries.filtering .boundary:not(.active):hover { opacity: 0.85; }
 
 /* ---- The tree -------------------------------------------------------------------------------- */
 
