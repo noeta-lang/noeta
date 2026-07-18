@@ -316,6 +316,21 @@ pub trait Os {
     /// already-exited child is `Ok`. A later `wait` observes the killed status.
     fn os_proc_kill(&mut self, handle: u64) -> Result<(), StdError>;
 
+    /// Send `signal` to the child — the general form of [`Self::os_proc_kill`] (`kill` is exactly
+    /// `signal(Signal::Kill)`, kept separate for its portable forceful-terminate guarantee).
+    /// Idempotent: signalling an already-exited child is `Ok`. On non-Unix hosts only
+    /// `Kill`/`Term` are expressible (as a forceful terminate); other signals are an `Io` error.
+    fn os_proc_signal(&mut self, handle: u64, signal: crate::os::Signal) -> Result<(), StdError>;
+
+    /// Build the `wait_async` work descriptor for a spawned child — the awaitable twin of
+    /// [`Self::os_proc_wait`]. Default: a [`crate::os::ProcWaitIo`] resolving through
+    /// [`Self::os_proc_wait`] at spawn (deterministic in the sandbox — the scripted child is already
+    /// complete); `RealHost` overrides it with a blocking-pool body so the wait genuinely overlaps
+    /// the isolate's other tasks. The exec-side [`Self::os_exec_spawn`] analogue for a held handle.
+    fn os_proc_wait_spawn(&mut self, handle: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::os::ProcWaitIo { handle })
+    }
+
     // --- Streaming (process-streaming arc): read a child's stdout line-by-line *while it runs*,
     // and feed its stdin — unlike `wait`, which only hands back the fully-captured output at exit.
     // The real host keeps draining both pipes on background threads (so a chatty child never

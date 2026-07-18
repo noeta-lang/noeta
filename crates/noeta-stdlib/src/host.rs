@@ -677,6 +677,17 @@ impl Os for SandboxHost {
         }
     }
 
+    /// The scripted child is already complete, so every signal is a harmless, validated no-op —
+    /// deterministic and in-oracle, exactly like `os_proc_kill` (`signal` is `kill`'s general form).
+    /// The handle must exist; the signal itself has no observable sandbox effect.
+    fn os_proc_signal(
+        &mut self,
+        handle: u64,
+        _signal: noeta_ext_abi::os::Signal,
+    ) -> Result<(), StdError> {
+        self.require_proc(handle)
+    }
+
     /// Stream the scripted stdout a line at a time from the stored output via the per-handle
     /// cursor — deterministic, and identical in shape to the real host's line streaming. `None`
     /// once the output is exhausted; a final unterminated line is returned once (like `str::lines`).
@@ -1033,9 +1044,18 @@ mod tests {
         // kill is a no-op on the completed child; wait remains valid afterward.
         assert!(host.os_proc_kill(a).is_ok());
         assert_eq!(host.os_proc_wait(a).unwrap().stdout, "hi\n");
+        // signal is a validated no-op on the completed child, idempotent across signals.
+        use noeta_ext_abi::os::Signal;
+        assert!(host.os_proc_signal(a, Signal::Term).is_ok());
+        assert!(host.os_proc_signal(a, Signal::Hup).is_ok());
+        assert_eq!(host.os_proc_wait(a).unwrap().stdout, "hi\n");
         // Operating on an unknown handle is an Io error.
         assert_eq!(host.os_proc_wait(999).unwrap_err().kind, ErrorKind::Io);
         assert_eq!(host.os_proc_kill(999).unwrap_err().kind, ErrorKind::Io);
+        assert_eq!(
+            host.os_proc_signal(999, Signal::Kill).unwrap_err().kind,
+            ErrorKind::Io
+        );
         // A spawn of an unstartable command fails at spawn, like a real missing binary.
         assert_eq!(
             host.os_spawn("frobnicate", &[]).unwrap_err().kind,

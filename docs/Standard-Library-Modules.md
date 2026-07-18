@@ -139,8 +139,10 @@ Process execution and system introspection. Under the sandbox the introspection 
 |---|---|---|
 | `pid` | `pid() -> int` | The child's OS process id. |
 | `wait` | `wait() -> ExecResult` | Blocks until the child exits; returns its status + captured output. Idempotent. |
+| `wait_async` | `wait_async() -> Future<ExecResult>` | The awaitable twin of `wait`: an async context awaits the child's exit. In the sandbox it resolves deterministically; on the real host the wait runs on the blocking pool, genuinely overlapping the isolate's other tasks. |
 | `try_wait` | `try_wait() -> ?ExecResult` | Non-blocking poll: `some(result)` if exited, `none` if still running. |
 | `kill` | `kill() -> void` | Forcefully terminates the child (idempotent). A later `wait` sees the killed status. |
+| `signal` | `signal(name: string) -> void` | Send a named OS signal to the child — the general form of `kill`. The name is case-insensitive and the `SIG` prefix is optional (`"TERM"`, `"sighup"`, `"KILL"`). Supported: `HUP`, `INT`, `QUIT`, `KILL`, `USR1`, `USR2`, `TERM`, `CONT`, `STOP`; an unknown name is E0021. Idempotent (signalling an exited child is a no-op). On non-Unix hosts only `KILL`/`TERM` are expressible. |
 | `read_line` | `read_line() -> ?string` | Streams the child's stdout a line at a time **while it runs** (blocks until a line is ready), `none` at end of output. `wait` still returns the whole capture. |
 | `read` | `read(n: int) -> ?string` | Up to `n` **characters** from stdout (POSIX-read shape: blocks only until at least one is ready), sharing the `read_line` cursor; `none` at EOF. |
 | `read_err_line` | `read_err_line() -> ?string` | Streams **stderr** a line at a time on its own cursor. |

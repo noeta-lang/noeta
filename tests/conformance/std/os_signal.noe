@@ -1,0 +1,19 @@
+// `child.signal(name)` (process-signals arc) — the general form of `kill`: send a named OS signal
+// to a spawned child. Names are case-insensitive and the `SIG` prefix is optional (`"TERM"`,
+// `"sighup"`, `"kill"` all work). In the sandbox the scripted child is already complete, so a signal
+// is a deterministic, idempotent no-op and a later `wait` still returns the outcome.
+// expect: stdout "signaled"
+// expect: stdout "0"
+// expect: stdout "child out"
+// expect: exit 0
+use std.{os}
+
+p = os.spawn("echo", ["child out"])
+p.signal("TERM")
+p.signal("SIGHUP")
+p.signal("kill")
+echo "signaled"
+
+r = p.wait()
+echo r.status()
+echo r.stdout().trim()
