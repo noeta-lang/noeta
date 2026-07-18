@@ -2150,6 +2150,13 @@ fn fs_dispatch(
                 path.to_string(),
             )))))
         }
+        "read_bytes_async" => {
+            want_arity(func, args, 1)?;
+            let path = want_str(func, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(
+                crate::FsIo::ReadBytes(path.to_string()),
+            ))))
+        }
         "write_async" | "append_async" => {
             want_arity(func, args, 2)?;
             let path = want_str(func, args, 0)?.to_string();
@@ -2161,16 +2168,23 @@ fn fs_dispatch(
             };
             Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
         }
-        // The async metadata twins (extern-types X6).
-        "exists_async" | "remove_async" => {
+        // The async metadata twins (extern-types X6; the directory pair is A.10 residue).
+        "exists_async" | "remove_async" | "is_dir_async" => {
             want_arity(func, args, 1)?;
             let path = want_str(func, args, 0)?.to_string();
-            let io = if func == "exists_async" {
-                crate::FsIo::Exists(path)
-            } else {
-                crate::FsIo::Remove(path)
+            let io = match func {
+                "exists_async" => crate::FsIo::Exists(path),
+                "is_dir_async" => crate::FsIo::IsDir(path),
+                _ => crate::FsIo::Remove(path),
             };
             Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
+        }
+        "mkdir_async" => {
+            want_arity(func, args, 1)?;
+            let path = want_str(func, args, 0)?.to_string();
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(crate::FsIo::Mkdir(
+                path,
+            )))))
         }
         "list_async" => {
             // 0-or-1 args, mirroring the sync `list` (whole sandbox vs one directory).
@@ -2714,6 +2728,10 @@ const FS_DOCS: &[(&str, &str)] = &[
         "Read the whole file at `path` as raw `bytes`.",
     ),
     (
+        "read_bytes_async",
+        "Async `read_bytes` — yields a `Future<bytes>`.",
+    ),
+    (
         "read_lines",
         "Read the file at `path` and split it into a list of lines (newlines removed).",
     ),
@@ -2734,6 +2752,7 @@ const FS_DOCS: &[(&str, &str)] = &[
     ("exists", "Whether a file or directory exists at `path`."),
     ("exists_async", "Async `exists`."),
     ("is_dir", "Whether `path` exists and is a directory."),
+    ("is_dir_async", "Async `is_dir` — yields a `Future<bool>`."),
     (
         "list",
         "The entry names of a directory (the given path, or the current directory).",
@@ -2743,6 +2762,7 @@ const FS_DOCS: &[(&str, &str)] = &[
         "mkdir",
         "Create the directory at `path`, including any missing parent directories.",
     ),
+    ("mkdir_async", "Async `mkdir` — yields a `Future<void>`."),
     (
         "open",
         "Open the file at `path` in mode `\"r\"`/`\"w\"`/`\"a\"`, returning a `FileHandle` cursor for \
@@ -3551,6 +3571,12 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Bytes),
     },
+    // A.10 residue: the async twin of `read_bytes` — a `Future<bytes>`.
+    ExtFn {
+        name: "read_bytes_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Bytes)),
+    },
     ExtFn {
         name: "read",
         params: &[Str],
@@ -3616,6 +3642,18 @@ const FS_FNS: &[ExtFn] = &[
         name: "mkdir",
         params: &[Str],
         ret: Concrete(SigType::Unit),
+    },
+    // A.10 residue: the async directory twins — `is_dir_async` → `Future<bool>`, `mkdir_async`
+    // → `Future<void>`. `list_async` already covers directory listing.
+    ExtFn {
+        name: "is_dir_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Bool)),
+    },
+    ExtFn {
+        name: "mkdir_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Unit)),
     },
     // `list([dir])` — the directory argument is trailing-optional (the http-arc H4 machinery,
     // which post-dates this function's old "checker special-cases the arity" note).
