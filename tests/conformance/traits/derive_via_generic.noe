@@ -1,0 +1,55 @@
+// `via:` delegation on a GENERIC deriving type (the derive-layers exclusion, lifted). A concrete
+// via field checks at the declaration as always; a parameter-typed via field defers to the
+// instantiation site (S4's `via:` twin — `satisfies` judges the substituted via field, and ONLY
+// it: sibling fields never constrain a delegated trait). Covers the builtin templates
+// (Comparable forward, Add unwrap-op-rewrap) and a user trait forwarded through a `T` field.
+// expect: stdout "true"
+// expect: stdout "5"
+// expect: stdout "hi w"
+// expect: stdout "1"
+// expect: stdout "3"
+// expect: exit 0
+@derive(Comparable, via: id)
+struct Slot<T> {
+    id: int
+    payload: T
+}
+a = Slot { id: 1, payload: [1, 2] }
+b = Slot { id: 2, payload: [3] }
+echo a < b
+
+@derive(Comparable, via: value)
+struct Box<T> {
+    value: T
+    note: string
+}
+
+@derive(Add, via: value)
+struct W<T> {
+    value: T
+}
+echo (W { value: 2 } + W { value: 3 }).value
+
+trait Greet {
+    fn hello(): string
+}
+struct Inner {
+    tag: string
+    impl Greet {
+        fn hello(): string { return "hi " ~ self.tag }
+    }
+}
+@derive(Greet, via: value)
+struct Wrap<T> {
+    value: T
+}
+echo Wrap { value: Inner { tag: "w" } }.hello()
+
+fn smallest<T: Comparable>(x: T, y: T): T {
+    return if x < y then x else y
+}
+// `Box<int>`: the substituted via field (`int`) orders, so the bound is satisfied.
+echo smallest(Box { value: 1, note: "a" }, Box { value: 9, note: "b" }).value
+// `Slot<List<int>>`: the payload could never order, but the delegation reads `id` alone —
+// the bound judges the via field, not the siblings (a field-wise derive would be refused here).
+echo smallest(Slot { id: 3, payload: [9, 9] }, Slot { id: 4, payload: [] }).id

@@ -150,6 +150,20 @@ struct Price { cents: int }
 
 **Generic derives are conditional.** `@derive(Comparable) struct Box<T> { value: T }` defers the parameter-typed field to each use: `Box<int>` satisfies `Comparable`, `Box<List<int>>` does not (the bound fails at the call site, E0025). A hand-written `impl` is the author's contract and stays unconditional.
 
+`via:` composes with this: a parameter-typed via field defers to the instantiation site too, and the condition is the **via field's alone** — delegation exists precisely so sibling fields don't constrain the trait. A `Slot<T>` with an `id: int` field and a `payload: T` field deriving `@derive(Comparable, via: id)` satisfies `Comparable` at every instantiation (only `id` is compared), even `Slot<List<int>>`, which a field-wise derive would refuse:
+
+```noeta check
+@derive(Comparable, via: value)
+struct Box<T> {
+    value: T
+    note: string
+}
+fn smallest<T: Comparable>(x: T, y: T): T {
+    return if x < y then x else y
+}
+echo smallest(Box { value: 1, note: "a" }, Box { value: 9, note: "b" }).value
+```
+
 ## Coherence
 
 Each type has **at most one** implementation of a given trait, across `@derive(T)`, an in-body `impl T { }`, and a standalone `impl T for Type { }`. A duplicate or competing impl is E0027. Because all traits are built-in and `impl` blocks may only target a type declared in the same module, the orphan problem is structurally impossible — coherence checking reduces to uniqueness.

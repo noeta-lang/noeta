@@ -1,0 +1,26 @@
+// A `via:` derive on a generic type is conditional on the INSTANTIATED via field (S4's `via:`
+// twin): a bound is refused when the substituted via field cannot support the trait — for a
+// builtin (`List<int>` has no ordering) and for a user trait (`int` implements no `Greet`).
+// expect: error E0025 at 25:6
+// expect: error E0025 at 26:6
+// expect: exit 1
+@derive(Comparable, via: value)
+struct Box<T> {
+    value: T
+    note: string
+}
+trait Greet {
+    fn hello(): string
+}
+@derive(Greet, via: value)
+struct Wrap<T> {
+    value: T
+}
+fn smallest<T: Comparable>(x: T, y: T): T {
+    return if x < y then x else y
+}
+fn salute<T: Greet>(x: T): string {
+    return x.hello()
+}
+echo smallest(Box { value: [1], note: "a" }, Box { value: [2], note: "b" }).note
+echo salute(Wrap { value: 3 })

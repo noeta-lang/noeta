@@ -766,6 +766,12 @@ struct Symbols {
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
     derived_traits: HashMap<String, HashSet<BuiltinTrait>>,
+    /// Each type's `via:`-delegated derives: type name → `(trait name, via field)` pairs, for
+    /// built-in and user traits alike. A via-derive's conditional constraint is the **via
+    /// field's** alone — delegation exists precisely so sibling fields don't constrain the trait
+    /// — so the instantiation-site checks (`satisfies`/`satisfies_user_trait`) consult this to
+    /// judge the substituted via field instead of every field (S4's `via:` twin).
+    via_derives: HashMap<String, Vec<(String, String)>>,
     /// Each generic user type's type-parameter **names**, in order — so a field/method access can
     /// map an instance's type arguments (`Box<int>`) back onto the declaration's parameters (`T`)
     /// and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).

@@ -548,7 +548,6 @@ impl Checker {
         derives: &[DeriveSpec],
         fields: &[noeta_ast::FieldDecl],
         type_methods: &[FnDecl],
-        generic_type: bool,
     ) {
         for spec in derives {
             let Some(t) = BuiltinTrait::from_name(&spec.name) else {
@@ -556,7 +555,7 @@ impl Checker {
                 // delegation): defaults adopted wholesale, required members bridged onto the
                 // type's own fields/methods, or the whole trait forwarded through a field.
                 if let Some(decl) = self.symbols.user_traits.get(&spec.name).cloned() {
-                    self.check_user_trait_derive(spec, &decl, fields, type_methods);
+                    self.check_user_trait_derive(type_name, spec, &decl, fields, type_methods);
                     continue;
                 }
                 // A NATIVE derive recipe (layer 4, `ExtDerive`): synthesizes handler forwards —
@@ -603,14 +602,7 @@ impl Checker {
             // the shared template planner; the field-wise recipe machinery (arity, formats, the
             // E0050 field constraint) does not apply — the synthesized method carries the behavior.
             if let Some((via_name, via_span)) = &spec.via {
-                if generic_type {
-                    self.error(
-                        DiagnosticCode::UnderivableTrait,
-                        spec.span,
-                        "`via:` delegation is not supported on a generic type".to_string(),
-                    )
-                    .help("write an explicit `impl` inside the generic type instead");
-                } else if let Err(e) =
+                if let Err(e) =
                     noeta_ast::derive::plan_builtin_via(&spec.name, type_name, fields, spec)
                 {
                     let d = self.error(DiagnosticCode::UnderivableTrait, spec.span, e.message);
@@ -620,7 +612,16 @@ impl Checker {
                 } else if t == BuiltinTrait::Comparable {
                     // The forward is `self.f.compare(other.f)` — a via field whose type can
                     // NEVER order (the same judgement the field-wise recipe applies) would only
-                    // fail at the first runtime comparison; reject it at the declaration.
+                    // fail at the first runtime comparison; reject it at the declaration. A via
+                    // field mentioning one of the type's own generic parameters is deferred to
+                    // the instantiation site instead (`satisfies` judges the substituted via
+                    // field — S4's `via:` twin), exactly like the field-wise recipe's deferral.
+                    let params: Vec<String> = self
+                        .symbols
+                        .generic_types
+                        .get(type_name)
+                        .cloned()
+                        .unwrap_or_default();
                     let field_ty = self
                         .symbols
                         .records
@@ -628,6 +629,7 @@ impl Checker {
                         .and_then(|fs| fs.iter().find(|(n, _)| n == via_name))
                         .map(|(_, ty)| ty.clone());
                     if let Some(ty) = field_ty
+                        && !mentions_param(&ty, &params)
                         && !self.type_orderable(&ty, &mut Vec::new())
                     {
                         self.error(
@@ -727,9 +729,12 @@ impl Checker {
     /// defaults adopt, explicit `member: target` bindings and name/unique-type deduction bridge the
     /// required methods, `via: field` forwards the whole trait. A plan failure is an E0050 carrying
     /// the planner's candidate list; a `via:` field whose type does not itself implement the trait
-    /// is also E0050 (the forward would dispatch into nothing).
+    /// is also E0050 (the forward would dispatch into nothing). A via field typed as one of the
+    /// deriving type's own generic parameters defers to the instantiation site instead
+    /// (`satisfies_user_trait` judges the substituted via field — S4's `via:` twin).
     fn check_user_trait_derive(
         &mut self,
+        type_name: &str,
         spec: &DeriveSpec,
         decl: &noeta_ast::TraitDecl,
         fields: &[noeta_ast::FieldDecl],
@@ -747,7 +752,16 @@ impl Checker {
         if let Some((via, via_span)) = &spec.via
             && let Some(f) = fields.iter().find(|f| f.name == *via)
         {
+            let params: Vec<String> = self
+                .symbols
+                .generic_types
+                .get(type_name)
+                .cloned()
+                .unwrap_or_default();
             let satisfied = match &f.ty {
+                Some(noeta_ast::TypeRef::Named { name, .. }) if params.contains(name) => {
+                    true // parameter-typed — deferred to the instantiation site
+                }
                 Some(noeta_ast::TypeRef::Named { name, .. }) => self
                     .symbols
                     .user_trait_impls
@@ -1140,6 +1154,16 @@ impl Checker {
                     .get(n)
                     .is_some_and(|s| s.contains(&t))
             {
+                // A `via:` derive's condition is the **via field's** alone — delegation exists
+                // precisely so sibling fields don't constrain the trait (S4's `via:` twin).
+                if let Some(field) = self.via_field(n, t.name()) {
+                    return match t {
+                        BuiltinTrait::Comparable => self
+                            .field_type_at(n, args, &field)
+                            .is_none_or(|ft| self.type_orderable(&ft, &mut Vec::new())),
+                        _ => true,
+                    };
+                }
                 return match t {
                     BuiltinTrait::Comparable => self.type_orderable(ty, &mut Vec::new()),
                     BuiltinTrait::Serialize => self.type_serializable(ty, &mut Vec::new()),
@@ -1151,20 +1175,72 @@ impl Checker {
         builtin_satisfies(ty, t)
     }
 
+    /// The `via:` field through which `type_name`'s derive of `trait_name` delegates, if that
+    /// membership came from a `via:` derive at all.
+    fn via_field(&self, type_name: &str, trait_name: &str) -> Option<String> {
+        self.symbols
+            .via_derives
+            .get(type_name)?
+            .iter()
+            .find(|(t, _)| t == trait_name)
+            .map(|(_, f)| f.clone())
+    }
+
+    /// A named type's field type at the given instantiation: the declared field type with the
+    /// instance's type arguments substituted for the declaration's parameters.
+    fn field_type_at(&self, type_name: &str, args: &[Type], field: &str) -> Option<Type> {
+        let ty = self
+            .symbols
+            .records
+            .get(type_name)?
+            .iter()
+            .find(|(n, _)| n == field)
+            .map(|(_, t)| t.clone())?;
+        let subst = self.type_arg_subst(type_name, args);
+        Some(apply_subst(&ty, &subst))
+    }
+
     /// Whether `ty` implements the user trait named `bound` (L1, UT3). Only a named user type can —
     /// via a recorded in-body or standalone `impl` (`user_trait_impls`). A `dyn`/inference-hole
     /// defers to runtime (never a false negative); a built-in/primitive type never implements a
     /// user trait.
     fn satisfies_user_trait(&self, ty: &Type, bound: &str) -> bool {
+        self.satisfies_user_trait_inner(ty, bound, &mut Vec::new())
+    }
+
+    /// The recursive worker: `visited` guards a recursive nominal reached through a `via:` chain
+    /// (covered by the outer frame — the same convention as [`Self::type_orderable`]).
+    fn satisfies_user_trait_inner(&self, ty: &Type, bound: &str, visited: &mut Vec<String>) -> bool {
         if ty.defers_to_runtime() {
             return true;
         }
         match ty {
-            Type::Named(n, _) => self
-                .symbols
-                .user_trait_impls
-                .get(n)
-                .is_some_and(|s| s.contains(bound)),
+            Type::DynTrait(t) => t == bound,
+            Type::Named(n, args) => {
+                if !self
+                    .symbols
+                    .user_trait_impls
+                    .get(n)
+                    .is_some_and(|s| s.contains(bound))
+                {
+                    return false;
+                }
+                // A GENERIC type whose membership came from a `via:` derive is conditional on the
+                // substituted via field implementing the trait itself (S4's `via:` twin) — the
+                // instantiation-site side of the declaration check, which deferred a
+                // parameter-typed via field to here.
+                if !args.is_empty()
+                    && !visited.iter().any(|v| v == n)
+                    && let Some(field) = self.via_field(n, bound)
+                    && let Some(ft) = self.field_type_at(n, args, field.as_str())
+                {
+                    visited.push(n.clone());
+                    let ok = self.satisfies_user_trait_inner(&ft, bound, visited);
+                    visited.pop();
+                    return ok;
+                }
+                true
+            }
             _ => false,
         }
     }

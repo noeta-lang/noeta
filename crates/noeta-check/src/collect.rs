@@ -778,6 +778,17 @@ impl Checker {
         {
             entry.insert(t);
         }
+        // A `via:` derive (built-in or user trait) also records its delegation field, so the
+        // instantiation-site conditional checks judge the via field rather than every field.
+        for d in derives {
+            if let Some((via, _)) = &d.via {
+                self.symbols
+                    .via_derives
+                    .entry(name.to_string())
+                    .or_default()
+                    .push((d.name.clone(), via.clone()));
+            }
+        }
     }
 
     pub(crate) fn record_trait_impls<'a>(
