@@ -162,8 +162,10 @@ pub enum DiagnosticCode {
     GeneratorMisuse,
     /// An async construct is misused (Track A): `.await` appears outside an async context (a sync
     /// `fn`, or a closure passed to a builtin — the coloring rule), `.await` is applied to a
-    /// non-`Future` value, an `async fn`'s body is otherwise malformed, or a well-formed async
-    /// program is not yet executable (the A.0 interim gate, lifted in A.1).
+    /// non-`Future` value, `.await` sits in a condition or loop head (an `if`/`while` condition or a
+    /// `for` iterable — the one value position the desugar cannot hoist), an `async fn`'s body is
+    /// otherwise malformed, or a well-formed async program is not yet executable (the A.0 interim gate,
+    /// lifted in A.1).
     AsyncMisuse,
     /// A structured-concurrency construct is misused (Track A.3b): a `spawn` appears outside any
     /// `concurrent { }` scope (an orphan task, forbidden by construction), a `spawn` operand is not a

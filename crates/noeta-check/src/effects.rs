@@ -145,22 +145,20 @@ impl Checker {
         }
     }
 
-    /// Track A.3a: an `.await` inside an `async fn` is compiled into a poll-state of the state machine
-    /// only when it is in **statement position** — the whole value of a binding / expression-statement /
-    /// `return` / `echo`, optionally under one `?`. An `.await` buried in a sub-expression (a call
-    /// argument, an operand, a condition, a `match` arm, …) is not yet supported (E0040): flag it rather
-    /// than let it compile to a drive-to-completion, which would not yield to a sibling under
-    /// concurrency (A.3b). Recurses into control-flow bodies; a closure resets async coloring, so its
-    /// `.await`s are already rejected by the ordinary E0040 rule.
+    /// Track A.3a/A.6: an `.await` inside an `async fn` is compiled into a poll-state of the state
+    /// machine. It is legal in every **value position** — statement position (a binding /
+    /// expression-statement / `return` / `echo` / destructure value, optionally under one `?`), any
+    /// unconditionally-evaluated sub-expression (hoisted to a preceding statement-position await by the
+    /// IR lowering, A.6), and — since A.6b and its residual — any **conditionally-evaluated** value
+    /// position: the right operand of `&&`/`||`, the fallback of `??`, and a `match`/`if…then…else` arm
+    /// body, each rewritten into control flow by the state-machine desugar so the guarded await runs
+    /// exactly when the surrounding expression would evaluate it. What stays rejected (E0040) is an
+    /// `.await` in a **condition or loop head** — an `if`/`while` condition or a `for` iterable, which
+    /// the desugar does not hoist — and awaiting into a `yield`. Recurses into control-flow bodies; a
+    /// closure resets async coloring, so its `.await`s are rejected by the ordinary coloring rule.
     pub(crate) fn check_await_positions(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             match stmt {
-                Stmt::Binding { value, .. }
-                | Stmt::Expr { expr: value, .. }
-                | Stmt::Echo { value, .. } => self.check_value_await(value),
-                Stmt::Return {
-                    value: Some(value), ..
-                } => self.check_value_await(value),
                 Stmt::If {
                     cond,
                     then_body,
@@ -181,35 +179,10 @@ impl Checker {
                     self.reject_nested_await(iterable);
                     self.check_await_positions(body);
                 }
-                // A destructuring binding hosts mid-expression awaits the same way (A.6): the whole
-                // value is hoisted, then the destructure runs on the ready result.
-                Stmt::Destructure { value, .. } => self.check_value_await(value),
                 // Awaiting into a `yield` is not supported (a fn is either async or a generator).
                 Stmt::Yield { value, .. } => self.reject_nested_await(value),
                 _ => {}
             }
-        }
-    }
-
-    /// Check the value of a statement for a disallowed `.await` (Track A.6). A mid-expression `.await`
-    /// in an **unconditionally-evaluated** position (a call argument, an operand, a list/map element,
-    /// an index, a member receiver, …) is fine — the IR lowering hoists it to a preceding
-    /// statement-position await, left-to-right. Only an `.await` in a **conditionally-evaluated**
-    /// position — the right operand of `&&`/`||`, the fallback of `??`, or a `match` / `if…then…else`
-    /// arm body — is still rejected (E0040), because hoisting it out would change short-circuit
-    /// semantics (A.6b).
-    pub(crate) fn check_value_await(&mut self, value: &Expr) {
-        if let Some(span) = conditional_await_span(value) {
-            self.error(
-                DiagnosticCode::AsyncMisuse,
-                span,
-                "`.await` in a conditionally-evaluated position is not yet supported".to_string(),
-            )
-            .help(
-                "an `.await` in the right side of `&&`/`||`/`??` or a `match`/`if…then…else` \
-                     branch would change short-circuit evaluation — bind it to a variable first, \
-                     e.g. `x = f().await`, then use `x`",
-            );
         }
     }
 
@@ -282,113 +255,5 @@ pub(crate) fn stmt_has_yield(stmt: &Stmt) -> bool {
         } => body_has_yield(then_body) || else_body.as_deref().is_some_and(body_has_yield),
         Stmt::For { body, .. } | Stmt::While { body, .. } => body_has_yield(body),
         _ => false,
-    }
-}
-
-/// The span of a **conditionally-evaluated** sub-expression of `e` that contains an `.await`, or
-/// `None` if every `.await` in `e` sits in an unconditionally-evaluated position (Track A.6). The IR
-/// lowering can hoist unconditional awaits to statement position left-to-right, but an await guarded by
-/// short-circuit evaluation — the right operand of `&&`/`||`, the fallback of `??`, or a
-/// `match`/`if…then…else` arm body — cannot be hoisted without changing when it runs, so it is still
-/// rejected (E0040). Recurses through the unconditional structure to find one nested deeper; a closure
-/// is a separate callable (its awaits are handled by ordinary coloring, not here).
-pub(crate) fn conditional_await_span(e: &Expr) -> Option<Span> {
-    fn any(es: &[Expr]) -> Option<Span> {
-        es.iter().find_map(conditional_await_span)
-    }
-    // The span of a guarded operand iff it hosts an await at this callable level.
-    let guarded = |g: &Expr| g.has_await().then(|| g.span());
-    match e {
-        // Short-circuit `&&`/`||`: the guarded RHS may hold an await — the state-machine desugar
-        // (Track A.6b) rewrites it into control flow so it runs only when the operator evaluates it.
-        // Recurse into the RHS so an await still nested in *another* conditional position inside it
-        // (a `??` fallback, a `match` arm) is caught; a plain (or nested-short-circuit) RHS await is fine.
-        Expr::Binary {
-            op: BinaryOp::And | BinaryOp::Or,
-            lhs,
-            rhs,
-            ..
-        } => conditional_await_span(lhs).or_else(|| conditional_await_span(rhs)),
-        Expr::Coalesce {
-            value, fallback, ..
-        } => conditional_await_span(value).or_else(|| guarded(fallback)),
-        Expr::Match {
-            scrutinee, arms, ..
-        } => conditional_await_span(scrutinee).or_else(|| {
-            arms.iter()
-                .find_map(|a| a.body.has_await().then_some(a.span))
-        }),
-        // A closure is a separate callable — its awaits are not this level's. An expression-tier
-        // block's holes desugar to closures, so the same applies.
-        Expr::Closure { .. } | Expr::TierExpr { .. } | Expr::NativeFnRef { .. } => None,
-        // Unconditional compounds: recurse into every child (evaluation order does not matter here —
-        // any conditional await anywhere disqualifies).
-        Expr::Await { expr, .. }
-        | Expr::Unary { operand: expr, .. }
-        | Expr::TupleIndex { receiver: expr, .. }
-        | Expr::Member { receiver: expr, .. }
-        | Expr::Try { expr, .. }
-        | Expr::Spawn { future: expr, .. }
-        | Expr::As { expr, .. }
-        | Expr::TypeTest { expr, .. }
-        | Expr::TypeOf { value: expr, .. }
-        | Expr::FieldsOf { value: expr, .. }
-        | Expr::ParamsOf { target: expr, .. }
-        | Expr::FromBytes { blob: expr, .. } => conditional_await_span(expr),
-        Expr::Channel { capacity, .. } => conditional_await_span(capacity),
-        Expr::Binary { lhs, rhs, .. }
-        | Expr::Pipeline {
-            left: lhs,
-            right: rhs,
-            ..
-        }
-        | Expr::Index {
-            receiver: lhs,
-            index: rhs,
-            ..
-        }
-        | Expr::Range {
-            start: lhs,
-            end: rhs,
-            ..
-        }
-        | Expr::FieldSet {
-            receiver: lhs,
-            value: rhs,
-            ..
-        } => conditional_await_span(lhs).or_else(|| conditional_await_span(rhs)),
-        Expr::Call { callee, args, .. } => conditional_await_span(callee).or_else(|| any(args)),
-        Expr::TypedModuleCall { recv, args, .. } => {
-            conditional_await_span(recv).or_else(|| any(args))
-        }
-        Expr::Invoke {
-            recv, name, args, ..
-        } => conditional_await_span(recv)
-            .or_else(|| conditional_await_span(name))
-            .or_else(|| conditional_await_span(args)),
-        Expr::List { items, .. } | Expr::Tuple { items, .. } => any(items),
-        Expr::Map { entries, .. } => entries
-            .iter()
-            .find_map(|(k, v)| conditional_await_span(k).or_else(|| conditional_await_span(v))),
-        Expr::Interp { parts, .. } => parts.iter().find_map(|part| match part {
-            StrPart::Hole(e) => conditional_await_span(e),
-            StrPart::Literal(_) => None,
-        }),
-        Expr::Object(lit) => lit
-            .fields
-            .iter()
-            .find_map(|f| conditional_await_span(&f.value))
-            .or_else(|| lit.spread.as_deref().and_then(conditional_await_span)),
-        // Leaves — no sub-expressions.
-        Expr::Str { .. }
-        | Expr::Int { .. }
-        | Expr::IntN { .. }
-        | Expr::Float { .. }
-        | Expr::F32 { .. }
-        | Expr::F64 { .. }
-        | Expr::Bool { .. }
-        | Expr::Ident { .. }
-        | Expr::AttributesOf { .. }
-        | Expr::RolesOf { .. } => None,
     }
 }

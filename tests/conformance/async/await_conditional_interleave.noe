@@ -1,0 +1,29 @@
+// Track A.6b-residual — a `match`-arm `.await` compiles to a real poll-state, not a drive-to-completion,
+// so a task suspended at an arm-body await yields to its siblings. Two tasks race in a `concurrent`
+// scope: `a` awaits `sleep(2)` inside a match arm, `b` awaits `sleep(1)` inside one. `a` suspends, `b`
+// runs and finishes first (shorter sleep) — the deterministic interleave only a poll-state can produce.
+// expect: stdout "a start"
+// expect: stdout "b start"
+// expect: stdout "b end"
+// expect: stdout "a end"
+// expect: stdout "sum=3"
+// expect: exit 0
+use std.task.{sleep}
+async fn napped(ms: int): int {
+    sleep(ms).await
+    return ms
+}
+async fn work(name: string, ms: int, go: bool): int {
+    echo name ~ " start"
+    r = match go {
+        true => napped(ms).await,
+        false => 0,
+    }
+    echo name ~ " end"
+    return r
+}
+concurrent {
+    a = spawn work("a", 2, true)
+    b = spawn work("b", 1, true)
+    echo "sum=" ~ (a.await + b.await)
+}

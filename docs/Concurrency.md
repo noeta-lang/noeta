@@ -48,7 +48,19 @@ async fn nap(name: string, ms: int): int {
 }
 ```
 
-`.await` inside a closure is E0040 (function coloring), and a conditionally-evaluated mid-expression `.await` (e.g. the right side of `&&`) is E0040 — an unconditional one is hoisted automatically.
+`.await` is legal in every **value position**. An unconditional mid-expression `.await` (a call argument, an operand, a list element) is hoisted to statement position automatically, left to right. A **conditionally-evaluated** `.await` — the right side of `&&`/`||`, a `??` fallback, or a `match`/`if…then…else` arm body — is rewritten into control flow so it runs exactly when the surrounding expression would evaluate it (laziness is preserved: a `??` fallback is awaited only when the value is `none`/`Err`; a `match` arm only when it is selected).
+
+What stays E0040: `.await` inside a **closure** (function coloring — a closure is a fresh callable, not the enclosing async context), and `.await` in a **condition or loop head** — an `if`/`while` condition or a `for` iterable — which cannot be hoisted without changing when the head evaluates. Awaiting a non-future is also E0040.
+
+| Position | `.await` allowed? |
+|---|---|
+| Statement value (`x = f().await`, `return`, `echo`, `?`) | ✅ |
+| Unconditional sub-expression (call arg, operand, element) | ✅ (hoisted) |
+| `&&` / `||` right operand | ✅ (guarded) |
+| `??` fallback | ✅ (guarded, lazy) |
+| `match` / `if…then…else` arm body | ✅ (guarded) |
+| `if` / `while` condition, `for` iterable (heads) | ❌ E0040 |
+| Inside a closure | ❌ E0040 |
 
 ## Structured concurrency
 

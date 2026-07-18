@@ -1,0 +1,16 @@
+// Track A.6b-residual — the boundary the residual does NOT cross: an `.await` in a **condition or loop
+// head** stays rejected (E0040), because the desugar cannot hoist it there without changing when the
+// head evaluates. (Value positions — `??` fallback, `match`/`if…then…else` arm bodies, short-circuit
+// operands — are now supported; only heads remain illegal.)
+// expect: error E0040 at 11:8
+// expect: exit 1
+async fn ready(): bool {
+    return true
+}
+async fn run(): int {
+    if ready().await {
+        return 1
+    }
+    return 0
+}
+echo run().await
