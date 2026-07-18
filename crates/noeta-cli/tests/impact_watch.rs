@@ -92,13 +92,14 @@ fn an_edit_reruns_exactly_the_impacted_tests() {
         std::fs::write(&app_path, format!("{}\n\n", app("0 + 1"))).map_err(|e| e.to_string())?;
         let err_at = wait_for(&stderr, err_at, "nothing impacted")?;
 
-        // A top-level change: the valve degrades to a full rerun, with the reason.
+        // A top-level change: the valve degrades to a full rerun, with the reason (prefixed
+        // by the file it came from — the multi-file engine attributes per member).
         std::fs::write(&app_path, format!("{}echo mid()\n", app("0 + 1")))
             .map_err(|e| e.to_string())?;
         wait_for(
             &stderr,
             err_at,
-            "rerunning everything: top-level statements changed",
+            "rerunning everything: app.noe: top-level statements changed",
         )?;
         wait_for(&stdout, out_at, "running 2 tests")?;
         Ok(())
@@ -108,4 +109,80 @@ fn an_edit_reruns_exactly_the_impacted_tests() {
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
     outcome.expect("impact-filtered watch round trip");
+}
+
+fn lib(add_body: &str, stray_body: &str) -> String {
+    format!(
+        "namespace App.Lib;\n\
+         pub fn add(a: int, b: int): int {{ return {add_body}; }}\n\
+         pub fn stray(): int {{ return {stray_body}; }}\n"
+    )
+}
+
+const APP_USING_LIB: &str = "use App.Lib.add;\n\
+                             fn compose(n: int): int { return add(n, 1); }\n\
+                             @test fn t_add(): void { assert(compose(1) == 2); }\n\
+                             @test fn t_other(): void { assert(true); }\n";
+
+#[test]
+#[ignore = "spawns the CLI and writes real files; run explicitly"]
+fn a_sibling_module_edit_narrows_to_its_caller_tests() {
+    // The multi-file impact arc's headline: editing an IMPORTED module reruns exactly the
+    // entry tests that transitively reach the change — the pre-salsa engine degraded every
+    // non-entry edit to a full rerun.
+    let dir = std::env::temp_dir().join(format!("noeta-impact-watch-mf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib_path = dir.join("lib.noe");
+    std::fs::write(&lib_path, lib("a + b", "9")).unwrap();
+    std::fs::write(dir.join("app.noe"), APP_USING_LIB).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
+        .args(["test", "--watch", "app.noe"])
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn `noeta test --watch`");
+    let stdout = tail(child.stdout.take().unwrap());
+    let stderr = tail(child.stderr.take().unwrap());
+
+    let outcome = (|| -> Result<(), String> {
+        // First run: both entry tests.
+        let out_at = wait_for(&stdout, 0, "running 2 tests")?;
+        let err_at = wait_for(&stderr, 0, "waiting for changes")?;
+
+        // Edit the imported lib fn: the closure crosses the module boundary in the linked
+        // program's qualified vocabulary and lands on the ONE test that reaches it.
+        std::fs::write(&lib_path, lib("b + a", "9")).map_err(|e| e.to_string())?;
+        let err_at = wait_for(&stderr, err_at, "impacted: App.Lib.add, compose, t_add")?;
+        let out_at = wait_for(&stdout, out_at, "running 1 test")?;
+        let err_at = wait_for(&stderr, err_at, "waiting for changes")?;
+
+        // Edit a lib fn OUTSIDE the entry's import closure: impacted, but no test reaches it —
+        // the runner's `--name` filter matches nothing and nothing runs.
+        std::fs::write(&lib_path, lib("b + a", "10 - 1")).map_err(|e| e.to_string())?;
+        let err_at = wait_for(&stderr, err_at, "impacted: App.Lib.stray")?;
+        let out_at = wait_for(&stdout, out_at, "no tests matching --name")?;
+        let err_at = wait_for(&stderr, err_at, "waiting for changes")?;
+
+        // An inert lib edit (formatting between declarations): no run at all.
+        std::fs::write(&lib_path, format!("{}\n\n", lib("b + a", "10 - 1")))
+            .map_err(|e| e.to_string())?;
+        let err_at = wait_for(&stderr, err_at, "nothing impacted")?;
+
+        // A lib signature change: unattributable — full rerun, reason names the file.
+        std::fs::write(
+            &lib_path,
+            lib("b + a", "10 - 1").replace("fn stray()", "fn stray(pad: int)"),
+        )
+        .map_err(|e| e.to_string())?;
+        wait_for(&stderr, err_at, "rerunning everything: lib.noe:")?;
+        wait_for(&stdout, out_at, "running 2 tests")?;
+        Ok(())
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.expect("multi-file impact-filtered watch round trip");
 }
