@@ -72,7 +72,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | Git-deps of *published* packages aren't expressible in the index `Dep` shape | package-manager v-next |
 | **Advisory intake beyond operator-curated:** self-service scope-owner advisories; a public report/triage queue; OSV/GHSA/RUSTSEC import with name mapping; a transparency-log suppression monitor (`noeta watch-scope`). Decide the trust model (who publishes vs who reports) first | namespace-protection arc (2026-07-15) |
 | git-forge registry: a tag whose `noeta.toml` fails to parse (incl. future-edition manifests) is silently skipped instead of surfacing an error — **bug**-adjacent | editions arc note *(active, small)* |
-| **noeta.dev playground frontend** — CodeMirror editor + tree-sitter highlighting, hover/completion UI over the shipped engine exports, examples wiring, share-by-URL | wasm W2.2/W2.3 tail *(active — the engine half is done and waiting)* |
 | Hosted edge-platform proof (Fastly/Fermyon Spin) + an edge deployment docs page | wasm W4.2. Needs an account; stays a user action |
 | Desktop packaging (Tauri); with it the p2p packaging polish (within-feature DCE pruning, capability-gating) | M3 roadmap item; the one roadmap entry the README carries |
 | A first-class `Uuid` type (string-typed today) | id-entropy scope cut |
@@ -116,6 +115,4 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 - **Vulnerability-intake trust model** — see the advisory row above; the design decision (operator / scope-owner / promote-from-report) precedes any code.
 - **Packed-field-kind enum dedup** — four phase-appropriate `PackedKind` encodings; revisit only if a shared public layout vocabulary earns its keep across the package boundary (the `PackedView` ABI may already be that vocabulary — check before building).
-- **Checked semantic-edit MCP tool** (R&D, from M3) — an edit tool that type-checks a proposed change before applying it.
-- **Background-work extensions** (from M3) — durable background jobs as a first-party extension pattern; overlaps the `TaskScope` row above.
 - **WASM revisit conditions** (recorded, not planned): direct wasm codegen only on perf data; wasm-threads isolates only on multi-core edge demand; p2p-in-browser is its own arc.

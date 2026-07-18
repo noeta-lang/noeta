@@ -32,15 +32,13 @@ trigger-gated. The standouts, roughly by leverage:
 1. **Publish the toolchain + registry repos** — the keystone: unblocks true out-of-tree packages,
    makes every "path deps until published" caveat disappear. A user decision (naming, visibility,
    push policy), then mechanical follow-through.
-2. **noeta.dev playground frontend** — the wasm engine half is shipped and waiting; a CodeMirror
-   pass turns it into the public face of the language.
-3. **`@derive(FromJson)`** — now unblocked by the type-system track; the acceptance test for
+2. **`@derive(FromJson)`** — now unblocked by the type-system track; the acceptance test for
    "the type is the schema".
-4. **The small-language-follow-ups cluster** — match-arm blocks, `Map.get`, closure-in-method VM
+3. **The small-language-follow-ups cluster** — match-arm blocks, `Map.get`, closure-in-method VM
    capture, generic-enum match-payload bug: each small, each user-visible.
-5. **In-run safepoint cycle collection** — the one GC story gap (peak residency of cycle-building
+4. **In-run safepoint cycle collection** — the one GC story gap (peak residency of cycle-building
    loops).
-6. **Generic traits' default methods** — the natural next traits slice after UT5.
+5. **Generic traits' default methods** — the natural next traits slice after UT5.
 
 ## Working discipline (unchanged)
 
