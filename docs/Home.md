@@ -116,7 +116,8 @@ Build the compiler, run the tests, and add a feature.
 > [!NOTE]
 > **Pre-alpha.** The language core and its tooling are complete and usable today: the full syntax,
 > the type system, traits/generics/derives, multi-file modules, a layered standard library, real
-> host IO, structured concurrency, the package manager, and the `run`/`repl`/`test`/`bench`/`doc`
+> host IO, structured concurrency, the package manager, native AOT and WebAssembly builds
+> (`noeta build --native`/`--wasm`/`--serve`), and the `run`/`repl`/`test`/`bench`/`doc`
 > toolchain, along with `noeta lsp`/`noeta dap` editor tooling and the `noeta mcp` agent surface.
 > Still on the roadmap: desktop packaging. Until alpha, anything may change
 > without notice — syntax, stdlib, and file formats included. Where a feature is a plan rather than
