@@ -1135,8 +1135,35 @@ pub struct FieldInit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
-    pub body: Expr,
+    /// The arm's body: a value expression (`pattern => expr`, the common form) or a statement
+    /// block (`pattern => { stmts }`, aether F1) whose value is `unit` — side-effectful arms
+    /// without an artificial expression. `{ … }` parses as an EXPRESSION first (map/set literals
+    /// keep their meaning); only a brace body that is not an expression is a block. Reuses
+    /// [`ClosureBody`] purely as a shape — a `return` inside a block arm returns from the
+    /// ENCLOSING function (the arm lowers in the same frame, not as a closure).
+    pub body: ClosureBody,
     pub span: Span,
+}
+
+impl ClosureBody {
+    /// Whether `name` is mentioned anywhere in the body (either form) — the same free-name probe
+    /// [`Expr::mentions`]/[`Stmt::mentions`] provide.
+    pub fn mentions(&self, name: &str) -> bool {
+        match self {
+            ClosureBody::Expr(e) => e.mentions(name),
+            ClosureBody::Block(stmts) => stmts.iter().any(|s| s.mentions(name)),
+        }
+    }
+
+    /// Whether the body contains an `.await` (either form). Used where a match arm's body counts
+    /// as the enclosing function's own await context (unlike a closure's, which is a separate
+    /// callable).
+    pub fn has_await(&self) -> bool {
+        match self {
+            ClosureBody::Expr(e) => e.has_await(),
+            ClosureBody::Block(stmts) => stmts.iter().any(Stmt::has_await),
+        }
+    }
 }
 
 /// The body of an [`Expr::Closure`]: either a single arrow expression (`=> expr`, its value is the
@@ -1227,6 +1254,47 @@ impl Stmt {
     /// signatures) do not mention; a nested `fn`'s BODY is scanned (conservative for the
     /// instance-classification use: mentioning `self` anywhere keeps the enclosing method
     /// instance-classified).
+    /// Whether the statement contains an `.await` in any value position, recursing into nested
+    /// control-flow bodies. A nested declaration (`fn`/type/trait/impl) is its own callable and is
+    /// not this level's await.
+    pub fn has_await(&self) -> bool {
+        match self {
+            Stmt::Echo { value, .. } | Stmt::Yield { value, .. } => value.has_await(),
+            Stmt::Binding { value, .. } | Stmt::Destructure { value, .. } => value.has_await(),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(Expr::has_await),
+            Stmt::Expr { expr, .. } => expr.has_await(),
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+                ..
+            } => {
+                cond.has_await()
+                    || then_body.iter().any(Stmt::has_await)
+                    || else_body
+                        .as_ref()
+                        .is_some_and(|b| b.iter().any(Stmt::has_await))
+            }
+            Stmt::For { iterable, body, .. } => {
+                iterable.has_await() || body.iter().any(Stmt::has_await)
+            }
+            Stmt::While { cond, body, .. } => cond.has_await() || body.iter().any(Stmt::has_await),
+            Stmt::Concurrent { body, .. } | Stmt::TierBlock { items: body, .. } => {
+                body.iter().any(Stmt::has_await)
+            }
+            Stmt::Fn(_)
+            | Stmt::Struct(_)
+            | Stmt::Class(_)
+            | Stmt::Enum(_)
+            | Stmt::Trait(_)
+            | Stmt::Impl(_)
+            | Stmt::Namespace { .. }
+            | Stmt::Use { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. } => false,
+        }
+    }
+
     pub fn mentions(&self, name: &str) -> bool {
         let stmts = |body: &[Stmt]| body.iter().any(|s| s.mentions(name));
         match self {

@@ -753,7 +753,12 @@ impl Resolver {
                 for arm in arms {
                     self.push_scope();
                     bind_pattern(&arm.pattern, &mut |name, span| self.bind(name, span));
-                    self.walk_expr(&arm.body);
+                    match &arm.body {
+                        noeta_ast::ClosureBody::Expr(e) => self.walk_expr(e),
+                        noeta_ast::ClosureBody::Block(stmts) => {
+                            stmts.iter().for_each(|s| self.walk_stmt(s))
+                        }
+                    }
                     self.pop_scope();
                 }
             }

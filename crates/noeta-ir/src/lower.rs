@@ -301,7 +301,11 @@ pub fn hoist_impl_methods_with_registry(
             entry.extend(decl.methods.iter().cloned());
             // Default-method fallback (UT5): the impl'd trait's omitted defaults ride along,
             // after the impl's own methods so a provided override wins the name-skip below.
-            entry.extend(omitted_defaults(&decl.trait_name, &decl.trait_args, &decl.methods));
+            entry.extend(omitted_defaults(
+                &decl.trait_name,
+                &decl.trait_args,
+                &decl.methods,
+            ));
         }
     }
     additions.retain(|_, v| !v.is_empty());
@@ -1628,7 +1632,24 @@ impl Lowerer<'_> {
                 let scrut = self.lower_expr(scrutinee, out)?;
                 let mut ir_arms = Vec::with_capacity(arms.len());
                 for arm in arms {
-                    let body = self.lower_value_block(&arm.body)?;
+                    // An expression arm's value block yields its value; a statement-block arm
+                    // (aether F1) lowers its statements in the SAME frame (so `return` exits the
+                    // enclosing function) and yields `unit`.
+                    let body = match &arm.body {
+                        noeta_ast::ClosureBody::Expr(e) => self.lower_value_block(e)?,
+                        noeta_ast::ClosureBody::Block(stmts) => {
+                            let mut out = Vec::new();
+                            for stmt in stmts {
+                                self.lower_stmt(stmt, &mut out)?;
+                            }
+                            // A block arm's value is `unit` — an explicit tail atom, so both
+                            // backends' "arm writes the match result" paths stay uniform.
+                            Block {
+                                stmts: out,
+                                tail: Some(Atom::Const(Const::Unit)),
+                            }
+                        }
+                    };
                     ir_arms.push(crate::Arm {
                         pattern: arm.pattern.clone(),
                         body,

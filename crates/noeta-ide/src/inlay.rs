@@ -278,7 +278,10 @@ impl Walker<'_> {
             } => {
                 self.expr(scrutinee);
                 for arm in arms {
-                    self.expr(&arm.body);
+                    match &arm.body {
+                        noeta_ast::ClosureBody::Expr(e) => self.expr(e),
+                        noeta_ast::ClosureBody::Block(stmts) => self.stmts(stmts),
+                    }
                 }
             }
             Expr::Object(lit) => {

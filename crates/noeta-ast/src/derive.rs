@@ -731,8 +731,14 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             scrutinee, arms, ..
         } => {
             visit_expr_types(scrutinee, f);
-            arms.iter_mut()
-                .for_each(|arm| visit_expr_types(&mut arm.body, f));
+            for arm in arms.iter_mut() {
+                match &mut arm.body {
+                    crate::ClosureBody::Expr(e) => visit_expr_types(e, f),
+                    crate::ClosureBody::Block(stmts) => {
+                        stmts.iter_mut().for_each(|s| visit_stmt_types(s, f))
+                    }
+                }
+            }
         }
         Expr::Interp { parts, .. } => {
             for part in parts.iter_mut() {

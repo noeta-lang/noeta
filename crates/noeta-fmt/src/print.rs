@@ -2037,13 +2037,17 @@ impl Printer<'_> {
             // The `if` keyword but not a desugar-shaped match — leave it to the normal `match` path.
             _ => return Ok(None),
         };
+        let (ClosureBody::Expr(then_e), ClosureBody::Expr(else_e)) = (&arms[0].body, &arms[1].body)
+        else {
+            return Ok(None); // a block arm cannot be the parser's if-then-else desugar
+        };
         Ok(Some(Doc::concat([
             Doc::text("if "),
             cond,
             Doc::text(" then "),
-            self.expr(&arms[0].body)?,
+            self.expr(then_e)?,
             Doc::text(" else "),
-            self.expr(&arms[1].body)?,
+            self.expr(else_e)?,
         ])))
     }
 
@@ -2343,10 +2347,14 @@ impl Printer<'_> {
             } else {
                 String::new()
             };
+            let body = match &a.body {
+                ClosureBody::Expr(e) => self.expr(e)?,
+                ClosureBody::Block(stmts) => self.block(stmts, 0, 0)?,
+            };
             Ok(Doc::concat([
                 pat,
                 Doc::text(format!("{pad} => ")),
-                self.expr(&a.body)?,
+                body,
                 Doc::text(","),
             ]))
         };

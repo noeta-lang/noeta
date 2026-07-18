@@ -314,9 +314,8 @@ pub(crate) fn conditional_await_span(e: &Expr) -> Option<Span> {
         } => conditional_await_span(value).or_else(|| guarded(fallback)),
         Expr::Match {
             scrutinee, arms, ..
-        } => {
-            conditional_await_span(scrutinee).or_else(|| arms.iter().find_map(|a| guarded(&a.body)))
-        }
+        } => conditional_await_span(scrutinee)
+            .or_else(|| arms.iter().find_map(|a| a.body.has_await().then_some(a.span))),
         // A closure is a separate callable — its awaits are not this level's. An expression-tier
         // block's holes desugar to closures, so the same applies.
         Expr::Closure { .. } | Expr::TierExpr { .. } | Expr::NativeFnRef { .. } => None,

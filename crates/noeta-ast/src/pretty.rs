@@ -883,7 +883,18 @@ impl Pretty for Expr {
                     out.push('\n');
                     indent(out, level + 1);
                     out.push_str(&format!("(arm {}\n", pattern_str(&arm.pattern)));
-                    arm.body.pretty(out, level + 2);
+                    match &arm.body {
+                        ClosureBody::Expr(e) => e.pretty(out, level + 2),
+                        ClosureBody::Block(stmts) => {
+                            indent(out, level + 2);
+                            out.push_str("(block");
+                            for stmt in stmts {
+                                out.push('\n');
+                                stmt.pretty(out, level + 3);
+                            }
+                            out.push(')');
+                        }
+                    }
                     out.push(')');
                 }
                 out.push(')');

@@ -3077,8 +3077,12 @@ fn tier_name_at(
             },
             Expr::Match {
                 scrutinee, arms, ..
-            } => in_expr(scrutinee, offset, source)
-                .or_else(|| arms.iter().find_map(|a| in_expr(&a.body, offset, source))),
+            } => in_expr(scrutinee, offset, source).or_else(|| {
+                arms.iter().find_map(|a| match &a.body {
+                    noeta_ast::ClosureBody::Expr(e) => in_expr(e, offset, source),
+                    noeta_ast::ClosureBody::Block(stmts) => in_stmts(stmts, offset, source),
+                })
+            }),
             Expr::Object(lit) => lit
                 .fields
                 .iter()
