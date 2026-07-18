@@ -81,12 +81,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.sql",
@@ -135,12 +135,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.html",
@@ -189,12 +189,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.css",
@@ -243,12 +243,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.json",
@@ -297,12 +297,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.yaml",
@@ -351,12 +351,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.xml",
@@ -405,12 +405,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.graphql",
@@ -459,12 +459,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.markdown",
@@ -513,12 +513,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.javascript",
@@ -567,12 +567,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.python",
@@ -621,12 +621,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.shell",
@@ -675,12 +675,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.toml",
@@ -729,12 +729,12 @@
           "name": "entity.name.function.decorator.noeta"
         },
         "3": {
-          "name": "punctuation.section.tier.begin.noeta"
+          "name": "punctuation.section.tier.begin.comment.noeta"
         }
       },
       "endCaptures": {
         "0": {
-          "name": "punctuation.section.tier.end.noeta"
+          "name": "punctuation.section.tier.end.comment.noeta"
         }
       },
       "contentName": "meta.embedded.block.sparql",

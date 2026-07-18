@@ -77,16 +77,16 @@
     },
 
     "text-tier-blocks": {
-      "comment": "A text tier's `@<name> { … }` body is verbatim prose the compiler never lexes as code (text-tiers arc). std's `doc` is the built-in text tier (body language: markdown); it is matched here — before #decorators — so the body's apostrophes/backticks/quotes can never open string scopes that bleed past the block. Brace counting mirrors the compiler lexer's matching_brace exactly: braces nest (the recursive #text-tier-brace-pair), and \\{ / \\} are literal braces with \\\\ a literal backslash (the escape pattern consumes them before any brace rule sees them). A third-party declared text tier (`@tier(x, text: \"sql\")`) ships its own injection grammar with a rule of this same shape (injectionSelector `L:source.noeta`) — that is the extension mechanism; this grammar stays static.",
+      "comment": "A text tier's `@<name> { … }` body is verbatim prose the compiler never lexes as code (text-tiers arc). std's `doc` is the built-in text tier (body language: markdown); it is matched here — before #decorators — so the body's apostrophes/backticks/quotes can never open string scopes that bleed past the block. Brace counting mirrors the compiler lexer's matching_brace exactly: braces nest (the recursive #text-tier-brace-pair), and \\{ / \\} are literal braces with \\\\ a literal backslash (the escape pattern consumes them before any brace rule sees them). The delimiter braces carry a `.comment.` scope so VS Code's bracket-pair colorization/matching skips them (it excludes brackets in comment/string tokens): a tier body is prose, not code, and across its embedded-markdown content the bracket parser would otherwise leave the opening `{` unmatched and drift every following code bracket's color. A third-party declared text tier (`@tier(x, text: \"sql\")`) ships its own injection grammar with a rule of this same shape (injectionSelector `L:source.noeta`) — that is the extension mechanism; this grammar stays static.",
       "begin": "(@)(doc)\\b\\s*(\\{)",
       "end": "\\}",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.decorator.noeta" },
         "2": { "name": "entity.name.function.decorator.noeta" },
-        "3": { "name": "punctuation.section.tier.begin.noeta" }
+        "3": { "name": "punctuation.section.tier.begin.comment.noeta" }
       },
       "endCaptures": {
-        "0": { "name": "punctuation.section.tier.end.noeta" }
+        "0": { "name": "punctuation.section.tier.end.comment.noeta" }
       },
       "contentName": "meta.embedded.block.markdown",
       "patterns": [
@@ -101,9 +101,15 @@
       "match": "\\\\[{}\\\\]"
     },
     "text-tier-brace-pair": {
-      "comment": "A nested balanced brace pair inside a text body — recursion is how TextMate counts depth, so a `{snippet}` in prose does not close the block.",
+      "comment": "A nested balanced brace pair inside a text body — recursion is how TextMate counts depth, so a `{snippet}` in prose does not close the block. The braces carry a `.comment.` scope so bracket colorization skips these prose braces too (see #text-tier-blocks).",
       "begin": "\\{",
       "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.tier.brace.comment.noeta" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.tier.brace.comment.noeta" }
+      },
       "patterns": [
         { "include": "#text-tier-escape" },
         { "include": "#text-tier-brace-pair" },
