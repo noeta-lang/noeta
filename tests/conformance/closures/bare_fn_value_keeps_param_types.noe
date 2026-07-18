@@ -1,0 +1,11 @@
+// A bare top-level `fn` bound to a name is a first-class value that KEEPS its parameter types
+// (http-server S5): calling it through the local binding (`d(3)`) type-checks arity and argument
+// types exactly as the direct call would, and it still fits where an `(int) -> int` is expected.
+// expect: stdout "6"
+// expect: stdout "100"
+// expect: exit 0
+fn double(x: int): int { return x * 2; }
+fn apply(f: (int) -> int, n: int): int { return f(n); }
+d = double;
+echo d(3);
+echo apply(d, 50);

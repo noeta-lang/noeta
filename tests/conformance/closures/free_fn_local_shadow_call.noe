@@ -1,0 +1,13 @@
+// A local of the same name as a free `fn` shadows it cleanly in CALL position, exactly as it
+// already does in value position (aether F6): inside `run`, the `(int) -> int` parameter `make`
+// wins over the free `fn make()` (arity 0), so `make(5)` is the parameter (returns 50) — not a
+// spurious "expects 0 argument(s), found 1". The free `fn` stays callable outside the shadow.
+// expect: stdout "50"
+// expect: stdout "7"
+// expect: exit 0
+fn make(): int { return 7; }
+fn run(make: (int) -> int): int {
+    return make(5);
+}
+echo run(fn(x: int): int => x * 10);
+echo make();

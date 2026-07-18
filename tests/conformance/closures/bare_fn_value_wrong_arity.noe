@@ -1,0 +1,8 @@
+// Calling a bare-`fn` value through its local binding is arity-checked against the function's
+// real parameters — the parameter types are not lost when the `fn` becomes a value (http-server
+// S5). Here `d` is `double`, which takes one argument, so calling it with two is a static error.
+// expect: error E0007 at 8:6
+// expect: exit 1
+fn double(x: int): int { return x * 2; }
+d = double;
+echo d(3, 4);
