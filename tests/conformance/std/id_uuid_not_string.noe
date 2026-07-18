@@ -1,0 +1,10 @@
+// `Uuid` is a genuinely distinct type, not an alias for `string` (extern-types X2): passing a
+// `Uuid` where a `string` parameter is expected is a static type error (E0007), caught before
+// either backend runs. This is the negative counterpart to `id_uuid_type.noe` — it proves the
+// checker sees `id.uuid()` as a `Uuid`, so the old "uuids are just strings" contract is gone.
+// expect: error E0007 at 10:6
+// expect: exit 1
+use std.{id}
+
+fn needs_string(s: string): int { return s.len(); }
+echo needs_string(id.uuid());
