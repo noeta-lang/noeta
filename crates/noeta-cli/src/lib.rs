@@ -582,7 +582,9 @@ pub fn run_cli(
                 .long("watch")
                 .global(true)
                 .action(clap::ArgAction::SetTrue)
-                .help("Restart the command whenever project source files change (*.noe, noeta.toml)"),
+                .help(
+                    "Restart the command whenever project source files change (*.noe, noeta.toml)",
+                ),
         )
         // Accepted and ignored on every subcommand: LSP clients (VS Code's vscode-languageclient
         // with `TransportKind.stdio`, and others) append `--stdio` to the server argv to select the
@@ -998,13 +1000,10 @@ pub(crate) fn run_declared_tier(
             .map(|root| {
                 object(vec![
                     field("name", str_expr(root.name.clone())),
-                    field(
-                        "run",
-                        Expr::Ident {
-                            name: root.name.clone(),
-                            span,
-                        },
-                    ),
+                    // A method root (`Type.method`) is referenced as an associated function, not a
+                    // bare (dotted) identifier — so a provider-overridden `test`/`bench` can invoke a
+                    // method root's `run`.
+                    field("run", cmd::test::root_ref(&root.name, span)),
                 ])
             })
             .collect()

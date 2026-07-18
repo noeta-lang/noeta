@@ -11,7 +11,7 @@ use noeta_check::TierFn;
 use noeta_runner::compile_real;
 use noeta_vm::VmBackend;
 
-use crate::cmd::test::{call_stmt, is_tier_setup};
+use crate::cmd::test::{call_root_stmt, is_tier_setup};
 use crate::context::{Prologue, check_under, tier_prologue};
 use crate::output::plural;
 
@@ -376,7 +376,7 @@ pub(crate) fn measure_iterations(
             inclusive: false,
             span,
         },
-        body: vec![call_stmt(&bench.name, Vec::new(), span)],
+        body: vec![call_root_stmt(&bench.name, Vec::new(), span)],
         span,
     });
     let program = Program {

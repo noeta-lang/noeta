@@ -301,12 +301,47 @@ pub(crate) fn is_tier_setup(stmt: &Stmt) -> bool {
     )
 }
 
-/// A statement that calls fn `name` with `args`: `name(args…);`. Zero `args` is the ordinary
-/// test/bench call; a single arg is a `#[Data]` row. A **method** root is named `Type.method` — it
-/// is called as an associated function `Type.method(args…)` (a bare-type-name receiver the compiler
-/// resolves to an associated call, invoked with no receiver); a plain name is a top-level call.
+/// A statement that calls fn `name` with `args`: `name(args…);`. `name` may be a **qualified**
+/// module path (`fuzz.tiers.run_fuzz`, a declared tier's runner) — a dotted identifier the compiler
+/// resolves as a qualified reference, so it is emitted verbatim as an `Expr::Ident`, NOT split into
+/// a member access. (A method **root** is invoked with [`call_root_stmt`], which does treat the dot
+/// as `Type.method`.)
 pub(crate) fn call_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
-    let callee = match name.split_once('.') {
+    Stmt::Expr {
+        expr: Expr::Call {
+            callee: Box::new(Expr::Ident {
+                name: name.to_string(),
+                span,
+            }),
+            args,
+            span,
+        },
+        span,
+    }
+}
+
+/// A statement that calls a **tier root** by name. A root is either a top-level fn (a bare name) or a
+/// method root named `Type.method` — the latter is called as an associated function
+/// `Type.method(args…)` (a bare-type-name receiver the compiler resolves to a no-receiver associated
+/// call). Unlike [`call_stmt`], the dot here IS a receiver split — a method root's name is exactly
+/// `Type.method`, never a deeper module path.
+pub(crate) fn call_root_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
+    Stmt::Expr {
+        expr: Expr::Call {
+            callee: Box::new(root_ref(name, span)),
+            args,
+            span,
+        },
+        span,
+    }
+}
+
+/// A reference to a tier root by name: a bare top-level fn is an [`Expr::Ident`]; a method root
+/// `Type.method` is an [`Expr::Member`] on the bare type name (an associated-function reference /
+/// no-receiver call the compiler resolves at the site). Used both to call a root and to pass a root
+/// as the `run` callable a declared tier's runner invokes.
+pub(crate) fn root_ref(name: &str, span: Span) -> Expr {
+    match name.split_once('.') {
         Some((type_name, method)) => Expr::Member {
             receiver: Box::new(Expr::Ident {
                 name: type_name.to_string(),
@@ -320,14 +355,6 @@ pub(crate) fn call_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
             name: name.to_string(),
             span,
         },
-    };
-    Stmt::Expr {
-        expr: Expr::Call {
-            callee: Box::new(callee),
-            args,
-            span,
-        },
-        span,
     }
 }
 
@@ -408,7 +435,7 @@ pub(crate) fn run_one_test(
     };
     let display = case.display.clone();
     let mut stmts = setup.to_vec();
-    stmts.push(call_stmt(&case.fn_name, args, case.span));
+    stmts.push(call_root_stmt(&case.fn_name, args, case.span));
     let program = Program { stmts, span };
 
     let checked = check_under(&program, editions);
