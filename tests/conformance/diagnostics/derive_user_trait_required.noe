@@ -1,0 +1,11 @@
+// Deriving a user trait with a required (default-less) method is E0050 — the derive can only
+// adopt defaults; the error names the missing method and points at the explicit-impl route.
+// expect: error E0050 at 9:9
+// expect: exit 1
+trait Greeter {
+    fn greet(who: string): string
+    fn shout(): string { return "HELLO" }
+}
+@derive(Greeter)
+struct P { x: int }
+echo "unreached"

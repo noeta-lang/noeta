@@ -236,9 +236,14 @@ pub fn lower_with_sites(
 
 /// Copy a standalone `impl Trait for T { methods }`'s method bodies onto the target type `T`'s own
 /// method table (L1 user traits, UT2), so both backends' `(type, method)` dispatch resolves them —
-/// the same flattening the parser already performs for in-body `impl` blocks. Returns a modified
-/// clone only when at least one standalone impl contributes a method the target does not already
-/// carry; otherwise `None` (use the original by reference — zero cost for the common case).
+/// the same flattening the parser already performs for in-body `impl` blocks. Additionally hoists
+/// **default-method fallback** (UT5): a trait method the impl omits falls back to the trait's
+/// default body, materialized onto the type for every impl form — standalone, in-body, and a
+/// `@derive(UserTrait)` (which adopts *all* defaults; the checker enforces the trait is fully
+/// defaulted). A provided method always wins over a default (the name-skip below). Generic traits
+/// are excluded from default hoisting (their bodies would need per-implementor substitution —
+/// deferred with generic-trait derivation). Returns a modified clone only when something was
+/// hoisted; otherwise `None` (use the original by reference — zero cost for the common case).
 ///
 /// **Idempotent**: a method whose name already exists on the target is skipped, so applying this to
 /// an already-hoisted program is a no-op. That lets the VM compiler hoist the AST `entry` for its
@@ -246,35 +251,85 @@ pub fn lower_with_sites(
 /// IR — both converge without duplicating a method. The IR interpreter (reference/eval) has no such
 /// split, so the lowering call alone covers it.
 pub fn hoist_standalone_impl_methods(program: &AstProgram) -> Option<AstProgram> {
+    // The trait declarations by name, for default-method fallback (UT5). Only a NON-generic
+    // trait's defaults hoist — a generic trait's default body would need type-parameter
+    // substitution per implementor, which is deferred with the rest of generic-trait derivation.
+    let traits: StdHashMap<&str, &noeta_ast::TraitDecl> = program
+        .stmts
+        .iter()
+        .filter_map(|s| match s {
+            AstStmt::Trait(t) if t.type_params.is_empty() => Some((t.name.as_str(), t)),
+            _ => None,
+        })
+        .collect();
+    // A trait's default methods that `provided` does not override, in declaration order.
+    let omitted_defaults = |trait_name: &str, provided: &[FnDecl]| -> Vec<FnDecl> {
+        traits
+            .get(trait_name)
+            .map(|t| {
+                t.methods
+                    .iter()
+                    .filter(|tm| tm.has_default && !provided.iter().any(|m| m.name == tm.sig.name))
+                    .map(|tm| tm.sig.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     let mut additions: StdHashMap<String, Vec<FnDecl>> = StdHashMap::new();
     for stmt in &program.stmts {
-        if let AstStmt::Impl(decl) = stmt
-            && !decl.methods.is_empty()
-        {
-            additions
-                .entry(decl.target.clone())
-                .or_default()
-                .extend(decl.methods.iter().cloned());
+        if let AstStmt::Impl(decl) = stmt {
+            let entry = additions.entry(decl.target.clone()).or_default();
+            entry.extend(decl.methods.iter().cloned());
+            // Default-method fallback (UT5): the impl'd trait's omitted defaults ride along,
+            // after the impl's own methods so a provided override wins the name-skip below.
+            entry.extend(omitted_defaults(&decl.trait_name, &decl.methods));
         }
     }
-    if additions.is_empty() {
+    additions.retain(|_, v| !v.is_empty());
+    // Fast path: nothing to hoist — no standalone-impl methods and no type body referencing a
+    // known trait through an in-body impl or a derive. Keeps the common no-trait program clone-free.
+    let body_references_trait =
+        |impls: &[noeta_ast::ImplBlock], derives: &[noeta_ast::DeriveSpec]| {
+            impls
+                .iter()
+                .any(|b| traits.contains_key(b.trait_name.as_str()))
+                || derives.iter().any(|d| traits.contains_key(d.name.as_str()))
+        };
+    let body_needs = program.stmts.iter().any(|s| match s {
+        AstStmt::Struct(d) => body_references_trait(&d.impls, &d.derives),
+        AstStmt::Class(d) => body_references_trait(&d.impls, &d.derives),
+        AstStmt::Enum(d) => body_references_trait(&d.impls, &d.derives),
+        _ => false,
+    });
+    if additions.is_empty() && !body_needs {
         return None;
     }
     let mut changed = false;
     let mut cloned = program.clone();
     for stmt in &mut cloned.stmts {
-        let (name, methods) = match stmt {
-            AstStmt::Struct(d) => (&d.name, &mut d.methods),
-            AstStmt::Class(d) => (&d.name, &mut d.methods),
-            AstStmt::Enum(d) => (&d.name, &mut d.methods),
+        let (name, methods, impls, derives) = match stmt {
+            AstStmt::Struct(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
+            AstStmt::Class(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
+            AstStmt::Enum(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
             _ => continue,
         };
-        if let Some(add) = additions.get(name) {
-            for m in add {
-                if !methods.iter().any(|existing| existing.name == m.name) {
-                    methods.push(m.clone());
-                    changed = true;
-                }
+        // UT5 for the unified body: an in-body `impl Trait { … }` block's omitted defaults, and a
+        // `@derive(UserTrait)` (which adopts every default — the checker enforces the trait is
+        // fully defaulted). The parser already copied an in-body impl's OWN methods into
+        // `methods`, so the name-skip makes provided overrides win here too.
+        let mut defaults: Vec<FnDecl> = Vec::new();
+        for block in impls {
+            defaults.extend(omitted_defaults(&block.trait_name, methods));
+        }
+        for spec in derives {
+            defaults.extend(omitted_defaults(&spec.name, methods));
+        }
+        let add = additions.get(name.as_str()).cloned().unwrap_or_default();
+        for m in add.into_iter().chain(defaults) {
+            if !methods.iter().any(|existing| existing.name == m.name) {
+                methods.push(m);
+                changed = true;
             }
         }
     }

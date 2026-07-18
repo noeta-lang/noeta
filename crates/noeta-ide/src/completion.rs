@@ -357,7 +357,7 @@ pub fn directive_arg_context(text: &str, offset: u32) -> Option<DirectiveArgCont
 /// general identifier completion, which would be pure noise inside a directive.
 pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candidate> {
     match ctxt.directive.as_str() {
-        "derive" => derive_candidates(ctxt),
+        "derive" => derive_candidates(ctxt, program),
         "role" => role_candidates(ctxt, program),
         "attribute" => noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS
             .iter()
@@ -397,9 +397,10 @@ pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -
     }
 }
 
-/// `@derive(…)`: the derivable built-in traits; inside `Serialize<…>`/`Deserialize<…>`, the
-/// serialization formats.
-fn derive_candidates(ctxt: &DirectiveArgContext) -> Vec<Candidate> {
+/// `@derive(…)`: the derivable built-in traits and the program's derivable **user traits** (UT5:
+/// non-generic, every method defaulted — deriving adopts the defaults); inside
+/// `Serialize<…>`/`Deserialize<…>`, the serialization formats.
+fn derive_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candidate> {
     if ctxt.in_generic.is_some() {
         return noeta_types::SERIALIZE_FORMATS
             .iter()
@@ -410,7 +411,7 @@ fn derive_candidates(ctxt: &DirectiveArgContext) -> Vec<Candidate> {
             })
             .collect();
     }
-    noeta_types::BUILTIN_TRAITS
+    let mut candidates: Vec<Candidate> = noeta_types::BUILTIN_TRAITS
         .iter()
         .filter(|t| t.derivable())
         .map(|t| {
@@ -424,7 +425,22 @@ fn derive_candidates(ctxt: &DirectiveArgContext) -> Vec<Candidate> {
                 detail: Some(detail),
             }
         })
-        .collect()
+        .collect();
+    for stmt in &program.stmts {
+        if let Stmt::Trait(decl) = stmt
+            && decl.type_params.is_empty()
+            && decl.methods.iter().all(|m| m.has_default)
+        {
+            candidates.push(Candidate {
+                label: decl.name.clone(),
+                kind: CandidateKind::Trait,
+                detail: Some(
+                    "user trait — fully defaulted, derive adopts the defaults".to_string(),
+                ),
+            });
+        }
+    }
+    dedupe_by_label(candidates)
 }
 
 /// `@role(…)`: the role-eligible (`@semantic`) enums — the built-in `Semantic` plus the program's
@@ -1160,6 +1176,28 @@ mod tests {
         assert_eq!(
             formats.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
             noeta_types::SERIALIZE_FORMATS.to_vec()
+        );
+    }
+
+    #[test]
+    fn derive_arguments_offer_fully_defaulted_user_traits() {
+        // UT5: a non-generic, fully-defaulted user trait is derivable and offered; a trait with a
+        // required method or generics is not.
+        let program = program_of(
+            "trait Full {\n    fn label(): string { return \"x\" }\n}\n\
+             trait Partial {\n    fn need(): int\n    fn have(): int { return 1 }\n}\n\
+             trait Gen<T> {\n    fn nop(): int { return 0 }\n}\n",
+        );
+        let cands = directive_arg_candidates(&arg_ctx("@derive(").unwrap(), &program);
+        let labels: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Full"), "got {labels:?}");
+        assert!(
+            !labels.contains(&"Partial"),
+            "required-method trait offered: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"Gen"),
+            "generic trait offered: {labels:?}"
         );
     }
 

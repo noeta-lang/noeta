@@ -1,0 +1,19 @@
+// `@derive(<UserTrait>)` (UT5): deriving a fully-defaulted user trait adopts every default — the
+// same as an explicit empty `impl` — and registers the trait membership, so the derived type
+// coerces to `dyn Trait` and dispatches through it.
+// expect: stdout "a thing!"
+// expect: stdout "a thing!"
+// expect: exit 0
+trait Describable {
+    fn label(): string { return "thing" }
+    fn describe(): string { return "a " ~ self.label() ~ "!" }
+}
+
+@derive(Describable)
+struct Point { x: int }
+
+fn takes(d: dyn Describable): string { return d.describe() }
+
+p = Point { x: 1 }
+echo p.describe()
+echo takes(p)

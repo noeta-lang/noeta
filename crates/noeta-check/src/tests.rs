@@ -2445,3 +2445,31 @@ fn attribute_target_kind_vocabulary_is_in_lockstep() {
     // The one historic drift: the old help text said `Record`, which was never accepted.
     assert!(crate::TargetKind::from_name("Record").is_none());
 }
+
+#[test]
+fn derive_of_a_fully_defaulted_user_trait_checks_clean() {
+    // UT5: deriving a user trait adopts its defaults; valid when every method has one.
+    let src =
+        "trait D {\n    fn label(): string { return \"x\" }\n}\n@derive(D)\nstruct P { n: int }\n";
+    assert_eq!(codes(src), Vec::<String>::new());
+}
+
+#[test]
+fn derive_of_a_user_trait_with_required_methods_is_e0050() {
+    let src = "trait G {\n    fn greet(who: string): string\n    fn shout(): string { return \"HI\" }\n}\n@derive(G)\nstruct P { n: int }\n";
+    assert_eq!(codes(src), ["E0050"]);
+}
+
+#[test]
+fn derive_of_a_generic_user_trait_is_e0050() {
+    let src = "trait C<T> {\n    fn nop(): int { return 0 }\n}\n@derive(C)\nstruct P { n: int }\n";
+    assert_eq!(codes(src), ["E0050"]);
+}
+
+#[test]
+fn derived_user_trait_satisfies_dyn_coercion_and_types_the_defaults() {
+    // The derive registers trait membership (dyn coercion checks) and the default method's
+    // signature (the member call types as `string`, not a hole).
+    let src = "trait D {\n    fn label(): string { return \"x\" }\n    fn describe(): string { return self.label() }\n}\n@derive(D)\nstruct P { n: int }\nfn takes(d: dyn D): string { return d.describe() }\np = P { n: 1 }\nout: string = p.describe()\necho takes(p)\necho out\n";
+    assert_eq!(codes(src), Vec::<String>::new());
+}
