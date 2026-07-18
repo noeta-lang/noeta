@@ -58,9 +58,9 @@ For editor-speed feedback, the compiler is a salsa query graph: editing one modu
 
 Honestly noted, so the picture is complete:
 
-- **Zero-copy cross-thread borrow-share** for isolates (built and miri-proven, unwired — blocked on `Rc<Shape> → Arc<Shape>`). See [Concurrency Internals](Concurrency-Internals).
-- **A `gc-arena` tracing path** for destructor-free classes.
-- **Explicit SIMD intrinsics** (`Simd<T, N>` + const generics) as a later track — the current approach deliberately relies on layout + autovectorization instead.
+- **Explicit SIMD intrinsics** (`Simd<T, N>` + const generics) as a later track — the shipped approach deliberately relies on layout (the SoA columns above) + autovectorization instead, which benched *faster* than hand-written intrinsics.
+
+Two items formerly listed here have since resolved: zero-copy cross-thread **borrow-share** for isolates shipped (interned `&'static` shapes + the `SharedRegion` spawn path — see [Concurrency Internals](Concurrency-Internals)), and the `gc-arena` tracing idea was superseded — cycle collection ships as the refcount GC's backup trace + trial-deletion collectors (see [Memory Management](Memory-Management)).
 
 ## Finding the hot spots
 
