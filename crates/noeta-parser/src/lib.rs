@@ -365,13 +365,21 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
             "`@packed` takes a single `Layout` argument".to_string(),
         );
     }
-    // The retired pre-enum spelling gets a targeted migration message.
+    // The retired pre-enum spelling gets a targeted migration message, naming the exact
+    // replacement when the old value identifies one.
     if head.as_str() == "layout" {
+        let replacement = match suffix {
+            Some(DirectiveSuffix::Named((value, _))) if value == "row" => "`@packed(Layout.Row)`",
+            Some(DirectiveSuffix::Named((value, _))) if value == "column" => {
+                "`@packed(Layout.Column)`"
+            }
+            _ => "`@packed(Layout.Row)` or `@packed(Layout.Column)`",
+        };
         reject(
             *head_span,
-            "the `layout: row|column` form was replaced by the `Layout` enum — write \
-             `@packed(Layout.Row)` or `@packed(Layout.Column)`"
-                .to_string(),
+            format!(
+                "the `layout: row|column` form was replaced by the `Layout` enum — write {replacement}"
+            ),
         );
         return PackedLayout::Row;
     }

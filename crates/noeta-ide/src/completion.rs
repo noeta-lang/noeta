@@ -12,6 +12,10 @@
 //! - [`directives`] — **directive completion** (C4): the decorator directives and the tier
 //!   name-space, offered right after an `@` (detected textually via [`is_directive_position`] —
 //!   a dangling `@` never parses).
+//! - [`directive_arg_candidates`] — **directive-argument completion** (C5): the vocabulary inside
+//!   a directive's parens (`@derive(` → the derivable traits, `@role(` → the semantic enums,
+//!   `@packed(` → the `Layout` variants, `@bench(` → its config knobs), from the same sources the
+//!   parser/checker validate against. Context via [`directive_arg_context`].
 //!
 //! A best-effort read of the mid-edit AST — it leans on the recovering parser and the client's own
 //! prefix filtering rather than requiring a clean parse. Both return backend-neutral [`Candidate`]s
@@ -253,6 +257,318 @@ pub fn directives(program: &Program) -> Vec<Candidate> {
         });
     }
     dedupe_by_label(candidates)
+}
+
+/// The directive-argument position the cursor is in: inside the parens of `@<directive>(…)`,
+/// with enough of the current argument decoded to pick the right vocabulary (C5). Detection is
+/// textual (a half-typed directive argument does not parse) and stays within the cursor's line
+/// (a directive's argument list never spans lines).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectiveArgContext {
+    /// The directive name before the open paren (`derive`, `role`, `packed`, `tier`, `attribute`,
+    /// or a tier name like `bench`).
+    pub directive: String,
+    /// 0-based index of the argument the cursor is in (top-level comma count).
+    pub active: usize,
+    /// `Some(head)` when the current argument is a dotted qualifier in progress (`Layout.`,
+    /// `Semantic.Entry|`) — completion offers `head`'s members.
+    pub after_dot: Option<String>,
+    /// `Some(head)` when the cursor is inside an unclosed generic-argument list (`Serialize<|`) —
+    /// completion offers `head`'s type arguments (the serialization formats).
+    pub in_generic: Option<String>,
+}
+
+/// Detect the [`DirectiveArgContext`] at byte `offset` of `text`, or `None` when the cursor is not
+/// inside a directive's parens.
+pub fn directive_arg_context(text: &str, offset: u32) -> Option<DirectiveArgContext> {
+    let bytes = text.as_bytes();
+    let offset = (offset as usize).min(bytes.len());
+    let line_start = text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+
+    // The innermost unclosed `(` on the cursor's line.
+    let mut opens: Vec<usize> = Vec::new();
+    for (i, b) in bytes[line_start..offset].iter().enumerate() {
+        match b {
+            b'(' => opens.push(line_start + i),
+            b')' => {
+                opens.pop();
+            }
+            _ => {}
+        }
+    }
+    let open = *opens.last()?;
+
+    // It must be preceded by `@name` to be a directive's argument list.
+    let mut i = open;
+    while i > line_start && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+        i -= 1;
+    }
+    if i == open || i == line_start || bytes[i - 1] != b'@' {
+        return None;
+    }
+    let directive = text[i..open].to_string();
+
+    // The argument region so far: the active index is the top-level comma count (commas inside a
+    // generic list `Serialize<K, V>` don't separate directive arguments), and the current argument
+    // is what follows the last top-level comma.
+    let args = &text[open + 1..offset];
+    let (mut active, mut angle_depth, mut arg_start) = (0usize, 0i32, 0usize);
+    for (i, c) in args.char_indices() {
+        match c {
+            '<' => angle_depth += 1,
+            '>' => angle_depth = (angle_depth - 1).max(0),
+            ',' if angle_depth == 0 => {
+                active += 1;
+                arg_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let current = args[arg_start..].trim_start();
+
+    // Inside an unclosed generic list? (`Serialize<`, `Serialize<Js`)
+    let in_generic = current.find('<').and_then(|lt| {
+        let closed = current[lt..].contains('>');
+        (!closed).then(|| current[..lt].trim().to_string())
+    });
+    // A dotted qualifier in progress? (`Layout.`, `Semantic.Entry`)
+    let after_dot = (in_generic.is_none())
+        .then(|| {
+            current
+                .rfind('.')
+                .map(|dot| current[..dot].trim().to_string())
+        })
+        .flatten()
+        .filter(|head| !head.is_empty() && head.chars().all(|c| c.is_alphanumeric() || c == '_'));
+
+    Some(DirectiveArgContext {
+        directive,
+        active,
+        after_dot,
+        in_generic,
+    })
+}
+
+/// The completion candidates inside a directive's argument list (C5), from the directive's own
+/// vocabulary — the same sources the parser/checker validate against, so completion can never
+/// offer what they would reject. `program` should be the merged workspace program (an imported
+/// `@semantic` enum or a dependency's `@tier` declaration is offered). Unknown vocabulary (a
+/// `@tier` fresh name, an unknown tier) yields an empty list — the caller still suppresses the
+/// general identifier completion, which would be pure noise inside a directive.
+pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candidate> {
+    match ctxt.directive.as_str() {
+        "derive" => derive_candidates(ctxt),
+        "role" => role_candidates(ctxt, program),
+        "attribute" => noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS
+            .iter()
+            .map(|kind| Candidate {
+                label: (*kind).to_string(),
+                kind: CandidateKind::Keyword,
+                detail: Some(format!("attach to every {}", kind.to_lowercase())),
+            })
+            .collect(),
+        "packed" => packed_candidates(ctxt),
+        "semantic" => Vec::new(), // takes no arguments
+        "tier" => {
+            // First positional is the fresh tier name; the rest are the named forms.
+            if ctxt.active == 0 {
+                Vec::new()
+            } else {
+                [
+                    ("config: ", "config: Type — the tier's knob attribute"),
+                    ("text: ", "text: \"<lang>\" — a verbatim text tier"),
+                    (
+                        "expr: ",
+                        "expr: Type — an expression tier (blocks are values)",
+                    ),
+                ]
+                .into_iter()
+                .map(|(label, detail)| Candidate {
+                    label: label.to_string(),
+                    kind: CandidateKind::Keyword,
+                    detail: Some(detail.to_string()),
+                })
+                .collect()
+            }
+        }
+        // Any other directive is a tier annotation (`@bench(…)`): its arguments are the knobs of
+        // the tier's config attribute.
+        tier => tier_config_candidates(tier, program),
+    }
+}
+
+/// `@derive(…)`: the derivable built-in traits; inside `Serialize<…>`/`Deserialize<…>`, the
+/// serialization formats.
+fn derive_candidates(ctxt: &DirectiveArgContext) -> Vec<Candidate> {
+    if ctxt.in_generic.is_some() {
+        return noeta_types::SERIALIZE_FORMATS
+            .iter()
+            .map(|format| Candidate {
+                label: (*format).to_string(),
+                kind: CandidateKind::Type,
+                detail: Some("serialization format".to_string()),
+            })
+            .collect();
+    }
+    noeta_types::BUILTIN_TRAITS
+        .iter()
+        .filter(|t| t.derivable())
+        .map(|t| {
+            let detail = match t.generic_arity() {
+                0 => "derivable trait".to_string(),
+                _ => format!("derivable trait — takes a format: {}<Json>", t.name()),
+            };
+            Candidate {
+                label: t.name().to_string(),
+                kind: CandidateKind::Trait,
+                detail: Some(detail),
+            }
+        })
+        .collect()
+}
+
+/// `@role(…)`: the role-eligible (`@semantic`) enums — the built-in `Semantic` plus the program's
+/// own — and, after `Enum.`, that enum's variants.
+fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candidate> {
+    if let Some(head) = &ctxt.after_dot {
+        let variants: Vec<String> = if head == noeta_ast::reflect::SEMANTIC_ENUM {
+            noeta_ast::reflect::SEMANTIC_VARIANTS
+                .iter()
+                .map(|v| (*v).to_string())
+                .collect()
+        } else {
+            program
+                .stmts
+                .iter()
+                .find_map(|stmt| match stmt {
+                    Stmt::Enum(decl) if decl.name == *head && decl.semantic.is_some() => {
+                        Some(decl.variants.iter().map(|v| v.name.clone()).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        return variants
+            .into_iter()
+            .map(|name| Candidate {
+                label: name,
+                kind: CandidateKind::EnumMember,
+                detail: Some(format!("role — {head} variant")),
+            })
+            .collect();
+    }
+    let mut candidates = vec![Candidate {
+        label: noeta_ast::reflect::SEMANTIC_ENUM.to_string(),
+        kind: CandidateKind::Enum,
+        detail: Some("built-in role vocabulary".to_string()),
+    }];
+    for stmt in &program.stmts {
+        if let Stmt::Enum(decl) = stmt
+            && decl.semantic.is_some()
+        {
+            candidates.push(Candidate {
+                label: decl.name.clone(),
+                kind: CandidateKind::Enum,
+                detail: Some("@semantic enum".to_string()),
+            });
+        }
+    }
+    dedupe_by_label(candidates)
+}
+
+/// `@packed(…)`: the `Layout` enum — the qualified variants at head position, the bare variants
+/// after `Layout.`.
+fn packed_candidates(ctxt: &DirectiveArgContext) -> Vec<Candidate> {
+    let detail = |variant: &str| match variant {
+        "Row" => "row-major (AoS) — the bare-@packed default",
+        "Column" => "column-major (SoA) — fastest for the bulk kernels",
+        _ => "storage layout",
+    };
+    match &ctxt.after_dot {
+        Some(head) if head == noeta_ast::reflect::LAYOUT_ENUM => {
+            noeta_ast::reflect::LAYOUT_VARIANTS
+                .iter()
+                .map(|v| Candidate {
+                    label: (*v).to_string(),
+                    kind: CandidateKind::EnumMember,
+                    detail: Some(detail(v).to_string()),
+                })
+                .collect()
+        }
+        Some(_) => Vec::new(),
+        None => noeta_ast::reflect::LAYOUT_VARIANTS
+            .iter()
+            .map(|v| Candidate {
+                label: format!("{}.{v}", noeta_ast::reflect::LAYOUT_ENUM),
+                kind: CandidateKind::EnumMember,
+                detail: Some(detail(v).to_string()),
+            })
+            .collect(),
+    }
+}
+
+/// A tier annotation's arguments (`@bench(iterations: 1000)`): the fields of the tier's config
+/// attribute, as `name:` keys. The tier resolves through the same [`TierRegistry`] name-space the
+/// checker uses; the config attribute is an extension attribute (`Bench { iterations }`) or a
+/// program-declared `@attribute` struct.
+fn tier_config_candidates(tier: &str, program: &Program) -> Vec<Candidate> {
+    let reg = noeta_stdlib::registry::single_registry_process();
+    let tiers = noeta_check::tiers::TierRegistry::collect_with_registry(program, reg);
+    let config = reg
+        .find_ext_tier(tier)
+        .and_then(|t| t.config.map(String::from))
+        .or_else(|| tiers.declared(tier).and_then(|d| d.config.clone()));
+    let Some(config) = config else {
+        return Vec::new(); // knob-less tier (`@test`) or unknown name
+    };
+    // Extension attribute (`Bench { iterations: int }`)…
+    if let Some(attr) = noeta_stdlib::registry::find_ext_attribute(&config) {
+        return attr
+            .fields
+            .iter()
+            .map(|f| Candidate {
+                label: format!("{}: ", f.name),
+                kind: CandidateKind::Field,
+                detail: Some(format!(
+                    "{}{}",
+                    render_attr_field_type(&f.ty),
+                    if f.default.is_some() {
+                        " (optional)"
+                    } else {
+                        ""
+                    }
+                )),
+            })
+            .collect();
+    }
+    // …or a program-declared `@attribute` struct.
+    program
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Struct(decl) if decl.name == config => Some(
+                decl.fields
+                    .iter()
+                    .map(|f| Candidate {
+                        label: format!("{}: ", f.name),
+                        kind: CandidateKind::Field,
+                        detail: f.ty.as_ref().map(symbols::render_type_ref),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Render an extension attribute field's type for a completion detail.
+fn render_attr_field_type(ty: &noeta_stdlib::registry::AttrFieldType) -> &'static str {
+    use noeta_stdlib::registry::AttrFieldType;
+    match ty {
+        AttrFieldType::Int => "int",
+        AttrFieldType::Str => "string",
+        AttrFieldType::Dyn => "dyn",
+    }
 }
 
 /// Whether the cursor at byte `offset` of `text` sits in an `@`-directive position: immediately
@@ -792,6 +1108,120 @@ mod tests {
             1,
             "one candidate per tier name"
         );
+    }
+
+    fn arg_ctx(src: &str) -> Option<DirectiveArgContext> {
+        directive_arg_context(src, src.len() as u32)
+    }
+
+    #[test]
+    fn directive_arg_context_detects_directive_and_active_argument() {
+        let c = arg_ctx("@derive(").unwrap();
+        assert_eq!((c.directive.as_str(), c.active), ("derive", 0));
+        let c = arg_ctx("@derive(Equatable, Compa").unwrap();
+        assert_eq!((c.directive.as_str(), c.active), ("derive", 1));
+        // A generic list's comma is not an argument separator.
+        let c = arg_ctx("@derive(Serialize<Json, ").unwrap();
+        assert_eq!(c.active, 0);
+        assert_eq!(c.in_generic.as_deref(), Some("Serialize"));
+        // Dotted qualifier in progress.
+        let c = arg_ctx("@role(Semantic.").unwrap();
+        assert_eq!(c.after_dot.as_deref(), Some("Semantic"));
+        let c = arg_ctx("@packed(Layout.R").unwrap();
+        assert_eq!(c.after_dot.as_deref(), Some("Layout"));
+        // Not a directive context: an ordinary call, a closed paren, plain code.
+        assert!(arg_ctx("f(1, ").is_none());
+        assert!(arg_ctx("@derive(Comparable) struct P ").is_none());
+        assert!(arg_ctx("x = 1").is_none());
+    }
+
+    #[test]
+    fn derive_arguments_offer_the_derivable_traits_and_formats() {
+        let program = program_of("");
+        let cands = directive_arg_candidates(&arg_ctx("@derive(").unwrap(), &program);
+        let labels: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
+        for t in [
+            "Equatable",
+            "Comparable",
+            "Display",
+            "Clone",
+            "Serialize",
+            "Deserialize",
+        ] {
+            assert!(labels.contains(&t), "missing {t}: {labels:?}");
+        }
+        assert!(
+            !labels.contains(&"Add"),
+            "non-derivable trait offered: {labels:?}"
+        );
+        assert!(cands.iter().all(|c| c.kind == CandidateKind::Trait));
+        // Inside `Serialize<…>` the formats are offered instead.
+        let formats = directive_arg_candidates(&arg_ctx("@derive(Serialize<").unwrap(), &program);
+        assert_eq!(
+            formats.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
+            noeta_types::SERIALIZE_FORMATS.to_vec()
+        );
+    }
+
+    #[test]
+    fn role_arguments_offer_semantic_enums_then_variants() {
+        let program = program_of("@semantic\nenum Zone { Frontend\n Backend }\nenum Plain { A }");
+        let heads = directive_arg_candidates(&arg_ctx("@role(").unwrap(), &program);
+        let labels: Vec<&str> = heads.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Semantic"), "got {labels:?}");
+        assert!(
+            labels.contains(&"Zone"),
+            "user @semantic enum offered; got {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"Plain"),
+            "non-semantic enum must not be offered"
+        );
+        // After `Semantic.` / `Zone.` the variants come.
+        let ctx = DirectiveArgContext {
+            directive: "role".into(),
+            active: 0,
+            after_dot: Some("Semantic".into()),
+            in_generic: None,
+        };
+        let vars = directive_arg_candidates(&ctx, &program);
+        assert!(vars.iter().any(|c| c.label == "EntryPoint"), "got {vars:?}");
+        let ctx = DirectiveArgContext {
+            after_dot: Some("Zone".into()),
+            ..ctx
+        };
+        let vars = directive_arg_candidates(&ctx, &program);
+        assert!(vars.iter().any(|c| c.label == "Backend"), "got {vars:?}");
+    }
+
+    #[test]
+    fn packed_and_attribute_arguments_offer_their_vocabularies() {
+        let program = program_of("");
+        let layouts = directive_arg_candidates(&arg_ctx("@packed(").unwrap(), &program);
+        let labels: Vec<&str> = layouts.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["Layout.Row", "Layout.Column"]);
+        let ctx = arg_ctx("@packed(Layout.").unwrap();
+        let vars = directive_arg_candidates(&ctx, &program);
+        assert_eq!(
+            vars.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
+            vec!["Row", "Column"]
+        );
+        let kinds = directive_arg_candidates(&arg_ctx("@attribute(").unwrap(), &program);
+        let labels: Vec<&str> = kinds.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS.to_vec());
+    }
+
+    #[test]
+    fn tier_annotation_arguments_offer_the_config_knobs() {
+        // `@bench(…)`'s config attribute is std's `Bench { iterations: int }`.
+        let program = program_of("");
+        let knobs = directive_arg_candidates(&arg_ctx("@bench(").unwrap(), &program);
+        assert!(
+            knobs.iter().any(|c| c.label == "iterations: "),
+            "got {knobs:?}"
+        );
+        // A knob-less tier offers nothing (but the context still suppresses identifier noise).
+        assert!(directive_arg_candidates(&arg_ctx("@test(").unwrap(), &program).is_empty());
     }
 
     #[test]

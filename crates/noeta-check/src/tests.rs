@@ -2431,3 +2431,17 @@ fn test_on_an_instance_method_is_invalid_site() {
                }\n";
     assert_eq!(codes(src), ["E0054"]);
 }
+
+#[test]
+fn attribute_target_kind_vocabulary_is_in_lockstep() {
+    // The shared `ATTRIBUTE_TARGET_KINDS` vocabulary (diagnostics help + IDE completion) accepts
+    // exactly what `TargetKind::from_name` parses.
+    for name in noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS {
+        assert!(
+            crate::TargetKind::from_name(name).is_some(),
+            "`{name}` is in the vocabulary but not parsed"
+        );
+    }
+    // The one historic drift: the old help text said `Record`, which was never accepted.
+    assert!(crate::TargetKind::from_name("Record").is_none());
+}

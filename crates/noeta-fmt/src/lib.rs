@@ -633,12 +633,19 @@ mod tests {
         let same_line = "@test fn t(): void { assert(true, \"ok\") }\necho 1\n";
         let out = fmt(same_line).unwrap();
         assert!(out.starts_with("@test\nfn t(): void {"), "got:\n{out}");
-        assert_eq!(fmt(&out).unwrap(), out, "directive-above form is idempotent");
+        assert_eq!(
+            fmt(&out).unwrap(),
+            out,
+            "directive-above form is idempotent"
+        );
 
         // The directive-above input parses (woven-newline absorption) and is already canonical.
         let above = "@bench(1000)\nfn b(): void {\n    assert(true, \"ok\")\n}\necho 1\n";
         let out = fmt(above).unwrap();
-        assert!(out.starts_with("@bench(1000)\nfn b(): void {"), "got:\n{out}");
+        assert!(
+            out.starts_with("@bench(1000)\nfn b(): void {"),
+            "got:\n{out}"
+        );
 
         // Grouping braces are for grouping: several items keep the block form.
         let block = "@test {\n    fn a(): void { assert(true, \"a\") }\n    fn b(): void { assert(true, \"b\") }\n}\necho 1\n";

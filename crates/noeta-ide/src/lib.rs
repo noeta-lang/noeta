@@ -1601,6 +1601,13 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
 
+        // A directive's argument list (`@derive(|`, `@bench(|` — C5) gets a synthetic signature
+        // naming the directive's vocabulary; a half-typed directive never resolves as a call, so
+        // this comes first.
+        if let Some(args) = completion::directive_arg_context(text, offset) {
+            return signature::directive_signature(&args, program);
+        }
+
         let call = signature::enclosing_call(tokens, text, offset)?;
         match call.receiver {
             // Plain function call: the callee is a top-level function.
@@ -1656,6 +1663,15 @@ impl DocumentStore {
         // member branches — an `@` prefix is never a member access.
         if completion::is_directive_position(entry_text, offset) {
             return Some(completion::directives(program));
+        }
+
+        // Directive-argument completion (`@derive(|`, `@role(Semantic.|`, `@bench(|` — C5): the
+        // directive's own vocabulary. Also before the member branches — `@packed(Layout.|` must
+        // complete the layout variants, not munge a member access out of `Layout.`. An empty
+        // vocabulary still returns (suppressing identifier completion, which is noise inside a
+        // directive's parens).
+        if let Some(args) = completion::directive_arg_context(entry_text, offset) {
+            return Some(completion::directive_arg_candidates(&args, program));
         }
 
         // Member completion, partial form: the parser produced a `receiver.member` access under the
@@ -4896,6 +4912,80 @@ mod tests {
             .expect("inside the method call");
         assert_eq!(sig.label, "add(a: int, b: int) -> int");
         assert_eq!(sig.active_param, 1);
+    }
+
+    #[test]
+    fn signature_help_inside_directive_args_names_the_vocabulary() {
+        let mut store = test_store();
+        store.open("file:///d.noe", "@derive(".to_string());
+        let sig = store
+            .signature_help(
+                "file:///d.noe",
+                Position {
+                    line: 0,
+                    character: 8,
+                },
+                Encoding::Utf8,
+            )
+            .expect("inside the directive args");
+        assert!(sig.label.contains("Comparable"), "got {}", sig.label);
+        assert!(sig.label.contains("Serialize<Format>"), "got {}", sig.label);
+
+        // A tier annotation's signature is its config attribute's field list.
+        store.open("file:///b.noe", "@bench(".to_string());
+        let sig = store
+            .signature_help(
+                "file:///b.noe",
+                Position {
+                    line: 0,
+                    character: 7,
+                },
+                Encoding::Utf8,
+            )
+            .expect("inside the tier annotation args");
+        assert!(sig.label.contains("iterations: int"), "got {}", sig.label);
+    }
+
+    #[test]
+    fn completions_inside_directive_args_offer_the_vocabulary() {
+        let mut store = test_store();
+        store.open(
+            "file:///da.noe",
+            "@derive(Com\nstruct P { x: int }".to_string(),
+        );
+        let items = store
+            .completions(
+                "file:///da.noe",
+                Position {
+                    line: 0,
+                    character: 11,
+                },
+                Encoding::Utf8,
+            )
+            .expect("open document offers completions");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Comparable"), "got {labels:?}");
+        assert!(
+            !labels.contains(&"fn"),
+            "keywords are noise inside directive args; got {labels:?}"
+        );
+        // `@packed(Layout.` completes the variants, not a munged member access.
+        store.open(
+            "file:///pl.noe",
+            "@packed(Layout.\nstruct V { x: f32 }".to_string(),
+        );
+        let items = store
+            .completions(
+                "file:///pl.noe",
+                Position {
+                    line: 0,
+                    character: 15,
+                },
+                Encoding::Utf8,
+            )
+            .expect("open document offers completions");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["Row", "Column"]);
     }
 
     #[test]

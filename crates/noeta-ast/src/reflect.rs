@@ -823,6 +823,13 @@ pub const SEMANTIC_VARIANTS: &[&str] = &[
     "Layer",
 ];
 
+/// The declaration-kind vocabulary an `@attribute(Kind, …)` placement list names — the directive
+/// spellings the checker's `TargetKind::from_name` accepts, shared so its diagnostics help and IDE
+/// completion can never drift from the accepted set (a checker test asserts lockstep).
+pub const ATTRIBUTE_TARGET_KINDS: &[&str] = &[
+    "Struct", "Class", "Enum", "Function", "Method", "Field", "Variant",
+];
+
 /// The prelude `Layout` enum's name — the storage-layout vocabulary `@packed` takes
 /// (`@packed(Layout.Column)`). Like [`SEMANTIC_ENUM`] it is directive vocabulary, not a runtime
 /// value: the parser resolves the argument syntactically, and the prelude registers the enum so
