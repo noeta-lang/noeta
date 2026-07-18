@@ -217,7 +217,7 @@ fn to_hierarchy_call(call: noeta_ide::HierarchyCall) -> Option<(CallHierarchyIte
 fn to_code_lens(uri: &str, lens: noeta_ide::RoleLens) -> CodeLens {
     let command = if lens.traceable {
         Command {
-            title: format!("⚑ {} · trace request path", lens.role),
+            title: format!("⚑ {} · trace call paths", lens.role),
             command: "noeta.showTrace".to_string(),
             arguments: Some(vec![
                 serde_json::Value::String(uri.to_string()),
@@ -245,6 +245,89 @@ fn to_code_lens(uri: &str, lens: noeta_ide::RoleLens) -> CodeLens {
 struct TraceParams {
     uri: String,
     from: Option<String>,
+}
+
+/// A resolved location on the trace wire.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceLocWire {
+    uri: String,
+    line: u32,
+    character: u32,
+}
+
+impl From<noeta_ide::trace::TraceLoc> for TraceLocWire {
+    fn from(l: noeta_ide::trace::TraceLoc) -> TraceLocWire {
+        TraceLocWire {
+            uri: l.uri,
+            line: l.line,
+            character: l.character,
+        }
+    }
+}
+
+/// One node of the structured trace on the wire (`noeta/traceTree`).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceNodeTreeWire {
+    name: String,
+    /// `root` | `call` | `reference` (passed as a value, never a syntactic call).
+    kind: String,
+    roles: Vec<String>,
+    loc: Option<TraceLocWire>,
+    external: bool,
+    dynamic: bool,
+    cycle: bool,
+    truncated: bool,
+    children: Vec<TraceNodeTreeWire>,
+}
+
+impl From<noeta_ide::trace::LocatedTraceNode> for TraceNodeTreeWire {
+    fn from(n: noeta_ide::trace::LocatedTraceNode) -> TraceNodeTreeWire {
+        use noeta_ide::trace::TraceKind;
+        TraceNodeTreeWire {
+            name: n.name,
+            kind: match n.kind {
+                TraceKind::Root => "root",
+                TraceKind::Call => "call",
+                TraceKind::Reference => "reference",
+            }
+            .to_string(),
+            roles: n.roles,
+            loc: n.loc.map(TraceLocWire::from),
+            external: n.external,
+            dynamic: n.dynamic,
+            cycle: n.cycle,
+            truncated: n.truncated,
+            children: n
+                .children
+                .into_iter()
+                .map(TraceNodeTreeWire::from)
+                .collect(),
+        }
+    }
+}
+
+/// A located boundary on the wire.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceBoundaryWire {
+    role: String,
+    target: String,
+    loc: Option<TraceLocWire>,
+}
+
+/// `noeta/traceTree` answer: the structured trace the dedicated view renders — boundaries + per-
+/// root call trees with resolved locations, or a `status` explaining why it is empty.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceTreeResult {
+    from: Option<String>,
+    /// `ok` | `noRoles` | `notFound`; absent workspace ⇒ all fields empty with status `ok`.
+    status: String,
+    truncated: bool,
+    boundaries: Vec<TraceBoundaryWire>,
+    roots: Vec<TraceNodeTreeWire>,
 }
 
 /// `noeta/trace` answer: the rendered trace document text (the client opens it read-only).
@@ -635,6 +718,39 @@ impl Backend {
             store.trace_document(&params.uri, params.from.as_deref())
         };
         Ok(TraceResult { content })
+    }
+
+    /// `noeta/traceTree`: the structured, located trace for the dedicated view — the same
+    /// role-aware call-graph walk `noeta/trace` renders as text.
+    async fn noeta_trace_tree(&self, params: TraceParams) -> Result<TraceTreeResult> {
+        let tree = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.trace_tree(&params.uri, params.from.as_deref(), Encoding::Utf16)
+        };
+        Ok(match tree {
+            Some(t) => TraceTreeResult {
+                from: t.from,
+                status: t.status.as_str().to_string(),
+                truncated: t.truncated,
+                boundaries: t
+                    .boundaries
+                    .into_iter()
+                    .map(|b| TraceBoundaryWire {
+                        role: b.role,
+                        target: b.target,
+                        loc: b.loc.map(TraceLocWire::from),
+                    })
+                    .collect(),
+                roots: t.roots.into_iter().map(TraceNodeTreeWire::from).collect(),
+            },
+            None => TraceTreeResult {
+                from: params.from,
+                status: "ok".to_string(),
+                truncated: false,
+                boundaries: Vec::new(),
+                roots: Vec::new(),
+            },
+        })
     }
 
     /// `noeta/architecture` (ide-ui U3): the workspace's role surface — role groups with their
@@ -1467,6 +1583,7 @@ async fn serve() {
         // The trace document (ide-ui U2) — a custom request, since LSP has no "render me a
         // read-only report" method; the VS Code extension opens the answer as `noeta-trace:`.
         .custom_method("noeta/trace", Backend::noeta_trace)
+        .custom_method("noeta/traceTree", Backend::noeta_trace_tree)
         // The Architecture view + test explorer (ide-ui U3): the role surface, lazy call levels,
         // and `@test` discovery — all custom requests read by the VS Code extension.
         .custom_method("noeta/architecture", Backend::noeta_architecture)
@@ -1591,7 +1708,7 @@ mod tests {
         assert_eq!(lenses.len(), 1);
         let wire = to_code_lens("file:///l.noe", lenses[0].clone());
         let command = wire.command.expect("traceable lens carries the command");
-        assert_eq!(command.title, "⚑ Semantic.EntryPoint · trace request path");
+        assert_eq!(command.title, "⚑ Semantic.EntryPoint · trace call paths");
         assert_eq!(command.command, "noeta.showTrace");
         assert_eq!(
             command.arguments.as_deref(),

@@ -314,8 +314,8 @@ function activate(context) {
   // covered by the statically-bundled `tier-languages` grammar.
   registerTierHighlighting(context);
 
-  // The role-trace view (ide-ui U2): the CodeLens-invoked `noeta.showTrace` command + the
-  // read-only `noeta-trace:` document it opens (served by the language server's `noeta/trace`).
+  // The role-trace view (ide-ui U2 / trace-view): the CodeLens-invoked `noeta.showTrace` command +
+  // the dedicated trace panel it opens (served by the language server's `noeta/traceTree`).
   registerTrace(context, () => client);
 
   // The Architecture sidebar + the native test explorer (ide-ui U3), both fed by the server's

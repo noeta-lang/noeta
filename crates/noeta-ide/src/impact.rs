@@ -225,7 +225,9 @@ fn reverse_closure(
                 Some(j) => {
                     let node = &graph.functions[j];
                     if impacted.insert(node.name.clone()) {
-                        if node.method && let Some(member) = node.name.rsplit('.').next() {
+                        if node.method
+                            && let Some(member) = node.name.rsplit('.').next()
+                        {
                             members.insert(member.to_string());
                         }
                         grew = true;
@@ -355,8 +357,7 @@ impl ImpactSession {
             if !seen.insert(index) {
                 continue;
             }
-            let Some(text) = uri_to_path(&uri).and_then(|p| std::fs::read_to_string(p).ok())
-            else {
+            let Some(text) = uri_to_path(&uri).and_then(|p| std::fs::read_to_string(p).ok()) else {
                 return Impact::All {
                     reason: format!("cannot read {}", canon.display()),
                 };
@@ -422,11 +423,7 @@ impl ImpactSession {
 
         // The linked program — what the runner executes — then tiers, check, graph, closure.
         // The entry was a member at construction, but a deletion + rebaseline can remove it.
-        let Some(entry_index) = cache
-            .source_uris
-            .iter()
-            .position(|u| *u == self.entry_uri)
-        else {
+        let Some(entry_index) = cache.source_uris.iter().position(|u| *u == self.entry_uri) else {
             return Impact::All {
                 reason: "the entry left the project".into(),
             };

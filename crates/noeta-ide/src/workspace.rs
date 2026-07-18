@@ -84,10 +84,7 @@ pub(crate) fn sync(
     let uris: Vec<String> = sources.iter().map(|(u, _)| u.clone()).collect();
 
     // File set unchanged → update each member's text in place (salsa backdates unchanged ones).
-    if let Some(cache) = existing
-        .as_ref()
-        .filter(|cache| cache.source_uris == uris)
-    {
+    if let Some(cache) = existing.as_ref().filter(|cache| cache.source_uris == uris) {
         for (program, (_, text)) in cache.programs.iter().zip(&sources) {
             program.set_text(db).to(text.clone());
         }

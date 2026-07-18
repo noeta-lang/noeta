@@ -387,3 +387,78 @@ fn save(n: int): int {
         assert!(root.children[0].children.is_empty());
     }
 }
+
+/// Why a [`LocatedTrace`] has the shape it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceStatus {
+    Ok,
+    /// The program binds no `@role` on any function — nothing to trace.
+    NoRoles,
+    /// The `from` spec matched no role binding and no function.
+    NotFound,
+}
+
+impl TraceStatus {
+    /// The wire tag.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TraceStatus::Ok => "ok",
+            TraceStatus::NoRoles => "noRoles",
+            TraceStatus::NotFound => "notFound",
+        }
+    }
+}
+
+/// A resolved editor location (the structured twin of the text renderer's `path:line`).
+#[derive(Debug, Clone)]
+pub struct TraceLoc {
+    pub uri: String,
+    pub line: u32,
+    pub character: u32,
+}
+
+/// One node of the located trace tree (see [`TraceNode`] for field semantics).
+#[derive(Debug, Clone)]
+pub struct LocatedTraceNode {
+    pub name: String,
+    pub kind: TraceKind,
+    pub roles: Vec<String>,
+    pub loc: Option<TraceLoc>,
+    pub external: bool,
+    pub dynamic: bool,
+    pub cycle: bool,
+    pub truncated: bool,
+    pub children: Vec<LocatedTraceNode>,
+}
+
+/// One located boundary a walk reached.
+#[derive(Debug, Clone)]
+pub struct LocatedBoundary {
+    pub role: String,
+    pub target: String,
+    pub loc: Option<TraceLoc>,
+}
+
+/// The structured, located trace the editor's trace view renders (the text document is the same
+/// walk rendered for terminals/agents).
+#[derive(Debug, Clone)]
+pub struct LocatedTrace {
+    pub from: Option<String>,
+    pub status: TraceStatus,
+    pub truncated: bool,
+    pub boundaries: Vec<LocatedBoundary>,
+    pub roots: Vec<LocatedTraceNode>,
+}
+
+impl LocatedTrace {
+    /// An empty trace carrying only its `status` (the not-ok cases).
+    pub fn empty(from: Option<&str>, status: TraceStatus) -> LocatedTrace {
+        LocatedTrace {
+            from: from.map(str::to_string),
+            status,
+            truncated: false,
+            boundaries: Vec::new(),
+            roots: Vec::new(),
+        }
+    }
+}

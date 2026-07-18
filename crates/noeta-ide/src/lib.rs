@@ -57,9 +57,7 @@ use noeta_lexer::TokenKind;
 use noeta_span::{SourceId, Span};
 use salsa::Setter;
 
-use crate::workspace::{
-    WorkspaceCache, disk_noe_uris, edition_of_uri, uri_to_path, workspace_key,
-};
+use crate::workspace::{WorkspaceCache, disk_noe_uris, edition_of_uri, uri_to_path, workspace_key};
 
 pub use offsets::{Encoding, LineIndex, Position, Range};
 pub use semtokens::SemanticToken;
@@ -1753,6 +1751,85 @@ impl DocumentStore {
         Some(self.render_trace(cache, from, &walked))
     }
 
+    /// The **structured** trace (the same walk [`Self::trace_document`] renders as text): the
+    /// boundary list and per-root call trees with resolved editor locations — what the editor's
+    /// dedicated trace view consumes. `None` when `uri` names no open workspace. A spec that
+    /// resolves to nothing comes back as a [`trace::LocatedTrace`] with the matching `status`, so
+    /// the view can say why it is empty.
+    pub fn trace_tree(
+        &self,
+        uri: &str,
+        from: Option<&str>,
+        encoding: Encoding,
+    ) -> Option<trace::LocatedTrace> {
+        let (cache, entry, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache, entry);
+        let roots = match trace::resolve_roots(&graph, &info, from) {
+            trace::Roots::Functions(roots) => roots,
+            trace::Roots::AllRoleBearers(all) if !all.is_empty() => all,
+            trace::Roots::AllRoleBearers(_) => {
+                return Some(trace::LocatedTrace::empty(
+                    from,
+                    trace::TraceStatus::NoRoles,
+                ));
+            }
+            trace::Roots::NotFound => {
+                return Some(trace::LocatedTrace::empty(
+                    from,
+                    trace::TraceStatus::NotFound,
+                ));
+            }
+        };
+        let walked = trace::walk(
+            &graph,
+            &trace::roles_by_target(&info),
+            &roots,
+            trace::DEFAULT_MAX_DEPTH,
+            trace::NODE_BUDGET,
+        );
+        let locate = |span: Option<Span>| -> Option<trace::TraceLoc> {
+            let (uri, range) = self.locate(cache, span?, encoding)?;
+            Some(trace::TraceLoc {
+                uri,
+                line: range.start.line,
+                character: range.start.character,
+            })
+        };
+        fn convert(
+            node: &trace::TraceNode,
+            locate: &dyn Fn(Option<Span>) -> Option<trace::TraceLoc>,
+        ) -> trace::LocatedTraceNode {
+            trace::LocatedTraceNode {
+                name: node.name.clone(),
+                kind: node.kind,
+                roles: node.roles.clone(),
+                // Prefer the declaration; a dynamic/external leaf falls back to its call site, so
+                // clicking it still lands somewhere meaningful.
+                loc: locate(node.decl_span).or_else(|| locate(node.site_span)),
+                external: node.external,
+                dynamic: node.dynamic,
+                cycle: node.cycle,
+                truncated: node.truncated,
+                children: node.children.iter().map(|c| convert(c, locate)).collect(),
+            }
+        }
+        Some(trace::LocatedTrace {
+            from: from.map(str::to_string),
+            status: trace::TraceStatus::Ok,
+            truncated: walked.truncated,
+            boundaries: walked
+                .boundaries
+                .iter()
+                .map(|b| trace::LocatedBoundary {
+                    role: b.role.clone(),
+                    target: b.target.clone(),
+                    loc: locate(b.decl_span),
+                })
+                .collect(),
+            roots: walked.roots.iter().map(|r| convert(r, &locate)).collect(),
+        })
+    }
+
     /// Render a finished walk as the trace document: a header, the `boundaries reached` summary,
     /// then one indented tree per root with `path:line` locations on every locatable node.
     fn render_trace(
@@ -3019,6 +3096,36 @@ mod tests {
             .find(|d| d.code == noeta_diagnostics::DiagnosticCode::UnresolvedImport)
             .expect("an E0019 for the unresolved import");
         assert_eq!(unresolved.help.as_deref(), Some("did you mean `http`?"));
+    }
+
+    #[test]
+    fn trace_tree_is_the_structured_walk() {
+        let mut store = test_store();
+        store.open(
+            "file:///a.noe",
+            "@semantic\nenum L { A; B; }\n@attribute(Function)\n@role(L.A)\nstruct Entry { p: int }\n@attribute(Function)\n@role(L.B)\nstruct Sink { p: int }\n#[Entry(1)]\nfn top(): int { return mid() }\n#[Sink(2)]\nfn mid(): int { return 1 }\necho top()\n"
+                .to_string(),
+        );
+        let t = store
+            .trace_tree("file:///a.noe", Some("top"), Encoding::Utf16)
+            .expect("workspace open");
+        assert_eq!(t.status, trace::TraceStatus::Ok);
+        assert_eq!(t.roots.len(), 1);
+        let root = &t.roots[0];
+        assert_eq!(root.name, "top");
+        assert_eq!(root.kind, trace::TraceKind::Root);
+        assert!(root.roles.contains(&"L.A".to_string()));
+        assert!(root.loc.is_some(), "root located");
+        let mid = &root.children[0];
+        assert_eq!(mid.name, "mid");
+        assert!(mid.roles.contains(&"L.B".to_string()));
+        // Both role bindings are boundaries.
+        assert_eq!(t.boundaries.len(), 2);
+        // A bogus spec reports notFound rather than emptiness.
+        let nf = store
+            .trace_tree("file:///a.noe", Some("nope"), Encoding::Utf16)
+            .unwrap();
+        assert_eq!(nf.status, trace::TraceStatus::NotFound);
     }
 
     #[test]
