@@ -75,7 +75,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -129,7 +129,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -183,7 +183,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -237,7 +237,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -291,7 +291,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -345,7 +345,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -399,7 +399,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -453,7 +453,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -507,7 +507,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -561,7 +561,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -615,7 +615,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -669,7 +669,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"
@@ -723,7 +723,7 @@
       "end": "\\}",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.decorator.noeta"
+          "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta"
         },
         "2": {
           "name": "entity.name.function.decorator.noeta"

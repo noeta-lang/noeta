@@ -77,11 +77,11 @@
     },
 
     "text-tier-blocks": {
-      "comment": "A text tier's `@<name> { … }` body is verbatim prose the compiler never lexes as code (text-tiers arc). std's `doc` is the built-in text tier; it is matched here — before #decorators — so the body's apostrophes/backticks/quotes can never open string scopes that bleed past the block. Brace counting mirrors the compiler lexer's matching_brace exactly: braces nest (the recursive #text-tier-brace-pair), and \\{ / \\} are literal braces with \\\\ a literal backslash (the escape pattern consumes them before any brace rule sees them). The whole body — delimiter braces AND content — is scoped as a documentation *comment* (`comment.block.documentation.noeta`, `.comment.` on the braces), so VS Code's bracket-pair colorization/matching skips every `{`/`}` in it: it excludes brackets in comment/string tokens, and a tier body is prose, not code. We deliberately do NOT inject `text.html.markdown` in the EDITOR: markdown's paragraph rule is greedy and swallows the closing `}` (scoping it `meta.paragraph.markdown`, standard-type Other), which re-introduces it as a counted bracket and drifts every following code brace's color. The docs *browser* still renders the body as full markdown — this only governs in-editor coloring. A third-party declared text tier (`@tier(x, text: \"sql\")`) ships its own injection grammar with a rule of this same shape (injectionSelector `L:source.noeta`) — that is the extension mechanism; this grammar stays static.",
+      "comment": "A text tier's `@<name> { … }` body is verbatim prose the compiler never lexes as code (text-tiers arc). std's `doc` is the built-in text tier; it is matched here — before #decorators — so the body's apostrophes/backticks/quotes can never open string scopes that bleed past the block. Brace counting mirrors the compiler lexer's matching_brace exactly: braces nest (the recursive #text-tier-brace-pair), and \\{ / \\} are literal braces with \\\\ a literal backslash (the escape pattern consumes them before any brace rule sees them). The whole body — delimiter braces AND content — is scoped as a documentation *comment* (`comment.block.documentation.noeta`, `.comment.` on the braces), so VS Code's bracket-pair colorization/matching skips every `{`/`}` in it: it excludes brackets in comment/string tokens, and a tier body is prose, not code. We deliberately do NOT inject `text.html.markdown` in the EDITOR: markdown's paragraph rule is greedy and swallows the closing `}` (scoping it `meta.paragraph.markdown`, standard-type Other), which re-introduces it as a counted bracket and drifts every following code brace's color. Instead #doc-markdown hand-rolls the accents doc prose actually uses (inline code, bold, italic, headings, bullets) with brace-free matches, so the muted comment base keeps markdown highlights without any rule that can swallow the closing brace; the docs *browser* still renders the body as full markdown. A third-party declared text tier (`@tier(x, text: \"sql\")`) ships its own injection grammar with a rule of this same shape (injectionSelector `L:source.noeta`) — that is the extension mechanism; this grammar stays static.",
       "begin": "(@)(doc)\\b\\s*(\\{)",
       "end": "\\}",
       "beginCaptures": {
-        "1": { "name": "punctuation.definition.decorator.noeta" },
+        "1": { "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta" },
         "2": { "name": "entity.name.function.decorator.noeta" },
         "3": { "name": "punctuation.section.tier.begin.comment.noeta" }
       },
@@ -91,7 +91,8 @@
       "contentName": "comment.block.documentation.noeta",
       "patterns": [
         { "include": "#text-tier-escape" },
-        { "include": "#text-tier-brace-pair" }
+        { "include": "#text-tier-brace-pair" },
+        { "include": "#doc-markdown" }
       ]
     },
     "text-tier-escape": {
@@ -112,14 +113,50 @@
       "contentName": "comment.block.documentation.noeta",
       "patterns": [
         { "include": "#text-tier-escape" },
-        { "include": "#text-tier-brace-pair" }
+        { "include": "#text-tier-brace-pair" },
+        { "include": "#doc-markdown" }
+      ]
+    },
+    "doc-markdown": {
+      "comment": "Hand-rolled markdown accents for `@doc` prose — the subset doc comments actually use — in place of injecting `text.html.markdown` (whose greedy paragraph rule swallows the tier's closing `}`; see #text-tier-blocks). Every match here EXCLUDES unescaped braces, so no accent can ever consume a block delimiter, and none of these scopes contains `meta.embedded`, so the standard token type stays Comment (or String for raw spans) — invisible to bracket colorization. Scope names mirror markdown's own (markup.*), so themes color them exactly like real markdown.",
+      "patterns": [
+        {
+          "comment": "An ATX heading line: `# Title`. Stops at any brace so a one-line `@doc { # T }` still closes.",
+          "name": "markup.heading.noeta",
+          "match": "^\\s*#{1,6}\\s[^{}]*"
+        },
+        {
+          "comment": "A list bullet (the marker only, so the text keeps the comment base color).",
+          "match": "^\\s*([-*+])\\s",
+          "captures": {
+            "1": { "name": "punctuation.definition.list.begin.markdown.noeta" }
+          }
+        },
+        {
+          "comment": "An inline code span. `.string.` in the scope also excludes its content from bracket counting.",
+          "name": "markup.inline.raw.string.noeta",
+          "match": "`[^`{}]+`"
+        },
+        {
+          "name": "markup.bold.noeta",
+          "match": "\\*\\*(?=\\S)[^*{}]+(?<=\\S)\\*\\*"
+        },
+        {
+          "name": "markup.italic.noeta",
+          "match": "(?<!\\*)\\*(?=\\S)[^*{}]+(?<=\\S)\\*(?!\\*)"
+        },
+        {
+          "comment": "Underscore italic, word-bounded so snake_case identifiers in prose are never italicized.",
+          "name": "markup.italic.noeta",
+          "match": "(?<![A-Za-z0-9_])_[^_{}]+_(?![A-Za-z0-9_])"
+        }
       ]
     },
     "decorators": {
       "comment": "Directives and tier blocks: @derive(...), @role(...), @test, @bench(...), @debug. The decorator set {derive, attribute, role, semantic, packed} is fixed; every other @name is a tier (open set). @doc is carved out above as the built-in text tier.",
       "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
-        "1": { "name": "punctuation.definition.decorator.noeta" },
+        "1": { "name": "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta" },
         "2": { "name": "entity.name.function.decorator.noeta" }
       }
     },

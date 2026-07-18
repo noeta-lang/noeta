@@ -90,7 +90,7 @@ function tierRules(name, lang) {
       begin: `(@)(${name})\\b\\s*(\\{)`,
       end: "\\}",
       beginCaptures: {
-        1: { name: "punctuation.definition.decorator.noeta" },
+        1: { name: "punctuation.definition.decorator.noeta entity.name.function.decorator.noeta" },
         2: { name: "entity.name.function.decorator.noeta" },
         3: { name: "punctuation.section.tier.begin.noeta" },
       },
