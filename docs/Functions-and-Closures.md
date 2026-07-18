@@ -70,6 +70,47 @@ echo c()   // 1
 echo c()   // 2
 ```
 
+## Nested functions
+
+A `fn` declared inside another function's body is **nested**: it is a local closure, callable only within the enclosing body, that captures enclosing locals as upvalues. Nested-function *names* are **hoisted** across their block — like top-level functions, siblings see each other regardless of declaration order — so forward references and mutual recursion just work:
+
+```noeta
+fn parity(n: int): bool {
+    fn even(k: int): bool {          // calls `odd`, declared below
+        if k == 0 { return true }
+        return odd(k - 1)
+    }
+    fn odd(k: int): bool {           // calls `even`, declared above
+        if k == 0 { return false }
+        return even(k - 1)
+    }
+    return even(n)                   // mutual recursion, both directions
+}
+echo parity(10)   // true
+```
+
+Two mutually recursive nested functions may also capture the *same* enclosing `mut` local — they share the one live cell, not copies:
+
+```noeta
+fn run(): int {
+    mut hits = 0
+    fn ping(n: int): int { hits = hits + 1; if n == 0 { return 0 }; return pong(n - 1) }
+    fn pong(n: int): int { hits = hits + 1; if n == 0 { return 0 }; return ping(n - 1) }
+    ping(4)
+    return hits   // 5 — every bounce incremented the shared counter
+}
+```
+
+Only `fn` declarations are hoisted. A plain `let`/value local stays **strictly lexical**: referencing one declared textually later is E0005 (unknown name), not a forward capture.
+
+```noeta
+fn run(): int {
+    fn peek(): int { return later }   // E0005 — `later` is a value local, not hoisted
+    later = 5
+    return peek()
+}
+```
+
 ## Function types
 
 Function types are first-class surface syntax — write them in annotations and signatures:

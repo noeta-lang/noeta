@@ -1,0 +1,22 @@
+// Two nested `fn`s are mutually recursive: `even` calls `odd` and `odd` calls `even`, both
+// declared as siblings inside `parity`. Nested `fn` declarations are hoisted for name resolution
+// (matching the checker's `bind_nested_fns` and how top-level fns already see each other), so each
+// captures the other's (celled) binding as an upvalue even though `even` is lowered before `odd`
+// exists. The two closures form a closure->cell->closure cycle reclaimed by the collector once
+// `parity` returns.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+fn parity(n: int): bool {
+    fn even(k: int): bool {
+        if k == 0 { return true; }
+        return odd(k - 1);
+    }
+    fn odd(k: int): bool {
+        if k == 0 { return false; }
+        return even(k - 1);
+    }
+    return even(n);
+}
+echo parity(10);
+echo parity(7);

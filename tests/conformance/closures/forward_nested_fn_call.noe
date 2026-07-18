@@ -1,0 +1,15 @@
+// A nested `fn` references a sibling nested `fn` declared textually *after* it, both called after
+// the two declarations. The forward reference resolves because nested `fn` names are hoisted into
+// the enclosing scope before any body is lowered (F1 forward capture).
+// expect: stdout "11"
+// expect: exit 0
+fn run(): int {
+    fn a(): int {
+        return b() + 1;
+    }
+    fn b(): int {
+        return 10;
+    }
+    return a();
+}
+echo run();
