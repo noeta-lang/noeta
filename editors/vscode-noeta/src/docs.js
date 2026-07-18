@@ -141,10 +141,11 @@ class DocsViewProvider {
         if (!client) return this.post({ type: "summary", id: msg.id, text: "" });
         try {
           const reply = await client.sendRequest("noeta/docsPage", { uri: this.uri(), id: msg.id });
+          const page = reply && reply.page; // the wire nests the page: { page: { markdown, … } }
           this.post({
             type: "summary",
             id: msg.id,
-            text: firstParagraph((reply && reply.markdown) || ""),
+            text: firstParagraph((page && page.markdown) || ""),
           });
         } catch {
           this.post({ type: "summary", id: msg.id, text: "" });
