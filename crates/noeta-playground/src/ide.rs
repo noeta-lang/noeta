@@ -133,5 +133,6 @@ fn kind_word(kind: CandidateKind) -> &'static str {
         CandidateKind::Type => "type",
         CandidateKind::Trait => "trait",
         CandidateKind::Module => "module",
+        CandidateKind::Directive => "directive",
     }
 }

@@ -1,6 +1,6 @@
 //! Completion candidates for `textDocument/completion` (slice **L5**).
 //!
-//! Two forms, chosen by the caller from the cursor context:
+//! Three forms, chosen by the caller from the cursor context:
 //!
 //! - [`complete`] — **identifier completion** (C1): the language keywords, the top-level
 //!   declarations (functions and types), and the value bindings in scope at the cursor (locals,
@@ -9,6 +9,9 @@
 //!   go-to-definition.
 //! - [`members_of`] — **member completion** (C2): the fields, enum variants, and methods of a named
 //!   type, offered on a `receiver.member` access once the caller has resolved the receiver's type.
+//! - [`directives`] — **directive completion** (C4): the decorator directives and the tier
+//!   name-space, offered right after an `@` (detected textually via [`is_directive_position`] —
+//!   a dangling `@` never parses).
 //!
 //! A best-effort read of the mid-edit AST — it leans on the recovering parser and the client's own
 //! prefix filtering rather than requiring a clean parse. Both return backend-neutral [`Candidate`]s
@@ -45,6 +48,9 @@ pub enum CandidateKind {
     Trait,
     /// A native module or namespace-group member (`http.client`, member completion on a group).
     Module,
+    /// An `@`-directive: a decorator (`@derive`, `@packed`, …) or a dev-tier (`@test`, `@doc`,
+    /// a declared `@tier`'s name) — offered right after an `@` (C4).
+    Directive,
 }
 
 /// One completion candidate: the inserted/filtered text, its kind, and an optional short detail.
@@ -181,6 +187,84 @@ pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
             }
         })
         .collect()
+}
+
+/// The short usage detail shown beside a built-in decorator directive — the closed set the
+/// statement grammar dispatches on ([`noeta_parser::DECORATOR_DIRECTIVES`]).
+fn decorator_detail(name: &str) -> &'static str {
+    match name {
+        "derive" => "@derive(Trait, …) — derive implementations for a type",
+        "attribute" => "@attribute(…) — declare this struct as a data attribute",
+        "role" => "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles",
+        "semantic" => "@semantic — mark an enum's variants as role names",
+        "packed" => "@packed(layout: row|column) — flat value-struct layout",
+        "tier" => "@tier(name, …) — declare a dev-tier and its runner",
+        _ => "decorator directive",
+    }
+}
+
+/// The directive candidates offered right after an `@` (**directive completion**, C4): the built-in
+/// decorator directives (the parser's closed set, so completion and the grammar can never drift)
+/// followed by the **tier name-space** — the installed extensions' tiers (`test`/`bench`/`doc`/
+/// `debug` plus any native package's) and the program's own `@tier` declarations, read from the
+/// same [`noeta_check::tiers::TierRegistry`] the checker validates `@<tier>` blocks against.
+/// `program` should be the merged workspace program so an imported package's declared tier is
+/// offered. De-duplicated by label (a program re-declaration of an extension tier — a second
+/// *provider* — is still one name).
+pub fn directives(program: &Program) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+    for name in noeta_parser::DECORATOR_DIRECTIVES {
+        candidates.push(Candidate {
+            label: (*name).to_string(),
+            kind: CandidateKind::Directive,
+            detail: Some(decorator_detail(name).to_string()),
+        });
+    }
+    // The registry-scoped tier name-space (LSP/IDE run single-registry: the seeded process global).
+    let reg = noeta_stdlib::registry::single_registry_process();
+    let tiers = noeta_check::tiers::TierRegistry::collect_with_registry(program, reg);
+    for tier in tiers.extension_tiers() {
+        let detail = match (tier.expr, tier.text) {
+            (Some(ty), _) => format!("expression tier — @{} {{ … }} : {ty}", tier.name),
+            (None, Some(lang)) => format!("text tier ({lang})"),
+            (None, None) => "dev-tier".to_string(),
+        };
+        candidates.push(Candidate {
+            label: tier.name.to_string(),
+            kind: CandidateKind::Directive,
+            detail: Some(detail),
+        });
+    }
+    for tier in tiers.declared_tiers() {
+        let provider = if tier.root.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", tier.root)
+        };
+        let detail = match (&tier.expr, &tier.text) {
+            (Some(ty), _) => format!("expression tier — @{} {{ … }} : {ty}{provider}", tier.name),
+            (None, Some(lang)) => format!("text tier ({lang}){provider}"),
+            (None, None) => format!("dev-tier{provider}"),
+        };
+        candidates.push(Candidate {
+            label: tier.name.clone(),
+            kind: CandidateKind::Directive,
+            detail: Some(detail),
+        });
+    }
+    dedupe_by_label(candidates)
+}
+
+/// Whether the cursor at byte `offset` of `text` sits in an `@`-directive position: immediately
+/// after an `@`, or after `@` plus a partial directive name (`@te|`). Textual — it must work
+/// mid-edit, where a dangling `@` never reaches the AST.
+pub fn is_directive_position(text: &str, offset: u32) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = (offset as usize).min(bytes.len());
+    while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+        i -= 1;
+    }
+    i > 0 && bytes[i - 1] == b'@'
 }
 
 /// The member candidates of the type named `type_name` in `program`: its fields, enum variants, and
@@ -650,6 +734,74 @@ mod tests {
         let program = program_of(src);
         let offset = src.find("Point").unwrap() as u32 + 1; // inside the `List<Point>` argument
         assert!(is_type_position(&program, offset));
+    }
+
+    #[test]
+    fn directives_offer_decorators_and_builtin_tiers() {
+        let cands = directives(&program_of(""));
+        let labels: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
+        // The parser's closed decorator set…
+        for name in ["derive", "attribute", "role", "semantic", "packed", "tier"] {
+            assert!(
+                labels.contains(&name),
+                "missing decorator {name}: {labels:?}"
+            );
+        }
+        // …and the extension-declared built-in tiers.
+        for name in ["test", "bench", "doc", "debug"] {
+            assert!(labels.contains(&name), "missing tier {name}: {labels:?}");
+        }
+        assert!(
+            cands.iter().all(|c| c.kind == CandidateKind::Directive),
+            "directive completion is homogeneous"
+        );
+        let doc = cands.iter().find(|c| c.label == "doc").unwrap();
+        assert!(
+            doc.detail.as_deref().unwrap_or("").contains("markdown"),
+            "the doc text tier names its body language: {:?}",
+            doc.detail
+        );
+    }
+
+    #[test]
+    fn directives_offer_program_declared_tiers() {
+        let src = "@tier(sql, text: \"sql\", expr: Query)\nfn q(statics: List<string>, holes: List<() -> int>): Query { return Query {} }\nstruct Query {}\n";
+        let cands = directives(&program_of(src));
+        let sql = cands
+            .iter()
+            .find(|c| c.label == "sql")
+            .expect("declared tier offered");
+        assert_eq!(sql.kind, CandidateKind::Directive);
+        assert!(
+            sql.detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("expression tier"),
+            "detail describes the tier form: {:?}",
+            sql.detail
+        );
+    }
+
+    #[test]
+    fn a_redeclared_extension_tier_is_offered_once() {
+        // A program `@tier(bench)` is a second *provider* of the extension tier, not a new name.
+        let src = "@tier(bench)\nfn run_bench(roots: List<TierRoot>): void {}\n";
+        let cands = directives(&program_of(src));
+        assert_eq!(
+            cands.iter().filter(|c| c.label == "bench").count(),
+            1,
+            "one candidate per tier name"
+        );
+    }
+
+    #[test]
+    fn is_directive_position_after_at_and_partial_name() {
+        assert!(is_directive_position("@", 1));
+        assert!(is_directive_position("@te", 3));
+        assert!(is_directive_position("fn f() {}\n@do", 13));
+        assert!(!is_directive_position("x = 1", 5));
+        assert!(!is_directive_position("te", 2), "no @ before the word");
+        assert!(!is_directive_position("@", 0), "cursor before the @ itself");
     }
 
     #[test]

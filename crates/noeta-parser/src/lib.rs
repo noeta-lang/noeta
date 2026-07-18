@@ -73,7 +73,8 @@ enum PrefixOp {
 /// this set by name: a tier parser rejects these names up front, so a decorator directive is never
 /// speculatively parsed as a tier (no wasted backtracking, and no need to restrict tier arguments —
 /// the side-effecting literal parser is only ever reached for a genuine tier).
-const DECORATOR_DIRECTIVES: &[&str] =
+/// Public so IDE completion offers exactly the set this grammar accepts (never a drifted copy).
+pub const DECORATOR_DIRECTIVES: &[&str] =
     &["derive", "attribute", "role", "semantic", "packed", "tier"];
 
 /// Whether `name` is a built-in decorator directive (vs. a tier directive).

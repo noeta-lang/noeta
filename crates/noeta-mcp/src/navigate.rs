@@ -366,6 +366,7 @@ fn candidate_kind(kind: completion::CandidateKind) -> &'static str {
         CandidateKind::Type => "type",
         CandidateKind::Trait => "trait",
         CandidateKind::Module => "module",
+        CandidateKind::Directive => "directive",
     }
 }
 
