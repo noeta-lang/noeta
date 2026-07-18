@@ -1,0 +1,24 @@
+// A bare name inside a method-nested closure is an ordinary lexical reference — never the
+// receiver's field (prelude-redesign EX.1: member access is explicit, `self.field`). A global
+// or a method-local that happens to share a field's name captures like any other name; before
+// this was pinned, the VM refused to compile such a closure while the reference ran it.
+// expect: stdout "101"
+// expect: stdout "43"
+// expect: exit 0
+count = 100
+struct S {
+    count: int
+    width: int
+    other: int
+    fn m(): int {
+        f = fn() => count
+        return f() + self.other
+    }
+    fn n(): int {
+        width = 42
+        g = fn() => width + self.other
+        return g()
+    }
+}
+echo S { count: 7, width: 9, other: 1 }.m()
+echo S { count: 7, width: 9, other: 1 }.n()

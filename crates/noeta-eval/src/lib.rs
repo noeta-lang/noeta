@@ -3330,10 +3330,8 @@ impl Interpreter {
         catch_return(result)
     }
 
-    /// Call an instance method: the receiver's fields are bound directly into the method
-    /// scope (so `total()` can reference `items` without a `self.` prefix), and `self` is
-    /// also bound to the whole object. Parameters bind last, so they win over a field of
-    /// the same name.
+    /// Call an instance method: `self` binds to the whole object; fields are NOT in scope
+    /// (member access is explicit — prelude-redesign EX.1). Parameters bind after `self`.
     fn call_method_on(
         &mut self,
         object: &Rc<ObjectValue>,

@@ -1072,8 +1072,6 @@ impl ModuleCompiler {
             // `destruct` block — so compile its methods into the prototypes reserved in pass 1.
             if let Stmt::Decl(Decl::Struct(strukt)) = stmt {
                 let name = strukt.decl.name.clone();
-                let field_set: HashSet<String> =
-                    strukt.decl.fields.iter().map(|f| f.name.clone()).collect();
                 for (method, func) in &strukt.methods {
                     let TypeInfo::Struct { fns, .. } = &self.types[&name] else {
                         unreachable!("a struct registered as non-struct");
@@ -1081,9 +1079,7 @@ impl ModuleCompiler {
                     let proto = fns[method];
                     let chunk = self.compile_func(
                         func,
-                        Some(MethodCtx {
-                            fields: field_set.clone(),
-                        }),
+                        Some(MethodCtx),
                         Vec::new(),
                         Vec::new(),
                         Some(format!("{name}.{method}")),
@@ -1105,9 +1101,7 @@ impl ModuleCompiler {
                     let proto = fns[method];
                     let chunk = self.compile_func(
                         func,
-                        Some(MethodCtx {
-                            fields: HashSet::new(),
-                        }),
+                        Some(MethodCtx),
                         Vec::new(),
                         Vec::new(),
                         Some(format!("{name}.{method}")),
@@ -1120,8 +1114,6 @@ impl ModuleCompiler {
                 continue;
             };
             let name = class.decl.name.clone();
-            let field_set: HashSet<String> =
-                class.decl.fields.iter().map(|f| f.name.clone()).collect();
             for (method, func) in &class.methods {
                 let TypeInfo::Class { fns, .. } = &self.types[&name] else {
                     unreachable!("a class registered as non-class");
@@ -1129,9 +1121,7 @@ impl ModuleCompiler {
                 let proto = fns[method];
                 let chunk = self.compile_func(
                     func,
-                    Some(MethodCtx {
-                        fields: field_set.clone(),
-                    }),
+                    Some(MethodCtx),
                     Vec::new(),
                     Vec::new(),
                     Some(format!("{name}.{method}")),
@@ -1148,9 +1138,7 @@ impl ModuleCompiler {
                     .expect("a destructor proto was reserved in pass 1");
                 let chunk = self.compile_func(
                     func,
-                    Some(MethodCtx {
-                        fields: field_set.clone(),
-                    }),
+                    Some(MethodCtx),
                     Vec::new(),
                     Vec::new(),
                     Some(format!("{name}::destruct")),
@@ -1231,14 +1219,13 @@ impl ModuleCompiler {
         let analysis = freevars::analyze(params, defaults, body, &enclosing_locals, &globals);
 
         // The capturable layer this function exposes to its own nested closures. A method also
-        // exposes `self`/its fields, but capturing them is left unsupported this slice — they go
-        // into `forbidden` so a nested closure that reaches for one is skipped, not miscompiled.
+        // exposes `self` (captured by boxing the receiver — aether F3); its FIELDS are deliberately
+        // absent: a bare name never resolves to a field anywhere (prelude-redesign EX.1 — the
+        // reference binds only `self` into a method frame, see `call_method_on`), so a bare name
+        // that happens to match a field is an ordinary local/global reference here too.
         let mut local_layer = analysis.local.clone();
-        let mut forbidden = HashSet::new();
-        if let Some(ctx) = &method {
-            forbidden.insert("self".to_string());
-            forbidden.extend(ctx.fields.iter().cloned());
-            local_layer.extend(forbidden.iter().cloned());
+        if method.is_some() {
+            local_layer.insert("self".to_string());
         }
 
         // Compile each defaulted parameter's default value into a zero-argument thunk prototype,
@@ -1262,7 +1249,6 @@ impl ModuleCompiler {
         let mut fc = FnCompiler::new(self, false, method, upvalues, enclosing_locals);
         fc.celled = analysis.celled;
         fc.local_layer = local_layer;
-        fc.forbidden = forbidden;
         fc.init_temps(temp_count);
 
         // A method reserves register 0 for the receiver; ordinary functions do not.
@@ -1444,10 +1430,10 @@ impl ModuleCompiler {
     }
 }
 
-/// The method-compilation context: the field names that resolve to the receiver in register 0.
-struct MethodCtx {
-    fields: HashSet<String>,
-}
+/// Marks a chunk as a method body: register 0 is the receiver, so `self` resolves to it (and a
+/// nested closure captures it by boxing that register — aether F3). Fields carry no compile
+/// state: a bare name never resolves to a field (prelude-redesign EX.1).
+struct MethodCtx;
 
 /// Per-prototype compilation state (one register file, one constant/diagnostic pool).
 struct FnCompiler<'m> {
@@ -1476,9 +1462,6 @@ struct FnCompiler<'m> {
     /// The names of this function's own locals that an inner closure captures, so they are
     /// stored as cells (computed by the free-variable analysis before lowering).
     celled: HashSet<String>,
-    /// Names a nested closure must not capture from here (a method's `self`/fields): capturing
-    /// one is left unsupported this slice, so it is skipped rather than miscompiled.
-    forbidden: HashSet<String>,
     /// The enclosing functions' capturable locals (outermost first) — for lowering this
     /// function's own nested closures.
     enclosing_locals: Vec<HashSet<String>>,
@@ -1617,7 +1600,6 @@ impl<'m> FnCompiler<'m> {
             upvalue_index,
             upvalue_mut,
             celled: HashSet::new(),
-            forbidden: HashSet::new(),
             enclosing_locals,
             local_layer: HashSet::new(),
             loops: Vec::new(),
@@ -1807,12 +1789,6 @@ impl<'m> FnCompiler<'m> {
                 upvalues.push((name, false));
                 captures.push(PendingCapture::SelfCell);
                 continue;
-            }
-            if self.forbidden.contains(&name) {
-                // A bare FIELD name inside a method-nested closure stays unsupported: the walker
-                // binds fields into the method scope while bare names elsewhere are locals or
-                // globals, so compiling it either way risks a semantic drift — skip, don't guess.
-                return unsupported("a closure inside a method capturing a bare field name");
             }
             if let Some(var) = self.lookup_local(&name) {
                 if !var.celled {
