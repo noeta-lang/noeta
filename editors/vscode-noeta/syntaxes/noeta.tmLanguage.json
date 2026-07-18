@@ -77,7 +77,7 @@
     },
 
     "text-tier-blocks": {
-      "comment": "A text tier's `@<name> { … }` body is verbatim prose the compiler never lexes as code (text-tiers arc). std's `doc` is the built-in text tier (body language: markdown); it is matched here — before #decorators — so the body's apostrophes/backticks/quotes can never open string scopes that bleed past the block. Brace counting mirrors the compiler lexer's matching_brace exactly: braces nest (the recursive #text-tier-brace-pair), and \\{ / \\} are literal braces with \\\\ a literal backslash (the escape pattern consumes them before any brace rule sees them). The delimiter braces carry a `.comment.` scope so VS Code's bracket-pair colorization/matching skips them (it excludes brackets in comment/string tokens): a tier body is prose, not code, and across its embedded-markdown content the bracket parser would otherwise leave the opening `{` unmatched and drift every following code bracket's color. A third-party declared text tier (`@tier(x, text: \"sql\")`) ships its own injection grammar with a rule of this same shape (injectionSelector `L:source.noeta`) — that is the extension mechanism; this grammar stays static.",
+      "comment": "A text tier's `@<name> { … }` body is verbatim prose the compiler never lexes as code (text-tiers arc). std's `doc` is the built-in text tier; it is matched here — before #decorators — so the body's apostrophes/backticks/quotes can never open string scopes that bleed past the block. Brace counting mirrors the compiler lexer's matching_brace exactly: braces nest (the recursive #text-tier-brace-pair), and \\{ / \\} are literal braces with \\\\ a literal backslash (the escape pattern consumes them before any brace rule sees them). The whole body — delimiter braces AND content — is scoped as a documentation *comment* (`comment.block.documentation.noeta`, `.comment.` on the braces), so VS Code's bracket-pair colorization/matching skips every `{`/`}` in it: it excludes brackets in comment/string tokens, and a tier body is prose, not code. We deliberately do NOT inject `text.html.markdown` in the EDITOR: markdown's paragraph rule is greedy and swallows the closing `}` (scoping it `meta.paragraph.markdown`, standard-type Other), which re-introduces it as a counted bracket and drifts every following code brace's color. The docs *browser* still renders the body as full markdown — this only governs in-editor coloring. A third-party declared text tier (`@tier(x, text: \"sql\")`) ships its own injection grammar with a rule of this same shape (injectionSelector `L:source.noeta`) — that is the extension mechanism; this grammar stays static.",
       "begin": "(@)(doc)\\b\\s*(\\{)",
       "end": "\\}",
       "beginCaptures": {
@@ -88,11 +88,10 @@
       "endCaptures": {
         "0": { "name": "punctuation.section.tier.end.comment.noeta" }
       },
-      "contentName": "meta.embedded.block.markdown",
+      "contentName": "comment.block.documentation.noeta",
       "patterns": [
         { "include": "#text-tier-escape" },
-        { "include": "#text-tier-brace-pair" },
-        { "include": "text.html.markdown" }
+        { "include": "#text-tier-brace-pair" }
       ]
     },
     "text-tier-escape": {
@@ -101,7 +100,7 @@
       "match": "\\\\[{}\\\\]"
     },
     "text-tier-brace-pair": {
-      "comment": "A nested balanced brace pair inside a text body — recursion is how TextMate counts depth, so a `{snippet}` in prose does not close the block. The braces carry a `.comment.` scope so bracket colorization skips these prose braces too (see #text-tier-blocks).",
+      "comment": "A nested balanced brace pair inside a text body — recursion is how TextMate counts depth, so a `{snippet}` in prose does not close the block. The braces + content carry a documentation-comment scope so bracket colorization skips these prose braces too (see #text-tier-blocks).",
       "begin": "\\{",
       "end": "\\}",
       "beginCaptures": {
@@ -110,10 +109,10 @@
       "endCaptures": {
         "0": { "name": "punctuation.section.tier.brace.comment.noeta" }
       },
+      "contentName": "comment.block.documentation.noeta",
       "patterns": [
         { "include": "#text-tier-escape" },
-        { "include": "#text-tier-brace-pair" },
-        { "include": "text.html.markdown" }
+        { "include": "#text-tier-brace-pair" }
       ]
     },
     "decorators": {
