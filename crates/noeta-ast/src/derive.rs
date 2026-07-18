@@ -65,12 +65,17 @@ pub fn plan_user_trait_derive(
     existing: &[FnDecl],
     spec: &DeriveSpec,
 ) -> Result<Vec<FnDecl>, DerivePlanError> {
-    if !tr.type_params.is_empty() {
-        return Err(DerivePlanError::new(
-            format!("generic trait `{}` cannot be derived", tr.name),
-            "write an explicit `impl` for the instantiation you need",
-        ));
-    }
+    // A generic trait derives at an instantiation (`@derive(Cache<string>)`): substitute its type
+    // parameters through every method signature/default body ONCE, then plan against the concrete
+    // trait exactly like the non-generic case. A non-generic trait rejects stray arguments.
+    let instantiated;
+    let tr = match instantiate_trait(tr, &spec.args)? {
+        Some(concrete) => {
+            instantiated = concrete;
+            &instantiated
+        }
+        None => tr,
+    };
     if let Some((via_field, _)) = &spec.via {
         return plan_user_trait_via(tr, fields, existing, spec, via_field);
     }
@@ -456,6 +461,299 @@ pub fn plan_native_derive(methods: &[(String, usize, String)], span: Span) -> Ve
             synth_fn(&template, ret_stmt(call, span), span)
         })
         .collect()
+}
+
+// ---- generic-trait substitution ------------------------------------------------------------
+
+/// Instantiate a generic trait at concrete type arguments: `Ok(Some(trait))` with every method's
+/// signature and default body substituted (`K` → the argument) and the parameters cleared;
+/// `Ok(None)` for a non-generic trait with no arguments (use the original); an arity mismatch —
+/// including arguments on a non-generic trait — is an error.
+pub fn instantiate_trait(
+    tr: &TraitDecl,
+    args: &[TypeRef],
+) -> Result<Option<TraitDecl>, DerivePlanError> {
+    if tr.type_params.is_empty() {
+        if args.is_empty() {
+            return Ok(None);
+        }
+        return Err(DerivePlanError::new(
+            format!("`{}` takes no type arguments", tr.name),
+            "drop the `<…>`",
+        ));
+    }
+    if args.len() != tr.type_params.len() {
+        return Err(DerivePlanError::new(
+            format!(
+                "generic trait `{}` takes {} type argument(s), found {}",
+                tr.name,
+                tr.type_params.len(),
+                args.len()
+            ),
+            format!(
+                "write `{}<{}>`",
+                tr.name,
+                tr.type_params
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    let map: std::collections::HashMap<String, TypeRef> = tr
+        .type_params
+        .iter()
+        .map(|p| p.name.clone())
+        .zip(args.iter().cloned())
+        .collect();
+    let mut concrete = tr.clone();
+    concrete.type_params.clear();
+    for tm in &mut concrete.methods {
+        substitute_type_params(&mut tm.sig, &map);
+    }
+    Ok(Some(concrete))
+}
+
+/// Substitute a generic trait's type parameters through a default method — its signature
+/// (parameter/return annotations) and every type reference in its body (`as<K>`, a binding
+/// annotation, a closure's annotations, …) — so the default materializes per-implementor
+/// (`impl Cache<string>` sees `K` as `string`). The walker is exhaustive over `Stmt`/`Expr`, so a
+/// new syntax carrying a `TypeRef` fails to compile here rather than silently skipping
+/// substitution.
+pub fn substitute_type_params(decl: &mut FnDecl, map: &std::collections::HashMap<String, TypeRef>) {
+    let subst = &mut |ty: &mut TypeRef| substitute_ref(ty, map);
+    for p in &mut decl.params {
+        if let Some(ty) = &mut p.ty {
+            subst(ty);
+        }
+        if let Some(default) = &mut p.default {
+            visit_expr_types(default, subst);
+        }
+    }
+    if let Some(ret) = &mut decl.ret {
+        subst(ret);
+    }
+    for stmt in &mut decl.body {
+        visit_stmt_types(stmt, subst);
+    }
+}
+
+/// Rewrite one type reference: a bare `Named` matching a parameter becomes the argument;
+/// everything else recurses into its children.
+fn substitute_ref(ty: &mut TypeRef, map: &std::collections::HashMap<String, TypeRef>) {
+    match ty {
+        TypeRef::Named { name, args, .. } => {
+            if args.is_empty()
+                && let Some(replacement) = map.get(name.as_str())
+            {
+                *ty = replacement.clone();
+                return;
+            }
+            for a in args {
+                substitute_ref(a, map);
+            }
+        }
+        TypeRef::DynTrait { .. } => {}
+        TypeRef::Optional { inner, .. } => substitute_ref(inner, map),
+        TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| substitute_ref(m, map)),
+        TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| substitute_ref(e, map)),
+        TypeRef::Fn { params, ret, .. } => {
+            params.iter_mut().for_each(|p| substitute_ref(p, map));
+            substitute_ref(ret, map);
+        }
+    }
+}
+
+/// Apply `f` to every [`TypeRef`] reachable from `stmt`, recursing through nested statements and
+/// expressions. Exhaustive by construction (no wildcard arm).
+fn visit_stmt_types(stmt: &mut Stmt, f: &mut impl FnMut(&mut TypeRef)) {
+    match stmt {
+        Stmt::Binding { ty, value, .. } => {
+            if let Some(ty) = ty {
+                f(ty);
+            }
+            visit_expr_types(value, f);
+        }
+        Stmt::Destructure { value, .. } => visit_expr_types(value, f),
+        Stmt::Echo { value, .. } | Stmt::Yield { value, .. } => visit_expr_types(value, f),
+        Stmt::Return { value, .. } => {
+            if let Some(value) = value {
+                visit_expr_types(value, f);
+            }
+        }
+        Stmt::Expr { expr, .. } => visit_expr_types(expr, f),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            visit_expr_types(cond, f);
+            then_body.iter_mut().for_each(|s| visit_stmt_types(s, f));
+            if let Some(else_body) = else_body {
+                else_body.iter_mut().for_each(|s| visit_stmt_types(s, f));
+            }
+        }
+        Stmt::For { iterable, body, .. } => {
+            visit_expr_types(iterable, f);
+            body.iter_mut().for_each(|s| visit_stmt_types(s, f));
+        }
+        Stmt::While { cond, body, .. } => {
+            visit_expr_types(cond, f);
+            body.iter_mut().for_each(|s| visit_stmt_types(s, f));
+        }
+        Stmt::Concurrent { body, .. } => body.iter_mut().for_each(|s| visit_stmt_types(s, f)),
+        Stmt::TierBlock { items, .. } => items.iter_mut().for_each(|s| visit_stmt_types(s, f)),
+        // Nested declarations inside a method body do not see the trait's parameters (they
+        // declare their own scopes), and the remaining statements carry no type references.
+        Stmt::Fn(_)
+        | Stmt::Struct(_)
+        | Stmt::Class(_)
+        | Stmt::Enum(_)
+        | Stmt::Trait(_)
+        | Stmt::Impl(_)
+        | Stmt::Namespace { .. }
+        | Stmt::Use { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
+    }
+}
+
+/// Apply `f` to every [`TypeRef`] reachable from `expr`. Exhaustive over the expression grammar.
+fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
+    match expr {
+        Expr::As { expr, ty, .. } | Expr::TypeTest { expr, ty, .. } => {
+            visit_expr_types(expr, f);
+            f(ty);
+        }
+        Expr::FromBytes { ty, blob, .. } => {
+            f(ty);
+            visit_expr_types(blob, f);
+        }
+        Expr::AttributesOf { ty, .. } => f(ty),
+        Expr::RolesOf { ty, .. } => {
+            if let Some(ty) = ty {
+                f(ty);
+            }
+        }
+        Expr::Channel { elem, capacity, .. } => {
+            f(elem);
+            visit_expr_types(capacity, f);
+        }
+        Expr::Closure {
+            params, ret, body, ..
+        } => {
+            for p in params.iter_mut() {
+                if let Some(ty) = &mut p.ty {
+                    f(ty);
+                }
+                if let Some(default) = &mut p.default {
+                    visit_expr_types(default, f);
+                }
+            }
+            if let Some(ret) = ret {
+                f(ret);
+            }
+            match body {
+                crate::ClosureBody::Expr(e) => visit_expr_types(e, f),
+                crate::ClosureBody::Block(stmts) => {
+                    stmts.iter_mut().for_each(|s| visit_stmt_types(s, f))
+                }
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            visit_expr_types(lhs, f);
+            visit_expr_types(rhs, f);
+        }
+        Expr::Pipeline { left, right, .. } => {
+            visit_expr_types(left, f);
+            visit_expr_types(right, f);
+        }
+        Expr::Coalesce {
+            value, fallback, ..
+        } => {
+            visit_expr_types(value, f);
+            visit_expr_types(fallback, f);
+        }
+        Expr::Unary { operand, .. } => visit_expr_types(operand, f),
+        Expr::Call { callee, args, .. } => {
+            visit_expr_types(callee, f);
+            args.iter_mut().for_each(|a| visit_expr_types(a, f));
+        }
+        Expr::Invoke {
+            recv, name, args, ..
+        } => {
+            visit_expr_types(recv, f);
+            visit_expr_types(name, f);
+            visit_expr_types(args, f);
+        }
+        Expr::TypedModuleCall { args, .. } => args.iter_mut().for_each(|a| visit_expr_types(a, f)),
+        Expr::Member { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
+            visit_expr_types(receiver, f)
+        }
+        Expr::FieldSet {
+            receiver, value, ..
+        } => {
+            visit_expr_types(receiver, f);
+            visit_expr_types(value, f);
+        }
+        Expr::Index {
+            receiver, index, ..
+        } => {
+            visit_expr_types(receiver, f);
+            visit_expr_types(index, f);
+        }
+        Expr::List { items, .. } | Expr::Tuple { items, .. } => {
+            items.iter_mut().for_each(|e| visit_expr_types(e, f))
+        }
+        Expr::Range { start, end, .. } => {
+            visit_expr_types(start, f);
+            visit_expr_types(end, f);
+        }
+        Expr::Try { expr, .. } | Expr::Await { expr, .. } => visit_expr_types(expr, f),
+        Expr::Spawn { future, .. } => visit_expr_types(future, f),
+        Expr::Map { entries, .. } => {
+            for (k, v) in entries.iter_mut() {
+                visit_expr_types(k, f);
+                visit_expr_types(v, f);
+            }
+        }
+        Expr::Object(lit) => {
+            lit.fields
+                .iter_mut()
+                .for_each(|fi| visit_expr_types(&mut fi.value, f));
+            if let Some(spread) = &mut lit.spread {
+                visit_expr_types(spread, f);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            visit_expr_types(scrutinee, f);
+            arms.iter_mut()
+                .for_each(|arm| visit_expr_types(&mut arm.body, f));
+        }
+        Expr::Interp { parts, .. } => {
+            for part in parts.iter_mut() {
+                if let crate::StrPart::Hole(e) = part {
+                    visit_expr_types(e, f);
+                }
+            }
+        }
+        Expr::TypeOf { value, .. } | Expr::FieldsOf { value, .. } => visit_expr_types(value, f),
+        Expr::ParamsOf { target, .. } => visit_expr_types(target, f),
+        Expr::TierExpr { holes, .. } => holes.iter_mut().for_each(|h| visit_expr_types(h, f)),
+        Expr::Ident { .. }
+        | Expr::Str { .. }
+        | Expr::Int { .. }
+        | Expr::IntN { .. }
+        | Expr::Float { .. }
+        | Expr::F32 { .. }
+        | Expr::F64 { .. }
+        | Expr::Bool { .. }
+        | Expr::NativeFnRef { .. } => {}
+    }
 }
 
 // ---- synthesis helpers ---------------------------------------------------------------------

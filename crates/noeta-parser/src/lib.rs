@@ -2769,8 +2769,18 @@ where
             });
         // `impl Trait { fn ... }` — implementing a built-in trait lights up its operator/protocol.
         // The body is just methods; they are flattened into the class's method table below.
+        // A generic trait implements at an instantiation: `impl Cache<string> { … }` — the
+        // arguments substitute through the trait's default methods (generic-trait UT5).
+        let trait_args = type_parser(ctx)
+            .separated_by(just(T::Comma))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::Lt), just(T::Gt))
+            .or_not()
+            .map(Option::unwrap_or_default);
         let class_impl = just(T::ImplKw)
             .ignore_then(trait_path.clone())
+            .then(trait_args.clone())
             .then(
                 method
                     .clone()
@@ -2781,10 +2791,11 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(move |((trait_name, trait_span), methods), e| {
+            .map_with(move |(((trait_name, trait_span), trait_args), methods), e| {
                 ClassMember::Impl(ImplBlock {
                     trait_name,
                     trait_span,
+                    trait_args,
                     methods,
                     span: ctx.to_span(e.span()),
                 })
@@ -2858,6 +2869,7 @@ where
         // above. The checker requires `Type` to be declared in the same module (orphan rule).
         let standalone_impl = just(T::ImplKw)
             .ignore_then(trait_path.clone())
+            .then(trait_args.clone())
             .then_ignore(just(T::ForKw))
             .then(id.clone())
             .then(
@@ -2871,10 +2883,12 @@ where
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
             .map_with(
-                move |(((trait_name, trait_span), (target, target_span)), methods), e| {
+                move |((((trait_name, trait_span), trait_args), (target, target_span)), methods),
+                      e| {
                     Stmt::Impl(noeta_ast::ImplDecl {
                         trait_name,
                         trait_span,
+                        trait_args,
                         target,
                         target_span,
                         methods,

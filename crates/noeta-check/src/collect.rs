@@ -592,6 +592,54 @@ impl Checker {
                 }
             }
         }
+        // GENERIC-trait impls (in-body and standalone) register their INSTANTIATED omitted
+        // defaults' signatures — `impl Cache<string>` registers `fn get(k: string): …` — so the
+        // member calls type concretely. The non-generic case is covered by the name-set loop
+        // below; an arity mismatch registers nothing (`check_trait_impl` reports it).
+        for stmt in &program.stmts {
+            let mut register = |type_name: &str,
+                                trait_name: &str,
+                                args: &[noeta_ast::TypeRef],
+                                provided: &[noeta_ast::FnDecl]| {
+                if args.is_empty() {
+                    return;
+                }
+                let Some(tr) = self.symbols.user_traits.get(trait_name).cloned() else {
+                    return;
+                };
+                let Ok(Some(concrete)) = noeta_ast::derive::instantiate_trait(&tr, args) else {
+                    return;
+                };
+                for tm in concrete
+                    .methods
+                    .iter()
+                    .filter(|tm| tm.has_default && !provided.iter().any(|m| m.name == tm.sig.name))
+                {
+                    self.register_synth_method(type_name, &tm.sig);
+                }
+            };
+            match stmt {
+                Stmt::Struct(d) => {
+                    for b in &d.impls {
+                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                    }
+                }
+                Stmt::Class(d) => {
+                    for b in &d.impls {
+                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                    }
+                }
+                Stmt::Enum(d) => {
+                    for b in &d.impls {
+                        register(&d.name, &b.trait_name, &b.trait_args, &b.methods);
+                    }
+                }
+                Stmt::Impl(d) => {
+                    register(&d.target, &d.trait_name, &d.trait_args, &d.methods);
+                }
+                _ => {}
+            }
+        }
         // Default-method fallback (UT5): a trait method the implementor omits falls back to the
         // trait's default body (the backends hoist it via `hoist_standalone_impl_methods`), so its
         // SIGNATURE registers here — member calls on the implementing type resolve and type it. A

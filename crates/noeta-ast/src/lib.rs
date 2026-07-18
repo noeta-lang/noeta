@@ -467,6 +467,10 @@ pub struct TypeParam {
 pub struct ImplBlock {
     pub trait_name: String,
     pub trait_span: Span,
+    /// The trait's generic type arguments (`impl Cache<string> { … }`) — required (matching the
+    /// trait's parameter count) when the trait is generic, so its default methods substitute
+    /// per-implementor; empty for the common non-generic trait.
+    pub trait_args: Vec<TypeRef>,
     pub methods: Vec<FnDecl>,
     pub span: Span,
 }
@@ -517,6 +521,9 @@ pub struct TraitMethod {
 pub struct ImplDecl {
     pub trait_name: String,
     pub trait_span: Span,
+    /// The trait's generic type arguments (`impl Cache<string> for T { … }`); see
+    /// [`ImplBlock::trait_args`].
+    pub trait_args: Vec<TypeRef>,
     pub target: String,
     pub target_span: Span,
     /// Methods written in the impl body. Empty for a marker/capability trait (e.g. `Attribute`);

@@ -1025,8 +1025,29 @@ impl Printer<'_> {
         Ok(self.leaf(Doc::concat(parts), f.span.end, f.span.end))
     }
 
+    /// A generic trait's instantiation arguments (`<string>`), or nothing for the common
+    /// non-generic impl.
+    fn trait_args_doc(&self, args: &[noeta_ast::TypeRef]) -> Result<Doc, FmtError> {
+        if args.is_empty() {
+            return Ok(Doc::text(""));
+        }
+        let mut tys = Vec::new();
+        for a in args {
+            tys.push(self.type_ref(a)?);
+        }
+        Ok(Doc::concat([
+            Doc::text("<"),
+            Doc::join(tys, Doc::text(", ")),
+            Doc::text(">"),
+        ]))
+    }
+
     fn impl_block(&self, b: &ImplBlock) -> Result<Doc, FmtError> {
-        let head = Doc::text(format!("impl {} ", b.trait_name));
+        let head = Doc::concat([
+            Doc::text(format!("impl {}", b.trait_name)),
+            self.trait_args_doc(&b.trait_args)?,
+            Doc::text(" "),
+        ]);
         let mut ms = Vec::new();
         for m in &b.methods {
             ms.push(self.fn_decl(m)?);
@@ -1046,7 +1067,11 @@ impl Printer<'_> {
     }
 
     fn impl_decl(&self, d: &ImplDecl) -> Result<Doc, FmtError> {
-        let head = Doc::text(format!("impl {} for {} ", d.trait_name, d.target));
+        let head = Doc::concat([
+            Doc::text(format!("impl {}", d.trait_name)),
+            self.trait_args_doc(&d.trait_args)?,
+            Doc::text(format!(" for {} ", d.target)),
+        ]);
         let body = if d.methods.is_empty() {
             Doc::text("{}")
         } else {

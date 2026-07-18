@@ -591,8 +591,20 @@ impl Pretty for ClassDecl {
 impl Pretty for ImplDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
+        let args = if self.trait_args.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<{}>",
+                self.trait_args
+                    .iter()
+                    .map(type_ref_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         out.push_str(&format!(
-            "(impl {} for {} {}",
+            "(impl {}{args} for {} {}",
             self.trait_name,
             self.target,
             span(self.span)

@@ -12,7 +12,12 @@ impl Checker {
     /// block must provide the trait's required method with the right arity. The impl's method
     /// *bodies* are checked separately (they are flattened into `ClassDecl::methods`).
     pub(crate) fn check_impl(&mut self, block: &ImplBlock) {
-        self.check_trait_impl(&block.trait_name, block.trait_span, &block.methods);
+        self.check_trait_impl(
+            &block.trait_name,
+            &block.trait_args,
+            block.trait_span,
+            &block.methods,
+        );
     }
 
     /// The trait-side validation shared by in-body `impl` blocks and standalone `impl Trait for T`
@@ -22,14 +27,38 @@ impl Checker {
     pub(crate) fn check_trait_impl(
         &mut self,
         trait_name: &str,
+        trait_args: &[noeta_ast::TypeRef],
         trait_span: Span,
         methods: &[FnDecl],
     ) {
-        // A user-defined trait (L1, UT2): validate conformance against its declared contract, then
-        // return before the built-in resolution below (which would otherwise report E0014).
+        // A user-defined trait (L1, UT2): validate conformance against its declared contract —
+        // instantiated at the impl's type arguments when the trait is generic (`impl
+        // Cache<string>` checks `fn get(k: string): …`) — then return before the built-in
+        // resolution below (which would otherwise report E0014).
         if let Some(decl) = self.symbols.user_traits.get(trait_name).cloned() {
-            self.check_user_trait_impl(&decl, trait_span, methods);
+            match noeta_ast::derive::instantiate_trait(&decl, trait_args) {
+                Ok(instantiated) => {
+                    self.check_user_trait_impl(
+                        instantiated.as_ref().unwrap_or(&decl),
+                        trait_span,
+                        methods,
+                    );
+                }
+                Err(e) => {
+                    let d = self.error(DiagnosticCode::InvalidImpl, trait_span, e.message);
+                    if let Some(h) = e.help {
+                        d.help(h);
+                    }
+                }
+            }
             return;
+        }
+        if !trait_args.is_empty() {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                trait_span,
+                format!("`{trait_name}` takes no type arguments"),
+            );
         }
         let Some(t) = BuiltinTrait::from_name(trait_name) else {
             // A dotted path in an in-body impl is a method-bundle reference (kernel-methods K1)
@@ -143,7 +172,12 @@ impl Checker {
                      supported here; write trait methods inside the type's own `class` body",
             );
         }
-        self.check_trait_impl(&decl.trait_name, decl.trait_span, &decl.methods);
+        self.check_trait_impl(
+            &decl.trait_name,
+            &decl.trait_args,
+            decl.trait_span,
+            &decl.methods,
+        );
     }
 
     /// Validate that an `impl` of a user trait provides its contract (L1, UT2): every **required**
@@ -701,14 +735,6 @@ impl Checker {
         fields: &[noeta_ast::FieldDecl],
         type_methods: &[FnDecl],
     ) {
-        if !spec.args.is_empty() {
-            self.error(
-                DiagnosticCode::UnderivableTrait,
-                spec.span,
-                format!("`{}` takes no type arguments in `@derive(...)`", spec.name),
-            );
-            return;
-        }
         if let Err(e) = noeta_ast::derive::plan_user_trait_derive(decl, fields, type_methods, spec)
         {
             let d = self.error(DiagnosticCode::UnderivableTrait, spec.span, e.message);
