@@ -17,7 +17,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| Forward / mutual capture among nested `fn`s (a closure capturing a local declared after it) | slice F1 residue. Trigger: a program with forward references between nested closures |
 | **`obj.f(args)` on a closure-valued field** — parsed unconditionally as method dispatch (E0005); needs the field-access-then-call desugar. With it: the `Callable`/`Members` protocols | M1.8 tail + coroutines Track-I. Trigger: member-handles / user iterators holding a `next` closure |
 | **`.await` in the remaining conditional positions** — `??` fallback (needs Option-aware unwrap desugar) and `match`/`if…then…else` arm bodies. Condition/loop heads stay rejected by design | A.6b residual (E0040) |
 | Nested `concurrent` inside a *spawned task's own body* runs atomically within that task's poll | A.7 residual |

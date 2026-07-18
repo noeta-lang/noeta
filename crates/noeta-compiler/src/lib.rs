@@ -1282,6 +1282,7 @@ impl ModuleCompiler {
                 });
             }
         }
+        fc.hoist_nested_fn_cells(&body.stmts);
         for stmt in &body.stmts {
             fc.stmt(stmt)?;
         }
@@ -2052,26 +2053,20 @@ impl<'m> FnCompiler<'m> {
         }
 
         let celled = self.celled.contains(name);
-        let reg = self.alloc_reg();
-        if celled {
-            // Pre-create the cell (holding unit) and bind the name, so the body's references to
-            // itself source this cell; the closure value is stored into it once built.
-            let unit = self.alloc_reg();
-            let k = self.add_const(Const::Unit);
-            self.code.push(Op::LoadConst { dst: unit, k });
-            self.code.push(Op::MakeCell {
-                dst: reg,
-                src: unit,
-            });
-            self.scopes.last_mut().unwrap().insert(
-                name.to_string(),
-                Var {
-                    reg,
-                    mutable: false,
-                    celled: true,
-                },
-            );
-        }
+        // A celled nested `fn` lives in a cell the block's hoist pass (`hoist_nested_fn_cells`)
+        // pre-created before any sibling body was lowered — so a forward or mutual reference
+        // (`even` calling `odd` declared later, or two mutually recursive fns) already sources a
+        // live cell. Reuse that binding; fall back to creating the cell here if this declaration
+        // was reached without a preceding hoist (defensive — every block hoists before lowering).
+        let cell_reg = if celled {
+            let existing = self.scopes.last().and_then(|s| s.get(name)).copied();
+            Some(match existing {
+                Some(var) if var.celled => var.reg,
+                _ => self.make_fn_cell(name),
+            })
+        } else {
+            None
+        };
         let (upvalues, captures) = self.resolve_captures(func)?;
         let enclosing = self.child_enclosing();
         let proto = self
@@ -2084,13 +2079,62 @@ impl<'m> FnCompiler<'m> {
             proto,
             captures,
         });
-        if celled {
-            self.code.push(Op::CellSet { cell: reg, src: t });
+        if let Some(cell) = cell_reg {
+            self.code.push(Op::CellSet { cell, src: t });
         } else {
             // `t` holds a just-built closure read nowhere else — the local adopts it (consuming move).
             self.declare_local(name, t, true, false, func.span);
         }
         Ok(())
+    }
+
+    /// Create a fresh unit-holding cell for a nested `fn` binding `name`, binding it (celled) in the
+    /// current scope and returning the cell's register. The closure value is stored into the cell
+    /// (`CellSet`) once built. Shared by the block hoist pass and [`Self::declare_fn`]'s fallback.
+    fn make_fn_cell(&mut self, name: &str) -> Reg {
+        let reg = self.alloc_reg();
+        let unit = self.alloc_reg();
+        let k = self.add_const(Const::Unit);
+        self.code.push(Op::LoadConst { dst: unit, k });
+        self.code.push(Op::MakeCell {
+            dst: reg,
+            src: unit,
+        });
+        self.scopes.last_mut().unwrap().insert(
+            name.to_string(),
+            Var {
+                reg,
+                mutable: false,
+                celled: true,
+            },
+        );
+        reg
+    }
+
+    /// Pre-create the upvalue cells for a block's **directly nested `fn` declarations** (F1 forward /
+    /// mutual capture) — the codegen mirror of the checker's `bind_nested_fns`. A captured (celled)
+    /// nested `fn` is bound to a fresh unit-holding cell *before* any sibling body is lowered, so a
+    /// forward reference (`a` calling `b` declared later) or mutual recursion (`even`/`odd`) sources a
+    /// live cell instead of failing to resolve ("a capture that could not be sourced from the
+    /// enclosing frame"). The closure value is stored into the cell when [`Self::declare_fn`] reaches
+    /// its declaration. Only celled fns need a cell; a `fn` nobody captures binds directly as a plain
+    /// local at its declaration site. Nested `fn`s in sub-blocks (an `if` body, a match arm) are
+    /// hoisted by that block's own scope, so only the direct statements are scanned here — matching
+    /// the strictly-lexical visibility a non-`fn` local keeps (a forward reference to one is E0005).
+    fn hoist_nested_fn_cells(&mut self, stmts: &[Stmt]) {
+        // At `main`'s global depth a top-level `fn` is a global (resolved by name regardless of
+        // order via `register_globals`), never a cell — so nothing to hoist.
+        if self.at_global_depth() {
+            return;
+        }
+        for stmt in stmts {
+            if let Stmt::Decl(Decl::Fn { name, .. }) = stmt
+                && self.celled.contains(name)
+                && !self.scopes.last().is_some_and(|s| s.contains_key(name))
+            {
+                self.make_fn_cell(name);
+            }
+        }
     }
 
     fn return_stmt(&mut self, value: Option<&Atom>, _span: Span) -> Result<(), Unsupported> {
@@ -2236,6 +2280,7 @@ impl<'m> FnCompiler<'m> {
                     unreachable!("a tuple for-pattern is desugared to projections in IR lowering")
                 }
             }
+            self.hoist_nested_fn_cells(&body.stmts);
             for stmt in &body.stmts {
                 self.stmt(stmt)?;
             }
@@ -2315,6 +2360,7 @@ impl<'m> FnCompiler<'m> {
                     unreachable!("a tuple for-pattern is desugared to projections in IR lowering")
                 }
             }
+            self.hoist_nested_fn_cells(&body.stmts);
             for stmt in &body.stmts {
                 self.stmt(stmt)?;
             }
@@ -2414,6 +2460,7 @@ impl<'m> FnCompiler<'m> {
     fn block(&mut self, block: &Block) -> Result<(), Unsupported> {
         self.scopes.push(HashMap::new());
         let result = (|| {
+            self.hoist_nested_fn_cells(&block.stmts);
             for stmt in &block.stmts {
                 self.stmt(stmt)?;
             }
@@ -4290,6 +4337,7 @@ impl<'m> FnCompiler<'m> {
             self.scopes.push(HashMap::new());
             self.emit_pattern(&arm.pattern, s, &mut fail_jumps);
             let body = (|| {
+                self.hoist_nested_fn_cells(&arm.body.stmts);
                 for stmt in &arm.body.stmts {
                     self.stmt(stmt)?;
                 }

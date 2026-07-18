@@ -1,0 +1,21 @@
+// Two mutually recursive nested `fn`s both capture the *same* enclosing `mut` local (`hits`),
+// proving the hoisted forward/mutual capture shares one live cell rather than two copies: every
+// `ping`/`pong` call increments the one counter, so a 5-deep bounce records exactly 5 hits.
+// expect: stdout "5"
+// expect: exit 0
+fn run(): int {
+    mut hits = 0;
+    fn ping(n: int): int {
+        hits = hits + 1;
+        if n == 0 { return 0; }
+        return pong(n - 1);
+    }
+    fn pong(n: int): int {
+        hits = hits + 1;
+        if n == 0 { return 0; }
+        return ping(n - 1);
+    }
+    ping(4);
+    return hits;
+}
+echo run();
