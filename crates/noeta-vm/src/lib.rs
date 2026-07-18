@@ -269,6 +269,9 @@ struct IsolateState {
     parallel_isolates: bool,
     isolate_module: Option<Arc<Module>>,
     isolate_factory: Option<IsolateFactory>,
+    /// Per-isolate profiling (injected by `noeta profile`): build a hook for each spawned worker,
+    /// deposit it (named) in the sink when the worker finishes. `None` on ordinary runs.
+    profile_seam: Option<(ProfileHookFactory, ProfileSink)>,
     isolates: Vec<IsolateSlot>,
     inflight_isolates: usize,
     /// The borrow-share region for real-isolate arguments (P-PAR S2): promotable argument graphs

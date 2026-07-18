@@ -96,7 +96,43 @@ body {
   overflow: hidden;
 }
 .row:hover { background: var(--vscode-list-hoverBackground); }
-.row.selected { background: var(--vscode-list-inactiveSelectionBackground); }
+/* Selection mirrors the native tree's two states: ACTIVE (view focused — the strong themed
+   background, selection foreground, and focus outline) and INACTIVE (focus elsewhere — the
+   muted background). Clicking a row focuses #tree (tabindex=-1), so :focus-within holds
+   exactly while the user is interacting with the tree, like a native list. */
+.row.selected {
+  background: var(--vscode-list-inactiveSelectionBackground);
+  color: var(--vscode-list-inactiveSelectionForeground, inherit);
+}
+#tree:focus { outline: none; } /* the selected row's outline is the focus indicator */
+#tree:focus-within .row.selected {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+  outline: 1px solid var(--vscode-list-focusOutline, transparent);
+  outline-offset: -1px;
+}
+#tree:focus-within .row.selected .twisty {
+  color: var(--vscode-list-activeSelectionIconForeground, var(--vscode-list-activeSelectionForeground));
+}
+
+/* The hover summary (linger on a row): the node's first @doc paragraph, in the native
+   editor-hover widget's colors. pointer-events off so the widget never steals the row's
+   hover (which would flicker mouseleave/mouseenter). */
+.doc-tooltip {
+  position: fixed;
+  z-index: 100;
+  max-width: 420px;
+  padding: 4px 8px;
+  font-size: 0.92em;
+  line-height: 1.4;
+  white-space: normal;
+  background: var(--vscode-editorHoverWidget-background);
+  color: var(--vscode-editorHoverWidget-foreground);
+  border: 1px solid var(--vscode-editorHoverWidget-border);
+  border-radius: 3px;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+  pointer-events: none;
+}
 
 /* The twisty (chevron) — rotated when expanded; a spacer when the node is a leaf. */
 .twisty {

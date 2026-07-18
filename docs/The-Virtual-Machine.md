@@ -56,12 +56,12 @@ Beyond speed, a shared shape gives per-instance type identity cheaply — which 
 
 ## Inline caches
 
-Every property-access and method-call site caches the last shape it saw and the resolved slot/prototype, so a repeated monomorphic access skips the lookup. (This *is* shipped — some older crate READMEs calling it "deferred" are stale.)
+Every property-access and method-call site caches the last shape it saw and the resolved slot/prototype, so a repeated monomorphic access skips the lookup.
 
 - The compiler assigns each `LoadField`/`CallMethod` op a cache slot id via a module-global counter (→ `Module.cache_slots`).
-- The VM allocates a per-run side array `Vec<Option<(Rc<Shape>, u32)>>` sized to `cache_slots` — a local in the dispatch loop, so it neither borrows `self` across the loop nor leaks between runs.
+- The VM allocates a per-run side array `Vec<Option<(&'static Shape, u32)>>` sized to `cache_slots` — a local in the dispatch loop, so it neither borrows `self` across the loop nor leaks between runs.
 - **Hit**: the receiver's shape pointer equals the cached one → use the cached slot/prototype directly (a raw pointer compare, no refcount bump).
-- **Miss**: resolve via `slot_of` (field) or the `(type, method)` hashmap (method), then refresh the entry — storing an `Rc<Shape>` *clone* so the cached key can never alias a freed shape.
+- **Miss**: resolve via `slot_of` (field) or the `(type, method)` hashmap (method), then refresh the entry — the cached key is an interned `&'static Shape`, so it can never alias a freed shape.
 
 `LoadField` caches the field slot index (skipping the name scan); `CallMethod` caches the method prototype (skipping the hashmap lookup *and its two string clones*, the dominant cost). Shapes are immutable once created, so a cached `(shape, slot)` never goes stale — a different shape simply misses and refreshes. The cache is VM-only and invisible to `RunResult`, so the differential is unaffected; measured impact is roughly −22% on member dispatch.
 
@@ -79,7 +79,7 @@ A compiled prototype runs on the **same contiguous register stack** the interpre
 
 ### Registers live in SSA (mem2reg)
 
-Within a compiled prototype, VM registers are **Cranelift SSA variables**, not memory: an analyzed prototype's registers — heap values included — live in machine registers for the whole native region, and the in-memory register stack is touched only at region boundaries (entry loads, bail-edge spills, helper syncs). On top of that sits **typed promotion**: a forward kind dataflow proves registers `Int`/`Bool`/`Float` along native paths, and a second *raw* (unboxed) variable per register lets typed arithmetic skip the NaN-box tag checks and box/unbox chains entirely — a counting loop's governing compare compiles to literally one `cmp; jl`. The analyses' claims are **verified, not trusted**: every mid-frame entry (a resume after a call, an OSR loop header) checks the claimed registers against what Tier 0 actually left in the slots and bails on a violation — Tier 0 can heap-box an overflow exactly where the native path would have bailed first, and a wrongly-trusted claim would corrupt refcounts. This "claims verified at entries, maintained by native defs" contract is what lets an untyped bytecode carry unboxed values safely. (`plans/jit/ssa.md` is the milestone record, including the measured dead ends.)
+Within a compiled prototype, VM registers are **Cranelift SSA variables**, not memory: an analyzed prototype's registers — heap values included — live in machine registers for the whole native region, and the in-memory register stack is touched only at region boundaries (entry loads, bail-edge spills, helper syncs). On top of that sits **typed promotion**: a forward kind dataflow proves registers `Int`/`Bool`/`Float` along native paths, and a second *raw* (unboxed) variable per register lets typed arithmetic skip the NaN-box tag checks and box/unbox chains entirely — a counting loop's governing compare compiles to literally one `cmp; jl`. The analyses' claims are **verified, not trusted**: every mid-frame entry (a resume after a call, an OSR loop header) checks the claimed registers against what Tier 0 actually left in the slots and bails on a violation — Tier 0 can heap-box an overflow exactly where the native path would have bailed first, and a wrongly-trusted claim would corrupt refcounts. This "claims verified at entries, maintained by native defs" contract is what lets an untyped bytecode carry unboxed values safely. (The JIT-SSA arc ledger in `plans/` git history is the milestone record, including the measured dead ends.)
 
 ### Getting hot, and getting in mid-loop (OSR)
 

@@ -7,11 +7,11 @@ This is a pre-alpha, not-yet-public language implementation built primarily thro
 - **What the language is:** see `README.md` and the [wiki](docs/Home.md) (`docs/`).
 - **How the implementation is structured:** see `ARCHITECTURE.md` (pipeline + crate map).
 - **Conventions and the agent workflow:** see `AGENTS.md` — naming, formatting/linting, the new-feature template, and the testing discipline apply to humans and agents alike.
-- **What to work on next:** see `plans/roadmap.md` and the per-slice files in `plans/m0/`.
+- **What to work on next:** see `plans/roadmap.md` (the frontier) and `plans/backlog.md` (every open item, with source + trigger).
 
 ## The loop
 
-1. Pick the lowest-numbered `todo` slice in `plans/roadmap.md`; set it `in-progress`.
+1. Pick an *(active)* item from `plans/backlog.md` (or a backlog trigger that has fired); for multi-slice work, open a `plans/<arc>/` ledger.
 2. Implement it as a **vertical slice** through the pipeline (grammar/AST → eval op → conformance cases → snapshots). Prefer end-to-end feature slices over diffuse refactors.
 3. **Every feature or fix lands with a conformance corpus entry** (`tests/conformance/**.noe` with `// expect:` headers). This is the iron rule.
 4. Keep it green and clean:
@@ -20,7 +20,7 @@ This is a pre-alpha, not-yet-public language implementation built primarily thro
    - `cargo clippy --all-targets -- -D warnings`
    - `cargo build` with zero warnings
 5. Review snapshot changes deliberately (`cargo insta review`) — never blind-accept.
-6. Mark the slice `done`, update `roadmap.md`, and commit code + task file together.
+6. Strike the backlog row (or update the arc ledger; delete the arc directory when it ships) and commit code + task file together.
 
 ## Conventions (summary; full list in `AGENTS.md`)
 

@@ -762,3 +762,71 @@ fn alloc_mode_attributes_bytes_to_the_allocating_paths() {
         "allocating path dominates: build_lists={lists} lean_math={math}"
     );
 }
+
+#[test]
+fn isolates_get_their_own_profiles() {
+    // Two worker isolates crunch on their own OS threads; the profile must carry one named
+    // flamegraph per isolate alongside main's — and the isolates' own work (`crunch` frames) must
+    // live in THEIR profiles, not main's.
+    let src = "async fn crunch(tx: Sender<int>, n: int): void {\n\
+               \x20   mut acc = 0\n\
+               \x20   mut i = 0\n\
+               \x20   while i < 200000 { acc = acc + i * n; i = i + 1 }\n\
+               \x20   tx.send(acc).await\n\
+               }\n\
+               async fn gather(rx: Receiver<int>): int {\n\
+               \x20   mut total = 0\n\
+               \x20   mut running = true\n\
+               \x20   while running {\n\
+               \x20       r = rx.recv().await\n\
+               \x20       (v, keep) = match r { some(x) => (x, true), none => (0, false) }\n\
+               \x20       total = total + v\n\
+               \x20       running = keep\n\
+               \x20   }\n\
+               \x20   return total\n\
+               }\n\
+               async fn run(): int {\n\
+               \x20   (tx, rx) = channel::<int>(4)\n\
+               \x20   mut result = 0\n\
+               \x20   concurrent {\n\
+               \x20       h = spawn gather(rx)\n\
+               \x20       concurrent {\n\
+               \x20           isolate crunch(tx, 2)\n\
+               \x20           isolate crunch(tx, 3)\n\
+               \x20       }\n\
+               \x20       tx.close()\n\
+               \x20       result = h.await\n\
+               \x20   }\n\
+               \x20   return result\n\
+               }\n\
+               echo run().await\n";
+    let path = fixture("isolates", src);
+    let report = noeta_prof::profile(&path, noeta_prof::Mode::Instrument);
+    assert_eq!(report.exit_code, 0, "{}", report.stderr);
+
+    assert_eq!(report.isolates.len(), 2, "one profile per isolate");
+    let names: Vec<&str> = report.isolates.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"isolate crunch #1") && names.contains(&"isolate crunch #2"),
+        "harvest-numbered names: {names:?}"
+    );
+    for (name, flame) in &report.isolates {
+        assert_eq!(flame.unit, noeta_prof::FlameUnit::Nanoseconds);
+        assert!(flame.total > 0, "{name} accumulated time");
+        let chains: Vec<String> = flame
+            .stacks
+            .iter()
+            .map(|s| flame.labels(s).collect::<Vec<_>>().join(";"))
+            .collect();
+        assert!(
+            chains.iter().any(|c| c.contains("crunch")),
+            "{name} runs crunch: {chains:?}"
+        );
+    }
+    // The folded artifact roots each isolate's stacks at its display name.
+    let folded = noeta_prof::render_folded(&report);
+    assert!(
+        folded.contains("isolate crunch #1;"),
+        "folded has thread-rooted isolate sections:\n{folded}"
+    );
+}

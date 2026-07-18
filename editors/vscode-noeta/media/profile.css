@@ -315,3 +315,15 @@ td .pct-num {
 .focus-clear:hover {
   background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
 }
+
+/* The thread picker (main + one entry per worker isolate). */
+.profile-picker {
+  margin-left: auto;
+  color: var(--vscode-dropdown-foreground);
+  background: var(--vscode-dropdown-background);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 2px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 0.9em;
+}

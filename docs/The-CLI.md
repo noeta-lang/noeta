@@ -168,11 +168,15 @@ For the tier runners the watch is **impact-filtered**: `noeta test --watch` (and
 each save against the previous run, walks the reverse call graph from the changed definitions,
 and reruns only the impacted tier fns (via the runners' repeatable `--name` filter) — edit a leaf
 function and exactly its caller-tests rerun; an inert edit (formatting between declarations, a
-comment) runs nothing. Edits the engine cannot attribute — a signature/layout change, a changed
-top-level statement (fixtures live there), another file, red code — degrade to a full rerun *with
-the reason printed*. The closure is static, so code reached only through dynamic dispatch is
-matched best-effort (method calls on untyped receivers over-approximate by name); run without the
-filter occasionally if you lean on reflection-driven dispatch.
+comment) runs nothing. The filter is **project-wide**: the watcher holds an incremental (salsa)
+workspace over the entry's directory, so editing an *imported module* narrows to the entry tests
+that transitively reach the change (in the linked program's qualified names — `App.Lib.add`),
+and editing a module function nothing imports reruns nothing at all. Edits the engine cannot
+attribute — a signature/layout change, a changed top-level statement (fixtures live there), a
+new or deleted module, a manifest change, red code — degrade to a full rerun *with the reason
+printed*. The closure is static, so code reached only through dynamic dispatch is matched
+best-effort (method calls on untyped receivers over-approximate by name); run without the filter
+occasionally if you lean on reflection-driven dispatch.
 
 `noeta serve --watch` upgrades from restarts to **in-process hot reload**. On each save of the
 entry file the watcher parses, type-checks (**transactionally** — red code never swaps; the old

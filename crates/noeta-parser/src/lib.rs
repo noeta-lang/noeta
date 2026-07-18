@@ -1051,11 +1051,13 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     // Render `found`/`expected` via the human-facing token descriptions. The expected set is
     // rebuilt by hand with a SORTED alternative list: chumsky's own Display iterates its
     // internal set in an order that is not stable across builds, which made every pinned
-    // E0003/E0004 message (snapshots, corpus error fixtures) a latent per-build flake. Only the
-    // ordering changes here — the prose scaffold matches chumsky's exactly.
+    // E0003/E0004 message (snapshots, corpus error fixtures) a latent per-build flake. The
+    // alternatives are rendered by matching `RichPattern` directly rather than through its
+    // Display impl: `describe()` already delimits tokens (backticks), and going through Display
+    // would stack chumsky's own quoting on top (twice, in 1.0.0-alpha.8).
     let err = err.map_token(|t| t.describe());
     let message = {
-        let mut expected: Vec<String> = err.expected().map(|p| format!("'{p}'")).collect();
+        let mut expected: Vec<String> = err.expected().map(pattern_text).collect();
         if expected.is_empty() {
             // Labelled/custom reasons (e.g. "expected a statement terminator") carry no
             // alternative set — chumsky's own rendering is already deterministic there.
@@ -1064,7 +1066,7 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
             expected.sort_unstable();
             expected.dedup();
             let found = match err.found() {
-                Some(d) => format!("found '{d}' "),
+                Some(d) => format!("found {d} "),
                 None => "found end of input ".to_string(),
             };
             let list = match expected.len() {
@@ -1079,6 +1081,21 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
         }
     };
     Diagnostic::error(code, span, message)
+}
+
+/// Render one expected-set alternative. Token descriptions come from
+/// [`noeta_lexer::TokenKind::describe`] and are already delimited (`` `,` ``, "an identifier"),
+/// so they pass through verbatim.
+fn pattern_text(p: &chumsky::error::RichPattern<'_, &'static str>) -> String {
+    use chumsky::error::RichPattern;
+    match p {
+        RichPattern::Token(t) => (**t).to_string(),
+        RichPattern::Label(l) => l.to_string(),
+        RichPattern::Identifier(i) => format!("`{i}`"),
+        RichPattern::Any => "anything".to_string(),
+        RichPattern::SomethingElse => "something else".to_string(),
+        RichPattern::EndOfInput => "end of input".to_string(),
+    }
 }
 
 // --- Leaf parsers -----------------------------------------------------------------

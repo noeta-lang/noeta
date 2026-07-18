@@ -87,9 +87,13 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
     // `--parallel` (server-hmr F5) hot-reloads too: the swap broadcasts to every worker isolate
     // via the shared queue, so the whole fleet swaps in place.
     let hot = args.first().is_some_and(|a| a == "serve");
-    // Impact-filtered tier watch (server-hmr W3): a `test`/`bench` rerun narrows to the
-    // declarations the edit impacted (the runners' `--name` filter), computed by the
-    // runner-agnostic engine (`noeta_ide::impact`) from the previous run's source.
+    // Impact-filtered tier watch (server-hmr W3; multi-file since the salsa rework): a
+    // `test`/`bench` rerun narrows to the declarations the edit impacted (the runners'
+    // `--name` filter), computed by the whole-project engine
+    // ([`noeta_ide::impact::ImpactSession`]) — a salsa workspace over the entry's directory,
+    // so an edit to an imported module narrows too, instead of degrading to a full rerun.
+    // A session that cannot be built (no entry, unreadable project) leaves plain
+    // restart-everything watching.
     let impact_entry = (!hot && args.first().is_some_and(|a| a == "test" || a == "bench"))
         .then(|| {
             args.iter()
@@ -97,6 +101,9 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
                 .find(|p| p.extension().is_some_and(|e| e == "noe"))
         })
         .flatten();
+    let mut session = impact_entry
+        .as_deref()
+        .and_then(noeta_ide::impact::ImpactSession::new);
     let mut extra: Vec<OsString> = Vec::new();
     loop {
         let mut cmd = Command::new(&exe);
@@ -104,10 +111,11 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
         if hot {
             cmd.env("NOETA_HOT", "1");
         }
-        // The source this run observes — the next edit's impact baseline.
-        let baseline = impact_entry
-            .as_deref()
-            .and_then(|e| std::fs::read_to_string(e).ok());
+        // The sources this run observes become the next edit's impact baseline (and the
+        // workspace re-syncs, absorbing any member-set change since the last run).
+        if let Some(s) = session.as_mut() {
+            s.rebaseline();
+        }
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -140,7 +148,7 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
             }
             // Decide the next run's filter; an inert edit skips the run entirely.
             loop {
-                match next_filter(impact_entry.as_deref(), baseline.as_deref(), &changed) {
+                match next_filter(&mut session, impact_entry.as_deref(), &changed) {
                     Filter::All(reason) => {
                         if let Some(reason) = reason {
                             eprintln!("[watch] rerunning everything: {reason}");
@@ -177,29 +185,32 @@ enum Filter {
     Skip,
 }
 
-/// Decide the next run's filter from the changed paths and the previous run's source. Anything
-/// that breaks attribution — no impact entry (not a tier command), an unreadable baseline, a
-/// change to another file or the manifest — degrades to a full rerun.
-fn next_filter(entry: Option<&Path>, baseline: Option<&str>, changed: &[PathBuf]) -> Filter {
-    let (Some(entry), Some(baseline)) = (entry, baseline) else {
+/// Decide the next run's filter from the changed paths, via the whole-project impact session.
+/// Anything that breaks attribution — no session (not a tier command, or the project would not
+/// anchor one), a manifest change, an edit the engine cannot attribute — degrades to a full
+/// rerun; the session itself narrows edits to any project module (multi-file impact).
+fn next_filter(
+    session: &mut Option<noeta_ide::impact::ImpactSession>,
+    entry: Option<&Path>,
+    changed: &[PathBuf],
+) -> Filter {
+    if session.is_none() {
         return Filter::All(None);
-    };
-    let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.to_path_buf());
-    let all_entry = !changed.is_empty()
-        && changed
-            .iter()
-            .all(|p| p.canonicalize().map(|c| c == entry_canon).unwrap_or(false));
-    if !all_entry {
-        return Filter::All(Some("a change outside the entry file".into()));
     }
-    let Ok(new_src) = std::fs::read_to_string(entry) else {
+    // The manifest/lockfile govern dependency resolution and editions — the workspace itself
+    // is stale, not just a member. Rebuild the session against the new resolution and rerun
+    // everything once.
+    if changed.iter().any(|p| {
+        p.file_name()
+            .is_some_and(|n| n == "noeta.toml" || n == "noeta.lock")
+    }) {
+        *session = entry.and_then(noeta_ide::impact::ImpactSession::new);
+        return Filter::All(Some("the manifest changed".into()));
+    }
+    let Some(s) = session.as_mut() else {
         return Filter::All(None);
     };
-    match noeta_ide::impact::impact_of_edit(
-        baseline,
-        &new_src,
-        noeta_pm::manifest::root_edition(entry),
-    ) {
+    match s.impact_of_changes(changed) {
         noeta_ide::impact::Impact::Decls(decls) if decls.is_empty() => Filter::Skip,
         noeta_ide::impact::Impact::Decls(decls) => Filter::Names(decls),
         noeta_ide::impact::Impact::All { reason } => Filter::All(Some(reason)),

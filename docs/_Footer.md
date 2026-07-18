@@ -1,1 +1,1 @@
-_Noeta — a reactive, single-binary, fully-typed language. Pre-alpha; these docs track what ships today and mark the roadmap where it does not._
+_Noeta — a general-purpose, fully-typed, single-binary language. Pre-alpha; these docs track what ships today and mark the roadmap where it does not._

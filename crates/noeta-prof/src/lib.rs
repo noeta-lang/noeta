@@ -89,6 +89,10 @@ pub struct Report {
     pub functions: Option<Vec<FnStat>>,
     /// The sampled flamegraph as folded stacks. `Some` only in [`Mode::Sample`].
     pub flamegraph: Option<Flamegraph>,
+    /// One additional flamegraph per **worker isolate** the run spawned (real OS threads), in
+    /// spawn-finish order, each named `isolate <fn> #<n>`. Same unit as the main flamegraph.
+    /// Empty for isolate-free programs and for [`Mode::Summary`].
+    pub isolates: Vec<(String, Flamegraph)>,
 }
 
 /// What one unit of a flamegraph's stack weight means — sample counts (the sampling profiler) or
@@ -183,19 +187,22 @@ pub struct FoldedStack {
 pub fn profile(path: &Path, mode: Mode) -> Report {
     let compiled = match session::compile_file(path) {
         Ok(compiled) => compiled,
-        Err(out) => return report_from(out, None, None),
+        Err(out) => return report_from(out, None, None, Vec::new()),
     };
 
     match mode {
         Mode::Summary => {
-            let (out, _) = session::run(&compiled, None);
-            report_from(out, None, None)
+            let (out, _) = session::run(&compiled, None, None);
+            report_from(out, None, None, Vec::new())
         }
         Mode::Instrument => {
             let hook = Box::new(instrument::InstrumentCollector::new(
                 compiled.module.protos.len(),
             ));
-            let (out, hook) = session::run(&compiled, Some(hook));
+            let protos = compiled.module.protos.len();
+            let (factory, sink) =
+                isolate_seam(move |_| Box::new(instrument::InstrumentCollector::new(protos)));
+            let (out, hook) = session::run(&compiled, Some(hook), Some((factory, sink.clone())));
             let (functions, flamegraph) = match hook {
                 Some(hook) => {
                     let collector = *hook
@@ -214,11 +221,20 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
                 }
                 None => (None, None),
             };
-            report_from(out, functions, flamegraph)
+            let isolates = drain_sink(sink, |hook| {
+                let collector = *hook
+                    .into_any()
+                    .downcast::<instrument::InstrumentCollector>()
+                    .expect("isolate hooks in instrument mode are InstrumentCollectors");
+                let (_, tree) = collector.finish();
+                resolve_tree_flamegraph(tree, &compiled, FlameUnit::Nanoseconds)
+            });
+            report_from(out, functions, flamegraph, isolates)
         }
         Mode::Alloc => {
             let hook = Box::new(alloc::AllocCollector::new());
-            let (out, hook) = session::run(&compiled, Some(hook));
+            let (factory, sink) = isolate_seam(|_| Box::new(alloc::AllocCollector::new()));
+            let (out, hook) = session::run(&compiled, Some(hook), Some((factory, sink.clone())));
             let flamegraph = hook.map(|hook| {
                 let collector = *hook
                     .into_any()
@@ -226,29 +242,90 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
                     .expect("the alloc mode installs an AllocCollector");
                 resolve_tree_flamegraph(collector.finish(), &compiled, FlameUnit::Bytes)
             });
-            report_from(out, None, flamegraph)
+            let isolates = drain_sink(sink, |hook| {
+                let collector = *hook
+                    .into_any()
+                    .downcast::<alloc::AllocCollector>()
+                    .expect("isolate hooks in alloc mode are AllocCollectors");
+                resolve_tree_flamegraph(collector.finish(), &compiled, FlameUnit::Bytes)
+            });
+            report_from(out, None, flamegraph, isolates)
         }
         Mode::Sample { clock, lines } => {
-            // Wall-clock sampling needs a timer thread bumping a shared atomic; op-clock is
-            // self-contained. Either way the collector rides the per-op seam and comes back with the
-            // aggregated stacks, which we resolve to labels here.
-            let (collector, timer) = match clock {
+            // Wall-clock sampling needs a timer thread bumping per-collector atomics (a fanout, so
+            // every isolate's collector ticks too); op-clock is self-contained. Either way the
+            // collectors ride the per-op seam and come back with their aggregated stacks.
+            let (collector, timer, fanout) = match clock {
                 SampleClock::Wall { hz } => {
                     let pending = Arc::new(AtomicU32::new(0));
-                    let timer = sample::spawn_timer(hz, Arc::clone(&pending));
-                    (sample::SampleCollector::wall(pending, lines), Some(timer))
+                    let fanout = Arc::new(std::sync::Mutex::new(vec![Arc::clone(&pending)]));
+                    let timer = sample::spawn_timer(hz, Arc::clone(&fanout));
+                    (
+                        sample::SampleCollector::wall(pending, lines),
+                        Some(timer),
+                        Some(fanout),
+                    )
                 }
-                SampleClock::Ops { every } => (sample::SampleCollector::ops(every, lines), None),
+                SampleClock::Ops { every } => {
+                    (sample::SampleCollector::ops(every, lines), None, None)
+                }
             };
-            let (out, hook) = session::run(&compiled, Some(Box::new(collector)));
+            let (factory, sink) = isolate_seam(move |_| -> Box<dyn noeta_vm::ProfileHook> {
+                match (clock, &fanout) {
+                    (SampleClock::Wall { .. }, Some(fanout)) => {
+                        // Register this isolate's tick target with the shared timer.
+                        let pending = Arc::new(AtomicU32::new(0));
+                        if let Ok(mut targets) = fanout.lock() {
+                            targets.push(Arc::clone(&pending));
+                        }
+                        Box::new(sample::SampleCollector::wall(pending, lines))
+                    }
+                    (SampleClock::Ops { every }, _) => {
+                        Box::new(sample::SampleCollector::ops(every, lines))
+                    }
+                    // Unreachable: wall clock always builds a fanout above.
+                    (SampleClock::Wall { .. }, None) => unreachable!("wall clock has a fanout"),
+                }
+            });
+            let (out, hook) = session::run(
+                &compiled,
+                Some(Box::new(collector)),
+                Some((factory, sink.clone())),
+            );
             // Stop the timer *before* resolving, so no further ticks accrue.
             if let Some(timer) = timer {
                 timer.stop();
             }
             let flamegraph = hook.map(|hook| resolve_flamegraph(hook, &compiled));
-            report_from(out, None, flamegraph)
+            let isolates = drain_sink(sink, |hook| resolve_flamegraph(hook, &compiled));
+            report_from(out, None, flamegraph, isolates)
         }
     }
+}
+
+/// Build the per-isolate profile seam: a hook factory from `make` plus the sink finished workers
+/// deposit into. The factory receives the isolate's display name (unused by the current
+/// collectors, forwarded for future ones).
+fn isolate_seam(
+    make: impl Fn(&str) -> Box<dyn noeta_vm::ProfileHook> + Send + Sync + 'static,
+) -> (noeta_vm::ProfileHookFactory, noeta_vm::ProfileSink) {
+    let sink: noeta_vm::ProfileSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+    (Arc::new(make), sink)
+}
+
+/// Drain the isolate sink, resolving each named hook into its flamegraph via `resolve`.
+fn drain_sink(
+    sink: noeta_vm::ProfileSink,
+    mut resolve: impl FnMut(Box<dyn noeta_vm::ProfileHook>) -> Flamegraph,
+) -> Vec<(String, Flamegraph)> {
+    let mut drained = match sink.lock() {
+        Ok(mut sink) => std::mem::take(&mut *sink),
+        Err(_) => Vec::new(),
+    };
+    drained
+        .drain(..)
+        .map(|(name, hook)| (name, resolve(hook)))
+        .collect()
 }
 
 /// Resolve a prototype to its [`FrameInfo`]: name + definition site, and the display label — the
@@ -507,10 +584,20 @@ fn finalize_flamegraph(
     }
 }
 
+/// The summary-line suffix naming how many isolate profiles the run produced (empty when none).
+fn isolates_suffix(report: &Report) -> String {
+    match report.isolates.len() {
+        0 => String::new(),
+        1 => " + 1 isolate profile".to_string(),
+        n => format!(" + {n} isolate profiles"),
+    }
+}
+
 fn report_from(
     out: session::RunOutput,
     functions: Option<Vec<FnStat>>,
     flamegraph: Option<Flamegraph>,
+    isolates: Vec<(String, Flamegraph)>,
 ) -> Report {
     let mut stdout = String::new();
     let mut stderr = String::new();
@@ -527,6 +614,7 @@ fn report_from(
         wall: out.wall,
         functions,
         flamegraph,
+        isolates,
     }
 }
 
@@ -543,6 +631,18 @@ pub fn render_folded(report: &Report) -> String {
         out.push(' ');
         out.push_str(&stack.count.to_string());
         out.push('\n');
+    }
+    // Isolate profiles follow, each stack rooted at the isolate's display name — the standard
+    // folded convention for threads, so inferno renders one flame per isolate beside `main`'s.
+    for (name, flame) in &report.isolates {
+        for stack in &flame.stacks {
+            out.push_str(name);
+            out.push(';');
+            out.push_str(&flame.labels(stack).collect::<Vec<_>>().join(";"));
+            out.push(' ');
+            out.push_str(&stack.count.to_string());
+            out.push('\n');
+        }
     }
     out
 }
@@ -673,8 +773,9 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
         Mode::Instrument => {
             let _ = writeln!(
                 err,
-                "noeta profile: {} functions, program ran in {:.3?} (tier-0, instrumenting)",
+                "noeta profile: {} functions{}, program ran in {:.3?} (tier-0, instrumenting)",
                 report.functions.as_ref().map_or(0, |f| f.len()),
+                isolates_suffix(&report),
                 report.wall
             );
         }
@@ -682,10 +783,11 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
             let flame = report.flamegraph.as_ref();
             let _ = writeln!(
                 err,
-                "noeta profile: {} bytes allocated over {} stacks, program ran in {:.3?} \
+                "noeta profile: {} bytes allocated over {} stacks{}, program ran in {:.3?} \
                  (tier-0, alloc)",
                 flame.map_or(0, |f| f.total),
                 flame.map_or(0, |f| f.stacks.len()),
+                isolates_suffix(&report),
                 report.wall,
             );
             if flame.map_or(0, |f| f.total) == 0 {
@@ -705,10 +807,11 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
             };
             let _ = writeln!(
                 err,
-                "noeta profile: {} samples over {} stacks, program ran in {:.3?} \
+                "noeta profile: {} samples over {} stacks{}, program ran in {:.3?} \
                  (tier-0, sampling, {clock_desc})",
                 flame.map_or(0, |f| f.total),
                 flame.map_or(0, |f| f.stacks.len()),
+                isolates_suffix(&report),
                 report.wall
             );
             // The default human view: the hottest functions by leaf (self) samples.

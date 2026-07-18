@@ -13,6 +13,7 @@
 //! [`Module`] before the run starts (and resolve `proto → name @ file:line` against its chunks).
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use noeta_bytecode::Module;
@@ -113,6 +114,7 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
 pub fn run(
     compiled: &Compiled,
     hook: Option<Box<dyn ProfileHook>>,
+    isolate_profiler: Option<(noeta_vm::ProfileHookFactory, noeta_vm::ProfileSink)>,
 ) -> (RunOutput, Option<Box<dyn ProfileHook>>) {
     let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(host) => Box::new(host),
@@ -134,22 +136,32 @@ pub fn run(
     };
 
     // We wrap only the run itself in the wall-clock measurement, not the compile — a profile reports
-    // where the *program* spends time, not the toolchain. Both paths pin tier-0 (JIT never armed).
+    // where the *program* spends time, not the toolchain. Tier-0 pinned (default Tiering::Off; the
+    // JIT is never armed). Real isolates ARE armed — `noeta run` parity, so a parallel program
+    // profiles as it actually executes — with the per-isolate profile seam threaded through when
+    // the caller supplies one.
+    let isolate_factory: noeta_vm::IsolateFactory = Arc::new(|| {
+        let host: Box<dyn noeta_stdlib::Host> =
+            Box::new(noeta_host_real::RealHost::new().expect("cannot start an isolate's runtime"));
+        let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
+            noeta_host_real::RealExecutor::new().expect("cannot start an isolate's async executor"),
+        );
+        (host, executor)
+    });
     let backend = VmBackend::new();
     let start = Instant::now();
-    let (result, hook, trace) = match hook {
-        // Instrumenting/sampling run: the hook rides the per-op seam and comes back with its results.
-        Some(hook) => {
-            let (result, hook, trace) =
-                backend.run_module_profiled(&compiled.module, host, executor, hook);
-            (result, Some(hook), trace)
-        }
-        // Plain tier-0 run (`run_module_debug(.., None)` is the JIT-off path; no per-op consult).
-        None => {
-            let (result, trace) = backend.run_module_debug(&compiled.module, host, executor, None);
-            (result, None, trace)
-        }
-    };
+    let outcome = backend.run_module_with(
+        &compiled.module,
+        noeta_vm::RunOptions {
+            host,
+            executor,
+            profiler: hook,
+            isolates: Some((Arc::new(compiled.module.clone()), isolate_factory)),
+            isolate_profiler,
+            ..noeta_vm::RunOptions::default()
+        },
+    );
+    let (result, hook, trace) = (outcome.result, outcome.profiler, outcome.trace);
     let wall = start.elapsed();
 
     let mut chunks = Vec::new();

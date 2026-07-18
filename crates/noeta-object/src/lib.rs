@@ -15,7 +15,9 @@
 //!
 //! Inline caches (monomorphic call-site/field-access caches keyed by shape) are a pure
 //! performance layer over this representation — invisible in observable output — and are
-//! deferred to a later optimization pass; field/slot resolution here is a direct lookup.
+//! shipped in the VM: a per-run cache side-array (sized to `Module.cache_slots`) stores the
+//! last shape seen at each `LoadField`/`CallMethod` site. Field/slot resolution here in
+//! `noeta-object` remains a direct lookup; the cache lives in `noeta-vm`.
 
 use serde::{Deserialize, Serialize};
 /// What kind of aggregate a [`Shape`] describes. Structs and classes differ only in whether

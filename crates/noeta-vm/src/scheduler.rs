@@ -589,11 +589,13 @@ impl<'m> Vm<'m> {
         // native names identically on its isolates. `None` (the default) keeps the worker on the
         // process-global default, exactly as the parent.
         let registry = self.persist.registry;
+        let profile_seam = self.isolates.profile_seam.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(
                 &module,
                 &factory,
+                profile_seam,
                 proto,
                 iso_args,
                 wire_globals,

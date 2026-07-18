@@ -104,7 +104,7 @@ noeta-fmt = { path = "crates/noeta-fmt" }
 # index. A library (not in the CLI binary) so `noeta-lsp`/`noeta-db` can resolve dependencies too.
 noeta-pm = { path = "crates/noeta-pm" }
 # Agent-native tooling: the `noeta mcp` Model Context Protocol server (agent adapter over the
-# salsa graph + VM — the third editor-tooling leg after lsp/dap). See plans/mcp/README.md.
+# salsa graph + VM — the third editor-tooling leg after lsp/dap).
 noeta-mcp = { path = "crates/noeta-mcp" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)

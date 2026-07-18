@@ -134,8 +134,8 @@ console — those are allowed to run code.
   correct even through `dyn` — rendered with the same spelling the type checker uses.
 - **Console fragments are session compiles.** The launch compile keeps its compiler alive as an
   incremental session (the same machinery as the REPL); each console entry appends new code with
-  stable ids and the running VM atomically adopts the extended program. Details in
-  `plans/tooling-unification`.
+  stable ids and the running VM atomically adopts the extended program. (Detailed design record:
+  the tooling-unification arc, in `plans/` git history.)
 
 ## Current limitations
 

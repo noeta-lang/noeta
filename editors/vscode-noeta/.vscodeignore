@@ -4,6 +4,7 @@
 .vscodeignore
 **/*.vsix
 .vscode-test/**
+test-workspace/**
 package-lock.json
 test/**
 node_modules/vscode-textmate/**

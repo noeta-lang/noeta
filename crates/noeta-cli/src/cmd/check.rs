@@ -129,8 +129,9 @@ pub(crate) fn cmd_check(
     let mut by_dir: std::collections::BTreeMap<PathBuf, Vec<&PathBuf>> =
         std::collections::BTreeMap::new();
     for entry in &entries {
-        // An empty parent (a bare relative name like `noeta check foo.noe`) reads as no
-        // directory, matching the sibling scan's behavior (the entry then links alone).
+        // An empty parent (a bare relative name like `noeta check foo.noe`) is the current
+        // directory: `read_dir_modules` scans `.` for it while keeping the pool's module names
+        // unprefixed, so the entry-to-pool name match below still holds.
         let dir = entry
             .parent()
             .unwrap_or_else(|| std::path::Path::new(""))
@@ -221,8 +222,8 @@ pub(crate) fn cmd_check(
                 Some(index) => check_entry(&parsed, &sources, index),
                 // An entry the directory scan didn't yield: either the file itself is
                 // unreadable (report it — one unreadable file does not abort the whole run) or
-                // the scan can't see it (an unreadable/empty parent, e.g. a bare `foo.noe`);
-                // then the entry links alone, exactly as the per-entry sibling scan degraded.
+                // the scan can't see it (an unreadable parent); then the entry links alone,
+                // exactly as the per-entry sibling scan degrades.
                 None => match std::fs::read_to_string(entry) {
                     Err(err) => {
                         eprintln!("noeta: cannot read {}: {err}", entry.display());

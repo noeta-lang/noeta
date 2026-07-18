@@ -155,9 +155,11 @@ impl Timer {
     }
 }
 
-/// Spawn a timer thread ticking at `hz` Hz (clamped to a sane range) that bumps `pending`. Returns
-/// the [`Timer`] handle to stop it after the run.
-pub fn spawn_timer(hz: u32, pending: Arc<AtomicU32>) -> Timer {
+/// Spawn a timer thread ticking at `hz` Hz (clamped to a sane range) that bumps every pending
+/// counter in `targets` — a fanout, so each isolate's wall collector registers its own counter with
+/// the one shared timer (per-isolate profiles). Returns the [`Timer`] handle to stop it after the
+/// run. The lock is uncontended in steady state (pushes happen only at isolate spawns).
+pub fn spawn_timer(hz: u32, targets: Arc<std::sync::Mutex<Vec<Arc<AtomicU32>>>>) -> Timer {
     let hz = hz.clamp(1, 100_000);
     let period = Duration::from_secs_f64(1.0 / f64::from(hz));
     let stop = Arc::new(AtomicBool::new(false));
@@ -165,7 +167,11 @@ pub fn spawn_timer(hz: u32, pending: Arc<AtomicU32>) -> Timer {
     let handle = std::thread::spawn(move || {
         while !stop_thread.load(Ordering::Relaxed) {
             std::thread::sleep(period);
-            pending.fetch_add(1, Ordering::Relaxed);
+            if let Ok(targets) = targets.lock() {
+                for pending in targets.iter() {
+                    pending.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
     });
     Timer {

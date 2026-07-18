@@ -1,7 +1,7 @@
 # The Noeta Docs
 
 > **AI-native, human-first.**
-> A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.
+> A general-purpose language that makes machine-written code checkable and human-readable — strong static types, an agent-native toolchain, single-binary output.
 
 Noeta is a general-purpose language for a world where agents write much of the code. An ML-grade type system — algebraic data types, `Result`-typed errors, exhaustive matching, real generics — makes machine-written code mechanically checkable, while every surface decision answers to human readability first. It compiles to a fast bytecode VM and ships from one toolchain that speaks agent natively (`noeta mcp`, an LSP, structured diagnostics).
 
@@ -116,8 +116,9 @@ Build the compiler, run the tests, and add a feature.
 > [!NOTE]
 > **Pre-alpha.** The language core and its tooling are complete and usable today: the full syntax,
 > the type system, traits/generics/derives, multi-file modules, a layered standard library, real
-> host IO, structured concurrency, the package manager, and the `run`/`repl`/`test`/`bench`/`doc`
+> host IO, structured concurrency, the package manager, native AOT and WebAssembly builds
+> (`noeta build --native`/`--wasm`/`--serve`), and the `run`/`repl`/`test`/`bench`/`doc`
 > toolchain, along with `noeta lsp`/`noeta dap` editor tooling and the `noeta mcp` agent surface.
-> Still on the roadmap: WebSockets/LiveView and desktop packaging. Until alpha, anything may change
+> Still on the roadmap: desktop packaging. Until alpha, anything may change
 > without notice — syntax, stdlib, and file formats included. Where a feature is a plan rather than
 > a reality, these docs say so plainly.
