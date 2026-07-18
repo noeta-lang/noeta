@@ -139,6 +139,10 @@ impl Index for GitForgeIndex {
 
         let tag_list = git(&["-C", bare_str, "tag", "--list", "v*"]).map_err(PmError::Network)?;
         let mut releases = Vec::new();
+        // Version tags whose `noeta.toml` won't parse (malformed, or a future edition this toolchain
+        // can't read). Never silently dropped (editions follow-on): warned about when other versions
+        // are usable, promoted to a hard error when they are the *only* candidates.
+        let mut unparseable: Vec<UnparseableTag> = Vec::new();
         for tag in tag_list.lines().map(str::trim).filter(|t| !t.is_empty()) {
             // A version tag is `v<semver>`; anything else (a non-release tag) is skipped.
             let Some(version) = tag.strip_prefix('v').and_then(|v| Version::parse(v).ok()) else {
@@ -152,14 +156,24 @@ impl Index for GitForgeIndex {
             if sha.is_empty() {
                 continue;
             }
-            // The version's dependency edges come from its `noeta.toml`. A tag with no manifest (or an
-            // unparseable one) isn't a valid package release — skip it rather than fail the listing.
+            // The version's dependency edges come from its `noeta.toml`. A tag with no manifest at all
+            // is a plain (non-package) source tag — a legitimate skip.
             let Ok(manifest_text) = git(&["-C", bare_str, "show", &format!("{tag}:noeta.toml")])
             else {
                 continue;
             };
-            let Ok(deps) = registry_deps(&manifest_text) else {
-                continue;
+            // But a tag that *has* a manifest which fails to parse is not a legitimate skip: a broken
+            // (or future-edition) manifest must be surfaced, not silently vanish, so record it and
+            // decide after the walk (warn-and-proceed vs. hard-error).
+            let deps = match registry_deps(&manifest_text) {
+                Ok(deps) => deps,
+                Err(err) => {
+                    unparseable.push(UnparseableTag {
+                        tag: tag.to_string(),
+                        error: err.message().to_string(),
+                    });
+                    continue;
+                }
             };
             releases.push(Release {
                 version,
@@ -182,6 +196,17 @@ impl Index for GitForgeIndex {
                 keywords: Vec::new(),
                 description: None,
             });
+        }
+        // A tag whose `noeta.toml` doesn't parse must never disappear without a trace (editions
+        // follow-on). If no version is usable at all, fail naming each cause — never let the caller
+        // report a misleading "no versions found". If *some* versions are usable, the broken tags must
+        // not brick resolution (a future-edition tag can't be allowed to strand an older toolchain), so
+        // warn and proceed.
+        if releases.is_empty() && !unparseable.is_empty() {
+            return Err(all_unparseable_error(name, &unparseable));
+        }
+        for skip in &unparseable {
+            eprintln!("{}", skipped_tag_warning(name, skip));
         }
         Ok(releases)
     }
@@ -225,6 +250,44 @@ fn registry_deps(manifest_text: &str) -> Result<Vec<Dep>, PmError> {
         }
     }
     Ok(deps)
+}
+
+/// A version tag that could not be turned into a release because its `noeta.toml` failed to parse — a
+/// malformed manifest, an invalid field, or (the case that motivated this) a **future edition** this
+/// toolchain can't read. Kept distinct from a tag with *no* manifest (a plain source tag), which is a
+/// legitimate non-release and stays silently skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnparseableTag {
+    tag: String,
+    error: String,
+}
+
+/// The stderr warning for one unparseable tag when *other* versions of the package resolved fine
+/// (private-registries + editions follow-on). The broken tag must not brick resolution, but the skip
+/// has to be visible and name the cause; a future-edition tag's own error already says "update the
+/// toolchain", so it flows through verbatim.
+fn skipped_tag_warning(name: &str, skip: &UnparseableTag) -> String {
+    format!(
+        "noeta: warning: `{name}`@`{tag}` was skipped — its `noeta.toml` could not be read ({error}). \
+         The tag may target a newer toolchain (a future edition); other published versions were used.",
+        tag = skip.tag,
+        error = skip.error,
+    )
+}
+
+/// The hard error when the **only** candidate versions of a package are unparseable (the
+/// private-registries + editions follow-on). Resolution fails naming each cause, so a package whose
+/// tags are all broken (or all future-edition) never degrades to a misleading "no versions found".
+fn all_unparseable_error(name: &str, skipped: &[UnparseableTag]) -> PmError {
+    let list = skipped
+        .iter()
+        .map(|s| format!("  - `{}`: {}", s.tag, s.error))
+        .collect::<Vec<_>>()
+        .join("\n");
+    PmError::Manifest(format!(
+        "no usable version of `{name}` — every published tag's `noeta.toml` failed to parse (a \
+         malformed manifest, or a future edition this toolchain can't read):\n{list}"
+    ))
 }
 
 fn path_str(p: &Path) -> Result<&str, PmError> {
@@ -301,6 +364,24 @@ mod tests {
         setup_git(&repo, &["tag", "v1.1.0"]);
         // A non-semver tag must be ignored.
         setup_git(&repo, &["tag", "nightly"]);
+    }
+
+    /// Lay out a repo `<host>/<org>/<package>` with an explicit sequence of `(tag, manifest)` commits —
+    /// each writes `noeta.toml` to the given contents and tags it. Lets a test stage a tag whose
+    /// manifest deliberately fails to parse.
+    fn make_repo_with_manifests(host: &Path, org: &str, package: &str, tags: &[(&str, &str)]) {
+        let repo = host.join(org).join(package);
+        std::fs::create_dir_all(&repo).unwrap();
+        setup_git(&repo, &["init", "-q", "-b", "main"]);
+        setup_git(&repo, &["config", "user.email", "t@t.test"]);
+        setup_git(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("lib.noe"), "namespace thing.core;\n").unwrap();
+        for (tag, manifest) in tags {
+            std::fs::write(repo.join("noeta.toml"), manifest).unwrap();
+            setup_git(&repo, &["add", "."]);
+            setup_git(&repo, &["commit", "-q", "-m", tag]);
+            setup_git(&repo, &["tag", tag]);
+        }
     }
 
     #[test]
@@ -423,5 +504,116 @@ mod tests {
         assert!(fetched.path.join("lib.noe").exists());
         assert!(fetched.path.join("noeta.toml").exists());
         assert_eq!(fetched.sha, sha);
+    }
+
+    /// The warning text names the package, the tag, and the underlying parse error, and hints at the
+    /// future-edition cause — so a skipped-but-not-fatal tag is visible.
+    #[test]
+    fn a_skipped_tag_warning_names_the_tag_and_cause() {
+        let skip = UnparseableTag {
+            tag: "v2.0.0".to_string(),
+            error: "`package.edition` `2099` is not a language edition this toolchain understands"
+                .to_string(),
+        };
+        let msg = skipped_tag_warning("acme/thing", &skip);
+        assert!(msg.contains("acme/thing"), "{msg}");
+        assert!(msg.contains("v2.0.0"), "{msg}");
+        assert!(msg.contains("2099"), "{msg}");
+        assert!(msg.contains("future edition"), "{msg}");
+        assert!(msg.starts_with("noeta: warning:"), "{msg}");
+    }
+
+    /// The all-unparseable error is a `Manifest` failure that lists every offending tag with its cause —
+    /// never a bare "no versions found".
+    #[test]
+    fn all_unparseable_error_lists_every_cause() {
+        let skipped = vec![
+            UnparseableTag {
+                tag: "v1.0.0".to_string(),
+                error: "expected `=`".to_string(),
+            },
+            UnparseableTag {
+                tag: "v2.0.0".to_string(),
+                error: "edition `2099` is not understood".to_string(),
+            },
+        ];
+        let err = all_unparseable_error("acme/thing", &skipped);
+        assert!(matches!(err, PmError::Manifest(_)));
+        let msg = err.message();
+        assert!(msg.contains("no usable version of `acme/thing`"), "{msg}");
+        assert!(msg.contains("v1.0.0"), "{msg}");
+        assert!(msg.contains("expected `=`"), "{msg}");
+        assert!(msg.contains("v2.0.0"), "{msg}");
+        assert!(msg.contains("2099"), "{msg}");
+    }
+
+    /// A tag whose `noeta.toml` fails to parse, alongside good tags, must NOT silently vanish and must
+    /// NOT abort resolution: the good versions still resolve (the broken one is warned about on stderr).
+    #[test]
+    fn a_parse_failing_tag_among_good_ones_still_resolves_the_rest() {
+        if !git_available() {
+            return;
+        }
+        let tmp = std::env::temp_dir().join("noeta_git_forge_parse_fail_mixed");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let host = tmp.join("host");
+        make_repo_with_manifests(
+            &host,
+            "acme",
+            "thing",
+            &[
+                (
+                    "v1.0.0",
+                    "[package]\nname = \"acme/thing\"\nversion = \"1.0.0\"\n",
+                ),
+                // v1.1.0 pins a future edition this toolchain can't read — a broken manifest.
+                (
+                    "v1.1.0",
+                    "[package]\nname = \"acme/thing\"\nversion = \"1.1.0\"\nedition = \"2099\"\n",
+                ),
+                (
+                    "v1.2.0",
+                    "[package]\nname = \"acme/thing\"\nversion = \"1.2.0\"\n",
+                ),
+            ],
+        );
+
+        let idx = GitForgeIndex::new(host.join("acme").to_str().unwrap(), tmp.join("cache"));
+        let releases = idx.releases("acme/thing").unwrap();
+        let mut versions: Vec<String> = releases.iter().map(|r| r.version.to_string()).collect();
+        versions.sort();
+        // The good versions resolve; the future-edition tag is skipped (with a warning), not fatal.
+        assert_eq!(versions, vec!["1.0.0", "1.2.0"]);
+    }
+
+    /// When the ONLY candidate versions are unparseable, resolution fails with a real error naming the
+    /// cause — never a misleading empty listing (which would surface downstream as "no such package").
+    #[test]
+    fn only_unparseable_tags_are_a_hard_error() {
+        if !git_available() {
+            return;
+        }
+        let tmp = std::env::temp_dir().join("noeta_git_forge_parse_fail_only");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let host = tmp.join("host");
+        make_repo_with_manifests(
+            &host,
+            "acme",
+            "thing",
+            &[(
+                // The sole version tag pins a future edition — unreadable by this toolchain.
+                "v3.0.0",
+                "[package]\nname = \"acme/thing\"\nversion = \"3.0.0\"\nedition = \"2099\"\n",
+            )],
+        );
+
+        let idx = GitForgeIndex::new(host.join("acme").to_str().unwrap(), tmp.join("cache"));
+        let err = idx.releases("acme/thing").unwrap_err();
+        assert!(matches!(err, PmError::Manifest(_)), "{err}");
+        let msg = err.message();
+        assert!(msg.contains("no usable version of `acme/thing`"), "{msg}");
+        assert!(msg.contains("v3.0.0"), "{msg}");
+        // The future-edition cause is carried through, so the fix (update the toolchain) is actionable.
+        assert!(msg.contains("2099"), "{msg}");
     }
 }

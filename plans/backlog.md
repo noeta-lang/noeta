@@ -71,7 +71,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | Per-dependency **capability enforcement** (a dep's `[trust]` grant actually bounding what it can reach) — research phase; static effect analysis is the tractable first step | package-manager phase-4 L3 |
 | Git-deps of *published* packages aren't expressible in the index `Dep` shape | package-manager v-next |
 | **Advisory intake beyond operator-curated:** self-service scope-owner advisories; a public report/triage queue; OSV/GHSA/RUSTSEC import with name mapping; a transparency-log suppression monitor (`noeta watch-scope`). Decide the trust model (who publishes vs who reports) first | namespace-protection arc (2026-07-15) |
-| git-forge registry: a tag whose `noeta.toml` fails to parse (incl. future-edition manifests) is silently skipped instead of surfacing an error — **bug**-adjacent | editions arc note *(active, small)* |
 | Hosted edge-platform proof (Fastly/Fermyon Spin) + an edge deployment docs page | wasm W4.2. Needs an account; stays a user action |
 | Desktop packaging (Tauri); with it the p2p packaging polish (within-feature DCE pruning, capability-gating) | M3 roadmap item; the one roadmap entry the README carries |
 | A first-class `Uuid` type (string-typed today) | id-entropy scope cut |
