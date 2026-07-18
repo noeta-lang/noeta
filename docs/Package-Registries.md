@@ -68,6 +68,11 @@ The convention is Go-module-like:
 - **Dependencies come from the tag.** Each version's `[dependencies]` are read from the `noeta.toml`
   at that tag, so the resolver backtracks over ranges exactly as it does with the hosted index. A tag
   with no manifest isn't a package release and is skipped.
+- **A broken manifest is never silent.** If a tag's `noeta.toml` fails to parse — a malformed manifest,
+  or a **future edition** this toolchain can't read — that version is skipped with a warning naming the
+  tag and the parse error, so an older toolchain isn't stranded when *other* versions still satisfy the
+  requirement. But if *every* candidate version's manifest is unparseable, resolution fails with an
+  error listing each offending tag and its cause, rather than reporting a misleading "no versions found".
 - **The commit is pinned.** The tag's commit SHA is recorded in `noeta.lock`, so a later build fetches
   that exact commit — a moved tag is caught.
 
