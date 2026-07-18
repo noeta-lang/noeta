@@ -1,0 +1,165 @@
+/* The Docs sidebar view (docs-browser-ui arc, round 2): filter input + navigable tree in ONE pane.
+ * A webview view is the only way to place a persistent filter input above the tree — VS Code's
+ * native TreeView has no header-input API. Styled with theme variables to match the native lists. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  user-select: none;
+}
+
+/* ---- Filter row (pinned) ------------------------------------------------------------------- */
+
+#filter-row {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+
+#filter {
+  flex: 1;
+  min-width: 0;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: inherit;
+  outline: none;
+}
+#filter:focus { border-color: var(--vscode-focusBorder); }
+#filter::placeholder { color: var(--vscode-input-placeholderForeground); }
+
+.icon-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--vscode-icon-foreground);
+  background: none;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+}
+.icon-btn:hover { background: var(--vscode-toolbar-hoverBackground); }
+.icon-btn svg { width: 16px; height: 16px; }
+
+#count {
+  padding: 0 10px 4px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  min-height: 0;
+}
+#count:empty { display: none; }
+
+/* ---- The tree / results container ---------------------------------------------------------- */
+
+#tree { padding: 2px 0 12px; }
+
+/* Indentation is structural: each nested child container adds a step, so no per-row inline style
+ * is needed (which a strict CSP could block). */
+.children { display: none; padding-left: 14px; }
+.children.open { display: block; }
+.row { padding-left: 4px; }
+
+.hint {
+  padding: 10px 12px;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  line-height: 1.5;
+}
+
+/* A node row (both tree rows and flat search results). */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding-right: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.row:hover { background: var(--vscode-list-hoverBackground); }
+.row.selected { background: var(--vscode-list-inactiveSelectionBackground); }
+
+/* The twisty (chevron) — rotated when expanded; a spacer when the node is a leaf. */
+.twisty {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vscode-icon-foreground);
+  transition: transform 0.1s ease;
+}
+.twisty svg { width: 12px; height: 12px; }
+.row.expanded > .twisty { transform: rotate(90deg); }
+.twisty.leaf { visibility: hidden; }
+
+.kind-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.kind-icon svg { width: 16px; height: 16px; }
+
+/* Kind accents — subtle, matches VS Code's symbol icon coloring. */
+.kind-function, .kind-method { color: var(--vscode-symbolIcon-functionForeground, #b180d7); }
+.kind-struct  { color: var(--vscode-symbolIcon-structForeground, #7bb3e0); }
+.kind-class   { color: var(--vscode-symbolIcon-classForeground, #e0a458); }
+.kind-enum    { color: var(--vscode-symbolIcon-enumeratorForeground, #e0a458); }
+.kind-variant { color: var(--vscode-symbolIcon-enumeratorMemberForeground, #7bb3e0); }
+.kind-field   { color: var(--vscode-symbolIcon-fieldForeground, #7bb3e0); }
+.kind-interface, .kind-trait { color: var(--vscode-symbolIcon-interfaceForeground, #4dc0b0); }
+.kind-module, .kind-package, .kind-guide, .kind-root, .kind-section {
+  color: var(--vscode-icon-foreground);
+}
+
+.label { flex: none; }
+.label .hl {
+  color: var(--vscode-list-highlightForeground, #4daafc);
+  font-weight: 600;
+}
+.detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.92em;
+}
+
+/* Flat search-result rows carry a dim breadcrumb + snippet under the label. */
+.result { height: auto; align-items: flex-start; padding: 3px 8px 3px 0; }
+.result .kind-icon { margin-top: 1px; }
+.result-body { display: flex; flex-direction: column; min-width: 0; }
+.result-title { display: flex; gap: 6px; align-items: baseline; }
+.crumb { color: var(--vscode-descriptionForeground); font-size: 0.82em; }
+.snippet {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}

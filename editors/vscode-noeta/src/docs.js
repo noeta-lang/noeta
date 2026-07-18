@@ -1,19 +1,16 @@
-// The Docs browser (docs-browser arc; docs-browser-ui arc): the project's and language's
-// documentation as a navigable tree — a "Docs" view in the Noeta activity bar fed by the language
-// server's `noeta/docs[Children]` requests over the unified doc model (the same model `noeta mcp`
-// serves, so the editor and agents browse the identical tree).
+// The Docs browser (docs-browser arc; docs-browser-ui arc). Two surfaces:
 //
-// Two surfaces, both in this file:
-//   * A **filter input** webview pinned above the tree (`noetaDocsFilter`): typing narrows the tree
-//     to the matching nodes and their ancestors, driven by the server's `noeta/docsSearch` so it
-//     sees matches in unexpanded and prose-only nodes, not just the labels already loaded.
-//   * A proper **page browser** webview panel (`media/docs.js`), reused across clicks, that renders a
-//     `DocPage` as a styled document — replacing the old ephemeral markdown-*preview* tab (which
-//     couldn't run commands, doubled guide-page headings, and rendered trivial members as a bare
-//     stub). Its "see also" cross-references and source footer are clickable.
+//   * The **Docs view** (`noetaDocs`) — a single webview holding the filter input AND the navigable
+//     tree in one pane (a native TreeView can't host an input; and driving a native tree's expansion
+//     from a filter left matches hidden under collapsed roots). Empty filter → a lazy tree; typing →
+//     a flat ranked match list. Fed by the language server's `noeta/docs[Children]` / `noeta/docsSearch`
+//     over the unified doc model (the same model `noeta mcp` serves — editor and agents see one tree).
+//   * The **page browser** (`noeta.docsPage`) — a reused webview panel that renders a `DocPage` as a
+//     styled document (replacing the old markdown-preview tab), with clickable "see also" xrefs and a
+//     go-to-source footer.
 //
-// The view follows the **active editor's** workspace (Noeta workspaces are per-entry-file) and
-// refreshes on save.
+// The view follows the active editor's workspace (Noeta workspaces are per-entry-file) and refreshes
+// on save.
 
 const {
   window,
@@ -23,251 +20,149 @@ const {
   Range,
   Position,
   ViewColumn,
-  EventEmitter,
-  TreeItem,
-  TreeItemLabel,
-  TreeItemCollapsibleState,
-  ThemeIcon,
 } = require("vscode");
 
-/** A tree node backed by a `DocNode` from the server, remembering the workspace URI it came from. */
-class DocItem extends TreeItem {
-  constructor(node, sourceUri, opts = {}) {
-    // In filter mode, ancestors of a match are force-expanded so the whole matching path is visible;
-    // a matching leaf keeps its natural (non-expandable) state but highlights the matched substring.
-    const collapsible = node.expandable
-      ? opts.forceExpanded
-        ? TreeItemCollapsibleState.Expanded
-        : TreeItemCollapsibleState.Collapsed
-      : TreeItemCollapsibleState.None;
-    super(labelFor(node.title, opts.highlights), collapsible);
-    this.node = node;
-    this.sourceUri = sourceUri;
-    this.id = `${sourceUri} ${node.id}`; // unique per (workspace, node) so reveal is stable
-    this.description = node.detail || undefined;
-    this.iconPath = iconFor(node.kind);
-    this.tooltip = node.detail ? `${node.title}\n${node.detail}` : node.title;
-    // A page-bearing node opens its rendered doc on click.
-    if (node.hasPage) {
-      this.command = {
-        title: "Open Docs Page",
-        command: "noeta.docsOpenPage",
-        arguments: [this],
-      };
-    }
-    // A located node (a declaration) offers "Go to Source" in its context menu.
-    if (node.uri != null && node.line != null) {
-      this.contextValue = "noetaDocLocated";
-    }
+/** A little HTML-attribute-safe nonce for the webviews' CSP. */
+function nonce() {
+  let text = "";
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  for (let i = 0; i < 32; i++) {
+    text += chars.charAt(Math.floor(Math.random() * chars.length));
   }
+  return text;
 }
 
-/** A tree label, optionally carrying highlight ranges (VS Code underlines them) for filter matches. */
-function labelFor(title, highlights) {
-  if (highlights && highlights.length) {
-    const label = new TreeItemLabel(title);
-    label.highlights = highlights;
-    return label;
-  }
-  return title;
-}
-
-/** The `[start, end)` ranges in `title` matching `query` (case-insensitive), for filter highlighting. */
-function highlightRanges(title, query) {
-  if (!query) {
-    return [];
-  }
-  const hay = title.toLowerCase();
-  const needle = query.toLowerCase();
-  const ranges = [];
-  let from = 0;
-  for (;;) {
-    const at = hay.indexOf(needle, from);
-    if (at === -1) {
-      break;
-    }
-    ranges.push([at, at + needle.length]);
-    from = at + needle.length;
-  }
-  return ranges;
-}
-
-function iconFor(kind) {
-  switch (kind) {
-    case "root":
-      return new ThemeIcon("book");
-    case "module":
-      return new ThemeIcon("file-code");
-    case "function":
-      return new ThemeIcon("symbol-function");
-    case "method":
-      return new ThemeIcon("symbol-method");
-    case "struct":
-      return new ThemeIcon("symbol-struct");
-    case "class":
-      return new ThemeIcon("symbol-class");
-    case "enum":
-      return new ThemeIcon("symbol-enum");
-    case "variant":
-      return new ThemeIcon("symbol-enum-member");
-    case "field":
-      return new ThemeIcon("symbol-field");
-    case "interface":
-      return new ThemeIcon("symbol-interface");
-    case "package":
-      return new ThemeIcon("package");
-    case "section":
-      return new ThemeIcon("note");
-    case "guide":
-      return new ThemeIcon("book");
-    default:
-      return new ThemeIcon("symbol-misc");
-  }
-}
-
-/** The ancestor ids of a doc id, e.g. `api/std.math/sqrt` → [`api`, `api/std.math`]. */
-function ancestorsOf(id) {
-  const segs = id.split("/");
-  const out = [];
-  for (let i = 1; i < segs.length; i++) {
-    out.push(segs.slice(0, i).join("/"));
-  }
-  return out;
-}
-
-class DocsProvider {
-  constructor(getClient) {
+/**
+ * The Docs sidebar view: filter + tree in one webview. Holds the active `.noe` file's URI (the
+ * workspace the project/deps corpora resolve against) and answers the webview's data requests over
+ * the language client.
+ */
+class DocsViewProvider {
+  constructor(context, getClient, openPage) {
+    this.context = context;
     this.getClient = getClient;
-    this.changed = new EventEmitter();
-    this.onDidChangeTreeData = this.changed.event;
-    /** The `.noe` document the view reflects (the active editor's), as a URI string. */
+    this.openPage = openPage; // (id) => Promise<void>
+    this.view = undefined;
     this.sourceUri = undefined;
-    /** id → DocItem, for `getParent` (reveal from search). Populated as the tree unfolds. */
-    this.items = new Map();
-    /** The active filter query, or "" for none. */
-    this.filter = "";
-    /** In filter mode: the ids to show (matches + their ancestors + roots). */
-    this.visibleIds = null;
-    /** In filter mode: the ids that actually matched (highlighted leaves). */
-    this.matchIds = null;
+  }
+
+  resolveWebviewView(view) {
+    this.view = view;
+    const media = Uri.joinPath(this.context.extensionUri, "media");
+    view.webview.options = { enableScripts: true, localResourceRoots: [media] };
+    const scriptUri = view.webview.asWebviewUri(Uri.joinPath(media, "docsView.js"));
+    const styleUri = view.webview.asWebviewUri(Uri.joinPath(media, "docsView.css"));
+    const n = nonce();
+    view.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src ${view.webview.cspSource}; script-src 'nonce-${n}'; img-src ${view.webview.cspSource};">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="${styleUri}" rel="stylesheet">
+<title>Noeta Docs</title>
+</head>
+<body>
+<div id="filter-row">
+  <input id="filter" type="text" placeholder="Filter docs…" aria-label="Filter docs" />
+  <button id="clear" class="icon-btn" title="Clear filter" aria-label="Clear filter"></button>
+  <button id="collapse" class="icon-btn" title="Collapse all" aria-label="Collapse all"></button>
+</div>
+<div id="count" aria-live="polite"></div>
+<div id="tree"></div>
+<script nonce="${n}" src="${scriptUri}"></script>
+</body>
+</html>`;
+    // The clear/collapse glyphs are drawn by the script; set them here so the buttons aren't empty.
+    view.webview.onDidReceiveMessage((msg) => this.handle(msg));
+  }
+
+  /** The URI the corpora resolve against — empty when no `.noe` file is active (guide/api still work). */
+  uri() {
+    return this.sourceUri || "";
   }
 
   setSource(uri) {
     if (uri !== this.sourceUri) {
       this.sourceUri = uri;
-      this.items.clear();
-      this.changed.fire();
+      this.sendRoots();
     }
   }
 
+  /** Re-send the corpus roots (also the refresh action) — resets the tree to its top level. */
   refresh() {
-    this.items.clear();
-    this.changed.fire();
+    this.sendRoots();
   }
 
-  /** Apply (or, with an empty query, clear) the tree filter. Returns the number of matches. */
-  async setFilter(query) {
-    const q = (query || "").trim();
-    this.filter = q;
-    this.items.clear();
-    if (!q) {
-      this.visibleIds = null;
-      this.matchIds = null;
-      this.changed.fire();
-      return 0;
-    }
+  async sendRoots() {
+    if (!this.view) return;
     const client = this.getClient();
     if (!client) {
-      this.changed.fire();
-      return 0;
+      this.post({ type: "message", text: "Starting the Noeta language server…" });
+      return;
     }
-    const reply = await client.sendRequest("noeta/docsSearch", {
-      uri: this.sourceUri || "",
-      query: q,
-    });
-    const hits = (reply && reply.hits) || [];
-    const visible = new Set();
-    const matched = new Set();
-    for (const hit of hits) {
-      matched.add(hit.id);
-      visible.add(hit.id);
-      for (const anc of ancestorsOf(hit.id)) {
-        visible.add(anc);
-      }
-    }
-    this.visibleIds = visible;
-    this.matchIds = matched;
-    this.changed.fire();
-    return matched.size;
+    const reply = await client.sendRequest("noeta/docs", { uri: this.uri() });
+    this.post({ type: "roots", nodes: (reply && reply.nodes) || [] });
   }
 
-  getTreeItem(item) {
-    return item;
+  post(message) {
+    if (this.view) this.view.webview.postMessage(message);
   }
 
-  async getChildren(item) {
+  async handle(msg) {
     const client = this.getClient();
-    if (!client) {
-      return [];
-    }
-    // The language-guide subtree resolves with no open workspace, so we always query — passing the
-    // active `.noe` file's URI when there is one (empty otherwise; the project subtree is then empty).
-    const uri = this.sourceUri || "";
-    const reply = item
-      ? await client.sendRequest("noeta/docsChildren", { uri, id: item.node.id })
-      : await client.sendRequest("noeta/docs", { uri });
-    let nodes = (reply && reply.nodes) || [];
-
-    // Filter mode: keep only nodes on a matching path (a match or an ancestor of one).
-    if (this.visibleIds) {
-      nodes = nodes.filter((n) => this.visibleIds.has(n.id));
-    }
-
-    return nodes.map((n) => {
-      const inFilter = this.visibleIds != null;
-      const isMatch = inFilter && this.matchIds.has(n.id);
-      const child = new DocItem(n, this.sourceUri, {
-        // An ancestor (visible but not itself a match) expands to reveal the path to the match.
-        forceExpanded: inFilter && !isMatch && n.expandable,
-        highlights: isMatch ? highlightRanges(n.title, this.filter) : [],
-      });
-      this.items.set(n.id, child);
-      if (item) {
-        this.parentOf = this.parentOf || new Map();
-        this.parentOf.set(n.id, item.node.id);
+    switch (msg.type) {
+      case "ready":
+        this.sendRoots();
+        break;
+      case "roots":
+        this.sendRoots();
+        break;
+      case "children": {
+        if (!client) return this.post({ type: "children", id: msg.id, nodes: [] });
+        const reply = await client.sendRequest("noeta/docsChildren", { uri: this.uri(), id: msg.id });
+        this.post({ type: "children", id: msg.id, nodes: (reply && reply.nodes) || [] });
+        break;
       }
-      return child;
-    });
-  }
-
-  getParent(item) {
-    const parentId = this.parentOf && this.parentOf.get(item.node.id);
-    return parentId ? this.items.get(parentId) : undefined;
+      case "search": {
+        if (!client) return this.post({ type: "results", query: msg.query, hits: [] });
+        const reply = await client.sendRequest("noeta/docsSearch", { uri: this.uri(), query: msg.query });
+        this.post({ type: "results", query: msg.query, hits: (reply && reply.hits) || [] });
+        break;
+      }
+      case "open":
+        await this.openPage(msg.id, this.uri());
+        break;
+      case "source":
+        await commands.executeCommand("vscode.open", Uri.parse(msg.uri), {
+          selection: new Range(
+            new Position(msg.line, msg.character || 0),
+            new Position(msg.line, msg.character || 0),
+          ),
+        });
+        break;
+    }
   }
 }
 
 /**
  * The page browser: a single reused webview panel that renders a `DocPage` as a styled document. The
- * markdown-to-HTML rendering, clickable cross-references, and heading handling all live in
- * `media/docs.js`; this side fetches pages over the language client and relays navigation back.
+ * markdown-to-HTML rendering, clickable cross-references, and heading handling live in `media/docs.js`.
  */
 class DocsPagePanel {
   constructor(context, getClient) {
     this.context = context;
     this.getClient = getClient;
     this.panel = undefined;
-    /** Whether the current panel's webview has announced `ready` (its script is live). */
     this.ready = false;
-    /** A page queued while the webview announces itself (`ready`). */
     this.pending = undefined;
     /** Called when a cross-reference is opened, so the tree can reveal it: (id, sourceUri) => void. */
     this.onNavigate = undefined;
   }
 
   ensurePanel() {
-    if (this.panel) {
-      return this.panel;
-    }
+    if (this.panel) return this.panel;
     this.ready = false;
     const media = Uri.joinPath(this.context.extensionUri, "media");
     const panel = window.createWebviewPanel(
@@ -294,7 +189,6 @@ class DocsPagePanel {
 <script nonce="${n}" src="${scriptUri}"></script>
 </body>
 </html>`;
-
     panel.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
     panel.onDidDispose(() => {
       this.panel = undefined;
@@ -316,9 +210,7 @@ class DocsPagePanel {
       }
     } else if (msg.type === "navigate") {
       await this.openById(msg.id, msg.sourceUri);
-      if (this.onNavigate) {
-        this.onNavigate(msg.id, msg.sourceUri);
-      }
+      if (this.onNavigate) this.onNavigate(msg.id, msg.sourceUri);
     } else if (msg.type === "source") {
       const pos = new Position(msg.line, msg.character || 0);
       await commands.executeCommand("vscode.open", Uri.parse(msg.uri), {
@@ -328,27 +220,17 @@ class DocsPagePanel {
     }
   }
 
-  /** Fetch and show the page for `node` (from a tree item). */
-  async open(node, sourceUri) {
-    return this.openById(node.id, sourceUri, node.title);
-  }
-
   /** Fetch and show the page for a doc id, revealing the panel. */
   async openById(id, sourceUri, fallbackTitle) {
     const client = this.getClient();
-    if (!client) {
-      return;
-    }
+    if (!client) return;
     const panel = this.ensurePanel();
     panel.reveal(ViewColumn.Beside, true);
     const reply = await client.sendRequest("noeta/docsPage", { uri: sourceUri || "", id });
     const page =
       (reply && reply.page) ||
-      // A node with no page (or a stale id) still gets a minimal, non-weird placeholder.
       { id, title: fallbackTitle || id.split("/").pop(), kind: "section", markdown: "", xrefs: [] };
     const message = { type: "page", page, sourceUri };
-    // The webview posts `ready` once its script is live; until then, queue the latest page (a
-    // just-created panel isn't listening yet). After `ready`, post directly.
     if (this.ready) {
       panel.webview.postMessage(message);
     } else {
@@ -357,136 +239,16 @@ class DocsPagePanel {
   }
 }
 
-/** A little HTML-attribute-safe nonce for the webviews' CSP. */
-function nonce() {
-  let text = "";
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
-}
-
 /**
- * The filter input pinned above the tree: a tiny webview view whose text box drives
- * `provider.setFilter`. A webview is the only way to place an input above a tree view — VS Code's
- * native `TreeView` has no header-input API.
- */
-class DocsFilterView {
-  constructor(context, provider) {
-    this.context = context;
-    this.provider = provider;
-    this.view = undefined;
-  }
-
-  resolveWebviewView(view) {
-    this.view = view;
-    view.webview.options = { enableScripts: true };
-    const n = nonce();
-    view.webview.html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'nonce-${n}'; script-src 'nonce-${n}';">
-<style nonce="${n}">
-  body { margin: 0; padding: 4px 8px; }
-  .row { display: flex; align-items: center; gap: 4px; }
-  input {
-    flex: 1; min-width: 0;
-    color: var(--vscode-input-foreground);
-    background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 2px;
-    padding: 3px 6px;
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    outline: none;
-  }
-  input:focus { border-color: var(--vscode-focusBorder); }
-  input::placeholder { color: var(--vscode-input-placeholderForeground); }
-  button {
-    color: var(--vscode-icon-foreground);
-    background: none; border: none; cursor: pointer;
-    padding: 2px 4px; border-radius: 2px; line-height: 1;
-  }
-  button:hover { background: var(--vscode-toolbar-hoverBackground); }
-  .count { color: var(--vscode-descriptionForeground); font-size: 0.85em; padding: 2px 2px 0; min-height: 1em; }
-</style>
-</head>
-<body>
-<div class="row">
-  <input id="filter" type="text" placeholder="Filter docs…" aria-label="Filter docs" />
-  <button id="clear" title="Clear filter" aria-label="Clear filter">&#x2715;</button>
-</div>
-<div class="count" id="count"></div>
-<script nonce="${n}">
-  const vscode = acquireVsCodeApi();
-  const input = document.getElementById("filter");
-  const clear = document.getElementById("clear");
-  const count = document.getElementById("count");
-  let timer;
-  function send() {
-    clearTimeout(timer);
-    vscode.setState({ value: input.value });
-    timer = setTimeout(() => vscode.postMessage({ type: "filter", value: input.value }), 150);
-  }
-  input.addEventListener("input", send);
-  clear.addEventListener("click", () => { input.value = ""; count.textContent = ""; send(); input.focus(); });
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { input.value = ""; count.textContent = ""; send(); }
-  });
-  window.addEventListener("message", (e) => {
-    if (e.data.type === "count") { count.textContent = e.data.text || ""; }
-  });
-  const prev = vscode.getState();
-  if (prev && prev.value) { input.value = prev.value; }
-</script>
-</body>
-</html>`;
-
-    view.webview.onDidReceiveMessage(async (msg) => {
-      if (msg.type === "filter") {
-        const n = await this.provider.setFilter(msg.value);
-        const q = (msg.value || "").trim();
-        view.webview.postMessage({
-          type: "count",
-          text: q ? `${n} match${n === 1 ? "" : "es"}` : "",
-        });
-      }
-    });
-  }
-}
-
-/**
- * Wire the Docs browser: the filter view, the tree view, the page-browser webview, active-editor
- * tracking, and the open-page / go-to-source / docs-for-symbol / search commands. `getClient`
- * returns the running LanguageClient (lazy — activation starts it asynchronously).
+ * Wire the Docs browser: the sidebar webview view, the page-browser panel, active-editor tracking,
+ * and the open-page / docs-for-symbol / search commands. `getClient` returns the running
+ * LanguageClient (lazy — activation starts it asynchronously).
  */
 function registerDocs(context, getClient) {
-  const provider = new DocsProvider(getClient);
-  const view = window.createTreeView("noetaDocs", {
-    treeDataProvider: provider,
-    showCollapseAll: true,
-  });
   const pagePanel = new DocsPagePanel(context, getClient);
-  const filterView = new DocsFilterView(context, provider);
-
-  // Opening a page (from the tree, search, or symbol command) shows it in the reused webview panel.
-  async function openPage(item) {
-    if (!item) {
-      return;
-    }
-    await pagePanel.open(item.node, item.sourceUri);
-  }
-
-  // A cross-reference opened inside the page browser reveals that node in the tree, best-effort.
-  pagePanel.onNavigate = (id) => {
-    const item = provider.items.get(id);
-    if (item) {
-      view.reveal(item, { select: true, focus: false }).then(undefined, () => {});
-    }
-  };
+  const provider = new DocsViewProvider(context, getClient, (id, uri) =>
+    pagePanel.openById(id, uri),
+  );
 
   function track(editor) {
     if (
@@ -495,34 +257,25 @@ function registerDocs(context, getClient) {
       editor.document.uri.scheme === "file"
     ) {
       provider.setSource(editor.document.uri.toString());
-      view.message = undefined;
-    } else if (!provider.sourceUri) {
-      // The language guide is always browsable; the project section fills in once a .noe is open.
-      view.message = "Open a .noe file to see project docs — the language guide is below.";
     }
   }
   track(window.activeTextEditor);
 
   context.subscriptions.push(
-    view,
-    window.registerWebviewViewProvider("noetaDocsFilter", filterView, {
+    window.registerWebviewViewProvider("noetaDocs", provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     window.onDidChangeActiveTextEditor(track),
     workspace.onDidSaveTextDocument((doc) => {
-      if (doc.languageId === "noeta") {
-        provider.refresh();
-      }
+      if (doc.languageId === "noeta") provider.refresh();
     }),
     commands.registerCommand("noeta.docsRefresh", () => provider.refresh()),
-    commands.registerCommand("noeta.docsOpenPage", (item) => openPage(item)),
-    // The search widget: a QuickPick backed by the server's `noeta/docsSearch` over the whole corpus
-    // (project + guide + api). Accepting a result opens its page and reveals it. Complements the
-    // inline filter — the QuickPick is a jump-to, the filter narrows the tree in place.
+    // The QuickPick search: a jump-to over the whole corpus (complements the inline filter, which
+    // narrows the tree in place). Accepting a result opens its page.
     commands.registerCommand("noeta.docsSearch", () => {
-      const sourceUri = provider.sourceUri || "";
+      const sourceUri = provider.uri();
       const qp = window.createQuickPick();
-      qp.placeholder = "Search Noeta docs — project, language guide, and API reference…";
+      qp.placeholder = "Search Noeta docs — project, dependencies, language guide, and API reference…";
       let seq = 0;
       qp.onDidChangeValue(async (value) => {
         const query = value.trim();
@@ -531,21 +284,16 @@ function registerDocs(context, getClient) {
           return;
         }
         const client = getClient();
-        if (!client) {
-          return;
-        }
+        if (!client) return;
         const mine = (seq += 1);
         qp.busy = true;
         const reply = await client.sendRequest("noeta/docsSearch", { uri: sourceUri, query });
-        if (mine !== seq) {
-          return; // a newer keystroke superseded this result
-        }
+        if (mine !== seq) return;
         qp.busy = false;
         qp.items = ((reply && reply.hits) || []).map((hit) => ({
           label: hit.title,
           description: hit.kind,
           detail: hit.snippet || undefined,
-          // Server-ranked already; bypass the client-side label filter so a prose-only match stays.
           alwaysShow: true,
           hit,
         }));
@@ -553,29 +301,10 @@ function registerDocs(context, getClient) {
       qp.onDidAccept(async () => {
         const sel = qp.selectedItems[0];
         qp.hide();
-        if (!sel) {
-          return;
-        }
-        const { hit } = sel;
-        await pagePanel.openById(hit.id, sourceUri, hit.title);
-        const item = provider.items.get(hit.id);
-        if (item) {
-          view.reveal(item, { select: true, focus: false }).then(undefined, () => {});
-        }
+        if (sel) await pagePanel.openById(sel.hit.id, sourceUri, sel.hit.title);
       });
       qp.onDidHide(() => qp.dispose());
       qp.show();
-    }),
-    // Context menu on a located declaration: jump to its source.
-    commands.registerCommand("noeta.docsGoToSource", async (item) => {
-      const { node } = item;
-      if (node.uri == null || node.line == null) {
-        return;
-      }
-      const pos = new Position(node.line, node.character || 0);
-      await commands.executeCommand("vscode.open", Uri.parse(node.uri), {
-        selection: new Range(pos, pos),
-      });
     }),
     // Palette / editor context: show the docs for the symbol under the cursor.
     commands.registerCommand("noeta.docsForSymbol", async () => {
@@ -597,20 +326,13 @@ function registerDocs(context, getClient) {
         window.showInformationMessage("Noeta: no documentation node for this symbol.");
         return;
       }
-      // Open the page directly (the model resolved the id), and reveal it in the tree best-effort.
       await pagePanel.openById(id, uri, id.split("/").pop());
-      const item = provider.items.get(id);
-      if (item) {
-        view.reveal(item, { select: true, focus: false }).then(undefined, () => {});
-      }
     }),
   );
 
   return {
-    // Called once the language client is running (an initial getChildren before that returned []).
     refresh: () => provider.refresh(),
     provider,
-    view,
   };
 }
 
