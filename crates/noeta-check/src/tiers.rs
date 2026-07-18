@@ -162,6 +162,17 @@ impl TierRegistry {
         self.reg().find_ext_tier(tier).is_some() || self.declared.contains_key(tier)
     }
 
+    /// The declaration sites `tier` permits (directive attachment-site model). An extension-declared
+    /// tier carries its registered `sites`; a program-declared `@tier` (no site syntax yet) and an
+    /// unknown name yield the empty slice — **unrestricted**, so the checker's site gate never fires
+    /// on them.
+    pub fn sites(&self, tier: &str) -> &'static [noeta_ext_abi::registry::TierSite] {
+        self.reg()
+            .find_ext_tier(tier)
+            .map(|t| t.sites)
+            .unwrap_or(&[])
+    }
+
     /// The **default-provider** declaration for `tier`: the first program/package declaration —
     /// what resolution falls back to when no target selects a provider and no extension declares
     /// the name. `None` for a purely-extension tier.

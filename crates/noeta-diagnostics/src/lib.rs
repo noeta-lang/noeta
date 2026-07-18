@@ -224,6 +224,11 @@ pub enum DiagnosticCode {
     /// values), or an expression tier's block stands in statement position (its value would be
     /// silently discarded — assign or return it).
     InvalidTierExpression,
+    /// A `@<tier>` directive attaches at a site the tier does not permit (directive attachment-site
+    /// model): the tier's registration lists the sites it may decorate, and this one is not among
+    /// them — e.g. a top-level-only tier used on a method, or a `@test` method that reads `self`
+    /// (a test method must be an associated function so the runner can call it with no receiver).
+    InvalidDirectiveSite,
 }
 
 impl DiagnosticCode {
@@ -283,6 +288,7 @@ impl DiagnosticCode {
         DiagnosticCode::UnderivableTrait,
         DiagnosticCode::InvalidTierDeclaration,
         DiagnosticCode::InvalidTierExpression,
+        DiagnosticCode::InvalidDirectiveSite,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -342,6 +348,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidTierDeclaration => "E0051",
             DiagnosticCode::InvalidTierExpression => "E0052",
             DiagnosticCode::InvalidTraitDeclaration => "E0053",
+            DiagnosticCode::InvalidDirectiveSite => "E0054",
         }
     }
 

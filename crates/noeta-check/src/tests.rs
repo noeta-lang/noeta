@@ -2404,3 +2404,30 @@ fn the_checker_resolves_native_names_against_the_injected_registry() {
         "an empty registry leaves `math.sqrt` unresolved, so no signature-mismatch can fire"
     );
 }
+
+#[test]
+fn directives_on_a_type_and_associated_method_are_clean() {
+    // `@doc` on a type and a method, and `@test` on an associated method (no `self`), are all
+    // permitted sites for the std tiers, so the program checks clean.
+    let src = "@doc { A point. }\n\
+               struct Point {\n    \
+               x: int = 0\n    \
+               @doc { Distance from origin. }\n    \
+               fn manhattan(): int { return self.x }\n    \
+               @test\n    \
+               fn origin_is_zero(): void { assert(Point {}.manhattan() == 0, \"o\") }\n\
+               }\n";
+    assert!(codes(src).is_empty(), "expected clean: {:?}", codes(src));
+}
+
+#[test]
+fn test_on_an_instance_method_is_invalid_site() {
+    // A `@test` method that reads `self` is an instance method — the runner has no receiver to call
+    // it on, so it is rejected (E0054, directive attachment-site model).
+    let src = "class Counter {\n    \
+               mut n: u64 = 0u64\n    \
+               @test\n    \
+               fn reads_self(): void { assert(self.n == 0u64, \"n\") }\n\
+               }\n";
+    assert_eq!(codes(src), ["E0054"]);
+}

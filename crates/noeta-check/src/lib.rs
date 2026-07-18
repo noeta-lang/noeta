@@ -67,8 +67,8 @@ use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl, FnDecl,
-    ForPattern, ImplBlock, ImplDecl, MatchArm, PackedDirective, Param, Pattern, Program, Stmt,
-    StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
+    ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, PackedDirective, Param, Pattern,
+    Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::{Edition, EditionMap};
@@ -661,6 +661,38 @@ impl TargetKind {
             TargetKind::Field => "Field",
             TargetKind::Variant => "Variant",
         }
+    }
+}
+
+/// The tier attachment site of a declaration `TargetKind` — the registry's site vocabulary. A
+/// `struct`/`class`/`enum` all map to `Type`; a field or variant is never a tier site (`None`).
+fn target_site(target: TargetKind) -> Option<noeta_ext_abi::registry::TierSite> {
+    use noeta_ext_abi::registry::TierSite;
+    Some(match target {
+        TargetKind::Function => TierSite::Function,
+        TargetKind::Method => TierSite::Method,
+        TargetKind::Struct | TargetKind::Class | TargetKind::Enum => TierSite::Type,
+        TargetKind::Field | TargetKind::Variant => return None,
+    })
+}
+
+/// A human-readable list of a tier's permitted sites for the E0054 help line — "a function, a
+/// method, or a type".
+fn sites_label(sites: &[noeta_ext_abi::registry::TierSite]) -> String {
+    use noeta_ext_abi::registry::TierSite;
+    let words: Vec<&str> = sites
+        .iter()
+        .map(|s| match s {
+            TierSite::Function => "a function",
+            TierSite::Method => "a method",
+            TierSite::Type => "a type",
+        })
+        .collect();
+    match words.as_slice() {
+        [] => "nothing".to_string(),
+        [one] => (*one).to_string(),
+        [a, b] => format!("{a} or {b}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
     }
 }
 
@@ -1664,6 +1696,62 @@ impl Checker {
         }
     }
 
+    /// Validate the `@<tier>` directives leading a function or method (directive attachment-site
+    /// model). Each directive must (1) name a known tier — else the same E0036 the block/annotation
+    /// forms raise — and (2) attach at a site the tier's registration permits, else **E0054**. A
+    /// tier with no declared sites is unrestricted (the gate never fires). `@test`/`@bench` on a
+    /// method carry the extra rule that the method must be an **associated function** (never reads
+    /// `self`), so the runner can call it with no receiver.
+    fn check_directives(
+        &mut self,
+        directives: &[MethodDirective],
+        target: TargetKind,
+        decl: &FnDecl,
+    ) {
+        for dir in directives {
+            if !self.symbols.tier_registry.is_known(&dir.name) {
+                let d = tiers::unknown_tier_diagnostic(self.reg(), &dir.name, dir.name_span);
+                self.diags.push(d);
+                continue;
+            }
+            let sites = self.symbols.tier_registry.sites(&dir.name);
+            let here = target_site(target);
+            if !sites.is_empty() && here.is_none_or(|s| !sites.contains(&s)) {
+                self.error(
+                    DiagnosticCode::InvalidDirectiveSite,
+                    dir.name_span,
+                    format!(
+                        "`@{}` cannot attach to a {}",
+                        dir.name,
+                        target.label().to_lowercase()
+                    ),
+                )
+                .help(format!(
+                    "`@{}` may attach to {}",
+                    dir.name,
+                    sites_label(sites)
+                ));
+                continue;
+            }
+            // A `@test`/`@bench` method is invoked with no receiver, so it must not read `self`.
+            if target == TargetKind::Method
+                && matches!(dir.name.as_str(), "test" | "bench")
+                && let Some(ty) = self.coloring.current_type.clone()
+                && self.symbols.method_instance.get(&(ty, decl.name.clone())) == Some(&true)
+            {
+                self.error(
+                    DiagnosticCode::InvalidDirectiveSite,
+                    dir.name_span,
+                    format!("a `@{}` method must be an associated function", dir.name),
+                )
+                .help(
+                    "a test/bench method is called with no receiver, so its body must not use \
+                     `self` — drop the `self` references, or make it a top-level function",
+                );
+            }
+        }
+    }
+
     /// Check a function (or method) body. `extra` seeds the body scope with additional bindings
     /// (a class's fields, when checking a method).
     fn check_fn(
@@ -1678,6 +1766,9 @@ impl Checker {
         // `Attribute` capability (E0029) and constructs it from its literal args (E0009/E0007/E0005).
         // `target` distinguishes a top-level `Function` from a `Method` for placement checks (P2.5).
         self.check_attrs(&decl.attrs, target);
+        // A method's leading `@<tier>` directives (`@test`/`@doc`/…): each names a known tier and
+        // attaches at a site the tier permits (E0054, the directive attachment-site model).
+        self.check_directives(&decl.directives, target, decl);
         // Bring the function's own generic parameters into scope for its body (a free function may
         // be generic; a method is generic over its class's parameters, already in scope, and
         // carries none of its own). Union with the current set so a method does not lose the
