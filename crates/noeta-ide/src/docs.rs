@@ -481,7 +481,11 @@ fn score_tree_into(tree: &ProjectTree, needle: &str, hits: &mut Vec<DocHit>) {
 /// The [`DocId`] documenting the declaration whose name span is `name_span`, if it is a project
 /// node — the bridge for "show docs for the symbol under the cursor" (the store resolves the
 /// cursor to a name span; this maps that span to its doc node).
-pub fn id_for_name_span(env: &impl DocEnv, members: &[MemberDoc], name_span: Span) -> Option<DocId> {
+pub fn id_for_name_span(
+    env: &impl DocEnv,
+    members: &[MemberDoc],
+    name_span: Span,
+) -> Option<DocId> {
     let tree = ProjectTree::build(env, members);
     let mut found = None;
     tree.for_each_with_span(&mut |node: &DocNode, span: Option<Span>| {
@@ -1458,7 +1462,10 @@ mod tests {
         let program = program_of("fn f() {}");
         let env = StubEnv;
         // The guide corpus is workspace-independent — env/program are ignored for guide ids.
-        let pages = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("guide"));
+        let pages = children(
+            &DocCtx::new(&env, one_member(&program)),
+            &DocId::new("guide"),
+        );
         assert!(pages.len() > 5, "guide root lists the wiki pages");
         assert!(
             pages
@@ -1466,7 +1473,8 @@ mod tests {
                 .all(|p| p.kind == DocKind::Guide && p.has_page && !p.expandable)
         );
         let page_node = &pages[0];
-        let page = page(&DocCtx::new(&env, one_member(&program)), &page_node.id).expect("a guide page renders");
+        let page = page(&DocCtx::new(&env, one_member(&program)), &page_node.id)
+            .expect("a guide page renders");
         assert_eq!(page.kind, DocKind::Guide);
         assert!(!page.markdown.is_empty());
         // A guide page is a leaf.
@@ -1518,7 +1526,10 @@ mod tests {
         let env = StubEnv;
 
         // Level 1: one module for the single source.
-        let modules = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project"));
+        let modules = children(
+            &DocCtx::new(&env, one_member(&program)),
+            &DocId::new("project"),
+        );
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].kind, DocKind::Module);
         assert_eq!(modules[0].title, "t.noe");
@@ -1546,7 +1557,10 @@ mod tests {
             "@doc {\n  Greets a person by name.\n}\nfn greet(name: str): str { return name }",
         );
         let env = StubEnv;
-        let modules = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project"));
+        let modules = children(
+            &DocCtx::new(&env, one_member(&program)),
+            &DocId::new("project"),
+        );
         let decls = children(&DocCtx::new(&env, one_member(&program)), &modules[0].id);
         let greet = &decls[0];
 
@@ -1563,7 +1577,10 @@ mod tests {
         // not a declaration's doc — the adjacency rule in `resolve_texts`.
         let program = program_of("@doc {\n  The geometry module.\n}\nuse std.math\nfn f() {}");
         let env = StubEnv;
-        let modules = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project"));
+        let modules = children(
+            &DocCtx::new(&env, one_member(&program)),
+            &DocId::new("project"),
+        );
         assert!(modules[0].has_page);
         let page = page(&DocCtx::new(&env, one_member(&program)), &modules[0].id).unwrap();
         // The module overview leads with its `@doc` prose, then a contents list of its decls.
@@ -1604,7 +1621,10 @@ mod tests {
             "@doc {\n  Module intro.\n}\nuse std.math\nfn a() {}\n@doc {\n  ## Notes\n  Some free prose.\n}\nuse std.list\nfn b() {}",
         );
         let env = StubEnv;
-        let modules = children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project"));
+        let modules = children(
+            &DocCtx::new(&env, one_member(&program)),
+            &DocId::new("project"),
+        );
         let kids = children(&DocCtx::new(&env, one_member(&program)), &modules[0].id);
         let section = kids.iter().find(|k| k.kind == DocKind::Section).unwrap();
         assert_eq!(section.title, "Notes");
@@ -1616,8 +1636,26 @@ mod tests {
     fn unknown_id_yields_no_children_and_no_page() {
         let program = program_of("fn f() {}");
         let env = StubEnv;
-        assert!(children(&DocCtx::new(&env, one_member(&program)), &DocId::new("project/99/nope")).is_empty());
-        assert!(page(&DocCtx::new(&env, one_member(&program)), &DocId::new("guide/whatever")).is_none());
-        assert!(page(&DocCtx::new(&env, one_member(&program)), &DocId::new("project/0/nope")).is_none());
+        assert!(
+            children(
+                &DocCtx::new(&env, one_member(&program)),
+                &DocId::new("project/99/nope")
+            )
+            .is_empty()
+        );
+        assert!(
+            page(
+                &DocCtx::new(&env, one_member(&program)),
+                &DocId::new("guide/whatever")
+            )
+            .is_none()
+        );
+        assert!(
+            page(
+                &DocCtx::new(&env, one_member(&program)),
+                &DocId::new("project/0/nope")
+            )
+            .is_none()
+        );
     }
 }

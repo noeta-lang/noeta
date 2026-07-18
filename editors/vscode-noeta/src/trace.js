@@ -1,101 +1,117 @@
-// The role-aware trace view (ide-ui U2): the `noeta.showTrace` command — invoked by the role
-// CodeLenses the language server puts above `@role`-bearing declarations, or from the palette —
-// asks the server's `noeta/trace` custom request for the rendered static trace and opens it as a
-// read-only `noeta-trace:` virtual document. The server renders the same call-graph walk the
-// `noeta mcp` trace tool serves, so what the editor shows always matches what agents see.
-//
-// Every `path:line` in the document is a clickable link (a DocumentLinkProvider over the trace
-// scheme), resolved against the traced workspace's directory carried in the virtual document URI.
+// The role-aware trace view (ide-ui U2; trace-view arc): the `noeta.showTrace` command — invoked
+// by the role CodeLens, the Architecture view's context menu, or the palette — fetches the
+// **structured** trace (`noeta/traceTree`, the same call-graph walk `noeta trace` renders as text
+// for terminals and agents) and shows it in a dedicated webview panel: a role-colored boundary
+// rail, interactive call trees with role-tinted indent rails, click-to-source everywhere, and the
+// walk's honesty markers (dynamic / external / passed-as-value / recursion / truncation) made
+// visible. One panel, reused across traces.
 
-const {
-  window,
-  workspace,
-  commands,
-  languages,
-  Uri,
-  Range,
-  DocumentLink,
-  EventEmitter,
-  ViewColumn,
-} = require("vscode");
-const path = require("path");
+const { window, commands, Uri, Range, Position, ViewColumn } = require("vscode");
 
-/** Rendered trace text per virtual-document URI (string form). The content provider reads it. */
-const traceContents = new Map();
-const traceChanged = new EventEmitter();
-
-/** The virtual URI for a trace: the label becomes the tab title; the query carries the base
- *  directory `path:line` links resolve against. */
-function traceUri(label, baseDir) {
-  const query = encodeURIComponent(JSON.stringify({ dir: baseDir }));
-  return Uri.parse(`noeta-trace:${encodeURIComponent(label)}.trace?${query}`);
+/** A little HTML-attribute-safe nonce for the webview's CSP. */
+function nonce() {
+  let text = "";
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  for (let i = 0; i < 32; i++) {
+    text += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return text;
 }
 
-function baseDirOf(uri) {
-  try {
-    return JSON.parse(decodeURIComponent(uri.query)).dir || "";
-  } catch {
-    return "";
+/** The reused trace panel: fetches `noeta/traceTree` and hands the structure to the webview. */
+class TracePanel {
+  constructor(context, getClient) {
+    this.context = context;
+    this.getClient = getClient;
+    this.panel = undefined;
+    this.ready = false;
+    this.pending = undefined;
   }
-}
 
-/** Run `noeta/trace` for (sourceUri, from) and open/refresh the virtual document. */
-async function showTrace(getClient, sourceUri, from) {
-  const client = getClient();
-  if (!client) {
-    window.showWarningMessage("Noeta language server is not running.");
-    return;
+  ensurePanel() {
+    if (this.panel) return this.panel;
+    this.ready = false;
+    const media = Uri.joinPath(this.context.extensionUri, "media");
+    const panel = window.createWebviewPanel(
+      "noeta.traceView",
+      "Noeta Trace",
+      { viewColumn: ViewColumn.Beside, preserveFocus: true },
+      { enableScripts: true, localResourceRoots: [media], retainContextWhenHidden: true },
+    );
+    const scriptUri = panel.webview.asWebviewUri(Uri.joinPath(media, "trace.js"));
+    const styleUri = panel.webview.asWebviewUri(Uri.joinPath(media, "trace.css"));
+    const n = nonce();
+    panel.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src ${panel.webview.cspSource}; script-src 'nonce-${n}';">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="${styleUri}" rel="stylesheet">
+<title>Noeta Trace</title>
+</head>
+<body>
+<div id="app" aria-live="polite"></div>
+<script nonce="${n}" src="${scriptUri}"></script>
+</body>
+</html>`;
+    panel.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
+    panel.onDidDispose(() => {
+      this.panel = undefined;
+      this.pending = undefined;
+      this.ready = false;
+    });
+    this.panel = panel;
+    return panel;
   }
-  const reply = await client.sendRequest("noeta/trace", {
-    uri: sourceUri,
-    from: from || null,
-  });
-  if (!reply || !reply.content) {
-    window.showWarningMessage("Noeta: no workspace covers this file — open a .noe file first.");
-    return;
-  }
-  const fsPath = Uri.parse(sourceUri).fsPath;
-  const target = traceUri(from || "all-roles", path.dirname(fsPath));
-  traceContents.set(target.toString(), reply.content);
-  traceChanged.fire(target); // refresh if the document is already open
-  const doc = await workspace.openTextDocument(target);
-  await window.showTextDocument(doc, { viewColumn: ViewColumn.Beside, preview: true });
-}
 
-/** Turn every `path:line` in a trace document into a link to that source location. */
-function traceLinks(document) {
-  const base = baseDirOf(document.uri);
-  const links = [];
-  const pattern = /([\w./-]+\.noe):(\d+)/g;
-  for (let line = 0; line < document.lineCount; line += 1) {
-    const text = document.lineAt(line).text;
-    for (const match of text.matchAll(pattern)) {
-      const file = path.isAbsolute(match[1]) ? match[1] : path.join(base, match[1]);
-      const range = new Range(line, match.index, line, match.index + match[0].length);
-      // The `#L<line>` fragment makes VS Code reveal that line on open.
-      links.push(new DocumentLink(range, Uri.file(file).with({ fragment: `L${match[2]}` })));
+  async handleMessage(msg) {
+    if (msg.type === "ready") {
+      this.ready = true;
+      if (this.pending) {
+        this.panel.webview.postMessage(this.pending);
+        this.pending = undefined;
+      }
+    } else if (msg.type === "source") {
+      const pos = new Position(msg.line, msg.character || 0);
+      await commands.executeCommand("vscode.open", Uri.parse(msg.uri), {
+        selection: new Range(pos, pos),
+        viewColumn: ViewColumn.One,
+      });
     }
   }
-  return links;
+
+  /** Fetch the trace for `sourceUri` (from `fnName`, or the whole role surface) and show it. */
+  async show(sourceUri, fnName) {
+    const client = this.getClient();
+    if (!client) {
+      window.showWarningMessage("Noeta: the language server is not running yet.");
+      return;
+    }
+    const panel = this.ensurePanel();
+    panel.title = fnName ? `Trace: ${fnName}` : "Noeta Trace";
+    panel.reveal(ViewColumn.Beside, true);
+    const trace = await client.sendRequest("noeta/traceTree", {
+      uri: sourceUri,
+      from: fnName || null,
+    });
+    const message = { type: "trace", trace };
+    if (this.ready) {
+      panel.webview.postMessage(message);
+    } else {
+      this.pending = message;
+    }
+  }
 }
 
 /**
- * Wire the trace view: the content provider for the `noeta-trace:` scheme, the link provider that
- * makes `path:line` clickable, and the `noeta.showTrace` command. `getClient` returns the running
+ * Wire the trace view: the panel + the `noeta.showTrace` command. `getClient` returns the running
  * LanguageClient (the command needs it lazily — activation starts the client asynchronously).
  */
 function registerTrace(context, getClient) {
+  const panel = new TracePanel(context, getClient);
   context.subscriptions.push(
-    workspace.registerTextDocumentContentProvider("noeta-trace", {
-      onDidChange: traceChanged.event,
-      provideTextDocumentContent(uri) {
-        return traceContents.get(uri.toString()) || "trace expired — run it again";
-      },
-    }),
-    languages.registerDocumentLinkProvider(
-      { scheme: "noeta-trace" },
-      { provideDocumentLinks: traceLinks },
-    ),
     // From a CodeLens: (uri, function). From the palette: no args — trace the active `.noe`
     // file's whole architectural surface (every role-bearing function).
     commands.registerCommand("noeta.showTrace", async (uriStr, fnName) => {
@@ -108,9 +124,8 @@ function registerTrace(context, getClient) {
         window.showWarningMessage("Noeta: open a .noe file to trace.");
         return;
       }
-      await showTrace(getClient, source, fnName);
+      await panel.show(source, fnName);
     }),
-    traceChanged,
   );
 }
 

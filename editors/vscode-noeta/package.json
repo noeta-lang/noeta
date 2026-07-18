@@ -258,7 +258,7 @@
       },
       {
         "command": "noeta.showTrace",
-        "title": "Trace Request Path",
+        "title": "Trace Call Paths",
         "icon": "$(type-hierarchy)",
         "category": "Noeta"
       },
@@ -270,7 +270,7 @@
       },
       {
         "command": "noeta.archTrace",
-        "title": "Trace Request Path from Here",
+        "title": "Trace Call Paths from Here",
         "category": "Noeta"
       },
       {

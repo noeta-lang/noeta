@@ -58,6 +58,19 @@ harness, so all three tools read one source of truth.
 a debug console that is effectively a REPL over the paused program (closures included). It debugs
 the **production VM** — same bytecode, JIT unarmed. See [Debugging](Debugging).
 
+## Tracing the architecture
+
+Every `@role`-bearing declaration gets a **CodeLens** (`⚑ Layer.Handler · trace call paths`);
+running it — or **Trace Call Paths from Here** in the Architecture sidebar's context menu, or
+**Noeta: Trace Call Paths** from the palette for the whole role surface — opens the **trace view**:
+the same static call-graph walk `noeta mcp`'s `trace` tool serves, rendered as a role-colored
+**boundary rail** (click a boundary to highlight every path reaching it, double-click to jump to
+it) over collapsible call trees whose indent rails are tinted by role, so the layers read as
+colored bands. Every row jumps to source; the walk's honesty markers are visible — dynamic and
+external callees dimmed, *passed-as-value* references badged (a callback registration is part of
+the flow but never a syntactic call), recursion marked, truncation explicit — and trivial
+low-level calls stay hidden behind a toggle so the architectural shape stays foregrounded.
+
 ## Profiling
 
 `noeta profile` reports where a program spends its time — a wall-time **flamegraph** (sampling),
