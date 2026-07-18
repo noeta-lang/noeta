@@ -12,6 +12,11 @@
 
   /** @type {"sampling" | "instrument"} */
   let kind = "sampling";
+  // What one stack weight means: sample counts (sampling) or exact nanoseconds (the instrumenting
+  // call tree). Drives every weight rendering — flame tooltips, crumbs, and table cells.
+  let weightUnit = "samples";
+  const fmtWeight = (n) => (weightUnit === "ns" ? fmtNs(n) : fmtInt(n));
+  const fmtWeightLong = (n) => (weightUnit === "ns" ? fmtNs(n) : fmtInt(n) + " samples");
   let meta = { summary: "", program: "" };
 
   // ---- formatting --------------------------------------------------------------------------
@@ -145,7 +150,7 @@
     let hits = [];
 
     const label = (node) =>
-      node.frame < 0 ? `all — ${fmtInt(tree.total)} samples` : frames[node.frame].name;
+      node.frame < 0 ? `all — ${fmtWeightLong(tree.total)}` : frames[node.frame].name;
 
     function drawCell(ctx, node, x, y, w, width, dimmed) {
       const name = node.frame < 0 ? "all" : frames[node.frame].name;
@@ -297,8 +302,8 @@
           el(
             "div",
             null,
-            `total ${fmtInt(node.total)} samples (${fmtPct(node.total / total)}) · ` +
-              `self ${fmtInt(node.self)} (${fmtPct(node.self / total)})`,
+            `total ${fmtWeightLong(node.total)} (${fmtPct(node.total / total)}) · ` +
+              `self ${fmtWeight(node.self)} (${fmtPct(node.self / total)})`,
           ),
         );
         const frame = frames[node.frame];
@@ -472,6 +477,7 @@
         app.append(el("div", "message", "The profile contains no functions."));
         return;
       }
+      weightUnit = "ns"; // instrument weights are exact nanoseconds
       const totalSelf = functions.reduce((acc, f) => acc + f.self_ns, 0);
       const rows = functions.map((f) => ({
         fn: f.name,
@@ -495,14 +501,27 @@
         rows,
         "self",
       );
-      view.classList.add("active");
-      app.append(view);
+      // The artifact now also carries the EXACT call tree (speedscope-shaped, ns-weighted): render
+      // the flame graph beside the table, tabbed like the sampling view. The Functions tab is the
+      // exact instrument table (true call counts + recursion-correct totals).
+      const frames = message.profile.shared?.frames ?? [];
+      const prof0 = (message.profile.profiles ?? [])[0];
+      if (frames.length && prof0?.samples?.length) {
+        const body = el("div", "sampling-body");
+        app.append(body);
+        const tree = buildTree(prof0.samples, prof0.weights ?? []);
+        tabbed(body, flameView(frames, tree), view);
+      } else {
+        view.classList.add("active");
+        app.append(view);
+      }
       return;
     }
 
     // Sampling: speedscope JSON — one "sampled" profile over a shared frame table.
     const frames = message.profile.shared?.frames ?? [];
     const profile = (message.profile.profiles ?? [])[0];
+    weightUnit = profile?.unit === "nanoseconds" ? "ns" : "samples";
     const allSamples = profile?.samples ?? [];
     const allWeights = profile?.weights ?? [];
     if (allSamples.length === 0) {
@@ -574,14 +593,19 @@
       [
         { key: "fn", title: "Function", className: "fn" },
         { key: "loc", title: "Hottest Line", className: "loc" },
-        { key: "self", title: "Self", num: true, format: fmtInt },
-        { key: "total", title: "Total", num: true, format: fmtInt },
+        { key: "self", title: "Self", num: true, format: fmtWeight },
+        { key: "total", title: "Total", num: true, format: fmtWeight },
         { key: "selfPct", title: "Self %", num: true, pct: true },
       ],
       samplingRows(frames, samples, weights, tree.total),
       "self",
     );
 
+    tabbed(container, flame, table);
+  }
+
+  /** Append the Flame Graph | Functions tab pair to `container`, flame active first. */
+  function tabbed(container, flame, table) {
     const tabs = el("div", "tabs");
     const views = { flame, table };
     const buttons = {};

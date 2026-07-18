@@ -334,7 +334,9 @@ enum Command {
         #[arg(long, value_name = "N")]
         every: Option<u64>,
         /// Output format. Sampling: `folded` (default), `svg` (flamegraph), `speedscope` (JSON for
-        /// speedscope.app). Instrumenting: `table` (default), `json`.
+        /// speedscope.app). Instrumenting: `table` (default), `json` (rows + the exact ns-weighted
+        /// call-tree stacks) — the stack formats (`folded`/`svg`/`speedscope`) also work, rendered
+        /// from the exact call tree.
         #[arg(long, value_name = "FMT")]
         format: Option<String>,
         /// Write the profile artifact to this file instead of stderr (recommended for `svg` /

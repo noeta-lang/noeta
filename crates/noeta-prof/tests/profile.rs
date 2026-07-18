@@ -633,3 +633,65 @@ fn profiles_a_program_with_a_path_dependency() {
     );
     assert_eq!(report.stdout, "got=42\n");
 }
+
+#[test]
+fn instrument_carries_an_exact_call_tree_flamegraph() {
+    // `root` fans into two callees with distinct call paths; the instrumenting run must produce a
+    // nanosecond-weighted flamegraph whose stacks reflect the exact tree — including fib's
+    // recursive self-path — alongside the usual function table.
+    let src = "fn fib(n: int): int {\n\
+               \x20   if n < 2 { return n; }\n\
+               \x20   return fib(n - 1) + fib(n - 2);\n\
+               }\n\
+               fn spin(n: int): int {\n\
+               \x20   mut acc = 0\n\
+               \x20   mut i = 0\n\
+               \x20   while i < n { acc = acc + i; i = i + 1; }\n\
+               \x20   return acc;\n\
+               }\n\
+               fn root(): int { return fib(14) + spin(400000); }\n\
+               echo root();\n";
+    let path = fixture("tree", src);
+    let report = noeta_prof::profile(&path, noeta_prof::Mode::Instrument);
+    assert_eq!(report.exit_code, 0, "{}", report.stderr);
+
+    let flame = report
+        .flamegraph
+        .as_ref()
+        .expect("instrument mode now carries the exact call tree");
+    assert_eq!(flame.unit, noeta_prof::FlameUnit::Nanoseconds);
+    assert!(flame.total > 0, "nanosecond weights accumulated");
+
+    // The folded chains include the fan-out paths and the recursive fib self-edge.
+    let chains: Vec<String> = flame
+        .stacks
+        .iter()
+        .map(|s| flame.labels(s).collect::<Vec<_>>().join(";"))
+        .collect();
+    let has = |needle: &str| chains.iter().any(|c| c.contains(needle));
+    assert!(has("root;spin"), "chains: {chains:?}");
+    assert!(has("root;fib"), "chains: {chains:?}");
+    assert!(has("fib;fib"), "recursion is a real path: {chains:?}");
+
+    // Exactness: per-path self weights sum to the per-function self times.
+    let table_self: u64 = report
+        .functions
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|f| f.self_ns)
+        .sum();
+    let flame_self: u64 = flame.stacks.iter().map(|s| s.count).sum();
+    assert_eq!(flame_self, table_self, "tree weights == table self-times");
+
+    // Both stack-shaped renders work in instrument mode, labeled in ns.
+    let folded = noeta_prof::render(&report, noeta_prof::Format::Folded).unwrap();
+    assert!(!folded.is_empty());
+    let json = noeta_prof::render(&report, noeta_prof::Format::Json).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert!(v["functions"].is_array(), "table rows present");
+    assert_eq!(
+        v["profiles"][0]["unit"], "nanoseconds",
+        "speedscope stacks present, ns unit"
+    );
+}

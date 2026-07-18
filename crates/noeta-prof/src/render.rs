@@ -35,7 +35,8 @@ impl Format {
         }
     }
 
-    /// Whether this format describes a **sampling** artifact (vs. an instrumenting one).
+    /// Whether this format is stack-shaped (folded/svg/speedscope). Historically "sampling", but
+    /// the instrumenting profiler now carries an exact call tree, so these render in either mode.
     pub fn is_sampling(self) -> bool {
         matches!(self, Format::Folded | Format::Svg | Format::Speedscope)
     }
@@ -53,7 +54,9 @@ pub fn render(report: &Report, format: Format) -> Result<Vec<u8>, String> {
     }
 }
 
-/// The instrumenting profiler's rows as a JSON array (name, file, line, calls, self_ns, total_ns).
+/// The instrumenting profiler's artifact: the per-function rows, plus — when the run carried the
+/// exact call tree — the speedscope-shaped stacks alongside (`shared`/`profiles`), so one artifact
+/// serves both the function table and an exact flamegraph (the VS Code profile view renders both).
 fn instrument_json(report: &Report) -> String {
     let rows: Vec<serde_json::Value> = report
         .functions
@@ -70,8 +73,13 @@ fn instrument_json(report: &Report) -> String {
             })
         })
         .collect();
-    serde_json::to_string_pretty(&serde_json::json!({ "functions": rows }))
-        .unwrap_or_else(|_| "{}".to_string())
+    let mut artifact = serde_json::json!({ "functions": rows });
+    if let Some(body) = speedscope_value(report) {
+        artifact["$schema"] = body["$schema"].clone();
+        artifact["shared"] = body["shared"].clone();
+        artifact["profiles"] = body["profiles"].clone();
+    }
+    serde_json::to_string_pretty(&artifact).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Render the flamegraph to an SVG string via `inferno` (from the folded stacks). Errors if inferno's
@@ -83,7 +91,11 @@ fn svg(report: &Report) -> Result<String, String> {
     }
     let mut opts = inferno::flamegraph::Options::default();
     opts.title = "noeta profile".to_string();
-    opts.count_name = "samples".to_string();
+    opts.count_name = report
+        .flamegraph
+        .as_ref()
+        .map(|f| f.unit.label().to_string())
+        .unwrap_or_else(|| "samples".to_string());
     let mut out: Vec<u8> = Vec::new();
     inferno::flamegraph::from_lines(&mut opts, folded.lines(), &mut out)
         .map_err(|e| format!("inferno flamegraph rendering failed: {e}"))?;
@@ -95,9 +107,17 @@ fn svg(report: &Report) -> Result<String, String> {
 /// structured `file`/`line`/`col` (speedscope-schema fields) so a consumer — the VS Code profile
 /// view — can jump to source without parsing labels. Each folded stack becomes one weighted sample.
 fn speedscope_json(report: &Report) -> String {
-    let Some(flame) = &report.flamegraph else {
-        return "{}".to_string();
-    };
+    match speedscope_value(report) {
+        Some(v) => serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string()),
+        None => "{}".to_string(),
+    }
+}
+
+/// The speedscope profile as a JSON value, or `None` when the report has no flamegraph. The
+/// weight `unit` comes from the flamegraph ("none" for sample counts, "nanoseconds" for the
+/// instrumenting call tree — speedscope and the VS Code view then format weights as time).
+fn speedscope_value(report: &Report) -> Option<serde_json::Value> {
+    let flame = report.flamegraph.as_ref()?;
 
     let frames: Vec<serde_json::Value> = flame
         .frames
@@ -129,12 +149,12 @@ fn speedscope_json(report: &Report) -> String {
         "profiles": [{
             "type": "sampled",
             "name": "noeta profile",
-            "unit": "none",
+            "unit": flame.unit.speedscope(),
             "startValue": 0,
             "endValue": flame.total,
             "samples": samples,
             "weights": weights,
         }],
     });
-    serde_json::to_string(&profile).unwrap_or_else(|_| "{}".to_string())
+    Some(profile)
 }

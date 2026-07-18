@@ -85,13 +85,41 @@ pub struct Report {
     pub flamegraph: Option<Flamegraph>,
 }
 
-/// A sampled flamegraph: a shared table of resolved frames plus every distinct call stack that was
-/// sampled (as index chains into that table), with its sample count. The same shape speedscope
+/// What one unit of a flamegraph's stack weight means — sample counts (the sampling profiler) or
+/// exact measured nanoseconds (the instrumenting profiler's call tree). Same shape, different unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlameUnit {
+    Samples,
+    Nanoseconds,
+}
+
+impl FlameUnit {
+    /// The short human label for a weight (`42 samples` / `42 ns`).
+    pub fn label(self) -> &'static str {
+        match self {
+            FlameUnit::Samples => "samples",
+            FlameUnit::Nanoseconds => "ns",
+        }
+    }
+    /// The speedscope-schema `unit` string.
+    pub fn speedscope(self) -> &'static str {
+        match self {
+            FlameUnit::Samples => "none",
+            FlameUnit::Nanoseconds => "nanoseconds",
+        }
+    }
+}
+
+/// A flamegraph: a shared table of resolved frames plus every distinct call stack (as index chains
+/// into that table), each with its weight — sample counts from the sampling profiler, or exact
+/// self-nanoseconds from the instrumenting call tree ([`FlameUnit`]). The same shape speedscope
 /// uses, so structured emitters map onto it directly; the folded text derives the labels.
 #[derive(Debug, Clone)]
 pub struct Flamegraph {
-    /// Total samples taken across the run.
+    /// Total weight across the run (samples taken, or nanoseconds measured).
     pub total: u64,
+    /// What one unit of weight means.
+    pub unit: FlameUnit,
     /// The shared frame table, indexed by [`FoldedStack::frames`]. Ordered by first use across the
     /// sorted stacks, so the table (like the stacks) is deterministic under the op-clock.
     pub frames: Vec<FrameInfo>,
@@ -159,8 +187,21 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
                 compiled.module.protos.len(),
             ));
             let (out, hook) = session::run(&compiled, Some(hook));
-            let functions = hook.map(|hook| resolve_functions(hook, &compiled));
-            report_from(out, functions, None)
+            let (functions, flamegraph) = match hook {
+                Some(hook) => {
+                    let collector = *hook
+                        .into_any()
+                        .downcast::<instrument::InstrumentCollector>()
+                        .expect("the instrument mode installs an InstrumentCollector");
+                    let (stats, tree) = collector.finish();
+                    (
+                        Some(resolve_functions(stats, &compiled)),
+                        Some(resolve_tree_flamegraph(tree, &compiled)),
+                    )
+                }
+                None => (None, None),
+            };
+            report_from(out, functions, flamegraph)
         }
         Mode::Sample { clock, lines } => {
             // Wall-clock sampling needs a timer thread bumping a shared atomic; op-clock is
@@ -260,17 +301,8 @@ pub fn top_functions(report: &Report, n: usize) -> Vec<(String, u64, f64)> {
 }
 
 /// Resolve the collector's raw per-proto counters into labelled, self-time-sorted [`FnStat`] rows.
-fn resolve_functions(
-    hook: Box<dyn noeta_vm::ProfileHook>,
-    compiled: &session::Compiled,
-) -> Vec<FnStat> {
-    let collector = *hook
-        .into_any()
-        .downcast::<instrument::InstrumentCollector>()
-        .expect("the instrument mode installs an InstrumentCollector");
-
-    let mut rows: Vec<FnStat> = collector
-        .finish()
+fn resolve_functions(stats: Vec<instrument::RawStat>, compiled: &session::Compiled) -> Vec<FnStat> {
+    let mut rows: Vec<FnStat> = stats
         .into_iter()
         .map(|raw| {
             let chunk = &compiled.module.protos[raw.proto as usize];
@@ -350,13 +382,69 @@ fn resolve_flamegraph(
         *merged.entry(indices).or_insert(0) += folded.count;
     }
 
+    finalize_flamegraph(total, FlameUnit::Samples, frames, merged)
+}
+
+/// Resolve the instrumenting collector's exact call tree into a [`Flamegraph`] weighted by
+/// measured self-nanoseconds: each tree node with self-time becomes one folded stack (its
+/// root→node proto path), so the flamegraph is exact — every call accounted, no sampling error.
+fn resolve_tree_flamegraph(
+    tree: Vec<instrument::RawTreeNode>,
+    compiled: &session::Compiled,
+) -> Flamegraph {
+    let mut frame_index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut frames: Vec<FrameInfo> = Vec::new();
+    let mut intern = |frame: FrameInfo| -> u32 {
+        if let Some(&i) = frame_index.get(&frame.label) {
+            return i;
+        }
+        let i = frames.len() as u32;
+        frame_index.insert(frame.label.clone(), i);
+        frames.push(frame);
+        i
+    };
+    // Each node's proto path, built parents-first (a parent always precedes its children in the
+    // trie's append order, so its path is already computed).
+    let mut paths: Vec<Vec<u32>> = Vec::with_capacity(tree.len());
+    for node in &tree {
+        let mut path = match node.parent {
+            Some(parent) => paths[parent as usize].clone(),
+            None => Vec::new(),
+        };
+        path.push(node.proto);
+        paths.push(path);
+    }
+    let mut total = 0u64;
+    let mut merged: std::collections::HashMap<Vec<u32>, u64> = std::collections::HashMap::new();
+    for (node, path) in tree.iter().zip(&paths) {
+        if node.self_ns == 0 {
+            continue; // an interior path with no own time — its children carry the weight
+        }
+        total += node.self_ns;
+        let indices: Vec<u32> = path
+            .iter()
+            .map(|&proto| intern(proto_frame(compiled, proto)))
+            .collect();
+        // Distinct paths can share a label chain (e.g. two anonymous protos resolving to one
+        // label), so merge by the interned chain exactly as the sampler does.
+        *merged.entry(indices).or_insert(0) += node.self_ns;
+    }
+    finalize_flamegraph(total, FlameUnit::Nanoseconds, frames, merged)
+}
+
+/// Order and pack an assembled flamegraph: heaviest stacks first (label-chain tiebreak for a
+/// deterministic order), then the frame table renumbered in first-use order over the sorted
+/// stacks, so the artifact is diffable (not hash-iteration-ordered).
+fn finalize_flamegraph(
+    total: u64,
+    unit: FlameUnit,
+    frames: Vec<FrameInfo>,
+    merged: std::collections::HashMap<Vec<u32>, u64>,
+) -> Flamegraph {
     let mut stacks: Vec<FoldedStack> = merged
         .into_iter()
         .map(|(frames, count)| FoldedStack { frames, count })
         .collect();
-    // Heaviest stacks first; ties broken by the folded label chain so the order is deterministic
-    // (the intern order above follows the collector's hash-map iteration, so indices can't be the
-    // tiebreak — labels can).
     stacks.sort_by(|a, b| {
         b.count.cmp(&a.count).then_with(|| {
             let la: Vec<&str> = a
@@ -373,8 +461,6 @@ fn resolve_flamegraph(
         })
     });
 
-    // Renumber the frame table in first-use order over the *sorted* stacks, so the table itself is
-    // deterministic (diffable speedscope output under the op-clock), not hash-iteration-ordered.
     let mut renumber: Vec<Option<u32>> = vec![None; frames.len()];
     let mut ordered: Vec<FrameInfo> = Vec::with_capacity(frames.len());
     for stack in &mut stacks {
@@ -389,6 +475,7 @@ fn resolve_flamegraph(
 
     Flamegraph {
         total,
+        unit,
         frames: ordered,
         stacks,
     }
@@ -517,7 +604,9 @@ fn default_format(mode: Mode) -> Option<Format> {
 fn format_fits(mode: Mode, format: Format) -> bool {
     match mode {
         Mode::Sample { .. } => format.is_sampling(),
-        Mode::Instrument => !format.is_sampling(),
+        // The instrumenting run carries the exact call tree, so the stack-shaped formats
+        // (folded/svg/speedscope) render from it too — every format fits.
+        Mode::Instrument => true,
         Mode::Summary => false,
     }
 }
@@ -532,8 +621,8 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
         && !format_fits(mode, format)
     {
         eprintln!(
-            "noeta profile: --format {format:?} does not apply to this mode (sampling formats \
-             need a sampling run; use --instrument for the table/json)"
+            "noeta profile: --format {format:?} does not apply to this mode (table/json need \
+             --instrument)"
         );
         return ExitCode::from(2);
     }

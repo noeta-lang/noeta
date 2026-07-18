@@ -1,4 +1,6 @@
-//! The **instrumenting** collector (P1): exact per-function call counts + self / total time.
+//! The **instrumenting** collector (P1): exact per-function call counts + self / total time, and —
+//! since the instrument-flamegraph slice — the exact **call tree**, so the instrumenting profiler
+//! renders a flamegraph too (weighted by measured self-nanoseconds rather than sample counts).
 //!
 //! It implements [`ProfileHook`], so the VM consults it before every interpreted op with a view of
 //! the live call stack. Rather than hook the VM's ~13 scattered frame push/pop sites, it keeps a
@@ -13,17 +15,41 @@
 //! by this frame's whole `elapsed`. **Total** (inclusive) time is counted only when a proto's
 //! *outermost* activation exits (a per-proto active-depth counter), so recursion never double-counts
 //! it. Counts and self-time are exact; total-time is exact for the outermost activation.
+//!
+//! The call tree is a trie over the same enter/exit events: a node is a distinct **path** of protos
+//! root→frame; enter descends (creating the child on first visit) and bumps the node's call count,
+//! exit banks the frame's self-time into the node it exits from. Per-path self-times sum exactly to
+//! the per-function self-times — the tree is the same measurement, keyed finer.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use noeta_vm::{DebugView, ProfileHook};
 
+/// The parent key of a root-level call-tree node (no parent).
+const ROOT: u32 = u32::MAX;
+
 /// One live activation on the shadow stack.
 struct Active {
     proto: u32,
+    /// The call-tree node this activation banks into (the path root→this frame).
+    node: u32,
     start: Instant,
     /// Time already banked to this frame's callees — subtracted from `elapsed` to get self-time.
     child_ns: u64,
+}
+
+/// One node of the exact call tree: a distinct root→frame path, with the calls that took exactly
+/// this path and the self-time banked while this path's leaf frame was executing.
+pub struct RawTreeNode {
+    /// The parent node's index, or `None` for a root-level frame.
+    pub parent: Option<u32>,
+    /// The prototype executing at this path's leaf.
+    pub proto: u32,
+    /// Activations that took exactly this path.
+    pub calls: u64,
+    /// Nanoseconds measured with this path's leaf as the executing frame (exclusive of callees).
+    pub self_ns: u64,
 }
 
 /// Per-function accumulator, keyed by prototype index (into `Module::protos`).
@@ -35,6 +61,10 @@ pub struct InstrumentCollector {
     /// Per-proto count of live activations (recursion depth), so inclusive time is banked only when
     /// the outermost activation of a proto exits.
     active: Vec<u32>,
+    /// The call-tree nodes, appended in first-visit order (a parent always precedes its children).
+    nodes: Vec<RawTreeNode>,
+    /// `(parent node | ROOT, proto)` → node index: the trie edges.
+    edges: HashMap<(u32, u32), u32>,
 }
 
 /// One function's raw counters, as the collector produced them (proto index + counts/times). The
@@ -55,6 +85,8 @@ impl InstrumentCollector {
             self_ns: vec![0; protos],
             total_ns: vec![0; protos],
             active: vec![0; protos],
+            nodes: Vec::new(),
+            edges: HashMap::new(),
         }
     }
 
@@ -62,8 +94,22 @@ impl InstrumentCollector {
         let i = proto as usize;
         self.calls[i] += 1;
         self.active[i] += 1;
+        // Descend the call tree: the current node's child for this proto (created on first visit).
+        let parent = self.stack.last().map(|a| a.node).unwrap_or(ROOT);
+        let nodes = &mut self.nodes;
+        let node = *self.edges.entry((parent, proto)).or_insert_with(|| {
+            nodes.push(RawTreeNode {
+                parent: (parent != ROOT).then_some(parent),
+                proto,
+                calls: 0,
+                self_ns: 0,
+            });
+            (nodes.len() - 1) as u32
+        });
+        self.nodes[node as usize].calls += 1;
         self.stack.push(Active {
             proto,
+            node,
             start: Instant::now(),
             child_ns: 0,
         });
@@ -72,12 +118,15 @@ impl InstrumentCollector {
     fn exit_top(&mut self) {
         let Active {
             proto,
+            node,
             start,
             child_ns,
         } = self.stack.pop().expect("exit_top on an empty shadow stack");
         let elapsed = start.elapsed().as_nanos() as u64;
+        let this_self = elapsed.saturating_sub(child_ns);
         let i = proto as usize;
-        self.self_ns[i] += elapsed.saturating_sub(child_ns);
+        self.self_ns[i] += this_self;
+        self.nodes[node as usize].self_ns += this_self;
         self.active[i] -= 1;
         if self.active[i] == 0 {
             self.total_ns[i] += elapsed;
@@ -88,12 +137,13 @@ impl InstrumentCollector {
     }
 
     /// Drain any activations still live at program end (the outermost `main`, and any leaf caught
-    /// mid-call by an abort), then produce one [`RawStat`] per function that was actually called.
-    pub fn finish(mut self) -> Vec<RawStat> {
+    /// mid-call by an abort), then produce one [`RawStat`] per function that was actually called,
+    /// plus the exact call tree.
+    pub fn finish(mut self) -> (Vec<RawStat>, Vec<RawTreeNode>) {
         while !self.stack.is_empty() {
             self.exit_top();
         }
-        (0..self.calls.len())
+        let stats = (0..self.calls.len())
             .filter(|&i| self.calls[i] > 0)
             .map(|i| RawStat {
                 proto: i as u32,
@@ -101,7 +151,8 @@ impl InstrumentCollector {
                 self_ns: self.self_ns[i],
                 total_ns: self.total_ns[i],
             })
-            .collect()
+            .collect();
+        (stats, self.nodes)
     }
 }
 
