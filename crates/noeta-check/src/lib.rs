@@ -1479,7 +1479,20 @@ impl Checker {
                 }
             }
             Stmt::Expr { expr, .. } => {
-                self.check(expr, &Type::Unknown, env);
+                // A `match` that is the whole of an expression statement has its value discarded, so
+                // block-bodied arms (aether F1) are legitimate here (side effects). Route it through
+                // `synth_match` with `value_used` false so it is not flagged E0055; any other
+                // expression is checked normally.
+                if let Expr::Match {
+                    scrutinee,
+                    arms,
+                    span,
+                } = expr
+                {
+                    self.synth_match(scrutinee, arms, *span, env, false);
+                } else {
+                    self.check(expr, &Type::Unknown, env);
+                }
             }
             Stmt::Return { value, span } => {
                 // In a generator, only bare `return;` is allowed (it ends iteration); a value has no

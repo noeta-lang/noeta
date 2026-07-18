@@ -18,7 +18,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | Item | Source / trigger |
 |---|---|
 | **Generic traits' default methods + generic-trait derive** — a generic user trait's defaults need per-implementor type substitution; today they are excluded (derive → E0050, defaults not hoisted: `noeta-check/collect.rs`, `noeta-ir/lower.rs`) | UT5 scope cut. Trigger: a generic trait wants defaults *(active — the natural next traits slice)* |
-| **Match arms take expressions only** — block/statement bodies in a `match` arm don't parse | aether F1 *(active)* |
 | **Closure inside a method capturing `self`/a field** — VM codegen gap (the reference interpreter handles it) | aether F3, deferred since M1.2. Trigger: any method-context closure *(active — user-visible backend asymmetry)* |
 | Forward / mutual capture among nested `fn`s (a closure capturing a local declared after it) | slice F1 residue. Trigger: a program with forward references between nested closures |
 | **`obj.f(args)` on a closure-valued field** — parsed unconditionally as method dispatch (E0005); needs the field-access-then-call desugar. With it: the `Callable`/`Members` protocols | M1.8 tail + coroutines Track-I. Trigger: member-handles / user iterators holding a `next` closure |
