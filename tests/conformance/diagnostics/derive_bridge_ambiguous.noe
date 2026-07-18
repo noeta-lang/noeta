@@ -1,0 +1,11 @@
+// Derive bridging deduction is deterministic: two type-compatible candidate fields for a required
+// method is E0050 naming them — ambiguity is a diagnostic, never a guess.
+// expect: error E0050 at 9:9
+// expect: exit 1
+trait Ordered {
+    fn value(): int
+    fn less(other: A): bool { return self.value() < other.value() }
+}
+@derive(Ordered)
+struct A { x: int; y: int }
+echo "unreached"

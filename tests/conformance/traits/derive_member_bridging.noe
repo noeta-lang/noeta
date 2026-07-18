@@ -1,0 +1,26 @@
+// Derive layer 1 — required-member bridging: `@derive(Trait, member: target)` bridges a required
+// trait method onto a field (explicit binding), and an unbound required method deduces its field —
+// same-name first, else the unique type-compatible candidate.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+trait Ordered {
+    fn value(): int
+    fn less(other: Money): bool { return self.value() < other.value() }
+}
+
+@derive(Ordered, value: amount)
+struct Money { amount: int }
+
+// Deduction by unique type-compatible field (`count` is the only `int`).
+trait Sized2 {
+    fn size(): int
+    fn empty(): bool { return self.size() == 0 }
+}
+@derive(Sized2)
+struct Bag { label: string; count: int }
+
+echo Money { amount: 3 }.less(Money { amount: 5 })
+echo Bag { label: "b", count: 0 }.empty()
+echo Bag { label: "b", count: 2 }.empty()

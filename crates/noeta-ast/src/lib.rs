@@ -10,6 +10,7 @@
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
+pub mod derive;
 pub mod desugar;
 mod pretty;
 pub mod reflect;
@@ -360,6 +361,22 @@ pub struct DeriveSpec {
     pub name: String,
     /// Generic type arguments (`<Json>`); empty for a nullary derive.
     pub args: Vec<TypeRef>,
+    /// Explicit required-member bindings (`@derive(Ordered, value: amount)`, derive layer 1): the
+    /// trait's required method name → the deriving type's member to bridge it to. Empty for the
+    /// common unbound derive (deduction covers it).
+    pub bindings: Vec<MemberBinding>,
+    /// Whole-trait delegation (`@derive(Comparable, via: amount)`, derive layer 2): forward the
+    /// trait through this field. Mutually exclusive with `bindings`.
+    pub via: Option<(String, Span)>,
+    pub span: Span,
+}
+
+/// One `member: target` pair on a derive (`@derive(Ordered, value: amount)`): bridge the trait's
+/// required `member` to the deriving type's `target` field or method.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberBinding {
+    pub member: String,
+    pub target: String,
     pub span: Span,
 }
 

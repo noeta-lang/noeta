@@ -913,7 +913,7 @@ impl Pretty for Expr {
 }
 
 /// Render a [`TypeRef`] back to its surface spelling (`int`, `List<int>`, `?User`) for snapshots.
-fn type_ref_str(ty: &TypeRef) -> String {
+pub(crate) fn type_ref_str(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Optional { inner, .. } => format!("?{}", type_ref_str(inner)),
         TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),

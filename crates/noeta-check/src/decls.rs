@@ -121,7 +121,7 @@ impl Checker {
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&r.fields, env);
-        self.check_derives(&r.name, &r.derives);
+        self.check_derives(&r.name, &r.derives, &r.fields, &r.methods, !r.type_params.is_empty());
         let standalone = self.standalone_for(&r.name);
         // A struct carries in-body `impl Trait { }` blocks and inherent methods (the unified body),
         // checked exactly as a class's — coherence over its impls, then each method body.
@@ -162,7 +162,7 @@ impl Checker {
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&c.fields, env);
-        self.check_derives(&c.name, &c.derives);
+        self.check_derives(&c.name, &c.derives, &c.fields, &c.methods, !c.type_params.is_empty());
         let standalone = self.standalone_for(&c.name);
         self.check_coherence(&c.derives, &c.impls, &standalone);
         self.check_attrs(&c.attrs, TargetKind::Class);
@@ -198,7 +198,7 @@ impl Checker {
             }
             self.check_attrs(&variant.attrs, TargetKind::Variant);
         }
-        self.check_derives(&e.name, &e.derives);
+        self.check_derives(&e.name, &e.derives, &[], &e.methods, !e.type_params.is_empty());
         let standalone = self.standalone_for(&e.name);
         // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body,
         // object-model slice 3), checked exactly as a class's — coherence over its impls, then each

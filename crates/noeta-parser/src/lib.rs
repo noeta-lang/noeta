@@ -494,18 +494,59 @@ fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
 /// Project a directive's arguments onto [`DeriveSpec`]s — the trait name plus its generic type
 /// arguments (`Serialize<Json>` → `name: "Serialize"`, `args: [Json]`). A non-generic derive has
 /// empty `args`; a stray `.`-qualifier on a derive argument is ignored (the checker never sees a
-/// valid program with one).
-fn directive_derive_specs(args: Vec<DirectiveArg>) -> Vec<DeriveSpec> {
-    args.into_iter()
-        .map(|((name, span), suffix)| DeriveSpec {
-            name,
-            args: match suffix {
-                Some(DirectiveSuffix::Generic(type_args)) => type_args,
-                _ => Vec::new(),
-            },
-            span,
-        })
-        .collect()
+/// valid program with one). A **named** argument configures the *preceding* trait (derive layers
+/// 1+2): `via: field` is whole-trait delegation, any other `member: target` is a required-member
+/// binding — `@derive(Ordered, value: amount)`. A named argument with no preceding trait is E0037.
+fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec> {
+    let mut specs: Vec<DeriveSpec> = Vec::new();
+    for ((name, span), suffix) in args {
+        match suffix {
+            Some(DirectiveSuffix::Named((target, target_span))) => {
+                let Some(spec) = specs.last_mut() else {
+                    ctx.diags.borrow_mut().push(
+                        Diagnostic::error(
+                            DiagnosticCode::InvalidDirectiveArgument,
+                            span,
+                            format!("`{name}: {target}` must follow the trait it configures"),
+                        )
+                        .with_help(format!(
+                            "write `@derive(Trait, {name}: {target})` — a named argument binds to \
+                             the trait before it"
+                        )),
+                    );
+                    continue;
+                };
+                if name == "via" {
+                    if spec.via.is_some() {
+                        ctx.diags.borrow_mut().push(Diagnostic::error(
+                            DiagnosticCode::InvalidDirectiveArgument,
+                            span,
+                            format!("duplicate `via:` on `@derive({})`", spec.name),
+                        ));
+                        continue;
+                    }
+                    spec.via = Some((target, target_span));
+                } else {
+                    spec.bindings.push(noeta_ast::MemberBinding {
+                        member: name,
+                        target,
+                        span: span.merge(target_span),
+                    });
+                }
+            }
+            suffix => specs.push(DeriveSpec {
+                name,
+                args: match suffix {
+                    Some(DirectiveSuffix::Generic(type_args)) => type_args,
+                    _ => Vec::new(),
+                },
+                bindings: Vec::new(),
+                via: None,
+                span,
+            }),
+        }
+    }
+    specs
 }
 
 /// Project one directive argument onto a [`RoleTag`]. A qualified `Enum.Variant` fills both names; a
@@ -3423,7 +3464,7 @@ where
                             // anywhere). `@role(Enum.Variant, …)` — semantic-role tags (accumulated
                             // across directives). `@semantic` — marks an enum role-eligible. The
                             // checker validates each one's arguments and the records-only rule.
-                            "derive" => derives.extend(directive_derive_specs(args)),
+                            "derive" => derives.extend(directive_derive_specs(args, &ctx)),
                             "attribute" => attribute = Some(directive_heads(args)),
                             "role" => role
                                 .get_or_insert_with(Vec::new)
@@ -4184,6 +4225,35 @@ mod tests {
         };
         assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Row));
         assert_eq!(s.derives.len(), 1); // @packed coexists with @derive
+    }
+
+    #[test]
+    fn derive_named_arguments_bind_to_the_preceding_trait() {
+        // Derive layers 1+2: `member: target` bindings and `via:` attach to the trait before them.
+        let parsed = parse_str(
+            "@derive(Ordered, value: amount, Greet, via: inner)\nstruct M { amount: int\n inner: int }\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Struct(s) = &parsed.program.stmts[0] else {
+            panic!("expected struct");
+        };
+        assert_eq!(s.derives.len(), 2);
+        assert_eq!(s.derives[0].name, "Ordered");
+        assert_eq!(s.derives[0].bindings.len(), 1);
+        assert_eq!(s.derives[0].bindings[0].member, "value");
+        assert_eq!(s.derives[0].bindings[0].target, "amount");
+        assert!(s.derives[0].via.is_none());
+        assert_eq!(s.derives[1].name, "Greet");
+        assert_eq!(s.derives[1].via.as_ref().map(|(f, _)| f.as_str()), Some("inner"));
+        // A named argument with no preceding trait is E0037.
+        let bad = parse_str("@derive(value: amount)\nstruct M { amount: int }\n");
+        assert!(
+            bad.diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::InvalidDirectiveArgument),
+            "got {:?}",
+            bad.diagnostics
+        );
     }
 
     #[test]

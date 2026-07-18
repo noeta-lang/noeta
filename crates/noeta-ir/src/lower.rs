@@ -302,31 +302,70 @@ pub fn hoist_standalone_impl_methods(program: &AstProgram) -> Option<AstProgram>
         AstStmt::Enum(d) => body_references_trait(&d.impls, &d.derives),
         _ => false,
     });
+    // A builtin `via:` derive (`@derive(Comparable, via: amount)`) synthesizes a method even with
+    // no user trait in the program.
+    let has_via = |derives: &[noeta_ast::DeriveSpec]| derives.iter().any(|d| d.via.is_some());
+    let body_needs = body_needs
+        || program.stmts.iter().any(|s| match s {
+            AstStmt::Struct(d) => has_via(&d.derives),
+            AstStmt::Class(d) => has_via(&d.derives),
+            AstStmt::Enum(d) => has_via(&d.derives),
+            _ => false,
+        });
     if additions.is_empty() && !body_needs {
         return None;
     }
     let mut changed = false;
     let mut cloned = program.clone();
     for stmt in &mut cloned.stmts {
-        let (name, methods, impls, derives) = match stmt {
-            AstStmt::Struct(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
-            AstStmt::Class(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
-            AstStmt::Enum(d) => (&d.name, &mut d.methods, &d.impls, &d.derives),
+        let (name, methods, fields, impls, derives) = match stmt {
+            AstStmt::Struct(d) => (
+                &d.name,
+                &mut d.methods,
+                d.fields.as_slice(),
+                &d.impls,
+                &d.derives,
+            ),
+            AstStmt::Class(d) => (
+                &d.name,
+                &mut d.methods,
+                d.fields.as_slice(),
+                &d.impls,
+                &d.derives,
+            ),
+            AstStmt::Enum(d) => (
+                &d.name,
+                &mut d.methods,
+                &[] as &[noeta_ast::FieldDecl],
+                &d.impls,
+                &d.derives,
+            ),
             _ => continue,
         };
-        // UT5 for the unified body: an in-body `impl Trait { … }` block's omitted defaults, and a
-        // `@derive(UserTrait)` (which adopts every default — the checker enforces the trait is
-        // fully defaulted). The parser already copied an in-body impl's OWN methods into
-        // `methods`, so the name-skip makes provided overrides win here too.
-        let mut defaults: Vec<FnDecl> = Vec::new();
+        // UT5 for the unified body: an in-body `impl Trait { … }` block's omitted defaults, plus a
+        // derive's *planned* methods (derive layers 1+2 — defaults adopted, required members
+        // bridged onto fields/methods, `via:` forwards, builtin `via:` templates) from the shared
+        // planner the checker validates with. A plan error contributes nothing here — the checker
+        // reports it and the program does not run. The parser already copied an in-body impl's OWN
+        // methods into `methods`, so the name-skip makes provided overrides win here too.
+        let mut synthesized: Vec<FnDecl> = Vec::new();
         for block in impls {
-            defaults.extend(omitted_defaults(&block.trait_name, methods));
+            synthesized.extend(omitted_defaults(&block.trait_name, methods));
         }
         for spec in derives {
-            defaults.extend(omitted_defaults(&spec.name, methods));
+            let planned = if let Some(t) = traits.get(spec.name.as_str()) {
+                noeta_ast::derive::plan_user_trait_derive(t, fields, methods, spec)
+            } else if spec.via.is_some() {
+                noeta_ast::derive::plan_builtin_via(&spec.name, name, fields, spec)
+            } else {
+                continue;
+            };
+            if let Ok(planned) = planned {
+                synthesized.extend(planned);
+            }
         }
         let add = additions.get(name.as_str()).cloned().unwrap_or_default();
-        for m in add.into_iter().chain(defaults) {
+        for m in add.into_iter().chain(synthesized) {
             if !methods.iter().any(|existing| existing.name == m.name) {
                 methods.push(m);
                 changed = true;

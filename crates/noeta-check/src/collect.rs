@@ -546,6 +546,41 @@ impl Checker {
                 }
             }
         }
+        // Derive bridging/delegation (layers 1+2): a derive's *planned* methods — required-member
+        // bridges, `via:` forwards, builtin `via:` templates — register their signatures, from
+        // the same shared planner the backends' hoist materializes, so what the checker types and
+        // what runs can never drift. Runs BEFORE the generic UT5 defaults loop below: a `via:`
+        // forward replaces the trait's default wholesale (delegation dispatches into the field's
+        // implementation), and registration keeps the first entry per name. A plan error is
+        // ignored here; `check_derives` reports it.
+        for stmt in &program.stmts {
+            let (type_name, fields, methods, derives): (
+                &str,
+                &[FieldDecl],
+                &[noeta_ast::FnDecl],
+                &[DeriveSpec],
+            ) = match stmt {
+                Stmt::Struct(d) => (&d.name, &d.fields, &d.methods, &d.derives),
+                Stmt::Class(d) => (&d.name, &d.fields, &d.methods, &d.derives),
+                Stmt::Enum(d) => (&d.name, &[], &d.methods, &d.derives),
+                _ => continue,
+            };
+            for spec in derives {
+                let planned = if let Some(tr) = self.symbols.user_traits.get(&spec.name).cloned() {
+                    noeta_ast::derive::plan_user_trait_derive(&tr, fields, methods, spec)
+                } else if spec.via.is_some() {
+                    noeta_ast::derive::plan_builtin_via(&spec.name, type_name, fields, spec)
+                } else {
+                    continue;
+                };
+                if let Ok(planned) = planned {
+                    let type_name = type_name.to_string();
+                    for m in &planned {
+                        self.register_synth_method(&type_name, m);
+                    }
+                }
+            }
+        }
         // Default-method fallback (UT5): a trait method the implementor omits falls back to the
         // trait's default body (the backends hoist it via `hoist_standalone_impl_methods`), so its
         // SIGNATURE registers here — member calls on the implementing type resolve and type it. A
@@ -561,35 +596,7 @@ impl Checker {
                     continue;
                 }
                 for tm in decl.methods.iter().filter(|tm| tm.has_default) {
-                    let key = (type_name.clone(), tm.sig.name.clone());
-                    if self.symbols.methods.contains_key(&key) {
-                        continue;
-                    }
-                    let m = &tm.sig;
-                    let params: Vec<Type> = m
-                        .params
-                        .iter()
-                        .map(|p| param_type(p, &self.imports.extern_types))
-                        .collect();
-                    let ret = async_return(
-                        m.ret
-                            .as_ref()
-                            .map(|t| from_ref_q(t, &self.imports.extern_types))
-                            .unwrap_or(Type::Unknown),
-                        m.is_async,
-                    );
-                    self.symbols
-                        .method_instance
-                        .insert(key.clone(), m.body.iter().any(|s| s.mentions("self")));
-                    self.symbols.methods.insert(
-                        key,
-                        FnSig {
-                            params,
-                            ret,
-                            required: required_params(&m.params),
-                            generic: None,
-                        },
-                    );
+                    self.register_synth_method(&type_name, &tm.sig);
                 }
             }
         }
@@ -658,6 +665,41 @@ impl Checker {
             .attribute_optional_fields
             .get(attr_name)
             .is_some_and(|set| set.contains(field))
+    }
+
+    /// Register a synthesized/fallback method's signature and instance classification for
+    /// `type_name`, unless the type already has one by that name — the registration UT5 default
+    /// fallback and derive bridging share (the body itself is materialized by the backends'
+    /// hoist; the checker needs the signature so member calls resolve and type).
+    fn register_synth_method(&mut self, type_name: &str, m: &noeta_ast::FnDecl) {
+        let key = (type_name.to_string(), m.name.clone());
+        if self.symbols.methods.contains_key(&key) {
+            return;
+        }
+        let params: Vec<Type> = m
+            .params
+            .iter()
+            .map(|p| param_type(p, &self.imports.extern_types))
+            .collect();
+        let ret = async_return(
+            m.ret
+                .as_ref()
+                .map(|t| from_ref_q(t, &self.imports.extern_types))
+                .unwrap_or(Type::Unknown),
+            m.is_async,
+        );
+        self.symbols
+            .method_instance
+            .insert(key.clone(), m.body.iter().any(|s| s.mentions("self")));
+        self.symbols.methods.insert(
+            key,
+            FnSig {
+                params,
+                ret,
+                required: required_params(&m.params),
+                generic: None,
+            },
+        );
     }
 
     /// Record that user type `name` satisfies each of `traits` (its `@derive`/`impl` names). Only

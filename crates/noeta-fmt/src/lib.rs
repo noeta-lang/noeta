@@ -694,6 +694,20 @@ mod tests {
     }
 
     #[test]
+    fn derive_bindings_and_via_are_preserved_and_idempotent() {
+        // Derive layers 1+2: `member: target` bindings and `via:` delegation must survive
+        // formatting — dropping either silently changes which implementation the derive
+        // synthesizes.
+        let out = fmt(
+            "@derive(Ordered, value: amount)\n@derive(Comparable, via: cents)\nstruct Money { amount: int\n cents: int }\n",
+        )
+        .unwrap();
+        assert!(out.contains("Ordered, value: amount"), "got:\n{out}");
+        assert!(out.contains("Comparable, via: cents"), "got:\n{out}");
+        assert_eq!(fmt(&out).unwrap(), out, "bindings/via form is idempotent");
+    }
+
+    #[test]
     fn indentation_width_tabs_and_final_newline_are_configurable() {
         let src = "fn f(): int {\nreturn 1\n}\n";
         let two = format_source(
