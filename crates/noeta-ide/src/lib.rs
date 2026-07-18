@@ -1257,6 +1257,16 @@ impl DocumentStore {
 
         let lang = registry.text_lang(&tier);
         let value = registry.expr_type(&tier);
+        // The built-in documentation tier gets tailored prose, like the code tiers below — the
+        // generic "text tier — markdown body" line undersells what `@doc` actually does.
+        if tier == "doc" {
+            let descriptor = "documentation tier `@doc` — markdown prose that attaches to the \
+                              declaration it precedes (a fn, method, or type), or documents the \
+                              module when none follows. Surfaces in hover, the docs browser, and \
+                              `noeta doc`"
+                .to_string();
+            return Some((descriptor, index.range(tier_span, encoding)));
+        }
         let descriptor = match (value, lang) {
             (Some(ty), Some(lang)) => {
                 format!("expression tier `@{tier}` — `{lang}` body, evaluates to `{ty}`")
@@ -3448,7 +3458,9 @@ mod tests {
         let on_doc = store.hover_tier("file:///a.noe", Position::new(0, 1), Encoding::Utf16);
         assert_eq!(
             on_doc.as_ref().map(|(d, _)| d.as_str()),
-            Some("text tier `@doc` — `markdown` body")
+            Some(concat!(
+                "documentation tier `@doc` — markdown prose that attaches to the declaration it precedes (a fn, method, or type), or documents the module when none follows. Surfaces in hover, the docs browser, and `noeta doc`"
+            ))
         );
     }
 
