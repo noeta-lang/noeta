@@ -1054,6 +1054,42 @@ fn link_core(
         }
     }
 
+    // **Implicit FQN imports**: a bare fully-qualified reference (`geometry.vec.Vec2 { … }`,
+    // `geometry.vec.add(a, b)`) with no `use` at all acts as its own import — the manifest already
+    // imports a dependency to a namespace, so anything under a loaded module's namespace is
+    // addressable by spelling it out. Every dotted reference candidate in the entry and each
+    // dependency driver (the same closed unit whose `use`s drive imports above) that resolves to a
+    // loaded module's `pub` declaration merges exactly like an explicit import — qualified, deduped
+    // through `merged_q`, dragging its same-module closure. No local name binds (nothing to
+    // collide); a candidate that resolves to nothing is just an ordinary member chain and is
+    // skipped (the checker reports a genuinely-unknown name).
+    for stmts in std::iter::once(&entry_program.stmts).chain(dep_drivers.iter().map(|d| &d.stmts)) {
+        for stmt in stmts {
+            for candidate in qualify::referenced_names(stmt) {
+                let Some((mpath, dname)) = split_fqn(&candidate, &module_views) else {
+                    continue;
+                };
+                if let Resolution::Resolved(decl) = resolve(&module_views, &mpath, dname)
+                    && merged_q.insert(candidate.clone())
+                {
+                    let mut decl = *decl;
+                    if let Some(map) = module_maps.get(&mpath) {
+                        qualify::qualify_stmt(&mut decl, map);
+                    }
+                    imported.push(decl);
+                    merge_module_closure(
+                        &mpath,
+                        dname,
+                        &module_views,
+                        &module_maps,
+                        &mut merged_q,
+                        &mut imported,
+                    );
+                }
+            }
+        }
+    }
+
     // A standalone `impl Trait for T {}` in a pooled module (a sibling, or a dependency's own module)
     // has no import name, so the `use`-driven merge above never pulls it — yet coherence requires an
     // impl to travel with its target type (a `dyn Trait` coercion or a bound check needs to see it).
@@ -1292,7 +1328,37 @@ fn build_module_map(
             }
         }
     }
+    // Bare FQN references with **no `use` at all** (`geometry.vec.Vec2 { … }` cold): every dotted
+    // reference this module spells that resolves to `<loaded module>.<pub decl>` gets an identity
+    // key, so its member chains collapse like an import's would. The FQN *is* the import — the
+    // matching declaration merge is the implicit-import pass in `link_core`.
+    for stmt in own_stmts {
+        for candidate in qualify::referenced_names(stmt) {
+            if !map.contains_key(&candidate)
+                && let Some((mpath, dname)) = split_fqn(&candidate, modules)
+                && matches!(resolve(modules, &mpath, dname), Resolution::Resolved(_))
+            {
+                map.insert(candidate.clone(), candidate);
+            }
+        }
+    }
     map
+}
+
+/// Split a dotted reference candidate into `(module path, declaration name)` when its prefix is a
+/// loaded module's namespace — `geometry.vec.Vec2` → `(["geometry", "vec"], "Vec2")`. `None` when
+/// no loaded module matches (an ordinary member chain like `customer.name`). Chain candidates
+/// arrive one prefix at a time (the collapse walk visits every length), so a single split
+/// suffices.
+fn split_fqn<'c>(candidate: &'c str, modules: &[ModuleView]) -> Option<(Vec<String>, &'c str)> {
+    let (prefix, dname) = candidate.rsplit_once('.')?;
+    modules
+        .iter()
+        .find(|m| {
+            m.namespace.len() == prefix.split('.').count()
+                && m.namespace.iter().map(String::as_str).eq(prefix.split('.'))
+        })
+        .map(|m| (m.namespace.clone(), dname))
 }
 
 /// How the linker treats a `use` whose namespace no loaded module declares — the choice turns on
