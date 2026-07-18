@@ -5,3 +5,6 @@
 **/*.vsix
 .vscode-test/**
 package-lock.json
+test/**
+node_modules/vscode-textmate/**
+node_modules/vscode-oniguruma/**

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.1
+
+Fixes auto-indent after a **multi-line tier block** (`@doc { ... }`, `@sql { ... }`, ...): pressing
+Enter after the closing `}` indented the next line to the block *body's* level. VS Code evaluates
+its indentation rules against lines with brackets in comment/string tokens removed, so the
+delimiter braces' `.comment.` scopes made the closing `}` invisible to `decreaseIndentPattern`.
+The delimiter braces are now scoped `punctuation.section.tier.begin/end.noeta` (no `comment`), while
+the body content -- and any braces *in* the prose -- stay comment-scoped (still excluded from
+bracket matching). Adds a grammar+indent regression suite (`npm test`) that tokenizes with the real
+grammars and drives a port of VS Code's indent algorithm.
+
 ## 0.7.1
 
 Text tiers (text-tiers arc): `@doc { ... }` bodies now highlight as **embedded markdown** and are
