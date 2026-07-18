@@ -289,7 +289,13 @@ impl<'m> Vm<'m> {
                             dbg.before_op(proto as u32, pc, &view)
                         };
                         match action {
-                            DebugAction::Continue => break,
+                            DebugAction::Continue => {
+                                // The program resumes (continue or a landed step): the observed
+                                // state may change before the next stop, so advance the generation
+                                // and invalidate every memoized watch result (watch-memoization).
+                                self.bump_stop_generation();
+                                break;
+                            }
                             DebugAction::Terminate => {
                                 self.debugger = Some(dbg);
                                 return Err(Abort);
@@ -302,19 +308,20 @@ impl<'m> Vm<'m> {
                                     text,
                                     frame,
                                     scope,
-                                    allow_calls,
+                                    kind,
                                     reply,
                                 } = req;
                                 // Every evaluate compiles through the adopted session (T5): full
-                                // language for a watch/console, and for a hover
-                                // (`allow_calls = false`) the same engine gated to the read-only
-                                // surface (T6) — one evaluator, not two.
+                                // language for a watch/console, and for a hover the same engine
+                                // gated to the read-only surface (T6) — one evaluator, not two. The
+                                // `kind` also drives watch-memoization (cache reuse + generation
+                                // bumping) inside `debug_eval_fragment`.
                                 let outcome = if self.debug_session.is_some() {
                                     self.debug_eval_fragment(
                                         &program,
                                         frame,
                                         &scope,
-                                        !allow_calls,
+                                        kind,
                                         &text,
                                         &frames[..],
                                         &regs[..],

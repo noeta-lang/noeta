@@ -18,7 +18,7 @@ use noeta_parser::parse_fragment;
 use noeta_span::{SourceId, SourceMap};
 use noeta_vm::debug::{StepState, capture, frame_param_names};
 use noeta_vm::{
-    DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugSetRequest, DebugView, Debugger,
+    DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugSetRequest, DebugView, Debugger, EvalKind,
 };
 use serde_json::{Value, json};
 
@@ -39,15 +39,16 @@ pub enum Resume {
     /// the client numbers stack frames, innermost first) and send the rendered result back on
     /// `reply`. The debugger cannot run this itself — running code needs `&mut Vm` — so it hands
     /// the request to the VM (via [`DebugAction::Evaluate`]); the program **stays paused**
-    /// throughout, so a watch/hover re-query never resumes it. With `allow_calls` the VM compiles
-    /// the fragment through the debug session (full language, closures included — T5);
-    /// `allow_calls = false` (a hover) stays side-effect-free and refuses to run code.
+    /// throughout, so a watch/hover re-query never resumes it. When the [`EvalKind`] allows calls
+    /// the VM compiles the fragment through the debug session (full language, closures included —
+    /// T5); a hover ([`EvalKind::Hover`]) stays side-effect-free and refuses to run code. The kind
+    /// also drives watch-memoization in the VM.
     Evaluate {
         program: Program,
         /// The raw console string, for the VM's compiled-wrapper memo (U3).
         text: String,
         frame: usize,
-        allow_calls: bool,
+        kind: EvalKind,
         reply: Sender<DebugEvalOutcome>,
     },
     /// Write a paused frame's local (the Variables-panel edit, U1): evaluate `value` as a console
@@ -182,10 +183,11 @@ impl DapDebugger {
                     program,
                     text,
                     frame,
-                    allow_calls,
+                    kind,
                     reply,
                 }) => {
-                    if allow_calls && let Err(message) = self.check_fragment(&program, frame, view)
+                    if kind.allows_calls()
+                        && let Err(message) = self.check_fragment(&program, frame, view)
                     {
                         let _ = reply.send(DebugEvalOutcome::Error(message));
                         continue;
@@ -199,7 +201,7 @@ impl DapDebugger {
                         text,
                         frame,
                         scope,
-                        allow_calls,
+                        kind,
                         reply,
                     });
                 }

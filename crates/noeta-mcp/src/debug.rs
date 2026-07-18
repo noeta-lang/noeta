@@ -30,7 +30,9 @@ use noeta_span::{Source, SourceId, SourceMap};
 use noeta_vm::debug::{
     StepMode, StepState, capture, frame_param_names, resolve_breakpoints, statement_starts,
 };
-use noeta_vm::{DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger, VmBackend};
+use noeta_vm::{
+    DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger, EvalKind, VmBackend,
+};
 use rmcp::ErrorData;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
@@ -360,7 +362,9 @@ impl McpDebugger {
                         text,
                         frame,
                         scope,
-                        allow_calls: true,
+                        // The agent debug-eval tool is an explicit console entry (it may run code
+                        // and mutate state) — not a memoized watch.
+                        kind: EvalKind::Console,
                         reply,
                     });
                 }

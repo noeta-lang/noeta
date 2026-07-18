@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 use debugger::{
     DapDebugger, FrameInfo, Paused, Resume, StepMode, parse_console_fragment, resolve_breakpoints,
 };
-use noeta_vm::DebugEvalOutcome;
+use noeta_vm::{DebugEvalOutcome, EvalKind};
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
 /// The debuggee is a single logical thread of execution; the DAP UI still needs a thread id to hang
@@ -492,8 +492,15 @@ fn evaluate(
         .and_then(|a| a.get("frameId"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
-    // A hover must not run code (VS Code fires it on mouse-over); a watch / debug console may.
-    let allow_calls = args.and_then(|a| a.get("context")).and_then(Value::as_str) != Some("hover");
+    // Map the DAP `context` to how the VM treats the fragment (watch-memoization): a hover is
+    // read-only (no code runs); a watch is a re-rendered observation whose result is memoized within
+    // a stop; anything else (the debug console `repl`, clipboard, …) is an explicit console entry
+    // that may mutate state and so bumps the stop generation.
+    let kind = match args.and_then(|a| a.get("context")).and_then(Value::as_str) {
+        Some("hover") => EvalKind::Hover,
+        Some("watch") => EvalKind::Watch,
+        _ => EvalKind::Console,
+    };
     let program = parse_console_fragment(expression).ok_or("could not parse the expression")?;
     // Evaluation reads the paused frames on the run worker — there must be a paused program.
     if with_paused(paused, |_| ()).is_none() {
@@ -506,7 +513,7 @@ fn evaluate(
             program,
             text: expression.to_string(),
             frame,
-            allow_calls,
+            kind,
             reply: reply_tx,
         })
         .map_err(|_| "the program is no longer running".to_string())?;
@@ -1046,6 +1053,143 @@ mod tests {
         );
         // ...and the frame local is untouched.
         assert_eq!(session.evaluate("xs.len()")["body"]["result"], "3");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// A `tick`-counting fixture for the watch-memoization tests: `tick()` returns the running count
+    /// of how many times it was called (it reassigns a `mut` global), so re-running it is *visible*
+    /// as an incremented result. Breaking on the first `echo` line of `probe` (line 7) leaves both
+    /// globals bound.
+    fn tick_fixture() -> String {
+        let path = fixture(
+            "watch_memo",
+            "mut counter = 0\n\
+             fn tick(): int {\n    \
+             counter = counter + 1\n    \
+             return counter\n}\n\
+             fn probe(): void {\n    \
+             echo \"a\"\n    \
+             echo \"b\"\n}\n\
+             probe()\n",
+        );
+        path.to_str().unwrap().to_string()
+    }
+
+    /// Launch `program`, break on `line`, and return the running session paused there.
+    fn launch_stopped_at(program: &str, line: i64) -> Session {
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": line } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+        session
+    }
+
+    /// Watch-memoization: an observational watch (`tick()`) is evaluated ONCE per stop — a repeated
+    /// render at the same stop returns the memoized result without re-running it — and the memo is
+    /// invalidated on a step, so the watch runs afresh at the next stop.
+    #[test]
+    fn watch_results_are_memoized_within_a_stop_and_reevaluated_after_a_step() {
+        let program = tick_fixture();
+        let mut session = launch_stopped_at(&program, 7);
+
+        // First render runs `tick()` (counter 0 → 1); the second render at the SAME stop is a memo
+        // hit — the same value, and `tick()` did NOT run again (counter is still 1).
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "1");
+        assert_eq!(
+            session.evaluate("tick()")["body"]["result"],
+            "1",
+            "a repeated watch at the same stop is memoized — it must not re-run"
+        );
+
+        // Stepping to the next line is a new stop: the memo is invalidated and `tick()` runs again
+        // (counter 1 → 2), and re-rendering at THIS stop is memoized at the new value.
+        session.step("next");
+        assert_eq!(
+            session.evaluate("tick()")["body"]["result"],
+            "2",
+            "a step invalidates the watch memo — the watch re-evaluates"
+        );
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "2");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// Watch-memoization: a debug-console (`repl`) entry that mutates state, and a `setVariable`
+    /// write, each invalidate the memoized watch results — the next render re-evaluates against the
+    /// changed state.
+    #[test]
+    fn console_mutation_and_set_variable_invalidate_memoized_watches() {
+        let program = tick_fixture();
+        let mut session = launch_stopped_at(&program, 7);
+
+        // Prime the watch memo (counter 0 → 1), then confirm the memo hit.
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "1");
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "1");
+
+        // A console entry (`repl` context) reassigns the global — an explicit mutation. It bumps the
+        // stop generation, so the next watch render re-runs `tick()` against `counter == 100`.
+        let mutate = session.evaluate_in("counter = 100", "repl");
+        assert_eq!(mutate["success"], true, "{mutate:#?}");
+        assert_eq!(
+            session.evaluate("tick()")["body"]["result"],
+            "101",
+            "a console mutation invalidates the watch memo"
+        );
+        // ...and re-rendering at the same stop is memoized again (still 101 — `tick()` did not run).
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "101");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// Watch-memoization: a `setVariable` write to a paused frame local invalidates a watch reading
+    /// that local — the memoized value does not go stale.
+    #[test]
+    fn set_variable_invalidates_a_watch_on_the_written_local() {
+        let path = fixture(
+            "watch_memo_setvar",
+            "fn probe(): void {\n    \
+             mut n = 10\n    \
+             echo n\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+        let mut session = launch_stopped_at(&program, 3);
+
+        // Prime a watch on the frame local `n` (memoized at 10).
+        assert_eq!(session.evaluate("n")["body"]["result"], "10");
+        assert_eq!(session.evaluate("n")["body"]["result"], "10");
+
+        // Write the local through the Variables panel; this bumps the generation.
+        session.send("scopes", json!({ "frameId": 0 }));
+        let scopes = session.response("scopes");
+        let var_ref = scopes["body"]["scopes"][0]["variablesReference"]
+            .as_i64()
+            .unwrap();
+        session.send(
+            "setVariable",
+            json!({ "variablesReference": var_ref, "name": "n", "value": "99" }),
+        );
+        assert_eq!(session.response("setVariable")["success"], true);
+
+        // The watch re-evaluates and sees the written value — not the stale memo.
+        assert_eq!(
+            session.evaluate("n")["body"]["result"],
+            "99",
+            "setVariable invalidates a watch reading the written local"
+        );
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();
