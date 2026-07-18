@@ -47,7 +47,10 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | **Keyed-list structural changes** — `keyed()` captures the key set at first render; add/remove/reorder still re-renders the parent region (per-row incrementality covers in-place mutation only) | LiveView. Trigger: large mutable lists with churn *(active — the known LiveView gap)* |
 | Nested reactive owner tree (SolidJS-style: a rerunning effect/computed owns and disposes child nodes) | reactivity S4b. Trigger: reactive nodes created inside a repeatedly-running body |
 | Opt-in value-equality suppression on `set` (an equal value need not re-fire dependents) | reactivity S0 note. Must stay opt-in |
-| OTEL: metrics + logs signals (counters/histograms/gauges, log export) — a plan sketch lived in `plans/native-otel/metrics-logs.md` (git history) | native-otel follow-on arc |
+| OTEL: **observable/async instruments** (`ObservableCounter`/`ObservableGauge` with pull callbacks) — sync `counter`/`up_down_counter`/`histogram`/`gauge` shipped; callback-driven instruments deferred | native-otel metrics-logs, §deferred |
+| OTEL: **histogram views / custom buckets / delta temporality** — every histogram uses the OTel default explicit bounds and only cumulative is emitted (the `Temporality::Delta` variant exists but is unused); custom bucket config, per-instrument views, and delta export deferred | native-otel metrics-logs, §deferred |
+| OTEL: **metrics cardinality limits** — no per-metric attribute-set cap today (unbounded `BTreeMap` per instrument); a hard cardinality-limit policy slice deferred | native-otel metrics-logs, §deferred |
+| OTEL: **stdout/structured-logging bridge** — `std.log` records go to the OTLP sink only; mirroring them to stdout (a `print`-bridge) is a separate decision, deferred | native-otel metrics-logs, §decision 3 |
 | Synced **store** (a whole reactive dataset, the §9.12 merge point) and `.history()`/time-travel over the p2p append log | p2p "later/open" R&D |
 
 ## Packages, registry & distribution
