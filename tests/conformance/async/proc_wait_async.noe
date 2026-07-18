@@ -1,0 +1,22 @@
+// `child.wait_async()` (process-signals arc) — the awaitable twin of `Process.wait`: an async
+// context awaits the child's exit and gets its `ExecResult`. In the sandbox the scripted child is
+// complete at spawn, so it resolves deterministically (in-oracle); on the real executor the wait
+// overlaps the isolate's other tasks on the blocking pool.
+// expect: stdout "7"
+// expect: stdout "false"
+// expect: stdout "boom"
+// expect: stdout "done"
+// expect: exit 0
+use std.{os}
+async fn run(): string {
+    p = os.spawn("status", ["7", "boom"])
+    r = p.wait_async().await
+    echo r.status()
+    echo r.ok()
+    return r.stderr().trim()
+}
+concurrent {
+    a = spawn run()
+    echo a.await
+}
+echo "done"

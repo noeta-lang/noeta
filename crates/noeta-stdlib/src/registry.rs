@@ -1899,6 +1899,19 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Unit),
     },
+    // Signalling (process-signals arc): the general form of `kill` — send a named OS signal.
+    ExtFn {
+        name: "signal",
+        params: &[Str],
+        ret: Concrete(SigType::Unit),
+    },
+    // `wait_async` (process-signals arc): the awaitable twin of `wait` — yields a
+    // `Future<ExecResult>`. Deterministic in the sandbox; genuinely overlapping on the real host.
+    ExtFn {
+        name: "wait_async",
+        params: &[],
+        ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
+    },
     // Streaming (process-streaming arc): consume stdout line-by-line or by character count while
     // the child runs, read stderr, and feed / close its stdin. `wait` still returns the whole
     // captured output.
@@ -1972,6 +1985,18 @@ fn process_method_dispatch(
             want_arity(method, args, 0)?;
             host.os_proc_kill(id)?;
             Ok(NativeOut::Unit)
+        }
+        "signal" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            let signal = crate::os::Signal::parse(name)
+                .ok_or_else(|| crate::os::unknown_signal_error(name))?;
+            host.os_proc_signal(id, signal)?;
+            Ok(NativeOut::Unit)
+        }
+        "wait_async" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(host.os_proc_wait_spawn(id))))
         }
         "read_line" => {
             want_arity(method, args, 0)?;
@@ -3196,6 +3221,14 @@ const PROCESS_DOCS: &[(&str, &str)] = &[
         "The exit status if the process has finished, else `none`, without blocking.",
     ),
     ("kill", "Terminate the process."),
+    (
+        "signal",
+        "Send a named OS signal (e.g. `\"TERM\"`, `\"HUP\"`) to the process — the general form of `kill`.",
+    ),
+    (
+        "wait_async",
+        "Await the process's exit, yielding a `Future<ExecResult>` — the async twin of `wait`.",
+    ),
     ("read", "Read available bytes from the process's stdout."),
     ("read_line", "Read the next line from the process's stdout."),
     (

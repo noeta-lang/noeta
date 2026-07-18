@@ -495,6 +495,16 @@ impl<'m> Vm<'m> {
         let host = &mut *self.persist.host;
         let result = recv.with_extern_mut(|e| reg.dispatch_method(e, method, host, &nargs));
         match result {
+            // Async WORK from an extern-type method (`Process.wait_async`, process-signals arc):
+            // ticket the descriptor and hand back the async-IO future — mirrors the module-function
+            // path above and the tree-walker's `call_extern_method`.
+            Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
+                let id = self
+                    .persist
+                    .executor
+                    .spawn_ext(&mut *self.persist.host, spawn.0);
+                Ok(Value::make_async_io(id))
+            }
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
         }

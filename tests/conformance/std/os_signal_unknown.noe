@@ -1,0 +1,6 @@
+// An unknown signal name is a runtime IO error (E0021), identical on both backends — the string is
+// parsed into a `Signal` enum at the boundary, and a name no variant matches is rejected.
+// expect: error E0021 at 6:1
+// expect: exit 1
+use std.{os}
+os.spawn("echo", ["hi"]).signal("frobnicate")

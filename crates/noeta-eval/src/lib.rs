@@ -2836,6 +2836,13 @@ impl Interpreter {
         // FileHandle discipline).
         let result = reg.dispatch_method(&mut **cell.borrow_mut(), name, &mut *self.host, &nargs);
         match result {
+            // Async WORK from an extern-type method (e.g. `Process.wait_async`, process-signals
+            // arc): ticket the descriptor on the executor and hand back the async-IO future —
+            // mirrors the module-function path in `call_std_function` and the VM.
+            Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
+                let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
+                Ok(Value::AsyncIo(id))
+            }
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
         }

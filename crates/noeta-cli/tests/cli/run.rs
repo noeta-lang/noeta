@@ -397,6 +397,34 @@ fn run_os_spawn_controls_a_real_child_process() {
 }
 
 #[test]
+fn run_os_proc_signal_and_wait_async_over_a_real_child() {
+    // `signal` sends a real OS signal (process-signals arc): SIGTERM to a `sleep` terminates it, so
+    // `wait` reports a non-success status. `wait_async` awaits a real child's exit on the blocking
+    // pool and yields its captured output. Proves the real-host `kill(2)` + async-wait paths, not
+    // the sandbox script.
+    let src = "use std.{os}\n\
+               s = os.spawn(\"sleep\", [\"5\"])\n\
+               s.signal(\"TERM\")\n\
+               echo s.wait().ok()\n\
+               async fn collect(): string {\n\
+                   p = os.spawn(\"echo\", [\"async hi\"])\n\
+                   r = p.wait_async().await\n\
+                   return r.stdout().trim()\n\
+               }\n\
+               concurrent {\n\
+                   a = spawn collect()\n\
+                   echo a.await\n\
+               }\n";
+    let file = temp_program("run_os_signal", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("false\nasync hi\n");
+}
+
+#[test]
 fn run_os_spawn_streams_stdout_and_feeds_stdin() {
     // Streaming over a REAL child: read a slow producer's lines with `read_line` as they arrive
     // (each blocks until the child emits it), confirm `wait()` still returns the whole capture,
