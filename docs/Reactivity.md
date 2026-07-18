@@ -1,6 +1,6 @@
 # Reactivity
 
-The standard library ships **fine-grained reactivity** — `signal`, `computed`, and `effect` — the same model SolidJS popularized, running server-side. State lives in signals; derivations and side effects declare what they read, and the runtime reruns exactly what a change affects, in a deterministic, glitch-free order. These are ordinary stdlib values (no new keywords), the load-bearing primitive behind the reactive-single-binary story (architecture §9.4); the transport layer that pushes changes to a browser is a later milestone (see [What's next](#whats-next)).
+The standard library ships **fine-grained reactivity** — `signal`, `computed`, and `effect` — the same model SolidJS popularized, running server-side. State lives in signals; derivations and side effects declare what they read, and the runtime reruns exactly what a change affects, in a deterministic, glitch-free order. These are ordinary stdlib values (no new keywords), the load-bearing primitive behind the reactive-single-binary story (architecture §9.4); the transport that carries changes to a browser — the view/diff protocol over the bundled WebSocket server — is covered under [Views](#views--pushing-state-to-a-client) below.
 
 ```noeta
 use std.reactive.{signal, computed, effect}
