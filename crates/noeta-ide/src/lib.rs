@@ -46,15 +46,20 @@ pub mod semtokens;
 pub mod signature;
 pub mod symbols;
 pub mod trace;
+mod workspace;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use noeta_ast::reflect::{PackedLayout, TypeRepr};
-use noeta_db::{DepModule, LangDatabase, SourceProgram, Workspace};
+use noeta_db::{LangDatabase, SourceProgram};
 use noeta_lexer::TokenKind;
 use noeta_span::{SourceId, Span};
 use salsa::Setter;
+
+use crate::workspace::{
+    WorkspaceCache, disk_noe_uris, edition_of_uri, uri_to_path, workspace_key,
+};
 
 pub use offsets::{Encoding, LineIndex, Position, Range};
 pub use semtokens::SemanticToken;
@@ -164,55 +169,6 @@ pub struct TestItem {
     pub skipped: bool,
     /// The test fn's declaration range in the document.
     pub range: Range,
-}
-
-/// One **directory's** workspace, shared by every open document in that directory (audit-4
-/// finding 6): the salsa [`Workspace`] input over the directory's `.noe` members — sorted by
-/// path, which is the stable [`SourceId`] assignment every document in the directory agrees on —
-/// and, per `SourceId`, the member's URI and salsa input. Open buffers overlay disk. Each open
-/// document reads its own merged program through the entry-parametric
-/// [`linked_from`](noeta_db::linked_from) family, so two open files hold ONE set of inputs and
-/// the per-file parses memoize once. Member texts are updated in place on every change; a file-
-/// *set* change **reuses** the existing inputs by URI (text/id updated, only genuinely new files
-/// get new inputs — the finding-9 input-growth fix).
-#[derive(Debug, Clone)]
-struct WorkspaceCache {
-    workspace: Workspace,
-    /// Per `SourceId`: the member's URI, sorted by path. Maps a merged-program span back to the
-    /// file it belongs to, for cross-file diagnostics and navigation. Members only — the reuse
-    /// fast-path compares this against a fresh directory scan; dependency modules live in
-    /// `dep_uris`/`dep_programs`.
-    source_uris: Vec<String>,
-    /// Per `SourceId`: the salsa input, for in-place text updates.
-    programs: Vec<SourceProgram>,
-    /// Dependency-package modules (package-manager P2.1c), indexed by `SourceId - programs.len()`
-    /// (their ids continue past the members). Kept apart from `source_uris`/`programs` so the
-    /// per-keystroke reuse check and text-update loop stay over members only, while cross-package
-    /// navigation still maps a dependency span back to its file.
-    dep_uris: Vec<String>,
-    dep_programs: Vec<SourceProgram>,
-    /// The [`DepModule`] inputs backing `workspace.dep_modules`, kept so a file-set rescan can
-    /// reuse them by URI instead of abandoning them (finding 9).
-    dep_modules: Vec<DepModule>,
-    /// A **surfaced** dependency-resolution failure (audit-5 #7): a hard `noeta-pm` failure —
-    /// a trust refusal, a version conflict, a broken manifest, a lockfile drift — recorded here
-    /// so [`DocumentStore::diagnostics`] reports the real cause instead of silently degrading to
-    /// "no dependencies" (which showed up only as inexplicable unknown-import errors). `None`
-    /// when resolution succeeded or failed for a routine reason (no manifest, network/IO), where
-    /// the quiet degrade is the right editor behavior.
-    dep_error: Option<noeta_pm::PmError>,
-}
-
-/// The resolved dependency modules for a workspace (package-manager P2.1c): the salsa [`DepModule`]
-/// inputs the `Workspace` links, plus — parallel-indexed — each module's URI and salsa input so a
-/// cross-package definition span maps back to its file.
-#[derive(Debug, Default)]
-struct ResolvedDeps {
-    modules: Vec<DepModule>,
-    uris: Vec<String>,
-    programs: Vec<SourceProgram>,
-    /// A hard resolution failure worth the user's attention (see `WorkspaceCache::dep_error`).
-    error: Option<noeta_pm::PmError>,
 }
 
 /// The server's document state: the salsa database, the open editor buffers, and one cached
@@ -442,100 +398,15 @@ impl DocumentStore {
     }
 
     /// (Re)build or update the shared workspace keyed `key` (see [`workspace_key`]). Discovers the
-    /// directory's `.noe` members, overlays open buffers, and either updates the cached inputs'
-    /// text in place (file set unchanged) or **reuses the inputs by URI** across the new file set
-    /// (finding 9: an input is never abandoned just because a sibling appeared or vanished — its
-    /// id/text are updated in place, and only genuinely new files get new inputs). The
-    /// [`Workspace`] input itself is likewise updated in place once created.
+    /// directory's `.noe` members, overlays open buffers, and hands the list to the shared
+    /// construction core ([`workspace::sync`]) — which updates the cached inputs' text in place
+    /// (file set unchanged) or **reuses the inputs by URI** across the new file set (finding 9),
+    /// re-resolving dependencies only on a set change.
     fn refresh_workspace(&mut self, key: &str) {
         let sources = self.discover_sources(key);
-        if sources.is_empty() {
-            self.workspaces.remove(key);
-            return;
-        }
-        let uris: Vec<String> = sources.iter().map(|(u, _)| u.clone()).collect();
-
-        // File set unchanged → update each member's text in place (salsa backdates unchanged ones).
-        let reuse = self
-            .workspaces
-            .get(key)
-            .filter(|cache| cache.source_uris == uris)
-            .map(|cache| cache.programs.clone());
-        if let Some(programs) = reuse {
-            for (program, (_, text)) in programs.iter().zip(&sources) {
-                program.set_text(&mut self.db).to(text.clone());
-            }
-            return;
-        }
-
-        // File set changed (or first build) → reuse existing inputs by URI, create only new ones.
-        let mut old_by_uri: HashMap<String, SourceProgram> = match self.workspaces.get(key) {
-            Some(cache) => cache
-                .source_uris
-                .iter()
-                .cloned()
-                .zip(cache.programs.iter().copied())
-                .collect(),
-            None => HashMap::new(),
-        };
-        let programs: Vec<SourceProgram> = sources
-            .iter()
-            .enumerate()
-            .map(|(id, (u, text))| match old_by_uri.remove(u) {
-                Some(program) => {
-                    // The member moved in the sorted order (or kept its slot): re-point its id and
-                    // text; name and edition are functions of the URI and cannot have changed.
-                    program.set_id(&mut self.db).to(id as u32);
-                    program.set_text(&mut self.db).to(text.clone());
-                    program
-                }
-                None => SourceProgram::new(
-                    &self.db,
-                    id as u32,
-                    u.clone(),
-                    text.clone(),
-                    edition_of_uri(u),
-                ),
-            })
-            .collect();
-        // Dependency packages (package-manager P2.1c): resolve the directory's deps and add each
-        // dep module as a `DepModule` input (SourceIds continue past the members), so
-        // cross-package `use <dep-key>.…` resolves in hover/goto/completion exactly as the CLI
-        // resolves it. Every member of one directory shares one manifest, so one resolution
-        // serves them all.
-        let deps = self.resolve_dep_modules(key, &uris, programs.len() as u32);
-        match self.workspaces.get_mut(key) {
-            Some(cache) => {
-                cache
-                    .workspace
-                    .set_members(&mut self.db)
-                    .to(programs.clone());
-                cache
-                    .workspace
-                    .set_dep_modules(&mut self.db)
-                    .to(deps.modules.clone());
-                cache.source_uris = uris;
-                cache.programs = programs;
-                cache.dep_uris = deps.uris;
-                cache.dep_programs = deps.programs;
-                cache.dep_modules = deps.modules;
-                cache.dep_error = deps.error;
-            }
-            None => {
-                let workspace = Workspace::new(&self.db, programs.clone(), deps.modules.clone());
-                self.workspaces.insert(
-                    key.to_string(),
-                    WorkspaceCache {
-                        workspace,
-                        source_uris: uris,
-                        programs,
-                        dep_uris: deps.uris,
-                        dep_programs: deps.programs,
-                        dep_modules: deps.modules,
-                        dep_error: deps.error,
-                    },
-                );
-            }
+        let existing = self.workspaces.remove(key);
+        if let Some(cache) = workspace::sync(&mut self.db, existing, sources) {
+            self.workspaces.insert(key.to_string(), cache);
         }
     }
 
@@ -548,15 +419,7 @@ impl DocumentStore {
     fn discover_sources(&self, key: &str) -> Vec<(String, String)> {
         let mut uris: Vec<String> = Vec::new();
         if let Some(dir) = key.strip_prefix("dir:") {
-            if let Ok(read_dir) = std::fs::read_dir(dir) {
-                uris.extend(
-                    read_dir
-                        .flatten()
-                        .map(|e| e.path())
-                        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "noe"))
-                        .map(|p| path_to_uri(&p)),
-                );
-            }
+            uris.extend(disk_noe_uris(Path::new(dir)));
             // Open buffers in this directory that are not (yet) on disk are members too.
             uris.extend(
                 self.buffers
@@ -582,108 +445,6 @@ impl DocumentStore {
                 (uri, text)
             })
             .collect()
-    }
-
-    /// Resolve the directory's dependency packages into salsa [`DepModule`] inputs
-    /// (package-manager P2.1c), each source given a [`SourceId`] continuing from `first_id` (past
-    /// the members) so its spans stay distinct and map back to its file for cross-package
-    /// navigation. Resolution reuses the CLI's `noeta-pm` walk — path deps read locally, git deps
-    /// served from the package store (materialized by a prior CLI run) — so the editor sees the
-    /// same cross-package program. A **routine** resolution failure (not a project, an offline
-    /// registry/network, a filesystem hiccup) degrades to no dependencies rather than breaking
-    /// the workspace; the user still gets the members' own analysis. A **hard** failure — a trust
-    /// refusal, a version conflict, a broken manifest, a lockfile drift — is recorded on the
-    /// returned deps so `diagnostics` surfaces the real cause (audit-5 #7: these used to be
-    /// silently swallowed and showed up only as spurious unknown-import errors). Existing dep
-    /// inputs (from a previous rescan of this directory) are reused by URI — updated in place,
-    /// never abandoned (finding 9).
-    fn resolve_dep_modules(
-        &mut self,
-        key: &str,
-        member_uris: &[String],
-        first_id: u32,
-    ) -> ResolvedDeps {
-        let mut deps = ResolvedDeps::default();
-        let Some(entry_path) = member_uris.first().and_then(|uri| uri_to_path(uri)) else {
-            return deps;
-        };
-        let packages = match noeta_pm::manifest::dependency_packages_query(&entry_path) {
-            Ok(packages) => packages,
-            // Not a project / environmental: the quiet degrade IS the right editor behavior
-            // (formatting and single-file analysis must not nag about a flaky network).
-            Err(
-                noeta_pm::PmError::NoManifest(_)
-                | noeta_pm::PmError::Network(_)
-                | noeta_pm::PmError::Io(_),
-            ) => return deps,
-            // A hard failure the user must see: trust/conflict/manifest/lock/auth/native-build.
-            Err(err) => {
-                deps.error = Some(err);
-                return deps;
-            }
-        };
-        // Previous dep inputs by URI, for reuse.
-        let mut old_by_uri: HashMap<String, (DepModule, SourceProgram)> =
-            match self.workspaces.get(key) {
-                Some(cache) => cache
-                    .dep_uris
-                    .iter()
-                    .cloned()
-                    .zip(
-                        cache
-                            .dep_modules
-                            .iter()
-                            .copied()
-                            .zip(cache.dep_programs.iter().copied()),
-                    )
-                    .collect(),
-                None => HashMap::new(),
-            };
-        let mut next_id = first_id;
-        for package in &packages {
-            let renames: Vec<String> = package
-                .dep_renames
-                .iter()
-                .flat_map(|(local, global)| [local.clone(), global.clone()])
-                .collect();
-            for module in &package.modules {
-                let uri = path_to_uri(Path::new(&module.name));
-                let (dep, src) = match old_by_uri.remove(&uri) {
-                    Some((dep, src)) => {
-                        src.set_id(&mut self.db).to(next_id);
-                        src.set_text(&mut self.db).to(module.text.clone());
-                        src.set_edition(&mut self.db).to(package.edition);
-                        dep.set_root(&mut self.db).to(package.root.clone());
-                        dep.set_key(&mut self.db).to(package.key.clone());
-                        dep.set_renames(&mut self.db).to(renames.clone());
-                        (dep, src)
-                    }
-                    None => {
-                        let src = SourceProgram::new(
-                            &self.db,
-                            next_id,
-                            module.name.clone(),
-                            module.text.clone(),
-                            // The dependency package's own edition (typed end to end).
-                            package.edition,
-                        );
-                        let dep = DepModule::new(
-                            &self.db,
-                            src,
-                            package.root.clone(),
-                            package.key.clone(),
-                            renames.clone(),
-                        );
-                        (dep, src)
-                    }
-                };
-                next_id += 1;
-                deps.modules.push(dep);
-                deps.uris.push(uri);
-                deps.programs.push(src);
-            }
-        }
-        deps
     }
 
     /// The workspace serving the document `uri` as a **member** — open, or discovered on disk in
@@ -2444,42 +2205,6 @@ fn attr_str(attrs: &[noeta_ast::Attribute], name: &str) -> Option<String> {
             noeta_ast::AttrValue::Str(s) => Some(s.clone()),
             _ => None,
         })
-}
-
-/// Convert a `file:` document URI to a filesystem path. Returns `None` for any other scheme (e.g.
-/// `untitled:`), which the caller treats as a lone, directory-less document. A minimal decoder: the
-/// path component after `file://`, with `%`-escapes not yet decoded (paths with escaped bytes are
-/// rare and degrade to a lone workspace, never a wrong file).
-fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    // `file:///abs` → `/abs`; a leading host (`file://host/p`) is not expected for local files.
-    Some(PathBuf::from(rest))
-}
-
-/// The shared-workspace key of a document: its **directory** (`dir:<path>`) for a `file:` URI —
-/// every document in one directory shares one [`WorkspaceCache`] — or the URI itself
-/// (`lone:<uri>`) for a directory-less document (`untitled:` …), which forms a lone workspace.
-fn workspace_key(uri: &str) -> String {
-    match uri_to_path(uri).and_then(|p| p.parent().map(Path::to_path_buf)) {
-        Some(dir) => format!("dir:{}", dir.display()),
-        None => format!("lone:{uri}"),
-    }
-}
-
-/// The language edition the document at `uri` is written against — its package's `edition`, read
-/// from the nearest `noeta.toml` (the editions arc). Defaults to [`Edition::DEFAULT`] for a
-/// directory-less document (e.g. `untitled:`) or a manifest-less file, so formatting/analysis of a
-/// lone buffer is unchanged. The formatter and (later) analysis run under this so a future edition's
-/// grammar is parsed correctly.
-fn edition_of_uri(uri: &str) -> noeta_lexer::Edition {
-    uri_to_path(uri)
-        .map(|p| noeta_pm::manifest::root_edition(&p))
-        .unwrap_or_default()
-}
-
-/// The `file:` URI for a filesystem path — the inverse of [`uri_to_path`] for the paths it produces.
-fn path_to_uri(path: &Path) -> String {
-    format!("file://{}", path.display())
 }
 
 /// The declared type name a reflected [`TypeRepr`] refers to, for member resolution — the nominal
