@@ -752,6 +752,18 @@ impl<'m> Vm<'m> {
                 retain(out);
                 Ok(out)
             }
+            noeta_stdlib::MapMethod::Get => {
+                self.stdlib_arity(name, args, 1, span)?;
+                // Borrow the key's `&str` (or probe through the extern contract) — no clone.
+                match self.map_probe(map, args[0], name, span)? {
+                    // Hit: the value is borrowed from the map; the resulting `some(v)` owns it.
+                    Some(value) => {
+                        retain(value);
+                        Ok(make_some(value))
+                    }
+                    None => Ok(make_none()),
+                }
+            }
         }
     }
 

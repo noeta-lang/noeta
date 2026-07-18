@@ -23,7 +23,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | Nested `concurrent` inside a *spawned task's own body* runs atomically within that task's poll | A.7 residual |
 | **A bare top-level `fn` used as a value loses its parameter types** (`fn(T) -> R` becomes `fn() -> R`) | http-server S5. Low blast radius; workaround: annotated closure |
 | A free `fn` and a local of the same name don't shadow cleanly in value position | aether F6 |
-| `Map.get(k) -> ?V` Option getter (today only `[k]` + `contains`) | aether F4 *(active, small)* |
 | `@derive(Deserialize<Json>)` recipes don't register through the checkerless REPL `extend` path | aether F2 |
 | Prelude constructors (`Ok`/`Err`/`some`) and `panic` as first-class *values* | slice F2 residue. Exotic; needs hand-matched runtime arity/error text |
 | **Editions S3/S4** — the first real edition-gated behavior (S3, pending a deliberate language divergence) and edition-aware diagnostics + a `noeta fix` migrator (S4, depends on S3) | editions arc. Trigger: a breaking language change we want to ship |

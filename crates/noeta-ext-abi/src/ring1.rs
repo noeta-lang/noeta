@@ -429,8 +429,12 @@ pub enum MapMethod {
     Remove,
     /// `get_or(key, default)` → the value at `key`, or `default` if `key` is absent. The fused,
     /// allocation-free read-with-default: one probe where `if m.has(k) then m[k] else d` costs two
-    /// (and no `Option` box, which is why this is not `get() -> ?V`).
+    /// (and no `Option` box). The [`MapMethod::Get`] companion returns `?V` when the caller wants to
+    /// distinguish absence from a present default value, or to chain with `??`/`?`.
     GetOr,
+    /// `get(key)` → `?V`: `some(v)` if `key` is present, else `none`. The Option-returning read — the
+    /// counterpart to [`MapMethod::GetOr`] when absence must be observable rather than defaulted away.
+    Get,
 }
 
 impl MapMethod {
@@ -442,6 +446,7 @@ impl MapMethod {
             "set" => Some(MapMethod::Set),
             "remove" => Some(MapMethod::Remove),
             "get_or" => Some(MapMethod::GetOr),
+            "get" => Some(MapMethod::Get),
             _ => None,
         }
     }

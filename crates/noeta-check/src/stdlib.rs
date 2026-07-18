@@ -462,6 +462,8 @@ fn map_method(name: &str, key: &Type, val: &Type) -> Option<Type> {
         "len" => Type::Int,
         // `get_or(key, default)` — the value at `key`, or `default`. Both are `V`.
         "get_or" => val.clone(),
+        // `get(key)` — the value at `key` as `?V` (`Option<V>`): absence is observable.
+        "get" => opt(val.clone()),
         // `set`/`remove` return a new map of the same `Map<K, V>` type.
         "set" | "remove" => Type::Map(Box::new(key.clone()), Box::new(val.clone())),
         // `iter()` yields the map's **values** (the iteration order `for` uses).
@@ -653,7 +655,7 @@ fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "keys" | "values" | "len" | "iter" => vec![],
         // Key positions take the receiver's own key type `K` (extern-types X4).
-        "has" | "remove" => vec![key.clone()],
+        "has" | "remove" | "get" => vec![key.clone()],
         "set" => vec![key.clone(), val.clone()], // `set(key, value)`
         "get_or" => vec![key.clone(), val.clone()], // `get_or(key, default)`
         _ => return None,

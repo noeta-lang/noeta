@@ -1,0 +1,26 @@
+// `get(key)` → `?V`: `some(v)` on a hit, `none` on a miss — the Option-returning read, the
+// counterpart to `get_or` when absence must be observable (chained with `??`, `==`, or `match`).
+// The Option is constructed and rendered identically in both backends, and a heap-valued hit
+// exercises the retain-on-return path.
+// expect: stdout "some(1)"
+// expect: stdout "none"
+// expect: stdout "true"
+// expect: stdout "1"
+// expect: stdout "99"
+// expect: stdout "got 2"
+// expect: stdout "some([1, 2])"
+// expect: stdout "none"
+// expect: exit 0
+m = {"a": 1, "b": 2}
+echo m.get("a")
+echo m.get("z")
+echo m.get("z") == none
+echo m.get("a") ?? 0
+echo m.get("z") ?? 99
+echo match m.get("b") {
+    some(v) => "got ${v}",
+    none => "empty",
+}
+lists = {"xs": [1, 2]}
+echo lists.get("xs")
+echo lists.get("nope")

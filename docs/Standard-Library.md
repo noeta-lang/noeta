@@ -95,6 +95,7 @@ echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }
 | `keys` | `keys() -> List<K>` | `{"b":2,"a":1}.keys()` → `["a", "b"]` |
 | `values` | `values() -> List<V>` | `{"b":2,"a":1}.values()` → `[1, 2]` |
 | `has` | `has(key: K) -> bool` | `{"a":1}.has("a")` → `true` |
+| `get` | `get(key: K) -> ?V` | `{"a":1}.get("a")` → `some(1)`, `.get("z")` → `none` — the Option read, for chaining with `??`/`match` |
 | `get_or` | `get_or(key: K, default: V) -> V` | `{"a":1}.get_or("z", 0)` → `0` — one probe where `if m.has(k) then m[k] else d` costs two |
 | `set` | `set(key: K, v: V) -> Map<K, V>` | new map with the entry added/updated |
 | `remove` | `remove(key: K) -> Map<K, V>` | new map without the key |
