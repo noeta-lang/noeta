@@ -878,10 +878,13 @@ struct Coloring {
     /// for ordinary fns and methods. Set from [`FnDecl::is_dev_tier`] in [`Checker::check_fn`].
     in_dev_tier: bool,
     /// The generic type parameters in scope while checking the current declaration, each mapped to
-    /// its declared trait **bounds** (`<T: Comparable>` → `{"T": ["Comparable"]}`). Empty at top
-    /// level; saved and restored around each generic declaration. The bounds drive body-side
-    /// enforcement (S4.3c — an operation on `T` is only allowed if a bound licenses it).
-    type_params: HashMap<String, Vec<String>>,
+    /// its declared trait **bounds** (`<T: Comparable>` → `{"T": [Comparable]}`), including an
+    /// instantiated bound's type arguments (`<T: Keyed<int>>`). Empty at top level; saved and
+    /// restored around each generic declaration. The bounds drive body-side enforcement (S4.3c —
+    /// an operation on `T` is only allowed if a bound licenses it) and body-side TYPING: a method
+    /// call on a `T`-typed receiver resolves through a bound's trait at the bound's instantiation
+    /// (`x.key(): int` under `T: Keyed<int>` — [`Checker::type_param_trait_method`]).
+    type_params: HashMap<String, Vec<crate::env::BoundReq>>,
     /// The declared return type of the function whose body is currently being checked — the
     /// expectation each `return <value>` is checked against. `Unknown` at top level and inside a
     /// function with no return annotation (so the check is a no-op there). Saved and restored
@@ -1789,7 +1792,7 @@ impl Checker {
             .extend(decl.type_params.iter().map(|p| {
                 (
                     p.name.clone(),
-                    p.bounds.iter().map(|b| b.name.clone()).collect(),
+                    bound_reqs(&p.bounds, &self.imports.extern_types),
                 )
             }));
         self.check_type_param_bounds(&decl.type_params);

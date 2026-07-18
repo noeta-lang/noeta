@@ -64,6 +64,8 @@ echo matches(Door { code: 7 }, 7)     // true
 
 An instantiated bound must match the trait's arity (`T: Keyed<int, string>` on a one-parameter trait is E0014), and built-in traits take no bound arguments.
 
+The bound also types the **body**: on a `T`-typed value, a method the bound's trait declares resolves at the bound's instantiation — under `<T: Keyed<int>>`, `item.key()` is an `int` and `item.same(x)` demands an `int`, so a wrong argument, return, or arity is E0007 at the definition, before any call site exists. A method no bound declares stays leniently deferred.
+
 ## The built-in traits
 
 Traits are a **fixed built-in set** — naming an unknown one is E0014. Operators dispatch to a trait's method:

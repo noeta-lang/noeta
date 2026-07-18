@@ -177,7 +177,7 @@ impl Checker {
         if let Type::Named(n, _) = operand
             && let Some(bounds) = self.coloring.type_params.get(n)
         {
-            return bounds.iter().any(|b| b == t.name());
+            return bounds.iter().any(|b| b.name == t.name());
         }
         self.satisfies(operand, t)
     }
@@ -187,7 +187,7 @@ impl Checker {
     pub(crate) fn unbounded_type_param(&self, operand: &Type, t: BuiltinTrait) -> Option<String> {
         match operand {
             Type::Named(n, _) => match self.coloring.type_params.get(n) {
-                Some(bounds) if !bounds.iter().any(|b| b == t.name()) => Some(n.clone()),
+                Some(bounds) if !bounds.iter().any(|b| b.name == t.name()) => Some(n.clone()),
                 _ => None,
             },
             _ => None,

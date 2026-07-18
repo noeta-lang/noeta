@@ -339,6 +339,17 @@ impl Checker {
                     return self
                         .call_user_method(name, &sig, args, arg_exprs, span, recv_args, env);
                 }
+                // A method call on an in-scope TYPE PARAMETER resolves through its user-trait
+                // bounds, typed at the bound's instantiation (`<T: Keyed<int>>` → `x.key(): int`,
+                // `x.same(other: int)`); a method no bound declares falls through and stays
+                // lenient as before (dispatch may still resolve at runtime).
+                if let Type::Named(n, _) = &recv
+                    && let Some((params, required, ret)) = self.type_param_trait_method(n, name)
+                {
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
+                    self.check_args(&params, required, args, arg_exprs, span, name);
+                    return ret;
+                }
                 // THE dyn-closure gap's primary site: a builtin method's parameter types carry
                 // the receiver's element type (`List<int>.map` expects `(int) -> dyn`), so the
                 // deferred closure argument finalizes against them here — its parameters adopt the

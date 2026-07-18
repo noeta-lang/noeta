@@ -235,18 +235,15 @@ impl Checker {
     pub(crate) fn enter_type_params(
         &mut self,
         params: &[TypeParam],
-    ) -> HashMap<String, Vec<String>> {
+    ) -> HashMap<String, Vec<BoundReq>> {
         let saved = std::mem::replace(
             &mut self.coloring.type_params,
             params
                 .iter()
                 .map(|p| {
-                    // Body-side licensing (S4.3c) is by trait NAME — an instantiated bound
-                    // (`T: Keyed<int>`) licenses the same operations; its arguments are enforced
-                    // at the call site (S4.2), not here.
                     (
                         p.name.clone(),
-                        p.bounds.iter().map(|b| b.name.clone()).collect(),
+                        bound_reqs(&p.bounds, &self.imports.extern_types),
                     )
                 })
                 .collect(),

@@ -1,0 +1,23 @@
+// Body-side typing under an instantiated bound catches misuse at the definition: under
+// `<T: Keyed<int>>` the trait's signatures substitute at the instantiation, so a wrong argument
+// type, a wrong return type, and a wrong arity are each E0007 — before any call site exists.
+// expect: error E0007 at 15:12
+// expect: error E0007 at 18:12
+// expect: error E0007 at 21:12
+// expect: exit 1
+trait Keyed<K> {
+    fn key(): K
+    fn same(other: K): bool {
+        return self.key() == other
+    }
+}
+fn wrong_arg<T: Keyed<int>>(item: T): bool {
+    return item.same("nope")
+}
+fn wrong_ret<T: Keyed<int>>(item: T): string {
+    return item.key()
+}
+fn wrong_arity<T: Keyed<int>>(item: T): bool {
+    return item.same(1, 2)
+}
+echo wrong_arg

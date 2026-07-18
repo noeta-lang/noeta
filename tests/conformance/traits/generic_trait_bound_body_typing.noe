@@ -1,0 +1,35 @@
+// Body-side typing under an instantiated bound: inside `fn f<T: Keyed<int>>`, a method call on
+// the `T`-typed receiver resolves through the bound's trait AT the bound's instantiation —
+// `item.key()` is an `int` (usable in arithmetic, returnable as `int`), `item.same(k)` demands
+// the instantiation's key type; `<K, T: Keyed<K>>` ties the two parameters, and a bare bound
+// stays permissive.
+// expect: stdout "8"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+trait Keyed<K> {
+    fn key(): K
+    fn same(other: K): bool {
+        return self.key() == other
+    }
+}
+struct Door {
+    code: int
+    impl Keyed<int> {
+        fn key(): int {
+            return self.code
+        }
+    }
+}
+fn next_code<T: Keyed<int>>(item: T): int {
+    return item.key() + 1
+}
+fn tied<K, T: Keyed<K>>(item: T, k: K): bool {
+    return item.same(k)
+}
+fn bare<T: Keyed>(item: T): bool {
+    return item.same(item.key())
+}
+echo next_code(Door { code: 7 })
+echo tied(Door { code: 7 }, 7)
+echo bare(Door { code: 7 })

@@ -171,6 +171,55 @@ impl Checker {
         ))
     }
 
+    /// Resolve a method call on an in-scope **type parameter** through its user-trait bounds
+    /// (S4.3c, typed): the first bound whose trait declares `name` types the call, its signature
+    /// substituted at the bound's instantiation — under `<T: Keyed<int>>`, `x.key()` is `int` and
+    /// `x.same(other)` demands an `int`. A bare bound on a generic trait substitutes its
+    /// parameters permissively (`dyn`). Returns `(parameter types, required count, return type)`;
+    /// `None` when the receiver is not a bounded parameter or no bound's trait declares `name` —
+    /// the caller stays lenient exactly as before (bounds license, they don't close the world).
+    pub(crate) fn type_param_trait_method(
+        &self,
+        param: &str,
+        name: &str,
+    ) -> Option<(Vec<Type>, usize, Type)> {
+        let bounds = self.coloring.type_params.get(param)?;
+        for b in bounds {
+            let Some(decl) = self.symbols.user_traits.get(&b.name) else {
+                continue;
+            };
+            let Some(m) = decl.methods.iter().find(|m| m.sig.name == name) else {
+                continue;
+            };
+            let subst: HashMap<String, Type> = decl
+                .type_params
+                .iter()
+                .enumerate()
+                .map(|(i, tp)| (tp.name.clone(), b.args.get(i).cloned().unwrap_or(Type::Dyn)))
+                .collect();
+            let params: Vec<Type> = m
+                .sig
+                .params
+                .iter()
+                .map(|p| apply_subst(&param_type(p, &self.imports.extern_types), &subst))
+                .collect();
+            let ret = async_return(
+                m.sig
+                    .ret
+                    .as_ref()
+                    .map(|t| from_ref_q(t, &self.imports.extern_types))
+                    .unwrap_or(Type::Unknown),
+                m.sig.is_async,
+            );
+            return Some((
+                params,
+                required_params(&m.sig.params),
+                apply_subst(&ret, &subst),
+            ));
+        }
+        None
+    }
+
     pub(crate) fn method_call_return(&self, recv: &Type, name: &str) -> Type {
         if let Some(t) = stdlib::method_return(self.reg(), recv, name) {
             return t;
