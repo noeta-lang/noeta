@@ -117,28 +117,61 @@ fn speedscope_json(report: &Report) -> String {
 /// weight `unit` comes from the flamegraph ("none" for sample counts, "nanoseconds" for the
 /// instrumenting call tree — speedscope and the VS Code view then format weights as time).
 fn speedscope_value(report: &Report) -> Option<serde_json::Value> {
-    let flame = report.flamegraph.as_ref()?;
+    let main = report.flamegraph.as_ref()?;
 
-    let frames: Vec<serde_json::Value> = flame
-        .frames
-        .iter()
-        .map(|f| {
-            let mut frame = serde_json::json!({ "name": f.label });
-            if let Some(file) = &f.file {
-                frame["file"] = serde_json::json!(file);
-            }
-            if let Some(line) = f.line {
-                frame["line"] = serde_json::json!(line);
-            }
-            if let Some(col) = f.col {
-                frame["col"] = serde_json::json!(col);
-            }
-            frame
-        })
+    // The speedscope container holds one frame table shared by EVERY profile, so the main run's
+    // frames and each isolate's are interned together (by label — the same identity the resolvers
+    // use) and each profile's stacks are remapped into the combined table.
+    let mut frame_index: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    let mut frames: Vec<serde_json::Value> = Vec::new();
+    let all: Vec<(&str, &crate::Flamegraph)> = std::iter::once(("main", main))
+        .chain(report.isolates.iter().map(|(n, f)| (n.as_str(), f)))
         .collect();
-
-    let samples: Vec<&Vec<u32>> = flame.stacks.iter().map(|s| &s.frames).collect();
-    let weights: Vec<u64> = flame.stacks.iter().map(|s| s.count).collect();
+    let mut profiles: Vec<serde_json::Value> = Vec::new();
+    for (name, flame) in all {
+        let remap: Vec<u32> = flame
+            .frames
+            .iter()
+            .map(|f| {
+                if let Some(&i) = frame_index.get(f.label.as_str()) {
+                    return i;
+                }
+                let mut frame = serde_json::json!({ "name": f.label });
+                if let Some(file) = &f.file {
+                    frame["file"] = serde_json::json!(file);
+                }
+                if let Some(line) = f.line {
+                    frame["line"] = serde_json::json!(line);
+                }
+                if let Some(col) = f.col {
+                    frame["col"] = serde_json::json!(col);
+                }
+                let i = frames.len() as u32;
+                frames.push(frame);
+                i
+            })
+            .collect();
+        for (local_idx, f) in flame.frames.iter().enumerate() {
+            frame_index
+                .entry(f.label.as_str())
+                .or_insert(remap[local_idx]);
+        }
+        let samples: Vec<Vec<u32>> = flame
+            .stacks
+            .iter()
+            .map(|s| s.frames.iter().map(|&i| remap[i as usize]).collect())
+            .collect();
+        let weights: Vec<u64> = flame.stacks.iter().map(|s| s.count).collect();
+        profiles.push(serde_json::json!({
+            "type": "sampled",
+            "name": name,
+            "unit": flame.unit.speedscope(),
+            "startValue": 0,
+            "endValue": flame.total,
+            "samples": samples,
+            "weights": weights,
+        }));
+    }
 
     let profile = serde_json::json!({
         "$schema": "https://www.speedscope.app/file-format-schema.json",
@@ -146,15 +179,7 @@ fn speedscope_value(report: &Report) -> Option<serde_json::Value> {
         "exporter": "noeta profile",
         "name": "noeta profile",
         "shared": { "frames": frames },
-        "profiles": [{
-            "type": "sampled",
-            "name": "noeta profile",
-            "unit": flame.unit.speedscope(),
-            "startValue": 0,
-            "endValue": flame.total,
-            "samples": samples,
-            "weights": weights,
-        }],
+        "profiles": profiles,
     });
     Some(profile)
 }

@@ -7,7 +7,8 @@
 #[cfg(feature = "compile")]
 use crate::{DebugSession, Program, Unsupported, compile};
 use crate::{
-    Debugger, Frame, HotSwapMailbox, IsolateFactory, Module, ProfileHook, RetTransform, Vm, release,
+    Debugger, Frame, HotSwapMailbox, IsolateFactory, Module, ProfileHook, ProfileHookFactory,
+    ProfileSink, RetTransform, Vm, release,
 };
 #[cfg(feature = "compile")]
 use noeta_backend::Backend;
@@ -75,6 +76,10 @@ pub struct RunOptions {
     /// Real OS-thread isolates (isolates I.4b): the module by `Arc` (worker threads own it)
     /// plus the fresh-VM factory. CLI-only / out-of-oracle.
     pub isolates: Option<(Arc<Module>, IsolateFactory)>,
+    /// Per-isolate profiling (`noeta profile` over a program with real isolates): each spawned
+    /// worker gets its own hook from the factory and deposits it, named, in the sink at finish.
+    /// Meaningful only alongside `isolates`.
+    pub isolate_profiler: Option<(ProfileHookFactory, ProfileSink)>,
     /// Record the `--jit-stats` bail histogram; the assembled [`JitReport`] rides back in
     /// [`RunOutcome::report`]. Costs one branch per bail *event* (a tier transition), so it
     /// observes without perturbing what it measures.
@@ -96,7 +101,8 @@ impl std::fmt::Debug for RunOptions {
             .field("debugger", &self.debugger.is_some())
             .field("profiler", &self.profiler.is_some())
             .field("hot_mailbox", &self.hot_mailbox.is_some())
-            .field("isolates", &self.isolates.is_some());
+            .field("isolates", &self.isolates.is_some())
+            .field("isolate_profiler", &self.isolate_profiler.is_some());
         #[cfg(feature = "compile")]
         d.field("session", &self.session.is_some());
         #[cfg(feature = "jit")]
@@ -119,6 +125,7 @@ impl Default for RunOptions {
             session: None,
             hot_mailbox: None,
             isolates: None,
+            isolate_profiler: None,
             #[cfg(feature = "jit")]
             bail_histogram: false,
             #[cfg(feature = "jit")]
@@ -204,6 +211,7 @@ impl VmBackend {
             vm.isolates.parallel_isolates = true;
             vm.isolates.isolate_module = Some(arc);
             vm.isolates.isolate_factory = Some(factory);
+            vm.isolates.profile_seam = opts.isolate_profiler;
         }
         match opts.tiering {
             Tiering::Off => {}

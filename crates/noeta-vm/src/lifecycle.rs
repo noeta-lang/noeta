@@ -13,6 +13,17 @@ use crate::*;
 pub type IsolateFactory =
     Arc<dyn Fn() -> (Box<dyn noeta_stdlib::Host>, Box<dyn noeta_stdlib::Executor>) + Send + Sync>;
 
+/// Builds a fresh [`ProfileHook`] for a worker isolate (per-isolate profiles): called with the
+/// isolate's display name at spawn, installed on the worker's VM, and — once the worker finishes —
+/// the hook is handed to the [`ProfileSink`] for the profiler to resolve. Injected by `noeta
+/// profile`; absent on ordinary runs.
+pub type ProfileHookFactory = Arc<dyn Fn(&str) -> Box<dyn ProfileHook> + Send + Sync>;
+
+/// Where finished worker isolates deposit their (display name, hook) pairs — one entry per isolate
+/// run, harvested by the profiler after the main run completes. The `Mutex` is uncontended (one
+/// lock at each isolate's start and end).
+pub type ProfileSink = Arc<std::sync::Mutex<Vec<(String, Box<dyn ProfileHook>)>>>;
+
 /// A spawned worker isolate (isolates I.4b): the channel its result (a marshalled [`isolate::Wire`], or
 /// a failure) arrives on, and the thread's join handle (taken to join at teardown).
 pub(crate) struct IsolateSlot {
@@ -328,6 +339,7 @@ impl<'m> Vm<'m> {
                 parallel_isolates: false,
                 isolate_module: None,
                 isolate_factory: None,
+                profile_seam: None,
                 isolates: Vec::new(),
                 inflight_isolates: 0,
                 shared_region: noeta_value::SharedRegion::new(),
@@ -581,6 +593,7 @@ impl<'m> Vm<'m> {
 pub(crate) fn run_isolate_worker(
     module: &Arc<Module>,
     factory: &IsolateFactory,
+    profile_seam: Option<(ProfileHookFactory, ProfileSink)>,
     proto: u32,
     iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
@@ -591,6 +604,21 @@ pub(crate) fn run_isolate_worker(
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     let (host, executor) = factory();
     let mut wvm = Vm::load(module, host, executor);
+    // Per-isolate profiling (injected by `noeta profile`): this worker gets its own collector, and
+    // the seam propagates so isolates IT spawns are profiled too. The display name is the spawned
+    // function's; its unique `#n` is assigned at HARVEST under the sink's lock (spawn-time
+    // numbering would race — concurrent isolates all read the same sink length).
+    let profile_fn_name = profile_seam.as_ref().map(|(factory, _)| {
+        let fn_name = module.protos[proto as usize]
+            .name
+            .clone()
+            .unwrap_or_else(|| "<anonymous>".to_string());
+        wvm.profiler = Some(factory(&fn_name));
+        fn_name
+    });
+    if let Some(seam) = &profile_seam {
+        wvm.isolates.profile_seam = Some(seam.clone());
+    }
     // Resolve native names against the spawner's registry (instance-registry IR3); `None` falls
     // back to the process-global default, exactly like the parent.
     wvm.persist.registry = registry;
@@ -638,6 +666,16 @@ pub(crate) fn run_isolate_worker(
         Err(abort) => Err(abort),
     };
     release(callee);
+    // Hand the worker's finished collector to the sink (before teardown — destructor ops after the
+    // program's own work are not the profile's subject). The `#n` is the sink's running count,
+    // assigned under the push's own lock so concurrent isolates never collide.
+    if let (Some((_, sink)), Some(fn_name)) = (&profile_seam, profile_fn_name)
+        && let Some(hook) = wvm.profiler.take()
+        && let Ok(mut sink) = sink.lock()
+    {
+        let name = format!("isolate {fn_name} #{}", sink.len() + 1);
+        sink.push((name, hook));
+    }
     let message = match outcome {
         Ok(result) => {
             let marshalled = isolate::marshal(result, &wvm.persist.shapes, &wvm.persist.channels)

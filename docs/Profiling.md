@@ -21,6 +21,14 @@ flamegraph actively hides it (allocation's price is paid later, in the allocator
 A flamegraph is stacks × a *weight*: wall samples, executed ops (`--every`), exact nanoseconds
 (`--instrument`), or allocated bytes (`--alloc`) — same picture, four different questions.
 
+## Threads
+
+Async tasks (`spawn` / `concurrent`) are cooperative and always profile into the main flamegraph.
+**Worker isolates** (`isolate f(args)`) run on their own OS threads and get their **own profile
+each**, named `isolate <fn> #<n>` — every mode produces one per isolate alongside `main`'s. A
+speedscope artifact carries them as separate profiles (tabs in the viewer); the folded/SVG forms
+root each isolate's stacks at its name.
+
 The program's own stdout is always forwarded untouched — the profile report goes to **stderr** (or a
 file with `-o`), so a program you profile stays pipeable.
 

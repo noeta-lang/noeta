@@ -90,7 +90,6 @@ pub(crate) fn cmd_mcp() -> ExitCode {
 /// Sampling (wall-time flamegraph) is the default; `--instrument` selects the exact per-function
 /// profiler; `--every N` makes sampling deterministic (op-weighted).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)] // a straight CLI-flag pass-through
 pub(crate) fn cmd_profile(
     file: &std::path::Path,
     instrument: bool,

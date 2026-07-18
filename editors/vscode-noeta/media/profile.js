@@ -12,6 +12,9 @@
 
   /** @type {"sampling" | "instrument"} */
   let kind = "sampling";
+  // Which profile of the artifact's `profiles` array is displayed: 0 = main; a program that
+  // spawned worker isolates carries one additional profile per isolate.
+  let profileIdx = 0;
   // What one stack weight means: sample counts (sampling) or exact nanoseconds (the instrumenting
   // call tree). Drives every weight rendering — flame tooltips, crumbs, and table cells.
   let weightUnit = "samples";
@@ -476,6 +479,23 @@
     const header = el("div", "header");
     header.append(el("span", "title", message.meta.program));
     if (message.meta.summary) header.append(el("span", "meta", message.meta.summary));
+    // A program that spawned isolates has one profile per worker thread — offer a picker.
+    const allProfiles = message.profile.profiles ?? [];
+    if (allProfiles.length > 1) {
+      const picker = el("select", "profile-picker");
+      allProfiles.forEach((p, i) => {
+        const option = document.createElement("option");
+        option.value = String(i);
+        option.textContent = p.name || (i === 0 ? "main" : `profile ${i}`);
+        if (i === profileIdx) option.selected = true;
+        picker.append(option);
+      });
+      picker.addEventListener("change", () => {
+        profileIdx = Number(picker.value);
+        show(message);
+      });
+      header.append(picker);
+    }
     app.append(header);
 
     if (message.kind === "instrument") {
@@ -510,13 +530,21 @@
       );
       // The artifact now also carries the EXACT call tree (speedscope-shaped, ns-weighted): render
       // the flame graph beside the table, tabbed like the sampling view. The Functions tab is the
-      // exact instrument table (true call counts + recursion-correct totals).
+      // exact instrument table (true call counts + recursion-correct totals). An ISOLATE profile
+      // (picker index > 0) has stacks but no row in the main function table — it renders the
+      // generic flame + leaf-table pair instead.
       const frames = message.profile.shared?.frames ?? [];
-      const prof0 = (message.profile.profiles ?? [])[0];
-      if (frames.length && prof0?.samples?.length) {
+      const chosen = allProfiles[profileIdx];
+      if (profileIdx > 0 && frames.length && chosen?.samples?.length) {
         const body = el("div", "sampling-body");
         app.append(body);
-        const tree = buildTree(prof0.samples, prof0.weights ?? []);
+        renderSampling(body, frames, chosen.samples, chosen.weights ?? [], null);
+        return;
+      }
+      if (frames.length && chosen?.samples?.length) {
+        const body = el("div", "sampling-body");
+        app.append(body);
+        const tree = buildTree(chosen.samples, chosen.weights ?? []);
         tabbed(body, flameView(frames, tree), view);
       } else {
         view.classList.add("active");
@@ -525,9 +553,10 @@
       return;
     }
 
-    // Sampling: speedscope JSON — one "sampled" profile over a shared frame table.
+    // Sampling: speedscope JSON — sampled profiles over a shared frame table (main first, one
+    // more per isolate).
     const frames = message.profile.shared?.frames ?? [];
-    const profile = (message.profile.profiles ?? [])[0];
+    const profile = allProfiles[profileIdx];
     weightUnit =
       profile?.unit === "nanoseconds" ? "ns" : profile?.unit === "bytes" ? "bytes" : "samples";
     const allSamples = profile?.samples ?? [];
@@ -640,6 +669,7 @@
     if (message.type === "profile") {
       kind = message.kind;
       meta = message.meta;
+      profileIdx = 0;
       show(message);
     } else if (message.type === "error") {
       renderMessage(message.message);
