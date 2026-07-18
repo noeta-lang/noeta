@@ -452,6 +452,41 @@ impl From<noeta_ide::docs::DocHit> for DocHitWire {
     }
 }
 
+/// One highlighted span of a snippet on the wire (`noeta/docsHighlight`), in UTF-16 code units —
+/// the doc viewer's webview slices JavaScript strings with these directly.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HlSpanWire {
+    start: u32,
+    end: u32,
+    /// The color class tag (`kw`/`str`/`num`/`com`/`ty`/`fn`/`dec`) — CSS `tok-<tag>`.
+    class: String,
+}
+
+impl From<noeta_ide::highlight::HlSpan> for HlSpanWire {
+    fn from(s: noeta_ide::highlight::HlSpan) -> HlSpanWire {
+        HlSpanWire {
+            start: s.start,
+            end: s.end,
+            class: s.class.as_str().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsHighlightParams {
+    /// The code snippets to classify (batched: one page's signature + fences in one request).
+    snippets: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsHighlightResult {
+    /// Per input snippet, its highlight spans (parallel to `snippets`).
+    spans: Vec<Vec<HlSpanWire>>,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DocsParams {
@@ -701,6 +736,27 @@ impl Backend {
         };
         Ok(DocsSearchResult {
             hits: Some(hits.into_iter().map(DocHitWire::from).collect()),
+        })
+    }
+
+    /// `noeta/docsHighlight`: classify Noeta code snippets (a doc page's signature and fences)
+    /// into colorable spans via the compiler's lexer (see [`noeta_ide::highlight`]). Stateless —
+    /// pure over the snippet text, no document store involved.
+    async fn noeta_docs_highlight(
+        &self,
+        params: DocsHighlightParams,
+    ) -> Result<DocsHighlightResult> {
+        Ok(DocsHighlightResult {
+            spans: params
+                .snippets
+                .iter()
+                .map(|code| {
+                    noeta_ide::highlight::highlight_code(code)
+                        .into_iter()
+                        .map(HlSpanWire::from)
+                        .collect()
+                })
+                .collect(),
         })
     }
 
@@ -1405,6 +1461,7 @@ async fn serve() {
         .custom_method("noeta/docsChildren", Backend::noeta_docs_children)
         .custom_method("noeta/docsPage", Backend::noeta_docs_page)
         .custom_method("noeta/docsSearch", Backend::noeta_docs_search)
+        .custom_method("noeta/docsHighlight", Backend::noeta_docs_highlight)
         .custom_method("noeta/docsForSymbol", Backend::noeta_docs_for_symbol)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;

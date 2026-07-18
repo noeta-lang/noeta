@@ -47,10 +47,27 @@
       .join("");
   }
 
-  function renderMarkdown(src) {
+  /** Render lexer-highlighted code: escape between spans, wrap span text in `tok-*` classes.
+   *  Spans are server-supplied (noeta/docsHighlight), sorted, non-overlapping, UTF-16 offsets —
+   *  i.e. exactly JavaScript string offsets. Defensive against malformed spans: skipped, never
+   *  thrown, so a bad span degrades to plain text. */
+  function renderHighlighted(text, spans) {
+    let out = "";
+    let pos = 0;
+    for (const s of spans) {
+      if (!s || s.start < pos || s.end > text.length || s.end <= s.start) continue;
+      out += escapeHtml(text.slice(pos, s.start));
+      out += '<span class="tok-' + s.class + '">' + escapeHtml(text.slice(s.start, s.end)) + "</span>";
+      pos = s.end;
+    }
+    return out + escapeHtml(text.slice(pos));
+  }
+
+  function renderMarkdown(src, hl) {
     const lines = (src || "").replace(/\r\n/g, "\n").split("\n");
     const html = [];
     let i = 0;
+    let fenceIdx = 0;
 
     const flushList = (items, ordered) => {
       const tag = ordered ? "ol" : "ul";
@@ -72,7 +89,14 @@
           i++;
         }
         i++; // closing fence
-        html.push("<pre><code>" + escapeHtml(body.join("\n")) + "</code></pre>");
+        const codeText = body.join("\n");
+        const spans = hl && hl.blocks ? hl.blocks[fenceIdx] : null;
+        fenceIdx++;
+        html.push(
+          "<pre><code>" +
+            (spans ? renderHighlighted(codeText, spans) : escapeHtml(codeText)) +
+            "</code></pre>",
+        );
         continue;
       }
 
@@ -196,7 +220,7 @@
     return node;
   }
 
-  function renderPage(page, sourceUri) {
+  function renderPage(page, sourceUri, highlights) {
     app.textContent = "";
 
     // Language-guide pages carry their own `# Title` H1 in the markdown; rendering an injected
@@ -212,7 +236,15 @@
 
       if (page.signature) {
         const sig = el("div", "doc-signature");
-        sig.appendChild(el("code", null, escapeHtml(page.signature)));
+        sig.appendChild(
+          el(
+            "code",
+            null,
+            highlights && highlights.signature
+              ? renderHighlighted(page.signature, highlights.signature)
+              : escapeHtml(page.signature),
+          ),
+        );
         app.appendChild(sig);
       }
     }
@@ -220,7 +252,7 @@
     const hasProse = page.markdown && page.markdown.trim();
     const body = el("div", "doc-body");
     if (hasProse) {
-      body.innerHTML = renderMarkdown(page.markdown);
+      body.innerHTML = renderMarkdown(page.markdown, highlights);
     } else if (!isGuide && !page.signature) {
       body.appendChild(el("p", "doc-empty-note", "No documentation yet."));
     } else if (!isGuide) {
@@ -271,7 +303,7 @@
   window.addEventListener("message", (event) => {
     const msg = event.data;
     if (msg.type === "page") {
-      renderPage(msg.page, msg.sourceUri);
+      renderPage(msg.page, msg.sourceUri, msg.highlights);
     } else if (msg.type === "placeholder") {
       renderPlaceholder(msg.text || "");
     }

@@ -227,3 +227,24 @@ body {
   font-size: 0.85em;
   color: var(--vscode-descriptionForeground);
 }
+
+/* ---- Lexer-highlighted code (noeta/docsHighlight token classes) ---------------------------- */
+/* Webviews expose only UI colors as CSS variables — never the editor's token theme — so these
+ * approximate the default Dark+/Light+ palettes, switched on the theme-family class VS Code
+ * stamps on <body>. Applies inside signature blocks and ```noeta fences alike. */
+
+.tok-kw  { color: #c586c0; }
+.tok-str { color: #ce9178; }
+.tok-num { color: #b5cea8; }
+.tok-com { color: #6a9955; }
+.tok-ty  { color: #4ec9b0; }
+.tok-fn  { color: #dcdcaa; }
+.tok-dec { color: #c586c0; }
+
+body.vscode-light .tok-kw,  body.vscode-high-contrast-light .tok-kw  { color: #af00db; }
+body.vscode-light .tok-str, body.vscode-high-contrast-light .tok-str { color: #a31515; }
+body.vscode-light .tok-num, body.vscode-high-contrast-light .tok-num { color: #098658; }
+body.vscode-light .tok-com, body.vscode-high-contrast-light .tok-com { color: #008000; }
+body.vscode-light .tok-ty,  body.vscode-high-contrast-light .tok-ty  { color: #267f99; }
+body.vscode-light .tok-fn,  body.vscode-high-contrast-light .tok-fn  { color: #795e26; }
+body.vscode-light .tok-dec, body.vscode-high-contrast-light .tok-dec { color: #af00db; }

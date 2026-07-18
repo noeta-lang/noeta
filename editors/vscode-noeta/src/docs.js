@@ -230,12 +230,68 @@ class DocsPagePanel {
     const page =
       (reply && reply.page) ||
       { id, title: fallbackTitle || id.split("/").pop(), kind: "section", markdown: "", xrefs: [] };
-    const message = { type: "page", page, sourceUri };
+    const highlights = await fetchHighlights(client, page);
+    const message = { type: "page", page, sourceUri, highlights };
     if (this.ready) {
       panel.webview.postMessage(message);
     } else {
       this.pending = message;
     }
+  }
+}
+
+/** Fence languages highlighted as Noeta: explicit tags plus untagged (the guide's convention). */
+const NOETA_FENCES = new Set(["", "noeta", "noe"]);
+
+/**
+ * Scan `markdown` for fenced code blocks, mirroring the webview renderer's fence parsing exactly
+ * (`media/docs.js` `renderMarkdown`): any line starting ``` opens a fence, the body runs until the
+ * next ```-starting line. Returns every fence in order with its ordinal (the webview counts all
+ * fences the same way, so ordinals line up).
+ */
+function scanFences(markdown) {
+  const lines = (markdown || "").replace(/\r\n/g, "\n").split("\n");
+  const fences = [];
+  let i = 0;
+  while (i < lines.length) {
+    const open = lines[i].match(/^```(\w*)/);
+    if (open) {
+      const body = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) {
+        body.push(lines[i]);
+        i++;
+      }
+      i++; // closing fence
+      fences.push({ index: fences.length, lang: open[1], body: body.join("\n") });
+      continue;
+    }
+    i++;
+  }
+  return fences;
+}
+
+/**
+ * Ask the server to lexer-highlight a page's Noeta code (the signature + noeta/untagged fences) in
+ * one batched `noeta/docsHighlight` request. Returns `{ signature, blocks }` (blocks keyed by the
+ * fence's ordinal among ALL fences), or null — the page then renders plain, never broken.
+ */
+async function fetchHighlights(client, page) {
+  try {
+    const fences = scanFences(page.markdown).filter((f) => NOETA_FENCES.has(f.lang));
+    const snippets = [];
+    if (page.signature) snippets.push(page.signature);
+    for (const f of fences) snippets.push(f.body);
+    if (!snippets.length) return null;
+    const reply = await client.sendRequest("noeta/docsHighlight", { snippets });
+    const all = (reply && reply.spans) || [];
+    let k = 0;
+    const out = { signature: null, blocks: {} };
+    if (page.signature) out.signature = all[k++] || null;
+    for (const f of fences) out.blocks[f.index] = all[k++] || null;
+    return out;
+  } catch {
+    return null;
   }
 }
 
