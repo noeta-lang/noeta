@@ -633,12 +633,19 @@ mod tests {
         let same_line = "@test fn t(): void { assert(true, \"ok\") }\necho 1\n";
         let out = fmt(same_line).unwrap();
         assert!(out.starts_with("@test\nfn t(): void {"), "got:\n{out}");
-        assert_eq!(fmt(&out).unwrap(), out, "directive-above form is idempotent");
+        assert_eq!(
+            fmt(&out).unwrap(),
+            out,
+            "directive-above form is idempotent"
+        );
 
         // The directive-above input parses (woven-newline absorption) and is already canonical.
         let above = "@bench(1000)\nfn b(): void {\n    assert(true, \"ok\")\n}\necho 1\n";
         let out = fmt(above).unwrap();
-        assert!(out.starts_with("@bench(1000)\nfn b(): void {"), "got:\n{out}");
+        assert!(
+            out.starts_with("@bench(1000)\nfn b(): void {"),
+            "got:\n{out}"
+        );
 
         // Grouping braces are for grouping: several items keep the block form.
         let block = "@test {\n    fn a(): void { assert(true, \"a\") }\n    fn b(): void { assert(true, \"b\") }\n}\necho 1\n";
@@ -671,6 +678,19 @@ mod tests {
             out,
             "method-directive formatting is not idempotent"
         );
+    }
+
+    #[test]
+    fn packed_layout_is_preserved_and_row_canonicalizes_bare() {
+        // `@packed(Layout.Column)` must survive formatting — dropping the argument silently
+        // changes the storage layout (the pre-enum formatter did exactly that).
+        let col = fmt("@packed(Layout.Column) struct V { x: f32; y: f32 }\n").unwrap();
+        assert!(col.contains("@packed(Layout.Column)"), "got:\n{col}");
+        assert_eq!(fmt(&col).unwrap(), col, "column form is idempotent");
+        // `Row` is the bare-`@packed` default, so the explicit spelling canonicalizes away.
+        let row = fmt("@packed(Layout.Row) struct V { x: f32; y: f32 }\n").unwrap();
+        assert!(row.contains("@packed\n"), "got:\n{row}");
+        assert!(!row.contains("Layout.Row"), "got:\n{row}");
     }
 
     #[test]

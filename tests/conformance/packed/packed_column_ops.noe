@@ -1,4 +1,4 @@
-// P-SIMD C2: the full breadth of list operations over a `@packed(layout: column)` list. Column-major
+// P-SIMD C2: the full breadth of list operations over a `@packed(Layout.Column)` list. Column-major
 // (SoA) storage is a pure *performance* attribute — invisible to `RunResult` — so every op (index,
 // field read, iteration, `set`, `~`/concat, `slice`/`reverse`/`filter`/`map`, `to_bytes`/`from_bytes`,
 // nested-struct decode) yields exactly what the default row layout would. The differential pins the VM
@@ -20,9 +20,9 @@
 // expect: stdout "2.0"
 // expect: stdout "V3 {x: 0.0, y: 0.0, z: 0.0}"
 // expect: exit 0
-@packed(layout: column) struct P { r: int; g: int; b: int; opaque: bool }
-@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
-@packed(layout: column) struct Seg { start: V3; end: V3 }
+@packed(Layout.Column) struct P { r: int; g: int; b: int; opaque: bool }
+@packed(Layout.Column) struct V3 { x: f32; y: f32; z: f32 }
+@packed(Layout.Column) struct Seg { start: V3; end: V3 }
 
 // Mixed-kind columns (three 8-byte `int` columns + a 1-byte `bool` column) stress the per-field
 // column-offset math (`field_offset`) with non-uniform widths.

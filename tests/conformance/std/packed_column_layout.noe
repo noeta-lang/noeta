@@ -1,6 +1,6 @@
-// P-SIMD (`plans/perf/p-simd-column-layout.md`): `@packed(layout: column)` declares a column-major
+// P-SIMD (`plans/perf/p-simd-column-layout.md`): `@packed(Layout.Column)` declares a column-major
 // (SoA) storage layout. Layout is a pure *performance* attribute — **invisible to behaviour** — so a
-// `layout: column` struct behaves identically to a `row` one (C1 parses/validates the directive; the
+// `Layout.Column` struct behaves identically to a `row` one (C1 parses/validates the directive; the
 // storage change lands in C2). This pins that equivalence: the same program on a column-layout type
 // produces the same output a row-layout type would.
 // expect: stdout "V3 {x: 1.0, y: 2.0, z: 3.0}"
@@ -10,7 +10,7 @@
 // expect: exit 0
 use std.{vec}
 
-@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
+@packed(Layout.Column) struct V3 { x: f32; y: f32; z: f32 }
 
 ps = [
   V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 },

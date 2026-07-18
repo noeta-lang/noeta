@@ -2,7 +2,7 @@
 // calls) — the column twin: the SoA reduction (`col_dot`) reads three contiguous f32 columns.
 use std.{vec}
 
-@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
+@packed(Layout.Column) struct V3 { x: f32; y: f32; z: f32 }
 
 mut xs = [V3 { x: 1.5f32, y: 2.5f32, z: 3.5f32 }]
 mut d = 0

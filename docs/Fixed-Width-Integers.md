@@ -108,12 +108,12 @@ Rules:
 - Fields must be packable — fixed-width ints, `int`, `f32`, `bool`, or a nested `@packed` struct. A non-primitive field is rejected.
 - Every list operation (index, field read, iteration, `set`, `~`/concat, `slice`/`reverse`/`filter`/`map`) yields exactly what the boxed layout would.
 
-## Column (SoA) layout — `@packed(layout: column)`
+## Column (SoA) layout — `@packed(Layout.Column)`
 
-By default a packed list is *row-major* (array-of-structs). `@packed(layout: column)` stores it **column-major** (struct-of-arrays) — each field in its own contiguous column. This is, again, a pure performance attribute invisible to results, but it is the layout the autovectorized bulk kernels reduce fastest.
+By default a packed list is *row-major* (array-of-structs). `@packed(Layout.Column)` stores it **column-major** (struct-of-arrays) — each field in its own contiguous column. The argument is the built-in `Layout` enum — `Layout.Row` (the bare-`@packed` default) or `Layout.Column` — the same `Enum.Variant` shape `@role` takes. This is, again, a pure performance attribute invisible to results, but it is the layout the autovectorized bulk kernels reduce fastest.
 
 ```noeta
-@packed(layout: column) struct P { r: int  g: int  b: int  opaque: bool }
+@packed(Layout.Column) struct P { r: int  g: int  b: int  opaque: bool }
 
 ps = [P { r: 255, g: 0, b: 128, opaque: true }, P { r: 1, g: 2, b: 3, opaque: false }]
 echo ps[1]              // P {r: 1, g: 2, b: 3, opaque: false}  (gather one element from its columns)
@@ -143,7 +143,7 @@ The flat/column layout is what makes the `vec.*_all` bulk kernels fast — they 
 
 ```noeta
 use std.{vec}
-@packed(layout: column) struct V3 { x: f32  y: f32  z: f32 }
+@packed(Layout.Column) struct V3 { x: f32  y: f32  z: f32 }
 
 ps = [V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }, V3 { x: 1.0f32, y: 2.0f32, z: 2.0f32 }]
 echo vec.length_all(ps)                 // [5.0, 3.0]     (reduction → f32 list)

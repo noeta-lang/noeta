@@ -6,3 +6,6 @@
 .vscode-test/**
 test-workspace/**
 package-lock.json
+test/**
+node_modules/vscode-textmate/**
+node_modules/vscode-oniguruma/**

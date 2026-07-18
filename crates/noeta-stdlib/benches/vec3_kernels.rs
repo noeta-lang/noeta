@@ -85,8 +85,8 @@ fn vec3_kernels(c: &mut Criterion) {
     soa.finish();
 
     // P-SIMD C3 row-vs-column dispatch: the *realistic* end-to-end kernel path each `vec.*_all` takes.
-    // A `layout: row` list feeds the AoS `*_buffers` kernels (read the interleaved bytes directly). A
-    // `layout: column` list feeds the column path: the reductions (`dot`/`length`) read the three
+    // A `Layout.Row` list feeds the AoS `*_buffers` kernels (read the interleaved bytes directly). A
+    // `Layout.Column` list feeds the column path: the reductions (`dot`/`length`) read the three
     // contiguous columns directly via `col_dot`/`col_length` (no decode — a per-call `SoaVec3` decode
     // benched *slower* than AoS), and the element-wise `add` is layout-agnostic (`add_buffers` on the
     // column bytes is a correct column result). This decides whether `column` is worth dispatching to.

@@ -248,7 +248,7 @@ pub fn soa_to_packed(a: &SoaVec3) -> Vec<u8> {
 }
 
 /// Serialize a [`SoaVec3`] to a **column-major** packed `List<Vec3>` byte buffer (`[x×n][y×n][z×n]`,
-/// P-SIMD C3) — so a batch (or a test) can produce a `layout: column` buffer. Each column is written
+/// P-SIMD C3) — so a batch (or a test) can produce a `Layout.Column` buffer. Each column is written
 /// as one contiguous `f32` run. (The reverse — reading a column buffer — is deliberately *not* a
 /// decode helper: the reduction kernels [`col_dot`]/[`col_length`] read the contiguous columns in
 /// place, since a per-call `SoaVec3` decode benched slower than the AoS kernels; see below.)
@@ -268,7 +268,7 @@ pub fn soa_to_columns(a: &SoaVec3) -> Vec<u8> {
 
 // --- Direct column-buffer reduction kernels (P-SIMD C3) ---
 //
-// The `dot`/`length` reductions over a `@packed(layout: column)` Vec3 buffer, reading the three
+// The `dot`/`length` reductions over a `@packed(Layout.Column)` Vec3 buffer, reading the three
 // **contiguous** `f32` columns straight out of the byte buffer — **no** `SoaVec3` decode (that
 // per-call `Vec<f32>` allocation benched *slower* than the AoS kernels, wiping out the layout win).
 // Each column is a contiguous run, so the per-element products are three contiguous `f32` streams

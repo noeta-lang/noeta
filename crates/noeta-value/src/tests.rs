@@ -182,7 +182,7 @@ fn packed_push_streams_in_place_and_frees() {
 
 #[test]
 fn packed_column_layout_round_trips_and_frees() {
-    // P-SIMD C2: a `@packed(layout: column)` list stores each field contiguously across elements
+    // P-SIMD C2: a `@packed(Layout.Column)` list stores each field contiguously across elements
     // (`[x×n][y×n]`) yet observes identically to a row list. Build it by streaming push (exercising
     // `column_append`'s O(n) rebuild), then check get / field / select / set / concat all read the
     // right values through the column offset math — and free clean under miri. Mixed field widths

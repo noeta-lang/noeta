@@ -28,7 +28,7 @@ fn composed_project(name: &str) -> PathBuf {
     std::fs::write(
         app.join("main.noe"),
         "use imgfx.{fx}\n\n\
-         @packed(layout: column) struct Px { r: f32; g: f32; b: f32 }\n\n\
+         @packed(Layout.Column) struct Px { r: f32; g: f32; b: f32 }\n\n\
          a = fx.acc();\n\
          a.add(2);\n\
          a.apply(fn(t) => t * 10);\n\

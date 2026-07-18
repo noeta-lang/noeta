@@ -4330,6 +4330,7 @@ dependencies = [
  "noeta-pm",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-types",
  "salsa",
 ]
 

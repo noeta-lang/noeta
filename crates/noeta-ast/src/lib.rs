@@ -238,7 +238,7 @@ pub struct StructDecl {
 
 /// The storage layout a `@packed` struct's lists use (P-SIMD `plans/perf/p-simd-column-layout.md`).
 /// A per-type performance attribute — **invisible to behaviour**; it only changes which kernel/offset
-/// math the runtime uses. Set by `@packed(layout: row|column)`; bare `@packed` is [`Row`](Self::Row).
+/// math the runtime uses. Set by `@packed(Layout.Row|Layout.Column)`; bare `@packed` is [`Row`](Self::Row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PackedLayout {
     /// Row-major: each element's fields are contiguous (AoS). The default, and today's `@packed`.

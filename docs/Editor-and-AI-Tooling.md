@@ -33,7 +33,7 @@ What it does today:
 | Feature | Notes |
 |---|---|
 | **Live diagnostics** | Every `E0xxx` with its span, on every keystroke (incremental `didChange`). |
-| **Hover types** | The inferred static type of the expression under the cursor, in surface syntax (`List<int>`, `Result<Order, OrderError>`). Non-default storage adds a fact line: a `@packed` type shows `@packed — 12 bytes`, a `List<packed>` shows `flat packed storage — 12 bytes/element, row-major` (or `column-major (SoA)` for `@packed(layout: column)`). |
+| **Hover types** | The inferred static type of the expression under the cursor, in surface syntax (`List<int>`, `Result<Order, OrderError>`). Non-default storage adds a fact line: a `@packed` type shows `@packed — 12 bytes`, a `List<packed>` shows `flat packed storage — 12 bytes/element, row-major` (or `column-major (SoA)` for `@packed(Layout.Column)`). |
 | **Go to definition** | Cross-module: a name defined in an imported module resolves to that file. |
 | **Find references / rename** | Including struct/class **members**; rename is prepare-checked so you can't rename what isn't renameable. |
 | **Completion** | Identifiers in scope, members after `.` (including the bare-dot and mid-whitespace trigger positions), and **type positions** (annotations, signatures). |

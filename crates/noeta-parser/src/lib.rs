@@ -180,9 +180,11 @@ enum Decorator {
 enum DirectiveSuffix {
     Dotted((String, Span)),
     Generic(Vec<TypeRef>),
-    /// A `: value` named-argument suffix (`@packed(layout: column)`): the head is the parameter name,
-    /// this carries the identifier value. Only `@packed` interprets it today; other directives ignore
-    /// it (their handlers match on `Dotted`/`Generic`), so a stray `x: y` on them is inert.
+    /// A `: value` named-argument suffix (`name: value`): the head is the parameter name, this
+    /// carries the identifier value. No directive consumes one today (`@packed` retired its
+    /// `layout: …` form for the `Layout` enum, which parses as `Dotted`); it is kept in the shared
+    /// grammar so a directive gaining a named argument later needs no grammar change, and so the
+    /// retired `@packed(layout: row)` still parses to a targeted migration diagnostic.
     Named((String, Span)),
 }
 
@@ -342,14 +344,16 @@ fn set_sugar_items(callee: &Expr) -> Option<&[Expr]> {
 
 /// Project a directive's arguments onto their head identifiers (dropping any suffix), for the
 /// directives that take plain names (`@attribute`).
-/// Parse `@packed`'s optional `layout: row|column` argument (P-SIMD). Bare `@packed` (no args) is
-/// [`PackedLayout::Row`]. Any malformed argument — unknown name, missing/wrong value, extra args —
-/// emits `E0037` and falls back to `Row` so parsing continues.
+/// Parse `@packed`'s optional layout argument (P-SIMD): the [`reflect::LAYOUT_ENUM`] vocabulary,
+/// `@packed(Layout.Row)` / `@packed(Layout.Column)` — the same `Enum.Variant` shape `@role` takes.
+/// Bare `@packed` (no args) is [`PackedLayout::Row`]. Any malformed argument — unknown name or
+/// variant, missing qualifier, extra args, the retired `layout: row|column` form — emits `E0037`
+/// and falls back to `Row` so parsing continues.
 fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) -> PackedLayout {
     let reject = |span: Span, msg: String| {
         ctx.diags.borrow_mut().push(
             Diagnostic::error(DiagnosticCode::InvalidDirectiveArgument, span, msg)
-                .with_help("`@packed` takes at most `layout: row` or `layout: column`"),
+                .with_help("`@packed` takes at most `Layout.Row` or `Layout.Column`"),
         );
     };
     let Some(((head, head_span), suffix)) = args.first() else {
@@ -358,26 +362,51 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
     if let Some(extra) = args.get(1) {
         reject(
             extra.0.1,
-            "`@packed` takes a single `layout` argument".to_string(),
+            "`@packed` takes a single `Layout` argument".to_string(),
         );
     }
-    if head.as_str() != "layout" {
+    // The retired pre-enum spelling gets a targeted migration message, naming the exact
+    // replacement when the old value identifies one.
+    if head.as_str() == "layout" {
+        let replacement = match suffix {
+            Some(DirectiveSuffix::Named((value, _))) if value == "row" => "`@packed(Layout.Row)`",
+            Some(DirectiveSuffix::Named((value, _))) if value == "column" => {
+                "`@packed(Layout.Column)`"
+            }
+            _ => "`@packed(Layout.Row)` or `@packed(Layout.Column)`",
+        };
         reject(
             *head_span,
             format!(
-                "unknown `@packed` argument `{head}`; the only argument is `layout: row|column`"
+                "the `layout: row|column` form was replaced by the `Layout` enum — write {replacement}"
+            ),
+        );
+        return PackedLayout::Row;
+    }
+    if head.as_str() != noeta_ast::reflect::LAYOUT_ENUM {
+        reject(
+            *head_span,
+            format!(
+                "unknown `@packed` argument `{head}`; the only argument is `Layout.Row|Layout.Column`"
             ),
         );
         return PackedLayout::Row;
     }
     match suffix {
-        Some(DirectiveSuffix::Named((value, value_span))) => match value.as_str() {
-            "row" => PackedLayout::Row,
-            "column" => PackedLayout::Column,
+        Some(DirectiveSuffix::Dotted((variant, variant_span))) => match variant.as_str() {
+            "Row" => PackedLayout::Row,
+            "Column" => PackedLayout::Column,
             other => {
                 reject(
-                    *value_span,
-                    format!("unknown layout `{other}`; expected `row` or `column`"),
+                    *variant_span,
+                    format!(
+                        "unknown layout `Layout.{other}`; the variants are {}",
+                        noeta_ast::reflect::LAYOUT_VARIANTS
+                            .iter()
+                            .map(|v| format!("`Layout.{v}`"))
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    ),
                 );
                 PackedLayout::Row
             }
@@ -385,8 +414,7 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
         _ => {
             reject(
                 *head_span,
-                "`@packed(layout: …)` needs a value — `layout: row` or `layout: column`"
-                    .to_string(),
+                "`@packed(Layout)` needs a variant — `Layout.Row` or `Layout.Column`".to_string(),
             );
             PackedLayout::Row
         }
@@ -3331,7 +3359,7 @@ where
             just(T::Dot)
                 .ignore_then(id.clone())
                 .map(DirectiveSuffix::Dotted),
-            // A `: value` named argument (`@packed(layout: column)`); only `@packed` reads it.
+            // A `: value` named argument; unconsumed today (see `DirectiveSuffix::Named`).
             just(T::Colon)
                 .ignore_then(id.clone())
                 .map(DirectiveSuffix::Named),
@@ -3419,9 +3447,10 @@ where
                             }
                             "packed" => {
                                 // `@packed` (P-PACK) — the struct-only flat-layout marker. Its one
-                                // optional argument is `layout: row|column` (P-SIMD): the storage
-                                // layout its lists use. Anything else is E0037. The checker validates
-                                // placement (struct-only) and the all-primitive field constraint.
+                                // optional argument is `Layout.Row|Layout.Column` (P-SIMD): the
+                                // storage layout its lists use. Anything else is E0037. The checker
+                                // validates placement (struct-only) and the all-primitive field
+                                // constraint.
                                 let layout = parse_packed_layout(&args, name_span, &ctx);
                                 packed = Some(PackedDirective {
                                     span: name_span,
@@ -4159,26 +4188,28 @@ mod tests {
 
     #[test]
     fn packed_layout_argument() {
-        // P-SIMD: `@packed(layout: column)` selects the column-major storage layout; `row` is the
-        // explicit default.
-        let col = parse_str("@packed(layout: column)\nstruct V { a: int }\n");
+        // P-SIMD: `@packed(Layout.Column)` selects the column-major storage layout; `Layout.Row`
+        // is the explicit default.
+        let col = parse_str("@packed(Layout.Column)\nstruct V { a: int }\n");
         assert!(col.diagnostics.is_empty(), "{:?}", col.diagnostics);
         let Stmt::Struct(s) = &col.program.stmts[0] else {
             panic!("expected struct");
         };
         assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Column));
 
-        let row = parse_str("@packed(layout: row)\nstruct V { a: int }\n");
+        let row = parse_str("@packed(Layout.Row)\nstruct V { a: int }\n");
         let Stmt::Struct(s) = &row.program.stmts[0] else {
             panic!("expected struct");
         };
         assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Row));
 
-        // Unknown value, unknown arg name, and a value-less `layout` are each E0037.
+        // Unknown variant, unknown arg name, a variant-less `Layout`, and the retired
+        // `layout: row|column` spelling are each E0037.
         for src in [
-            "@packed(layout: bogus)\nstruct V { a: int }\n",
+            "@packed(Layout.Bogus)\nstruct V { a: int }\n",
             "@packed(x)\nstruct V { a: int }\n",
-            "@packed(layout)\nstruct V { a: int }\n",
+            "@packed(Layout)\nstruct V { a: int }\n",
+            "@packed(layout: column)\nstruct V { a: int }\n",
         ] {
             let bad = parse_str(src);
             assert!(
@@ -4189,6 +4220,17 @@ mod tests {
                 bad.diagnostics
             );
         }
+        // The retired form's message points at the enum replacement.
+        let old = parse_str("@packed(layout: row)\nstruct V { a: int }\n");
+        assert!(
+            old.diagnostics
+                .iter()
+                .any(|d| d.message.contains("Layout") && d.message.contains("replaced")),
+            "migration help expected, got {:?}",
+            old.diagnostics
+        );
+        // The accepted spellings and the reflect vocabulary stay in lockstep.
+        assert_eq!(noeta_ast::reflect::LAYOUT_VARIANTS, &["Row", "Column"]);
     }
 
     #[test]

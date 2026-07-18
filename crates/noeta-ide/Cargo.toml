@@ -26,6 +26,9 @@ noeta-pm = { workspace = true, features = ["fmt-config"] }
 # (the dangling `.` otherwise drops the statement, so the receiver never gets a type).
 noeta-parser = { workspace = true }
 noeta-check = { workspace = true }
+# The built-in trait vocabulary (`BUILTIN_TRAITS`) directive-argument completion offers in
+# `@derive(...)` — the same table the checker validates derives against.
+noeta-types = { workspace = true }
 # The impact engine (server-hmr W3) attributes edits with the hot-swap differ.
 noeta-compiler = { workspace = true }
 noeta-stdlib = { workspace = true }

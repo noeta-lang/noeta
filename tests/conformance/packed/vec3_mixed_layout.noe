@@ -10,7 +10,7 @@
 use std.{vec}
 
 @packed struct R3 { x: f32; y: f32; z: f32 }
-@packed(layout: column) struct C3 { x: f32; y: f32; z: f32 }
+@packed(Layout.Column) struct C3 { x: f32; y: f32; z: f32 }
 
 rows = [R3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, R3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
 cols = [C3 { x: 1.0f32, y: 0.0f32, z: 0.0f32 }, C3 { x: 0.0f32, y: 3.0f32, z: 4.0f32 }]

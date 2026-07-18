@@ -802,7 +802,7 @@ struct Symbols {
     /// Collected in pass 1 so a packed struct's field-type validation (a field may be another packed
     /// struct declared later) sees the full set, and so `List<Packed>` specialization can consult it.
     packed_structs: HashSet<String>,
-    /// Every `@packed(layout: column)` struct (P-SIMD C2) — a subset of [`Checker::packed_structs`]
+    /// Every `@packed(Layout.Column)` struct (P-SIMD C2) — a subset of [`Checker::packed_structs`]
     /// whose lists are stored column-major. Collected alongside `packed_structs` so `packed_layout`
     /// can flag the runtime schema; layout is a performance-only property (behaviour-invisible).
     column_structs: HashSet<String>,

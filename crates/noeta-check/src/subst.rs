@@ -636,12 +636,12 @@ pub(crate) fn constraint_mismatch(
         ConstraintLayout::Any => {}
         ConstraintLayout::Row if layout.column => {
             return Some(
-                "the bundle requires row layout; the type is `@packed(layout: column)`".to_string(),
+                "the bundle requires row layout; the type is `@packed(Layout.Column)`".to_string(),
             );
         }
         ConstraintLayout::Column if !layout.column => {
             return Some(
-                "the bundle requires column layout — mark the type `@packed(layout: column)`"
+                "the bundle requires column layout — mark the type `@packed(Layout.Column)`"
                     .to_string(),
             );
         }

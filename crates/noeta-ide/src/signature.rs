@@ -44,6 +44,122 @@ pub fn from_decl(decl: &FnDecl, active: usize) -> SignatureData {
     }
 }
 
+/// The signature to show while the cursor is inside a **directive's** argument list (C5): a
+/// synthetic signature naming the directive's own vocabulary — decorators from their fixed
+/// grammar, a tier annotation (`@bench(…)`) from its config attribute's fields. `None` when the
+/// directive takes no arguments the cursor could be typing (an unknown tier, a knob-less `@test`).
+pub fn directive_signature(
+    ctxt: &crate::completion::DirectiveArgContext,
+    program: &noeta_ast::Program,
+) -> Option<SignatureData> {
+    let one = |label: &str, param: &str| SignatureData {
+        label: label.to_string(),
+        parameters: vec![param.to_string()],
+        active_param: 0,
+    };
+    match ctxt.directive.as_str() {
+        "derive" => {
+            let traits = noeta_types::BUILTIN_TRAITS
+                .iter()
+                .filter(|t| t.derivable())
+                .map(|t| match t.generic_arity() {
+                    0 => t.name().to_string(),
+                    _ => format!("{}<Format>", t.name()),
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            Some(one(&format!("@derive(Trait, …) — {traits}"), "Trait"))
+        }
+        "role" => Some(one(
+            &format!(
+                "@role(Enum.Variant, …) — {}.{{{}}} or any @semantic enum",
+                noeta_ast::reflect::SEMANTIC_ENUM,
+                noeta_ast::reflect::SEMANTIC_VARIANTS.join(", ")
+            ),
+            "Enum.Variant",
+        )),
+        "attribute" => Some(one(
+            &format!(
+                "@attribute(Kind, …) — {}",
+                noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS.join(", ")
+            ),
+            "Kind",
+        )),
+        "packed" => {
+            let variants = noeta_ast::reflect::LAYOUT_VARIANTS
+                .iter()
+                .map(|v| format!("{}.{v}", noeta_ast::reflect::LAYOUT_ENUM))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            Some(one(&format!("@packed({variants})"), &variants))
+        }
+        "semantic" => None, // takes no arguments
+        "tier" => {
+            let parameters = vec![
+                "name".to_string(),
+                "config: Type | text: \"<lang>\" | expr: Type".to_string(),
+            ];
+            Some(SignatureData {
+                label: format!("@tier({})", parameters.join(", ")),
+                active_param: ctxt.active.min(parameters.len() - 1),
+                parameters,
+            })
+        }
+        // A tier annotation: its signature is the config attribute's field list.
+        tier => {
+            let reg = noeta_stdlib::registry::single_registry_process();
+            let tiers = noeta_check::tiers::TierRegistry::collect_with_registry(program, reg);
+            let config = reg
+                .find_ext_tier(tier)
+                .and_then(|t| t.config.map(String::from))
+                .or_else(|| tiers.declared(tier).and_then(|d| d.config.clone()))?;
+            let parameters: Vec<String> =
+                if let Some(attr) = noeta_stdlib::registry::find_ext_attribute(&config) {
+                    attr.fields
+                        .iter()
+                        .map(|f| {
+                            use noeta_stdlib::registry::AttrFieldType;
+                            let ty = match f.ty {
+                                AttrFieldType::Int => "int",
+                                AttrFieldType::Str => "string",
+                                AttrFieldType::Dyn => "dyn",
+                            };
+                            format!(
+                                "{}: {ty}{}",
+                                f.name,
+                                if f.default.is_some() { "?" } else { "" }
+                            )
+                        })
+                        .collect()
+                } else {
+                    program.stmts.iter().find_map(|stmt| match stmt {
+                        noeta_ast::Stmt::Struct(decl) if decl.name == config => Some(
+                            decl.fields
+                                .iter()
+                                .map(|f| {
+                                    let ty =
+                                        f.ty.as_ref()
+                                            .map(symbols::render_type_ref)
+                                            .unwrap_or_else(|| "dyn".to_string());
+                                    format!("{}: {ty}", f.name)
+                                })
+                                .collect(),
+                        ),
+                        _ => None,
+                    })?
+                };
+            if parameters.is_empty() {
+                return None;
+            }
+            Some(SignatureData {
+                label: format!("@{tier}({}) — {config} knobs", parameters.join(", ")),
+                active_param: ctxt.active.min(parameters.len() - 1),
+                parameters,
+            })
+        }
+    }
+}
+
 /// The call the cursor is inside: the callee name, the 0-based active argument index, and — when the
 /// call is a method call `recv.callee(` — the span of the receiver `recv` (so the caller can resolve
 /// its type and find the method). `receiver` is `None` for a plain function call.

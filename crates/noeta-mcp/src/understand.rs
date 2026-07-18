@@ -582,7 +582,7 @@ enum Color { Red; Green }
     fn type_at_notes_packed_storage() {
         let p = prepare(
             &Some(
-                "@packed(layout: column) struct Vec3 { x: f32; y: f32; z: f32 }\n\
+                "@packed(Layout.Column) struct Vec3 { x: f32; y: f32; z: f32 }\n\
                  v = Vec3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }\n\
                  vs = [v]\n\
                  echo vs.len()\n"

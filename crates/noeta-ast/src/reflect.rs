@@ -823,6 +823,24 @@ pub const SEMANTIC_VARIANTS: &[&str] = &[
     "Layer",
 ];
 
+/// The declaration-kind vocabulary an `@attribute(Kind, …)` placement list names — the directive
+/// spellings the checker's `TargetKind::from_name` accepts, shared so its diagnostics help and IDE
+/// completion can never drift from the accepted set (a checker test asserts lockstep).
+pub const ATTRIBUTE_TARGET_KINDS: &[&str] = &[
+    "Struct", "Class", "Enum", "Function", "Method", "Field", "Variant",
+];
+
+/// The prelude `Layout` enum's name — the storage-layout vocabulary `@packed` takes
+/// (`@packed(Layout.Column)`). Like [`SEMANTIC_ENUM`] it is directive vocabulary, not a runtime
+/// value: the parser resolves the argument syntactically, and the prelude registers the enum so
+/// tooling (hover, completion, docs) sees one authoritative declaration.
+pub const LAYOUT_ENUM: &str = "Layout";
+
+/// The `Layout.*` variants, in declaration order, mirroring [`PackedLayout`](crate::PackedLayout):
+/// `Row` (AoS, the bare-`@packed` default) and `Column` (SoA, P-SIMD). The single source of truth
+/// the parser validates `@packed(Layout.…)` against and completion offers.
+pub const LAYOUT_VARIANTS: &[&str] = &["Row", "Column"];
+
 /// Push each field's `#[...]` attributes, keyed by the qualified `Type.field` name (mirroring the
 /// `Type.method` convention), so a `#[Column(...)]` on a property surfaces distinctly per owner.
 fn push_field_attrs(manifest: &mut Vec<AttributeRecord>, type_name: &str, fields: &[FieldDecl]) {
@@ -861,7 +879,7 @@ pub struct PackedLayout {
     pub type_name: String,
     /// The fields in declared (slot) order.
     pub fields: Vec<PackedField>,
-    /// Whether lists of this element are stored **column-major** — the `@packed(layout: column)`
+    /// Whether lists of this element are stored **column-major** — the `@packed(Layout.Column)`
     /// attribute (P-SIMD C2). A performance-only property (see `noeta_object::PackedSchema::column`);
     /// carried here so the compiler can thread it into the runtime schema both backends read.
     pub column: bool,

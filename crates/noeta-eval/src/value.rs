@@ -304,7 +304,7 @@ pub(crate) struct PackedSchema {
     /// Bytes per element — the sum of each field's [`SlotKind::byte_width`] (P-PACK 3.2b: a byte-
     /// addressed buffer, so an `f32` field is 4 bytes, not 8).
     pub(crate) byte_size: usize,
-    /// Whether the list buffer is stored column-major (`@packed(layout: column)`, P-SIMD C2) — the
+    /// Whether the list buffer is stored column-major (`@packed(Layout.Column)`, P-SIMD C2) — the
     /// eval mirror of `noeta_object::PackedSchema::column`. Performance-only; observed values are
     /// identical either way (the differential pins that both backends agree).
     pub(crate) column: bool,
@@ -568,7 +568,7 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u8>) -> Optio
 /// Append one packed `row` (`byte_size` bytes, fields in slot order) to a column-major buffer,
 /// returning the rebuilt buffer with each field's column extended by the new element (P-SIMD C2).
 /// O(n): column layout stores each field contiguously, so a new element inserts into the middle of
-/// the buffer at every column's end. Used only on the `layout: column` path.
+/// the buffer at every column's end. Used only on the `Layout.Column` path.
 fn column_append(schema: &PackedSchema, buf: &[u8], row: &[u8]) -> Vec<u8> {
     let n = schema.count(buf.len());
     let mut out = Vec::with_capacity(buf.len() + schema.byte_size);

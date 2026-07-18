@@ -664,9 +664,10 @@ impl Checker {
                         *span,
                         format!("`{kind_name}` is not a valid attribute target kind"),
                     )
-                    .help(
-                        "the target kinds are Record, Class, Enum, Function, Method, Field, Variant",
-                    );
+                    .help(format!(
+                        "the target kinds are {}",
+                        noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS.join(", ")
+                    ));
                 }
             }
         }

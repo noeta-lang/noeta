@@ -1,0 +1,6 @@
+// The retired pre-enum spelling `@packed(layout: row|column)` gets a targeted migration error
+// (E0037) pointing at the `Layout` enum form.
+// expect: error E0037 at 5:9
+// expect: exit 1
+@packed(layout: column) struct V { a: int }
+echo "unreached"

@@ -2068,7 +2068,7 @@ fn packed_layout_table(text: &str) -> std::collections::HashMap<String, PackedLa
 fn packed_layouts_index_every_packed_struct_by_name() {
     let table = packed_layout_table(
         "@packed struct Vec3 { x: f32; y: f32; z: f32 }\n\
-         @packed(layout: column) struct Particle { n: int; alive: bool }\n\
+         @packed(Layout.Column) struct Particle { n: int; alive: bool }\n\
          struct Boxed { s: string }\n\
          echo 1\n",
     );
@@ -2430,4 +2430,18 @@ fn test_on_an_instance_method_is_invalid_site() {
                fn reads_self(): void { assert(self.n == 0u64, \"n\") }\n\
                }\n";
     assert_eq!(codes(src), ["E0054"]);
+}
+
+#[test]
+fn attribute_target_kind_vocabulary_is_in_lockstep() {
+    // The shared `ATTRIBUTE_TARGET_KINDS` vocabulary (diagnostics help + IDE completion) accepts
+    // exactly what `TargetKind::from_name` parses.
+    for name in noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS {
+        assert!(
+            crate::TargetKind::from_name(name).is_some(),
+            "`{name}` is in the vocabulary but not parsed"
+        );
+    }
+    // The one historic drift: the old help text said `Record`, which was never accepted.
+    assert!(crate::TargetKind::from_name("Record").is_none());
 }

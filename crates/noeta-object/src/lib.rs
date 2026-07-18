@@ -184,7 +184,7 @@ pub struct PackedSchema {
     /// VM stores a `List<packed>` as a byte buffer so an `f32` field is 4 bytes, not 8).
     pub byte_size: usize,
     /// Whether the list buffer is stored **column-major** (SoA: `[f0×n][f1×n]…`) rather than
-    /// row-major (AoS: each element's fields contiguous) — the `@packed(layout: column)` attribute
+    /// row-major (AoS: each element's fields contiguous) — the `@packed(Layout.Column)` attribute
     /// (P-SIMD C2). A pure *performance* property: every op reads it to pick the byte offset, but the
     /// observed value is identical either way (differential holds by construction). Top-level fields
     /// become columns; a nested `@packed` field stays a contiguous per-element chunk until leaf-
