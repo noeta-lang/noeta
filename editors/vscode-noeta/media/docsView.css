@@ -131,11 +131,18 @@ body {
 .kind-variant { color: var(--vscode-symbolIcon-enumeratorMemberForeground, #7bb3e0); }
 .kind-field   { color: var(--vscode-symbolIcon-fieldForeground, #7bb3e0); }
 .kind-interface, .kind-trait { color: var(--vscode-symbolIcon-interfaceForeground, #4dc0b0); }
-.kind-module, .kind-package, .kind-guide, .kind-root, .kind-section {
+/* Neutral kinds (modules, packages, guide pages, roots, sections): dim only the ICON — the title
+ * keeps the normal list foreground. Coloring the whole row made these titles the same gray as
+ * their crumb/snippet, so search results melted together. Symbol kinds (function/struct/…) keep
+ * their whole-row accent — a colored title reads as a symbol, like the outline view. */
+.kind-module .kind-icon, .kind-package .kind-icon, .kind-guide .kind-icon,
+.kind-root .kind-icon, .kind-section .kind-icon {
   color: var(--vscode-icon-foreground);
 }
 
 .label { flex: none; }
+/* In flat search results, lift the title off its metadata lines. */
+.result .label { font-weight: 500; }
 .label .hl {
   color: var(--vscode-list-highlightForeground, #4daafc);
   font-weight: 600;
