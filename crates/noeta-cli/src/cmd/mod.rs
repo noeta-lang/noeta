@@ -6,6 +6,7 @@ pub(crate) mod build;
 pub(crate) mod check;
 pub(crate) mod doc;
 pub(crate) mod fmt;
+pub(crate) mod init;
 pub(crate) mod native;
 pub(crate) mod pm;
 pub(crate) mod repl;

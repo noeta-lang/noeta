@@ -53,6 +53,7 @@ use cmd::build::{cmd_build, cmd_dump};
 use cmd::check::cmd_check;
 use cmd::doc::cmd_doc;
 use cmd::fmt::cmd_fmt;
+use cmd::init::cmd_init;
 use cmd::pm::{cmd_add, cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update};
 use cmd::repl::cmd_repl;
 use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
@@ -77,6 +78,25 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Scaffold a new Noeta project: a `noeta.toml` wiring the std dev tiers (`@test`,
+    /// `@bench`, `@doc`, `@debug`) into a `development` target beside an explicit
+    /// `production` baseline, a `src/main.noe` exercising each tier, `.gitignore`, the
+    /// `.vscode/` run profiles the Noeta extension understands, and the agent surface —
+    /// `AGENTS.md` (how to drive the toolchain, CLI and MCP) plus `SYNTAX.md`, the full
+    /// language reference generated from the embedded guide. Never overwrites an existing
+    /// file, so it is safe in a non-empty directory.
+    Init {
+        /// Directory to initialize (default: the current directory; created if missing).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Package name as `company/package` (default: `local/<directory-name>` — change
+        /// `local` to your registry scope before publishing).
+        #[arg(long)]
+        name: Option<String>,
+        /// Skip `git init` when the directory is not already inside a git repository.
+        #[arg(long)]
+        no_git: bool,
+    },
     /// Run a program file.
     Run {
         /// Path to a `.noe` file.
@@ -655,6 +675,7 @@ pub fn run_cli(
     let cli =
         <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     match cli.command {
+        Command::Init { path, name, no_git } => cmd_init(&path, &name, no_git),
         Command::Run {
             file,
             tier,
