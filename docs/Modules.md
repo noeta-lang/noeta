@@ -32,6 +32,31 @@ customer = User.new("Ada", 7)
 echo customer.name                          // Ada
 ```
 
+## Qualified references
+
+A declaration can also be referenced by a **module-qualified name** at any use site — a struct literal, an annotation, a call, an enum construction or pattern, even a first-class function value. Importing a whole module binds its last segment as a navigable handle, and a spelled-out fully-qualified name always works, with **no `use` at all** — the FQN *is* the import:
+
+```noeta check
+namespace App.Main;
+
+use geometry.vec;                              // the whole module: binds `vec`
+
+a = vec.Vec2 { x: 1, y: 2 }                    // qualified struct literal
+b: vec.Vec2 = vec.Vec2 { x: 3, y: 4 }          // qualified annotation
+c = vec.add(a, b)                              // qualified call
+g = geometry.vec.Vec2 { x: 5, y: 6 }           // spelled-out FQN — zero `use` needed
+f = geometry.vec.add                           // a first-class fn value, FQN too
+s = vec.Shape.Circle(7)                        // qualified enum construction
+r = match s {
+    vec.Shape.Circle(radius) => radius,        // qualified pattern
+    _ => 0,
+}
+```
+
+A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `gv.Vec2`) and merges only `pub` declarations. Item imports keep today's precedence: in `use a.b`, an item `b` exported by module `a` wins over a module named `a.b`.
+
+**Locals win in value position.** A dotted chain whose root is a local binding is member access on that local, not a module reference — `vec = Holder { … }; vec.add` reads the field, closure parameters included. Type positions (annotations, literal heads, patterns) are a separate namespace, so a local `vec` never blocks `vec.Vec2` as a type.
+
 ## Aliasing an import — `as`
 
 An import can be renamed locally with `as`. This is how a file brings in two types that share a short name from different namespaces — each under its own local name:
