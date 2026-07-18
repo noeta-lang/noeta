@@ -1,0 +1,40 @@
+@doc {
+  # Profiler demo
+
+  A deliberately compute-heavy entry: `simulate` fans out into two hot paths — vector
+  churn through the `geometry` dependency and an integer mixing loop — so
+  **Noeta: Profile File (Sampling)** produces a real flame graph with distinct frames
+  (and `--lines` resolves the hot lines). Profile THIS file; `main.noe` finishes in
+  microseconds, too fast to sample.
+}
+use geometry.vec.{Vec2, add, scale}
+
+@doc { Accumulate vectors through the dependency's `add`/`scale` — the geometry-heavy path. }
+fn churn_vectors(rounds: int): int {
+    mut acc = Vec2 {}
+    for i in 0..rounds {
+        acc = add(acc, Vec2 { x: i % 7, y: i % 11 })
+        if i % 64 == 0 {
+            acc = scale(acc, 1)
+        }
+    }
+    return acc.manhattan()
+}
+
+@doc { An integer avalanche loop — the arithmetic-heavy path. }
+fn mix_bits(rounds: int): int {
+    mut h = 1469598103
+    for i in 0..rounds {
+        h = (h * 31 + i) % 1000000007
+        h = (h * 37 + 17) % 998244353
+    }
+    return h
+}
+
+@doc { The profile root: both hot paths under one frame. }
+fn simulate(): int {
+    total = churn_vectors(400000) + mix_bits(1500000)
+    return total % 100000
+}
+
+echo "simulated: ${simulate()}"
