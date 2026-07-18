@@ -116,14 +116,37 @@
         continue;
       }
 
-      // Blockquote (consecutive `>` lines).
+      // Blockquote (consecutive `>` lines) — including GitHub-style admonitions
+      // (`> [!NOTE]` / `[!TIP]` / `[!IMPORTANT]` / `[!WARNING]` / `[!CAUTION]`), rendered as a
+      // labeled callout instead of a quote with the literal marker in it.
       if (/^>\s?/.test(line)) {
         const quote = [];
         while (i < lines.length && /^>\s?/.test(lines[i])) {
           quote.push(lines[i].replace(/^>\s?/, ""));
           i++;
         }
-        html.push("<blockquote>" + renderInline(quote.join(" ")) + "</blockquote>");
+        const joined = quote.join("\n");
+        // Paragraph breaks inside the quote (blank `>` lines) survive as separate <p>s.
+        const paras = (text) =>
+          text
+            .split(/\n{2,}/)
+            .map((p) => p.replace(/\n/g, " ").trim())
+            .filter(Boolean)
+            .map((p) => "<p>" + renderInline(p) + "</p>")
+            .join("");
+        const alert = joined.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i);
+        if (alert) {
+          const kind = alert[1].toLowerCase();
+          const label = kind.charAt(0).toUpperCase() + kind.slice(1);
+          html.push(
+            '<div class="admonition adm-' + kind + '">' +
+              '<div class="adm-label">' + label + "</div>" +
+              paras(joined.slice(alert[0].length)) +
+              "</div>",
+          );
+        } else {
+          html.push("<blockquote>" + paras(joined) + "</blockquote>");
+        }
         continue;
       }
 

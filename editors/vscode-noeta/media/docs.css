@@ -149,6 +149,30 @@ body {
   color: var(--vscode-descriptionForeground);
 }
 
+/* GitHub-style admonitions (`> [!NOTE] …`): a labeled callout, accent-colored per kind through
+ * VS Code's own UI colors so it tracks the theme. */
+.doc-body .admonition {
+  margin: 0.8rem 0;
+  padding: 0.5rem 0.9rem;
+  border-left: 3px solid var(--adm-accent, var(--vscode-textLink-foreground));
+  border-radius: 0 0.3rem 0.3rem 0;
+  background: color-mix(in srgb, var(--adm-accent, var(--vscode-textLink-foreground)) 7%, transparent);
+}
+.doc-body .admonition p { margin: 0.35rem 0; }
+.doc-body .adm-label {
+  font-size: 0.78em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--adm-accent, var(--vscode-textLink-foreground));
+  margin-bottom: 0.15rem;
+}
+.doc-body .adm-note      { --adm-accent: var(--vscode-editorInfo-foreground, #3794ff); }
+.doc-body .adm-tip       { --adm-accent: var(--vscode-charts-green, #89d185); }
+.doc-body .adm-important { --adm-accent: var(--vscode-charts-purple, #b180d7); }
+.doc-body .adm-warning   { --adm-accent: var(--vscode-editorWarning-foreground, #cca700); }
+.doc-body .adm-caution   { --adm-accent: var(--vscode-editorError-foreground, #f14c4c); }
+
 .doc-body a {
   color: var(--vscode-textLink-foreground);
   text-decoration: none;
