@@ -354,6 +354,18 @@ impl<'m> Vm<'m> {
                                             .to_string(),
                                     )
                                 };
+                                // Refresh the adapter-visible snapshot with the just-written
+                                // register BEFORE unblocking the client, so a `variables`/
+                                // `stackTrace` racing in behind this response reads the new value
+                                // rather than the stale pause-time capture.
+                                {
+                                    let view = DebugView {
+                                        module,
+                                        frames: &frames[..],
+                                        regs: &regs[..],
+                                    };
+                                    dbg.after_side_effect(&view);
+                                }
                                 let _ = reply.send(outcome);
                             }
                         }

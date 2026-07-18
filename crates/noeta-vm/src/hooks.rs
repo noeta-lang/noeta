@@ -21,6 +21,15 @@ pub trait Debugger: Send {
     /// register windows — so a pause can build a stack trace and read locals. May block until the
     /// user resumes.
     fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction;
+
+    /// Called by the VM immediately after it services a paused side effect that mutated the frame —
+    /// a [`DebugAction::SetVariable`] register write — and **before** the request's `reply` unblocks
+    /// the client. A debugger that publishes a captured stack for another thread to read (the DAP
+    /// adapter) refreshes it here, so a `variables`/`stackTrace` that races in right behind the
+    /// `setVariable` response observes the write rather than the stale pause-time snapshot (the
+    /// trampoline would otherwise only refresh on its next `before_op`, after the reply). The default
+    /// is a no-op — a debugger that reads the live view directly on its own thread needs nothing.
+    fn after_side_effect(&mut self, _view: &DebugView) {}
 }
 
 /// A profiler observing tier-0 execution (the `noeta profile` engine implements it). Like the
