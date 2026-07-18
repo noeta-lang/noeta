@@ -2925,6 +2925,7 @@ fn splices_a_type(insert: &str, text: &str, offset: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::path_to_uri;
 
     /// A fresh store with the process-global std registry seeded first. Every IDE feature that runs
     /// the checker resolves stdlib names (`abs`, `math.sqrt`, …) through the extension registry, so
