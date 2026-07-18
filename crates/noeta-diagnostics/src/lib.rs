@@ -229,6 +229,13 @@ pub enum DiagnosticCode {
     /// them — e.g. a top-level-only tier used on a method, or a `@test` method that reads `self`
     /// (a test method must be an associated function so the runner can call it with no receiver).
     InvalidDirectiveSite,
+    /// A block-bodied match arm (`pattern => { stmts }`, aether F1) appears in a `match` whose value
+    /// is used as an expression. Blocks are statement sequences in Noeta — they never produce a
+    /// value (a block-bodied function yields `unit` unless it `return`s) — so such an arm would
+    /// silently contribute `unit` where a value is expected. Either give the arm a value expression
+    /// (`pattern => <expr>`) or use the `match` in statement position, where block arms are for
+    /// side effects.
+    MatchArmNotValue,
 }
 
 impl DiagnosticCode {
@@ -289,6 +296,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidTierDeclaration,
         DiagnosticCode::InvalidTierExpression,
         DiagnosticCode::InvalidDirectiveSite,
+        DiagnosticCode::MatchArmNotValue,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -349,6 +357,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidTierExpression => "E0052",
             DiagnosticCode::InvalidTraitDeclaration => "E0053",
             DiagnosticCode::InvalidDirectiveSite => "E0054",
+            DiagnosticCode::MatchArmNotValue => "E0055",
         }
     }
 

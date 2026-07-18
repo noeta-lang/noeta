@@ -745,7 +745,10 @@ impl Checker {
                 scrutinee,
                 arms,
                 span,
-            } => self.synth_match(scrutinee, arms, *span, env),
+                // Reached through `synth`/`check` — the match is a sub-expression, so its value is
+                // used (a statement-position match routes through `Stmt::Expr` with `value_used`
+                // false instead).
+            } => self.synth_match(scrutinee, arms, *span, env, true),
             Expr::Object(lit) => {
                 if let Some(spread) = &lit.spread {
                     self.synth(spread, env);

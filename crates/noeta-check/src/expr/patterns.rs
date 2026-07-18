@@ -5,12 +5,19 @@
 use crate::*;
 
 impl Checker {
+    /// Type a `match`. `value_used` is `true` when the match stands in value position (its result
+    /// is consumed — a binding RHS, an argument, an operand, a `return`), and `false` only when it
+    /// is the whole of an expression statement (its value discarded). Block-bodied arms (aether F1)
+    /// produce no value — blocks are statement sequences in Noeta — so in value position they are a
+    /// hard error (E0055) rather than silently contributing `unit`; in statement position they are
+    /// the intended side-effect form.
     pub(crate) fn synth_match(
         &mut self,
         scrutinee: &Expr,
         arms: &[MatchArm],
         span: Span,
         env: &mut Env,
+        value_used: bool,
     ) -> Type {
         let scrut = self.synth(scrutinee, env);
         self.check_exhaustive(&scrut, arms, span);
@@ -30,8 +37,19 @@ impl Checker {
             let t = match &arm.body {
                 noeta_ast::ClosureBody::Expr(e) => self.synth(e, env),
                 // A statement-block arm (aether F1): check its statements in the arm scope; the
-                // arm's value is `unit`.
+                // arm's value is `unit`. In value position that is a silent value loss — blocks
+                // never produce values — so reject it (E0055).
                 noeta_ast::ClosureBody::Block(stmts) => {
+                    if value_used {
+                        self.error(
+                            DiagnosticCode::MatchArmNotValue,
+                            arm.span,
+                            "a block-bodied match arm produces no value, but this `match` is used \
+                             as an expression; give the arm a value with `=> <expr>`, or use the \
+                             `match` as a statement (block arms are for side effects)"
+                                .to_string(),
+                        );
+                    }
                     for stmt in stmts {
                         self.check_stmt(stmt, env);
                     }
