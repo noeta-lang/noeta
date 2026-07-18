@@ -186,6 +186,21 @@ struct DebugSession<'m> {
     /// fresh values (indices stay valid forever — the module only grows). Only successful compiles
     /// are memoized, and the param names are part of the key, so a hit is exactly a replay.
     memo: HashMap<(String, Vec<String>), u32>,
+    /// Watch-result memo (watch-memoization): `(fragment text, frame index)` → the stop generation
+    /// it was rendered at and its rendered `(value, type)`. The compiled-wrapper memo above still
+    /// re-*runs* the fragment on every render; this one lets an **observational** watch (all
+    /// top-level statements are expressions) skip execution entirely when it is re-rendered at the
+    /// same stop. A hit requires the stored generation to equal [`DebugSession::stop_generation`],
+    /// so any resume/step or console mutation (each of which bumps the generation) forces a fresh
+    /// evaluation; stale entries never match and are overwritten lazily. Frame index is part of the
+    /// key so the same expression watched against different paused frames does not collide.
+    result_memo: HashMap<(String, usize), (u64, String, String)>,
+    /// The **stop generation** — a monotonically-increasing state version for the paused program.
+    /// It bumps whenever the observed state may have changed: the program resumes/steps (the
+    /// dispatch loop bumps it on `DebugAction::Continue`), a console entry runs, a mutating watch
+    /// runs, or a Variables-panel `setVariable` writes a register. A memoized watch result is valid
+    /// only while its stored generation equals this one.
+    stop_generation: u64,
 }
 
 /// The unforgeable global a wrapped console fragment binds its closure to (see

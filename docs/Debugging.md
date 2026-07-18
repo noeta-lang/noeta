@@ -40,7 +40,7 @@ pauses before the first instruction.
 | **Call stack** | Every frame with its function name and source position — including frames from functions defined in other modules. |
 | **Variables** | Each frame's named locals (and `self` in a method frame) with their current value and type — the same surface type spelling (`List<int>`, `Point`) the LSP hover and REPL `:type` show. Only locals *in scope at the pause* appear; a name declared further down the function isn't shown as bound yet. |
 | **Hover** | Hovering an expression in the source while paused evaluates it **read-only** — names, `.field` chains, `[index]`, operators, literals. Anything that would run code is refused (see below). |
-| **Watch & debug console** | Full expression evaluation — the console is effectively **a REPL over the paused program** (see next section). Repeated watch evaluations are memoized, so stepping with a full watch panel costs nothing extra. |
+| **Watch & debug console** | Full expression evaluation — the console is effectively **a REPL over the paused program** (see next section). A watch panel is evaluated **once per stop**: re-rendering the same watch at the same pause replays its cached result without re-running it, so a full watch panel costs nothing extra between renders (see [Watches are evaluated once per stop](#watches-are-evaluated-once-per-stop)). |
 | **Edit variables** | Change a local's value from the Variables panel while paused; the replacement is any console expression (other locals visible), and the resumed program runs with the new value. `self` is not editable. |
 | **Panic tracebacks** | An abort replays its diagnostic and call-chain traceback as console output, same rendering as `noeta run`. |
 
@@ -107,6 +107,26 @@ trace in the checker or the debugged program's diagnostics.
 Frame locals pass into a fragment **by value**: `i = 5` typed at the console changes the fragment's
 copy, not the paused register. To actually change a live local, edit it in the **Variables panel**
 (`setVariable`) — that writes the frame register, and the resumed program sees the new value.
+
+## Watches are evaluated once per stop
+
+A watch panel re-renders its expressions constantly — on every step, and whenever the editor
+refreshes the view. To keep that free, an **observational** watch (one that only reads — every
+top-level statement is an expression) has its rendered result **memoized within a stop**: the first
+render runs it, and any repeat render at the same pause replays the cached value without re-running
+the fragment. A watch that calls a function with a side effect therefore runs that side effect once
+per stop, not once per render — the standard debugger contract that a watch is an observation.
+
+The memo is keyed by the watch's text and the frame it is evaluated against, and it is invalidated
+the moment the observed state can change:
+
+- **resuming or stepping** — the next stop is a fresh evaluation;
+- **a debug-console (`repl`) entry**, which may mutate program or session state;
+- **editing a variable** from the Variables panel (`setVariable`).
+
+After any of these the next render re-evaluates against the changed state, so a watch never shows a
+stale value. Debug-console entries and hovers are never memoized: a console entry is an explicit
+action you asked to run, and a hover is already read-only and cheap.
 
 ## Hover stays side-effect-free
 

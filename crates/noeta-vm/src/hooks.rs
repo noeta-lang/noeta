@@ -124,9 +124,9 @@ pub enum DebugAction {
 #[derive(Debug)]
 pub struct DebugEvalRequest {
     /// The parsed fragment (the adapter parses the console string; statements are allowed — a
-    /// trailing bare expression is the fragment's value). On a session run with `allow_calls` the
-    /// VM compiles it through the adopted session (closures included, tooling-unification T5);
-    /// hover walks its trailing expression read-only.
+    /// trailing bare expression is the fragment's value). On a session run whose [`EvalKind`] allows
+    /// calls the VM compiles it through the adopted session (closures included, tooling-unification
+    /// T5); a hover walks its trailing expression read-only.
     pub program: Program,
     /// The raw console string `program` was parsed from — the memo key (U3): a re-evaluated watch
     /// (same text, same scope shape) reuses its compiled wrapper instead of appending a new one.
@@ -142,12 +142,51 @@ pub struct DebugEvalRequest {
     /// binding whose value expression sits to the right of its name). Same names the checker gate
     /// used, so a fragment referencing an out-of-scope name is already refused before it reaches here.
     pub scope: Vec<String>,
-    /// Whether the fragment may run **code** (calls, closures, statements). `false` for a hover — a
-    /// hover must stay side-effect-free, so it evaluates paths/operators only and refuses a call.
-    pub allow_calls: bool,
+    /// Which surface the request came from (the DAP `context`) — see [`EvalKind`]. It decides three
+    /// things: whether the fragment may run code (a hover may not), whether its result is
+    /// **memoized** within the current stop (only an observational watch is), and whether running it
+    /// **bumps the stop generation** (a console entry / a mutating watch does, invalidating cached
+    /// watch results).
+    pub kind: EvalKind,
     /// Where the rendered outcome is sent back. Only strings cross this channel — the runtime values
     /// are thread-local, so they are rendered on the run worker before the reply travels back.
     pub reply: Sender<DebugEvalOutcome>,
+}
+
+/// What surface a debug `evaluate` came from — the DAP `context` field, mapped to how the VM treats
+/// the fragment (tooling-unification, watch-memoization):
+///
+/// - [`EvalKind::Hover`] (`context: "hover"`) — read-only: the fragment must be a single
+///   side-effect-free expression and no code runs. Never memoized, never bumps the generation.
+/// - [`EvalKind::Watch`] (`context: "watch"`) — a re-rendered observation. An *observational* watch
+///   (all top-level statements are expressions) has its rendered result **memoized** by
+///   `(text, frame)` at the current stop generation, so re-rendering the same watch at the same stop
+///   does not re-run it. A watch that instead binds/assigns/loops is treated as a mutation: it runs
+///   fresh and bumps the generation.
+/// - [`EvalKind::Console`] (`context: "repl"`, the debug console, or any other context) — an
+///   explicit user entry that may mutate program/session state. It always runs fresh and bumps the
+///   stop generation, invalidating every memoized watch result at the prior generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalKind {
+    /// A debug hover — read-only, no code runs.
+    Hover,
+    /// A watch-panel expression — memoized when observational.
+    Watch,
+    /// A debug-console entry — always runs, bumps the stop generation.
+    Console,
+}
+
+impl EvalKind {
+    /// Whether the fragment may run **code** (calls, closures, statements). Only a hover may not — it
+    /// must stay side-effect-free, evaluating paths/operators only and refusing a call.
+    pub fn allows_calls(self) -> bool {
+        !matches!(self, EvalKind::Hover)
+    }
+
+    /// Whether the fragment is evaluated on the read-only (pure) surface — a hover.
+    pub fn is_pure(self) -> bool {
+        matches!(self, EvalKind::Hover)
+    }
 }
 
 /// The result of a [`DebugEvalRequest`]: the rendered value + type, or an error message. Strings only,

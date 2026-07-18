@@ -42,7 +42,7 @@ use std::sync::mpsc::Receiver;
 
 use noeta_span::SourceId;
 use noeta_vm::debug::{StepMode, StepState, capture, frame_param_names, resolve_breakpoints};
-use noeta_vm::{DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger};
+use noeta_vm::{DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger, EvalKind};
 use serde_json::json;
 
 /// A parsed `noeta_debug_run` request: the buffer plus the debug launch parameters.
@@ -313,7 +313,9 @@ impl BrowserDebugger {
             // wrapper's parameters (see `DebugEvalRequest::scope`) — no not-yet-stored current-line
             // local leaks in as its pre-store `unit`.
             scope: params,
-            allow_calls: true,
+            // The playground eval box is an explicit console entry (it may run code) — not a
+            // memoized watch.
+            kind: EvalKind::Console,
             reply,
         })
     }

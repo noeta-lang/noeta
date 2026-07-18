@@ -182,6 +182,8 @@ fn debug_session_vm<'a>(arena: &'a typed_arena::Arena<Module>, src: &str) -> Vm<
         compiler: Box::new(compiler),
         arena,
         memo: HashMap::new(),
+        result_memo: HashMap::new(),
+        stop_generation: 0,
     });
     vm
 }
@@ -291,7 +293,7 @@ fn console_fragment_evaluation_is_bounded() {
     let text = "mut i = 0\nwhile true { i = i + 1 }";
     let program = fragment(text);
     let DebugEvalOutcome::Error(message) =
-        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
     else {
         panic!("a runaway fragment must be stopped, not hang");
     };
@@ -301,14 +303,82 @@ fn console_fragment_evaluation_is_bounded() {
     let text = "base + 1";
     let program = fragment(text);
     let DebugEvalOutcome::Value { text: v, .. } =
-        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
     else {
         panic!("the session must survive a budget trip");
     };
     assert_eq!(v, "11");
 }
 
-/// U3 (tooling-unification): a re-evaluated watch — same text, same scope shape — reuses its
+/// Watch-memoization: an *observational* watch (`tick()`) has its rendered result memoized within
+/// a stop — a repeated render returns the cached value WITHOUT re-running the fragment (visible
+/// because `tick()` mutates a global on each real run) — and bumping the stop generation
+/// invalidates the memo so the next render re-evaluates.
+#[test]
+fn observational_watch_result_is_memoized_until_the_generation_bumps() {
+    let arena = typed_arena::Arena::new();
+    let mut vm = debug_session_vm(
+        &arena,
+        "mut counter = 0\nfn tick(): int { counter = counter + 1\nreturn counter }\necho counter\n",
+    );
+    vm.run_top();
+    let frames = vec![Frame {
+        proto: 0,
+        base: 0,
+        pc: 0,
+        ret_dst: 0,
+        ret_transform: RetTransform::None,
+        upvalues: Vec::new(),
+    }];
+    let regs = vec![Value::unit(); vm.module.protos[0].num_registers as usize];
+
+    let text = "tick()";
+    let program = fragment(text);
+    // First watch render runs `tick()` (counter 0 → 1).
+    let DebugEvalOutcome::Value { text: v1, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Watch, text, &frames, &regs)
+    else {
+        panic!("first watch eval should succeed");
+    };
+    assert_eq!(v1, "1");
+    // A repeated render at the same generation is a memo HIT — `tick()` does not run, so the value
+    // stays 1 rather than advancing to 2.
+    let DebugEvalOutcome::Value { text: v2, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Watch, text, &frames, &regs)
+    else {
+        panic!("second watch eval should succeed");
+    };
+    assert_eq!(v2, "1", "a memoized watch must not re-run its fragment");
+
+    // Bumping the generation (what a resume/step or a console mutation does) invalidates the memo:
+    // the next render re-runs `tick()` (counter 1 → 2).
+    vm.bump_stop_generation();
+    let DebugEvalOutcome::Value { text: v3, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Watch, text, &frames, &regs)
+    else {
+        panic!("third watch eval should succeed");
+    };
+    assert_eq!(v3, "2", "a generation bump invalidates the watch memo");
+
+    // A CONSOLE entry is never memoized and always re-runs — each call advances the counter.
+    let DebugEvalOutcome::Value { text: c1, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
+    else {
+        panic!("console eval should succeed");
+    };
+    assert_eq!(c1, "3");
+    let DebugEvalOutcome::Value { text: c2, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
+    else {
+        panic!("console eval should succeed");
+    };
+    assert_eq!(
+        c2, "4",
+        "a console entry is not memoized — it re-runs every time"
+    );
+}
+
+/// U3 (tooling-unification): a re-evaluated fragment — same text, same scope shape — reuses its
 /// compiled wrapper instead of appending a fresh proto + slot to the session per step.
 #[test]
 fn watch_fragments_are_memoized_by_text_and_scope() {
@@ -333,7 +403,7 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
     let text = "twice(base) + 1";
     let program = fragment(text);
     let DebugEvalOutcome::Value { text: v1, .. } =
-        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
     else {
         panic!("first eval should succeed");
     };
@@ -343,7 +413,7 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
 
     // Same text, same scope shape → memo hit: nothing appends, the value is fresh.
     let DebugEvalOutcome::Value { text: v2, .. } =
-        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
     else {
         panic!("second eval should succeed");
     };
@@ -361,9 +431,15 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
 
     // Different text → a fresh compile (the memo is per-expression, not a single slot).
     let other = fragment("twice(base) + 2");
-    let DebugEvalOutcome::Value { text: v3, .. } =
-        vm.debug_eval_fragment(&other, 0, &[], false, "twice(base) + 2", &frames, &regs)
-    else {
+    let DebugEvalOutcome::Value { text: v3, .. } = vm.debug_eval_fragment(
+        &other,
+        0,
+        &[],
+        EvalKind::Console,
+        "twice(base) + 2",
+        &frames,
+        &regs,
+    ) else {
         panic!("third eval should succeed");
     };
     assert_eq!(v3, "22");

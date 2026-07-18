@@ -200,6 +200,8 @@ impl VmBackend {
                 compiler: Box::new(session),
                 arena: &arena,
                 memo: HashMap::new(),
+                result_memo: HashMap::new(),
+                stop_generation: 0,
             });
         }
         vm.hot_mailbox = opts.hot_mailbox;
