@@ -19,6 +19,38 @@ fn fib(n: int): int {
 
 `return` yields a value. A `void` function may `return;` or simply fall off the end.
 
+## Sealed functions & the `use (…)` capture clause
+
+A named function is **sealed**: its body sees its parameters and the program's *declarations*
+(other functions, types, imports) — never the surrounding **value bindings**. A top-level `items`
+does not leak into `fn place(items: …)`; inside the body, `items` means the parameter, always.
+To read a surrounding binding, import it explicitly with a capture clause between the parameter
+list and the return type:
+
+```noeta
+tax_rate = 0.25
+fn with_tax(price: float) use (tax_rate): float {
+    return price * (1.0 + tax_rate)
+}
+echo with_tax(100.0)   // 125.0
+```
+
+A capture is a **live view** of the named binding (a `mut` global mutated later is seen; writing
+through the capture follows the binding's own `mut` rules). The clause works on methods and
+nested `fn`s the same way — a nested `fn` importing an enclosing `mut` local is the explicit form
+of a closure counter. Without the clause, a reference to a top-level binding is an error with the
+fix spelled out (E0005: *add `use (name)` to the signature, or pass it as a parameter*), and a
+bare assignment to an unlisted name simply declares a fresh local.
+
+**No shadowing (E0055).** One name means one thing per scope stack. A binder — a closure
+parameter, `for` variable, match-pattern binding, or fresh local — may not reuse a name already
+bound in a scope it can see, and a binding may not reuse an imported name or module alias
+(E0020). Sealing is what keeps this ergonomic: named-fn params conflict with nothing because the
+surrounding bindings genuinely are not in scope. Where capture *is* implicit — anonymous
+closures — the rule bites: `fn(base) => …` under a visible `base` is rejected; rename one.
+(Reassignment is not shadowing — `x = 5` on an existing binding follows the `mut` rules E0006/E0007
+— and `is`-narrowing refines the *same* binding, so neither ever needs a shadow.)
+
 ## Default (optional) parameters
 
 A **trailing** parameter may have a default `name: T = expr`. A required parameter may not follow a defaulted one (E0026).

@@ -351,12 +351,12 @@ fn channel_seeded_consumer_spans_parent_under_the_producer() {
     let spans = emitted_spans(
         "use std.{tracing}\n\
          (tx, rx) = channel::<int>(1)\n\
-         async fn produce(): int {\n\
+         async fn produce() use (tx): int {\n\
          \x20   tx.send(7).await\n\
          \x20   tx.close()\n\
          \x20   return 0\n\
          }\n\
-         async fn consume(): int {\n\
+         async fn consume() use (rx): int {\n\
          \x20   r = rx.recv().await\n\
          \x20   work = tracing.span(\"work\")\n\
          \x20   work.end()\n\

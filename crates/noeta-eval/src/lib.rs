@@ -12,7 +12,7 @@
 //! last-use destruction); only the crate's *name history* survives in old comments.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 use noeta_ast::reflect::TypeRepr;
@@ -825,6 +825,12 @@ struct Scope {
     /// declaration order at scope exit — the deterministic destruction order the spec wants.
     order: RefCell<Vec<String>>,
     parent: Option<Rc<Scope>>,
+    /// The SEALED-fn frontier: `Some(allow)` on a named fn's call scope. An outward write walk
+    /// (`assign`/`assign_force`/`take_mut`) crossing this scope may continue to the parent only
+    /// for names in `allow` (the `use (…)` captures) — any other name reports `NotFound`, so the
+    /// caller declares a fresh local, exactly as the checker typed it. Reads (`lookup`) are not
+    /// gated: the checker already rejected unlisted reads, and statics resolve through the chain.
+    seal: Option<HashSet<String>>,
 }
 
 /// The outcome of trying to reassign an existing binding through the scope chain. `Assigned`
@@ -854,6 +860,7 @@ impl Scope {
             vars: RefCell::new(HashMap::new()),
             order: RefCell::new(Vec::new()),
             parent: None,
+            seal: None,
         })
     }
 
@@ -863,6 +870,18 @@ impl Scope {
             vars: RefCell::new(HashMap::new()),
             order: RefCell::new(Vec::new()),
             parent: Some(Rc::clone(parent)),
+            seal: None,
+        })
+    }
+
+    /// A call scope carrying a sealed fn's write frontier (see the `seal` field).
+    fn sealed_child(parent: &Rc<Scope>, allow: &[String]) -> Rc<Scope> {
+        leak::inc();
+        Rc::new(Scope {
+            vars: RefCell::new(HashMap::new()),
+            order: RefCell::new(Vec::new()),
+            parent: Some(Rc::clone(parent)),
+            seal: Some(allow.iter().cloned().collect()),
         })
     }
 
@@ -901,6 +920,14 @@ impl Scope {
                 AssignOutcome::Immutable
             };
         }
+        if let Some(allow) = &self.seal
+            && !allow.contains(name)
+            && !name.starts_with('$')
+        {
+            // The sealed frontier: an unlisted name never reaches the surrounding scope.
+            // (`$`-prefixed names are the lowering's synthesized state variables — seal-exempt.)
+            return AssignOutcome::NotFound;
+        }
         match &self.parent {
             Some(parent) => parent.assign(name, value),
             None => AssignOutcome::NotFound,
@@ -916,6 +943,12 @@ impl Scope {
             drop_audit::on_bind(self as *const Scope as usize, name);
             let old = std::mem::replace(&mut binding.value, value);
             return AssignOutcome::Assigned(old);
+        }
+        if let Some(allow) = &self.seal
+            && !allow.contains(name)
+            && !name.starts_with('$')
+        {
+            return AssignOutcome::NotFound;
         }
         match &self.parent {
             Some(parent) => parent.assign_force(name, value),
@@ -936,6 +969,13 @@ impl Scope {
             return binding
                 .mutable
                 .then(|| std::mem::replace(&mut binding.value, Value::Unit));
+        }
+        if let Some(allow) = &self.seal
+            && !allow.contains(name)
+            && !name.starts_with('$')
+        {
+            // Sealed frontier: the COW fast path must not reach an unlisted surrounding binding.
+            return None;
         }
         self.parent
             .as_ref()
@@ -3318,7 +3358,10 @@ impl Interpreter {
             ));
         }
         let supplied = args.len();
-        let call_scope = Scope::child(&closure.captured);
+        let call_scope = match &closure.body.captures {
+            Some(allow) => Scope::sealed_child(&closure.captured, allow),
+            None => Scope::child(&closure.captured),
+        };
         for (param, arg) in closure.params.iter().zip(args) {
             call_scope.declare(param.clone(), arg, false);
         }
@@ -3356,7 +3399,10 @@ impl Interpreter {
             ));
         }
         let supplied = args.len();
-        let call_scope = Scope::child(&method.captured);
+        let call_scope = match &method.body.captures {
+            Some(allow) => Scope::sealed_child(&method.captured, allow),
+            None => Scope::child(&method.captured),
+        };
         // Bind only `self` — fields are **not** snapshotted into the scope. A bare field read
         // resolves live off `self` (see `eval_ir_atom`), mirroring the VM (which loads fields off the
         // receiver register, never a copy), so a field mutated mid-method — including through an alias
@@ -3401,7 +3447,10 @@ impl Interpreter {
             ));
         }
         let supplied = args.len();
-        let call_scope = Scope::child(&method.captured);
+        let call_scope = match &method.body.captures {
+            Some(allow) => Scope::sealed_child(&method.captured, allow),
+            None => Scope::child(&method.captured),
+        };
         call_scope.declare("self".to_string(), receiver, false);
         for (param, arg) in method.params.iter().zip(args) {
             call_scope.declare(param.clone(), arg, false);

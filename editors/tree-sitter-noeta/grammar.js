@@ -159,9 +159,13 @@ module.exports = grammar({
       field('name', $.identifier),
       optional($.type_parameters),
       field('parameters', $.parameters),
+      // The sealed-fn capture clause: `fn f(params) use (a, b): Ret { … }` — the explicit
+      // import of surrounding value bindings into a named function's body.
+      optional(field('captures', $.capture_clause)),
       optional(seq(':', field('return_type', $._type))),
       field('body', $.block),
     ),
+    capture_clause: $ => seq('use', '(', commaSep1($.identifier), ')'),
 
     parameters: $ => seq('(', optional(commaSep($.parameter)), ')'),
     parameter: $ => seq(

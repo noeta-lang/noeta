@@ -297,7 +297,7 @@ fn para_html_publishes_and_resolves_from_the_registry() {
          use std.reactive.signal\n\
          use std.http.{Request, Response}\n\
          c = signal(1)\n\
-         fn page(): Html { return @html { <h1>${c.get()}</h1> } }\n\
+         fn page() use (c): Html { return @html { <h1>${c.get()}</h1> } }\n\
          fn fetch(req: Request): Response { return handle(req, \"t\", page) }\n",
     )
     .unwrap();

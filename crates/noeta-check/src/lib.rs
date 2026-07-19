@@ -878,6 +878,13 @@ struct Coloring {
     /// access on `self` *or* any same-type value is permitted (the type-scoped privacy rule). `None`
     /// at top level and inside free functions.
     current_type: Option<String>,
+    /// While checking a declaration the linker MERGED from another module (recognizable by its
+    /// qualified dotted name — the entry's own declarations keep bare names): the no-shadowing
+    /// statics half is off there. The merged program flattens every module's top-level names into
+    /// one table, so a package's param would otherwise be checked against its CONSUMERS' function
+    /// and type names — names its author cannot know. Its own module's statics were checked, with
+    /// bare names, when that package itself was the entry. Scope-hit shadowing still applies.
+    in_merged_decl: bool,
     /// While checking a **sealed** named-function/method body: top-level value bindings are not
     /// in scope there (only `use (…)` captures, `self`, and params are), so the hoisted-globals
     /// fallback in the unknown-name gate must not resolve them — the miss is the point, reported
@@ -1145,20 +1152,26 @@ impl Checker {
         // No hoisted-globals half: a named function's body is SEALED — top-level value bindings
         // are simply not in scope there, so a param named like a global shadows nothing. Where
         // globals genuinely are in scope (top level itself, top-level closures), the env walk
-        // above already sees them.
+        // above already sees them. The statics half is off inside a linker-merged declaration
+        // (see `Coloring::in_merged_decl` — the flat symbol tables there include the CONSUMER's
+        // names, which a package author cannot know).
+        let statics = !self.coloring.in_merged_decl;
         let shadowed = if scope_hit {
             Some("a binding already in scope")
-        } else if self.symbols.functions.contains_key(name)
+        } else if statics && self.symbols.functions.contains_key(name)
             || self.imports.imported_fns.contains_key(name)
         {
             Some("a top-level function")
-        } else if self.symbols.types.contains(name) || self.symbols.enums.contains_key(name) {
+        } else if statics
+            && (self.symbols.types.contains(name) || self.symbols.enums.contains_key(name))
+        {
             Some("a type")
-        } else if self.imports.modules.contains_key(name)
-            || self.imports.namespaces.contains_key(name)
+        } else if statics
+            && (self.imports.modules.contains_key(name)
+                || self.imports.namespaces.contains_key(name))
         {
             Some("an imported module")
-        } else if self.imports.extern_types.contains_key(name) {
+        } else if statics && self.imports.extern_types.contains_key(name) {
             Some("an imported type")
         } else {
             None
@@ -1756,24 +1769,41 @@ impl Checker {
                 if env.len() > 1 {
                     self.check_shadow(&decl.name, decl.name_span, env, ShadowScopes::Enclosing);
                 }
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || decl.name.contains('.');
                 self.check_fn(decl, env, &[], TargetKind::Function);
+                self.coloring.in_merged_decl = saved;
             }
             Stmt::Struct(r) => {
                 self.check_reserved_name(&r.name, r.name_span);
                 self.check_reserved_type_name(&r.name, r.name_span);
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || r.name.contains('.');
                 self.check_struct(r, env);
+                self.coloring.in_merged_decl = saved;
             }
             Stmt::Class(c) => {
                 self.check_reserved_name(&c.name, c.name_span);
                 self.check_reserved_type_name(&c.name, c.name_span);
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || c.name.contains('.');
                 self.check_class(c, env);
+                self.coloring.in_merged_decl = saved;
             }
             Stmt::Enum(e) => {
                 self.check_reserved_name(&e.name, e.name_span);
                 self.check_reserved_type_name(&e.name, e.name_span);
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || e.name.contains('.');
                 self.check_enum(e, env);
+                self.coloring.in_merged_decl = saved;
             }
-            Stmt::Impl(decl) => self.check_standalone_impl(decl),
+            Stmt::Impl(decl) => {
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || decl.target.contains('.');
+                self.check_standalone_impl(decl);
+                self.coloring.in_merged_decl = saved;
+            }
             Stmt::Trait(decl) => self.check_trait_decl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
             // A dev-tier block reaching the checker is an *inactive* residual (object-model

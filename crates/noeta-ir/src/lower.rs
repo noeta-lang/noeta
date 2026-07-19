@@ -434,6 +434,7 @@ pub fn lower_with_sites_opts(
         sites,
         real_isolates,
         synth_step_name: None,
+        synth_step_captures: None,
         type_aliases: collect_type_aliases(program, registry),
         expr_tiers: noeta_ast::desugar::expr_tier_handlers(program)
             .into_iter()
@@ -466,6 +467,8 @@ struct Lowerer<'a> {
     /// the first `Expr::Closure` the lowering meets (the step itself, which lowers before anything
     /// nested inside it). A user's own closure therefore always finds `None` and stays anonymous.
     synth_step_name: Option<String>,
+    /// The armed seal for the synthesized generator/async step closure (see `synth_step_name`).
+    synth_step_captures: Option<Vec<String>>,
     /// The runtime **narrowing identity** each `use`-imported local type name resolves to, so a
     /// target (`x is MyId`, `x.as<Uuid>()`) matches the value's runtime tag in both backends (they
     /// share this lowered IR). Two kinds of entry:
@@ -792,6 +795,7 @@ impl Lowerer<'_> {
                     true,
                     decl.is_async,
                     Some(decl.name.clone()),
+                    Some(decl.captures.iter().map(|(n, _)| n.clone()).collect()),
                 )?;
                 out.push(Stmt::Decl(Decl::Fn {
                     name: decl.name.clone(),
@@ -811,6 +815,7 @@ impl Lowerer<'_> {
                         m.is_async,
                         // Methods trace as `Type.method` (the VM's chunk naming).
                         Some(format!("{}.{}", decl.name, m.name)),
+                        Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
@@ -825,6 +830,8 @@ impl Lowerer<'_> {
                         false,
                         // The VM's destructor-prototype naming.
                         Some(format!("{}::destruct", decl.name)),
+                        // A destructor touches only `self` — fully sealed.
+                        Some(Vec::new()),
                     )?)),
                     None => None,
                 };
@@ -852,6 +859,7 @@ impl Lowerer<'_> {
                         m.is_async,
                         // Methods trace as `Type.method` (the VM's chunk naming).
                         Some(format!("{}.{}", decl.name, m.name)),
+                        Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
@@ -876,6 +884,7 @@ impl Lowerer<'_> {
                         m.is_async,
                         // Methods trace as `Type.method` (the VM's chunk naming).
                         Some(format!("{}.{}", decl.name, m.name)),
+                        Some(m.captures.iter().map(|(n, _)| n.clone()).collect()),
                     )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
@@ -933,6 +942,7 @@ impl Lowerer<'_> {
         generator: bool,
         is_async: bool,
         name: Option<String>,
+        captures: Option<Vec<String>>,
     ) -> Result<Func, Unsupported> {
         let outer = self.temps;
         self.temps = 0;
@@ -955,8 +965,11 @@ impl Lowerer<'_> {
             // closure or the synthesized step closure itself, so the desugar applies exactly once.
             BodyKind::Block(stmts) if generator && body_has_yield(stmts) => {
                 // The desugar's synthesized step closure executes this function's body, so it
-                // traces under this function's name (see `synth_step_name`).
+                // traces under this function's name (see `synth_step_name`), and it inherits
+                // this function's SEAL — the user statements live in the step's body, so its
+                // bare-assignment locality must match what the checker typed for the fn.
                 self.synth_step_name = name.clone();
+                self.synth_step_captures = captures.clone();
                 self.lower_generator(stmts, span)?
             }
             // An `async fn` (Track A) lowers to a lazy `Future` over its body — `make_future(thunk)` —
@@ -964,8 +977,10 @@ impl Lowerer<'_> {
             // rather than a per-element state machine). `is_async` is set only at named-`fn`/method
             // sites, never a closure or the synthesized thunk, so the wrap applies exactly once.
             BodyKind::Block(stmts) if is_async => {
-                // As for a generator: the future's step closure is this function's body.
+                // As for a generator: the future's step closure is this function's body, and it
+                // inherits the seal.
                 self.synth_step_name = name.clone();
+                self.synth_step_captures = captures.clone();
                 self.lower_async(stmts, span)?
             }
             BodyKind::Block(stmts) => self.lower_body(stmts)?,
@@ -974,6 +989,7 @@ impl Lowerer<'_> {
         self.temps = outer;
         Ok(Func {
             name,
+            captures,
             params: param_names,
             defaults,
             body,
@@ -1006,6 +1022,17 @@ impl Lowerer<'_> {
     fn lower_generator(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
         let desugar =
             desugar_state_machine(stmts, span, self.sites.for_stream_sites, SuspendMode::Gen);
+        // The sealed step closure must keep writing the machine's PERSISTENT locals — the
+        // desugar's hoisted prelude cells (`$state`, awaited-future cells, and any USER local
+        // that lives across a suspend) — through the enclosing scope. Extend the armed seal
+        // with the prelude's binding names so those writes cross the frontier; everything else
+        // stays sealed exactly as the checker typed the surface body.
+        if let Some(allow) = &mut self.synth_step_captures {
+            allow.extend(desugar.prelude.iter().filter_map(|stmt| match stmt {
+                AstStmt::Binding { name, .. } => Some(name.clone()),
+                _ => None,
+            }));
+        }
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -1039,6 +1066,17 @@ impl Lowerer<'_> {
     fn lower_async(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
         let desugar =
             desugar_state_machine(stmts, span, self.sites.for_stream_sites, SuspendMode::Async);
+        // The sealed step closure must keep writing the machine's PERSISTENT locals — the
+        // desugar's hoisted prelude cells (`$state`, awaited-future cells, and any USER local
+        // that lives across a suspend) — through the enclosing scope. Extend the armed seal
+        // with the prelude's binding names so those writes cross the frontier; everything else
+        // stays sealed exactly as the checker typed the surface body.
+        if let Some(allow) = &mut self.synth_step_captures {
+            allow.extend(desugar.prelude.iter().filter_map(|stmt| match stmt {
+                AstStmt::Binding { name, .. } => Some(name.clone()),
+                _ => None,
+            }));
+        }
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -1921,7 +1959,10 @@ impl Lowerer<'_> {
                 // The name is the armed synthesized-step name if this closure IS such a step (taken,
                 // so anything nested inside the step's body finds `None`); a user closure is anonymous.
                 let name = self.synth_step_name.take();
-                let func = self.lower_func(params, body_kind, *span, false, false, name)?;
+                // A synthesized step closure inherits its fn's seal; a user closure is `None`
+                // (auto-capturing).
+                let captures = self.synth_step_captures.take();
+                let func = self.lower_func(params, body_kind, *span, false, false, name, captures)?;
                 Ok(self.emit(
                     out,
                     Rvalue::Closure {

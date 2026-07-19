@@ -1,0 +1,43 @@
+// SEALED named functions + the `use (…)` capture clause. A named fn's body sees params and
+// statics only; a capture imports a surrounding binding as a LIVE view (mutability preserved);
+// an unlisted bare assignment declares a FRESH LOCAL — never a silent global write. Params may
+// reuse global names freely (the global is not in scope, so nothing shadows). Both backends agree.
+// expect: stdout "125.0"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "15"
+// expect: stdout "10"
+// expect: stdout "42"
+// expect: exit 0
+tax_rate = 0.25;
+fn with_tax(price: float) use (tax_rate): float {
+    return price * (1.0 + tax_rate);
+}
+echo with_tax(100.0);
+
+// An UNLISTED bare assignment inside a fn is a fresh local — the global is untouched.
+mut x = 1;
+fn writes_local(): int {
+    x = 2;
+    return x;
+}
+echo x;
+echo writes_local();
+
+// A LISTED write goes through to the live global.
+mut total = 0;
+fn add_to_total(n: int) use (total): void {
+    total = total + n;
+}
+add_to_total(5);
+add_to_total(10);
+echo total;
+
+// A param may reuse a global's name — sealed, so nothing shadows; the param wins by being
+// the only `items` in scope.
+items = 42;
+fn count_items(items: int): int {
+    return items;
+}
+echo count_items(10);
+echo items;

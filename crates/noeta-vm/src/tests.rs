@@ -37,12 +37,24 @@ fn aot_helper_export_names_match_the_jit_constants() {
 }
 
 fn run(src: &str) -> RunResult {
-    let source = Source::new(SourceId::FIRST, "test.noe", src);
-    let lexed = lex(&source);
-    let parsed = parse(&source, &lexed.tokens);
-    VmBackend::new()
-        .try_run(&parsed.program)
-        .expect("program should be in the M1.0 subset")
+    // On a deep worker stack: the front-end's recursive descent (checker `check`/`synth`, the
+    // reuse/drops passes) can out-recurse libtest's ~2 MiB test thread in a debug build on a
+    // realistic case — the same reason the conformance corpus runs `on_deep_stack`.
+    const DEEP_STACK: usize = 64 * 1024 * 1024;
+    let src = src.to_string();
+    std::thread::Builder::new()
+        .stack_size(DEEP_STACK)
+        .spawn(move || {
+            let source = Source::new(SourceId::FIRST, "test.noe", &src);
+            let lexed = lex(&source);
+            let parsed = parse(&source, &lexed.tokens);
+            VmBackend::new()
+                .try_run(&parsed.program)
+                .expect("program should be in the M1.0 subset")
+        })
+        .expect("spawn vm test worker")
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
 }
 
 /// P-AOT L3.2b: prove the dispatch-table binding + native dispatch **in-process**, isolating the
@@ -198,7 +210,7 @@ fn installed_fragments_extend_a_running_debug_vm() {
         &arena,
         "struct P { x: int }\n\
          fn twice(n: int): int { return n * 2 }\n\
-         fn callcb(n: int): int { return cb(n) }\n\
+         fn callcb(n: int) use (cb): int { return cb(n) }\n\
          mut cb = fn(n: int) => n\n\
          mut base = 10\n\
          mut p0 = P { x: 3 }\n\

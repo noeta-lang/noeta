@@ -771,6 +771,13 @@ pub struct Func {
     /// `work`, not `<anonymous>`. Both backends read this one field, so trace names agree by
     /// construction.
     pub name: Option<String>,
+    /// The **seal**: `Some(allow)` for a named fn/method — its body's bare assignments may only
+    /// reach surrounding bindings named in `allow` (the surface `use (…)` capture clause); any
+    /// other bare assignment declares a fresh local, exactly as the checker typed it. `None` for
+    /// an anonymous closure and every synthesized step closure (auto-capturing, unchanged).
+    /// Reads are not gated here — the checker already rejected unlisted reads, and free-variable
+    /// capture / global loads for statics and allow-listed names behave as before.
+    pub captures: Option<Vec<String>>,
     pub params: Vec<String>,
     /// Each parameter's default thunk, parallel to `params` (`None` for a required
     /// parameter). A default is evaluated in the *captured* scope when its argument is
