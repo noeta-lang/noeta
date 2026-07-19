@@ -754,6 +754,40 @@ impl Checker {
                         )
                         .help("delegate `Comparable` through a field whose type orders");
                     }
+                } else if t == BuiltinTrait::Error {
+                    // The forward is `self.f.message()` — the via field's type must itself
+                    // implement `Error`, or the delegation dispatches into nothing (the same
+                    // judgement as a user-trait `via:`). A field typed as one of the deriving
+                    // type's own generic parameters defers to the instantiation site.
+                    let params: Vec<String> = self
+                        .symbols
+                        .generic_types
+                        .get(type_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let field_ty = self
+                        .symbols
+                        .records
+                        .get(type_name)
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == via_name))
+                        .map(|(_, ty)| ty.clone());
+                    if let Some(ty) = field_ty
+                        && !mentions_param(&ty, &params)
+                        && !self.satisfies(&ty, BuiltinTrait::Error)
+                    {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            *via_span,
+                            format!(
+                                "`via: {via_name}` forwards `message()` to the field, but its \
+                                 type (`{ty}`) does not implement `Error`"
+                            ),
+                        )
+                        .help(
+                            "the field's type needs an `impl Error` (or its own \
+                             `@derive(Error)`)",
+                        );
+                    }
                 }
                 continue;
             }
@@ -772,16 +806,37 @@ impl Checker {
             }
             if !t.derivable() {
                 self.error(
-                        DiagnosticCode::UnknownTrait,
+                    DiagnosticCode::UnknownTrait,
+                    spec.span,
+                    format!("`{}` is not a derivable trait", spec.name),
+                )
+                .help(
+                    "derivable traits are `Equatable`, `Comparable`, `Display`, `Error`, \
+                         `Clone`, `Serialize<Format>`, `Deserialize<Format>`; mark attribute \
+                         records with the `@attribute` directive",
+                );
+                continue;
+            }
+            // `@derive(Error)`'s synthesized `message()` returns `"${self}"` — the type's display
+            // story — so the type must HAVE one: an `impl Display` (whose `to_string` the
+            // rendering dispatches to) or a `@derive(Display)` (the structural rendering, opted
+            // into). Without either, the "message" would be an accidental structural dump.
+            if t == BuiltinTrait::Error {
+                let ty = Type::Named(type_name.to_string(), Vec::new());
+                if !self.satisfies(&ty, BuiltinTrait::Display) {
+                    self.error(
+                        DiagnosticCode::UnderivableTrait,
                         spec.span,
-                        format!("`{}` is not a derivable trait", spec.name),
+                        format!(
+                            "cannot derive `Error` for `{type_name}`: it does not implement \
+                             `Display`, so `message()` has no rendering to return"
+                        ),
                     )
                     .help(
-                        "derivable traits are `Equatable`, `Comparable`, `Display`, `Clone`, \
-                         `Serialize<Format>`, `Deserialize<Format>`; mark attribute records with the \
-                         `@attribute` directive",
+                        "add `@derive(Display)` or an `impl Display`, or delegate with \
+                         `@derive(Error, via: <field>)`",
                     );
-                continue;
+                }
             }
             // Generic arity: `Serialize` requires one type argument (`Serialize<Json>`); every other
             // derivable trait is nullary.

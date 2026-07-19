@@ -1,0 +1,32 @@
+// `@derive(Error)` (error-ergonomics): the synthesized `message()` returns `"${self}"` — the
+// type's display story — so it can never disagree with how the value renders. With an
+// `impl Display`, `message()` is exactly the hand-written `to_string()`; with `@derive(Display)`,
+// it is the structural rendering the author opted into. A derived `Error` satisfies the
+// `<E: Error>` bound like a hand-written impl. Runs identically on both backends.
+// expect: stdout "A#5"
+// expect: stdout "C {code: 9}"
+// expect: stdout "report: A#5"
+// expect: stdout "report: C {code: 9}"
+// expect: exit 0
+@derive(Error)
+struct A {
+    code: int
+
+    impl Display {
+        fn to_string(): string { return "A#${self.code}" }
+    }
+}
+
+@derive(Display, Error)
+struct C { code: int }
+
+fn report<E: Error>(e: E): string {
+    return "report: ${e.message()}"
+}
+
+a = A { code: 5 }
+c = C { code: 9 }
+echo a.message()
+echo c.message()
+echo report(a)
+echo report(c)

@@ -340,11 +340,14 @@ pub fn hoist_impl_methods_with_registry(
         AstStmt::Enum(d) => body_references_trait(&d.impls, &d.derives),
         _ => false,
     });
-    // A builtin `via:` derive (`@derive(Comparable, via: amount)`) and a native derive recipe
+    // A builtin `via:` derive (`@derive(Comparable, via: amount)`), a plain `@derive(Error)`
+    // (whose `message()` is synthesized, error-ergonomics), and a native derive recipe
     // (`@derive(Inspect)`, layer 4) synthesize methods even with no user trait in the program.
     let derive_needs = |derives: &[noeta_ast::DeriveSpec]| {
         derives.iter().any(|d| {
-            d.via.is_some() || registry.is_some_and(|r| r.find_ext_derive(&d.name).is_some())
+            d.via.is_some()
+                || d.name == "Error"
+                || registry.is_some_and(|r| r.find_ext_derive(&d.name).is_some())
         })
     };
     let body_needs = body_needs
@@ -403,6 +406,10 @@ pub fn hoist_impl_methods_with_registry(
                 noeta_ast::derive::plan_user_trait_derive(t, fields, methods, spec)
             } else if spec.via.is_some() {
                 noeta_ast::derive::plan_builtin_via(&spec.name, name, fields, spec)
+            } else if spec.name == "Error" {
+                // A plain `@derive(Error)` (error-ergonomics): synthesize the checker-validated
+                // `fn message(): string { return "${self}" }` — the type's display story.
+                Ok(noeta_ast::derive::plan_error_derive(spec.span))
             } else if let Some(d) = registry.and_then(|r| r.find_ext_derive(&spec.name)) {
                 // A native derive recipe (layer 4): forwards into the extension's handlers.
                 let methods: Vec<(String, usize, String)> = d

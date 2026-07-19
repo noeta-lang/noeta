@@ -1,0 +1,10 @@
+// `@derive(Error, via: field)` forwards `message()` into the field's own `Error`
+// implementation — a field whose type does not implement `Error` has nothing to dispatch into,
+// so the delegation is rejected at the declaration (E0050).
+// expect: error E0050 at 6:21
+// expect: exit 1
+@derive(Error, via: cause)
+struct Wrapped {
+    context: string
+    cause: int
+}

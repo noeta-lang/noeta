@@ -47,8 +47,12 @@ pub enum BuiltinTrait {
     /// [`BuiltinTrait::Display`]: an error type *may* also implement `Display` (and std's
     /// `JsonError` does), but `impl Error` alone imposes exactly one method — rendering stays
     /// whatever the type's display story already is, so adopting `Error` never changes program
-    /// output. Not derivable in this slice (the impl is a single method; a future derive could
-    /// forward `message` through `Display`'s `to_string`).
+    /// output. Derivable (error-ergonomics): `@derive(Error)` synthesizes
+    /// `fn message(): string { return "${self}" }` — the message IS the type's display story
+    /// (an `impl Display`'s `to_string`, or a derived `Display`'s structural rendering), so the
+    /// derive requires the type to have `Display` at all (E0050 otherwise). `@derive(Error,
+    /// via: field)` instead forwards `message()` into the field's own implementation — the
+    /// wrapper-error shape — requiring the field's type to implement `Error`.
     Error,
     /// **From** (error-ergonomics arc) — the declared-conversion protocol: `impl From<Source>` on a
     /// type `Target` declares that a `Source` value converts into a `Target`, provided by one
@@ -137,9 +141,11 @@ impl BuiltinTrait {
             Equatable => ("Equatable", Some(("eq", Some(1))), None, true),
             Comparable => ("Comparable", Some(("compare", Some(1))), None, true),
             Display => ("Display", Some(("to_string", Some(0))), None, true),
-            // The failure-value protocol: one nullary method, `message(): string`. Not derivable
-            // (a possible future derive via `Display` is a recorded backlog row, not shipped).
-            Error => ("Error", Some(("message", Some(0))), None, false),
+            // The failure-value protocol: one nullary method, `message(): string`. Derivable
+            // (error-ergonomics): the synthesized `message()` returns `"${self}"` — the type's
+            // display story (requires Display, impl'd or derived; E0050 otherwise) — or forwards
+            // into a field's own `message()` via `via:`.
+            Error => ("Error", Some(("message", Some(0))), None, true),
             // The declared-conversion protocol: one associated function `from(value: Source):
             // Target`. Not derivable (a conversion body cannot be synthesized from fields).
             From => ("From", Some(("from", Some(1))), None, false),
@@ -369,6 +375,7 @@ mod tests {
             "Equatable",
             "Comparable",
             "Display",
+            "Error",
             "Add",
             "Sub",
             "Mul",

@@ -604,6 +604,10 @@ impl Checker {
                     noeta_ast::derive::plan_user_trait_derive(&tr, fields, methods, spec)
                 } else if spec.via.is_some() {
                     noeta_ast::derive::plan_builtin_via(&spec.name, type_name, fields, spec)
+                } else if spec.name == BuiltinTrait::Error.name() {
+                    // A plain `@derive(Error)` (error-ergonomics) synthesizes
+                    // `fn message(): string` — register it so `e.message()` types precisely.
+                    Ok(noeta_ast::derive::plan_error_derive(spec.span))
                 } else if let Some(ext) = self.reg().find_ext_derive(&spec.name) {
                     // A native derive recipe (layer 4): register its handler-forward signatures.
                     let ext_methods: Vec<(String, usize, String)> = ext
