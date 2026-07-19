@@ -124,6 +124,69 @@ impl Checker {
                 self.check(&args[0], err, env);
                 expected.clone()
             }
+            // A call of a generic user function absorbs the expected type through its RETURN
+            // position (poly-values F2c): `r: Result<Order, JsonError> = load(text)` binds `T`
+            // from the expectation via the same structural binding a call's arguments use, seeded
+            // first-wins into the shared generic-call machinery — so the arguments can only fill
+            // what the return leaves open. This is what lets a forwarding generic infer its
+            // instantiation from an annotated binding without a turbofish. (Inference does NOT
+            // flow through `?` — `o: Order = load(text)?` still spells `load::<Order>` — the
+            // expectation would have to invert the `Result` wrapper, which check-mode `?` does not
+            // model; documented as turbofish-required.)
+            Expr::Call { callee, args, span }
+                if !matches!(expected, Type::Unknown | Type::Dyn)
+                    && matches!(callee.as_ref(), Expr::Ident { name, .. }
+                        if lookup(env, name).is_none()
+                            && self
+                                .symbols
+                                .functions
+                                .get(name)
+                                .is_some_and(|sig| sig.generic.is_some())) =>
+            {
+                let Expr::Ident {
+                    name,
+                    span: callee_span,
+                } = callee.as_ref()
+                else {
+                    unreachable!("guarded by the arm pattern")
+                };
+                let sig = self.symbols.functions.get(name).cloned().expect("guarded");
+                let generic = sig.generic.clone().expect("guarded");
+                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+                let mut seed: HashMap<String, Type> = HashMap::new();
+                bind_type_params(&generic.raw_ret, expected, &tps, &mut seed);
+                let mut arg_types: Vec<Type> = args
+                    .iter()
+                    .map(|a| {
+                        if self.is_deferred_arg(a, env) {
+                            Type::Unknown
+                        } else {
+                            self.synth(a, env)
+                        }
+                    })
+                    .collect();
+                let actual = self.check_generic_call_seeded(
+                    name,
+                    &generic,
+                    sig.required,
+                    &mut arg_types,
+                    args,
+                    *callee_span,
+                    seed,
+                    Some(*span),
+                    env,
+                );
+                // The deferred-argument safety net, mirroring `synth_call`.
+                for (i, arg) in args.iter().enumerate() {
+                    if self.is_deferred_arg(arg, env)
+                        && matches!(arg_types.get(i), Some(Type::Unknown))
+                    {
+                        self.synth(arg, env);
+                    }
+                }
+                self.subsume(&actual, expected, expr.span());
+                actual
+            }
             // A closure absorbs an expected function type: an explicit parameter annotation wins,
             // otherwise the parameter adopts the expected type; the body is checked against the
             // expected return.
