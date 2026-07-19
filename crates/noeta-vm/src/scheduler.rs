@@ -69,8 +69,33 @@ impl<'m> Vm<'m> {
             let _ = handle.join();
         }
         self.isolates.inflight_isolates = self.isolates.inflight_isolates.saturating_sub(1);
+        // Drop the worker's stall-registry slot now it is harvested (isolates I.4c) — on the parent
+        // thread, balanced against the spawn-time `register_worker_stall`.
+        self.deregister_worker_stall();
         if self.isolates.inflight_isolates == 0 {
             self.free_shared_region();
+        }
+    }
+
+    /// Add a stall-registry slot for a spawned isolate worker (isolates I.4c), on the **parent
+    /// thread** at spawn — so `active` counts the worker before its own thread has started and
+    /// registered itself, which is the window that produced the false deadlock (the parent, briefly
+    /// the only registered scheduler, saw `parked == active` and latched a join as a deadlock).
+    /// No-op unless this parent participates in the registry (`stall_active`).
+    pub(crate) fn register_worker_stall(&mut self) {
+        if self.stall_active {
+            isolate::STALL.register();
+            self.registered_workers += 1;
+        }
+    }
+
+    /// Drop one isolate-worker stall slot — at harvest ([`finish_isolate`](Self::finish_isolate)), or
+    /// at teardown for any worker joined without a harvest. Balanced against `register_worker_stall`
+    /// by the `registered_workers` count, so the registry returns to a clean state.
+    pub(crate) fn deregister_worker_stall(&mut self) {
+        if self.registered_workers > 0 {
+            self.registered_workers -= 1;
+            isolate::STALL.deregister();
         }
     }
 
@@ -758,6 +783,9 @@ impl<'m> Vm<'m> {
         // process-global default, exactly as the parent.
         let registry = self.persist.registry;
         let profile_seam = self.isolates.profile_seam.clone();
+        // The worker participates in the stall registry iff this parent does (isolates I.4c); its
+        // `active` slot is already registered above, on the parent thread.
+        let stall_tracked = self.stall_active;
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(
@@ -769,6 +797,7 @@ impl<'m> Vm<'m> {
                 wire_globals,
                 trace,
                 registry,
+                stall_tracked,
                 span,
             );
             let _ = tx.send(msg);
@@ -782,6 +811,10 @@ impl<'m> Vm<'m> {
             handle: Some(thread_handle),
         });
         self.isolates.inflight_isolates += 1;
+        // Register the worker's stall slot up front, on this (parent) thread — before the worker's
+        // own thread starts — so `active` never lags a starting worker (isolates I.4c false-positive
+        // fix).
+        self.register_worker_stall();
         Ok(Some(
             self.register_task(Value::make_isolate_future(id), holds),
         ))
