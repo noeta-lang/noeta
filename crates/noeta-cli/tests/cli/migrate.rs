@@ -221,6 +221,173 @@ fn dsn_is_read_from_the_database_url_env() {
         .stdout(predicate::str::contains("Applied 1 migration(s)"));
 }
 
+// --- Seeds -------------------------------------------------------------------------------------
+
+/// A seed inserting Ada, written idempotently so a re-run is a no-op (the documented idiom).
+const SEED_IDEMPOTENT: (&str, &str) = (
+    "0001_users.sql",
+    "INSERT OR IGNORE INTO users (id, name) VALUES (10, 'Ada');",
+);
+
+/// A project with migrations under `migrations/` and seeds under `seeds/`.
+fn project_with_seeds(name: &str, migrations: &[(&str, &str)], seeds: &[(&str, &str)]) -> PathBuf {
+    let mut files: Vec<(String, &str)> = migrations
+        .iter()
+        .map(|(f, sql)| (format!("migrations/{f}"), *sql))
+        .collect();
+    files.extend(seeds.iter().map(|(f, sql)| (format!("seeds/{f}"), *sql)));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(f, sql)| (f.as_str(), *sql)).collect();
+    temp_dir(name, &refs)
+}
+
+#[test]
+fn migrate_seed_flag_applies_then_seeds() {
+    let dir = project_with_seeds("migrate_seed_flag", &[M1], &[SEED_IDEMPOTENT]);
+
+    lang()
+        .current_dir(&dir)
+        .args(["migrate", "--db", "sqlite:app.db", "--seed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Applied 1 migration(s)"))
+        .stdout(predicate::str::contains("Ran 1 seed file(s)"))
+        .stdout(predicate::str::contains("seeded 0001_users.sql"));
+}
+
+#[test]
+fn migrate_seed_subcommand_errors_when_a_migration_is_pending() {
+    let dir = project_with_seeds("migrate_seed_pending", &[M1], &[SEED_IDEMPOTENT]);
+
+    // Nothing migrated yet: seeding a stale schema is refused with guidance.
+    lang()
+        .current_dir(&dir)
+        .args(["migrate", "--db", "sqlite:app.db", "seed"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("migration(s) are still pending"))
+        .stderr(predicate::str::contains("--seed"));
+}
+
+#[test]
+fn migrate_seed_subcommand_runs_when_current_and_is_rerunnable() {
+    let dir = project_with_seeds("migrate_seed_current", &[M1], &[SEED_IDEMPOTENT]);
+
+    lang()
+        .current_dir(&dir)
+        .args(["migrate", "--db", "sqlite:app.db"])
+        .assert()
+        .success();
+
+    // Seeds-only against the up-to-date schema, twice — the idempotent idiom keeps it a no-op.
+    for _ in 0..2 {
+        lang()
+            .current_dir(&dir)
+            .args(["migrate", "--db", "sqlite:app.db", "seed"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Ran 1 seed file(s)"));
+    }
+}
+
+#[test]
+fn reset_seed_is_the_full_dev_loop() {
+    let dir = project_with_seeds("migrate_reset_seed", &[M1], &[SEED_IDEMPOTENT]);
+    lang()
+        .current_dir(&dir)
+        .args(["migrate", "--db", "sqlite:app.db"])
+        .assert()
+        .success();
+
+    lang()
+        .current_dir(&dir)
+        .args([
+            "migrate",
+            "--db",
+            "sqlite:app.db",
+            "--reset",
+            "--seed",
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "dropped the schema and re-applied 1",
+        ))
+        .stdout(predicate::str::contains("Ran 1 seed file(s)"));
+}
+
+#[test]
+fn new_seed_scaffolds_under_the_seeds_directory() {
+    let dir = temp_dir("migrate_new_seed", &[]);
+
+    lang()
+        .current_dir(&dir)
+        .args(["migrate", "new", "--seed", "demo users"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created"))
+        .stdout(predicate::str::contains("_demo_users.sql"));
+
+    // The file landed under seeds/, not migrations/, with the idempotent-idiom template.
+    let created: Vec<_> = std::fs::read_dir(dir.join("seeds"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "sql"))
+        .collect();
+    assert_eq!(created.len(), 1);
+    let body = std::fs::read_to_string(created[0].path()).unwrap();
+    assert!(body.contains("INSERT OR IGNORE"), "{body}");
+    assert!(!dir.join("migrations").exists());
+}
+
+#[test]
+fn seeds_dir_override_flag_is_honored() {
+    let dir = temp_dir(
+        "migrate_seeds_dir_flag",
+        &[
+            ("migrations/0001_users.sql", M1.1),
+            ("data/0001_users.sql", SEED_IDEMPOTENT.1),
+        ],
+    );
+
+    lang()
+        .current_dir(&dir)
+        .args([
+            "migrate",
+            "--db",
+            "sqlite:app.db",
+            "--seed",
+            "--seeds-dir",
+            "data",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Ran 1 seed file(s)"));
+}
+
+#[test]
+fn seeds_dir_is_read_from_the_manifest_db_table() {
+    let dir = temp_dir(
+        "migrate_seeds_manifest",
+        &[
+            (
+                "noeta.toml",
+                "[db]\nurl = \"sqlite:app.db\"\nmigrations = \"migrations\"\nseeds = \"fixtures\"\n",
+            ),
+            ("migrations/0001_users.sql", M1.1),
+            ("fixtures/0001_users.sql", SEED_IDEMPOTENT.1),
+        ],
+    );
+
+    lang()
+        .current_dir(&dir)
+        .env_remove("DATABASE_URL")
+        .args(["migrate", "--seed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Ran 1 seed file(s)"));
+}
+
 #[test]
 fn dsn_is_read_from_the_manifest_db_table() {
     let dir = temp_dir(

@@ -214,9 +214,10 @@ pub struct Trust {
 }
 
 /// The `[db]` table — a project's default database wiring for `noeta migrate` (and any tooling that
-/// wants a declared DSN). Both keys are optional: `url` is the connection string (the same dsn schemes
-/// `db.connect` accepts) and `migrations` is the directory holding the `.sql` migration files
-/// (default `migrations/`). The CLI layers a `--db`/`--dir` flag and the `DATABASE_URL` env var over
+/// wants a declared DSN). Every key is optional: `url` is the connection string (the same dsn schemes
+/// `db.connect` accepts), `migrations` is the directory holding the `.sql` migration files (default
+/// `migrations/`), and `seeds` is the directory holding the re-runnable `.sql` seed files (default
+/// `seeds/`). The CLI layers a `--db`/`--dir`/`--seeds-dir` flag and the `DATABASE_URL` env var over
 /// these, so a project can declare a default here and still override per-invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DbConfig {
@@ -225,6 +226,8 @@ pub struct DbConfig {
     pub url: Option<String>,
     /// The migrations directory, if declared. `None` = the default (`migrations/`).
     pub migrations: Option<String>,
+    /// The seeds directory, if declared. `None` = the default (`seeds/`).
+    pub seeds: Option<String>,
 }
 
 /// What a matched advisory of a given intake tier does to an `noeta audit` run (advisory-intake arc,
@@ -1272,6 +1275,7 @@ fn parse_db(table: &toml::Table) -> Result<DbConfig, String> {
     Ok(DbConfig {
         url: string_key("url")?,
         migrations: string_key("migrations")?,
+        seeds: string_key("seeds")?,
     })
 }
 
@@ -1618,11 +1622,19 @@ mod tests {
         let m = Manifest::parse(
             "[db]\n\
              url = \"postgres://u:p@h/db\"\n\
-             migrations = \"db/migrations\"\n",
+             migrations = \"db/migrations\"\n\
+             seeds = \"db/seeds\"\n",
         )
         .expect("valid");
         assert_eq!(m.db().url.as_deref(), Some("postgres://u:p@h/db"));
         assert_eq!(m.db().migrations.as_deref(), Some("db/migrations"));
+        assert_eq!(m.db().seeds.as_deref(), Some("db/seeds"));
+    }
+
+    #[test]
+    fn a_db_table_without_seeds_defaults_to_none() {
+        let m = Manifest::parse("[db]\nurl = \"sqlite:app.db\"\n").expect("valid");
+        assert!(m.db().seeds.is_none());
     }
 
     #[test]

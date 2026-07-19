@@ -4,7 +4,8 @@
 //! One module and one extern type, rooted at `para`:
 //!   * `db`         — `db.connect(dsn) -> Connection`; the dsn scheme selects the driver.
 //!   * `Connection` — `execute(sql, params) -> int`, `query(sql, params) -> List<Map<string, dyn>>`,
-//!     `close()`; a shared handle over a boxed [`driver::SqlDriver`].
+//!     `migrate(dir) -> int`, `seed(dir) -> int`, `close()`; a shared handle over a boxed
+//!     [`driver::SqlDriver`].
 //!
 //! The **swappable-driver seam** is [`driver::SqlDriver`]: SQLite ([`sqlite::SqliteDriver`], behind
 //! `ring-sqlite`) and PostgreSQL ([`pg::PostgresDriver`], behind `ring-postgres`) are the two impls;
