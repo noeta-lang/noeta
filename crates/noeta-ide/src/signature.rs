@@ -11,7 +11,7 @@
 //! [`from_decl`] renders a resolved function/method declaration into a backend-neutral
 //! [`SignatureData`] the server maps to an LSP `SignatureHelp`.
 
-use noeta_ast::FnDecl;
+use noeta_ast::{BuiltinDirective, FnDecl};
 use noeta_lexer::{Token, TokenKind};
 use noeta_span::Span;
 
@@ -57,8 +57,8 @@ pub fn directive_signature(
         parameters: vec![param.to_string()],
         active_param: 0,
     };
-    match ctxt.directive.as_str() {
-        "derive" => {
+    match BuiltinDirective::from_name(&ctxt.directive) {
+        Some(BuiltinDirective::Derive) => {
             let traits = noeta_types::BUILTIN_TRAITS
                 .iter()
                 .filter(|t| t.derivable())
@@ -73,7 +73,7 @@ pub fn directive_signature(
                 "Trait",
             ))
         }
-        "role" => Some(one(
+        Some(BuiltinDirective::Role) => Some(one(
             &format!(
                 "@role(Enum.Variant, …) — {}.{{{}}} or any @semantic enum",
                 noeta_ast::reflect::SEMANTIC_ENUM,
@@ -81,14 +81,14 @@ pub fn directive_signature(
             ),
             "Enum.Variant",
         )),
-        "attribute" => Some(one(
+        Some(BuiltinDirective::Attribute) => Some(one(
             &format!(
                 "@attribute(Kind, …) — {}",
                 noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS.join(", ")
             ),
             "Kind",
         )),
-        "packed" => {
+        Some(BuiltinDirective::Packed) => {
             let variants = noeta_ast::reflect::LAYOUT_VARIANTS
                 .iter()
                 .map(|v| format!("{}.{v}", noeta_ast::reflect::LAYOUT_ENUM))
@@ -96,8 +96,11 @@ pub fn directive_signature(
                 .join(" | ");
             Some(one(&format!("@packed({variants})"), &variants))
         }
-        "semantic" => None, // takes no arguments
-        "tier" => {
+        Some(BuiltinDirective::Semantic) => None, // takes no arguments
+        // `@validated` takes no arguments; it previously reached the tier-annotation fallthrough,
+        // which returns `None` for a name that is not a registered tier — identical, now explicit.
+        Some(BuiltinDirective::Validated) => None,
+        Some(BuiltinDirective::Tier) => {
             let parameters = vec![
                 "name".to_string(),
                 "config: Type | text: \"<lang>\" | expr: Type".to_string(),
@@ -108,8 +111,10 @@ pub fn directive_signature(
                 parameters,
             })
         }
-        // A tier annotation: its signature is the config attribute's field list.
-        tier => {
+        // Not a built-in directive — a tier annotation: its signature is the config attribute's
+        // field list.
+        None => {
+            let tier = ctxt.directive.as_str();
             let reg = noeta_stdlib::registry::single_registry_process();
             let tiers = noeta_check::tiers::TierRegistry::collect_with_registry(program, reg);
             let config = reg

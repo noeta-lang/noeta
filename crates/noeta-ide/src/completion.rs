@@ -23,7 +23,7 @@
 
 use std::collections::HashSet;
 
-use noeta_ast::{FnDecl, Program, Stmt, TypeRef};
+use noeta_ast::{BuiltinDirective, FnDecl, Program, Stmt, TypeRef};
 use noeta_span::{SourceId, Span};
 
 use crate::resolve;
@@ -194,19 +194,21 @@ pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
 }
 
 /// The short usage detail shown beside a built-in decorator directive — the closed set the
-/// statement grammar dispatches on ([`noeta_parser::DECORATOR_DIRECTIVES`]).
-fn decorator_detail(name: &str) -> &'static str {
-    match name {
-        "derive" => "@derive(Trait, …) — derive implementations for a type",
-        "attribute" => "@attribute(…) — declare this struct as a data attribute",
-        "role" => "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles",
-        "semantic" => "@semantic — mark an enum's variants as role names",
-        "packed" => "@packed(Layout.Row|Layout.Column) — flat value-struct layout",
-        "validated" => {
+/// statement grammar dispatches on ([`noeta_ast::BuiltinDirective`]). Exhaustive on the enum so a new
+/// directive can't be offered without a detail string.
+fn decorator_detail(directive: BuiltinDirective) -> &'static str {
+    match directive {
+        BuiltinDirective::Derive => "@derive(Trait, …) — derive implementations for a type",
+        BuiltinDirective::Attribute => "@attribute(…) — declare this struct as a data attribute",
+        BuiltinDirective::Role => {
+            "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles"
+        }
+        BuiltinDirective::Semantic => "@semantic — mark an enum's variants as role names",
+        BuiltinDirective::Packed => "@packed(Layout.Row|Layout.Column) — flat value-struct layout",
+        BuiltinDirective::Validated => {
             "@validated — literal construction only through the type's own constructor functions"
         }
-        "tier" => "@tier(name, …) — declare a dev-tier and its runner",
-        _ => "decorator directive",
+        BuiltinDirective::Tier => "@tier(name, …) — declare a dev-tier and its runner",
     }
 }
 
@@ -220,11 +222,11 @@ fn decorator_detail(name: &str) -> &'static str {
 /// *provider* — is still one name).
 pub fn directives(program: &Program) -> Vec<Candidate> {
     let mut candidates = Vec::new();
-    for name in noeta_parser::DECORATOR_DIRECTIVES {
+    for directive in BuiltinDirective::ALL {
         candidates.push(Candidate {
-            label: (*name).to_string(),
+            label: directive.as_str().to_string(),
             kind: CandidateKind::Directive,
-            detail: Some(decorator_detail(name).to_string()),
+            detail: Some(decorator_detail(directive).to_string()),
         });
     }
     // The registry-scoped tier name-space (LSP/IDE run single-registry: the seeded process global).
@@ -359,10 +361,10 @@ pub fn directive_arg_context(text: &str, offset: u32) -> Option<DirectiveArgCont
 /// `@tier` fresh name, an unknown tier) yields an empty list — the caller still suppresses the
 /// general identifier completion, which would be pure noise inside a directive.
 pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candidate> {
-    match ctxt.directive.as_str() {
-        "derive" => derive_candidates(ctxt, program),
-        "role" => role_candidates(ctxt, program),
-        "attribute" => noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS
+    match BuiltinDirective::from_name(&ctxt.directive) {
+        Some(BuiltinDirective::Derive) => derive_candidates(ctxt, program),
+        Some(BuiltinDirective::Role) => role_candidates(ctxt, program),
+        Some(BuiltinDirective::Attribute) => noeta_ast::reflect::ATTRIBUTE_TARGET_KINDS
             .iter()
             .map(|kind| Candidate {
                 label: (*kind).to_string(),
@@ -370,9 +372,12 @@ pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -
                 detail: Some(format!("attach to every {}", kind.to_lowercase())),
             })
             .collect(),
-        "packed" => packed_candidates(ctxt),
-        "semantic" => Vec::new(), // takes no arguments
-        "tier" => {
+        Some(BuiltinDirective::Packed) => packed_candidates(ctxt),
+        Some(BuiltinDirective::Semantic) => Vec::new(), // takes no arguments
+        // `@validated` takes no arguments; it previously reached the tier-config fallthrough, which
+        // returns empty for a name that is not a registered tier — identical result, now explicit.
+        Some(BuiltinDirective::Validated) => Vec::new(),
+        Some(BuiltinDirective::Tier) => {
             // First positional is the fresh tier name; the rest are the named forms.
             if ctxt.active == 0 {
                 Vec::new()
@@ -394,9 +399,9 @@ pub fn directive_arg_candidates(ctxt: &DirectiveArgContext, program: &Program) -
                 .collect()
             }
         }
-        // Any other directive is a tier annotation (`@bench(…)`): its arguments are the knobs of
+        // Not a built-in directive: a tier annotation (`@bench(…)`) whose arguments are the knobs of
         // the tier's config attribute.
-        tier => tier_config_candidates(tier, program),
+        None => tier_config_candidates(&ctxt.directive, program),
     }
 }
 
