@@ -41,6 +41,15 @@ pub enum BuiltinTrait {
     Equatable,
     Comparable,
     Display,
+    /// **Error** (error-machinery arc) — the failure-value protocol: a type whose values describe
+    /// what went wrong. The required method is `message(): string`; a value of an
+    /// `Error`-implementing type is the idiomatic `Err` payload. Deliberately independent of
+    /// [`BuiltinTrait::Display`]: an error type *may* also implement `Display` (and std's
+    /// `JsonError` does), but `impl Error` alone imposes exactly one method — rendering stays
+    /// whatever the type's display story already is, so adopting `Error` never changes program
+    /// output. Not derivable in this slice (the impl is a single method; a future derive could
+    /// forward `message` through `Display`'s `to_string`).
+    Error,
     Clone,
     Serialize,
     /// **Deserialize** (L2.2 DI) — the structural JSON *decode* capability, the mirror of
@@ -114,6 +123,9 @@ impl BuiltinTrait {
             Equatable => ("Equatable", Some(("eq", Some(1))), None, true),
             Comparable => ("Comparable", Some(("compare", Some(1))), None, true),
             Display => ("Display", Some(("to_string", Some(0))), None, true),
+            // The failure-value protocol: one nullary method, `message(): string`. Not derivable
+            // (a possible future derive via `Display` is a recorded backlog row, not shipped).
+            Error => ("Error", Some(("message", Some(0))), None, false),
             Clone => ("Clone", None, None, true),
             Serialize => ("Serialize", None, None, true),
             Deserialize => ("Deserialize", None, None, true),
@@ -211,6 +223,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     BuiltinTrait::Equatable,
     BuiltinTrait::Comparable,
     BuiltinTrait::Display,
+    BuiltinTrait::Error,
     BuiltinTrait::Clone,
     BuiltinTrait::Serialize,
     BuiltinTrait::Deserialize,

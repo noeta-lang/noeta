@@ -39,7 +39,7 @@ pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIV
 /// registered type. This is what the checker stores in `Type::Named` so a native type is never
 /// conflated with a same-short-named user type; runtime values carry the same qualified identity
 /// (`ExternValue::type_identity`), so the two sides key dispatch and `is`/`as` identically.
-fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
+pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
     reg.resolve_type(n)
         .map_or_else(|| n.to_string(), registry::ExtType::qualified)
 }

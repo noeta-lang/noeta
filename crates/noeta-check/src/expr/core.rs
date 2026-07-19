@@ -1117,12 +1117,12 @@ impl Checker {
                 };
                 // Arguments are synthesized (checked as expressions) regardless of which function.
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
-                // The only call-site-typed native function today is `json.parse::<T>(text)`. (When
-                // more land, this resolves through the registry's `RetTy::TypeArg` functions; the
-                // dynamic `json.parse(s)` keeps its own path, so the shared name does not collide.)
-                // `json.parse::<T>` (aborting) and `json.decode::<T>` (recoverable → `Result<T, string>`,
-                // L2 DI) are the call-site-typed native functions.
-                let recoverable_decode = module == "json" && func == "decode";
+                // The call-site-typed native functions: `json.parse::<T>` (the aborting
+                // convenience door) and `json.try_parse::<T>` (the recoverable door →
+                // `Result<T, JsonError>`, one error story with `json.decode_typed`). When more
+                // land, this resolves through the registry's `RetTy::TypeArg` functions; the
+                // dynamic `json.parse(s)` keeps its own path, so the shared name does not collide.
+                let recoverable_decode = module == "json" && func == "try_parse";
                 if module == "json" && (func == "parse" || recoverable_decode) {
                     if arg_types.len() != 1 {
                         self.error(
@@ -1167,10 +1167,17 @@ impl Checker {
                         );
                     }
                 }
-                // `json.decode::<T>` is recoverable — it yields `Result<T, string>` so a malformed
-                // body is a catchable error, not a program abort (unlike `json.parse::<T>`).
+                // `json.try_parse::<T>` is recoverable — it yields `Result<T, JsonError>` so a
+                // malformed or mismatched body is a catchable, path-carrying error, not a program
+                // abort (unlike `json.parse::<T>`, the aborting convenience form over the same
+                // decode walk). The error arm is the registered `std.json.JsonError` extern type,
+                // resolved through the registry like every native signature type.
                 if recoverable_decode {
-                    Type::Result(Box::new(t), Box::new(Type::String))
+                    let json_error = Type::Named(
+                        stdlib::qualified_extern(self.reg(), "JsonError"),
+                        Vec::new(),
+                    );
+                    Type::Result(Box::new(t), Box::new(json_error))
                 } else {
                     t
                 }

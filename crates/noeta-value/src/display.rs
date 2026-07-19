@@ -176,7 +176,10 @@ impl Value {
 
     /// Deeply marshal this value into the neutral [`noeta_ext_abi::NativeValue`] tree the shared JSON
     /// serializer ([`noeta_ext_abi::json_text::stringify`]) consumes — the VM half of `json.stringify` and
-    /// `@derive(Serialize<Json>)`. Numbers become scalars; strings, enum variants, and the opaque
+    /// `@derive(Serialize<Json>)`. Mirrors the reference interpreter's `value_to_native_deep`
+    /// (`noeta-eval/src/lib.rs`) — per-representation glue, mirrored by design (see
+    /// `plans/backend-mirror.md`); divergence is caught by `std/json_encoder_one_engine.noe` and
+    /// the differential. Numbers become scalars; strings, enum variants, and the opaque
     /// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
     /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`]. Read-only — it never changes a
     /// refcount (a packed list materializes a temporary that is released here).

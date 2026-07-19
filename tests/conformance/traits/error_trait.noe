@@ -1,0 +1,59 @@
+// The `Error` builtin trait (error-machinery arc): a type whose values describe a failure.
+// The required method is `message(): string`; a value of an `Error`-implementing type is the
+// idiomatic `Err` payload. `Error` deliberately does NOT require `Display` — echoing an `Err`
+// keeps the payload's ordinary rendering (the structural default here), so adopting `Error`
+// never changes program output. A `<T: Error>` bound is satisfied by any implementor. Runs
+// identically on both backends.
+// expect: stdout "insufficient funds: need 5 more"
+// expect: stdout "Err(ParseFailure {at: 3})"
+// expect: stdout "caught: bad digit at 3"
+// expect: stdout "report: insufficient funds: need 5 more"
+// expect: exit 0
+struct ParseFailure {
+    at: int
+
+    impl Error {
+        fn message(): string {
+            return "bad digit at ${self.at}"
+        }
+    }
+}
+
+class Shortfall {
+    missing: int
+
+    fn new(missing: int): Shortfall { return Shortfall { missing: missing } }
+
+    impl Error {
+        fn message(): string {
+            return "insufficient funds: need ${self.missing} more"
+        }
+    }
+}
+
+// The required method dispatches like any instance method.
+echo Shortfall.new(5).message()
+
+// An `Error` value is the idiomatic `Err` payload; without a `Display` impl the payload keeps
+// its structural rendering inside `Err(...)` — conservative, unchanged by `impl Error`.
+fn digit(c: string): Result<int, ParseFailure> {
+    return Err(ParseFailure { at: 3 })
+}
+
+echo digit("x")
+
+fn caught(): string {
+    return match digit("x") {
+        Ok(n) => "ok: ${n}",
+        Err(e) => "caught: ${e.message()}",
+    }
+}
+
+echo caught()
+
+// `<T: Error>` is a checkable bound; the method is callable on the bounded parameter.
+fn report<E: Error>(e: E): string {
+    return "report: ${e.message()}"
+}
+
+echo report(Shortfall.new(5))

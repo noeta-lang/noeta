@@ -732,9 +732,10 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        // The call-site-typed native functions: `json.parse::<T>` (aborting) and the
-                        // recoverable `json.decode::<T>` → `Result<T, string>` (L2 DI).
-                        let recoverable = func == "decode";
+                        // The call-site-typed native functions: `json.parse::<T>` (aborting) and
+                        // the recoverable `json.try_parse::<T>` → `Result<T, JsonError>` (one
+                        // error story with `json.decode_typed`).
+                        let recoverable = func == "try_parse";
                         if mod_name == "json" && (func == "parse" || recoverable) {
                             let text = args
                                 .first()
@@ -747,34 +748,36 @@ impl<'m> Vm<'m> {
                                     format!("`json.{func}` expects a `string` argument"),
                                 ));
                             };
-                            match noeta_stdlib::json::parse_typed(&text, recipe) {
-                                Ok(out) => {
-                                    let value = materialize_recipe(out);
-                                    let value = if recoverable {
-                                        Value::enum_value(
-                                            self.persist.shapes[*ok_shape as usize],
-                                            vec![value],
-                                        )
-                                    } else {
-                                        value
-                                    };
-                                    set_reg(regs, fbase, *dst, value);
-                                }
-                                Err(error) if recoverable => {
-                                    // A decode failure is a recoverable `Result.Err(message)`.
-                                    let msg = Value::string(&error.message);
-                                    let err = Value::enum_value(
+                            if recoverable {
+                                // A decode failure is a recoverable `Result.Err(JsonError)` — the
+                                // path-carrying extern error value, exactly as the eval reference
+                                // wraps it.
+                                let value = match noeta_stdlib::json::try_parse_typed(&text, recipe)
+                                {
+                                    Ok(out) => Value::enum_value(
+                                        self.persist.shapes[*ok_shape as usize],
+                                        vec![materialize_recipe(out)],
+                                    ),
+                                    Err(error) => Value::enum_value(
                                         self.persist.shapes[*err_shape as usize],
-                                        vec![msg],
-                                    );
-                                    set_reg(regs, fbase, *dst, err);
-                                }
-                                Err(error) => {
-                                    return Err(self.error(
-                                        stdlib_error_code(error.kind),
-                                        *span,
-                                        error.message,
-                                    ));
+                                        vec![Value::extern_value(noeta_stdlib::ExternBox::new(
+                                            error,
+                                        ))],
+                                    ),
+                                };
+                                set_reg(regs, fbase, *dst, value);
+                            } else {
+                                match noeta_stdlib::json::parse_typed(&text, recipe) {
+                                    Ok(out) => {
+                                        set_reg(regs, fbase, *dst, materialize_recipe(out));
+                                    }
+                                    Err(error) => {
+                                        return Err(self.error(
+                                            stdlib_error_code(error.kind),
+                                            *span,
+                                            error.message,
+                                        ));
+                                    }
                                 }
                             }
                         } else {
@@ -796,15 +799,16 @@ impl<'m> Vm<'m> {
                         err_shape,
                         span,
                     } => {
-                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown type
-                        // name, a non-string operand, or a malformed body all land as `Result.Err`; a
-                        // good decode is `Result.Ok(value)` wrapping the materialized struct. Mirrors
-                        // the recoverable `json.decode::<T>` branch above, but the recipe is looked up by
-                        // runtime type name rather than baked at the call site.
-                        let err = |vm: &Self, msg: String| {
+                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown
+                        // type name, a non-string operand, or a malformed body all land as
+                        // `Result.Err` wrapping a path-carrying `JsonError` (the same error story
+                        // as `json.try_parse::<T>`). Mirrors the recoverable `try_parse` branch
+                        // above, but the recipe is looked up by runtime type name rather than
+                        // baked at the call site.
+                        let err = |vm: &Self, error: noeta_stdlib::json::JsonError| {
                             Value::enum_value(
                                 vm.persist.shapes[*err_shape as usize],
-                                vec![Value::string(&msg)],
+                                vec![Value::extern_value(noeta_stdlib::ExternBox::new(error))],
                             )
                         };
                         let name_val = regs[fbase + *name as usize].as_string();
@@ -817,14 +821,19 @@ impl<'m> Vm<'m> {
                             ));
                         };
                         let value = match self.deserialize_recipes.get(&type_name) {
-                            None => err(self, format!("unknown deserializable type `{type_name}`")),
-                            Some(recipe) => match noeta_stdlib::json::parse_typed(&text, recipe) {
-                                Ok(out) => Value::enum_value(
-                                    self.persist.shapes[*ok_shape as usize],
-                                    vec![materialize_recipe(out)],
-                                ),
-                                Err(error) => err(self, error.message),
-                            },
+                            None => err(
+                                self,
+                                noeta_stdlib::json::JsonError::unknown_type(&type_name),
+                            ),
+                            Some(recipe) => {
+                                match noeta_stdlib::json::try_parse_typed(&text, recipe) {
+                                    Ok(out) => Value::enum_value(
+                                        self.persist.shapes[*ok_shape as usize],
+                                        vec![materialize_recipe(out)],
+                                    ),
+                                    Err(error) => err(self, error),
+                                }
+                            }
                         };
                         set_reg(regs, fbase, *dst, value);
                         pc += 1;

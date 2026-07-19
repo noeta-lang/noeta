@@ -1,0 +1,28 @@
+// `json.try_parse::<T>(text)` is the recoverable sibling of `json.parse::<T>`: the exact same
+// typed decode walk, but a malformed or shape-mismatched body yields `Result<T, JsonError>` —
+// a catchable, path-carrying error value — instead of aborting. `??` coalesces an `Err` away
+// like any Result. Runs identically on both backends.
+// expect: stdout "ok: Ada is 36"
+// expect: stdout "bad-json"
+// expect: stdout "bad-shape"
+// expect: stdout "fallback"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct User { name: string  age: int }
+
+fn outcome(r: Result<User, JsonError>, on_err: string): string {
+    return match r {
+        Ok(u) => "ok: ${u.name} is ${u.age}",
+        Err(e) => on_err,
+    }
+}
+
+echo outcome(json.try_parse::<User>("{\"name\": \"Ada\", \"age\": 36}"), "unreached")
+echo outcome(json.try_parse::<User>("{ not json"), "bad-json")
+echo outcome(json.try_parse::<User>("{\"name\": \"Bob\"}"), "bad-shape")
+
+// `??` unwraps the Ok or takes the fallback on an Err.
+fallback = User { name: "fallback", age: 0 }
+echo (json.try_parse::<User>("[]") ?? fallback).name

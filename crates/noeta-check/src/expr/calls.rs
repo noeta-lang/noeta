@@ -250,8 +250,9 @@ impl Checker {
                 .or_else(|| self.resolve_namespace_module(receiver, env));
                 if let Some(qm) = module_id {
                     // The router-facing runtime decode `json.decode_typed(name, text)` (L2.2 DI): a
-                    // 2-string-arg call whose result is `Result<dyn, string>` (it decodes a JSON body
-                    // into the type named by a *runtime* string, recoverably). It is not a registered
+                    // 2-string-arg call whose result is `Result<dyn, JsonError>` (it decodes a JSON
+                    // body into the type named by a *runtime* string, recoverably — the same
+                    // path-carrying error story as `json.try_parse::<T>`). It is not a registered
                     // native signature — `Result` has no `SigType` — so it is typed here directly, its
                     // call span recorded so lowering emits the dedicated `Rvalue::DecodeTyped`.
                     if name == "decode_typed"
@@ -272,7 +273,11 @@ impl Checker {
                             name,
                         );
                         self.sites.decode_typed_sites.insert(call_span);
-                        return Type::Result(Box::new(Type::Dyn), Box::new(Type::String));
+                        let json_error = Type::Named(
+                            stdlib::qualified_extern(self.reg(), "JsonError"),
+                            Vec::new(),
+                        );
+                        return Type::Result(Box::new(Type::Dyn), Box::new(json_error));
                     }
                     if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
                         let required =

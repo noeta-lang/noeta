@@ -309,6 +309,7 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         // `Type::Named` and so resolve through the seeded `trait_impls` table in `satisfies`, never
         // reaching here — no primitive is ever `Mergeable`.
         Bt::Clone
+        | Bt::Error
         | Bt::Serialize
         | Bt::Deserialize
         | Bt::Index
