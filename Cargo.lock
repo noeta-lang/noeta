@@ -4536,6 +4536,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-span",
  "proptest",
+ "stacker",
 ]
 
 [[package]]

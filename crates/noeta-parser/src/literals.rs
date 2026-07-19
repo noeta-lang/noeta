@@ -408,6 +408,17 @@ pub(crate) fn parse_tier_expr_body(
     }
 }
 
+/// The stack a single hole's grammar build+parse may need before [`parse_hole`] grows onto a fresh
+/// segment. A `${…}` hole re-enters the **whole** expression+statement grammar ([`expr_parser`] over
+/// a fresh [`statement_parser`]); constructing that combinator graph is stack-heavy (each grammar
+/// closure is a large frame), and it runs *deep* in the enclosing parse — so when this much stack is
+/// not free, the build moves to a new segment. Kept comfortably above what one hole's build uses.
+const HOLE_STACK_RED_ZONE: usize = 2 * 1024 * 1024;
+
+/// The fresh stack size [`parse_hole`] allocates when the red zone is not met — large enough that a
+/// hole's grammar build (and any hole nested within it, which grows again) never overflows it.
+const HOLE_STACK_GROW: usize = 32 * 1024 * 1024;
+
 /// Parse a single interpolation hole's expression. The hole text is lexed and parsed
 /// with token spans shifted to their absolute position in the source, so diagnostics
 /// and snapshots point at the real location. Hole diagnostics flow through the
@@ -436,14 +447,24 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     let input = toks.as_slice().map(eoi, |(t, s)| (t, s));
     // An interpolation hole is a standalone expression; build it over a real statement parser so a
     // block-bodied closure inside a hole still parses (its block uses that statement grammar).
-    let (expr, errs) = expr_parser(ctx, statement_parser(ctx))
-        .parse(input)
-        .into_output_errors();
-    for err in errs {
-        ctx.diags.borrow_mut().push(rich_to_diag(ctx, err));
-    }
-    expr.unwrap_or(Expr::Str {
-        value: String::new(),
-        span: Span::empty_at_in(ctx.source.id(), abs_offset),
+    //
+    // This re-enters the **whole** grammar *deep* in the enclosing parse: the string literal that
+    // holds the hole is itself parsed several blocks in (a fn body, a tier block, …), so the giant
+    // grammar-combinator graph is (re)constructed on a stack already partly consumed. On a small
+    // caller stack — a ~2 MiB test thread — that construction alone can exhaust the remainder, so
+    // grow onto a fresh segment when the red zone is not free. `maybe_grow` is a no-op (no
+    // allocation) whenever ample stack remains, so the common shallow-hole case pays nothing. This
+    // is the hole-parse counterpart of the top-level [`crate::parse`]'s deep-nesting worker thread.
+    stacker::maybe_grow(HOLE_STACK_RED_ZONE, HOLE_STACK_GROW, || {
+        let (expr, errs) = expr_parser(ctx, statement_parser(ctx))
+            .parse(input)
+            .into_output_errors();
+        for err in errs {
+            ctx.diags.borrow_mut().push(rich_to_diag(ctx, err));
+        }
+        expr.unwrap_or(Expr::Str {
+            value: String::new(),
+            span: Span::empty_at_in(ctx.source.id(), abs_offset),
+        })
     })
 }
