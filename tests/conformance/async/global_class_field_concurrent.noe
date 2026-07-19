@@ -1,0 +1,16 @@
+// The fix composes with concurrency: two `spawn`ed async tasks each mutating the same class global's
+// field, joined at the closing `}`, both store through the one global (cooperative single-thread
+// scheduling, so no race) → 0 + 2 + 3 = 5.
+// expect: stdout "5"
+// expect: exit 0
+class G {
+    pub mut n: int
+    fn new(): G { return G { n: 0 }; }
+}
+g = G.new()
+async fn add(x: int): void { g.n = g.n + x }
+concurrent {
+    spawn add(2)
+    spawn add(3)
+}
+echo g.n

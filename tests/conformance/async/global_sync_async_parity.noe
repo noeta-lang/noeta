@@ -1,0 +1,15 @@
+// Sync-vs-async parity: a synchronous and an asynchronous function mutating the SAME class global's
+// field compile the mutation the same way (both go through `LoadGlobal`/`TakeGlobal`/`StoreGlobal`),
+// so their effects compose — 0 + 10 + 20 = 30.
+// expect: stdout "30"
+// expect: exit 0
+class G {
+    pub mut n: int
+    fn new(): G { return G { n: 0 }; }
+}
+g = G.new()
+fn sync_add(x: int): void { g.n = g.n + x }
+async fn async_add(x: int): void { g.n = g.n + x }
+sync_add(10)
+async_add(20).await
+echo g.n

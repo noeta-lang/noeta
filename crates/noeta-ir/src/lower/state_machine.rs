@@ -78,7 +78,20 @@ pub(super) fn desugar_state_machine(
     span: Span,
     stream_sites: &HashSet<Span>,
     mode: SuspendMode,
+    module_globals: &HashSet<String>,
+    params: &[String],
 ) -> StateMachineDesugar {
+    // A bare reassignment of a module global that this function does not shadow (no param, no fresh
+    // `mut` local of the same name) is a global store, never a capturable local — so it must not be
+    // hoisted into a state-machine cell. Build that exclusion set once: a global name minus any that
+    // a param shadows. (An in-body `mut g` re-shadow is handled by the `declaring` check at
+    // hoist-decision time, since such a name is eligible rather than a bare-assign candidate.)
+    let param_set: HashSet<&str> = params.iter().map(String::as_str).collect();
+    let global_stores: HashSet<String> = module_globals
+        .iter()
+        .filter(|g| !param_set.contains(g.as_str()))
+        .cloned()
+        .collect();
     let mut flat = Flattener {
         blocks: Vec::new(),
         binds: Vec::new(),
@@ -87,6 +100,7 @@ pub(super) fn desugar_state_machine(
         stream_sites,
         mode,
         tmp: 0,
+        global_stores,
     };
     // Track A.6: hoist mid-expression awaits to statement position before flattening (async only —
     // a generator has no awaits). After this the flattener only ever sees head/hoisted-binding awaits.
@@ -335,6 +349,12 @@ struct Flattener<'a> {
     mode: SuspendMode,
     /// Counter for the synthetic `$for`/`$next`/`$fut`/`$aw` cell names the flattener introduces.
     tmp: usize,
+    /// Module-global names this function reassigns as global stores (no shadowing param). A bare
+    /// `g = …`/`g.f = …` against such a name is a store to the global — not a fresh local — so it is
+    /// excluded from cell-hoisting: the desugared body keeps a bare reassignment the compiler resolves
+    /// to `StoreGlobal`, exactly as a synchronous function does. Without this a global reassignment
+    /// would be mis-hoisted into a captured cell initialized to `none`, shadowing the real global.
+    global_stores: HashSet<String>,
 }
 
 impl Flattener<'_> {
@@ -394,11 +414,24 @@ impl Flattener<'_> {
         self.binds
             .iter()
             .filter(|name| {
+                // A bare reassignment of a module global (with no shadowing `mut` local here) is a
+                // global store, not a hoistable local — keep it a bare reassignment so the compiler
+                // resolves it to `StoreGlobal`, exactly as in a synchronous function.
+                !self.is_global_store(name)
+            })
+            .filter(|name| {
                 let eligible = self.declaring.contains(*name) && !self.disqualified.contains(*name);
                 !eligible || self.ref_block_count(name) > 1
             })
             .cloned()
             .collect()
+    }
+
+    /// Whether `name` denotes a module-global store here: it is a reassigned global with no `mut`
+    /// declaration in this body shadowing it. Such a name must never become a state-machine cell —
+    /// its reads/writes go through the global, shared across suspensions like any other global.
+    fn is_global_store(&self, name: &str) -> bool {
+        self.global_stores.contains(name) && !self.declaring.contains(name)
     }
 
     /// The number of distinct states that reference `name` (read or written). A name referenced in
