@@ -102,6 +102,8 @@ Only `Send` values may cross an isolate boundary, and the **value/reference axis
 
 Sending a `!Send` value across an isolate is E0042.
 
+The rule also covers **globals**, not just a call's arguments and result: an isolate runs in a fresh heap and snapshots the module's value-type globals by copy, but a reference `class` global has identity and cannot be copied across — so it is **not** shared. A worker that reads such a global fails at that use naming the global, its type, and the fix (make it a value `struct`, or pass the value-type data it holds as arguments) rather than silently observing a stale duplicate. A `class` global an isolate never reads is fine — only a read triggers the error.
+
 ## Channels
 
 A bounded, typed channel connects tasks or isolates:

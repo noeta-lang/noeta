@@ -2421,3 +2421,69 @@ fn lib_rs_stays_decomposed() {
          plans/audit/audit-1-vm-runtime.md finding 1) instead of raising the budget."
     );
 }
+
+/// Isolates I.4b worker-teardown gap: a worker isolate that strands reference cycles
+/// (`a.next = b; b.next = a` on a reference `class`) must reap them at its **own** teardown —
+/// refcounting alone never reclaims a cycle, and before the fix the worker's teardown ran no cycle
+/// pass, so the cycle (and its `__destruct`) leaked until the thread died. The value heap is
+/// thread-local, so `live_count()` measured on the worker's own thread *is* the worker heap's
+/// residency; it must return to the pre-run baseline (delta 0), exactly as the main heap's
+/// [`Vm::teardown`] guarantees. Drives `run_isolate_worker` directly (real isolates are CLI/
+/// out-of-oracle, so the differential leak oracle never samples this path).
+#[test]
+fn worker_teardown_reaps_stranded_reference_cycles() {
+    use std::sync::Arc;
+    let _ = noeta_stdlib::registry::default_seeded();
+    let src = "class Node { pub mut next: ?Node\n\
+         fn new(): Node { return Node { next: none } } }\n\
+         fn spin(count: int): int {\n\
+         mut i = 0\n\
+         while i < count {\n\
+         a = Node.new()\n\
+         b = Node.new()\n\
+         a.next = some(b)\n\
+         b.next = some(a)\n\
+         i = i + 1\n\
+         }\n\
+         return i\n\
+         }\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let proto = module
+        .protos
+        .iter()
+        .position(|p| p.name.as_deref() == Some("spin"))
+        .expect("spin proto") as u32;
+    let factory: crate::IsolateFactory = Arc::new(|| {
+        (
+            Box::new(noeta_stdlib::SandboxHost::new()) as Box<dyn noeta_stdlib::Host>,
+            Box::new(noeta_stdlib::SandboxExecutor::new()) as Box<dyn noeta_stdlib::Executor>,
+        )
+    });
+    let residual = std::thread::spawn(move || {
+        let before = noeta_value::live_count();
+        let result = crate::lifecycle::run_isolate_worker(
+            &module,
+            &factory,
+            None,
+            proto,
+            vec![crate::isolate::IsoArg::Copied(crate::isolate::Wire::Int(5))],
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            noeta_span::Span::new(0, 0),
+        );
+        assert!(result.is_ok(), "spin returns an int");
+        noeta_value::live_count() as i64 - before as i64
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        residual, 0,
+        "the worker's own teardown must reap its stranded cycles (residency 0)"
+    );
+}

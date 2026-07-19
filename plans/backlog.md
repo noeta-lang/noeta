@@ -30,12 +30,12 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| **Real-isolate worker environment limits:** workers snapshot only marshallable globals (a `class`-instance global is skipped → fails at use); worker teardown skips cycle collection | isolates I.4b |
 | User-facing `h.cancel()` + a typed cancelled outcome (today cancellation is race/scope-internal) | A.8 scope decision |
 | App-lifetime `TaskScope` patterns: DI-managed workers, durable queues, schedulers; overlaps the "background-work extensions" proposal below | §7.2 design. Framework/extension patterns, not language constructs |
 | Safepoint GC inside **re-entrant runs**: mid-run collection is gated to the outermost interpreter loop (a nested run's outer register stacks live in Rust locals the poll cannot enumerate), so cycles built inside `map`-applied closures, `NativeCtx`-driven loops (the HTTP serve loop), or a single mammoth un-awaited task body still accumulate until the next outermost safepoint / exit. Rooting the outer stacks (an active-stack registry) would lift the gate | memory-management 6.x follow-up (safepoint GC shipped; this is the residual scope) |
 | Intrusive free-list registry — closes the trace collector's ~10% acyclic overhead on alloc-churn micro-benches | memory-management 6.4 |
 | VM E0005 on a **top-level nested self-recursive `fn` inside a block** (`while { fn rec(){... rec() ...} }`): the closure's self-reference compiles to a `LoadGlobal "rec"` no one stores; the reference interpreter runs it fine — a differential gap outside the corpus (found writing the safepoint-GC corpus; pre-existing, reproduces with collection disarmed) | compiler closure conversion (`freevars.rs`) |
+| An **`async fn` that mutates a `class` global's field** (`g.n = g.n + x`) mis-captures the global into the state-machine's cell environment (the entry proto initializes that upvalue with a fresh `MakeEnum` instead of `LoadGlobal g`), so the body reads a stale enum → "no field `n` on enum". Reproduces with **no isolate** (plain `work().await`); a read-only `g.n` is fine (loads via `LoadGlobal`). Found closing isolates I.4b | compiler async desugar × mutated-global capture (`freevars.rs` / async state machine) |
 | DAP: reverse debugging (stepping backward / replay) | debug-adapter deferred |
 
 ## Reactivity & web

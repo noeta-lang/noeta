@@ -272,6 +272,13 @@ struct IsolateState {
     shared_region: noeta_value::SharedRegion,
     promote_memo: HashMap<u64, Value>,
     promote_sources: Vec<Value>,
+    /// Worker-side map of globals the parent could **not** ship into this isolate (isolates I.4b):
+    /// global slot → the unshippable value's type name (e.g. a `class`, which has reference identity
+    /// and cannot cross into a fresh heap). The slot is left unbound; if the worker body actually
+    /// *reads* it, `Op::LoadGlobal` raises a precise E0042 naming the global + its type + the fix,
+    /// instead of the confusing "cannot find `x`" an ordinary unbound slot yields. Empty on the
+    /// parent VM and whenever every global shipped.
+    unshippable_globals: HashMap<u32, String>,
 }
 
 /// The run's captured output (audit-1 finding 3): stdout, diagnostics, a deliberate

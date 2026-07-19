@@ -467,6 +467,19 @@ pub fn marshal(
         return Ok(Wire::Map(out));
     }
     if value.is_object() {
+        // A reference `class` must NEVER cross an isolate boundary by copy (isolates I.4b): it has
+        // **identity**, and deep-copying it into the worker's fresh heap would silently break that
+        // — two heaps each with their own "the" instance, mutations invisible across the boundary.
+        // Value `struct`s copy freely (no identity); classes are refused so the spawn site skips the
+        // global (and flags a precise diagnostic at use) instead of shipping a stale duplicate. The
+        // checker already rejects a `class` *argument*/*result* (E0042); this closes the *global*
+        // path the checker's argument/result classifier does not see.
+        if value
+            .shape()
+            .is_some_and(|s| s.kind == noeta_object::ShapeKind::Class)
+        {
+            return Err("class".to_string());
+        }
         let shape = shape_index(value, shapes).ok_or("unknown object shape")?;
         let fields = value.slots().unwrap_or_default();
         return Ok(Wire::Object {

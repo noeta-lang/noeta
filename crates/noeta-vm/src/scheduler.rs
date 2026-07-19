@@ -842,11 +842,28 @@ impl<'m> Vm<'m> {
         // Ship globals by slot id (P-VMT-GSLOT): the worker shares the same `Arc<Module>`, so slots
         // line up on both sides. A `None` (unbound) or unshippable slot is skipped.
         let mut wire_globals: Vec<(u32, isolate::Wire)> = Vec::new();
+        // Globals the worker cannot see because they don't marshal (a `class` — reference identity;
+        // a closure with captures; a `Local` channel endpoint). Their slots stay unbound on the
+        // worker; recorded here (slot → type name) so a worker body that *reads* one gets a precise
+        // diagnostic at use rather than a confusing "cannot find `x`" (isolates I.4b).
+        let mut unshippable_globals: Vec<(u32, String)> = Vec::new();
         for (slot, v) in self.persist.globals.iter().enumerate() {
-            if !v.is_unbound()
-                && let Ok(w) = isolate::marshal(*v, &self.persist.shapes, &self.persist.channels)
-            {
-                wire_globals.push((slot as u32, w));
+            if v.is_unbound() {
+                continue;
+            }
+            match isolate::marshal(*v, &self.persist.shapes, &self.persist.channels) {
+                Ok(w) => wire_globals.push((slot as u32, w)),
+                // A non-value-type global: the worker only *needs* it if its body reads it, so this
+                // is not a spawn-time error — the slot is skipped and flagged for a use-site error.
+                // Prefer the shape name (the `class`/type name, e.g. `Counter`) over the generic
+                // kind (`object`); fall back to the value kind for the shapeless cases.
+                Err(_) => {
+                    let ty = v
+                        .shape()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| v.type_name().to_string());
+                    unshippable_globals.push((slot as u32, ty));
+                }
             }
         }
         let module = Arc::clone(
@@ -883,6 +900,7 @@ impl<'m> Vm<'m> {
                 proto,
                 iso_args,
                 wire_globals,
+                unshippable_globals,
                 trace,
                 registry,
                 stall_tracked,

@@ -380,6 +380,7 @@ impl<'m> Vm<'m> {
                 shared_region: noeta_value::SharedRegion::new(),
                 promote_memo: HashMap::new(),
                 promote_sources: Vec::new(),
+                unshippable_globals: HashMap::new(),
             },
             out: RunOutput {
                 stdout: String::new(),
@@ -651,6 +652,7 @@ pub(crate) fn run_isolate_worker(
     proto: u32,
     iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
+    unshippable_globals: Vec<(u32, String)>,
     trace: Option<noeta_stdlib::TraceContext>,
     registry: Option<&'static noeta_stdlib::registry::Registry>,
     stall_tracked: bool,
@@ -698,6 +700,9 @@ pub(crate) fn run_isolate_worker(
         wvm.persist.globals[*slot as usize] = value;
         wvm.persist.global_order.push(*slot);
     }
+    // Record the globals the parent could not ship (isolates I.4b): their slots stay unbound, but
+    // reading one now names the offending global + type instead of "cannot find `x`".
+    wvm.isolates.unshippable_globals = unshippable_globals.into_iter().collect();
     let arg_vals: Vec<Value> = iso_args
         .iter()
         .map(|a| match a {
@@ -773,17 +778,34 @@ pub(crate) fn run_isolate_worker(
         }),
     };
     // Tear the worker down so its thread-local heap returns to zero residency: release the JIT
-    // inline caches' closure pins (S4.2), destroy globals in reverse declaration order, then
-    // drain any channel buffers.
+    // inline caches' closure pins (S4.2), reap reference cycles, destroy globals in reverse
+    // declaration order, then drain any channel buffers. This mirrors the main heap's
+    // [`Vm::teardown`] exit reapers (isolates I.4b worker-teardown gap): a worker body can strand a
+    // reference cycle (`a.next = b; b.next = a` on a `class`) that refcounting alone never reclaims,
+    // so without a cycle pass here it — and its `__destruct` — leaked until the thread died. `gc_
+    // suspended` is already set (above), and `reclaim_cycle_garbage` manages it around each
+    // destructor, so these explicit collections run correctly after the safepoint trigger is
+    // disarmed. The worker always collects in `Trace` mode (set at entry).
     #[cfg(feature = "jit")]
     for v in std::mem::take(&mut wvm.tier1.jit_cache_pins) {
         release(v);
     }
-    for slot in wvm.persist.global_order.clone().into_iter().rev() {
-        let value = std::mem::replace(&mut wvm.persist.globals[slot as usize], Value::unbound());
-        if !value.is_unbound() {
-            wvm.release_value(value);
-        }
+    // Pre-teardown trace: the frame stack is unwound, so the still-bound globals (plus the arena /
+    // traced-future roots released below) are the whole root set — sweep everything unreachable
+    // from them, running each dead member's `__destruct` exactly once (container-before-contained),
+    // exactly as the main heap does. This reclaims a cycle already stranded mid-run.
+    {
+        let mut roots: Vec<Value> = wvm
+            .persist
+            .globals
+            .iter()
+            .copied()
+            .filter(|v| !v.is_unbound())
+            .collect();
+        roots.extend(wvm.persist.ext_arena.iter().copied().flatten());
+        roots.extend(wvm.sched.traced_futures.iter().map(|t| t.future));
+        let garbage = collect_trace(&roots);
+        wvm.reclaim_cycle_garbage(garbage);
     }
     for chan in std::mem::take(&mut wvm.persist.channels) {
         if let Channel::Local { buffer, .. } = chan {
@@ -804,6 +826,18 @@ pub(crate) fn run_isolate_worker(
     for traced in std::mem::take(&mut wvm.sched.traced_futures) {
         wvm.release_value(traced.future);
     }
+    for slot in wvm.persist.global_order.clone().into_iter().rev() {
+        let value = std::mem::replace(&mut wvm.persist.globals[slot as usize], Value::unbound());
+        if !value.is_unbound() {
+            wvm.release_value(value);
+        }
+    }
+    // Backup collection: a reference `class` cycle rooted in the globals survives the destruction
+    // above (each member still holds the other), but with the globals now gone there are no roots
+    // left — trace from an empty root set to reclaim it, running each member's `__destruct` exactly
+    // once. The main heap's teardown ends the same way.
+    let garbage = collect_trace(&[]);
+    wvm.reclaim_cycle_garbage(garbage);
     message
 }
 
