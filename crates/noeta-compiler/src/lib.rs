@@ -414,6 +414,7 @@ fn compile_to_mc(
     let main = {
         let mut fc = FnCompiler::new(&mut module, true, None, Vec::new(), Vec::new());
         fc.init_temps(ir.temp_count);
+        fc.setup_main_scopes(&ir.top);
         for stmt in &ir.top.stmts {
             fc.stmt(stmt)?;
         }
@@ -608,6 +609,7 @@ impl SessionCompiler {
         let main = {
             let mut fc = FnCompiler::new(&mut self.mc, true, None, Vec::new(), Vec::new());
             fc.init_temps(ir.temp_count);
+            fc.setup_main_scopes(&ir.top);
             for stmt in &ir.top.stmts {
                 fc.stmt(stmt)?;
             }
@@ -2147,6 +2149,27 @@ impl<'m> FnCompiler<'m> {
                 self.make_fn_cell(name);
             }
         }
+    }
+
+    /// Prime `main`'s closure-conversion state from its top-level body. Unlike an ordinary function
+    /// (compiled through [`Self::compile_chunk`], which runs the free-variable analysis and seeds
+    /// `celled`/`local_layer`), `main` is lowered by iterating `ir.top.stmts` directly, so without
+    /// this its `celled`/`local_layer` sets stay empty. That empties the celling decision for a `fn`
+    /// nested in a **top-level block** (`while { fn rec(){ ... rec() ... } }`): the block's hoist
+    /// pass finds nothing to cell, so the self-reference resolves to a `LoadGlobal` no one stores
+    /// (E0005), diverging from the reference interpreter which runs it fine.
+    ///
+    /// `main`'s peculiarity is that its **depth-0** bindings are module globals, not frame locals
+    /// (see [`Self::at_global_depth`]). The free-variable analysis, which treats every binding as a
+    /// local, is therefore filtered by the module-global set: a top-level `fn`/`mut`/import stays a
+    /// global (referenced by name, never captured), while a binding introduced inside a top-level
+    /// block — the only genuine `main` locals — is kept, so a nested `fn` that captures it (self or
+    /// mutual recursion) resolves to its cell/upvalue exactly as inside any other function.
+    fn setup_main_scopes(&mut self, top: &Block) {
+        let globals = self.module.global_names();
+        let analysis = freevars::analyze(&[], &[], top, &[], &globals);
+        self.local_layer = &analysis.local - &globals;
+        self.celled = &analysis.celled - &globals;
     }
 
     fn return_stmt(&mut self, value: Option<&Atom>, _span: Span) -> Result<(), Unsupported> {
