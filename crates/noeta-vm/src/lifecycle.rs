@@ -335,6 +335,8 @@ impl<'m> Vm<'m> {
             reentry_pool: Vec::new(),
             cache_pool: Vec::new(),
             run_depth: 0,
+            transient_roots: Vec::new(),
+            gc_suspended: false,
             isolates: IsolateState {
                 parallel_isolates: false,
                 isolate_module: None,
@@ -441,6 +443,14 @@ fn is_last_heap_owner() -> bool {
     SESSION_HEAP_OWNERS.with(|c| c.get()) == 0
 }
 
+/// The number of live session heap-owners on this thread — the safepoint-GC gate's input: a
+/// mid-run trace sweep is sound only when at most this VM's own session shares the thread's heap
+/// registry (a sibling session's live objects are not in this VM's roots). See
+/// [`Vm::maybe_safepoint_gc`].
+pub(crate) fn session_heap_owner_count() -> usize {
+    SESSION_HEAP_OWNERS.with(|c| c.get())
+}
+
 impl<'m> Vm<'m> {
     /// Tear the VM down after its entry chunk(s) ran and drain the [`RunResult`]: reap reference
     /// cycles, drain channel buffers, clear the reactive graph, destroy the globals in reverse binding
@@ -448,6 +458,11 @@ impl<'m> Vm<'m> {
     /// workers. Split from [`Vm::run_top`] so a session runs this **once** at the end rather than after
     /// every entry (REPL-on-VM R0); leak residency must reach zero here.
     pub(crate) fn teardown(&mut self, mode: noeta_value::CollectorMode) -> RunResult {
+        // Exit reached: suspend + disarm the safepoint-GC trigger. The destructor bodies teardown
+        // runs below execute against a heap mid-surgery, and the exit collections reclaim
+        // everything a pending safepoint would have.
+        self.gc_suspended = true;
+        noeta_value::safepoint_gc_disarm();
         // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
         // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
         // different points: the **trace** marks from the live globals *before* teardown (the frame stack
@@ -656,16 +671,27 @@ pub(crate) fn run_isolate_worker(
             isolate::IsoArg::Borrowed(root) => root.value(),
         })
         .collect();
+    // Arm the worker's own safepoint-GC trigger (per-isolate: all trigger state is thread-local),
+    // so a cycle-building isolate body bounds its residency at its own safepoints.
+    noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
     let callee = Value::closure(proto, Vec::new());
+    // This depth-0 call/drive holds `callee` (and then `future`) only in Rust locals — root them
+    // through `transient_roots` so a safepoint collection inside the body stays exact.
+    wvm.transient_roots.push(callee);
     let outcome = match wvm.call_value(callee, arg_vals, span) {
         Ok(future) => {
-            let result = wvm.drive_future(future, span);
+            wvm.transient_roots.push(future);
+            let result = wvm.drive_future(future, span, Some((&[], &[])));
             release(future);
             result
         }
         Err(abort) => Err(abort),
     };
+    wvm.transient_roots.clear();
     release(callee);
+    // Worker teardown below runs destructors against a heap being dismantled — stop collecting.
+    wvm.gc_suspended = true;
+    noeta_value::safepoint_gc_disarm();
     // Hand the worker's finished collector to the sink (before teardown — destructor ops after the
     // program's own work are not the profile's subject). The `#n` is the sink's running count,
     // assigned under the push's own lock so concurrent isolates never collide.
@@ -894,7 +920,7 @@ impl<'m> Vm<'m> {
     /// a destructor — but a destructor-bearing value **captured** by a cycle's closure is itself dead,
     /// and this is where its `__destruct` fires. Intra-cycle order is best-effort (spec §6); the eval
     /// reaper mirrors the behavior so the differential agrees on order-independent programs.
-    fn reclaim_cycle_garbage(&mut self, garbage: noeta_gc::Garbage) {
+    pub(crate) fn reclaim_cycle_garbage(&mut self, garbage: noeta_gc::Garbage) {
         let noeta_gc::Garbage {
             fresh,
             already_destructed,
@@ -907,6 +933,10 @@ impl<'m> Vm<'m> {
         // either way. Restored after (a no-op at clean exit, but correct if a safepoint ever calls this).
         let saved_mode = noeta_value::collector_mode();
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        // Suspend the safepoint poll while the dead subgraph is pinned and half-freed: a destructor
+        // body (exit reclaim only — safepoint garbage is destructor-free by construction) runs the
+        // dispatch loop, whose polls must not start a nested collection over this state.
+        let saved_suspended = std::mem::replace(&mut self.gc_suspended, true);
         for &g in fresh.iter().chain(&already_destructed) {
             retain(g);
         }
@@ -941,6 +971,7 @@ impl<'m> Vm<'m> {
             g.gc_free_shallow();
         }
         noeta_value::set_collector_mode(saved_mode);
+        self.gc_suspended = saved_suspended;
     }
 
     /// Store `value` in the embed-handle table (server-hmr F3), taking ownership of its reference,
