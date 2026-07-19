@@ -364,6 +364,51 @@ impl Checker {
                     return self
                         .call_user_method(name, &sig, args, arg_exprs, span, recv_args, env);
                 }
+                // `obj.f(args)` where `f` is a FIELD of the receiver's type — the
+                // **field-access-then-call desugar**: no method `f` exists (a real method wins in
+                // call position, checked above; in value position the field already wins, so the
+                // two positions agree with `g = obj.f; g(x)` as the escape hatch when both exist).
+                // A `Fn`-typed field is checked exactly like a call through a `Fn`-typed local
+                // (same arity/argument checking, same `required = 0` because a function value does
+                // not record defaults), and the call span is recorded so lowering emits field-get
+                // + indirect call instead of method dispatch. A `dyn`/hole field stays deferred —
+                // lowered as a field call, its misuse caught by the runtime's "not callable"
+                // (E0007). A field of any other concrete type is statically not callable (E0007) —
+                // the method table was already consulted, so nothing can resolve this at runtime.
+                if let Type::Named(n, recv_args) = &recv
+                    && let Some(fty) = self.record_field_type(n, name, recv_args)
+                {
+                    if !self.field_visible(n, name) {
+                        self.report_private_field(n, name, FieldAccess::Read, span);
+                    }
+                    self.sites.field_call_sites.insert(call_span);
+                    match fty {
+                        Type::Fn { params, ret } => {
+                            self.finalize_closure_args(&params, args, arg_exprs, env);
+                            let erased_import =
+                                params.is_empty() && matches!(*ret, Type::Dyn);
+                            if !erased_import {
+                                self.check_args(&params, 0, args, arg_exprs, span, name);
+                            }
+                            return *ret;
+                        }
+                        t if t.defers_to_runtime() => {
+                            self.finalize_closure_args(&[], args, arg_exprs, env);
+                            return t;
+                        }
+                        t => {
+                            self.finalize_closure_args(&[], args, arg_exprs, env);
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "field `{name}` of `{n}` has type `{t}` and is not callable"
+                                ),
+                            );
+                            return Type::Unknown;
+                        }
+                    }
+                }
                 // A method call on an in-scope TYPE PARAMETER resolves through its user-trait
                 // bounds, typed at the bound's instantiation (`<T: Keyed<int>>` → `x.key(): int`,
                 // `x.same(other: int)`); a method no bound declares falls through and stays

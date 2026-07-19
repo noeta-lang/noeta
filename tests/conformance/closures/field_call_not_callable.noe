@@ -1,0 +1,11 @@
+// Calling a field whose declared type is not a function is a static E0007 — the receiver's
+// method table was already consulted (a method would have won), so nothing can resolve
+// `c.count(...)` at runtime; before the field-call desugar this died at runtime as a spurious
+// E0005 "no method `count`".
+// expect: error E0007 at 11:6
+// expect: exit 1
+struct Counter {
+    count: int
+}
+c = Counter { count: 3 }
+echo c.count(1)

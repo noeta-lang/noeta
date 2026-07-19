@@ -64,6 +64,12 @@ pub struct Sites {
     /// Bound-handle sites (`value.method` in value position, EX.2b) → lowered to
     /// [`Rvalue::BoundHandle`] (the receiver captured into the handle).
     pub bound_handle_sites: HashSet<Span>,
+    /// Field-call sites: `obj.f(args)` spans the checker resolved to a **field** of the receiver's
+    /// type (no method `f` exists — a method wins in call position). Lowering emits field-get +
+    /// indirect call (`Rvalue::Field` then `Rvalue::Call`) at these spans instead of method
+    /// dispatch, so `obj.f(args)` means `(obj.f)(args)`. A pure function of the program, like the
+    /// other site maps.
+    pub field_call_sites: HashSet<Span>,
     /// Method-bundle call sites (kernel-methods K2): each bound bundle-method call span → the
     /// statically resolved route `(module qualified identity, bundle name)`. Lowering bakes the
     /// route into the call, so runtime dispatch is **call-site-resolved** — no shape-keyed
@@ -151,6 +157,8 @@ pub(crate) struct SiteMaps {
     /// **Bound**-handle sites (`value.method` in value position, EX.2b): spans whose `Member`
     /// lowers to an [`Rvalue::BoundHandle`] (receiver captured) instead of a field load.
     pub(crate) bound_handle_sites: HashSet<Span>,
+    /// Field-call sites (`obj.f(args)` where `f` is a field) — see [`Sites::field_call_sites`].
+    pub(crate) field_call_sites: HashSet<Span>,
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — lowering reads this (via
     /// [`Checked::f32_literal_sites`]) to emit a narrow `Const::F32` for the literal.
     pub(crate) f32_literal_sites: HashSet<Span>,
@@ -179,6 +187,7 @@ impl SiteMaps {
             width_sites: self.width_sites,
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,
+            field_call_sites: self.field_call_sites,
             f32_literal_sites: self.f32_literal_sites,
             bundle_call_sites: self.bundle_call_sites,
             namespace_module_sites: self.namespace_module_sites,
