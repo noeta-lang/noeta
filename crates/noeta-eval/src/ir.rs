@@ -1493,6 +1493,18 @@ impl Interpreter {
                 let future = self.eval_ir_atom(future, frame)?;
                 Ok(match self.poll_once(&future, *span)? {
                     Some(value) => crate::builtin_enum("Option", "some", vec![value]),
+                    // A cancelled handle awaited inside an `async fn` body would otherwise suspend
+                    // forever on a `none`; fail loudly (Track A.8, E0056) instead — the same
+                    // contract top-level `.await` enforces. The VM's `Op::PollFuture` mirror.
+                    None if self.handle_cancelled(&future) => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::AwaitCancelled,
+                            *span,
+                            "cannot await a cancelled task; use `.join()` to observe the cancelled \
+                             outcome"
+                                .to_string(),
+                        ));
+                    }
                     None => crate::builtin_enum("Option", "none", vec![]),
                 })
             }

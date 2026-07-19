@@ -1,0 +1,10 @@
+// Track A.8 — the `Future<T>` cancellation methods are both nullary; the checker arity-gates them
+// statically. `h.cancel(5)` supplies an argument to a 0-arg method, so it is rejected before either
+// backend runs (E0007), exactly like any other built-in-method arity misuse.
+// expect: error E0007 at 9:5
+// expect: exit 1
+async fn work(): int { return 5 }
+concurrent {
+    h = spawn work()
+    h.cancel(5)
+}

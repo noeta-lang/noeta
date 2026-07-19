@@ -1,0 +1,18 @@
+// Track A.8 — plain `.await` of a **cancelled** task fails loudly (E0056) rather than hanging or
+// silently yielding a zero. Cancel-unaware code that awaits a task someone else cancelled fails
+// where the cancellation is observed; cancel-aware code uses `h.join()` instead. `work` is cancelled
+// while suspended at its `sleep`, then awaited — the await raises E0056 at the driver. Both backends
+// raise it identically.
+// expect: error E0056 at 17:10
+// expect: exit 1
+use std.task.{sleep}
+async fn work(): int {
+    sleep(10).await
+    return 5
+}
+concurrent {
+    h = spawn work()
+    sleep(1).await
+    h.cancel()
+    echo h.await
+}

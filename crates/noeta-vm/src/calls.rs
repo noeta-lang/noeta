@@ -414,6 +414,23 @@ impl<'m> Vm<'m> {
         {
             return Ok(Value::make_channel_recv(id));
         }
+        // Task-handle cancellation methods (Track A.8): `h.cancel()` marks the task cancelled
+        // exactly as a `race` loser (idempotent; a no-op on a completed task or a bare future),
+        // `h.join()` drives it and reports the typed `Result<T, Cancelled>` outcome. Offered on any
+        // `Future<T>`, since a spawn/isolate handle is itself a `Future<T>`; on a bare future
+        // `cancel` no-ops (`cancel_task` finds no handle parts) and `join` equals `Ok(future.await)`.
+        if v.is_handle() || v.is_future() {
+            match method {
+                "cancel" => {
+                    self.cancel_task(v);
+                    return Ok(Value::unit());
+                }
+                "join" => {
+                    return self.join_task(v, span);
+                }
+                _ => {}
+            }
+        }
         // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
         // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
         // seam like any other; `get` inlines via the declared arena read.)

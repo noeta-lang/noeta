@@ -2372,6 +2372,18 @@ impl<'m> Vm<'m> {
                         let future = regs[fbase + *src as usize];
                         let result = match self.poll_once(future, *span)? {
                             Poll::Ready(value) => make_some(value),
+                            // A cancelled handle awaited inside an `async fn` body would otherwise
+                            // suspend forever on a `none`; fail loudly (Track A.8, E0056) instead —
+                            // the same contract top-level `.await` (`drive_future`) enforces.
+                            Poll::Pending if self.handle_cancelled(future) => {
+                                return Err(self.error(
+                                    DiagnosticCode::AwaitCancelled,
+                                    *span,
+                                    "cannot await a cancelled task; use `.join()` to observe the \
+                                     cancelled outcome"
+                                        .to_string(),
+                                ));
+                            }
                             Poll::Pending => make_none(),
                         };
                         set_reg(regs, fbase, *dst, result);
