@@ -17,6 +17,7 @@ mod fmt;
 mod grammar;
 mod init;
 mod isolates;
+mod keyed;
 mod namespace;
 mod pm;
 mod pm_native;

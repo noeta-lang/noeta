@@ -3289,6 +3289,10 @@ const VIEW_METHOD_DOCS: &[(&str, &str)] = &[
         "expose",
         "Expose a named value into the view for the client.",
     ),
+    (
+        "unexpose",
+        "Drop a named binding and dispose its handle — a diff never pushes it again and its scope reclaims.",
+    ),
 ];
 
 const SPAN_METHOD_DOCS: &[(&str, &str)] = &[
