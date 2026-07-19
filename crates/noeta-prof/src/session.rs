@@ -1,13 +1,16 @@
-//! The profile session's compile + run path: load → check → compile (tier-0, JIT-off) → execute.
+//! The profile session's compile + run path: load → check → compile → execute.
 //!
 //! This is the *same* production pipeline `noeta run` drives — the shared front half
 //! (`noeta_runner::compile::load_default_project`: dependency packages, tier machinery, per-source
-//! editions) then check → compile → VM — with one profiler-specific choice: the program runs
-//! with the **JIT unarmed** ([`VmBackend::run_module_debug`] with no debugger — the tier-0 run path),
-//! so every frame is interpreter-executed and there is a real pc + an op boundary at each step for a
-//! later collector to observe. Unlike `noeta dap` it compiles **without** debug info: the profiler
-//! only needs function names + source lines, and those live in the always-emitted line tables on
-//! every `Chunk` (`name` / `def_span` / `line_table`), not the debug-gated locals table.
+//! editions) then check → compile → VM. Tiering is the profiler's one axis: by default the program
+//! runs with the **JIT unarmed** (tier-0), so every frame is interpreter-executed and there is a real
+//! pc + an op boundary at each step for a collector to observe — the debugger's choice too. The
+//! tier-1 sampling mode (`noeta profile --jit`) instead arms the production hot-counter JIT
+//! ([`noeta_vm::Tiering::Hot`]); hot prototypes run native and the sampler attributes their wall time
+//! at the JIT trampoline (function-level, tier-1-labeled). Unlike `noeta dap` it compiles **without**
+//! debug info: the profiler only needs function names + source lines, and those live in the
+//! always-emitted line tables on every `Chunk` (`name` / `def_span` / `line_table`), not the
+//! debug-gated locals table.
 //!
 //! Compilation is split from execution so a later slice can attach a collector to the compiled
 //! [`Module`] before the run starts (and resolve `proto → name @ file:line` against its chunks).
@@ -43,6 +46,10 @@ pub struct RunOutput {
     pub chunks: Vec<OutputChunk>,
     pub exit_code: i32,
     pub wall: Duration,
+    /// Prototypes the tier-1 JIT compiled during the run (the `--jit-stats`-style promotion count),
+    /// `Some` only on a tier-1 (`jit`-armed) sampling run built with the `jit` feature. `None` on
+    /// every tier-0 run (and on a `jit`-armed run of a build without the feature — nothing compiled).
+    pub jit_compiled: Option<usize>,
 }
 
 impl RunOutput {
@@ -56,6 +63,7 @@ impl RunOutput {
             }],
             exit_code,
             wall: Duration::ZERO,
+            jit_compiled: None,
         }
     }
 }
@@ -106,15 +114,19 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     }
 }
 
-/// Run an already-compiled program **tier-0** (JIT unarmed) on the real host, timing the run and
-/// collecting the program's output. With `hook = Some(..)` a [`ProfileHook`] is consulted before
-/// every op (the instrumenting/sampling collector) and handed back for its results to be reclaimed;
-/// with `None` it is the plain tier-0 run (P0). Never panics on ordinary failure: a host/executor
-/// that cannot start becomes a `stderr` chunk with a non-zero exit.
+/// Run an already-compiled program on the real host, timing the run and collecting the program's
+/// output. With `hook = Some(..)` a [`ProfileHook`] is consulted before every op (the
+/// instrumenting/sampling collector) and handed back for its results to be reclaimed; with `None` it
+/// is the plain run (P0). `tier1` arms the production hot-counter JIT (tier-1 sampling — the sampler
+/// attributes native time at the JIT trampoline); off, the run is pinned tier-0 (JIT unarmed) so
+/// every frame is interpreter-executed and observable at an op boundary, as the debugger/profiler
+/// have always required. Never panics on ordinary failure: a host/executor that cannot start becomes
+/// a `stderr` chunk with a non-zero exit.
 pub fn run(
     compiled: &Compiled,
     hook: Option<Box<dyn ProfileHook>>,
     isolate_profiler: Option<(noeta_vm::ProfileHookFactory, noeta_vm::ProfileSink)>,
+    tier1: bool,
 ) -> (RunOutput, Option<Box<dyn ProfileHook>>) {
     let host: Box<dyn noeta_stdlib::Host> = match noeta_host_real::RealHost::new() {
         Ok(host) => Box::new(host),
@@ -148,6 +160,16 @@ pub fn run(
         );
         (host, executor)
     });
+    // Tier-1 sampling arms the production hot-counter tier (`Tiering::Hot`, off-thread compile —
+    // exactly what `noeta run` uses), so the profile reflects what actually ships; the sampler banks
+    // native segments at the JIT trampoline. Off, the run stays `Tiering::Off` (tier-0 pinned). The
+    // `Tiering` enum is always available; without the `jit` feature `Hot` is a no-op (everything
+    // interprets), so a `jit`-armed run of a feature-less build stays observably tier-0.
+    let tiering = if tier1 {
+        noeta_vm::Tiering::Hot
+    } else {
+        noeta_vm::Tiering::Off
+    };
     let backend = VmBackend::new();
     let start = Instant::now();
     let outcome = backend.run_module_with(
@@ -158,9 +180,20 @@ pub fn run(
             profiler: hook,
             isolates: Some((Arc::new(compiled.module.clone()), isolate_factory)),
             isolate_profiler,
+            tiering,
+            // Compile the outstanding queue at exit so the promotion count reported below is final
+            // rather than racing the program's own runtime. Off-path when `jit` is disabled.
+            #[cfg(feature = "jit")]
+            drain_at_exit: tier1,
             ..noeta_vm::RunOptions::default()
         },
     );
+    // The tier-1 promotion count (`--jit-stats`-style): how many prototypes went native. Only
+    // meaningful on a `jit`-feature build's armed run; `None` otherwise.
+    #[cfg(feature = "jit")]
+    let jit_compiled = tier1.then_some(outcome.stats.compiled);
+    #[cfg(not(feature = "jit"))]
+    let jit_compiled: Option<usize> = None;
     let (result, hook, trace) = (outcome.result, outcome.profiler, outcome.trace);
     let wall = start.elapsed();
 
@@ -188,6 +221,7 @@ pub fn run(
             chunks,
             exit_code: result.exit_code,
             wall,
+            jit_compiled,
         },
         hook,
     )

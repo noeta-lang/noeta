@@ -30,6 +30,13 @@ noeta-host-real = { workspace = true }
 serde_json = { workspace = true }
 inferno = { workspace = true }
 
+[features]
+# Arm the tier-1 JIT under the sampling profiler (`noeta profile --jit`): enables `noeta-vm`'s JIT so
+# hot prototypes run native and the sampler attributes their wall time at the JIT trampoline. Off,
+# the profiler is pure tier-0 (Cranelift-free), exactly as before. The CLI's own `jit` feature turns
+# this on; `--no-default-features` keeps the profiler tier-0 only.
+jit = ["noeta-vm/jit"]
+
 [lints]
 workspace = true
 
