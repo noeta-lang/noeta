@@ -103,7 +103,7 @@ fn run(): int {
 
 Only `fn` declarations are hoisted. A plain `let`/value local stays **strictly lexical**: referencing one declared textually later is E0005 (unknown name), not a forward capture.
 
-```noeta
+```noeta error
 fn run(): int {
     fn peek(): int { return later }   // E0005 — `later` is a value local, not hoisted
     later = 5

@@ -129,8 +129,14 @@ echo match place(items, customer) {
 An arm body is usually a **value expression** (`pattern => expr`) — that value becomes the `match`'s result. An arm may also be a **statement block** (`pattern => { stmts }`) for side effects that need no artificial expression. A block is a statement sequence, so — like a block-bodied function — it **produces no value** (`unit`); its statements run in the enclosing frame, so a `return` inside exits the enclosing function and `break`/`continue` target the enclosing loop.
 
 ```noeta
+enum Cmd { Log; Skip; Retry; }
+
+fn audit(c: Cmd): void { echo "audited"; }
+fn handle(c: Cmd): void { echo "handled"; }
+
+cmd = Cmd.Log;
 match cmd {
-    Cmd.Log => { echo "logging"; audit(cmd) },   // block arm: runs for effect, yields unit
+    Cmd.Log => { echo "logging"; audit(cmd); },   // block arm: runs for effect, yields unit
     Cmd.Skip => { },                              // empty block arm
     _ => handle(cmd),
 }
@@ -138,8 +144,9 @@ match cmd {
 
 Because a block yields no value, a block arm is only valid where the `match`'s value is **discarded** — i.e. the `match` stands in statement position. Using a block arm where the value is **consumed** (a binding RHS, an argument, a `return`, an operand) is a compile error (**E0055**): the arm would silently contribute `unit` where a value is expected. Give such an arm a value expression instead (the block's last statement is *not* its value):
 
-```noeta
+```noeta error
 // E0055: `2 => { … }` produces no value, but this `match` is bound to `r`.
+x = 2;
 r = match x {
     1 => "one",
     2 => { t = "tw"; t ~ "o" },   // ✗ write `2 => { t = "tw"; t ~ "o" }` as `2 => "two"`
