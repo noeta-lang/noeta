@@ -170,7 +170,8 @@ fn push_value_edge(value: &Value, out: &mut Vec<Node>) {
         Value::Object(o) => out.push(Node::Object(Rc::clone(o))),
         Value::Iter(i) => out.push(Node::Iter(Rc::clone(i))),
         Value::Future(f) => out.push(Node::Boxed(Rc::clone(f))),
-        Value::ChannelSend(_, m) => out.push(Node::Boxed(Rc::clone(m))),
+        // The third field is the rendezvous `SendPhase` cell (I.4c) — plain state, no Value children.
+        Value::ChannelSend(_, m, _) => out.push(Node::Boxed(Rc::clone(m))),
         Value::BoundMethod(inner, _) => push_value_edge(inner, out),
         _ => {}
     }
