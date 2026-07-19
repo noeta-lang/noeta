@@ -94,6 +94,26 @@ pub struct Sites {
     /// before the ordinary propagation, so both backends convert identically by construction. A
     /// pure function of the program, like the other site maps.
     pub try_conversion_sites: HashMap<Span, String>,
+    /// The program-wide **type-argument table** (poly-values F2b): every concrete instantiation a
+    /// call of a forwarding generic fn resolved, interned by structural equality. Lowering embeds
+    /// it into the IR `Program` (and the VM `Module`), and a hidden call argument indexes it at
+    /// runtime. A pure function of the program, like the other site maps.
+    pub type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// Call spans of **forwarding-generic** calls → the hidden type-argument slots the call must
+    /// supply, in the callee's forwarding order (`Table(i)` = a concrete instantiation's table
+    /// index; `Forward(j)` = pass the enclosing fn's own hidden slot `j` through). Lowering
+    /// prepends the matching atoms to the call's arguments.
+    pub hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
+    /// `Expr::TypedModuleCall` spans whose turbofish is a FORWARDED type parameter → the enclosing
+    /// fn's hidden slot index holding the instantiation's table entry. Lowering emits a dynamic
+    /// recipe operand instead of a baked `TypeRecipe`.
+    pub dynamic_recipe_sites: HashMap<Span, u32>,
+    /// `Expr::AttributesOf` spans whose turbofish is a FORWARDED type parameter → the hidden slot
+    /// index; the manifest query resolves the type NAME through the table at runtime.
+    pub dynamic_attr_sites: HashMap<Span, u32>,
+    /// Forwarding generic fns → their hidden-parameter count. Lowering prepends that many hidden
+    /// parameters (`$ty0`, `$ty1`, …) to the fn's IR parameter list.
+    pub forwarding_fns: HashMap<String, u32>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -175,6 +195,16 @@ pub(crate) struct SiteMaps {
     pub(crate) namespace_module_sites: HashMap<Span, String>,
     /// `?`-conversion sites (error-ergonomics) — see [`Sites::try_conversion_sites`].
     pub(crate) try_conversion_sites: HashMap<Span, String>,
+    /// The type-argument table (poly-values F2b) — see [`Sites::type_arg_table`].
+    pub(crate) type_arg_table: Vec<noeta_ext_abi::TypeArgInfo>,
+    /// Forwarding-call hidden-argument slots — see [`Sites::hidden_arg_sites`].
+    pub(crate) hidden_arg_sites: HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>,
+    /// Dynamic-recipe turbofish sites — see [`Sites::dynamic_recipe_sites`].
+    pub(crate) dynamic_recipe_sites: HashMap<Span, u32>,
+    /// Dynamic manifest-query sites — see [`Sites::dynamic_attr_sites`].
+    pub(crate) dynamic_attr_sites: HashMap<Span, u32>,
+    /// Forwarding fns' hidden-parameter counts — see [`Sites::forwarding_fns`].
+    pub(crate) forwarding_fns: HashMap<String, u32>,
 }
 
 impl SiteMaps {
@@ -201,6 +231,11 @@ impl SiteMaps {
             bundle_call_sites: self.bundle_call_sites,
             namespace_module_sites: self.namespace_module_sites,
             try_conversion_sites: self.try_conversion_sites,
+            type_arg_table: self.type_arg_table,
+            hidden_arg_sites: self.hidden_arg_sites,
+            dynamic_recipe_sites: self.dynamic_recipe_sites,
+            dynamic_attr_sites: self.dynamic_attr_sites,
+            forwarding_fns: self.forwarding_fns,
             destructor_relevance,
         }
     }

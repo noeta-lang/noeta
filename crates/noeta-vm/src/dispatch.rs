@@ -714,12 +714,27 @@ impl<'m> Vm<'m> {
                         func: func_id,
                         args,
                         recipe,
+                        dynamic,
                         span,
                     } => {
                         // Resolve the interned module/func names (`module` is the outer loop-local
                         // `&Module`, so bind the op's ids under different names to avoid shadowing it).
                         let mod_name = module.name(*mod_id);
                         let func = module.name(*func_id);
+                        // The recipe: baked at the call site, or (poly-values F2b) resolved
+                        // per-instantiation through the forwarding fn's hidden slot register — an
+                        // index into the module's type-argument table. Mirrors the tree-walker.
+                        let dynamic_recipe = dynamic.and_then(|slot| {
+                            let idx = regs[fbase + slot as usize].as_int().unwrap_or(-1);
+                            module
+                                .type_args
+                                .get(idx.max(0) as usize)
+                                .and_then(|e| e.recipe.clone().map(Box::new))
+                        });
+                        let recipe = match dynamic {
+                            Some(_) => &dynamic_recipe,
+                            None => recipe,
+                        };
                         // The recipe is required; its absence was already reported by the checker.
                         let Some(recipe) = recipe else {
                             return Err(self.error(
@@ -2555,8 +2570,25 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, tuple);
                         pc += 1;
                     }
-                    Op::AttributesOf { dst, type_name } => {
-                        let result = self.materialize_attributes(module.name(*type_name));
+                    Op::AttributesOf {
+                        dst,
+                        type_name,
+                        dynamic,
+                    } => {
+                        // A forwarded type parameter (F2b) resolves the concrete NAME through the
+                        // hidden slot's table entry; a static turbofish keeps the interned name.
+                        let result = match dynamic {
+                            Some(slot) => {
+                                let idx = regs[fbase + *slot as usize].as_int().unwrap_or(-1);
+                                let name = module
+                                    .type_args
+                                    .get(idx.max(0) as usize)
+                                    .map(|e| e.name.as_str())
+                                    .unwrap_or("");
+                                self.materialize_attributes(name)
+                            }
+                            None => self.materialize_attributes(module.name(*type_name)),
+                        };
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }

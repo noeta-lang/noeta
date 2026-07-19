@@ -237,6 +237,7 @@ fn compile_inner(
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
         deserialize_recipes: module.deserialize_recipes,
+        type_args: module.type_args,
         destruct_reachable,
         cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
@@ -390,6 +391,7 @@ fn compile_to_mc(
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
         deserialize_recipes: sites.deserialize_recipes,
+        type_args: ir.type_args.clone(),
         structural_eq_types: HashSet::new(),
         packed_fields: HashMap::new(),
         key_capable_types: HashSet::new(),
@@ -495,6 +497,7 @@ impl SessionCompiler {
             comparable_derives: Vec::new(),
             tojson_derives: Vec::new(),
             deserialize_recipes: Vec::new(),
+            type_args: Vec::new(),
             structural_eq_types: HashSet::new(),
             packed_fields: HashMap::new(),
             key_capable_types: HashSet::new(),
@@ -597,6 +600,10 @@ impl SessionCompiler {
             // derive a recipe (and does not recognize `decode_typed` at all), so this is a checked-session
             // capability by construction.
             self.mc.deserialize_recipes = sites.deserialize_recipes.clone();
+            // The forwarding type-argument table (F2b): the session checker accumulates it across
+            // entries (indexes are append-only), so the lowered snapshot is cumulative and a
+            // wholesale replace stays index-stable.
+            self.mc.type_args = ir.type_args.clone();
         }
 
         // Register this entry's globals/types/methods into the persistent tables (all additive:
@@ -685,6 +692,7 @@ impl SessionCompiler {
             comparable_derives: self.mc.comparable_derives.clone(),
             tojson_derives: self.mc.tojson_derives.clone(),
             deserialize_recipes: self.mc.deserialize_recipes.clone(),
+            type_args: self.mc.type_args.clone(),
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
             reflection: self.reflection.clone(),
@@ -776,6 +784,9 @@ struct ModuleCompiler {
     /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI), taken verbatim from the checker's
     /// [`noeta_check::Sites::deserialize_recipes`] and copied onto [`Module::deserialize_recipes`].
     deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
+    /// The program-wide type-argument table (poly-values F2b), taken from the lowered IR
+    /// `Program::type_args` and copied onto [`Module::type_args`].
+    type_args: Vec<noeta_ext_abi::TypeArgInfo>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
@@ -3491,15 +3502,25 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::FieldsOf { dst, src });
                 Ok(())
             }
-            Rvalue::AttributesOf { ty, .. } => {
+            Rvalue::AttributesOf { ty, dynamic, .. } => {
                 // The attribute type is resolved at compile time (closed-world); the VM reads the
-                // matching manifest entries from `Module::reflection` and materializes them.
+                // matching manifest entries from `Module::reflection` and materializes them. A
+                // FORWARDED type parameter (F2b) instead resolves its name at runtime through the
+                // hidden slot register and the module's type-argument table.
+                let dynamic = match dynamic {
+                    Some(slot) => Some(self.atom_reg(slot)?),
+                    None => None,
+                };
                 let type_name = match ty {
                     TypeRef::Named { name, .. } => name.as_str(),
                     _ => "",
                 };
                 let type_name = self.module.intern_name(type_name);
-                self.code.push(Op::AttributesOf { dst, type_name });
+                self.code.push(Op::AttributesOf {
+                    dst,
+                    type_name,
+                    dynamic,
+                });
                 Ok(())
             }
             Rvalue::RolesOf { ty, .. } => {
@@ -3530,9 +3551,14 @@ impl<'m> FnCompiler<'m> {
                 func,
                 args,
                 recipe,
+                dynamic,
                 span,
             } => {
                 let args = self.atom_regs(args)?;
+                let dynamic = match dynamic {
+                    Some(slot) => Some(self.atom_reg(slot)?),
+                    None => None,
+                };
                 let module_id = self.module.intern_name(module);
                 let func_id = self.module.intern_name(func);
                 self.code.push(Op::TypedModuleCall {
@@ -3541,6 +3567,7 @@ impl<'m> FnCompiler<'m> {
                     func: func_id,
                     args,
                     recipe: recipe.clone().map(Box::new),
+                    dynamic,
                     span: *span,
                 });
                 Ok(())

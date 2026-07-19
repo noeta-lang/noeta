@@ -1,0 +1,17 @@
+// F2b negative: an instantiation that flows into a recipe-needing forward must be buildable — a
+// class (no decode recipe) is rejected statically at the INSTANTIATING call, mirroring the direct
+// `json.try_parse::<Box>` error.
+// expect: error E0007 at 17:5
+// expect: exit 1
+use std.json
+use std.json.JsonError
+
+class Box {
+    value: int
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+r = load::<Box>("{}")

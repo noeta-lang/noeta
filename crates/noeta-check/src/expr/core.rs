@@ -416,6 +416,27 @@ impl Checker {
             }
             // The one lookup site that needs an *owned* type (synthesis returns `Type` by value),
             // so it clones here rather than in `lookup` (audit-3 Finding 12).
+            Expr::Ident { name, span }
+                if lookup(env, name).is_none()
+                    && self.symbols.forwarding.contains_key(name.as_str())
+                    && self.symbols.functions.contains_key(name.as_str()) =>
+            {
+                // A FORWARDING generic fn is not a first-class value (poly-values F2b): its hidden
+                // type-argument slot is supplied per call, and an erased value would silently miss
+                // it. The clear boundary beats a runtime arity surprise.
+                self.error(
+                    DiagnosticCode::InvalidTypeArguments,
+                    *span,
+                    format!(
+                        "cannot use `{name}` as a value: its type parameter determines a \
+                         call-site-typed result, which only a direct call can supply"
+                    ),
+                )
+                .help(format!(
+                    "call it directly (`{name}::<T>(...)`), or wrap it in a closure"
+                ));
+                Type::Unknown
+            }
             Expr::Ident { name, span } => match lookup(env, name)
                 .cloned()
                 // A bare user-function reference is a first-class value of its **full** signature
@@ -1004,6 +1025,35 @@ impl Checker {
                 // The type argument must itself be an attribute — a struct marked `@attribute` (the
                 // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
                 // materialize.
+                // A FORWARDED type parameter (poly-values F2b): the attribute type arrives
+                // per-instantiation through the enclosing fn's hidden slot; the manifest query
+                // resolves the concrete NAME at runtime. Whether that instantiation is an
+                // attribute is a per-name manifest fact (an entry-less name yields the empty
+                // list, exactly like the runtime path).
+                if let Type::Named(p, targs) = &target
+                    && targs.is_empty()
+                    && self.coloring.type_params.contains_key(p)
+                {
+                    match self.coloring.current_forwarding.iter().position(|n| n == p) {
+                        Some(idx) => {
+                            self.sites.dynamic_attr_sites.insert(*span, idx as u32);
+                        }
+                        None => {
+                            self.error(
+                                DiagnosticCode::InvalidTypeArguments,
+                                *span,
+                                format!(
+                                    "cannot forward `{p}` here: call-site-typed forwarding is \
+                                     supported in top-level generic functions only"
+                                ),
+                            );
+                        }
+                    }
+                    return Type::List(Box::new(Type::Named(
+                        "Attributed".to_string(),
+                        vec![target],
+                    )));
+                }
                 let is_attribute = matches!(&target, Type::Named(n, _)
                     if self.symbols.attributes.contains(n));
                 if !is_attribute {
@@ -1163,16 +1213,57 @@ impl Checker {
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
                 self.check_type_ref(ty);
                 let t = from_ref_q(ty, &self.imports.extern_types);
+                // A turbofish naming an in-scope TYPE PARAMETER (poly-values F2b): the recipe is
+                // per-instantiation, delivered through the enclosing forwarding fn's hidden slot —
+                // record the dynamic site instead of a baked recipe. Only the bare parameter
+                // forwards (a composite mentioning it has no single runtime slot); and only a
+                // top-level generic fn has hidden slots to read (methods/nested contexts are
+                // rejected — the honest boundary, not silently wrong).
+                let forwarded = match &t {
+                    Type::Named(p, targs)
+                        if targs.is_empty() && self.coloring.type_params.contains_key(p) =>
+                    {
+                        match self.coloring.current_forwarding.iter().position(|n| n == p) {
+                            Some(idx) => {
+                                self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
+                            }
+                            None => {
+                                self.error(
+                                    DiagnosticCode::InvalidTypeArguments,
+                                    *span,
+                                    format!(
+                                        "cannot forward `{p}` here: call-site-typed forwarding \
+                                         is supported in top-level generic functions only"
+                                    ),
+                                );
+                            }
+                        }
+                        true
+                    }
+                    t if self.mentions_in_scope_param(t) => {
+                        self.error(
+                            DiagnosticCode::InvalidTypeArguments,
+                            *span,
+                            format!(
+                                "cannot forward `{t}`: a call-site-typed turbofish inside a \
+                                 generic function must be the bare type parameter"
+                            ),
+                        );
+                        true
+                    }
+                    _ => false,
+                };
                 // Record the build recipe for the turbofish `T`; a type with no recipe (an enum,
                 // class, unconstrained generic, …) cannot be built at the call site — a clear error.
                 // Deferred so the diagnostic sits after the function-resolution error, if any.
-                let has_recipe = match self.type_to_recipe(&t) {
-                    Some(recipe) => {
-                        self.sites.typed_module_call_sites.insert(*span, recipe);
-                        true
-                    }
-                    None => false,
-                };
+                let has_recipe = forwarded
+                    || match self.type_to_recipe(&t) {
+                        Some(recipe) => {
+                            self.sites.typed_module_call_sites.insert(*span, recipe);
+                            true
+                        }
+                        None => false,
+                    };
                 // Resolve `module.func::<T>` through the registry's call-site-typed table. A
                 // turbofish on a non-call-site-typed or unknown function keeps a clear error; a
                 // resolved function validates arity/argument types from its declared signature (the

@@ -755,6 +755,10 @@ pub enum Op {
     AttributesOf {
         dst: Reg,
         type_name: NameId,
+        /// A forwarded type parameter (poly-values F2b): the register holding the hidden slot's
+        /// index into [`Module::type_args`]; the concrete type NAME is resolved through the table
+        /// at runtime instead of `type_name` (which is unused then).
+        dynamic: Option<Reg>,
     },
     /// `roles_of()` / `roles_of::<RoleEnum>()`: `dst = List<RoleBinding>` — the `(declaration, Role)`
     /// semantic-role index from the module's reflection info, each entry materialized into a
@@ -847,6 +851,10 @@ pub enum Op {
         /// Boxed (P-VMT-OPSZ): a `TypeRecipe` is 48 bytes and only a call-site-typed native call
         /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
         recipe: Option<Box<noeta_ext_abi::TypeRecipe>>,
+        /// A forwarded type parameter (poly-values F2b): the register holding the hidden slot's
+        /// index into [`Module::type_args`], whose entry supplies the per-instantiation recipe
+        /// (`recipe` is `None` then).
+        dynamic: Option<Reg>,
         span: Span,
     },
     /// The **router-facing** runtime JSON decode (`json.decode_typed(name, text)` → `Result<dyn,
@@ -1319,6 +1327,11 @@ pub struct Module {
     /// inline on the op) so the op stays `Copy`-cheap and the `TypeRepr` — which is `Send` — keeps the
     /// module shareable across isolate threads. Empty for a program with no tagged list literal.
     pub type_reprs: Vec<noeta_ast::reflect::TypeRepr>,
+    /// The program-wide **type-argument table** (poly-values F2b): the concrete instantiations of
+    /// forwarding generics, indexed by the hidden call arguments (see
+    /// [`Op::TypedModuleCall::dynamic`] / [`Op::AttributesOf::dynamic`]). Copied from the IR
+    /// `Program`, so both backends resolve identical entries. Empty without forwarding.
+    pub type_args: Vec<noeta_ext_abi::TypeArgInfo>,
     /// The interned instruction name table (P-VMT-OPSZ): every [`NameId`] in an op indexes here.
     /// Deduped module-wide by the compiler, so a name used at N sites is stored once. Holds field /
     /// method / global / type names, ext-call module+func, and `match`-literal strings; the VM
@@ -1723,9 +1736,14 @@ fn op_repr(
         Op::Narrow {
             dst, src, target, ..
         } => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
-        Op::AttributesOf { dst, type_name } => {
-            format!("AttributesOf r{dst} <- attributes_of::<{}>()", n(type_name))
-        }
+        Op::AttributesOf {
+            dst,
+            type_name,
+            dynamic,
+        } => match dynamic {
+            Some(slot) => format!("AttributesOf r{dst} <- attributes_of::<$ty r{slot}>()"),
+            None => format!("AttributesOf r{dst} <- attributes_of::<{}>()", n(type_name)),
+        },
         Op::RolesOf { dst, role_enum } => match role_enum {
             Some(e) => format!("RolesOf     r{dst} <- roles_of::<{}>()", n(e)),
             None => format!("RolesOf     r{dst} <- roles_of()"),

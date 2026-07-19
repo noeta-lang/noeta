@@ -562,6 +562,7 @@ mod tests {
             comparable_derives: Vec::new(),
             tojson_derives: Vec::new(),
             deserialize_recipes: Vec::new(),
+            type_args: Vec::new(),
             destruct_reachable: Vec::new(),
             cache_slots: 0,
             reflection: Default::default(),

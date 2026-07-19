@@ -1167,6 +1167,7 @@ impl Checker {
         arg_exprs: &[Expr],
         span: Span,
         recv_args: &[Type],
+        hidden_site: Option<Span>,
         env: &mut Env,
     ) -> Type {
         // Seed with the receiver's type arguments (instance call); the call's own arguments then
@@ -1178,7 +1179,17 @@ impl Checker {
             .zip(recv_args.iter().cloned())
             .filter(|(_, t)| !t.defers_to_runtime())
             .collect();
-        self.check_generic_call_seeded(name, generic, required, args, arg_exprs, span, seed, env)
+        self.check_generic_call_seeded(
+            name,
+            generic,
+            required,
+            args,
+            arg_exprs,
+            span,
+            seed,
+            hidden_site,
+            env,
+        )
     }
 
     /// The seeded core of [`Self::check_generic_call`]: `seed` holds type-parameter bindings that
@@ -1197,6 +1208,7 @@ impl Checker {
         arg_exprs: &[Expr],
         span: Span,
         seed: HashMap<String, Type>,
+        hidden_site: Option<Span>,
         env: &mut Env,
     ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1269,7 +1281,101 @@ impl Checker {
             }
         }
         self.enforce_type_param_bounds(name, &generic.params, &subst, &tps, span);
+        // A call of a **forwarding** generic (poly-values F2b) must supply its hidden
+        // type-argument slots: resolve each forwarding parameter's instantiation into a table
+        // entry (concrete) or a pass-through of the enclosing fn's own slot (a bare in-scope
+        // type parameter). `hidden_site` is the whole-call span lowering keys on; `None` for a
+        // method call (methods never forward).
+        if let Some(call_span) = hidden_site
+            && let Some(fwd) = self.symbols.forwarding.get(name).cloned()
+        {
+            let mut hidden = Vec::with_capacity(fwd.len());
+            for fp in &fwd {
+                let concrete = subst.get(&fp.name).cloned().unwrap_or(Type::Unknown);
+                match &concrete {
+                    Type::Named(q, qa)
+                        if qa.is_empty() && self.coloring.type_params.contains_key(q) =>
+                    {
+                        match self.coloring.current_forwarding.iter().position(|n| n == q) {
+                            Some(j) => hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32)),
+                            None => {
+                                self.error(
+                                    DiagnosticCode::InvalidTypeArguments,
+                                    span,
+                                    format!(
+                                        "cannot forward `{q}` into `{name}` here: call-site-typed \
+                                         forwarding is supported in top-level generic functions \
+                                         only"
+                                    ),
+                                )
+                                .help(format!(
+                                    "spell the instantiation with an explicit turbofish \
+                                     (`{name}::<...>`) so `{q}` is recognized as forwarded"
+                                ));
+                            }
+                        }
+                    }
+                    t if t.defers_to_runtime() || t.contains_unknown() => {
+                        self.error(
+                            DiagnosticCode::CannotInfer,
+                            span,
+                            format!(
+                                "cannot infer type parameter `{}` of `{name}`, which determines \
+                                 a call-site-typed result",
+                                fp.name
+                            ),
+                        )
+                        .help(format!("supply it explicitly: `{name}::<...>(...)`"));
+                    }
+                    t if self.mentions_in_scope_param(t) => {
+                        self.error(
+                            DiagnosticCode::InvalidTypeArguments,
+                            span,
+                            format!(
+                                "cannot forward `{t}` into `{name}`: forward the bare type \
+                                 parameter, not a composite type mentioning it"
+                            ),
+                        );
+                    }
+                    concrete_ty => {
+                        let recipe = self.type_to_recipe(concrete_ty);
+                        if fp.needs_recipe && recipe.is_none() {
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "`{concrete_ty}` cannot be built by the call-site-typed \
+                                     `::<T>` position `{}` of `{name}` forwards into",
+                                    fp.name
+                                ),
+                            );
+                        }
+                        let info = noeta_ext_abi::TypeArgInfo {
+                            name: concrete_ty.to_string(),
+                            recipe,
+                        };
+                        let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
+                            Some(i) => i,
+                            None => {
+                                self.sites.type_arg_table.push(info);
+                                self.sites.type_arg_table.len() - 1
+                            }
+                        };
+                        hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
+                    }
+                }
+            }
+            self.sites.hidden_arg_sites.insert(call_span, hidden);
+        }
         subst_or_dyn(&generic.raw_ret, &subst, &tps)
+    }
+
+    /// Whether `t` mentions any type parameter currently in scope — the guard that keeps a
+    /// composite instantiation (`List<T>`) out of a forwarded hidden slot (only the bare
+    /// parameter passes through).
+    pub(crate) fn mentions_in_scope_param(&self, t: &Type) -> bool {
+        let params: Vec<String> = self.coloring.type_params.keys().cloned().collect();
+        mentions_param(t, &params)
     }
 
     /// Enforce a polymorphic callable's declared **trait bounds** against a resolved substitution:

@@ -1,0 +1,17 @@
+// F2b negative: a call of a forwarding generic whose `T` the arguments cannot pin must spell the
+// turbofish — the instantiation determines a call-site-typed recipe, so leaving it a hole is
+// E0023 with a "supply it explicitly" help, not a silent dyn.
+// expect: error E0023 at 17:5
+// expect: exit 1
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+r = load("{\"id\": 1}")

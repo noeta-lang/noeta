@@ -81,6 +81,7 @@ mod decls;
 mod effects;
 mod env;
 mod expr;
+mod forwarding;
 mod packed;
 mod prelude;
 mod relevance;
@@ -97,6 +98,7 @@ pub use tiers::{
 
 use effects::*;
 use env::*;
+use forwarding::*;
 use sites::SiteMaps;
 pub use sites::{DestructorRelevance, Sites};
 use subst::*;
@@ -269,6 +271,10 @@ fn check_all_impl(
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
+    // The type-param forwarding pre-pass (poly-values F2b) must precede body checking: a call
+    // site of a forwarding fn records hidden arguments, whether it appears before or after the
+    // callee's declaration.
+    checker.symbols.forwarding = compute_forwarding(program);
     // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
     // relevance is recorded inline during `check_program`, and needs the reachable set ready).
     checker.compute_relevance(program);
@@ -321,6 +327,7 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
+    checker.symbols.forwarding = compute_forwarding(program);
     checker.compute_relevance(program);
     checker.check_semantic_roles(program);
     checker.check_tier_decls(program);
@@ -439,6 +446,13 @@ impl SessionChecker {
         let diag_mark = self.checker.diags.len();
         self.checker.collect_imports(entry);
         self.checker.collect(entry);
+        // A session entry's forwarding table extends the accumulated one (an entry may declare a
+        // forwarding fn a later entry calls; cross-entry transitive forwarding is out of scope,
+        // like any cross-entry forward reference).
+        self.checker
+            .symbols
+            .forwarding
+            .extend(compute_forwarding(entry));
         // Re-run the reachability fixpoint over the ACCUMULATED registries (this entry's
         // `destruct` class can make an earlier entry's type reachable), and record this entry's
         // parameter relevance.
@@ -520,6 +534,7 @@ impl SessionChecker {
         self.checker.coloring.current_async = false;
         self.checker.coloring.concurrent_depth = 0;
         self.checker.coloring.loop_depth = 0;
+        self.checker.coloring.current_forwarding.clear();
         self.checker.coloring.index_on_list.clear();
     }
 }
@@ -856,6 +871,12 @@ struct Symbols {
     attribute_optional_fields: HashMap<String, HashSet<String>>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
+    /// The **type-param forwarding table** (poly-values F2b): top-level generic fn name → its
+    /// ordered forwarding type parameters (those flowing into a call-site-typed position —
+    /// `json.try_parse::<T>`, `attributes_of::<T>`, or transitively another forwarding generic).
+    /// Computed by the syntactic pre-pass ([`compute_forwarding`]) before bodies are checked, so
+    /// body-side sites and call sites agree on the hidden-argument layout.
+    forwarding: ForwardingMap,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
     /// through the type's own block, its fields, or its collection elements (the fixpoint
     /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.
@@ -943,6 +964,10 @@ struct Coloring {
     /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
+    /// While checking a top-level **forwarding** generic fn's body (poly-values F2b), its ordered
+    /// forwarding type-parameter names — the hidden-argument layout the body's dynamic sites
+    /// (`json.try_parse::<T>`) and onward-forwarding calls index into. Empty everywhere else.
+    current_forwarding: Vec<String>,
     /// `Expr::Index` spans whose receiver typed as a built-in `List` — recorded as each index is
     /// synthesized so that [`Checker::synth_member`] can recognize a `list[i].field` read without
     /// re-synthesizing (and re-diagnosing) the inner receiver. Internal scratch, not exported (so it
@@ -1849,6 +1874,29 @@ impl Checker {
         // carries none of its own). Union with the current set so a method does not lose the
         // class's parameters; restored after the body. Bounds are validated AFTER the parameters
         // enter scope — a bound argument may name a sibling parameter (`<K, T: Keyed<K>>`).
+        // While checking a top-level forwarding generic's body (poly-values F2b), expose its
+        // hidden-argument layout so the body's dynamic sites and onward-forwarding calls can index
+        // it. Methods/nested contexts get an empty layout (forwarding is top-level-fn only).
+        let saved_forwarding = std::mem::replace(
+            &mut self.coloring.current_forwarding,
+            if target == TargetKind::Function {
+                self.symbols
+                    .forwarding
+                    .get(&decl.name)
+                    .map(|f| f.iter().map(|p| p.name.clone()).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
+        );
+        // Record the hidden-parameter count for lowering — for EVERY forwarding fn, called or
+        // not, so the body's dynamic sites always have their slots.
+        if !self.coloring.current_forwarding.is_empty() {
+            self.sites.forwarding_fns.insert(
+                decl.name.clone(),
+                self.coloring.current_forwarding.len() as u32,
+            );
+        }
         let saved_type_params = self.coloring.type_params.clone();
         self.coloring
             .type_params
@@ -1971,6 +2019,7 @@ impl Checker {
         self.coloring.current_yield = saved_yield;
         self.coloring.loop_depth = saved_loop_depth;
         self.coloring.type_params = saved_type_params;
+        self.coloring.current_forwarding = saved_forwarding;
     }
 }
 

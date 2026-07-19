@@ -99,6 +99,7 @@ pub fn insert_drops(program: &Program, relevance: Option<&Relevance>) -> Program
     Program {
         top,
         temp_count: program.temp_count,
+        type_args: program.type_args.clone(),
         span: program.span,
     }
 }
@@ -220,6 +221,7 @@ fn liveness_of_body(func: &Func) -> BlockLiveness {
     liveness::analyze(&Program {
         top: func.body.clone(),
         temp_count: func.temp_count,
+        type_args: Vec::new(),
         span: func.span,
     })
     .top

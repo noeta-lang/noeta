@@ -97,6 +97,11 @@ impl Checker {
         if lookup(env, name).is_some() {
             return None;
         }
+        // A FORWARDING generic fn is not a first-class value (F2b) — fall through to synthesis,
+        // whose `Ident` arm reports the boundary once.
+        if self.symbols.forwarding.contains_key(name) {
+            return None;
+        }
         // The prelude constructors, typed as the generic constructors they are:
         // `Ok<T, E>(v: T): Result<T, E>` (also the nullary `Ok(): Result<void, E>`),
         // `Err<T, E>(e: E): Result<T, E>`, `some<T>(v: T): Option<T>`. The synthetic `$T`/`$E`
@@ -106,50 +111,52 @@ impl Checker {
         // inference hole (divergent in practice, compatible with any expected return).
         let t = || Type::Named("$T".to_string(), Vec::new());
         let e = || Type::Named("$E".to_string(), Vec::new());
-        let (params, raw_params, raw_ret): (Vec<(String, Vec<BoundReq>)>, Vec<Type>, Type) =
-            match name {
-                "panic" => {
-                    return Some(Type::Fn {
-                        params: vec![Type::Dyn],
-                        ret: Box::new(Type::Unknown),
-                    });
-                }
-                "some" => (Vec::new(), vec![t()], Type::Option(Box::new(t()))),
-                "Ok" if exp_params.is_empty() => (
-                    Vec::new(),
-                    Vec::new(),
-                    Type::Result(Box::new(Type::Unit), Box::new(e())),
-                ),
-                "Ok" => (
-                    Vec::new(),
-                    vec![t()],
-                    Type::Result(Box::new(t()), Box::new(e())),
-                ),
-                "Err" => (
-                    Vec::new(),
-                    vec![e()],
-                    Type::Result(Box::new(t()), Box::new(e())),
-                ),
-                _ => {
-                    // A generic user function: its un-erased `GenericInfo` drives the instantiation
-                    // exactly as a call site's does, bounds included.
-                    let sig = self.symbols.functions.get(name)?;
-                    let generic = sig.generic.clone()?;
-                    let required = sig.required;
-                    // The value adopts the expectation's arity when the declaration's defaults
-                    // allow it (a trailing-defaulted parameter may be dropped from the value's
-                    // face); otherwise keep the full parameter list and let subsumption report
-                    // the arity mismatch.
-                    let n = if (required..=generic.raw_params.len()).contains(&exp_params.len()) {
-                        exp_params.len()
-                    } else {
-                        generic.raw_params.len()
-                    };
-                    let mut raw_params = generic.raw_params;
-                    raw_params.truncate(n);
-                    (generic.params, raw_params, generic.raw_ret)
-                }
-            };
+        /// The instantiable shape of a polymorphic value: its (bounded) type parameters and
+        /// un-erased params/return — the same trio [`GenericInfo`] carries.
+        type CtorShape = (Vec<(String, Vec<BoundReq>)>, Vec<Type>, Type);
+        let (params, raw_params, raw_ret): CtorShape = match name {
+            "panic" => {
+                return Some(Type::Fn {
+                    params: vec![Type::Dyn],
+                    ret: Box::new(Type::Unknown),
+                });
+            }
+            "some" => (Vec::new(), vec![t()], Type::Option(Box::new(t()))),
+            "Ok" if exp_params.is_empty() => (
+                Vec::new(),
+                Vec::new(),
+                Type::Result(Box::new(Type::Unit), Box::new(e())),
+            ),
+            "Ok" => (
+                Vec::new(),
+                vec![t()],
+                Type::Result(Box::new(t()), Box::new(e())),
+            ),
+            "Err" => (
+                Vec::new(),
+                vec![e()],
+                Type::Result(Box::new(t()), Box::new(e())),
+            ),
+            _ => {
+                // A generic user function: its un-erased `GenericInfo` drives the instantiation
+                // exactly as a call site's does, bounds included.
+                let sig = self.symbols.functions.get(name)?;
+                let generic = sig.generic.clone()?;
+                let required = sig.required;
+                // The value adopts the expectation's arity when the declaration's defaults
+                // allow it (a trailing-defaulted parameter may be dropped from the value's
+                // face); otherwise keep the full parameter list and let subsumption report
+                // the arity mismatch.
+                let n = if (required..=generic.raw_params.len()).contains(&exp_params.len()) {
+                    exp_params.len()
+                } else {
+                    generic.raw_params.len()
+                };
+                let mut raw_params = generic.raw_params;
+                raw_params.truncate(n);
+                (generic.params, raw_params, generic.raw_ret)
+            }
+        };
         let is_prelude_ctor = params.is_empty();
         let tps: HashSet<String> = if is_prelude_ctor {
             ["$T".to_string(), "$E".to_string()].into_iter().collect()
@@ -280,6 +287,7 @@ impl Checker {
             arg_exprs,
             span,
             seed,
+            Some(span),
             env,
         )
     }
@@ -402,6 +410,7 @@ impl Checker {
                             arg_exprs,
                             span,
                             &[],
+                            Some(call_span),
                             env,
                         );
                     }
@@ -890,6 +899,8 @@ impl Checker {
                 arg_exprs,
                 span,
                 recv_args,
+                // Methods never forward (forwarding is top-level-fn only), so no hidden site.
+                None,
                 env,
             );
         }

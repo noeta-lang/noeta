@@ -63,6 +63,11 @@ pub struct Program {
     pub top: Block,
     /// The number of distinct [`Temp`]s used anywhere in `top` (the top-level frame size).
     pub temp_count: u32,
+    /// The program-wide **type-argument table** (poly-values F2b): the concrete instantiations of
+    /// forwarding generics, indexed by the hidden call arguments. Both backends resolve dynamic
+    /// call-site-typed sites (`json.try_parse::<T>` with a forwarded `T`) through this one table,
+    /// so they agree by construction. Empty for programs without forwarding.
+    pub type_args: Vec<noeta_ext_abi::TypeArgInfo>,
     pub span: Span,
 }
 
@@ -505,8 +510,15 @@ pub enum Rvalue {
     /// `(Sender, Receiver)` tuple of scheduler-owned endpoint ids. The message type `T` is a
     /// checker-only concern (the runtime channel is untyped), so only `capacity` reaches here.
     MakeChannel { capacity: Atom, span: Span },
-    /// `attributes_of::<T>()` — the manifest's `#[T(...)]` attributes.
-    AttributesOf { ty: TypeRef, span: Span },
+    /// `attributes_of::<T>()` — the manifest's `#[T(...)]` attributes. `dynamic` (poly-values
+    /// F2b) is the enclosing forwarding fn's hidden slot when `T` is a forwarded type parameter:
+    /// the backend resolves the concrete type NAME through [`Program::type_args`] at runtime
+    /// (the manifest is name-keyed either way).
+    AttributesOf {
+        ty: TypeRef,
+        dynamic: Option<Atom>,
+        span: Span,
+    },
     /// `roles_of()` / `roles_of::<RoleEnum>()` — the `(declaration, Role)` index, optionally scoped
     /// to a single role enum.
     RolesOf { ty: Option<TypeRef>, span: Span },
@@ -531,6 +543,11 @@ pub enum Rvalue {
         func: String,
         args: Vec<Atom>,
         recipe: Option<noeta_ext_abi::TypeRecipe>,
+        /// A **per-instantiation** recipe source (poly-values F2b): the enclosing forwarding fn's
+        /// hidden slot holding the instantiation's index into [`Program::type_args`]. `Some` iff
+        /// the turbofish was a forwarded type parameter; then `recipe` is `None` and the backend
+        /// resolves the table entry's recipe at runtime.
+        dynamic: Option<Atom>,
         span: Span,
     },
     /// The **router-facing** runtime JSON decode `json.decode_typed(name, text)` (L2.2 DI): decode
