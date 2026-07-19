@@ -313,8 +313,8 @@ pub(crate) fn safepoint_collect() {
         while let Some(key) = queue.pop() {
             members.push(key);
             for &next in adjacency.get(&key).map(Vec::as_slice).unwrap_or(&[]) {
-                if !component_of.contains_key(&next) {
-                    component_of.insert(next, id);
+                if let std::collections::hash_map::Entry::Vacant(slot) = component_of.entry(next) {
+                    slot.insert(id);
                     queue.push(next);
                 }
             }

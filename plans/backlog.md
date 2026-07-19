@@ -34,8 +34,9 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | **Real-isolate worker environment limits:** workers snapshot only marshallable globals (a `class`-instance global is skipped → fails at use); worker teardown skips cycle collection | isolates I.4b |
 | User-facing `h.cancel()` + a typed cancelled outcome (today cancellation is race/scope-internal) | A.8 scope decision |
 | App-lifetime `TaskScope` patterns: DI-managed workers, durable queues, schedulers; overlaps the "background-work extensions" proposal below | §7.2 design. Framework/extension patterns, not language constructs |
-| **In-run safepoint cycle collection** — both cycle reapers run only at clean exit; a program building cycles in a loop has unbounded peak residency | memory-management 6.x *(active — the main GC follow-up)* |
+| Safepoint GC inside **re-entrant runs**: mid-run collection is gated to the outermost interpreter loop (a nested run's outer register stacks live in Rust locals the poll cannot enumerate), so cycles built inside `map`-applied closures, `NativeCtx`-driven loops (the HTTP serve loop), or a single mammoth un-awaited task body still accumulate until the next outermost safepoint / exit. Rooting the outer stacks (an active-stack registry) would lift the gate | memory-management 6.x follow-up (safepoint GC shipped; this is the residual scope) |
 | Intrusive free-list registry — closes the trace collector's ~10% acyclic overhead on alloc-churn micro-benches | memory-management 6.4 |
+| VM E0005 on a **top-level nested self-recursive `fn` inside a block** (`while { fn rec(){... rec() ...} }`): the closure's self-reference compiles to a `LoadGlobal "rec"` no one stores; the reference interpreter runs it fine — a differential gap outside the corpus (found writing the safepoint-GC corpus; pre-existing, reproduces with collection disarmed) | compiler closure conversion (`freevars.rs`) |
 | DAP: debug worker isolates (adapter reports a single hardcoded thread; workers run undebugged). Also: conditional/hit-count breakpoints, reverse debugging | debug-adapter deferred |
 
 ## Reactivity & web
