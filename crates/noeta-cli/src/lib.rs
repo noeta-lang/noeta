@@ -55,6 +55,7 @@ use cmd::doc::cmd_doc;
 use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
 use cmd::init::cmd_init;
+use cmd::migrate::cmd_migrate;
 use cmd::pm::{
     cmd_add, cmd_advisory_promote, cmd_advisory_publish, cmd_advisory_report, cmd_advisory_reports,
     cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update, cmd_watch_scope,
@@ -564,6 +565,49 @@ enum Command {
         /// Where to keep the pinned watch state between runs (default: under the noeta cache).
         #[arg(long)]
         state: Option<PathBuf>,
+    },
+    /// Apply the project's SQL migrations (para/db). With no flags, applies every pending migration
+    /// under the migrations directory (default `migrations/`), each in its own transaction, printing
+    /// each file. The database connection string is resolved from `--db`, else `DATABASE_URL`, else
+    /// the `[db] url` in `noeta.toml`. Forward-only: there are no down migrations — use `--reset` in
+    /// development.
+    Migrate {
+        /// `noeta migrate new <name>` — scaffold the next migration file. When omitted, the flags below
+        /// select apply / status / dry-run / reset.
+        #[command(subcommand)]
+        action: Option<MigrateAction>,
+        /// The database connection string (overrides `DATABASE_URL` and `[db] url`).
+        #[arg(long, value_name = "DSN")]
+        db: Option<String>,
+        /// The migrations directory (overrides `[db] migrations`; default `migrations`).
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+        /// Show which migrations are applied and which are pending, then exit.
+        #[arg(long)]
+        status: bool,
+        /// List the migrations that would be applied without touching the database.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// DESTRUCTIVE: drop the whole schema and re-apply every migration from zero. Requires `--yes`
+        /// (or an interactive confirmation).
+        #[arg(long)]
+        reset: bool,
+        /// Skip the interactive confirmation for `--reset` (for scripts/CI).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// The `noeta migrate` sub-actions that are not plain flags.
+#[derive(Subcommand)]
+enum MigrateAction {
+    /// Scaffold the next migration file: `migrations/<UTC-timestamp>_<name>.sql`.
+    New {
+        /// A short description, slugified into the filename (e.g. "add users table").
+        name: String,
+        /// The migrations directory to create the file in (default `migrations`).
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -1100,6 +1144,26 @@ pub fn run_cli(
             ),
         },
         Command::WatchScope { scope, state } => cmd_watch_scope(&scope, state.as_deref()),
+        Command::Migrate {
+            action,
+            db,
+            dir,
+            status,
+            dry_run,
+            reset,
+            yes,
+        } => {
+            let new = action.map(|MigrateAction::New { name, dir }| (name, dir));
+            cmd_migrate(cmd::migrate::MigrateArgs {
+                new,
+                db,
+                dir,
+                status,
+                dry_run,
+                reset,
+                yes,
+            })
+        }
     }
 }
 

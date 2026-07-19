@@ -18,6 +18,7 @@ mod grammar;
 mod init;
 mod isolates;
 mod keyed;
+mod migrate;
 mod namespace;
 mod pm;
 mod pm_native;
