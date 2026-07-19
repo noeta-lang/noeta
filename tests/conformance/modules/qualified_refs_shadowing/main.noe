@@ -1,11 +1,8 @@
-// Locals shadow a module alias in VALUE position: after `vec = Holder { add: 5 }`, the chain
-// `vec.add` is field access on the local — not the module function — and a closure parameter
-// named like the alias shadows it inside the closure the same way. Type positions are a separate
-// namespace, so `vec.Vec2` in a literal head still resolves while the local `vec` exists.
-// expect: stdout "5"
-// expect: stdout "6"
-// expect: stdout "10"
-// expect: exit 0
+// One name, one meaning — the import half (E0020): a value binding may not reuse the local name
+// a `use` binds (here the whole-module import's `vec` handle). The error points at the import;
+// the fix is renaming the binding or aliasing the import (`use geometry.vec as gv`).
+// expect: error E0020 at 8:14
+// expect: exit 1
 namespace App.Main;
 
 use geometry.vec;
@@ -16,9 +13,3 @@ struct Holder {
 
 vec = Holder { add: 5 };
 echo vec.add;
-
-f = fn(vec: Holder) => vec.add;
-echo f(Holder { add: 6 });
-
-v = vec.Vec2 { x: 10, y: 20 };
-echo v.x;

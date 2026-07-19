@@ -1,9 +1,10 @@
-// A nested `fn` captures and mutates an enclosing `mut` local (a closure counter).
+// A nested `fn` imports and mutates an enclosing `mut` local via `use (…)` (a named fn is
+// sealed — the capture clause is the explicit import; the view is live).
 // expect: stdout "3"
 // expect: exit 0
 fn make_counter(): int {
     mut count = 0;
-    fn bump(): void {
+    fn bump() use (count): void {
         count = count + 1;
     }
     bump();

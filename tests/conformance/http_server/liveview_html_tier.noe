@@ -36,11 +36,11 @@ fn render(statics: List<string>, holes: List<() -> dyn>): Html {
 
 count = signal(0)
 
-fn page(): Html {
+fn page() use (count): Html {
     return @html { count: ${count.get()} double: ${count.get() * 2} }
 }
 
-async fn session(sock: Socket): bool {
+async fn session(sock: Socket) use (count): bool {
     doc = page()
     v = view()
     mut i = 0

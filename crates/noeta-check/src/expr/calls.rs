@@ -60,8 +60,15 @@ impl Checker {
             // Built-in namable types/enums (`Ordering`, `Type`, `Semantic`, iterator types, …)
             // are legitimate bare references — `Ordering.Less` names the prelude enum's variant.
             || PRELUDE_TYPES.contains(&name)
-            // A hoisted top-level global (a fn body may reference one declared later).
-            || self.symbols.global_binding_names.contains(name)
+            // A hoisted top-level global (top-level code may reference one declared later) — but
+            // NOT inside a sealed named-fn body, where top-level value bindings are out of scope
+            // unless `use (…)`-captured (captures are in the sealed env, caught by `lookup`).
+            || (!self.coloring.in_sealed_body
+                && self.symbols.global_binding_names.contains(name))
+            // A nested `fn`'s name is an item of its enclosing body — visible to recursion and
+            // siblings even inside sealed bodies (a declaration, not captured value state).
+            // Program-wide-hoisted, so out-of-scope references defer to the runtime error.
+            || self.symbols.nested_fn_names.contains(name)
     }
 
     pub(crate) fn synth_call(
@@ -169,11 +176,22 @@ impl Checker {
                 // check time instead of failing at runtime. A session defers (a later entry may
                 // define it).
                 if !self.config.session_mode && !self.is_known_name(name, env) {
-                    self.error(
+                    // In a SEALED named-fn body, a callee that names a real top-level binding
+                    // (e.g. a closure bound at top level) gets the capture hint.
+                    let sealed_global_miss = self.coloring.in_sealed_body
+                        && self.symbols.global_binding_names.contains(name);
+                    let diag = self.error(
                         DiagnosticCode::UnknownName,
                         span,
                         format!("cannot find `{name}` in this scope"),
                     );
+                    if sealed_global_miss {
+                        diag.help(format!(
+                            "`{name}` is a top-level binding, which a named function does not \
+                             see implicitly — add `use ({name})` to the signature, or pass it \
+                             as a parameter"
+                        ));
+                    }
                 }
                 Type::Unknown
             }

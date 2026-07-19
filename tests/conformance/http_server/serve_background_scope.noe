@@ -24,13 +24,13 @@ use std.task.{sleep}
 
 fn a_job(): void { echo "[bg] ran a job" }
 
-async fn handle(req: Request): Response {
+async fn handle(req: Request) use (tx): Response {
     echo "queued ${req.path()}"
     tx.send(a_job).await
     return server.response(202, "accepted")
 }
 
-async fn worker(): void {
+async fn worker() use (rx): void {
     mut going = true
     while going {
         job = rx.recv().await
@@ -43,7 +43,7 @@ async fn worker(): void {
     }
 }
 
-async fn main(): void {
+async fn main() use (tx): void {
     concurrent {
         spawn worker()
         server.serve(8080, handle)

@@ -15,7 +15,7 @@ class Res {
 }
 g = Res.new(99);
 fn make(): int {
-    fn rec(n: int): int {
+    fn rec(n: int) use (g): int {
         if n <= 0 { return g.id; }
         return rec(n - 1);
     }

@@ -736,6 +736,12 @@ struct Symbols {
     /// reference to a not-yet-bound global still fails at runtime; this gate does not try to catch
     /// that ordering case, only genuine typos.)
     global_binding_names: HashSet<String>,
+    /// Every **nested** `fn` declaration's name, hoisted program-wide (collect pass 1). A nested
+    /// fn's name is an ITEM of its enclosing body — recursion and sibling calls must resolve even
+    /// inside a SEALED body (where value bindings need `use (…)` capture, but declarations do
+    /// not). Coarse like [`Self::global_binding_names`]: an out-of-scope reference defers to the
+    /// runtime error rather than the unknown-name gate.
+    nested_fn_names: HashSet<String>,
     /// Declared type → its kind (`Enum`/`Struct`/`Class`). Drives the abstract kind-type
     /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
     /// pure lattice cannot decide, consulted by [`Checker::assignable`].
@@ -872,12 +878,12 @@ struct Coloring {
     /// access on `self` *or* any same-type value is permitted (the type-scoped privacy rule). `None`
     /// at top level and inside free functions.
     current_type: Option<String>,
-    /// While checking a declaration the linker MERGED from another module (recognizable by its
-    /// qualified dotted name — the entry's own declarations keep bare names), the no-shadowing
-    /// rule's hoisted-globals half is off: the entry's top-level bindings are not in scope inside
-    /// another module's function body, so a merged fn whose params happen to reuse the entry's
-    /// binding names is no shadow. Set around each dotted-named decl in `check_stmt`.
-    in_merged_decl: bool,
+    /// While checking a **sealed** named-function/method body: top-level value bindings are not
+    /// in scope there (only `use (…)` captures, `self`, and params are), so the hoisted-globals
+    /// fallback in the unknown-name gate must not resolve them — the miss is the point, reported
+    /// with an "add `use (name)`" hint. `false` at top level and inside top-level closures, which
+    /// capture their surroundings.
+    in_sealed_body: bool,
     /// While checking the body of a fn lifted from a **dev-tier block** (`@test`/…, slice 6d), the
     /// type-scoped field-privacy gate is relaxed to white-box access: co-located developer tooling
     /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
@@ -1136,13 +1142,10 @@ impl Checker {
                 .any(|frame| frame.contains_key(name)),
             ShadowScopes::StaticsOnly => false,
         };
-        // The hoisted-globals half applies only to binders BELOW the top level: a top-level
-        // binding/destructure's own name is itself in the hoisted set (collect pass 1), so
-        // checking it at depth 1 would flag every declaration — while any deeper binder that
-        // matches a hoisted global is a genuine shadow, even of one declared later in the file.
-        // Off inside a linker-merged declaration: the entry's globals are not in scope there
-        // (see `Coloring::in_merged_decl`).
-        let include_globals = env.len() > 1 && !self.coloring.in_merged_decl;
+        // No hoisted-globals half: a named function's body is SEALED — top-level value bindings
+        // are simply not in scope there, so a param named like a global shadows nothing. Where
+        // globals genuinely are in scope (top level itself, top-level closures), the env walk
+        // above already sees them.
         let shadowed = if scope_hit {
             Some("a binding already in scope")
         } else if self.symbols.functions.contains_key(name)
@@ -1157,10 +1160,6 @@ impl Checker {
             Some("an imported module")
         } else if self.imports.extern_types.contains_key(name) {
             Some("an imported type")
-        } else if include_globals && self.symbols.global_binding_names.contains(name) {
-            // Hoisted top-level binding names — a binder inside a function may not shadow a
-            // global even one declared later in the file.
-            Some("a top-level binding")
         } else {
             None
         };
@@ -1757,41 +1756,24 @@ impl Checker {
                 if env.len() > 1 {
                     self.check_shadow(&decl.name, decl.name_span, env, ShadowScopes::Enclosing);
                 }
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || decl.name.contains('.');
                 self.check_fn(decl, env, &[], TargetKind::Function);
-                self.coloring.in_merged_decl = saved;
             }
             Stmt::Struct(r) => {
                 self.check_reserved_name(&r.name, r.name_span);
                 self.check_reserved_type_name(&r.name, r.name_span);
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || r.name.contains('.');
                 self.check_struct(r, env);
-                self.coloring.in_merged_decl = saved;
             }
             Stmt::Class(c) => {
                 self.check_reserved_name(&c.name, c.name_span);
                 self.check_reserved_type_name(&c.name, c.name_span);
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || c.name.contains('.');
                 self.check_class(c, env);
-                self.coloring.in_merged_decl = saved;
             }
             Stmt::Enum(e) => {
                 self.check_reserved_name(&e.name, e.name_span);
                 self.check_reserved_type_name(&e.name, e.name_span);
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || e.name.contains('.');
                 self.check_enum(e, env);
-                self.coloring.in_merged_decl = saved;
             }
-            Stmt::Impl(decl) => {
-                let saved = self.coloring.in_merged_decl;
-                self.coloring.in_merged_decl = saved || decl.target.contains('.');
-                self.check_standalone_impl(decl);
-                self.coloring.in_merged_decl = saved;
-            }
+            Stmt::Impl(decl) => self.check_standalone_impl(decl),
             Stmt::Trait(decl) => self.check_trait_decl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
             // A dev-tier block reaching the checker is an *inactive* residual (object-model
@@ -1992,14 +1974,46 @@ impl Checker {
         // dev-tier body stays white-box too (co-located tooling). Restored after the body.
         let saved_dev_tier = self.coloring.in_dev_tier;
         self.coloring.in_dev_tier = decl.is_dev_tier || saved_dev_tier;
+        // SEALED body env: a named function's body sees its `use (…)` captures, `self`/`extra`,
+        // and its parameters — never the surrounding value scope implicitly (anonymous closures
+        // are the auto-capturing form). Each capture resolves against the DECLARATION site's env
+        // as a live view of that binding, keeping its mutability; a name that only exists as a
+        // hoisted-but-later top-level binding is accepted at `Unknown` (immutable view — its type
+        // completes at runtime); anything else is an unknown name.
+        let mut sealed: Env = vec![HashMap::new()];
+        for (name, span) in &decl.captures {
+            self.check_reserved_name(name, *span);
+            // A duplicate in the capture list, or a capture named like a static, is a shadow.
+            self.check_shadow(name, *span, &sealed, ShadowScopes::All);
+            if let Some(ty) = lookup(env, name) {
+                let ty = ty.clone();
+                if lookup_mutable(env, name) {
+                    bind_mut(&mut sealed, name, ty);
+                } else {
+                    bind(&mut sealed, name, ty);
+                }
+            } else if self.symbols.global_binding_names.contains(name) {
+                bind(&mut sealed, name, Type::Unknown);
+            } else {
+                self.error(
+                    DiagnosticCode::UnknownName,
+                    *span,
+                    format!("cannot capture `{name}`: no binding of that name at the declaration site"),
+                )
+                .help("`use (…)` names a value binding visible where the function is declared");
+            }
+        }
+        // From here on the body checks against the sealed env only.
+        let env = &mut sealed;
+        let saved_sealed = std::mem::replace(&mut self.coloring.in_sealed_body, true);
         env.push(HashMap::new());
         for (name, ty) in extra {
             bind(env, name, ty.clone());
         }
         for p in &decl.params {
             self.check_reserved_name(&p.name, p.name_span);
-            // Params land in the just-pushed frame: any env hit — an enclosing binding or a
-            // duplicate in this very list (`fn(x, x)`) — is a shadow (E0055).
+            // Params land in the just-pushed frame: any env hit — a capture or a duplicate in
+            // this very list (`fn(x, x)`) — is a shadow (E0055).
             self.check_shadow(&p.name, p.name_span, env, ShadowScopes::All);
             bind(env, &p.name, param_type(p, &self.imports.extern_types));
         }
@@ -2007,6 +2021,7 @@ impl Checker {
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
         }
+        self.coloring.in_sealed_body = saved_sealed;
         // E0048: a non-`void` function must return a value on every path. If control can reach the end
         // of the body — it falls off the end, or an `if` without an `else` leaves a path open — the
         // function would implicitly return `unit` where its signature promised another type, and a
