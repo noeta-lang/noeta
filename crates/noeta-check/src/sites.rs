@@ -70,6 +70,15 @@ pub struct Sites {
     /// dispatch, so `obj.f(args)` means `(obj.f)(args)`. A pure function of the program, like the
     /// other site maps.
     pub field_call_sites: HashSet<Span>,
+    /// **Generic-method turbofish** spans reached through the `TypedModuleCall` surface (generic
+    /// methods, D3): a `recv.m::<T>(args)` with a single type argument and a bare-identifier
+    /// receiver parses as [`noeta_ast::Expr::TypedModuleCall`] (the atom that also spells
+    /// `json.parse::<T>(s)`), but when the receiver is a value or a user type — not an imported
+    /// native module — it is a generic **method** call. The checker records the span here so
+    /// lowering desugars it to a plain method call (`Rvalue::Method` / the associated-call path)
+    /// instead of a native `Rvalue::TypedModuleCall`. A pure function of the program, like the
+    /// other site maps.
+    pub member_method_call_sites: HashSet<Span>,
     /// Method-bundle call sites (kernel-methods K2): each bound bundle-method call span → the
     /// statically resolved route `(module qualified identity, bundle name)`. Lowering bakes the
     /// route into the call, so runtime dispatch is **call-site-resolved** — no shape-keyed
@@ -193,6 +202,9 @@ pub(crate) struct SiteMaps {
     pub(crate) bound_handle_sites: HashSet<Span>,
     /// Field-call sites (`obj.f(args)` where `f` is a field) — see [`Sites::field_call_sites`].
     pub(crate) field_call_sites: HashSet<Span>,
+    /// Generic-method turbofish spans reached via the `TypedModuleCall` surface (D3) — see
+    /// [`Sites::member_method_call_sites`].
+    pub(crate) member_method_call_sites: HashSet<Span>,
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — lowering reads this (via
     /// [`Checked::f32_literal_sites`]) to emit a narrow `Const::F32` for the literal.
     pub(crate) f32_literal_sites: HashSet<Span>,
@@ -236,6 +248,7 @@ impl SiteMaps {
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,
             field_call_sites: self.field_call_sites,
+            member_method_call_sites: self.member_method_call_sites,
             f32_literal_sites: self.f32_literal_sites,
             bundle_call_sites: self.bundle_call_sites,
             namespace_module_sites: self.namespace_module_sites,

@@ -805,7 +805,16 @@ impl Checker {
                     }
                     // A static call: the type arguments are not known from a bare type name, so the
                     // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
-                    return self.call_user_method(name, &sig, args, arg_exprs, span, &[], env);
+                    return self.call_user_method(
+                        name,
+                        &sig,
+                        args,
+                        arg_exprs,
+                        span,
+                        &[],
+                        Some(call_span),
+                        env,
+                    );
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
@@ -838,8 +847,16 @@ impl Checker {
                         .help(format!("call it on the type: `{n}.{name}(...)`"));
                         return sig.ret.clone();
                     }
-                    return self
-                        .call_user_method(name, &sig, args, arg_exprs, span, recv_args, env);
+                    return self.call_user_method(
+                        name,
+                        &sig,
+                        args,
+                        arg_exprs,
+                        span,
+                        recv_args,
+                        Some(call_span),
+                        env,
+                    );
                 }
                 // `obj.f(args)` where `f` is a FIELD of the receiver's type — the
                 // **field-access-then-call desugar**: no method `f` exists (a real method wins in
@@ -1025,7 +1042,7 @@ impl Checker {
             .cloned()
         {
             return Some(
-                self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, env),
+                self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, None, env),
             );
         }
         if self.symbols.types.contains(n) || self.symbols.enums.contains_key(n) {
@@ -1102,18 +1119,37 @@ impl Checker {
         arg_exprs: &[Expr],
         span: Span,
         recv_args: &[Type],
+        call_span: Option<Span>,
         env: &mut Env,
     ) -> Type {
         if let Some(generic) = &sig.generic {
-            return self.check_generic_call(
+            // Return-position seeding for a generic METHOD (D3): when this exact call sits in a
+            // checked position, check-mode armed the expectation under the call's span — bind the
+            // declared return against it, first-wins AFTER the receiver's own arguments (the
+            // receiver stays authoritative for the class's parameters; the expectation fills what
+            // it leaves open — typically the method's own).
+            let mut seed: HashMap<String, Type> = generic
+                .params
+                .iter()
+                .map(|(n, _)| n.clone())
+                .zip(recv_args.iter().cloned())
+                .filter(|(_, t)| !t.defers_to_runtime())
+                .collect();
+            if let Some((pending_span, expected)) = self.pending_member_ret.clone()
+                && call_span == Some(pending_span)
+            {
+                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+                bind_type_params(&generic.raw_ret, &expected, &tps, &mut seed);
+            }
+            return self.check_generic_call_seeded(
                 name,
                 generic,
                 sig.required,
                 args,
                 arg_exprs,
                 span,
-                recv_args,
-                // Methods never forward (forwarding is top-level-fn only), so no hidden site.
+                seed,
+                // Methods never forward (the pinned D3 boundary), so no hidden site.
                 None,
                 env,
             );
@@ -1122,6 +1158,163 @@ impl Checker {
         self.finalize_closure_args(&params, args, arg_exprs, env);
         self.check_args(&params, sig.required, args, arg_exprs, span, name);
         sig.ret.clone()
+    }
+
+    /// Type an **explicitly instantiated METHOD call** `recv.m::<U, ...>(args)` (generic
+    /// methods, D3). The receiver is a value (instance method) or a bare type name (associated
+    /// function); the named type arguments bind to the method's OWN type parameters in order —
+    /// the class's parameters come from the receiver's type arguments, never the turbofish — and
+    /// both substitutions compose through the one seeded generic-call machinery (the receiver's
+    /// bindings first, the turbofish's next, arguments filling only what those leave open).
+    /// Misapplied turbofish — an unknown method, a non-generic one, or a type-argument arity
+    /// mismatch against the method's own parameters — is E0058.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn synth_typed_method_call(
+        &mut self,
+        recv: &Expr,
+        name: &str,
+        name_span: Span,
+        type_args: &[TypeRef],
+        args: &mut [Type],
+        arg_exprs: &[Expr],
+        span: Span,
+        env: &mut Env,
+    ) -> Type {
+        for t in type_args {
+            self.check_type_ref(t);
+        }
+        let resolved: Vec<Type> = type_args
+            .iter()
+            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .collect();
+        // Resolve the receiver: a bare unshadowed TYPE name is the associated form (no receiver
+        // instantiation); anything else synthesizes and must be a user type with methods.
+        let (type_name, recv_args, associated) = match recv {
+            Expr::Ident { name: tn, .. }
+                if lookup(env, tn).is_none() && self.symbols.types.contains(tn) =>
+            {
+                (tn.clone(), Vec::new(), true)
+            }
+            _ => match self.synth(recv, env) {
+                Type::Named(n, targs) => (n, targs, false),
+                t if t.defers_to_runtime() => {
+                    // A `dyn`/hole receiver cannot resolve a method signature to instantiate —
+                    // the explicit turbofish demands a statically-known method (unlike a plain
+                    // deferred method call, which stays lenient).
+                    self.error(
+                        DiagnosticCode::InvalidTypeArguments,
+                        name_span,
+                        format!(
+                            "cannot instantiate `{name}` explicitly on a dynamically-typed \
+                             receiver"
+                        ),
+                    )
+                    .help("explicit type arguments need a statically-known method");
+                    return Type::Unknown;
+                }
+                t => {
+                    self.error(
+                        DiagnosticCode::InvalidTypeArguments,
+                        name_span,
+                        format!("type `{t}` has no generic method `{name}`"),
+                    )
+                    .help("explicit type arguments apply only to a user type's generic method");
+                    return Type::Unknown;
+                }
+            },
+        };
+        let Some(sig) = self
+            .symbols
+            .methods
+            .get(&(type_name.clone(), name.to_string()))
+            .cloned()
+        else {
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                name_span,
+                format!("`{type_name}` has no method `{name}`"),
+            );
+            return Type::Unknown;
+        };
+        // The associated/instance discipline (E0047) holds for the turbofish form exactly as for
+        // plain calls.
+        let is_instance = self
+            .symbols
+            .method_instance
+            .get(&(type_name.clone(), name.to_string()))
+            .copied()
+            .unwrap_or(true);
+        if associated && is_instance {
+            self.error(
+                DiagnosticCode::InvalidReceiver,
+                name_span,
+                format!("`{name}` is an instance method of `{type_name}`"),
+            )
+            .help(format!(
+                "call it on a value (`x.{name}::<...>(...)`), or pass `{type_name}.{name}` as a \
+                 handle"
+            ));
+            return sig.ret.clone();
+        }
+        if !associated && !is_instance {
+            self.error(
+                DiagnosticCode::InvalidReceiver,
+                name_span,
+                format!("`{name}` is an associated function of `{type_name}`"),
+            )
+            .help(format!(
+                "call it on the type: `{type_name}.{name}::<...>(...)`"
+            ));
+            return sig.ret.clone();
+        }
+        let Some(generic) = sig.generic.clone() else {
+            self.finalize_closure_args(&sig.params, args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                name_span,
+                format!("`{name}` takes no type parameters"),
+            )
+            .help("drop the `::<...>` — only a generic method is instantiated explicitly");
+            return sig.ret.clone();
+        };
+        let own = &generic.params[generic.class_params..];
+        if resolved.len() != own.len() {
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                span,
+                format!(
+                    "`{name}` expects {} type argument(s), found {}",
+                    own.len(),
+                    resolved.len()
+                ),
+            );
+            let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+            return erase_type_params(generic.raw_ret.clone(), &tps);
+        }
+        // The composed seed: the receiver's type arguments bind the class's parameters
+        // (positionally, exactly as a plain instance call's), the turbofish binds the method's
+        // own — both first-wins, so arguments can only fill what they leave open.
+        let mut seed: HashMap<String, Type> = generic
+            .params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .zip(recv_args.iter().cloned())
+            .filter(|(_, t)| !t.defers_to_runtime())
+            .collect();
+        for ((n, _), t) in own.iter().zip(resolved) {
+            seed.entry(n.clone()).or_insert(t);
+        }
+        self.check_generic_call_seeded(
+            name,
+            &generic,
+            sig.required,
+            args,
+            arg_exprs,
+            span,
+            seed,
+            None,
+            env,
+        )
     }
 
     /// Arity- and type-check a method call's arguments against the resolved parameter signature

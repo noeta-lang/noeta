@@ -1049,14 +1049,28 @@ pub enum Expr {
         span: Span,
     },
     /// An **explicitly instantiated call of a user generic function** — the general turbofish
-    /// `f::<T, ...>(args)` (poly-values F2). `name` is the callee (a bare identifier — generic
-    /// methods do not exist: a method is generic over its class's parameters only, so the surface
-    /// is free functions); `type_args` are the explicit instantiations, bound to the function's
-    /// declared type parameters in order (arity-checked, E0058). Explicit arguments WIN over
+    /// `f::<T, ...>(args)` (poly-values F2). `name` is the callee (a bare identifier; the method
+    /// form is [`Expr::TypedMethodCall`]); `type_args` are the explicit instantiations, bound to
+    /// the function's declared type parameters in order (arity-checked, E0058). Explicit
+    /// arguments WIN over
     /// argument-derived inference; a conflict surfaces as the ordinary argument-assignability
     /// E0007 against the substituted parameter. Erased at runtime like every generic call — this
     /// lowers exactly as the plain `f(args)` does.
     TypedCall {
+        name: String,
+        name_span: Span,
+        type_args: Vec<TypeRef>,
+        args: Vec<Expr>,
+        span: Span,
+    },
+    /// An **explicitly instantiated METHOD call** — `recv.m::<U, ...>(args)` (generic methods,
+    /// poly-deferrals D3). `recv` is a value (→ instance method) or a bare type name (→
+    /// associated function); `type_args` bind to the METHOD's OWN type parameters in order
+    /// (arity-checked E0058 — the class's parameters come from the receiver, never the
+    /// turbofish). Explicit arguments win exactly as in [`Expr::TypedCall`]. Erased at runtime —
+    /// this lowers exactly as the plain `recv.m(args)` method call does.
+    TypedMethodCall {
+        recv: Box<Expr>,
         name: String,
         name_span: Span,
         type_args: Vec<TypeRef>,
@@ -1401,6 +1415,7 @@ impl Expr {
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
             | Expr::TypedCall { span, .. }
+            | Expr::TypedMethodCall { span, .. }
             | Expr::RolesOf { span, .. }
             | Expr::ParamsOf { span, .. }
             | Expr::Invoke { span, .. }
@@ -1504,6 +1519,7 @@ impl Expr {
             Expr::TypedModuleCall { recv, args, .. } => recv.mentions(name) || any(args),
             // The callee is a top-level fn name, never a local binding, so only the arguments count.
             Expr::TypedCall { args, .. } => any(args),
+            Expr::TypedMethodCall { recv, args, .. } => recv.mentions(name) || any(args),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),
@@ -1594,6 +1610,7 @@ impl Expr {
             } => recv.has_await() || name.has_await() || args.has_await(),
             Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any(args),
             Expr::TypedCall { args, .. } => any(args),
+            Expr::TypedMethodCall { recv, args, .. } => recv.has_await() || any(args),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.has_await() || value.has_await(),

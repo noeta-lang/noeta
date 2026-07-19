@@ -1,0 +1,17 @@
+// The member turbofish `recv.m::<U>(args)` (poly-deferrals D3) binds a generic method's own type
+// parameter explicitly — the class's parameter `T` still comes from the receiver, never the
+// turbofish. It carries where inference would leave `U` open and agrees with it where it would
+// not. Erased at runtime, so both backends run the plain method call.
+// expect: stdout "10"
+// expect: stdout "picked"
+// expect: exit 0
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn choose<U>(other: U, take: bool): U {
+        echo self.value;
+        return other;
+    }
+}
+b = Box.new(10);
+echo b.choose::<string>("picked", false);

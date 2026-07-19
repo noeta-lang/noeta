@@ -1281,6 +1281,11 @@ impl Printer<'_> {
         }
         parts.push(Doc::text("fn "));
         parts.push(Doc::text(m.sig.name.clone()));
+        // A trait method's own `<...>` is rejected by the checker (E0058 — trait method sets stay
+        // monomorphic, poly-deferrals D3), but the formatter must still round-trip it faithfully:
+        // dropping it here would make the formatted source re-parse to a different AST (the fmt
+        // safety gate). Emit it exactly as a free fn / concrete method does.
+        parts.push(self.type_params(&m.sig.type_params)?);
         parts.push(self.params(&m.sig.params)?);
         if let Some(ret) = &m.sig.ret {
             parts.push(Doc::text(": "));
@@ -2178,6 +2183,25 @@ impl Printer<'_> {
                 parts.push(self.arg_list(args, anchor)?);
                 Doc::concat(parts)
             }
+            Expr::TypedMethodCall {
+                recv,
+                name,
+                type_args,
+                args,
+                ..
+            } => {
+                let mut parts = vec![self.receiver(recv)?, Doc::text(format!(".{name}::<"))];
+                for (i, t) in type_args.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(Doc::text(", "));
+                    }
+                    parts.push(self.type_ref(t)?);
+                }
+                parts.push(Doc::text(">"));
+                let anchor = type_args.last().map(|t| t.span().end).unwrap_or(0);
+                parts.push(self.arg_list(args, anchor)?);
+                Doc::concat(parts)
+            }
             Expr::RolesOf { ty: Some(ty), .. } => Doc::concat([
                 Doc::text("roles_of::<"),
                 self.type_ref(ty)?,
@@ -2822,7 +2846,8 @@ fn prec(e: &Expr) -> u8 {
         | Expr::Await { .. }
         | Expr::As { .. }
         | Expr::TypeTest { .. }
-        | Expr::TypedModuleCall { .. } => 14,
+        | Expr::TypedModuleCall { .. }
+        | Expr::TypedMethodCall { .. } => 14,
         // `receiver.field = value` — only ever a binding's RHS; parenthesize if it somehow nests.
         Expr::FieldSet { .. } => 0,
         // Atoms and self-delimiting forms never need parentheses as an operand.
@@ -2866,7 +2891,8 @@ fn head_is_object(e: &Expr) -> bool {
         Expr::Member { receiver, .. }
         | Expr::Index { receiver, .. }
         | Expr::TupleIndex { receiver, .. }
-        | Expr::TypedModuleCall { recv: receiver, .. } => head_is_object(receiver),
+        | Expr::TypedModuleCall { recv: receiver, .. }
+        | Expr::TypedMethodCall { recv: receiver, .. } => head_is_object(receiver),
         Expr::Call { callee, .. } => head_is_object(callee),
         Expr::Try { expr, .. }
         | Expr::Await { expr, .. }

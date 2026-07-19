@@ -1,0 +1,12 @@
+// The member turbofish is arity-checked against the METHOD's OWN parameters (poly-deferrals D3):
+// `choose` declares one (`<U>`), so two explicit type arguments is `E0058` — the class's parameter
+// is never among them.
+// expect: error E0058 at 12:6
+// expect: exit 1
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn choose<U>(other: U, take: bool): U { echo self.value; return other; }
+}
+b = Box.new(1);
+echo b.choose::<int, string>(2, true);

@@ -389,6 +389,15 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 rec!(a);
             }
         }
+        // A generic METHOD's own type parameters never forward (the pinned D3 boundary — method
+        // dispatch has no hidden-slot channel), so a member-call turbofish contributes nothing;
+        // its receiver/arguments recurse like any call's.
+        Expr::TypedMethodCall { recv, args, .. } => {
+            rec!(recv);
+            for a in args {
+                rec!(a);
+            }
+        }
         // A closure body runs within the enclosing generic's scope: forwarded sites inside it are
         // the enclosing function's (its hidden slot is captured like any local).
         Expr::Closure { body, .. } => match body {

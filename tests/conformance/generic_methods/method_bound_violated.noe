@@ -1,0 +1,16 @@
+// A generic METHOD's bound is enforced at the call (poly-deferrals D3): `bigger<U: Comparable>`
+// called with a plain struct that is not `Comparable` is rejected (`E0025`), the method-parameter
+// mirror of a free generic fn's call-site bound check.
+// expect: error E0025 at 16:6
+// expect: exit 1
+struct Plain { v: int }
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn bigger<U: Comparable>(a: U, b: U): bool {
+        echo self.value;
+        return a > b;
+    }
+}
+b = Box.new(1);
+echo b.bigger(Plain { v: 1 }, Plain { v: 2 });

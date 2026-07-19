@@ -1,0 +1,17 @@
+// A bound on a generic METHOD's own type parameter (poly-deferrals D3) rides the same TraitBound
+// machinery a free fn's does: `bigger<U: Comparable>` requires `U` to be ordered. `int` is
+// `Comparable`, so the call type-checks and runs `a > b`. The parameter is erased; both backends
+// run it identically.
+// expect: stdout "1"
+// expect: stdout "true"
+// expect: exit 0
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn bigger<U: Comparable>(a: U, b: U): bool {
+        echo self.value;
+        return a > b;
+    }
+}
+b = Box.new(1);
+echo b.bigger(3, 2);

@@ -297,6 +297,21 @@ impl Checker {
                     self.subsume(&fn_ty, expected, *span);
                     return fn_ty;
                 }
+                // A METHOD call in a checked position absorbs the expectation through its RETURN
+                // (generic methods, D3 — the method twin of the F2c free-fn arm): arm the pending
+                // expectation, keyed by THIS call's span, for `call_user_method` to seed a generic
+                // method's instantiation with; consumed only on an exact span match, and cleared
+                // unconditionally after synthesis so it can never leak into a sibling call.
+                if let Expr::Call { callee, span, .. } = expr
+                    && matches!(callee.as_ref(), Expr::Member { .. })
+                    && !matches!(expected, Type::Unknown | Type::Dyn)
+                {
+                    self.pending_member_ret = Some((*span, expected.clone()));
+                    let actual = self.synth(expr, env);
+                    self.pending_member_ret = None;
+                    self.subsume(&actual, expected, expr.span());
+                    return actual;
+                }
                 let actual = self.synth(expr, env);
                 self.subsume(&actual, expected, expr.span());
                 actual
@@ -1300,6 +1315,52 @@ impl Checker {
                     Expr::Ident { name, .. } => name.clone(),
                     _ => String::new(),
                 };
+                // `recv.func::<T>(args)` where the receiver is NOT an imported native module is a
+                // generic METHOD call (D3): the atom that spells `json.parse::<T>(s)` also captures
+                // a single-type-argument member turbofish on a bare identifier, so `box.pick::<U>(x)`
+                // (a value's instance method) and `Box.make::<U>(x)` (a user type's associated
+                // function) arrive here too. Route them to the one method-call typing path — the
+                // multi-type-argument spelling parses as `Expr::TypedMethodCall` and lands there
+                // directly. Record the span so lowering desugars it to a plain method call rather
+                // than a native `Rvalue::TypedModuleCall`. A bare identifier that is neither a
+                // module, a local binding, nor a user type (a typo'd module) falls through to the
+                // native-call path below and reports there, unchanged.
+                if let Expr::Ident { name, .. } = recv.as_ref()
+                    && !self.imports.modules.contains_key(name)
+                    && (lookup(env, name).is_some() || self.symbols.types.contains(name))
+                {
+                    self.check_type_ref(ty);
+                    let mut arg_types: Vec<Type> = args
+                        .iter()
+                        .map(|a| {
+                            if self.is_deferred_arg(a, env) {
+                                Type::Unknown
+                            } else {
+                                self.synth(a, env)
+                            }
+                        })
+                        .collect();
+                    self.sites.member_method_call_sites.insert(*span);
+                    let ret = self.synth_typed_method_call(
+                        recv,
+                        func,
+                        *func_span,
+                        std::slice::from_ref(ty),
+                        &mut arg_types,
+                        args,
+                        *span,
+                        env,
+                    );
+                    // The deferred-argument safety net, as the `TypedMethodCall` arm does.
+                    for (i, expr) in args.iter().enumerate() {
+                        if self.is_deferred_arg(expr, env)
+                            && matches!(arg_types.get(i), Some(Type::Unknown))
+                        {
+                            self.synth(expr, env);
+                        }
+                    }
+                    return ret;
+                }
                 let module = self
                     .imports
                     .modules
@@ -1414,6 +1475,46 @@ impl Checker {
                 );
                 // The deferred-argument safety net, mirroring `synth_call`: any deferred argument
                 // no branch finalized is synthesized standalone so its body is always checked.
+                for (i, expr) in args.iter().enumerate() {
+                    if self.is_deferred_arg(expr, env)
+                        && matches!(arg_types.get(i), Some(Type::Unknown))
+                    {
+                        self.synth(expr, env);
+                    }
+                }
+                ret
+            }
+            // `recv.m::<U, ...>(args)` — an explicitly instantiated METHOD call (generic methods,
+            // D3). Arguments defer exactly as the free-fn turbofish's do.
+            Expr::TypedMethodCall {
+                recv,
+                name,
+                name_span,
+                type_args,
+                args,
+                span,
+            } => {
+                let mut arg_types: Vec<Type> = args
+                    .iter()
+                    .map(|a| {
+                        if self.is_deferred_arg(a, env) {
+                            Type::Unknown
+                        } else {
+                            self.synth(a, env)
+                        }
+                    })
+                    .collect();
+                let ret = self.synth_typed_method_call(
+                    recv,
+                    name,
+                    *name_span,
+                    type_args,
+                    &mut arg_types,
+                    args,
+                    *span,
+                    env,
+                );
+                // The deferred-argument safety net, as above.
                 for (i, expr) in args.iter().enumerate() {
                     if self.is_deferred_arg(expr, env)
                         && matches!(arg_types.get(i), Some(Type::Unknown))

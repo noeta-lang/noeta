@@ -86,6 +86,71 @@ impl Checker {
         }
     }
 
+    /// Register one METHOD's signature under `(type_name, method)` — the shared worker of the
+    /// struct/class/enum collection arms (they previously triplicated this verbatim). The
+    /// registered signature is erased over BOTH the enclosing type's parameters and the method's
+    /// OWN (generic methods, poly-deferrals D3); the `GenericInfo` composes them — the class's
+    /// parameters first (`class_params` many, seeded positionally by the receiver's type
+    /// arguments), then the method's own (filled by turbofish/arguments/expectation).
+    fn collect_method_sig(
+        &mut self,
+        type_name: &str,
+        m: &FnDecl,
+        type_tps: &HashSet<String>,
+        type_generics: &[(String, Vec<BoundReq>)],
+    ) {
+        self.symbols.method_instance.insert(
+            (type_name.to_string(), m.name.clone()),
+            m.body.iter().any(|s| s.mentions("self")),
+        );
+        let own_generics: Vec<(String, Vec<BoundReq>)> = m
+            .type_params
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    bound_reqs(&p.bounds, &self.imports.extern_types),
+                )
+            })
+            .collect();
+        let mut tps = type_tps.clone();
+        tps.extend(m.type_params.iter().map(|p| p.name.clone()));
+        let raw_params: Vec<Type> = m
+            .params
+            .iter()
+            .map(|p| param_type(p, &self.imports.extern_types))
+            .collect();
+        let raw_ret = async_return(
+            m.ret
+                .as_ref()
+                .map(|t| from_ref_q(t, &self.imports.extern_types))
+                .unwrap_or(Type::Unknown),
+            m.is_async,
+        );
+        let params = raw_params
+            .iter()
+            .cloned()
+            .map(|t| erase_type_params(t, &tps))
+            .collect();
+        let ret = erase_type_params(raw_ret.clone(), &tps);
+        let generic =
+            (!type_generics.is_empty() || !own_generics.is_empty()).then(|| GenericInfo {
+                params: type_generics.iter().cloned().chain(own_generics).collect(),
+                class_params: type_generics.len(),
+                raw_params,
+                raw_ret,
+            });
+        self.symbols.methods.insert(
+            (type_name.to_string(), m.name.clone()),
+            FnSig {
+                params,
+                ret,
+                required: required_params(&m.params),
+                generic,
+            },
+        );
+    }
+
     /// Pass 1: register every top-level declaration so forward references resolve before any
     /// body is checked. Mirrors the compiler's "register types first" pass.
     pub(crate) fn collect(&mut self, program: &Program) {
@@ -174,47 +239,13 @@ impl Checker {
                             )
                         })
                         .collect();
-                    let methods = r
+                    let methods: Vec<&FnDecl> = r
                         .methods
                         .iter()
-                        .chain(r.impls.iter().flat_map(|b| b.methods.iter()));
+                        .chain(r.impls.iter().flat_map(|b| b.methods.iter()))
+                        .collect();
                     for m in methods {
-                        self.symbols.method_instance.insert(
-                            (r.name.clone(), m.name.clone()),
-                            m.body.iter().any(|s| s.mentions("self")),
-                        );
-                        let raw_params: Vec<Type> = m
-                            .params
-                            .iter()
-                            .map(|p| param_type(p, &self.imports.extern_types))
-                            .collect();
-                        let raw_ret = async_return(
-                            m.ret
-                                .as_ref()
-                                .map(|t| from_ref_q(t, &self.imports.extern_types))
-                                .unwrap_or(Type::Unknown),
-                            m.is_async,
-                        );
-                        let params = raw_params
-                            .iter()
-                            .cloned()
-                            .map(|t| erase_type_params(t, &tps))
-                            .collect();
-                        let ret = erase_type_params(raw_ret.clone(), &tps);
-                        let generic = (!struct_generics.is_empty()).then(|| GenericInfo {
-                            params: struct_generics.clone(),
-                            raw_params,
-                            raw_ret,
-                        });
-                        self.symbols.methods.insert(
-                            (r.name.clone(), m.name.clone()),
-                            FnSig {
-                                params,
-                                ret,
-                                required: required_params(&m.params),
-                                generic,
-                            },
-                        );
+                        self.collect_method_sig(&r.name, m, &tps, &struct_generics);
                     }
                 }
                 Stmt::Class(c) => {
@@ -307,47 +338,13 @@ impl Checker {
                         c.name.clone(),
                         c.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
-                    let methods = c
+                    let methods: Vec<&FnDecl> = c
                         .methods
                         .iter()
-                        .chain(c.impls.iter().flat_map(|b| b.methods.iter()));
+                        .chain(c.impls.iter().flat_map(|b| b.methods.iter()))
+                        .collect();
                     for m in methods {
-                        self.symbols.method_instance.insert(
-                            (c.name.clone(), m.name.clone()),
-                            m.body.iter().any(|s| s.mentions("self")),
-                        );
-                        let raw_params: Vec<Type> = m
-                            .params
-                            .iter()
-                            .map(|p| param_type(p, &self.imports.extern_types))
-                            .collect();
-                        let raw_ret = async_return(
-                            m.ret
-                                .as_ref()
-                                .map(|t| from_ref_q(t, &self.imports.extern_types))
-                                .unwrap_or(Type::Unknown),
-                            m.is_async,
-                        );
-                        let params = raw_params
-                            .iter()
-                            .cloned()
-                            .map(|t| erase_type_params(t, &tps))
-                            .collect();
-                        let ret = erase_type_params(raw_ret.clone(), &tps);
-                        let generic = (!class_generics.is_empty()).then(|| GenericInfo {
-                            params: class_generics.clone(),
-                            raw_params,
-                            raw_ret,
-                        });
-                        self.symbols.methods.insert(
-                            (c.name.clone(), m.name.clone()),
-                            FnSig {
-                                params,
-                                ret,
-                                required: required_params(&m.params),
-                                generic,
-                            },
-                        );
+                        self.collect_method_sig(&c.name, m, &tps, &class_generics);
                     }
                 }
                 Stmt::Enum(e) => {
@@ -413,42 +410,7 @@ impl Checker {
                         })
                         .collect();
                     for m in &e.methods {
-                        self.symbols.method_instance.insert(
-                            (e.name.clone(), m.name.clone()),
-                            m.body.iter().any(|s| s.mentions("self")),
-                        );
-                        let raw_params: Vec<Type> = m
-                            .params
-                            .iter()
-                            .map(|p| param_type(p, &self.imports.extern_types))
-                            .collect();
-                        let raw_ret = async_return(
-                            m.ret
-                                .as_ref()
-                                .map(|t| from_ref_q(t, &self.imports.extern_types))
-                                .unwrap_or(Type::Unknown),
-                            m.is_async,
-                        );
-                        let params = raw_params
-                            .iter()
-                            .cloned()
-                            .map(|t| erase_type_params(t, &tps))
-                            .collect();
-                        let ret = erase_type_params(raw_ret.clone(), &tps);
-                        let generic = (!enum_generics.is_empty()).then(|| GenericInfo {
-                            params: enum_generics.clone(),
-                            raw_params,
-                            raw_ret,
-                        });
-                        self.symbols.methods.insert(
-                            (e.name.clone(), m.name.clone()),
-                            FnSig {
-                                params,
-                                ret,
-                                required: required_params(&m.params),
-                                generic,
-                            },
-                        );
+                        self.collect_method_sig(&e.name, m, &tps, &enum_generics);
                     }
                 }
                 Stmt::Fn(f) => {
@@ -489,6 +451,7 @@ impl Checker {
                                 )
                             })
                             .collect(),
+                        class_params: 0,
                         raw_params,
                         raw_ret,
                     });

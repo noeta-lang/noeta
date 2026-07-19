@@ -384,6 +384,16 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             type_args.iter_mut().for_each(|t| q_typeref(t, visit));
             args.iter_mut().for_each(|a| q_expr(a, visit));
         }
+        Expr::TypedMethodCall {
+            recv,
+            type_args,
+            args,
+            ..
+        } => {
+            q_expr(recv, visit);
+            type_args.iter_mut().for_each(|t| q_typeref(t, visit));
+            args.iter_mut().for_each(|a| q_expr(a, visit));
+        }
         Expr::Unary { operand, .. } => q_expr(operand, visit),
         Expr::Binary { lhs, rhs, .. } => {
             q_expr(lhs, visit);

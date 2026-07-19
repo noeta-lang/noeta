@@ -32,9 +32,27 @@ xs: List<int> = empty::<int>()      // T appears only in the return — turbofis
 echo pick::<string>("x", "y", false)
 ```
 
-The expected type at an annotated binding can carry the instantiation too — `r: List<int> = empty()` infers `T = int` from the **return position** (the bidirectional checker seeds `T` from the expectation, and the arguments fill only what it leaves open). Inference does not flow through `?`: `o: Order = load(text)?` still spells `load::<Order>(text)`.
+The expected type at an annotated binding can carry the instantiation too — `r: List<int> = empty()` infers `T = int` from the **return position** (the bidirectional checker seeds `T` from the expectation, and the arguments fill only what it leaves open). Inference flows through `?` and `??` as well: `o: Order = load(text)?` seeds `T = Order` by inverting the `Result` wrapper at the checked `Try`, and `o: Order = load(text) ?? fallback` through the coalesce — no turbofish needed.
 
-Methods have no type parameters of their own — a method is generic over its class's parameters, instantiated by the receiver — so the turbofish surface is free functions (plus the intrinsic forms below).
+## Generic methods
+
+A method may declare **its own** type parameters, instantiated per call — independently of the class's parameters, which the receiver pins. `Box<T>` fixes `T` from the value; a method `pick<U>(...)` adds `U` on top, and both substitutions compose (`Box<int>` with `pick::<string>(...)` binds `T = int`, `U = string`).
+
+```noeta
+class Box<T> {
+    pub value: T
+    fn new(v: T): Box<T> { return Box { value: v } }
+    fn paired<U>(u: U): Pair<T, U> { return Pair { first: self.value, second: u } }
+}
+struct Pair<A, B> { first: A  second: B }
+
+b = Box.new(7)
+p = b.paired::<string>("hi")        // Pair<int, string> — T from b, U from the turbofish
+```
+
+All three instantiation paths a free function has apply, consistent with them: **argument inference** (`b.choose(99, true)` infers `U = int`), the **member turbofish** `recv.m::<U>(args)` (the class's parameter never appears among these — only the method's own, arity-checked E0058), and **expected-type seeding** (`xs: List<int> = b.collect()` seeds a return-only `U` from the annotation). Bounds on a method parameter ride the ordinary trait machinery (`fn bigger<U: Comparable>(...)`; a non-`Comparable` argument is E0025). The parameters are erased like every generic — one compiled method serves every instantiation.
+
+Two boundaries hold statically. A generic method's own parameter does **not** forward into a call-site-typed position (`json.try_parse::<U>` inside a method body is E0058 — method dispatch has no hidden-slot channel; forwarding stays a top-level-generic-fn capability). And a **trait's** required-method set stays monomorphic — a per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter; put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
 
 ## Forwarding `T`
 
@@ -55,7 +73,7 @@ order = load::<Order>("{\"id\": 1}")
 user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation decode
 ```
 
-Generics are erased, so one compiled body serves every instantiation; where a forwarded site needs per-instantiation data at runtime (a decode recipe, an attribute type's name), the instantiating call passes it through a hidden argument — invisible in the surface language. The boundaries, all reported statically: forwarding into a call-site-typed position works in **top-level generic functions** (not methods or nested `fn`s); only the **bare** parameter forwards (`List<T>` in a `::<...>` position is E0058); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
+Generics are erased, so one compiled body serves every instantiation; where a forwarded site needs per-instantiation data at runtime (a decode recipe, an attribute type's name), the instantiating call passes it through a hidden argument — invisible in the surface language. Forwarding works from a **top-level generic function** and from a **nested `fn`** inside one, and a **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`. The boundaries, all reported statically: a **generic method's** own parameter does not forward into a call-site-typed position (E0058 — method dispatch has no hidden-slot channel); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
 
 ## Generic functions as values
 

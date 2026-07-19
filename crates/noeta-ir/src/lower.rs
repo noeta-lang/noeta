@@ -109,6 +109,11 @@ pub struct LoweringSites<'a> {
     /// receiver's type → lowered as [`Rvalue::Field`] then [`Rvalue::Call`] (the field-access-
     /// then-call desugar) instead of [`Rvalue::Method`], so `obj.f(args)` means `(obj.f)(args)`.
     pub field_call_sites: &'a HashSet<Span>,
+    /// Generic-method turbofish spans reached via the `TypedModuleCall` surface (D3): a
+    /// `recv.m::<T>(args)` whose bare-identifier receiver is a value or a user type (not an
+    /// imported native module) → desugared to a plain method call ([`Rvalue::Method`] / the
+    /// associated-call path) instead of a native [`Rvalue::TypedModuleCall`].
+    pub member_method_call_sites: &'a HashSet<Span>,
     /// Bare float-literal spans the checker adapted into an `f32` context (`mut x: f32 = 1.5`,
     /// P-NUM-SYM). Unlike `f64` (bit-identical to `float`), `f32` is a *distinct 32-bit*
     /// representation, so an adapted literal must lower to a narrow [`Const::F32`] rather than the
@@ -173,6 +178,7 @@ impl LoweringSites<'static> {
             handle_sites: HANDLES.get_or_init(HashMap::new),
             bound_handle_sites: SPANS.get_or_init(HashSet::new),
             field_call_sites: SPANS.get_or_init(HashSet::new),
+            member_method_call_sites: SPANS.get_or_init(HashSet::new),
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
             bundle_call_sites: PAIRS.get_or_init(HashMap::new),
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
@@ -209,6 +215,7 @@ macro_rules! lowering_sites {
             handle_sites: &$s.handle_sites,
             bound_handle_sites: &$s.bound_handle_sites,
             field_call_sites: &$s.field_call_sites,
+            member_method_call_sites: &$s.member_method_call_sites,
             f32_literal_sites: &$s.f32_literal_sites,
             bundle_call_sites: &$s.bundle_call_sites,
             namespace_module_sites: &$s.namespace_module_sites,
@@ -1802,6 +1809,33 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            // `recv.m::<U, ...>(args)` (generic methods, D3): the explicit instantiation is a
+            // checker-only fact — the method's own type parameters are erased, and a generic
+            // method never forwards (the pinned D3 boundary, so no hidden slot) — so this lowers
+            // EXACTLY as the plain `recv.m(args)` method call does. Rebuild the equivalent
+            // member-call `Expr` at the same span and reuse the one method-dispatch path (instance
+            // → `Rvalue::Method`, `Type.assoc` → the associated-call lowering), so every
+            // site-keyed dispatch decision is shared by construction.
+            Expr::TypedMethodCall {
+                recv,
+                name,
+                name_span,
+                args,
+                span,
+                ..
+            } => {
+                let desugared = Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        receiver: recv.clone(),
+                        name: name.clone(),
+                        name_span: *name_span,
+                        span: *span,
+                    }),
+                    args: args.clone(),
+                    span: *span,
+                };
+                self.lower_expr(&desugared, out)
+            }
             Expr::Member {
                 receiver,
                 name,
@@ -2167,10 +2201,29 @@ impl Lowerer<'_> {
             Expr::TypedModuleCall {
                 recv,
                 func,
+                func_span,
                 args,
                 span,
                 ..
             } => {
+                // A generic-METHOD turbofish (D3) that shares the `ident.func::<T>(args)` surface —
+                // the checker resolved the receiver to a value or a user type, not a native module —
+                // lowers EXACTLY as the plain `recv.func(args)` method call does (the method's own
+                // type parameter is erased and never forwards). Rebuild the equivalent member call
+                // at the same span and reuse the one method-dispatch path.
+                if self.sites.member_method_call_sites.contains(span) {
+                    let desugared = Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            receiver: recv.clone(),
+                            name: func.clone(),
+                            name_span: *func_span,
+                            span: *span,
+                        }),
+                        args: args.clone(),
+                        span: *span,
+                    };
+                    return self.lower_expr(&desugared, out);
+                }
                 let module = match recv.as_ref() {
                     Expr::Ident { name, .. } => name.clone(),
                     _ => String::new(),

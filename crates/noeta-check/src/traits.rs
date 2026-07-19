@@ -390,6 +390,26 @@ impl Checker {
                     ),
                 );
             }
+            // A trait's REQUIRED-method set stays monomorphic (the pinned D3 boundary): a
+            // per-method `<...>` on a trait method has no coherent instantiation site — the trait
+            // is dispatched dynamically and each `impl` would have to agree on the method's own
+            // parameters — so it is rejected here (E0058), not silently erased. Generic methods
+            // live on concrete types (`class`/`struct`/`enum`), where the receiver pins the class's
+            // parameters and the call pins the method's own.
+            if !m.sig.type_params.is_empty() {
+                self.error(
+                    DiagnosticCode::InvalidTypeArguments,
+                    m.sig.name_span,
+                    format!(
+                        "trait method `{}::{}` cannot declare its own type parameters",
+                        decl.name, m.sig.name
+                    ),
+                )
+                .help(
+                    "a trait's method set stays monomorphic; put a generic method on a concrete \
+                     type, or make the whole trait generic (`trait T<U> { ... }`)",
+                );
+            }
         }
     }
 

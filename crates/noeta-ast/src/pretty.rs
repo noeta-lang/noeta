@@ -1031,6 +1031,27 @@ impl Pretty for Expr {
                 }
                 out.push(')');
             }
+            Expr::TypedMethodCall {
+                recv,
+                name,
+                type_args,
+                args,
+                span: s,
+                ..
+            } => {
+                let tys: Vec<String> = type_args.iter().map(type_ref_str).collect();
+                out.push_str(&format!(
+                    "(typed-method-call {name} <{}> {}\n",
+                    tys.join(", "),
+                    span(*s)
+                ));
+                recv.pretty(out, level + 1);
+                for arg in args {
+                    out.push('\n');
+                    arg.pretty(out, level + 1);
+                }
+                out.push(')');
+            }
             Expr::FieldSet {
                 receiver,
                 field,

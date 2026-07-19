@@ -1046,6 +1046,14 @@ struct Checker {
     /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
     /// the destructor check for a value whose type can run no destructor.
     relevance: DestructorRelevance,
+    /// The pending RETURN-position expectation for the METHOD call currently being synthesized
+    /// (generic methods, D3): `(the call's span, the expected type)`, armed by check-mode's
+    /// default arm just before it synthesizes a `Call`-with-`Member`-callee and consumed by
+    /// [`Checker::call_user_method`] on an exact span match — so `u: User = box.pick(text)` seeds
+    /// the method's own type parameters from the annotation, the method twin of the free-fn F2c
+    /// arm. Cleared unconditionally after the synthesis returns; sub-expression calls have
+    /// different spans, so it can never mis-seed a nested call.
+    pending_member_ret: Option<(Span, Type)>,
     diags: Vec<Diagnostic>,
 }
 
