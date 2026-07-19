@@ -1,10 +1,11 @@
-// A default value is evaluated in a globals-only scope, so it may reference a module-level binding.
-// Omitting the argument runs the default and reads the global `DEFAULT`.
+// A default value is evaluated in the fn's SEALED definition scope: it may reference a
+// module-level binding through the `use (…)` capture clause, exactly like the body. Omitting the
+// argument runs the default and reads the captured global `DEFAULT`.
 // expect: stdout "42"
 // expect: stdout "7"
 // expect: exit 0
 DEFAULT = 42;
-fn get(x: int = DEFAULT): int {
+fn get(x: int = DEFAULT) use (DEFAULT): int {
     return x;
 }
 echo get();

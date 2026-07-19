@@ -64,7 +64,7 @@ echo greet("Ada", "Hi")   // Hi, Ada!
 ```
 
 > [!NOTE]
-> A default is evaluated in **globals-only scope**. It may read module-level bindings but *not* other arguments, `self`, or fields — naming another parameter resolves to nothing at runtime (E0005). A default widens the accepted arity to a range.
+> A default is evaluated in the function's **sealed definition scope**: it sees statics and the fn's `use (…)` captures — exactly like the body — but *not* other arguments, `self`, or fields (naming another parameter is E0005). A default that reads a module-level binding therefore needs the binding in the capture clause: `fn f(x: int, step: int = base) use (base)`. A default widens the accepted arity to a range.
 
 ## Multiple return via tuples
 

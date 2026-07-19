@@ -2006,12 +2006,6 @@ impl Checker {
             self.check_type_opt(&p.ty);
         }
         self.check_type_opt(&decl.ret);
-        // Validate parameter defaults: trailing-only (`E0026`) and each default's type against its
-        // parameter (`E0007`). Checked here, before the parameter frame is pushed, so a default is
-        // evaluated against the definition scope — for a named function/method that is globals only
-        // (mirroring how both backends evaluate it). `self.coloring.type_params` already includes this
-        // function's own.
-        self.validate_param_defaults(&decl.params, env);
         // The body's `return`s are checked against the declared return type; `Unknown` when
         // unannotated (already an `E0022`), so the check stays a no-op there. Saved/restored so a
         // nested function does not clobber the enclosing one's expectation.
@@ -2099,6 +2093,12 @@ impl Checker {
         // From here on the body checks against the sealed env only.
         let env = &mut sealed;
         let saved_sealed = std::mem::replace(&mut self.coloring.in_sealed_body, true);
+        // Validate parameter defaults: trailing-only (`E0026`) and each default's type against its
+        // parameter (`E0007`). Checked against the SEALED env before the parameter frame is pushed
+        // — a default sees statics and this fn's `use (…)` captures, exactly like the body, and
+        // never other parameters. (Runtime agrees: both backends evaluate an omitted argument's
+        // default thunk in the definition scope.)
+        self.validate_param_defaults(&decl.params, env);
         env.push(HashMap::new());
         for (name, ty) in extra {
             bind(env, name, ty.clone());
