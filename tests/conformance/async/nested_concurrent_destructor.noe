@@ -1,0 +1,42 @@
+// Track A.7 — destructor ordering under nesting. `outer` (spawned in the top scope) holds a `Res` and
+// opens an inner `concurrent` spawning two `inner` tasks, each holding their own `Res`. The inner tasks'
+// captured `Res` destructors fire once each at the INNER scope close (drop inner1, drop inner2), before
+// `outer` continues past its `concurrent`. `outer`'s own `Res` outlives its body (captured in its future)
+// and drops at teardown, after the program's observable output. The suspension-point join must not change
+// destructor timing (the inner scope closes by its captured index and reclaims its tasks' futures exactly
+// as a synchronous join did). No double-run, no leak — residency 0. Both backends agree.
+// expect: stdout "use inner1"
+// expect: stdout "use inner2"
+// expect: stdout "drop inner1"
+// expect: stdout "drop inner2"
+// expect: stdout "use outer"
+// expect: stdout "sum=3"
+// expect: stdout "drop outer"
+// expect: exit 0
+use std.task.{sleep}
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${self.tag}" }
+}
+async fn inner(n: int): int {
+    r = Res.new("inner${n}")
+    sleep(1).await
+    echo "use ${r.tag}"
+    return n
+}
+async fn outer(): int {
+    r = Res.new("outer")
+    mut s = 0
+    concurrent {
+        a = spawn inner(1)
+        b = spawn inner(2)
+        s = a.await + b.await
+    }
+    echo "use ${r.tag}"
+    return s
+}
+concurrent {
+    h = spawn outer()
+    echo "sum=" ~ h.await
+}

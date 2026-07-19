@@ -1,0 +1,39 @@
+// Track A.7 — a `concurrent { }` inside a spawned task's body is a genuine suspension point, so two
+// sibling tasks that each open their own inner `concurrent` INTERLEAVE rather than one running to
+// completion before the other starts. `group("A")` and `group("B")` are outer siblings; each spawns two
+// 2ms leaves in its own inner scope. Because the inner join yields out of the task's poll (instead of
+// driving the inner scope to completion in place), all four leaves start before any ends — impossible
+// under the old atomic drive, which would print A1/A2 start+end fully before B even began. The two inner
+// scopes are open simultaneously (out of structured-stack order), exercising the stable-index tombstone
+// scope model. Deterministic under the sandbox clock; both backends agree.
+// expect: stdout "A1 start"
+// expect: stdout "A2 start"
+// expect: stdout "B1 start"
+// expect: stdout "B2 start"
+// expect: stdout "A1 end"
+// expect: stdout "A2 end"
+// expect: stdout "B1 end"
+// expect: stdout "B2 end"
+// expect: stdout "total=8"
+// expect: exit 0
+use std.task.{sleep}
+async fn leaf(name: string, ms: int): int {
+    echo name ~ " start"
+    sleep(ms).await
+    echo name ~ " end"
+    return ms
+}
+async fn group(tag: string): int {
+    mut s = 0
+    concurrent {
+        x = spawn leaf(tag ~ "1", 2)
+        y = spawn leaf(tag ~ "2", 2)
+        s = x.await + y.await
+    }
+    return s
+}
+concurrent {
+    a = spawn group("A")
+    b = spawn group("B")
+    echo "total=" ~ (a.await + b.await)
+}

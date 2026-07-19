@@ -591,6 +591,9 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::PollFuture { future, .. } => f(future),
         Rvalue::Pending { .. } => {}
         Rvalue::Spawn { future, .. } => f(future),
+        // `$scope_begin()` reads nothing; `$scope_ready(scope)` reads its scope-index operand (A.7).
+        Rvalue::ScopeBegin { .. } => {}
+        Rvalue::ScopeReady { scope, .. } | Rvalue::ScopeEndAt { scope, .. } => f(scope),
         Rvalue::SpawnIsolate { callee, args, .. } => {
             f(callee);
             args.iter().for_each(f);

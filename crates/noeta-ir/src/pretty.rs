@@ -388,6 +388,9 @@ impl Printer<'_> {
             Rvalue::PollFuture { future, .. } => format!("poll_future({})", atom(future)),
             Rvalue::Pending { .. } => "pending".to_string(),
             Rvalue::Spawn { future, .. } => format!("spawn({})", atom(future)),
+            Rvalue::ScopeBegin { .. } => "scope_begin()".to_string(),
+            Rvalue::ScopeReady { scope, .. } => format!("scope_ready({})", atom(scope)),
+            Rvalue::ScopeEndAt { scope, .. } => format!("scope_end({})", atom(scope)),
             Rvalue::SpawnIsolate { callee, args, .. } => {
                 let args = args.iter().map(atom).collect::<Vec<_>>().join(", ");
                 format!("isolate({}, [{args}])", atom(callee))

@@ -37,7 +37,10 @@ use crate::{
 };
 
 mod state_machine;
-use state_machine::{PENDING_IDENT, POLL_FN, SuspendMode, body_has_yield, desugar_state_machine};
+use state_machine::{
+    PENDING_IDENT, POLL_FN, SCOPE_BEGIN_FN, SCOPE_END_FN, SCOPE_READY_FN, SuspendMode,
+    body_has_yield, desugar_state_machine,
+};
 
 /// A construct the lowering does not yet handle. Carried back so the caller can skip the
 /// program (the transitional differential's "outside the IR subset" bucket), mirroring the
@@ -1377,6 +1380,37 @@ impl Lowerer<'_> {
                         },
                         *span,
                     ));
+                }
+                // The A.7 nested-`concurrent` desugar's scope primitives (synthetic `$`-names the async
+                // state machine emits when it splits a `concurrent { }` block — see `state_machine.rs`).
+                // `$scope_begin()` opens a scope and yields its index; `$scope_ready(idx)` is the join
+                // poll-state's readiness test; `$scope_end()` closes the drained scope (`Stmt::ScopeEnd`,
+                // whose join is a no-op here since the poll-states already drained it, then pops).
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if name == SCOPE_BEGIN_FN && args.is_empty() {
+                        return Ok(self.emit(out, Rvalue::ScopeBegin { span: *span }, *span));
+                    }
+                    if name == SCOPE_READY_FN
+                        && let [arg] = args.as_slice()
+                    {
+                        let scope = self.lower_expr(arg, out)?;
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::ScopeReady { scope, span: *span },
+                            *span,
+                        ));
+                    }
+                    if name == SCOPE_END_FN
+                        && let [arg] = args.as_slice()
+                    {
+                        let scope = self.lower_expr(arg, out)?;
+                        // Effect-only (closes the scope); no value binding — `Stmt::Eval`, not a `let`.
+                        out.push(Stmt::Eval {
+                            rvalue: Rvalue::ScopeEndAt { scope, span: *span },
+                            span: *span,
+                        });
+                        return Ok(Atom::Const(Const::Unit));
+                    }
                 }
                 // A call whose callee is a member access is a method call; otherwise an
                 // ordinary call. Evaluation order matches the tree-walker's `eval_call`:

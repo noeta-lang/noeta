@@ -91,6 +91,10 @@ concurrent {
 | `race(list)` | Returns the first result; losers are cancelled cooperatively. |
 | `map_bounded(items, n, f)` | Applies async `f` to each item with at most `n` in flight; results in item order. |
 
+### Nested `concurrent` interleaves
+
+A `concurrent { … }` block opened **inside a spawned task's own body** is a genuine suspension point, not an atomic step: its join yields out of the task's poll while the inner scope's tasks are still pending, so those inner tasks interleave with the outer scope's siblings across scheduler rounds (rather than the inner scope being driven to completion inside one poll of the outer task). Two sibling tasks that each open their own `concurrent` therefore run interleaved, not one-after-the-other. Scopes close by identity, so a nested block can finish while a sibling's block is still open — structured guarantees (a block joins all its tasks before it returns) hold regardless of interleaving. Under the sandbox clock the interleaving is deterministic and both backends agree.
+
 ## Isolates and `Send`
 
 An **isolate** is a shared-nothing unit of execution — its own heap, communicating only by message. `isolate f(args)` runs `f` on a fresh isolate with real parallelism.

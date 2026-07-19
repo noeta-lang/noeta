@@ -1,0 +1,46 @@
+// Track A.7 — three levels of nested `concurrent` (a spine): `lvl1` spawns `lvl2`, whose inner
+// `concurrent` spawns `lvl3`, whose inner `concurrent`... each an async fn whose body opens its own
+// `concurrent` and awaits a single child. Every level's join is a genuine suspension point, and the
+// scopes nest strictly (a deeper scope is opened by a task inside the shallower one, and closes before
+// its parent's join completes), so the stable-index scope stack reclaims them LIFO. The clock advances
+// once (the single 1ms sleep at the bottom), then each level resumes and completes in order. Result
+// 3 + 20 + 100 = 123. Both backends agree.
+// expect: stdout "l1 start"
+// expect: stdout "l2 start"
+// expect: stdout "l3 start"
+// expect: stdout "l3 end"
+// expect: stdout "l2 end"
+// expect: stdout "l1 end"
+// expect: stdout "top=123"
+// expect: exit 0
+use std.task.{sleep}
+async fn lvl3(): int {
+    echo "l3 start"
+    sleep(1).await
+    echo "l3 end"
+    return 3
+}
+async fn lvl2(): int {
+    echo "l2 start"
+    mut v = 0
+    concurrent {
+        c = spawn lvl3()
+        v = c.await
+    }
+    echo "l2 end"
+    return v + 20
+}
+async fn lvl1(): int {
+    echo "l1 start"
+    mut v = 0
+    concurrent {
+        b = spawn lvl2()
+        v = b.await
+    }
+    echo "l1 end"
+    return v + 100
+}
+concurrent {
+    a = spawn lvl1()
+    echo "top=" ~ a.await
+}
