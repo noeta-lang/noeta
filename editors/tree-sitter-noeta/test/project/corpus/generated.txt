@@ -1,0 +1,79 @@
+==================
+Generated overlay: a declared custom tier IS a verbatim body
+==================
+
+@spec {
+  <case name="x"/>
+}
+fn run(): void {}
+
+---
+
+(source_file
+  (text_tier_block
+    name: (identifier)
+    body: (text_block
+      (text_body)))
+  (function_declaration
+    name: (identifier)
+    parameters: (parameters)
+    return_type: (primitive_type)
+    body: (block)))
+
+==================
+Generated overlay: a second custom tier is verbatim too
+==================
+
+@query {
+  select * from t
+}
+
+---
+
+(source_file
+  (text_tier_block
+    name: (identifier)
+    body: (text_block
+      (text_body))))
+
+==================
+Generated overlay: the std `doc` tier still parses verbatim
+==================
+
+@doc {
+  # Title
+  balanced {snippet} prose
+}
+
+---
+
+(source_file
+  (text_tier_block
+    name: (identifier)
+    body: (text_block
+      (text_body))))
+
+==================
+Generated overlay: an undeclared tier still parses as a code decorator
+==================
+
+@test {
+  fn t(): void { assert(true) }
+}
+
+---
+
+(source_file
+  (decorator
+    name: (identifier)
+    (block
+      (function_declaration
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (primitive_type)
+        body: (block
+          (expression_statement
+            (call_expression
+              function: (identifier)
+              arguments: (arguments
+                (boolean_literal)))))))))

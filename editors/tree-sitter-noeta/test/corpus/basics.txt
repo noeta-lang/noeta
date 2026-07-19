@@ -179,6 +179,23 @@ A code tier block still parses as code
                 (boolean_literal)))))))))
 
 ==================
+Static fallback: an undeclared custom tier is NOT verbatim
+==================
+
+@spec {
+  hello
+}
+
+---
+
+(source_file
+  (decorator
+    name: (identifier)
+    (block
+      (expression_statement
+        (identifier)))))
+
+==================
 Leading shebang line
 ==================
 

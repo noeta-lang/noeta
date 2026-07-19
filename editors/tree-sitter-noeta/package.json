@@ -21,7 +21,9 @@
   ],
   "scripts": {
     "generate": "tree-sitter generate",
-    "test": "tree-sitter test"
+    "test": "tree-sitter test && npm run test:project",
+    "test:static": "tree-sitter test",
+    "test:project": "node test/project/run.js"
   },
   "devDependencies": {
     "tree-sitter-cli": "^0.26.0"
@@ -39,5 +41,8 @@
         "queries/injections.scm"
       ]
     }
-  ]
+  ],
+  "allowScripts": {
+    "tree-sitter-cli@0.26.10": true
+  }
 }
