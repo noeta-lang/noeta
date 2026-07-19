@@ -299,8 +299,16 @@ impl Pretty for FnDecl {
             .iter()
             .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
             .collect();
+        // The `use (…)` capture clause is part of the sealed fn's identity: dropping it would
+        // strip the body's access to its captured bindings, so the safety gate must see it.
+        let captures = if self.captures.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<&str> = self.captures.iter().map(|(n, _)| n.as_str()).collect();
+            format!(" use ({})", names.join(", "))
+        };
         out.push_str(&format!(
-            "({tier}{directives}{attrs}{}fn {}{}{} [{}] {}",
+            "({tier}{directives}{attrs}{}fn {}{}{}{captures} [{}] {}",
             if self.is_async { "async " } else { "" },
             pub_str(self.is_public),
             self.name,
