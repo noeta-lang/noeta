@@ -381,13 +381,16 @@ fn enforce_transparency(
         };
         // `None` license: the lock doesn't carry one, so only the coordinates are checked — the
         // record's license field is still authenticated by inclusion, just not cross-checked here.
+        let version = pkg.version.to_string();
         index.verify_inclusion_at(
-            &pkg.identity,
-            &pkg.version.to_string(),
-            url,
-            tag,
-            sha,
-            None,
+            &crate::registry::ReleaseCoords {
+                name: &pkg.identity,
+                version: &version,
+                url,
+                tag,
+                sha,
+                license: None,
+            },
             &cp,
         )?;
     }

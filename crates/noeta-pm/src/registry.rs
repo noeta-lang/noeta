@@ -881,23 +881,33 @@ pub struct VerifiedLog {
     pub public_key: String,
 }
 
+/// The coordinates identifying one logged release for transparency-log verification
+/// (namespace-protection #1): identity, version, and the git coordinates the registry resolved it
+/// to, plus the optional license claim to cross-check (`None` skips the license check — e.g.
+/// lockfile-driven verification, where the lock carries no license).
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+#[derive(Debug)]
+pub struct ReleaseCoords<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub url: &'a str,
+    pub tag: &'a str,
+    pub sha: &'a str,
+    pub license: Option<&'a str>,
+}
+
 #[cfg(all(feature = "registry-http", feature = "provenance"))]
 impl HttpIndex {
     /// Verify a resolved release is **included** in the transparency log at a **signed** checkpoint
     /// (namespace-protection #1). `pinned_key` is the log public key the caller already trusts; `None`
-    /// adopts the served key (trust-on-first-use). The release is identified by its coordinates
-    /// (`name`/`version`/`url`/`tag`/`sha`), which must match the logged record. Returns the verified
+    /// adopts the served key (trust-on-first-use). The release is identified by its [`ReleaseCoords`],
+    /// which must match the logged record. Returns the verified
     /// checkpoint to pin. This proves, without trusting the registry, that the release we're about to
     /// use is publicly logged under a key the log operator controls — a compromised registry can't
     /// quietly serve an unlogged forgery.
     pub fn verify_release_logged(
         &self,
-        name: &str,
-        version: &str,
-        url: &str,
-        tag: &str,
-        sha: &str,
-        license: Option<&str>,
+        coords: &ReleaseCoords<'_>,
         pinned_key: Option<&str>,
     ) -> Result<VerifiedLog, PmError> {
         use crate::transparency;
@@ -915,7 +925,7 @@ impl HttpIndex {
                     .to_string(),
             ));
         }
-        self.verify_inclusion_at(name, version, url, tag, sha, license, &cp)?;
+        self.verify_inclusion_at(coords, &cp)?;
         Ok(VerifiedLog {
             tree_size: cp.tree_size,
             root_hex: cp.root_hash,
@@ -930,15 +940,18 @@ impl HttpIndex {
     /// then checks every release against it).
     pub fn verify_inclusion_at(
         &self,
-        name: &str,
-        version: &str,
-        url: &str,
-        tag: &str,
-        sha: &str,
-        license: Option<&str>,
+        coords: &ReleaseCoords<'_>,
         cp: &LogCheckpoint,
     ) -> Result<(), PmError> {
         use crate::transparency;
+        let &ReleaseCoords {
+            name,
+            version,
+            url,
+            tag,
+            sha,
+            license,
+        } = coords;
         let incl = self.log_inclusion(name, version)?.ok_or_else(|| {
             PmError::Trust(format!("`{name}`@{version} is not in the transparency log"))
         })?;
@@ -2284,26 +2297,48 @@ mod http_tests {
 
         // First use (no pinned key) adopts the served key and verifies the whole chain.
         let verified = index
-            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", Some("MIT"), None)
+            .verify_release_logged(
+                &ReleaseCoords {
+                    name: "acme/imgfx",
+                    version: "1.0.0",
+                    url: "u",
+                    tag: "t",
+                    sha: "abc",
+                    license: Some("MIT"),
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(verified.tree_size, 1);
         assert_eq!(verified.public_key, pub_hex);
         assert_eq!(verified.root_hex, root_hex);
         // A caller that doesn't know the license (lockfile-driven verification) skips that check.
         index
-            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", None, None)
+            .verify_release_logged(
+                &ReleaseCoords {
+                    name: "acme/imgfx",
+                    version: "1.0.0",
+                    url: "u",
+                    tag: "t",
+                    sha: "abc",
+                    license: None,
+                },
+                None,
+            )
             .unwrap();
 
         // The record binds the license: an index serving a *different* license than it logged is
         // caught as equivocation.
         let err = index
             .verify_release_logged(
-                "acme/imgfx",
-                "1.0.0",
-                "u",
-                "t",
-                "abc",
-                Some("GPL-3.0-only"),
+                &ReleaseCoords {
+                    name: "acme/imgfx",
+                    version: "1.0.0",
+                    url: "u",
+                    tag: "t",
+                    sha: "abc",
+                    license: Some("GPL-3.0-only"),
+                },
                 None,
             )
             .unwrap_err();
@@ -2312,12 +2347,14 @@ mod http_tests {
         // A wrong pinned log key is rejected — the checkpoint signature won't verify against it.
         let err = index
             .verify_release_logged(
-                "acme/imgfx",
-                "1.0.0",
-                "u",
-                "t",
-                "abc",
-                Some("MIT"),
+                &ReleaseCoords {
+                    name: "acme/imgfx",
+                    version: "1.0.0",
+                    url: "u",
+                    tag: "t",
+                    sha: "abc",
+                    license: Some("MIT"),
+                },
                 Some(&"00".repeat(32)),
             )
             .unwrap_err();
@@ -2647,7 +2684,17 @@ mod wire_fixture_tests {
         });
         let index = HttpIndex::new(base).unwrap();
         let verified = index
-            .verify_release_logged(NAME, "1.2.0", URL, "v1.2.0", SHA_120, Some(LICENSE), None)
+            .verify_release_logged(
+                &ReleaseCoords {
+                    name: NAME,
+                    version: "1.2.0",
+                    url: URL,
+                    tag: "v1.2.0",
+                    sha: SHA_120,
+                    license: Some(LICENSE),
+                },
+                None,
+            )
             .unwrap();
         let cp = fixture_value("log-checkpoint-response.json");
         assert_eq!(verified.tree_size, cp["tree_size"].as_u64().unwrap());
@@ -2662,12 +2709,14 @@ mod wire_fixture_tests {
         // The record binds the license: claiming a different one is caught as equivocation.
         let err = index
             .verify_release_logged(
-                NAME,
-                "1.2.0",
-                URL,
-                "v1.2.0",
-                SHA_120,
-                Some("GPL-3.0-only"),
+                &ReleaseCoords {
+                    name: NAME,
+                    version: "1.2.0",
+                    url: URL,
+                    tag: "v1.2.0",
+                    sha: SHA_120,
+                    license: Some("GPL-3.0-only"),
+                },
                 None,
             )
             .unwrap_err();

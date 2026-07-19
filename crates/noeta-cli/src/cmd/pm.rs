@@ -856,14 +856,17 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
             let noeta_pm::manifest::GitRef::Tag(tag) = git_ref else {
                 continue;
             };
+            let version = pkg.version.to_string();
             match index.verify_release_logged(
-                &pkg.identity,
-                &pkg.version.to_string(),
-                url,
-                tag,
-                sha,
-                // Resolved deps don't carry a license claim to cross-check — coordinates only.
-                None,
+                &noeta_pm::registry::ReleaseCoords {
+                    name: &pkg.identity,
+                    version: &version,
+                    url,
+                    tag,
+                    sha,
+                    // Resolved deps don't carry a license claim to cross-check — coordinates only.
+                    license: None,
+                },
                 pinned.as_deref(),
             ) {
                 Ok(v) => {
