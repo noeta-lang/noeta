@@ -129,61 +129,94 @@ impl Checker {
             // from the expectation via the same structural binding a call's arguments use, seeded
             // first-wins into the shared generic-call machinery — so the arguments can only fill
             // what the return leaves open. This is what lets a forwarding generic infer its
-            // instantiation from an annotated binding without a turbofish. (Inference does NOT
-            // flow through `?` — `o: Order = load(text)?` still spells `load::<Order>` — the
-            // expectation would have to invert the `Result` wrapper, which check-mode `?` does not
-            // model; documented as turbofish-required.)
-            Expr::Call { callee, args, span }
-                if !matches!(expected, Type::Unknown | Type::Dyn)
-                    && matches!(callee.as_ref(), Expr::Ident { name, .. }
-                        if lookup(env, name).is_none()
-                            && self
-                                .symbols
-                                .functions
-                                .get(name)
-                                .is_some_and(|sig| sig.generic.is_some())) =>
+            // instantiation from an annotated binding without a turbofish.
+            Expr::Call {
+                callee: _,
+                args,
+                span,
+            } if !matches!(expected, Type::Unknown | Type::Dyn)
+                && self.seedable_generic_call(expr, env).is_some() =>
             {
-                let Expr::Ident {
-                    name,
-                    span: callee_span,
-                } = callee.as_ref()
-                else {
-                    unreachable!("guarded by the arm pattern")
-                };
-                let sig = self.symbols.functions.get(name).cloned().expect("guarded");
-                let generic = sig.generic.clone().expect("guarded");
+                let (name, callee_span, generic) =
+                    self.seedable_generic_call(expr, env).expect("guarded");
+                let required = self.symbols.functions[&name].required;
                 let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
                 let mut seed: HashMap<String, Type> = HashMap::new();
                 bind_type_params(&generic.raw_ret, expected, &tps, &mut seed);
-                let mut arg_types: Vec<Type> = args
-                    .iter()
-                    .map(|a| {
-                        if self.is_deferred_arg(a, env) {
-                            Type::Unknown
-                        } else {
-                            self.synth(a, env)
-                        }
-                    })
-                    .collect();
-                let actual = self.check_generic_call_seeded(
-                    name,
+                let actual = self.check_seeded_generic_call(
+                    &name,
                     &generic,
-                    sig.required,
-                    &mut arg_types,
+                    required,
                     args,
-                    *callee_span,
+                    callee_span,
+                    *span,
                     seed,
-                    Some(*span),
                     env,
                 );
-                // The deferred-argument safety net, mirroring `synth_call`.
-                for (i, arg) in args.iter().enumerate() {
-                    if self.is_deferred_arg(arg, env)
-                        && matches!(arg_types.get(i), Some(Type::Unknown))
-                    {
-                        self.synth(arg, env);
-                    }
+                self.subsume(&actual, expected, expr.span());
+                actual
+            }
+            // Return-position inference THROUGH `?` (poly-deferrals D1): the expected type of the
+            // `?` EXPRESSION is the success-arm payload, and the callee's declared return names the
+            // wrapper (`Result<T, E>` / `?T`) — so `o: Order = load(text)?` seeds `T = Order` by
+            // binding the declaration's success arm against the expectation. The error arm still
+            // resolves from the declaration (its `From`-conversion check at `?` runs unchanged via
+            // the shared unwrap below), so E0057/`try_conversion_sites` behave exactly as in
+            // synthesis position.
+            Expr::Try { expr: inner, span }
+                if !matches!(expected, Type::Unknown | Type::Dyn)
+                    && self.seedable_generic_call(inner, env).is_some() =>
+            {
+                let (name, callee_span, generic) =
+                    self.seedable_generic_call(inner, env).expect("guarded");
+                let Expr::Call {
+                    args,
+                    span: call_span,
+                    ..
+                } = inner.as_ref()
+                else {
+                    unreachable!("seedable_generic_call matches plain calls only")
+                };
+                let required = self.symbols.functions[&name].required;
+                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+                let mut seed: HashMap<String, Type> = HashMap::new();
+                // Bind the declared SUCCESS arm against the expectation; a declared return that is
+                // not a `Result`/`Option` leaves the seed empty (the unwrap below then reports the
+                // ordinary `?`-misuse, exactly as synthesis position would).
+                match &generic.raw_ret {
+                    Type::Result(ok, _) => bind_type_params(ok, expected, &tps, &mut seed),
+                    Type::Option(some) => bind_type_params(some, expected, &tps, &mut seed),
+                    _ => {}
                 }
+                let wrapped = self.check_seeded_generic_call(
+                    &name,
+                    &generic,
+                    required,
+                    args,
+                    callee_span,
+                    *call_span,
+                    seed,
+                    env,
+                );
+                let actual = self.try_unwrap(&wrapped, *span);
+                self.subsume(&actual, expected, expr.span());
+                actual
+            }
+            // The same success-arm seeding in `??` fallback position (poly-deferrals D1):
+            // `o: Order = load(text) ?? default` — the expectation reaches the call through the
+            // coalesce's payload, and the fallback must satisfy the same expectation.
+            Expr::Coalesce {
+                value, fallback, ..
+            } if !matches!(expected, Type::Unknown | Type::Dyn)
+                && self.seedable_generic_call(value, env).is_some() =>
+            {
+                let wrapped = self.check_coalesce_seeded(value, expected, env);
+                self.check(fallback, expected, env);
+                let actual = match wrapped {
+                    Type::Result(ok, _) => *ok,
+                    Type::Option(some) => *some,
+                    _ => Type::Unknown,
+                };
                 self.subsume(&actual, expected, expr.span());
                 actual
             }
@@ -932,29 +965,7 @@ impl Checker {
             }
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
-                match &inner {
-                    Type::Result(ok, err) => {
-                        // The error-position rule (error-ergonomics): a mismatched `Err` type
-                        // either converts through the target's `impl From<Source>` (site recorded
-                        // for lowering) or is E0057.
-                        let err = (**err).clone();
-                        self.check_try_error(&err, *span);
-                        (**ok).clone()
-                    }
-                    Type::Option(some) => (**some).clone(),
-                    // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
-                    // diagnostic, yielding the same deferred type.
-                    t if t.defers_to_runtime() => t.clone(),
-                    other => {
-                        self.error(
-                            DiagnosticCode::InvalidTry,
-                            *span,
-                            format!("`?` expects a `Result` or `Option`, found `{other}`"),
-                        )
-                        .help("`?` only propagates `Result`/`Option`; this value is neither");
-                        Type::Unknown
-                    }
-                }
+                self.try_unwrap(&inner, *span)
             }
             Expr::Await { expr, span } => {
                 let inner = self.synth(expr, env);
@@ -1041,6 +1052,21 @@ impl Checker {
             Expr::Coalesce {
                 value, fallback, ..
             } => {
+                // A generic-call value seeds its instantiation from the FALLBACK's type
+                // (poly-deferrals D1): `o = load(text) ?? default` — with no annotation, the only
+                // expectation in sight is the fallback, so it is synthesized first and its type
+                // bound against the callee's declared success arm. A deferring fallback leaves the
+                // seed empty (bind_type_params never binds from `dyn`/holes), reducing to the
+                // pre-existing behavior.
+                if self.seedable_generic_call(value, env).is_some() {
+                    let fb = self.synth(fallback, env);
+                    let wrapped = self.check_coalesce_seeded(value, &fb, env);
+                    return match wrapped {
+                        Type::Result(ok, _) => *ok,
+                        Type::Option(some) => *some,
+                        _ => Type::Unknown,
+                    };
+                }
                 let v = self.synth(value, env);
                 self.synth(fallback, env);
                 match v {

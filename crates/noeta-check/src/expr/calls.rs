@@ -189,6 +189,146 @@ impl Checker {
         })
     }
 
+    /// If `expr` is a plain call of an unshadowed **generic user function** (`load(text)` — an
+    /// `Ident` callee with a collected `GenericInfo`), the trio a return-position seeding arm
+    /// needs: the callee's name, its span, and its un-erased generic signature. The shared guard
+    /// of the check-mode `Call`/`Try`/`??` seeding arms (F2c + poly-deferrals D1), so the three
+    /// positions cannot drift on what counts as seedable.
+    pub(crate) fn seedable_generic_call(
+        &self,
+        expr: &Expr,
+        env: &Env,
+    ) -> Option<(String, Span, GenericInfo)> {
+        let Expr::Call { callee, .. } = expr else {
+            return None;
+        };
+        let Expr::Ident { name, span } = callee.as_ref() else {
+            return None;
+        };
+        if lookup(env, name).is_some() {
+            return None;
+        }
+        let generic = self.symbols.functions.get(name)?.generic.clone()?;
+        Some((name.clone(), *span, generic))
+    }
+
+    /// The seeded-call worker behind the check-mode seeding arms: defer the deferrable arguments,
+    /// run the shared seeded generic-call machinery (hidden forwarding slots keyed on
+    /// `call_span`), and finish with the deferred-argument safety net `synth_call` applies — so a
+    /// seeded position types its arguments exactly like a synthesized call.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn check_seeded_generic_call(
+        &mut self,
+        name: &str,
+        generic: &GenericInfo,
+        required: usize,
+        args: &[Expr],
+        callee_span: Span,
+        call_span: Span,
+        seed: HashMap<String, Type>,
+        env: &mut Env,
+    ) -> Type {
+        let mut arg_types: Vec<Type> = args
+            .iter()
+            .map(|a| {
+                if self.is_deferred_arg(a, env) {
+                    Type::Unknown
+                } else {
+                    self.synth(a, env)
+                }
+            })
+            .collect();
+        let ret = self.check_generic_call_seeded(
+            name,
+            generic,
+            required,
+            &mut arg_types,
+            args,
+            callee_span,
+            seed,
+            Some(call_span),
+            env,
+        );
+        // The deferred-argument safety net, mirroring `synth_call`.
+        for (i, arg) in args.iter().enumerate() {
+            if self.is_deferred_arg(arg, env) && matches!(arg_types.get(i), Some(Type::Unknown)) {
+                self.synth(arg, env);
+            }
+        }
+        ret
+    }
+
+    /// Seed a coalesce's generic-call VALUE from the success-arm expectation (poly-deferrals D1):
+    /// `load(text) ?? default` binds the callee's declared `Result`/`Option` payload against
+    /// `success_expected` and runs the seeded call, returning the still-WRAPPED type (the caller
+    /// unwraps the payload). The caller has already established `value` is seedable.
+    pub(crate) fn check_coalesce_seeded(
+        &mut self,
+        value: &Expr,
+        success_expected: &Type,
+        env: &mut Env,
+    ) -> Type {
+        let (name, callee_span, generic) = self
+            .seedable_generic_call(value, env)
+            .expect("caller-guarded: value is a seedable generic call");
+        let Expr::Call {
+            args,
+            span: call_span,
+            ..
+        } = value
+        else {
+            unreachable!("seedable_generic_call matches plain calls only")
+        };
+        let required = self.symbols.functions[&name].required;
+        let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+        let mut seed: HashMap<String, Type> = HashMap::new();
+        match &generic.raw_ret {
+            Type::Result(ok, _) => bind_type_params(ok, success_expected, &tps, &mut seed),
+            Type::Option(some) => bind_type_params(some, success_expected, &tps, &mut seed),
+            _ => {}
+        }
+        self.check_seeded_generic_call(
+            &name,
+            &generic,
+            required,
+            args,
+            callee_span,
+            *call_span,
+            seed,
+            env,
+        )
+    }
+
+    /// Unwrap the operand type of a `?` (`Expr::Try`) — the one shared judgment for synthesis and
+    /// the check-mode seeding arm (poly-deferrals D1): a `Result` yields its `Ok` payload and runs
+    /// the error-position `From`-conversion rule (E0057 / `try_conversion_sites`); an `Option`
+    /// yields its payload; a `dyn`/hole defers; anything else is E0012.
+    pub(crate) fn try_unwrap(&mut self, inner: &Type, span: Span) -> Type {
+        match inner {
+            Type::Result(ok, err) => {
+                // The error-position rule (error-ergonomics): a mismatched `Err` type either
+                // converts through the target's `impl From<Source>` (site recorded for lowering)
+                // or is E0057.
+                let err = (**err).clone();
+                self.check_try_error(&err, span);
+                (**ok).clone()
+            }
+            Type::Option(some) => (**some).clone(),
+            // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
+            // diagnostic, yielding the same deferred type.
+            t if t.defers_to_runtime() => t.clone(),
+            other => {
+                self.error(
+                    DiagnosticCode::InvalidTry,
+                    span,
+                    format!("`?` expects a `Result` or `Option`, found `{other}`"),
+                )
+                .help("`?` only propagates `Result`/`Option`; this value is neither");
+                Type::Unknown
+            }
+        }
+    }
+
     /// Type an **explicitly instantiated user-generic call** `f::<T, ...>(args)` (poly-values F2).
     /// The named type arguments bind to the function's declared type parameters IN ORDER and are
     /// seeded as winning bindings into the shared generic-call machinery

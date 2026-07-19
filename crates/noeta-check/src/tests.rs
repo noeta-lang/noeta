@@ -2473,3 +2473,24 @@ fn derived_user_trait_satisfies_dyn_coercion_and_types_the_defaults() {
     let src = "trait D {\n    fn label(): string { return \"x\" }\n    fn describe(): string { return self.label() }\n}\n@derive(D)\nstruct P { n: int }\nfn takes(d: dyn D): string { return d.describe() }\np = P { n: 1 }\nout: string = p.describe()\necho takes(p)\necho out\n";
     assert_eq!(codes(src), Vec::<String>::new());
 }
+
+#[test]
+fn try_through_inference_seeds_the_success_arm() {
+    // D1 (poly-deferrals): `o: Order = load(text)?` binds `T = Order` through the `?` unwrap; a
+    // wrong expectation is caught as the ordinary subsumption mismatch (proving the seed flowed,
+    // rather than the payload erasing to `dyn`).
+    let ok = "struct Order { id: int }\nfn wrap<T>(v: T): Result<T, string> { return Ok(v) }\nfn go(o: Order): Result<int, string> {\n    r: Order = wrap(o)?\n    return Ok(r.id)\n}\n";
+    assert_eq!(codes(ok), Vec::<String>::new());
+    // The seed WINS over the argument (first-wins, as in every seeded position): `T` is pinned
+    // to `Order` by the expectation, so the `int` argument fails assignability against it.
+    let bad = "struct Order { id: int }\nfn wrap<T>(v: T): Result<T, string> { return Ok(v) }\nfn go(o: Order): Result<int, string> {\n    r: Order = wrap(5)?\n    return Ok(r.id)\n}\n";
+    assert_eq!(codes(bad), ["E0007"]);
+}
+
+#[test]
+fn coalesce_seeds_from_fallback_type() {
+    // D1: `v = wrap(o) ?? fallback` — the fallback's type seeds the success arm, so the binding
+    // is precisely typed (`.id` on the result checks; a bogus member would not).
+    let src = "struct Order { id: int }\nfn wrap<T>(v: T): Result<T, string> { return Ok(v) }\no = Order { id: 1 }\npicked = wrap(o) ?? o\necho picked.id\n";
+    assert_eq!(codes(src), Vec::<String>::new());
+}

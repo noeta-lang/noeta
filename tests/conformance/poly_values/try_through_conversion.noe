@@ -1,0 +1,42 @@
+// D1 (poly-deferrals): `?`-through inference composes with the error-position `From`-conversion
+// machinery — seeding the SUCCESS arm from the expectation leaves the declared ERROR arm fully
+// resolved (`JsonError`), so the `?` boundary still converts it into the enclosing function's
+// `AppError` through `impl From<JsonError>` (E0057 machinery, unchanged).
+// expect: stdout "order 7"
+// expect: stdout "decode failed with kind missing_field"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+struct AppError {
+    kind: string
+
+    impl From<JsonError> {
+        fn from(e: JsonError): AppError {
+            return AppError { kind: e.kind() }
+        }
+    }
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+fn describe(text: string): Result<string, AppError> {
+    o: Order = load(text)?
+    return Ok("order ${o.id}")
+}
+
+echo match describe("{\"id\": 7}") {
+    Ok(s) => s,
+    Err(e) => "unreached",
+}
+
+echo match describe("{\"name\": \"Ada\"}") {
+    Ok(s) => "unreached",
+    Err(e) => "decode failed with kind ${e.kind}",
+}
