@@ -80,6 +80,7 @@ Formats `.noe` source into the canonical style — the same layout no matter how
 ```text
 noeta fmt [PATHS...]   # format files, or every .noe under a directory, in place (atomic)
 noeta fmt --check ...  # write nothing; list any file that is not already formatted, exit 1 (CI)
+noeta fmt --diff  ...  # write nothing; print a unified diff of the pending reformat, exit 1 if any (CI)
 noeta fmt --stdin      # read source on stdin, write the formatted result to stdout (format-on-save)
 noeta fmt --parens <remove|add> ...      # override the [fmt] parens policy for redundant header parens
 noeta fmt --semicolons <remove|add|preserve> ...   # override the [fmt] semicolons policy
@@ -97,7 +98,17 @@ parens           = "remove"   # "remove" (default) strips redundant parens aroun
 semicolons       = "remove"   # "remove" (default) strips redundant statement terminators; "add" or "preserve"
 ```
 
-With `wrap = false` (the default) the formatter preserves the line breaks you wrote and only normalizes indentation, spacing, and blank lines — so a tidy file is left essentially as-is. Trailing `;` and comments are always preserved; when `wrap = true`, wrapped lists get a trailing comma. Editors format with the same engine: the VS Code extension turns on **format-on-save** and **format-on-type** (reformatting a block when you type its closing `}`) for `.noe` files by default.
+With `wrap = false` (the default) the formatter preserves the line breaks you wrote and only normalizes indentation, spacing, and blank lines — so a tidy file is left essentially as-is. Trailing `;` and comments are always preserved. With `wrap = true` the layout is re-derived from `line_width`: over-width **collections**, **argument/parameter lists**, **pipelines** (`|>`), **binary chains** (`a + b + c …`), **method chains** (`a.b().c() …`), and **union types** (`A | B | C`) each break one element per line (wrapped lists get a trailing comma), while anything that fits stays on one line. Editors format with the same engine: the VS Code extension turns on **format-on-save** and **format-on-type** (reformatting a block when you type its closing `}`) for `.noe` files by default.
+
+To keep a region exactly as written — a hand-aligned table, a generated block — wrap it in `// fmt: off` / `// fmt: on` markers (on their own lines); everything between them passes through byte-for-byte, and formatting resumes after `// fmt: on` (an unmatched `// fmt: off` disables formatting to the end of its scope).
+
+```noeta
+// fmt: off
+matrix = [1, 0, 0,
+          0, 1, 0,
+          0, 0, 1]
+// fmt: on
+```
 
 ---
 

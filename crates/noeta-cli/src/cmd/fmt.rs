@@ -33,12 +33,13 @@ pub(crate) fn apply_fmt_overrides(
 pub(crate) fn cmd_fmt(
     paths: &[PathBuf],
     check: bool,
+    diff: bool,
     stdin: bool,
     parens: Option<noeta_fmt::ParenStyle>,
     semicolons: Option<noeta_fmt::SemicolonStyle>,
 ) -> ExitCode {
     if stdin {
-        return cmd_fmt_stdin(parens, semicolons);
+        return cmd_fmt_stdin(diff, parens, semicolons);
     }
     if paths.is_empty() {
         eprintln!("noeta fmt: no files given (use `--stdin` to format standard input)");
@@ -115,7 +116,13 @@ pub(crate) fn cmd_fmt(
                 if formatted == original {
                     continue; // already canonical — no write, no churn
                 }
-                if check {
+                if diff {
+                    would_change = true;
+                    print!(
+                        "{}",
+                        unified_diff(&file.display().to_string(), &original, &formatted)
+                    );
+                } else if check {
                     would_change = true;
                     println!("{}", file.display());
                 } else if let Err(err) = atomic_write(file, &formatted) {
@@ -130,11 +137,22 @@ pub(crate) fn cmd_fmt(
         }
     }
 
-    if failed || (check && would_change) {
+    if failed || ((check || diff) && would_change) {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// A `git`/`diff -u`-style unified diff of a pending reformat: a `--- a/<path>` / `+++ b/<path>`
+/// header and standard `@@` hunks with three lines of context. Printed by `noeta fmt --diff` instead
+/// of rewriting the file.
+pub(crate) fn unified_diff(path: &str, original: &str, formatted: &str) -> String {
+    similar::TextDiff::from_lines(original, formatted)
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .to_string()
 }
 
 /// The per-directory tier discovery for formatting, in **one scan** (audit-4 F10): each sibling
@@ -241,8 +259,10 @@ pub(crate) fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::R
     std::fs::rename(&tmp, path)
 }
 
-/// Format stdin → stdout with the config discovered from the current directory.
+/// Format stdin → stdout with the config discovered from the current directory. With `diff`, print a
+/// unified diff (input vs. formatted) instead of the formatted text, exiting non-zero if it differs.
 pub(crate) fn cmd_fmt_stdin(
+    diff: bool,
     parens: Option<noeta_fmt::ParenStyle>,
     semicolons: Option<noeta_fmt::SemicolonStyle>,
 ) -> ExitCode {
@@ -264,6 +284,13 @@ pub(crate) fn cmd_fmt_stdin(
     };
     match noeta_fmt::format_source("<stdin>", &text, &config) {
         Ok(formatted) => {
+            if diff {
+                if formatted != text {
+                    print!("{}", unified_diff("<stdin>", &text, &formatted));
+                    return ExitCode::FAILURE;
+                }
+                return ExitCode::SUCCESS;
+            }
             print!("{formatted}");
             ExitCode::SUCCESS
         }

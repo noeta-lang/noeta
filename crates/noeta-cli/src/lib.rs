@@ -409,6 +409,10 @@ enum Command {
         /// if any exist (for CI).
         #[arg(long)]
         check: bool,
+        /// Do not write. Print a unified diff of the pending reformat for each file (empty output +
+        /// exit 0 when everything is already formatted; exit non-zero when any diff is shown).
+        #[arg(long)]
+        diff: bool,
         /// Read source from stdin and write the formatted result to stdout (editor "format on save").
         #[arg(long)]
         stdin: bool,
@@ -820,10 +824,11 @@ pub fn run_cli(
         Command::Fmt {
             files,
             check,
+            diff,
             stdin,
             parens,
             semicolons,
-        } => cmd_fmt(&files, check, stdin, parens, semicolons),
+        } => cmd_fmt(&files, check, diff, stdin, parens, semicolons),
         Command::Grammar { target } => match target {
             GrammarTarget::TreeSitter {
                 project,
