@@ -40,13 +40,19 @@ Methods have no type parameters of their own — a method is generic over its cl
 
 Inside a generic function's body, `T` is legal wherever a type goes — including as a turbofish argument to another generic, to a call-site-typed native function (`json.try_parse::<T>`), to `attributes_of::<T>()`, and to `channel::<T>(cap)`:
 
-```noeta
+```noeta check
+use std.{json}
+use std.json.JsonError
+
+struct Order { id: int }
+struct User { name: string }
+
 fn load<T>(text: string): Result<T, JsonError> {
     return json.try_parse::<T>(text)
 }
 
-order = load::<Order>(read("order.json"))
-user  = load::<User>(read("user.json"))     // same body, per-instantiation decode
+order = load::<Order>("{\"id\": 1}")
+user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation decode
 ```
 
 Generics are erased, so one compiled body serves every instantiation; where a forwarded site needs per-instantiation data at runtime (a decode recipe, an attribute type's name), the instantiating call passes it through a hidden argument — invisible in the surface language. The boundaries, all reported statically: forwarding into a call-site-typed position works in **top-level generic functions** (not methods or nested `fn`s); only the **bare** parameter forwards (`List<T>` in a `::<...>` position is E0058); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
