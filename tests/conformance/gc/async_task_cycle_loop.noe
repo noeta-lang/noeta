@@ -1,0 +1,43 @@
+// In-run safepoint cycle collection — cycles built by INTERLEAVING async tasks. Each task strands
+// class cycles between its awaits; the scheduler's drive loop reaches a safepoint between polls,
+// where the parked tasks' futures are collector roots (their state machines survive) while the
+// stranded cycles are reclaimed. Crosses the default threshold on both backends; destructor-free,
+// so the output is unchanged and exit residency stays 0.
+// expect: stdout "built 24000"
+// expect: exit 0
+use std.task.{sleep}
+
+class Node {
+    pub mut next: ?Node
+    fn new(): Node { return Node { next: none } }
+}
+
+async fn build(rounds: int, per: int): int {
+    mut made = 0
+    mut r = 0
+    while r < rounds {
+        mut i = 0
+        while i < per {
+            a = Node.new()
+            b = Node.new()
+            a.next = some(b)
+            b.next = some(a)
+            made = made + 2
+            i = i + 1
+        }
+        sleep(1).await
+        r = r + 1
+    }
+    return made
+}
+
+async fn run(): int {
+    mut total = 0
+    concurrent {
+        x = spawn build(4, 1500)
+        y = spawn build(4, 1500)
+        total = x.await + y.await
+    }
+    return total
+}
+echo "built ${run().await}"

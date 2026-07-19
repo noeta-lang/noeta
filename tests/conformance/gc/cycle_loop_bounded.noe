@@ -1,0 +1,21 @@
+// In-run safepoint cycle collection (memory-management 6.x) — a loop stranding a reference-class
+// two-cycle per iteration. 30k iterations cross the default safepoint threshold (10k live
+// objects), so the mid-run collector fires repeatedly on both backends during the standard
+// differential/leak gates; a destructor-free cycle's reclamation is unobservable, so the output
+// is identical to a run without safepoint collection (and exit residency is still 0).
+// expect: stdout "30000"
+// expect: exit 0
+class Node {
+    pub mut next: ?Node
+    fn new(): Node { return Node { next: none } }
+}
+
+mut i = 0
+while i < 30000 {
+    a = Node.new()
+    b = Node.new()
+    a.next = some(b)
+    b.next = some(a)
+    i = i + 1
+}
+echo i
