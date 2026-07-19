@@ -231,7 +231,9 @@ impl AdvisoryAction {
             "warn" => Ok(AdvisoryAction::Warn),
             "fail" => Ok(AdvisoryAction::Fail),
             "off" => Ok(AdvisoryAction::Off),
-            other => Err(format!("`{other}` must be one of \"fail\", \"warn\", \"off\"")),
+            other => Err(format!(
+                "`{other}` must be one of \"fail\", \"warn\", \"off\""
+            )),
         }
     }
 }
@@ -1320,7 +1322,8 @@ fn parse_advisory_policy(trust_table: &toml::Table) -> Result<AdvisoryPolicy, St
     };
     // A bare string sets every tier at once.
     if let Some(s) = value.as_str() {
-        let action = AdvisoryAction::parse(s).map_err(|err| format!("`trust.advisories`: {err}"))?;
+        let action =
+            AdvisoryAction::parse(s).map_err(|err| format!("`trust.advisories`: {err}"))?;
         return Ok(AdvisoryPolicy {
             operator: action,
             publisher: action,
@@ -1332,10 +1335,11 @@ fn parse_advisory_policy(trust_table: &toml::Table) -> Result<AdvisoryPolicy, St
         .ok_or("`trust.advisories` must be an action string (\"fail\"/\"warn\"/\"off\") or a table of per-tier actions")?;
     let mut policy = AdvisoryPolicy::default();
     for (key, v) in table {
-        let s = v
-            .as_str()
-            .ok_or_else(|| format!("`trust.advisories.{key}` must be a string (\"fail\"/\"warn\"/\"off\")"))?;
-        let action = AdvisoryAction::parse(s).map_err(|err| format!("`trust.advisories.{key}`: {err}"))?;
+        let s = v.as_str().ok_or_else(|| {
+            format!("`trust.advisories.{key}` must be a string (\"fail\"/\"warn\"/\"off\")")
+        })?;
+        let action =
+            AdvisoryAction::parse(s).map_err(|err| format!("`trust.advisories.{key}`: {err}"))?;
         match key.as_str() {
             "operator" => policy.operator = action,
             "publisher" => policy.publisher = action,
@@ -1910,7 +1914,10 @@ mod tests {
     #[test]
     fn advisory_policy_rejects_a_bad_action_or_tier() {
         assert!(
-            Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n[trust]\nadvisories = \"spicy\"\n").is_err()
+            Manifest::parse(
+                "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n[trust]\nadvisories = \"spicy\"\n"
+            )
+            .is_err()
         );
         assert!(
             Manifest::parse(

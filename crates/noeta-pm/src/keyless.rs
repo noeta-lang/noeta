@@ -86,7 +86,11 @@ pub const ADVISORY_PREDICATE_TYPE: &str = "https://noeta.dev/attestation/advisor
 pub fn advisory_attested_digest(canonical_bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical_bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The in-toto Statement (v1) a publisher advisory keyless-signs: the subject binds

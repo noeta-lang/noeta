@@ -235,6 +235,10 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
         seq: 0,
         signature: String::new(),
         log_index: Some(0),
+        tier: advisory::AdvisoryTier::Operator,
+        bundle: None,
+        upstream_id: None,
+        upstream_url: None,
     };
     adv.signature = to_hex(&sk.sign(&adv.canonical_bytes()).to_bytes());
     let digest = advisory::feed_digest(std::slice::from_ref(&adv));
@@ -279,6 +283,15 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
 
     let entry = path_dep_project("pm_audit_advisory");
     let app_dir = entry.parent().unwrap();
+    // Opt this project into failing on an operator-tier advisory (advisory-intake arc, tier 5): the
+    // default is warn, so a CI gate declares `[trust].advisories = "fail"` to break the build on a hit.
+    std::fs::write(
+        app_dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nhi = { path = \"../greetlib\" }\n\
+         [trust]\nadvisories = \"fail\"\n",
+    )
+    .unwrap();
     lang()
         .arg("audit")
         .arg(app_dir)
@@ -288,6 +301,8 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
         .stdout(predicate::str::contains("Security advisories:"))
         .stdout(predicate::str::contains("NOETA-2026-0007"))
         .stdout(predicate::str::contains("greeting injection"))
+        // The intake tier is shown per advisory (advisory-intake arc, tier 5).
+        .stdout(predicate::str::contains("[operator/high]"))
         // The advisory is verified as included in the transparency log (log-binding).
         .stdout(predicate::str::contains("included in the transparency log"));
 
@@ -358,6 +373,107 @@ fn noeta_claim_guides_when_not_in_ci_and_device_flow_unconfigured() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("NOETA_GITHUB_CLIENT_ID"));
+}
+
+#[test]
+fn noeta_advisory_report_posts_a_public_report() {
+    // advisory-intake arc, tier 4: `noeta advisory report <package> <summary>` POSTs an unauthenticated
+    // report to the registry. The mock captures the request and confirms its shape.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |method, path, body| {
+        tx.send((method.to_string(), path.to_string(), body.to_string()))
+            .unwrap();
+        (
+            201,
+            r#"{"status":"report filed","id":"rep-abc-123","note":"queued for triage"}"#
+                .to_string(),
+        )
+    });
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .args([
+            "advisory",
+            "report",
+            "acme/imgfx",
+            "looks like it leaks memory",
+            "--details",
+            "repro attached",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("report filed"))
+        .stdout(predicate::str::contains("rep-abc-123"));
+
+    let (method, path, body) = rx.recv().unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(path, "/v1/reports");
+    assert!(body.contains(r#""package":"acme/imgfx""#), "body: {body}");
+    assert!(body.contains("looks like it leaks memory"), "body: {body}");
+    assert!(body.contains("repro attached"), "body: {body}");
+}
+
+#[test]
+fn noeta_watch_scope_pins_a_baseline_and_reports_clean() {
+    // advisory-intake arc, tier 6: `noeta watch-scope <scope>` verifies the advisory feed + transparency
+    // log and pins a baseline on the first run. Here the mock serves a verifiable *empty* feed and log
+    // (an empty tree's root and an empty feed's digest are both sha256 of nothing), so the first run
+    // establishes the baseline and reports clean, writing a state file.
+    use ed25519_dalek::{Signer, SigningKey};
+    use noeta_pm::advisory;
+
+    let to_hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let adv_sk = SigningKey::from_bytes(&[3u8; 32]);
+    let adv_pub = to_hex(adv_sk.verifying_key().as_bytes());
+    let log_sk = SigningKey::from_bytes(&[5u8; 32]);
+    let log_pub = to_hex(log_sk.verifying_key().as_bytes());
+
+    // An empty feed: digest over no advisories == sha256 of the empty string, which is also an empty
+    // Merkle tree's root — so one value serves both the feed digest and the log root.
+    let empty = advisory::feed_digest(&[]);
+    let feed_head = format!("noeta-advisory-feed-v1\n0\n{empty}\n");
+    let feed_sig = to_hex(&adv_sk.sign(feed_head.as_bytes()).to_bytes());
+    let log_cp = format!("noeta-log-checkpoint-v1\n0\n{empty}\n");
+    let log_sig = to_hex(&log_sk.sign(log_cp.as_bytes()).to_bytes());
+
+    let feed = r#"{"advisories":[]}"#.to_string();
+    let adv_key = format!(r#"{{"public_key":"{adv_pub}"}}"#);
+    let checkpoint = format!(r#"{{"count":0,"digest":"{empty}","signature":"{feed_sig}"}}"#);
+    let log_key = format!(r#"{{"public_key":"{log_pub}"}}"#);
+    let log_checkpoint =
+        format!(r#"{{"tree_size":0,"root_hash":"{empty}","signature":"{log_sig}"}}"#);
+
+    let base = mock_http(move |_method, path, _body| match path {
+        "/v1/advisories" => (200, feed.clone()),
+        "/v1/advisories/key" => (200, adv_key.clone()),
+        "/v1/advisories/checkpoint" => (200, checkpoint.clone()),
+        "/v1/log/key" => (200, log_key.clone()),
+        "/v1/log/checkpoint" => (200, log_checkpoint.clone()),
+        _ => (404, r#"{"error":"not found"}"#.to_string()),
+    });
+
+    let state = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("watch_acme.toml");
+    let _ = std::fs::remove_file(&state);
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .args(["watch-scope", "acme", "--state"])
+        .arg(&state)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("baseline pinned"))
+        .stdout(predicate::str::contains(
+            "no suppression or rewrite detected",
+        ));
+    // The baseline is now pinned in the state file for the next run to diff against.
+    let pinned = std::fs::read_to_string(&state).unwrap();
+    assert!(
+        pinned.contains(&adv_pub),
+        "state pins the advisory key:\n{pinned}"
+    );
+    assert!(
+        pinned.contains("log_tree_size"),
+        "state pins the log checkpoint:\n{pinned}"
+    );
 }
 
 #[test]

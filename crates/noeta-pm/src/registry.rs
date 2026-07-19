@@ -748,7 +748,9 @@ impl HttpIndex {
             .post(format!("{}/v1/reports", self.base))
             .json(&body)
             .send()
-            .map_err(|err| PmError::Network(format!("filing a report for `{package}` failed: {err}")))?;
+            .map_err(|err| {
+                PmError::Network(format!("filing a report for `{package}` failed: {err}"))
+            })?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
         if status.is_success() {
@@ -1368,7 +1370,9 @@ impl HttpIndex {
             .json(&body)
             .send()
             .map_err(|err| {
-                PmError::Network(format!("publishing an advisory for scope `{scope}` failed: {err}"))
+                PmError::Network(format!(
+                    "publishing an advisory for scope `{scope}` failed: {err}"
+                ))
             })?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();

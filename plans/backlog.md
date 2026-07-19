@@ -54,7 +54,7 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | TUF-based Sigstore trust-root refresh (today: build-time-embedded root + env override); registry-side keyless *requirement* is a policy flag away | keyless-signing v-next |
 | Per-dependency **capability enforcement** (a dep's `[trust]` grant actually bounding what it can reach) — research phase; static effect analysis is the tractable first step | package-manager phase-4 L3 |
 | Git-deps of *published* packages aren't expressible in the index `Dep` shape | package-manager v-next |
-| **Advisory intake beyond operator-curated:** self-service scope-owner advisories; a public report/triage queue; OSV/GHSA/RUSTSEC import with name mapping; a transparency-log suppression monitor (`noeta watch-scope`). Decide the trust model (who publishes vs who reports) first | namespace-protection arc (2026-07-15) |
+| **Advisory-intake residuals** (arc landed 2026-07-19: three-tier feed — operator/publisher/imported — + public report queue + `noeta watch-scope`; registry `advisory-intake`, lang `w4-advisory-intake`, both UNMERGED/UNPUSHED). Open: (a) a client verb to **promote a report** — the registry `/reports/{id}/promote` endpoint + scope-owner path exist, but there is no `noeta advisory promote`; today it is admin/curl or the scope-owner does a fresh `advisory publish`. (b) OSV import severity is text-only (`database_specific.severity`); **CVSS-vector scoring** is out of scope. (c) The import cron pulls one `OSV_IMPORT_URL` (a pre-assembled OSV array); per-ecosystem OSV/GHSA/RUSTSEC source adapters + pagination are not built. (d) `watch-scope` state is a local file; a shared/attested watch ledger is future | advisory-intake arc (2026-07-19) |
 | Hosted edge-platform proof (Fastly/Fermyon Spin) + an edge deployment docs page | wasm W4.2. Needs an account; stays a user action |
 | Desktop packaging (Tauri); with it the p2p packaging polish (within-feature DCE pruning, capability-gating) | M3 roadmap item; the one roadmap entry the README carries |
 
@@ -90,6 +90,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 ## Design proposals (no slice yet)
 
-- **Vulnerability-intake trust model** — see the advisory row above; the design decision (operator / scope-owner / promote-from-report) precedes any code.
+- ~~**Vulnerability-intake trust model**~~ — DECIDED + built (advisory-intake arc, 2026-07-19): three tiers (operator-issued / scope-owner self-service with keyless provenance / OSV-GHSA-RUSTSEC import via operator-curated name map), a public report queue that only becomes an advisory on operator/owner promote, and `noeta watch-scope`. See the advisory-intake residuals row above for what's left.
 - **Packed-field-kind enum dedup** — four phase-appropriate `PackedKind` encodings; revisit only if a shared public layout vocabulary earns its keep across the package boundary (the `PackedView` ABI may already be that vocabulary — check before building).
 - **WASM revisit conditions** (recorded, not planned): direct wasm codegen only on perf data; wasm-threads isolates only on multi-core edge demand; p2p-in-browser is its own arc.
