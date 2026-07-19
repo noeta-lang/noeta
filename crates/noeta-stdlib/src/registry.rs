@@ -260,6 +260,20 @@ const CORE_TYPES: &[ExtType] = &[
         docs: FILE_HANDLE_DOCS,
         ..ExtType::DEFAULTS
     },
+    // `JsonError` (error-machinery arc) — the JSON decode failure: pure, content-equal data (the
+    // `ExecResult` model), std's first `Error` implementor. Declares `Error` + `Display` through
+    // the registration (the extern-type analogue of a user `impl`), so `<E: Error>` bounds accept
+    // it and it renders as its composed message.
+    ExtType {
+        name: crate::json::JSON_ERROR_TYPE_NAME,
+        namespace: "std.json",
+        methods: JSON_ERROR_METHODS,
+        dispatch: json_error_method_dispatch,
+        key_capable: false, // a decode failure is not a map key
+        traits: &["Error", "Display"],
+        docs: JSON_ERROR_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // `ExecResult` (stdlib-gaps) — pure, content-equal subprocess outcome (the `Response` model).
     ExtType {
         name: crate::os::EXEC_RESULT_TYPE_NAME,
@@ -3823,6 +3837,99 @@ fn json_dispatch(
             Ok(NativeOut::Str(crate::json::stringify(&args[0])))
         }
         _ => Err(no_function_error("json", func)),
+    }
+}
+
+/// The `JsonError` instance methods (error-machinery arc): pure reads over the decode failure —
+/// the `ExecResult` accessor model. `message` is `impl Error`'s required method; `to_string` is
+/// `impl Display`'s (both declared on the type's registration below), and both return the same
+/// composed message the value also displays as.
+const JSON_ERROR_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "message",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "kind",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "path",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "line",
+        params: &[],
+        ret: Concrete(SigType::Option(&Int)),
+    },
+    ExtFn {
+        name: "column",
+        params: &[],
+        ret: Concrete(SigType::Option(&Int)),
+    },
+];
+
+const JSON_ERROR_DOCS: &[(&str, &str)] = &[
+    (
+        "message",
+        "The composed human message — the path-prefixed detail (`items[2].price: expected float, \
+         found JSON number`). The `Error` trait's required method.",
+    ),
+    (
+        "to_string",
+        "Same as `message()` — the `Display` rendering, so `${e}` interpolates the message.",
+    ),
+    (
+        "kind",
+        "What went wrong: `\"syntax\"` (malformed document), `\"mismatch\"` (wrong value kind), \
+         `\"missing_field\"`, or `\"unknown_type\"` (a `decode_typed` name with no recipe).",
+    ),
+    (
+        "path",
+        "The path from the document root to the failing value (`items[2].price`); empty for a \
+         document-level failure.",
+    ),
+    (
+        "line",
+        "The 1-based source line of a `syntax` failure, `none` otherwise.",
+    ),
+    (
+        "column",
+        "The 1-based source column of a `syntax` failure, `none` otherwise.",
+    ),
+];
+
+fn json_error_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    use crate::json::{JSON_ERROR_TYPE_NAME, JsonError};
+    let Some(error) = recv.as_any().downcast_ref::<JsonError>() else {
+        return Err(type_error(method, JSON_ERROR_TYPE_NAME));
+    };
+    want_arity(method, args, 0)?;
+    let opt_int = |v: Option<u32>| match v {
+        Some(n) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Int(i64::from(n))))),
+        None => NativeOut::None,
+    };
+    match method {
+        // `message` (Error) and `to_string` (Display) are the same composed message by design.
+        "message" | "to_string" => Ok(NativeOut::Str(error.message())),
+        "kind" => Ok(NativeOut::Str(error.kind.label().to_string())),
+        "path" => Ok(NativeOut::Str(error.path.clone())),
+        "line" => Ok(opt_int(error.line)),
+        "column" => Ok(opt_int(error.column)),
+        _ => Err(crate::no_method_error(JSON_ERROR_TYPE_NAME, method)),
     }
 }
 
