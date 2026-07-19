@@ -390,6 +390,26 @@ impl Checker {
                     ),
                 );
             }
+            // A trait's REQUIRED-method set stays monomorphic (the pinned D3 boundary): a
+            // per-method `<...>` on a trait method has no coherent instantiation site — the trait
+            // is dispatched dynamically and each `impl` would have to agree on the method's own
+            // parameters — so it is rejected here (E0058), not silently erased. Generic methods
+            // live on concrete types (`class`/`struct`/`enum`), where the receiver pins the class's
+            // parameters and the call pins the method's own.
+            if !m.sig.type_params.is_empty() {
+                self.error(
+                    DiagnosticCode::InvalidTypeArguments,
+                    m.sig.name_span,
+                    format!(
+                        "trait method `{}::{}` cannot declare its own type parameters",
+                        decl.name, m.sig.name
+                    ),
+                )
+                .help(
+                    "a trait's method set stays monomorphic; put a generic method on a concrete \
+                     type, or make the whole trait generic (`trait T<U> { ... }`)",
+                );
+            }
         }
     }
 
@@ -1281,89 +1301,96 @@ impl Checker {
             }
         }
         self.enforce_type_param_bounds(name, &generic.params, &subst, &tps, span);
-        // A call of a **forwarding** generic (poly-values F2b) must supply its hidden
-        // type-argument slots: resolve each forwarding parameter's instantiation into a table
-        // entry (concrete) or a pass-through of the enclosing fn's own slot (a bare in-scope
-        // type parameter). `hidden_site` is the whole-call span lowering keys on; `None` for a
-        // method call (methods never forward).
+        // A call of a **forwarding** generic (poly-values F2b, composite slots D2a) must supply
+        // its hidden type-argument slots: substitute the call's instantiation into each slot
+        // TEMPLATE and resolve the result into a table entry (concrete — the whole composite is
+        // interned statically, so the runtime never constructs a recipe) or a pass-through of the
+        // enclosing fn's own matching slot (a template still mentioning the caller's parameters).
+        // `hidden_site` is the whole-call span lowering keys on; `None` for a method call
+        // (methods never forward).
         if let Some(call_span) = hidden_site
             && let Some(fwd) = self.symbols.forwarding.get(name).cloned()
+            // A poisoned callee (diverging slot set, D2a) already carries the one clear error at
+            // its declaration; resolving its partial slots here would only cascade noise.
+            && !self.symbols.forwarding_poisoned.contains(name)
         {
             let mut hidden = Vec::with_capacity(fwd.len());
-            for fp in &fwd {
-                let concrete = subst.get(&fp.name).cloned().unwrap_or(Type::Unknown);
-                match &concrete {
-                    Type::Named(q, qa)
-                        if qa.is_empty() && self.coloring.type_params.contains_key(q) =>
+            for slot in &fwd {
+                let sigma = apply_subst(&slot.template, &subst);
+                // A callee parameter the call leaves unbound (or pins only to `dyn`/a hole)
+                // cannot fill a call-site-typed slot — the instantiation must be explicit.
+                if let Some(open) = params_mentioned(&slot.template, &tps)
+                    .into_iter()
+                    .find(|p| {
+                        subst
+                            .get(p)
+                            .is_none_or(|t| t.defers_to_runtime() || t.contains_unknown())
+                    })
+                {
+                    self.error(
+                        DiagnosticCode::CannotInfer,
+                        span,
+                        format!(
+                            "cannot infer type parameter `{open}` of `{name}`, which determines \
+                             a call-site-typed result"
+                        ),
+                    )
+                    .help(format!("supply it explicitly: `{name}::<...>(...)`"));
+                    continue;
+                }
+                if self.mentions_in_scope_param(&sigma) {
+                    // A pass-through: the substituted template mentions the CALLER's own
+                    // parameters, so the caller's matching slot (computed by the same fixpoint)
+                    // is forwarded onward.
+                    match self
+                        .coloring
+                        .current_forwarding
+                        .iter()
+                        .position(|t| t == &sigma)
                     {
-                        match self.coloring.current_forwarding.iter().position(|n| n == q) {
-                            Some(j) => hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32)),
-                            None => {
-                                self.error(
-                                    DiagnosticCode::InvalidTypeArguments,
-                                    span,
-                                    format!(
-                                        "cannot forward `{q}` into `{name}` here: call-site-typed \
-                                         forwarding is supported in top-level generic functions \
-                                         only"
-                                    ),
-                                )
-                                .help(format!(
-                                    "spell the instantiation with an explicit turbofish \
-                                     (`{name}::<...>`) so `{q}` is recognized as forwarded"
-                                ));
-                            }
-                        }
-                    }
-                    t if t.defers_to_runtime() || t.contains_unknown() => {
-                        self.error(
-                            DiagnosticCode::CannotInfer,
-                            span,
-                            format!(
-                                "cannot infer type parameter `{}` of `{name}`, which determines \
-                                 a call-site-typed result",
-                                fp.name
-                            ),
-                        )
-                        .help(format!("supply it explicitly: `{name}::<...>(...)`"));
-                    }
-                    t if self.mentions_in_scope_param(t) => {
-                        self.error(
-                            DiagnosticCode::InvalidTypeArguments,
-                            span,
-                            format!(
-                                "cannot forward `{t}` into `{name}`: forward the bare type \
-                                 parameter, not a composite type mentioning it"
-                            ),
-                        );
-                    }
-                    concrete_ty => {
-                        let recipe = self.type_to_recipe(concrete_ty);
-                        if fp.needs_recipe && recipe.is_none() {
+                        Some(j) => hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32)),
+                        None => {
                             self.error(
-                                DiagnosticCode::TypeMismatch,
+                                DiagnosticCode::InvalidTypeArguments,
                                 span,
                                 format!(
-                                    "`{concrete_ty}` cannot be built by the call-site-typed \
-                                     `::<T>` position `{}` of `{name}` forwards into",
-                                    fp.name
+                                    "cannot forward `{sigma}` into `{name}` here: \
+                                     call-site-typed forwarding is supported in top-level \
+                                     generic functions only"
                                 ),
-                            );
+                            )
+                            .help(format!(
+                                "spell the instantiation with an explicit turbofish \
+                                 (`{name}::<...>`) so `{sigma}` is recognized as forwarded"
+                            ));
                         }
-                        let info = noeta_ext_abi::TypeArgInfo {
-                            name: concrete_ty.to_string(),
-                            recipe,
-                        };
-                        let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
-                            Some(i) => i,
-                            None => {
-                                self.sites.type_arg_table.push(info);
-                                self.sites.type_arg_table.len() - 1
-                            }
-                        };
-                        hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
                     }
+                    continue;
                 }
+                let recipe = self.type_to_recipe(&sigma);
+                if slot.needs_recipe && recipe.is_none() {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`{sigma}` cannot be built by the call-site-typed `::<{}>` \
+                             position of `{name}`",
+                            slot.template
+                        ),
+                    );
+                }
+                let info = noeta_ext_abi::TypeArgInfo {
+                    name: sigma.to_string(),
+                    recipe,
+                };
+                let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
+                    Some(i) => i,
+                    None => {
+                        self.sites.type_arg_table.push(info);
+                        self.sites.type_arg_table.len() - 1
+                    }
+                };
+                hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
             }
             self.sites.hidden_arg_sites.insert(call_span, hidden);
         }

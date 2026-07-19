@@ -735,6 +735,16 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             type_args.iter_mut().for_each(&mut *f);
             args.iter_mut().for_each(|a| visit_expr_types(a, f));
         }
+        Expr::TypedMethodCall {
+            recv,
+            type_args,
+            args,
+            ..
+        } => {
+            visit_expr_types(recv, f);
+            type_args.iter_mut().for_each(&mut *f);
+            args.iter_mut().for_each(|a| visit_expr_types(a, f));
+        }
         Expr::Member { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
             visit_expr_types(receiver, f)
         }

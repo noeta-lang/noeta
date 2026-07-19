@@ -1,0 +1,20 @@
+// D2a pinned boundary: POLYMORPHIC RECURSION through a composite forward. Each recursive call
+// demands a deeper composite slot (`T` → `List<T>` → `List<List<T>>` → …), so the static
+// TypeArgInfo table cannot enumerate the instantiations; the pre-pass fixpoint detects the
+// divergence and reports it at the declaration instead of looping.
+// expect: error E0058 at 12:4
+// expect: exit 1
+use std.json
+use std.json.JsonError
+
+struct Order { id: int }
+
+fn deep<T>(text: string, n: int): int {
+    r = json.try_parse::<T>(text)
+    if n == 0 {
+        return 0
+    }
+    return deep::<List<T>>(text, n - 1)
+}
+
+echo deep::<Order>("{\"id\": 1}", 2)

@@ -1,0 +1,9 @@
+// A trait's required-method set stays MONOMORPHIC (the pinned D3 boundary): a per-method `<U>` on a
+// trait method has no coherent instantiation site (the trait is dispatched dynamically), so it is
+// rejected with a clear `E0058` rather than silently erased. Generic methods live on concrete types.
+// expect: error E0058 at 7:8
+// expect: exit 1
+trait Converter {
+    fn convert<U>(x: U): U
+}
+echo "unreached";

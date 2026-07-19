@@ -1,0 +1,19 @@
+// D2b pinned boundary: a nested `fn`'s OWN type parameter has no call-site channel (nested fns
+// are called as untyped local values), so a call-site-typed site naming it — including one that
+// SHADOWS the enclosing forwarding parameter — is a clear E0058, never silently the enclosing
+// slot.
+// expect: error E0058 at 13:13
+// expect: exit 1
+use std.json
+use std.json.JsonError
+
+fn outer<T>(text: string): int {
+    r = json.try_parse::<T>(text)
+    fn inner<T>(t: string): int {
+        x = json.try_parse::<T>(t)
+        return 1
+    }
+    return inner(text)
+}
+
+echo outer::<int>("1")

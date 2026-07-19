@@ -1,0 +1,19 @@
+// F1 expected-type seeding reaches a generic METHOD's own type parameter (poly-deferrals D3):
+// `collect` mentions `U` only in its return, so the arguments cannot pin it — but the checked
+// binding `xs: List<int>` seeds `U = int` from the annotation, exactly the free-fn expected-type
+// arm applied to a method. The receiver still pins the class parameter `T`. Both backends run it.
+// expect: stdout "1"
+// expect: stdout "[]"
+// expect: exit 0
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn collect<U>(): List<U> {
+        base: T = self.value
+        echo base;
+        return [];
+    }
+}
+b = Box.new(1);
+xs: List<int> = b.collect();
+echo xs;

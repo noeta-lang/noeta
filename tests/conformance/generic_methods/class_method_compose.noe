@@ -1,0 +1,25 @@
+// The two substitutions COMPOSE (poly-deferrals D3): a generic method on a generic class binds
+// the class's parameter `T` from the receiver AND its own parameter `U` from the call. Here
+// `Box<int>::paired::<string>` produces `Pair<int, string>` — `T = int` (from `b`), `U = string`
+// (from the turbofish) — and both projections type precisely, so `need_int`/`need_str` accept
+// them. Both parameters erased at runtime; identical on both backends.
+// expect: stdout "7"
+// expect: stdout "hi"
+// expect: exit 0
+struct Pair<A, B> {
+    first: A
+    second: B
+}
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn paired<U>(u: U): Pair<T, U> {
+        return Pair { first: self.value, second: u };
+    }
+}
+fn need_int(n: int): int { return n; }
+fn need_str(s: string): string { return s; }
+b = Box.new(7);
+p = b.paired::<string>("hi");
+echo need_int(p.first);
+echo need_str(p.second);

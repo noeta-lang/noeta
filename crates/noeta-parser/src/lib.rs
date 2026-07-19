@@ -2095,6 +2095,9 @@ where
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen));
+        // A second handle on the argument-list grammar for the member-turbofish postfix below
+        // (the first is moved into the call postfix).
+        let member_call_args = call_args.clone();
 
         // Precedence via binding power: pipeline (loosest) < || < && < eq < cmp < ~ <
         // +/- < */% < prefix < postfix (call/member, tightest). Mirrors the original
@@ -2181,14 +2184,40 @@ where
                     expr
                 },
             ),
+            // `.member`, optionally followed by an explicit method instantiation
+            // `::<T, ...>(args)` (generic methods, D3) — folded into ONE postfix entry (the pratt
+            // op-tuple is at its arity cap): the turbofish half must see its `(` args to commit,
+            // so a bare `.member` keeps parsing exactly as before.
             postfix(
                 14,
-                just(T::Dot).ignore_then(member_name),
-                move |receiver, (name, name_span), e| Expr::Member {
-                    receiver: Box::new(receiver),
-                    name,
-                    name_span,
-                    span: ctx.to_span(e.span()),
+                just(T::Dot).ignore_then(member_name).then(
+                    just(T::ColonColon)
+                        .ignore_then(
+                            type_parser(ctx)
+                                .separated_by(just(T::Comma))
+                                .at_least(1)
+                                .allow_trailing()
+                                .collect::<Vec<_>>()
+                                .delimited_by(just(T::Lt), just(T::Gt)),
+                        )
+                        .then(member_call_args.clone())
+                        .or_not(),
+                ),
+                move |receiver, ((name, name_span), turbo), e| match turbo {
+                    Some((type_args, args)) => Expr::TypedMethodCall {
+                        recv: Box::new(receiver),
+                        name,
+                        name_span,
+                        type_args,
+                        args,
+                        span: ctx.to_span(e.span()),
+                    },
+                    None => Expr::Member {
+                        receiver: Box::new(receiver),
+                        name,
+                        name_span,
+                        span: ctx.to_span(e.span()),
+                    },
                 },
             ),
             // `receiver[index]` — index access (the `Index` trait / list element access).
@@ -2873,12 +2902,17 @@ where
             .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
+            // A method may declare its OWN type parameters (`fn pick<U>(...)`, generic methods
+            // D3), composing with the enclosing class's (which stay in scope around it).
+            .then(type_params.clone())
             .then(params_parser(ctx, expr.clone(), true))
             .then(capture_clause.clone())
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
-                move |((((((decos, async_kw), name_pair), params), captures), ret), body), e| {
+                move |(((((((decos, async_kw), name_pair), type_params), params), captures), ret),
+                       body),
+                      e| {
                     let mut directives = Vec::new();
                     let mut attrs = Vec::new();
                     for deco in decos {
@@ -2891,8 +2925,7 @@ where
                         name: name_pair.0,
                         name_span: name_pair.1,
                         is_public: false,
-                        // Methods are generic over their enclosing class's parameters, not their own.
-                        type_params: Vec::new(),
+                        type_params,
                         params,
                         ret,
                         attrs,
@@ -3075,18 +3108,21 @@ where
             .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
+            // Parsed so the checker can reject it with a CLEAR error (trait method sets stay
+            // monomorphic — a per-method `<U>` on a trait method is E0058, not a parse fumble).
+            .then(type_params.clone())
             .then(params_parser(ctx, expr.clone(), true))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone().or_not())
             .map_with(
-                move |(((((attrs, async_kw), name_pair), params), ret), body), e| {
+                move |((((((attrs, async_kw), name_pair), type_params), params), ret), body), e| {
                     let has_default = body.is_some();
                     TraitMethod {
                         sig: FnDecl {
                             name: name_pair.0,
                             name_span: name_pair.1,
                             is_public: false,
-                            type_params: Vec::new(),
+                            type_params,
                             params,
                             ret,
                             attrs,

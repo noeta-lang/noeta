@@ -129,61 +129,94 @@ impl Checker {
             // from the expectation via the same structural binding a call's arguments use, seeded
             // first-wins into the shared generic-call machinery — so the arguments can only fill
             // what the return leaves open. This is what lets a forwarding generic infer its
-            // instantiation from an annotated binding without a turbofish. (Inference does NOT
-            // flow through `?` — `o: Order = load(text)?` still spells `load::<Order>` — the
-            // expectation would have to invert the `Result` wrapper, which check-mode `?` does not
-            // model; documented as turbofish-required.)
-            Expr::Call { callee, args, span }
-                if !matches!(expected, Type::Unknown | Type::Dyn)
-                    && matches!(callee.as_ref(), Expr::Ident { name, .. }
-                        if lookup(env, name).is_none()
-                            && self
-                                .symbols
-                                .functions
-                                .get(name)
-                                .is_some_and(|sig| sig.generic.is_some())) =>
+            // instantiation from an annotated binding without a turbofish.
+            Expr::Call {
+                callee: _,
+                args,
+                span,
+            } if !matches!(expected, Type::Unknown | Type::Dyn)
+                && self.seedable_generic_call(expr, env).is_some() =>
             {
-                let Expr::Ident {
-                    name,
-                    span: callee_span,
-                } = callee.as_ref()
-                else {
-                    unreachable!("guarded by the arm pattern")
-                };
-                let sig = self.symbols.functions.get(name).cloned().expect("guarded");
-                let generic = sig.generic.clone().expect("guarded");
+                let (name, callee_span, generic) =
+                    self.seedable_generic_call(expr, env).expect("guarded");
+                let required = self.symbols.functions[&name].required;
                 let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
                 let mut seed: HashMap<String, Type> = HashMap::new();
                 bind_type_params(&generic.raw_ret, expected, &tps, &mut seed);
-                let mut arg_types: Vec<Type> = args
-                    .iter()
-                    .map(|a| {
-                        if self.is_deferred_arg(a, env) {
-                            Type::Unknown
-                        } else {
-                            self.synth(a, env)
-                        }
-                    })
-                    .collect();
-                let actual = self.check_generic_call_seeded(
-                    name,
+                let actual = self.check_seeded_generic_call(
+                    &name,
                     &generic,
-                    sig.required,
-                    &mut arg_types,
+                    required,
                     args,
-                    *callee_span,
+                    callee_span,
+                    *span,
                     seed,
-                    Some(*span),
                     env,
                 );
-                // The deferred-argument safety net, mirroring `synth_call`.
-                for (i, arg) in args.iter().enumerate() {
-                    if self.is_deferred_arg(arg, env)
-                        && matches!(arg_types.get(i), Some(Type::Unknown))
-                    {
-                        self.synth(arg, env);
-                    }
+                self.subsume(&actual, expected, expr.span());
+                actual
+            }
+            // Return-position inference THROUGH `?` (poly-deferrals D1): the expected type of the
+            // `?` EXPRESSION is the success-arm payload, and the callee's declared return names the
+            // wrapper (`Result<T, E>` / `?T`) — so `o: Order = load(text)?` seeds `T = Order` by
+            // binding the declaration's success arm against the expectation. The error arm still
+            // resolves from the declaration (its `From`-conversion check at `?` runs unchanged via
+            // the shared unwrap below), so E0057/`try_conversion_sites` behave exactly as in
+            // synthesis position.
+            Expr::Try { expr: inner, span }
+                if !matches!(expected, Type::Unknown | Type::Dyn)
+                    && self.seedable_generic_call(inner, env).is_some() =>
+            {
+                let (name, callee_span, generic) =
+                    self.seedable_generic_call(inner, env).expect("guarded");
+                let Expr::Call {
+                    args,
+                    span: call_span,
+                    ..
+                } = inner.as_ref()
+                else {
+                    unreachable!("seedable_generic_call matches plain calls only")
+                };
+                let required = self.symbols.functions[&name].required;
+                let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+                let mut seed: HashMap<String, Type> = HashMap::new();
+                // Bind the declared SUCCESS arm against the expectation; a declared return that is
+                // not a `Result`/`Option` leaves the seed empty (the unwrap below then reports the
+                // ordinary `?`-misuse, exactly as synthesis position would).
+                match &generic.raw_ret {
+                    Type::Result(ok, _) => bind_type_params(ok, expected, &tps, &mut seed),
+                    Type::Option(some) => bind_type_params(some, expected, &tps, &mut seed),
+                    _ => {}
                 }
+                let wrapped = self.check_seeded_generic_call(
+                    &name,
+                    &generic,
+                    required,
+                    args,
+                    callee_span,
+                    *call_span,
+                    seed,
+                    env,
+                );
+                let actual = self.try_unwrap(&wrapped, *span);
+                self.subsume(&actual, expected, expr.span());
+                actual
+            }
+            // The same success-arm seeding in `??` fallback position (poly-deferrals D1):
+            // `o: Order = load(text) ?? default` — the expectation reaches the call through the
+            // coalesce's payload, and the fallback must satisfy the same expectation.
+            Expr::Coalesce {
+                value, fallback, ..
+            } if !matches!(expected, Type::Unknown | Type::Dyn)
+                && self.seedable_generic_call(value, env).is_some() =>
+            {
+                let wrapped = self.check_coalesce_seeded(value, expected, env);
+                self.check(fallback, expected, env);
+                let actual = match wrapped {
+                    Type::Result(ok, _) => *ok,
+                    Type::Option(some) => *some,
+                    _ => Type::Unknown,
+                };
                 self.subsume(&actual, expected, expr.span());
                 actual
             }
@@ -266,6 +299,21 @@ impl Checker {
                 {
                     self.subsume(&fn_ty, expected, *span);
                     return fn_ty;
+                }
+                // A METHOD call in a checked position absorbs the expectation through its RETURN
+                // (generic methods, D3 — the method twin of the F2c free-fn arm): arm the pending
+                // expectation, keyed by THIS call's span, for `call_user_method` to seed a generic
+                // method's instantiation with; consumed only on an exact span match, and cleared
+                // unconditionally after synthesis so it can never leak into a sibling call.
+                if let Expr::Call { callee, span, .. } = expr
+                    && matches!(callee.as_ref(), Expr::Member { .. })
+                    && !matches!(expected, Type::Unknown | Type::Dyn)
+                {
+                    self.pending_member_ret = Some((*span, expected.clone()));
+                    let actual = self.synth(expr, env);
+                    self.pending_member_ret = None;
+                    self.subsume(&actual, expected, expr.span());
+                    return actual;
                 }
                 let actual = self.synth(expr, env);
                 self.subsume(&actual, expected, expr.span());
@@ -487,19 +535,22 @@ impl Checker {
                     && self.symbols.forwarding.contains_key(name.as_str())
                     && self.symbols.functions.contains_key(name.as_str()) =>
             {
-                // A FORWARDING generic fn is not a first-class value (poly-values F2b): its hidden
-                // type-argument slot is supplied per call, and an erased value would silently miss
-                // it. The clear boundary beats a runtime arity surprise.
+                // A FORWARDING generic fn referenced bare — with NO expectation to pin its
+                // instantiation — is not a value (poly-values F2b): its hidden type-argument slot
+                // would be silently missing. With a pinning expected function type the reference
+                // IS a value (D2c — `instantiate_fn_value` binds the slots into a wrapper); this
+                // arm is only reached when synthesis finds nothing to pin it.
                 self.error(
                     DiagnosticCode::InvalidTypeArguments,
                     *span,
                     format!(
-                        "cannot use `{name}` as a value: its type parameter determines a \
-                         call-site-typed result, which only a direct call can supply"
+                        "cannot use `{name}` as a value here: its type parameter determines a \
+                         call-site-typed result, and nothing pins the instantiation"
                     ),
                 )
                 .help(format!(
-                    "call it directly (`{name}::<T>(...)`), or wrap it in a closure"
+                    "bind it against an expected function type (`f: (string) -> ... = {name}`), \
+                     call it directly (`{name}::<T>(...)`), or wrap it in a closure"
                 ));
                 Type::Unknown
             }
@@ -947,29 +998,7 @@ impl Checker {
             }
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
-                match &inner {
-                    Type::Result(ok, err) => {
-                        // The error-position rule (error-ergonomics): a mismatched `Err` type
-                        // either converts through the target's `impl From<Source>` (site recorded
-                        // for lowering) or is E0057.
-                        let err = (**err).clone();
-                        self.check_try_error(&err, *span);
-                        (**ok).clone()
-                    }
-                    Type::Option(some) => (**some).clone(),
-                    // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
-                    // diagnostic, yielding the same deferred type.
-                    t if t.defers_to_runtime() => t.clone(),
-                    other => {
-                        self.error(
-                            DiagnosticCode::InvalidTry,
-                            *span,
-                            format!("`?` expects a `Result` or `Option`, found `{other}`"),
-                        )
-                        .help("`?` only propagates `Result`/`Option`; this value is neither");
-                        Type::Unknown
-                    }
-                }
+                self.try_unwrap(&inner, *span)
             }
             Expr::Await { expr, span } => {
                 let inner = self.synth(expr, env);
@@ -1056,6 +1085,21 @@ impl Checker {
             Expr::Coalesce {
                 value, fallback, ..
             } => {
+                // A generic-call value seeds its instantiation from the FALLBACK's type
+                // (poly-deferrals D1): `o = load(text) ?? default` — with no annotation, the only
+                // expectation in sight is the fallback, so it is synthesized first and its type
+                // bound against the callee's declared success arm. A deferring fallback leaves the
+                // seed empty (bind_type_params never binds from `dyn`/holes), reducing to the
+                // pre-existing behavior.
+                if self.seedable_generic_call(value, env).is_some() {
+                    let fb = self.synth(fallback, env);
+                    let wrapped = self.check_coalesce_seeded(value, &fb, env);
+                    return match wrapped {
+                        Type::Result(ok, _) => *ok,
+                        Type::Option(some) => *some,
+                        _ => Type::Unknown,
+                    };
+                }
                 let v = self.synth(value, env);
                 self.synth(fallback, env);
                 match v {
@@ -1112,7 +1156,12 @@ impl Checker {
                     && targs.is_empty()
                     && self.coloring.type_params.contains_key(p)
                 {
-                    match self.coloring.current_forwarding.iter().position(|n| n == p) {
+                    match self
+                        .coloring
+                        .current_forwarding
+                        .iter()
+                        .position(|t| t == &target)
+                    {
                         Some(idx) => {
                             self.sites.dynamic_attr_sites.insert(*span, idx as u32);
                         }
@@ -1281,6 +1330,52 @@ impl Checker {
                     Expr::Ident { name, .. } => name.clone(),
                     _ => String::new(),
                 };
+                // `recv.func::<T>(args)` where the receiver is NOT an imported native module is a
+                // generic METHOD call (D3): the atom that spells `json.parse::<T>(s)` also captures
+                // a single-type-argument member turbofish on a bare identifier, so `box.pick::<U>(x)`
+                // (a value's instance method) and `Box.make::<U>(x)` (a user type's associated
+                // function) arrive here too. Route them to the one method-call typing path — the
+                // multi-type-argument spelling parses as `Expr::TypedMethodCall` and lands there
+                // directly. Record the span so lowering desugars it to a plain method call rather
+                // than a native `Rvalue::TypedModuleCall`. A bare identifier that is neither a
+                // module, a local binding, nor a user type (a typo'd module) falls through to the
+                // native-call path below and reports there, unchanged.
+                if let Expr::Ident { name, .. } = recv.as_ref()
+                    && !self.imports.modules.contains_key(name)
+                    && (lookup(env, name).is_some() || self.symbols.types.contains(name))
+                {
+                    self.check_type_ref(ty);
+                    let mut arg_types: Vec<Type> = args
+                        .iter()
+                        .map(|a| {
+                            if self.is_deferred_arg(a, env) {
+                                Type::Unknown
+                            } else {
+                                self.synth(a, env)
+                            }
+                        })
+                        .collect();
+                    self.sites.member_method_call_sites.insert(*span);
+                    let ret = self.synth_typed_method_call(
+                        recv,
+                        func,
+                        *func_span,
+                        std::slice::from_ref(ty),
+                        &mut arg_types,
+                        args,
+                        *span,
+                        env,
+                    );
+                    // The deferred-argument safety net, as the `TypedMethodCall` arm does.
+                    for (i, expr) in args.iter().enumerate() {
+                        if self.is_deferred_arg(expr, env)
+                            && matches!(arg_types.get(i), Some(Type::Unknown))
+                        {
+                            self.synth(expr, env);
+                        }
+                    }
+                    return ret;
+                }
                 let module = self
                     .imports
                     .modules
@@ -1291,45 +1386,37 @@ impl Checker {
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
                 self.check_type_ref(ty);
                 let t = from_ref_q(ty, &self.imports.extern_types);
-                // A turbofish naming an in-scope TYPE PARAMETER (poly-values F2b): the recipe is
-                // per-instantiation, delivered through the enclosing forwarding fn's hidden slot —
-                // record the dynamic site instead of a baked recipe. Only the bare parameter
-                // forwards (a composite mentioning it has no single runtime slot); and only a
-                // top-level generic fn has hidden slots to read (methods/nested contexts are
-                // rejected — the honest boundary, not silently wrong).
-                let forwarded = match &t {
-                    Type::Named(p, targs)
-                        if targs.is_empty() && self.coloring.type_params.contains_key(p) =>
+                // A turbofish MENTIONING an in-scope type parameter (poly-values F2b; composites
+                // D2a): the recipe is per-instantiation, delivered through the enclosing
+                // forwarding fn's hidden slot for this exact template — the bare `T` or the whole
+                // composite (`List<T>`), both computed identically by the pre-pass — so record
+                // the dynamic site instead of a baked recipe. Only a top-level generic fn (or a
+                // nested fn inside one, D2b) has hidden slots to read; method contexts are
+                // rejected — the honest boundary, not silently wrong.
+                let forwarded = if self.mentions_in_scope_param(&t) {
+                    match self
+                        .coloring
+                        .current_forwarding
+                        .iter()
+                        .position(|s| s == &t)
                     {
-                        match self.coloring.current_forwarding.iter().position(|n| n == p) {
-                            Some(idx) => {
-                                self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
-                            }
-                            None => {
-                                self.error(
-                                    DiagnosticCode::InvalidTypeArguments,
-                                    *span,
-                                    format!(
-                                        "cannot forward `{p}` here: call-site-typed forwarding \
-                                         is supported in top-level generic functions only"
-                                    ),
-                                );
-                            }
+                        Some(idx) => {
+                            self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
                         }
-                        true
+                        None => {
+                            self.error(
+                                DiagnosticCode::InvalidTypeArguments,
+                                *span,
+                                format!(
+                                    "cannot forward `{t}` here: call-site-typed forwarding is \
+                                     supported in top-level generic functions only"
+                                ),
+                            );
+                        }
                     }
-                    t if self.mentions_in_scope_param(t) => {
-                        self.error(
-                            DiagnosticCode::InvalidTypeArguments,
-                            *span,
-                            format!(
-                                "cannot forward `{t}`: a call-site-typed turbofish inside a \
-                                 generic function must be the bare type parameter"
-                            ),
-                        );
-                        true
-                    }
-                    _ => false,
+                    true
+                } else {
+                    false
                 };
                 // Record the build recipe for the turbofish `T`; a type with no recipe (an enum,
                 // class, unconstrained generic, …) cannot be built at the call site — a clear error.
@@ -1403,6 +1490,46 @@ impl Checker {
                 );
                 // The deferred-argument safety net, mirroring `synth_call`: any deferred argument
                 // no branch finalized is synthesized standalone so its body is always checked.
+                for (i, expr) in args.iter().enumerate() {
+                    if self.is_deferred_arg(expr, env)
+                        && matches!(arg_types.get(i), Some(Type::Unknown))
+                    {
+                        self.synth(expr, env);
+                    }
+                }
+                ret
+            }
+            // `recv.m::<U, ...>(args)` — an explicitly instantiated METHOD call (generic methods,
+            // D3). Arguments defer exactly as the free-fn turbofish's do.
+            Expr::TypedMethodCall {
+                recv,
+                name,
+                name_span,
+                type_args,
+                args,
+                span,
+            } => {
+                let mut arg_types: Vec<Type> = args
+                    .iter()
+                    .map(|a| {
+                        if self.is_deferred_arg(a, env) {
+                            Type::Unknown
+                        } else {
+                            self.synth(a, env)
+                        }
+                    })
+                    .collect();
+                let ret = self.synth_typed_method_call(
+                    recv,
+                    name,
+                    *name_span,
+                    type_args,
+                    &mut arg_types,
+                    args,
+                    *span,
+                    env,
+                );
+                // The deferred-argument safety net, as above.
                 for (i, expr) in args.iter().enumerate() {
                     if self.is_deferred_arg(expr, env)
                         && matches!(arg_types.get(i), Some(Type::Unknown))

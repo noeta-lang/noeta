@@ -1,0 +1,51 @@
+// D2c (poly-deferrals): a FORWARDING generic fn used as a VALUE, instantiated by the expected
+// function type (F1). The annotated binding pins `T = Order`, so the hidden type-argument slot
+// is resolved statically and BOUND INTO the value (a synthesized wrapper closure partially
+// applies it); the value then flows through higher-order code (`map`) like any function value.
+// Also composes with a composite slot (`List<T>`).
+// expect: stdout "ids [7, 8]"
+// expect: stdout "batch 2"
+// expect: stdout "each 3"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+fn load_all<T>(text: string): Result<List<T>, JsonError> {
+    return json.try_parse::<List<T>>(text)
+}
+
+decode: (string) -> Result<Order, JsonError> = load
+texts = ["{\"id\": 7}", "{\"id\": 8}"]
+ids = texts.map(decode).map(fn(r) => match r {
+    Ok(o) => o.id,
+    Err(e) => -1,
+})
+echo "ids ${ids}"
+
+decode_all: (string) -> Result<List<Order>, JsonError> = load_all
+b = decode_all("[{\"id\": 1}, {\"id\": 2}]")
+echo match b {
+    Ok(v) => "batch ${v.len()}",
+    Err(e) => "unreached",
+}
+
+// Inside ANOTHER generic fn, the value's slot is a PASS-THROUGH of the enclosing `T`: the
+// wrapper closure captures the enclosing hidden `$ty` local like any upvalue.
+fn decode_each<T>(texts: List<string>): List<Result<T, JsonError>> {
+    d: (string) -> Result<T, JsonError> = load
+    return texts.map(d)
+}
+
+each = decode_each::<Order>(["{\"id\": 3}"])
+echo match each[0] {
+    Ok(o) => "each ${o.id}",
+    Err(e) => "unreached",
+}

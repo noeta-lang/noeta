@@ -1,0 +1,48 @@
+// D2b (poly-deferrals): a NESTED `fn` inside a forwarding generic forwards the ENCLOSING fn's
+// `T` — the pre-pass walks nested bodies, the checker retains the enclosing slot layout, and the
+// nested body's site reads the enclosing hidden `$ty` local through ordinary closure capture
+// (both backends). Composes with composite slots (`load_all::<T>` from a nested body passes the
+// enclosing `List<T>` slot through).
+// expect: stdout "order 7"
+// expect: stdout "users 1"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+struct User {
+    name: string
+}
+
+fn load_all<T>(text: string): Result<List<T>, JsonError> {
+    return json.try_parse::<List<T>>(text)
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    fn decode(t: string): Result<T, JsonError> {
+        return json.try_parse::<T>(t)
+    }
+    return decode(text)
+}
+
+fn batch<T>(text: string): Result<List<T>, JsonError> {
+    fn all(t: string): Result<List<T>, JsonError> {
+        return load_all::<T>(t)
+    }
+    return all(text)
+}
+
+o = load::<Order>("{\"id\": 7}")
+echo match o {
+    Ok(v) => "order ${v.id}",
+    Err(e) => "unreached",
+}
+
+us = batch::<User>("[{\"name\": \"Ada\"}]")
+echo match us {
+    Ok(v) => "users ${v.len()}",
+    Err(e) => "unreached",
+}

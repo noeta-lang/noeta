@@ -1,0 +1,21 @@
+// A generic METHOD (poly-deferrals D3) declares its OWN type parameter `<U>`, instantiated per
+// call. Here the arguments alone pin it: `b.choose(99, true)` infers `U = int`, `b.choose("hi",
+// false)` infers `U = string` — the same argument-inference a free generic fn does, now on a
+// method whose class parameter `T` is fixed by the receiver. Erased at runtime; both backends run
+// the same dispatch a plain `b.choose(...)` compiles to.
+// expect: stdout "10"
+// expect: stdout "99"
+// expect: stdout "10"
+// expect: stdout "hi"
+// expect: exit 0
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn choose<U>(other: U, take: bool): U {
+        echo self.value;
+        return other;
+    }
+}
+b = Box.new(10);
+echo b.choose(99, true);
+echo b.choose("hi", false);

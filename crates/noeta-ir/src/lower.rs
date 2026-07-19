@@ -109,6 +109,11 @@ pub struct LoweringSites<'a> {
     /// receiver's type → lowered as [`Rvalue::Field`] then [`Rvalue::Call`] (the field-access-
     /// then-call desugar) instead of [`Rvalue::Method`], so `obj.f(args)` means `(obj.f)(args)`.
     pub field_call_sites: &'a HashSet<Span>,
+    /// Generic-method turbofish spans reached via the `TypedModuleCall` surface (D3): a
+    /// `recv.m::<T>(args)` whose bare-identifier receiver is a value or a user type (not an
+    /// imported native module) → desugared to a plain method call ([`Rvalue::Method`] / the
+    /// associated-call path) instead of a native [`Rvalue::TypedModuleCall`].
+    pub member_method_call_sites: &'a HashSet<Span>,
     /// Bare float-literal spans the checker adapted into an `f32` context (`mut x: f32 = 1.5`,
     /// P-NUM-SYM). Unlike `f64` (bit-identical to `float`), `f32` is a *distinct 32-bit*
     /// representation, so an adapted literal must lower to a narrow [`Const::F32`] rather than the
@@ -138,6 +143,10 @@ pub struct LoweringSites<'a> {
     pub dynamic_attr_sites: &'a HashMap<Span, u32>,
     /// Forwarding generic fns → their hidden-parameter count (prepended as `$ty0`, `$ty1`, …).
     pub forwarding_fns: &'a HashMap<String, u32>,
+    /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
+    /// adopted arity)`. The reference lowers to a synthesized closure calling the fn; the inner
+    /// call reuses this same span, so `hidden_arg_sites` binds the resolved slots into the value.
+    pub fn_value_sites: &'a HashMap<Span, (String, u32)>,
 }
 
 impl LoweringSites<'static> {
@@ -157,6 +166,7 @@ impl LoweringSites<'static> {
         static HIDDEN: OnceLock<HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>> = OnceLock::new();
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
+        static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         LoweringSites {
             packed_list_sites: PACKED.get_or_init(HashMap::new),
             index_field_sites: SPANS.get_or_init(HashSet::new),
@@ -168,6 +178,7 @@ impl LoweringSites<'static> {
             handle_sites: HANDLES.get_or_init(HashMap::new),
             bound_handle_sites: SPANS.get_or_init(HashSet::new),
             field_call_sites: SPANS.get_or_init(HashSet::new),
+            member_method_call_sites: SPANS.get_or_init(HashSet::new),
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
             bundle_call_sites: PAIRS.get_or_init(HashMap::new),
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
@@ -177,6 +188,7 @@ impl LoweringSites<'static> {
             dynamic_recipe_sites: SLOTS.get_or_init(HashMap::new),
             dynamic_attr_sites: SLOTS.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
+            fn_value_sites: FN_VALUES.get_or_init(HashMap::new),
         }
     }
 }
@@ -203,6 +215,7 @@ macro_rules! lowering_sites {
             handle_sites: &$s.handle_sites,
             bound_handle_sites: &$s.bound_handle_sites,
             field_call_sites: &$s.field_call_sites,
+            member_method_call_sites: &$s.member_method_call_sites,
             f32_literal_sites: &$s.f32_literal_sites,
             bundle_call_sites: &$s.bundle_call_sites,
             namespace_module_sites: &$s.namespace_module_sites,
@@ -212,6 +225,7 @@ macro_rules! lowering_sites {
             dynamic_recipe_sites: &$s.dynamic_recipe_sites,
             dynamic_attr_sites: &$s.dynamic_attr_sites,
             forwarding_fns: &$s.forwarding_fns,
+            fn_value_sites: &$s.fn_value_sites,
         }
     };
 }
@@ -481,6 +495,7 @@ pub fn lower_with_sites_opts(
     let program: &AstProgram = hoisted.as_ref().unwrap_or(program);
     let mut lowerer = Lowerer {
         temps: 0,
+        fn_depth: 0,
         sites,
         real_isolates,
         synth_step_name: None,
@@ -507,6 +522,12 @@ pub fn lower_with_sites_opts(
 struct Lowerer<'a> {
     /// The next free temporary index in the current frame; also the running frame size.
     temps: u32,
+    /// How many function frames enclose the code being lowered: `0` at module top level, `1+`
+    /// inside a fn/method/closure body. Only a TOP-LEVEL `fn` (depth 0) may carry hidden
+    /// forwarding parameters — a NESTED fn that forwards (D2b) reads the enclosing fn's hidden
+    /// locals through closure capture instead, and its (possibly colliding) name must never key
+    /// the top-level `forwarding_fns` table.
+    fn_depth: u32,
     /// The checker's lowering-site maps (see [`LoweringSites`]) — the span-keyed hints that drive
     /// packed/fused/streamed lowering. Empty on the boxed/unfused REPL/IR-corpus path.
     sites: LoweringSites<'a>,
@@ -1090,11 +1111,17 @@ impl Lowerer<'_> {
         // PREPENDED parameters (`$ty0`, `$ty1`, …): prepending — not appending — keeps the
         // declaration's trailing defaults trailing, so omitted-argument filling is untouched.
         // Every call site prepends the matching hidden atoms (`hidden_arg_sites`). Keyed by the
-        // top-level fn name; methods/closures never appear in the map.
-        let hidden = name
-            .as_deref()
-            .and_then(|n| self.sites.forwarding_fns.get(n).copied())
-            .unwrap_or(0);
+        // top-level fn name — only at depth 0: a NESTED fn (D2b) may share a top-level name but
+        // never carries hidden parameters (it captures the enclosing `$ty` locals instead), and
+        // methods/closures never appear in the map.
+        let hidden = if self.fn_depth == 0 {
+            name.as_deref()
+                .and_then(|n| self.sites.forwarding_fns.get(n).copied())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.fn_depth += 1;
         let mut param_names: Vec<String> = (0..hidden).map(hidden_param_name).collect();
         param_names.extend(params.iter().map(|p| p.name.clone()));
         // Defaults are evaluated in the captured scope at call time, each in its own frame, so
@@ -1137,6 +1164,7 @@ impl Lowerer<'_> {
         };
         let temp_count = self.temps;
         self.temps = outer;
+        self.fn_depth -= 1;
         Ok(Func {
             name,
             captures,
@@ -1344,6 +1372,66 @@ impl Lowerer<'_> {
             // returns to signal it suspended at an `.await`. Lowers to the dedicated rvalue.
             Expr::Ident { name, span } if name == PENDING_IDENT => {
                 Ok(self.emit(out, Rvalue::Pending { span: *span }, *span))
+            }
+            // A FORWARDING generic fn used as a VALUE (poly-deferrals D2c): the checker resolved
+            // the instantiation's hidden slots at this span — wrap the reference in a synthesized
+            // closure `($fv0, …) => name($fv0, …)` whose inner call carries THIS span, so
+            // `prepend_hidden_args` binds the resolved atoms into the value (a partial
+            // application over the type-argument slots; a `Forward` slot captures the enclosing
+            // `$ty` local like any closure upvalue). The inner callee gets a zero-width span so
+            // it cannot re-trigger this arm.
+            Expr::Ident { name, span } if matches!(self.sites.fn_value_sites.get(span), Some((n, _)) if n == name) =>
+            {
+                let (fname, arity) = self.sites.fn_value_sites[span].clone();
+                let callee_span = Span {
+                    start: span.start,
+                    end: span.start,
+                    source: span.source,
+                };
+                let params: Vec<Param> = (0..arity)
+                    .map(|i| Param {
+                        name: format!("$fv{i}"),
+                        name_span: *span,
+                        ty: None,
+                        default: None,
+                        span: *span,
+                    })
+                    .collect();
+                let call = Expr::Call {
+                    callee: Box::new(Expr::Ident {
+                        name: fname,
+                        span: callee_span,
+                    }),
+                    args: params
+                        .iter()
+                        .map(|p| Expr::Ident {
+                            name: p.name.clone(),
+                            span: *span,
+                        })
+                        .collect(),
+                    span: *span,
+                };
+                // Anonymous like any closure — naming it after the fn would make the wrapper
+                // adopt the fn's hidden parameters at top level (the `forwarding_fns` lookup is
+                // name-keyed); the inner call still traces under the real fn.
+                // A synthetic wrapper has no explicit capture clause.
+                let func = self.lower_func(
+                    &params,
+                    BodyKind::Arrow(&call),
+                    *span,
+                    false,
+                    false,
+                    None,
+                    None,
+                )?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Closure {
+                        func: Rc::new(func),
+                        span: *span,
+                    },
+                    *span,
+                ))
             }
             Expr::Ident { name, span } => Ok(Atom::Var {
                 name: name.clone(),
@@ -1769,6 +1857,33 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            // `recv.m::<U, ...>(args)` (generic methods, D3): the explicit instantiation is a
+            // checker-only fact — the method's own type parameters are erased, and a generic
+            // method never forwards (the pinned D3 boundary, so no hidden slot) — so this lowers
+            // EXACTLY as the plain `recv.m(args)` method call does. Rebuild the equivalent
+            // member-call `Expr` at the same span and reuse the one method-dispatch path (instance
+            // → `Rvalue::Method`, `Type.assoc` → the associated-call lowering), so every
+            // site-keyed dispatch decision is shared by construction.
+            Expr::TypedMethodCall {
+                recv,
+                name,
+                name_span,
+                args,
+                span,
+                ..
+            } => {
+                let desugared = Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        receiver: recv.clone(),
+                        name: name.clone(),
+                        name_span: *name_span,
+                        span: *span,
+                    }),
+                    args: args.clone(),
+                    span: *span,
+                };
+                self.lower_expr(&desugared, out)
+            }
             Expr::Member {
                 receiver,
                 name,
@@ -2134,10 +2249,29 @@ impl Lowerer<'_> {
             Expr::TypedModuleCall {
                 recv,
                 func,
+                func_span,
                 args,
                 span,
                 ..
             } => {
+                // A generic-METHOD turbofish (D3) that shares the `ident.func::<T>(args)` surface —
+                // the checker resolved the receiver to a value or a user type, not a native module —
+                // lowers EXACTLY as the plain `recv.func(args)` method call does (the method's own
+                // type parameter is erased and never forwards). Rebuild the equivalent member call
+                // at the same span and reuse the one method-dispatch path.
+                if self.sites.member_method_call_sites.contains(span) {
+                    let desugared = Expr::Call {
+                        callee: Box::new(Expr::Member {
+                            receiver: recv.clone(),
+                            name: func.clone(),
+                            name_span: *func_span,
+                            span: *span,
+                        }),
+                        args: args.clone(),
+                        span: *span,
+                    };
+                    return self.lower_expr(&desugared, out);
+                }
                 let module = match recv.as_ref() {
                     Expr::Ident { name, .. } => name.clone(),
                     _ => String::new(),

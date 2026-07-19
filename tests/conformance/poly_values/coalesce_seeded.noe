@@ -1,0 +1,27 @@
+// D1 (poly-deferrals): the `??` fallback position seeds a generic call's instantiation. With an
+// annotation the expectation reaches the call through the coalesce's payload
+// (`o: Order = load(text) ?? default`); WITHOUT one, the fallback's own type is the expectation
+// (`o = load(text) ?? default` — synthesized first, then bound against the declared success arm).
+// Both work for a FORWARDING generic (the seed makes the hidden type-argument slot resolvable).
+// expect: stdout "parsed 7"
+// expect: stdout "fell back 0"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+default_order = Order { id: 0 }
+
+good: Order = load("{\"id\": 7}") ?? default_order
+echo "parsed ${good.id}"
+
+// Un-annotated: the fallback (`default_order`, an `Order`) seeds `T`.
+bad = load("{\"nope\": true}") ?? default_order
+echo "fell back ${bad.id}"

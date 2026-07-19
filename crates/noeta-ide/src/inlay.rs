@@ -312,6 +312,10 @@ impl Walker<'_> {
                 self.exprs(args);
             }
             Expr::TypedCall { args, .. } => self.exprs(args),
+            Expr::TypedMethodCall { recv, args, .. } => {
+                self.expr(recv);
+                self.exprs(args);
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {

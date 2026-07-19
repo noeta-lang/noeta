@@ -410,7 +410,7 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         }
         // A turbofish call binds nothing itself — walk the argument expressions.
         Expr::TypedCall { args, .. } => args.iter().for_each(|a| bound_in_expr(a, names)),
-        Expr::TypedModuleCall { recv, args, .. } => {
+        Expr::TypedModuleCall { recv, args, .. } | Expr::TypedMethodCall { recv, args, .. } => {
             bound_in_expr(recv, names);
             args.iter().for_each(|a| bound_in_expr(a, names));
         }
@@ -741,6 +741,16 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         Expr::TypedCall {
             type_args, args, ..
         } => {
+            type_args.iter_mut().for_each(|t| q_typeref(t, visit));
+            args.iter_mut().for_each(|a| q_expr(a, visit));
+        }
+        Expr::TypedMethodCall {
+            recv,
+            type_args,
+            args,
+            ..
+        } => {
+            q_expr(recv, visit);
             type_args.iter_mut().for_each(|t| q_typeref(t, visit));
             args.iter_mut().for_each(|a| q_expr(a, visit));
         }

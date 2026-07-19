@@ -274,7 +274,9 @@ fn check_all_impl(
     // The type-param forwarding pre-pass (poly-values F2b) must precede body checking: a call
     // site of a forwarding fn records hidden arguments, whether it appears before or after the
     // callee's declaration.
-    checker.symbols.forwarding = compute_forwarding(program);
+    let fwd = compute_forwarding(program, &checker.imports.extern_types);
+    checker.symbols.forwarding = fwd.map;
+    checker.symbols.forwarding_poisoned = fwd.poisoned;
     // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
     // relevance is recorded inline during `check_program`, and needs the reachable set ready).
     checker.compute_relevance(program);
@@ -327,7 +329,9 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
-    checker.symbols.forwarding = compute_forwarding(program);
+    let fwd = compute_forwarding(program, &checker.imports.extern_types);
+    checker.symbols.forwarding = fwd.map;
+    checker.symbols.forwarding_poisoned = fwd.poisoned;
     checker.compute_relevance(program);
     checker.check_semantic_roles(program);
     checker.check_tier_decls(program);
@@ -449,10 +453,12 @@ impl SessionChecker {
         // A session entry's forwarding table extends the accumulated one (an entry may declare a
         // forwarding fn a later entry calls; cross-entry transitive forwarding is out of scope,
         // like any cross-entry forward reference).
+        let fwd = compute_forwarding(entry, &self.checker.imports.extern_types);
+        self.checker.symbols.forwarding.extend(fwd.map);
         self.checker
             .symbols
-            .forwarding
-            .extend(compute_forwarding(entry));
+            .forwarding_poisoned
+            .extend(fwd.poisoned);
         // Re-run the reachability fixpoint over the ACCUMULATED registries (this entry's
         // `destruct` class can make an earlier entry's type reachable), and record this entry's
         // parameter relevance.
@@ -877,12 +883,17 @@ struct Symbols {
     attribute_optional_fields: HashMap<String, HashSet<String>>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
-    /// The **type-param forwarding table** (poly-values F2b): top-level generic fn name → its
-    /// ordered forwarding type parameters (those flowing into a call-site-typed position —
+    /// The **type-param forwarding table** (poly-values F2b + composite slots D2a): top-level
+    /// generic fn name → its ordered forwarding SLOTS (each a type template — bare `T` or a
+    /// composite like `List<T>` — flowing into a call-site-typed position:
     /// `json.try_parse::<T>`, `attributes_of::<T>`, or transitively another forwarding generic).
     /// Computed by the syntactic pre-pass ([`compute_forwarding`]) before bodies are checked, so
     /// body-side sites and call sites agree on the hidden-argument layout.
     forwarding: ForwardingMap,
+    /// Functions whose forwarding slot set failed to converge — polymorphic recursion through a
+    /// composite forward (`f<T>` demanding `List<T>`, then `List<List<T>>`, …). Reported as a
+    /// clear E0058 at the declaration instead of an unbounded table.
+    forwarding_poisoned: HashSet<String>,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
     /// through the type's own block, its fields, or its collection elements (the fixpoint
     /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.
@@ -984,9 +995,16 @@ struct Coloring {
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
     /// While checking a top-level **forwarding** generic fn's body (poly-values F2b), its ordered
-    /// forwarding type-parameter names — the hidden-argument layout the body's dynamic sites
-    /// (`json.try_parse::<T>`) and onward-forwarding calls index into. Empty everywhere else.
-    current_forwarding: Vec<String>,
+    /// forwarding slot TEMPLATES (bare `T` or a composite like `List<T>`, D2a) — the
+    /// hidden-argument layout the body's dynamic sites (`json.try_parse::<List<T>>`) and
+    /// onward-forwarding calls index into. A slot whose template mentions a name shadowed by a
+    /// nested `fn`'s own type parameter is masked to `Unknown` inside that nested body (D2b) so
+    /// it can never match the shadowing parameter. Empty everywhere else.
+    current_forwarding: Vec<Type>,
+    /// How many `fn` bodies enclose the statement being checked: `0` at top level, `1` inside a
+    /// top-level fn/method body, `2+` inside a nested `fn`. Distinguishes a TOP-LEVEL fn (whose
+    /// name keys the forwarding/symbol tables) from a nested one that may share its name (D2b).
+    fn_depth: usize,
     /// `Expr::Index` spans whose receiver typed as a built-in `List` — recorded as each index is
     /// synthesized so that [`Checker::synth_member`] can recognize a `list[i].field` read without
     /// re-synthesizing (and re-diagnosing) the inner receiver. Internal scratch, not exported (so it
@@ -1047,6 +1065,14 @@ struct Checker {
     /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
     /// the destructor check for a value whose type can run no destructor.
     relevance: DestructorRelevance,
+    /// The pending RETURN-position expectation for the METHOD call currently being synthesized
+    /// (generic methods, D3): `(the call's span, the expected type)`, armed by check-mode's
+    /// default arm just before it synthesizes a `Call`-with-`Member`-callee and consumed by
+    /// [`Checker::call_user_method`] on an exact span match — so `u: User = box.pick(text)` seeds
+    /// the method's own type parameters from the annotation, the method twin of the free-fn F2c
+    /// arm. Cleared unconditionally after the synthesis returns; sub-expression calls have
+    /// different spans, so it can never mis-seed a nested call.
+    pending_member_ret: Option<(Span, Type)>,
     diags: Vec<Diagnostic>,
 }
 
@@ -2020,21 +2046,62 @@ impl Checker {
         // While checking a top-level forwarding generic's body (poly-values F2b), expose its
         // hidden-argument layout so the body's dynamic sites and onward-forwarding calls can index
         // it. Methods/nested contexts get an empty layout (forwarding is top-level-fn only).
-        let saved_forwarding = std::mem::replace(
-            &mut self.coloring.current_forwarding,
-            if target == TargetKind::Function {
-                self.symbols
-                    .forwarding
-                    .get(&decl.name)
-                    .map(|f| f.iter().map(|p| p.name.clone()).collect())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            },
-        );
+        // A slot set that failed the pre-pass fixpoint (polymorphic recursion through a
+        // composite forward, D2a) is a clear error at the declaration — the static table cannot
+        // enumerate its instantiations.
+        if self.symbols.forwarding_poisoned.contains(&decl.name)
+            && self.coloring.fn_depth == 0
+            && target == TargetKind::Function
+        {
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                decl.name_span,
+                format!(
+                    "type-parameter forwarding in `{}` does not converge: recursion keeps \
+                     building deeper composite instantiations",
+                    decl.name
+                ),
+            )
+            .help(
+                "erased generics deliver each forwarded instantiation through a static table, \
+                 which polymorphic recursion (e.g. `f::<List<T>>` inside `f<T>`) cannot \
+                 enumerate; restructure so the composite is built by the caller",
+            );
+        }
+        let next_forwarding = if target == TargetKind::Function && self.coloring.fn_depth == 0 {
+            self.symbols
+                .forwarding
+                .get(&decl.name)
+                .map(|f| f.iter().map(|s| s.template.clone()).collect())
+                .unwrap_or_default()
+        } else if target == TargetKind::Function {
+            // A NESTED `fn` (D2b) consumes the ENCLOSING top-level fn's slots — its body
+            // reads the enclosing hidden locals through closure capture — so the layout is
+            // retained, with any slot whose template mentions a name this declaration's own
+            // type parameters shadow masked out (`Unknown` never matches a lookup).
+            let shadowed: Vec<String> = decl.type_params.iter().map(|p| p.name.clone()).collect();
+            self.coloring
+                .current_forwarding
+                .iter()
+                .map(|t| {
+                    if mentions_param(t, &shadowed) {
+                        Type::Unknown
+                    } else {
+                        t.clone()
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let saved_forwarding =
+            std::mem::replace(&mut self.coloring.current_forwarding, next_forwarding);
+        self.coloring.fn_depth += 1;
         // Record the hidden-parameter count for lowering — for EVERY forwarding fn, called or
-        // not, so the body's dynamic sites always have their slots.
-        if !self.coloring.current_forwarding.is_empty() {
+        // not, so the body's dynamic sites always have their slots. Top-level only: a nested fn
+        // retains the enclosing layout for its body's SITES (D2b) but carries no hidden
+        // parameters of its own (it captures the enclosing locals instead).
+        if self.coloring.fn_depth == 1 && !self.coloring.current_forwarding.is_empty() {
             self.sites.forwarding_fns.insert(
                 decl.name.clone(),
                 self.coloring.current_forwarding.len() as u32,
@@ -2198,6 +2265,7 @@ impl Checker {
         self.coloring.current_yield = saved_yield;
         self.coloring.loop_depth = saved_loop_depth;
         self.coloring.type_params = saved_type_params;
+        self.coloring.fn_depth -= 1;
         self.coloring.current_forwarding = saved_forwarding;
     }
 }

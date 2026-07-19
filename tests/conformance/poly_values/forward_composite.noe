@@ -1,0 +1,57 @@
+// D2a (poly-deferrals): COMPOSITE forwards — `List<T>`, `Map<string, T>`, `?T` as call-site-typed
+// turbofish arguments inside a generic body. The slot's template is the whole composite; each
+// instantiating call substitutes its concrete `T` in and interns the resulting type into the
+// program-wide TypeArgInfo table STATICALLY, so one erased body decodes `List<Order>` and
+// `List<User>` with their own recipes and the runtime never constructs one.
+// expect: stdout "orders 2 first 7"
+// expect: stdout "users 1 Ada"
+// expect: stdout "scores a=1"
+// expect: stdout "maybe 9"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+struct User {
+    name: string
+}
+
+fn load_all<T>(text: string): Result<List<T>, JsonError> {
+    return json.try_parse::<List<T>>(text)
+}
+
+fn load_index<T>(text: string): Result<Map<string, T>, JsonError> {
+    return json.try_parse::<Map<string, T>>(text)
+}
+
+fn load_maybe<T>(text: string): Result<?T, JsonError> {
+    return json.try_parse::<?T>(text)
+}
+
+os = load_all::<Order>("[{\"id\": 7}, {\"id\": 8}]")
+echo match os {
+    Ok(v) => "orders ${v.len()} first ${v[0].id}",
+    Err(e) => "unreached",
+}
+
+us = load_all::<User>("[{\"name\": \"Ada\"}]")
+echo match us {
+    Ok(v) => "users ${v.len()} ${v[0].name}",
+    Err(e) => "unreached",
+}
+
+scores = load_index::<int>("{\"a\": 1}")
+score_line = match scores {
+    Ok(m) => m["a"],
+    Err(e) => -1,
+}
+echo "scores a=${score_line}"
+
+m = load_maybe::<int>("9")
+echo match m {
+    Ok(v) => "maybe ${v ?? -1}",
+    Err(e) => "unreached",
+}

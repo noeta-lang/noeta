@@ -1,0 +1,43 @@
+// D1 (poly-deferrals): return-position inference flows THROUGH `?`. The expected type of the
+// `?` EXPRESSION is the success-arm payload, so `o: Order = load(text)?` seeds `T = Order` from
+// the annotation — no turbofish — even for a FORWARDING generic whose `T` determines a
+// call-site-typed recipe. The `Option` wrapper (`?T`) seeds the same way.
+// expect: stdout "7"
+// expect: stdout "count 0"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+fn read_order(text: string): Result<int, JsonError> {
+    o: Order = load(text)?
+    return Ok(o.id)
+}
+
+echo match read_order("{\"id\": 7}") {
+    Ok(id) => "${id}",
+    Err(e) => "unreached",
+}
+
+// The `?T` wrapper: the success arm (`List<T>`) binds against the expectation (`List<int>`),
+// pinning `T` from the annotation alone.
+fn empty_list<T>(): ?List<T> {
+    return some([])
+}
+
+fn count_empty(): ?string {
+    xs: List<int> = empty_list()?
+    return some("count ${xs.len()}")
+}
+
+echo match count_empty() {
+    some(s) => s,
+    none => "unreached",
+}

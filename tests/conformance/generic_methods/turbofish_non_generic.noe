@@ -1,0 +1,11 @@
+// A member turbofish on a NON-generic method (poly-deferrals D3) is `E0058`: only a method that
+// declares its own type parameters is instantiated explicitly.
+// expect: error E0058 at 11:6
+// expect: exit 1
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn get(): T { return self.value; }
+}
+b = Box.new(1);
+echo b.get::<int>();

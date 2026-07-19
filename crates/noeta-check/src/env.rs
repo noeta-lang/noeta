@@ -38,8 +38,15 @@ pub(crate) struct FnSig {
 /// bounds, and return the substituted result type.
 #[derive(Clone)]
 pub(crate) struct GenericInfo {
-    /// `(type-parameter name, trait bounds)` in declaration order.
+    /// `(type-parameter name, trait bounds)` in declaration order. For a METHOD with its own
+    /// type parameters (generic methods, poly-deferrals D3) this is the CLASS's parameters
+    /// followed by the method's own — the two substitutions compose because the receiver's type
+    /// arguments seed exactly the first `class_params` entries (positionally) and the method's
+    /// own are filled by turbofish/arguments/expectation.
     pub(crate) params: Vec<(String, Vec<BoundReq>)>,
+    /// How many leading entries of `params` belong to the enclosing class/struct/enum (`0` for a
+    /// free function). A member-call turbofish binds the REMAINING (method-own) parameters only.
+    pub(crate) class_params: usize,
     pub(crate) raw_params: Vec<Type>,
     pub(crate) raw_ret: Type,
 }

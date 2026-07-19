@@ -208,6 +208,44 @@ pub(crate) fn mentions_param(ty: &Type, params: &[String]) -> bool {
     }
 }
 
+/// The type parameters of `params` that `ty` mentions (bare or nested), in first-appearance
+/// order, deduplicated. The forwarding call-site resolution uses it to name the exact parameter a
+/// slot template needs but the call left open (D2a).
+pub(crate) fn params_mentioned(ty: &Type, params: &HashSet<String>) -> Vec<String> {
+    fn walk(ty: &Type, params: &HashSet<String>, out: &mut Vec<String>) {
+        match ty {
+            Type::Named(n, args) => {
+                if params.contains(n) && !out.iter().any(|o| o == n) {
+                    out.push(n.clone());
+                }
+                for a in args {
+                    walk(a, params, out);
+                }
+            }
+            Type::List(t) | Type::Set(t) | Type::Option(t) => walk(t, params, out),
+            Type::Map(k, v) | Type::Result(k, v) => {
+                walk(k, params, out);
+                walk(v, params, out);
+            }
+            Type::Tuple(elems) | Type::Union(elems) => {
+                for e in elems {
+                    walk(e, params, out);
+                }
+            }
+            Type::Fn { params: ps, ret } => {
+                for p in ps {
+                    walk(p, params, out);
+                }
+                walk(ret, params, out);
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(ty, params, &mut out);
+    out
+}
+
 /// Apply a call's substitution with every still-unbound parameter of `tps` mapped to `dyn` — the
 /// **capture-safe** form of substitute-then-erase: a type the substitution itself inserted is
 /// never re-erased, even when the caller's in-scope type parameter shares a NAME with the
