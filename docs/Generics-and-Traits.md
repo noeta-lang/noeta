@@ -75,6 +75,7 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Equatable` | `eq(other): bool` | `==` `!=` |
 | `Comparable` | `compare(other): Ordering` | `< <= > >=` |
 | `Display` | `to_string(): string` | `echo`, `${…}` |
+| `Error` | `message(): string` | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
 | `Add` | `add(other): T` | `+` |
 | `Sub` | `sub(other): T` | `-` |
 | `Mul` | `mul(other): T` | `*` |

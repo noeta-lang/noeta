@@ -40,6 +40,31 @@ echo match validate([]) {
 }
 ```
 
+## The `Error` trait
+
+A type whose values describe a failure implements the built-in `Error` trait — one required method, `message(): string`. An `Error`-implementing value is the idiomatic `Err` payload: the caller can always ask *what went wrong* without knowing the concrete error type.
+
+```noeta
+struct ParseFailure {
+    at: int
+
+    impl Error {
+        fn message(): string { return "bad digit at ${self.at}" }
+    }
+}
+
+fn digit(c: string): Result<int, ParseFailure> {
+    return Err(ParseFailure { at: 3 })
+}
+
+echo match digit("x") {
+    Ok(n)  => "ok: ${n}",
+    Err(e) => "failed: ${e.message()}",
+}
+```
+
+`Error` is independent of `Display`: implementing it never changes how the value renders (an `Err(e)` echoes with the payload's ordinary display), and an error type may *also* implement `Display` when its message is the natural rendering. `<E: Error>` works as a generic bound, so helpers can be polymorphic over any error type. `Error` is not derivable — the impl is a single hand-written method. The standard library's first implementor is [`JsonError`](Standard-Library-Modules#json), the payload of `json.try_parse::<T>` and `json.decode_typed`.
+
 ## `?` — propagate a failure
 
 On a `Result` or `Option`, the postfix `?` unwraps the success value, or **early-returns** the `Err`/`none` from the enclosing function. Using `?` on any other type is E0012.

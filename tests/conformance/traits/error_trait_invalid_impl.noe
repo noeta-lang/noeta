@@ -1,0 +1,11 @@
+// An `impl Error` must provide the trait's required method `message` with no parameters. This
+// block names the wrong method, so the impl does not satisfy the trait (E0015).
+// expect: error E0015 at 8:10
+// expect: exit 1
+struct Broken {
+    code: int
+
+    impl Error {
+        fn describe(): string { return "nope" }
+    }
+}
