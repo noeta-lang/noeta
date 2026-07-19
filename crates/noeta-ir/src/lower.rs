@@ -481,6 +481,7 @@ pub fn lower_with_sites_opts(
     let program: &AstProgram = hoisted.as_ref().unwrap_or(program);
     let mut lowerer = Lowerer {
         temps: 0,
+        fn_depth: 0,
         sites,
         real_isolates,
         synth_step_name: None,
@@ -506,6 +507,12 @@ pub fn lower_with_sites_opts(
 struct Lowerer<'a> {
     /// The next free temporary index in the current frame; also the running frame size.
     temps: u32,
+    /// How many function frames enclose the code being lowered: `0` at module top level, `1+`
+    /// inside a fn/method/closure body. Only a TOP-LEVEL `fn` (depth 0) may carry hidden
+    /// forwarding parameters — a NESTED fn that forwards (D2b) reads the enclosing fn's hidden
+    /// locals through closure capture instead, and its (possibly colliding) name must never key
+    /// the top-level `forwarding_fns` table.
+    fn_depth: u32,
     /// The checker's lowering-site maps (see [`LoweringSites`]) — the span-keyed hints that drive
     /// packed/fused/streamed lowering. Empty on the boxed/unfused REPL/IR-corpus path.
     sites: LoweringSites<'a>,
@@ -1080,11 +1087,17 @@ impl Lowerer<'_> {
         // PREPENDED parameters (`$ty0`, `$ty1`, …): prepending — not appending — keeps the
         // declaration's trailing defaults trailing, so omitted-argument filling is untouched.
         // Every call site prepends the matching hidden atoms (`hidden_arg_sites`). Keyed by the
-        // top-level fn name; methods/closures never appear in the map.
-        let hidden = name
-            .as_deref()
-            .and_then(|n| self.sites.forwarding_fns.get(n).copied())
-            .unwrap_or(0);
+        // top-level fn name — only at depth 0: a NESTED fn (D2b) may share a top-level name but
+        // never carries hidden parameters (it captures the enclosing `$ty` locals instead), and
+        // methods/closures never appear in the map.
+        let hidden = if self.fn_depth == 0 {
+            name.as_deref()
+                .and_then(|n| self.sites.forwarding_fns.get(n).copied())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.fn_depth += 1;
         let mut param_names: Vec<String> = (0..hidden).map(hidden_param_name).collect();
         param_names.extend(params.iter().map(|p| p.name.clone()));
         // Defaults are evaluated in the captured scope at call time, each in its own frame, so
@@ -1122,6 +1135,7 @@ impl Lowerer<'_> {
         };
         let temp_count = self.temps;
         self.temps = outer;
+        self.fn_depth -= 1;
         Ok(Func {
             name,
             params: param_names,

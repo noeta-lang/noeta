@@ -1123,7 +1123,12 @@ impl Checker {
                     && targs.is_empty()
                     && self.coloring.type_params.contains_key(p)
                 {
-                    match self.coloring.current_forwarding.iter().position(|n| n == p) {
+                    match self
+                        .coloring
+                        .current_forwarding
+                        .iter()
+                        .position(|t| t == &target)
+                    {
                         Some(idx) => {
                             self.sites.dynamic_attr_sites.insert(*span, idx as u32);
                         }
@@ -1302,45 +1307,37 @@ impl Checker {
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
                 self.check_type_ref(ty);
                 let t = from_ref_q(ty, &self.imports.extern_types);
-                // A turbofish naming an in-scope TYPE PARAMETER (poly-values F2b): the recipe is
-                // per-instantiation, delivered through the enclosing forwarding fn's hidden slot —
-                // record the dynamic site instead of a baked recipe. Only the bare parameter
-                // forwards (a composite mentioning it has no single runtime slot); and only a
-                // top-level generic fn has hidden slots to read (methods/nested contexts are
-                // rejected — the honest boundary, not silently wrong).
-                let forwarded = match &t {
-                    Type::Named(p, targs)
-                        if targs.is_empty() && self.coloring.type_params.contains_key(p) =>
+                // A turbofish MENTIONING an in-scope type parameter (poly-values F2b; composites
+                // D2a): the recipe is per-instantiation, delivered through the enclosing
+                // forwarding fn's hidden slot for this exact template — the bare `T` or the whole
+                // composite (`List<T>`), both computed identically by the pre-pass — so record
+                // the dynamic site instead of a baked recipe. Only a top-level generic fn (or a
+                // nested fn inside one, D2b) has hidden slots to read; method contexts are
+                // rejected — the honest boundary, not silently wrong.
+                let forwarded = if self.mentions_in_scope_param(&t) {
+                    match self
+                        .coloring
+                        .current_forwarding
+                        .iter()
+                        .position(|s| s == &t)
                     {
-                        match self.coloring.current_forwarding.iter().position(|n| n == p) {
-                            Some(idx) => {
-                                self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
-                            }
-                            None => {
-                                self.error(
-                                    DiagnosticCode::InvalidTypeArguments,
-                                    *span,
-                                    format!(
-                                        "cannot forward `{p}` here: call-site-typed forwarding \
-                                         is supported in top-level generic functions only"
-                                    ),
-                                );
-                            }
+                        Some(idx) => {
+                            self.sites.dynamic_recipe_sites.insert(*span, idx as u32);
                         }
-                        true
+                        None => {
+                            self.error(
+                                DiagnosticCode::InvalidTypeArguments,
+                                *span,
+                                format!(
+                                    "cannot forward `{t}` here: call-site-typed forwarding is \
+                                     supported in top-level generic functions only"
+                                ),
+                            );
+                        }
                     }
-                    t if self.mentions_in_scope_param(t) => {
-                        self.error(
-                            DiagnosticCode::InvalidTypeArguments,
-                            *span,
-                            format!(
-                                "cannot forward `{t}`: a call-site-typed turbofish inside a \
-                                 generic function must be the bare type parameter"
-                            ),
-                        );
-                        true
-                    }
-                    _ => false,
+                    true
+                } else {
+                    false
                 };
                 // Record the build recipe for the turbofish `T`; a type with no recipe (an enum,
                 // class, unconstrained generic, …) cannot be built at the call site — a clear error.

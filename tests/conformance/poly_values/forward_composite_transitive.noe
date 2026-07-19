@@ -1,0 +1,36 @@
+// D2a (poly-deferrals): a composite slot composes through TRANSITIVE forwarding — `batch<T>`
+// forwards its bare `T` into `load_all`, whose slot template is `List<T>`; the fixpoint gives
+// `batch` its own `List<T>` slot, and `batch`'s call passes it through (`HiddenArg::Forward`),
+// so the concrete `List<Order>` entry is still interned once at the outermost concrete call.
+// The expected-return seeding (F2c) also fills a composite slot without a turbofish.
+// expect: stdout "batch 2"
+// expect: stdout "seeded 8"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+fn load_all<T>(text: string): Result<List<T>, JsonError> {
+    return json.try_parse::<List<T>>(text)
+}
+
+fn batch<T>(text: string): Result<List<T>, JsonError> {
+    return load_all::<T>(text)
+}
+
+b = batch::<Order>("[{\"id\": 7}, {\"id\": 8}]")
+echo match b {
+    Ok(v) => "batch ${v.len()}",
+    Err(e) => "unreached",
+}
+
+// No turbofish: the annotated binding seeds `T = Order` (F2c), which resolves the composite
+// hidden slot `List<Order>` exactly as the explicit call does.
+s: Result<List<Order>, JsonError> = load_all("[{\"id\": 8}]")
+echo match s {
+    Ok(v) => "seeded ${v[0].id}",
+    Err(e) => "unreached",
+}

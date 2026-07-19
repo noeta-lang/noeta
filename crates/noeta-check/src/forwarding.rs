@@ -1,42 +1,94 @@
-//! **Type-param forwarding pre-pass** (poly-values F2b): which top-level generic functions
-//! forward a type parameter into a **call-site-typed position** — a native turbofish
-//! (`json.try_parse::<T>`), a reflection manifest query (`attributes_of::<T>`), or (transitively)
-//! another forwarding generic (`load::<T>(p)`).
+//! **Type-param forwarding pre-pass** (poly-values F2b, extended by poly-deferrals D2a): which
+//! top-level generic functions forward a type parameter into a **call-site-typed position** — a
+//! native turbofish (`json.try_parse::<T>`), a reflection manifest query (`attributes_of::<T>`),
+//! or (transitively) another forwarding generic (`load::<T>(p)`).
 //!
 //! Generics are erased at runtime, so one compiled body serves every instantiation; a forwarded
 //! site therefore needs its per-instantiation data (`TypeRecipe` / type name) delivered
 //! **dynamically** — as a hidden call argument indexing the program's `TypeArgInfo` table. This
 //! pass computes, purely syntactically and BEFORE body checking, each function's ordered list of
-//! forwarding parameters, so both the body-side sites (which read the hidden slot) and the call
+//! forwarding **slots**, so both the body-side sites (which read the hidden slot) and the call
 //! sites (which supply it) agree on the layout.
 //!
+//! A slot is identified by its **type template** over the enclosing fn's type parameters — the
+//! bare parameter (`T`) or a composite mentioning it (`List<T>`, `Map<string, T>`, `?T`,
+//! `Result<T, E>`). The composite case (D2a) is what makes `json.try_parse::<List<T>>` legal
+//! inside a generic body: the CALL SITE substitutes its concrete instantiation into the template
+//! (`T = Order` → `List<Order>`) and interns that whole concrete type into the program-wide
+//! `TypeArgInfo` table — statically, so the runtime never constructs a recipe. A call that
+//! forwards the caller's own parameter passes the caller's matching slot through instead
+//! (`HiddenArg::Forward`), which is why the templates propagate through the call graph by
+//! substitution here (a fixpoint, as before).
+//!
+//! Substitution-propagated templates can GROW (`f<T>` calling `f::<List<T>>` would demand
+//! `List<T>`, then `List<List<T>>`, …): genuine polymorphic recursion, which erased generics
+//! with a static table cannot serve. The fixpoint caps template depth and reports the offending
+//! function (`poisoned`) instead of looping — the checker turns that into a clear E0058.
+//!
 //! Scope: **top-level `fn` declarations only.** Methods carry their class's parameters (a
-//! different instantiation channel) and nested `fn`s are not in the symbol table; a forwarded
-//! site in either is a checker error, not silently wrong. Transitive forwarding is recognized
-//! through an EXPLICIT turbofish only (`g::<T>(x)`) — a fixpoint over the call graph; forwarding
-//! via argument inference alone is rejected at the call site with a "spell the turbofish" help.
+//! different instantiation channel); a forwarded site there is a checker error, not silently
+//! wrong. A nested `fn` forwards the ENCLOSING top-level fn's parameters (D2b): its body is
+//! walked with the enclosing scope minus any names its own declaration shadows, and the slot it
+//! reads is the enclosing fn's (captured like any local by closure conversion). Transitive
+//! forwarding is recognized through an EXPLICIT turbofish only (`g::<T>(x)`) — forwarding via
+//! argument inference alone is rejected at the call site with a "spell the turbofish" help.
 
+use crate::subst::{apply_subst, from_ref_q, mentions_param};
 use noeta_ast::{ClosureBody, Expr, FnDecl, Program, Stmt, StrPart, TypeRef};
-use std::collections::HashMap;
+use noeta_types::Type;
+use std::collections::{HashMap, HashSet};
 
-/// One forwarding type parameter of a generic function, in declaration order.
+/// One forwarding slot of a generic function, in first-appearance order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ForwardParam {
-    /// The type parameter's name (`"T"`).
-    pub(crate) name: String,
+pub(crate) struct ForwardSlot {
+    /// The slot's type template over the fn's type parameters: the bare parameter (`T`) or a
+    /// composite mentioning it (`List<T>`). A call site substitutes its instantiation into this
+    /// template to produce the concrete type the hidden argument indexes.
+    pub(crate) template: Type,
     /// Whether some forwarded site consumes a **build recipe** (a `TypedModuleCall` turbofish) —
     /// if so, an instantiating call must supply a recipe-capable type (checked statically at the
     /// call site). A name-only consumer (`attributes_of`) leaves this `false`.
     pub(crate) needs_recipe: bool,
 }
 
-/// The per-function forwarding table: fn name → its forwarding type parameters, in the
-/// declaration's type-parameter order.
-pub(crate) type ForwardingMap = HashMap<String, Vec<ForwardParam>>;
+/// The per-function forwarding table: fn name → its forwarding slots, in first-appearance order.
+pub(crate) type ForwardingMap = HashMap<String, Vec<ForwardSlot>>;
+
+/// The pre-pass result: the slot table, plus the functions whose slot set failed to converge
+/// (polymorphic recursion through a composite forward — the checker reports these).
+pub(crate) struct Forwarding {
+    pub(crate) map: ForwardingMap,
+    pub(crate) poisoned: HashSet<String>,
+}
+
+/// The deepest template the fixpoint will register. Substitution-grown templates past this depth
+/// mean the slot set is diverging (polymorphic recursion); real programs nest a handful at most.
+const MAX_TEMPLATE_DEPTH: usize = 8;
+
+/// Structural nesting depth of a type (a bare name is 1, `List<T>` is 2, …) — the fixpoint's
+/// divergence measure.
+fn type_depth(t: &Type) -> usize {
+    let inner = match t {
+        Type::Named(_, args) => args.iter().map(type_depth).max().unwrap_or(0),
+        Type::List(e) | Type::Set(e) | Type::Option(e) => type_depth(e),
+        Type::Map(k, v) | Type::Result(k, v) => type_depth(k).max(type_depth(v)),
+        Type::Tuple(es) | Type::Union(es) => es.iter().map(type_depth).max().unwrap_or(0),
+        Type::Fn { params, ret } => params
+            .iter()
+            .map(type_depth)
+            .max()
+            .unwrap_or(0)
+            .max(type_depth(ret)),
+        _ => 0,
+    };
+    inner + 1
+}
 
 /// Compute the program's forwarding table — a fixpoint over the top-level `fn`s (a function
-/// forwards transitively through a turbofish call of another forwarding function).
-pub(crate) fn compute_forwarding(program: &Program) -> ForwardingMap {
+/// forwards transitively through a turbofish call of another forwarding function). `xt` is the
+/// program's extern-type import map, so a template's non-parameter names carry the same
+/// qualified identity the checker's body-site and call-site types do.
+pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>) -> Forwarding {
     let fns: Vec<&FnDecl> = program
         .stmts
         .iter()
@@ -56,44 +108,75 @@ pub(crate) fn compute_forwarding(program: &Program) -> ForwardingMap {
         })
         .collect();
     let mut map: ForwardingMap = HashMap::new();
+    let mut poisoned: HashSet<String> = HashSet::new();
     loop {
         let mut changed = false;
         for f in &fns {
-            // Collect this pass's marks: param name → needs_recipe.
-            let mut marks: HashMap<String, bool> = HashMap::new();
+            // Collect this pass's marks in first-appearance order.
+            let mut marks: Vec<ForwardSlot> = Vec::new();
             {
-                let mut mark_fn = |param: &str, needs_recipe: bool| {
-                    let slot = marks.entry(param.to_string()).or_insert(false);
-                    *slot |= needs_recipe;
+                let mut overflow = false;
+                let mut mark_fn = |template: Type, needs_recipe: bool| {
+                    if type_depth(&template) > MAX_TEMPLATE_DEPTH {
+                        overflow = true;
+                        return;
+                    }
+                    match marks.iter_mut().find(|s| s.template == template) {
+                        Some(slot) => slot.needs_recipe |= needs_recipe,
+                        None => marks.push(ForwardSlot {
+                            template,
+                            needs_recipe,
+                        }),
+                    }
                 };
-                let mark: &mut dyn FnMut(&str, bool) = &mut mark_fn;
+                let mark: &mut dyn FnMut(Type, bool) = &mut mark_fn;
                 let params: Vec<&str> = f.type_params.iter().map(|p| p.name.as_str()).collect();
+                let cx = WalkCx {
+                    params: &params,
+                    map: &map,
+                    decl_params: &decl_params,
+                    xt,
+                };
                 for stmt in &f.body {
-                    walk_stmt(stmt, &params, &map, &decl_params, mark);
+                    walk_stmt(stmt, &cx, mark);
+                }
+                if overflow {
+                    poisoned.insert(f.name.clone());
                 }
             }
-            // Project onto declaration order and compare with the previous fixpoint state.
-            let next: Vec<ForwardParam> = f
-                .type_params
-                .iter()
-                .filter_map(|p| {
-                    marks.get(&p.name).map(|&needs_recipe| ForwardParam {
-                        name: p.name.clone(),
-                        needs_recipe,
-                    })
-                })
-                .collect();
-            if next.is_empty() {
+            if marks.is_empty() {
                 continue;
             }
-            if map.get(&f.name) != Some(&next) {
-                map.insert(f.name.clone(), next);
+            if map.get(&f.name) != Some(&marks) {
+                map.insert(f.name.clone(), marks);
                 changed = true;
             }
         }
         if !changed {
-            return map;
+            return Forwarding { map, poisoned };
         }
+    }
+}
+
+/// The walk's read-only context: the enclosing fn's type parameters, the fixpoint state, every
+/// candidate's declared parameter order, and the extern-type import map.
+struct WalkCx<'a> {
+    params: &'a [&'a str],
+    map: &'a ForwardingMap,
+    decl_params: &'a HashMap<&'a str, Vec<&'a str>>,
+    xt: &'a HashMap<String, String>,
+}
+
+impl WalkCx<'_> {
+    /// A surface type reference as the checker will see it, template-canonicalized.
+    fn to_type(&self, ty: &TypeRef) -> Type {
+        from_ref_q(ty, self.xt)
+    }
+
+    /// Whether a canonicalized type mentions one of the enclosing fn's type parameters.
+    fn mentions(&self, t: &Type) -> bool {
+        let params: Vec<String> = self.params.iter().map(|p| p.to_string()).collect();
+        mentions_param(t, &params)
     }
 }
 
@@ -102,23 +185,15 @@ fn is_bare_param(ty: &TypeRef, param: &str) -> bool {
     matches!(ty, TypeRef::Named { name, args, .. } if name == param && args.is_empty())
 }
 
-fn walk_stmt(
-    stmt: &Stmt,
-    params: &[&str],
-    map: &ForwardingMap,
-    decl_params: &HashMap<&str, Vec<&str>>,
-    mark: &mut dyn FnMut(&str, bool),
-) {
+fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
     match stmt {
-        Stmt::Echo { value: e, .. } | Stmt::Yield { value: e, .. } => {
-            walk_expr(e, params, map, decl_params, mark)
-        }
-        Stmt::Binding { value, .. } => walk_expr(value, params, map, decl_params, mark),
-        Stmt::Destructure { value, .. } => walk_expr(value, params, map, decl_params, mark),
-        Stmt::Expr { expr, .. } => walk_expr(expr, params, map, decl_params, mark),
+        Stmt::Echo { value: e, .. } | Stmt::Yield { value: e, .. } => walk_expr(e, cx, mark),
+        Stmt::Binding { value, .. } => walk_expr(value, cx, mark),
+        Stmt::Destructure { value, .. } => walk_expr(value, cx, mark),
+        Stmt::Expr { expr, .. } => walk_expr(expr, cx, mark),
         Stmt::Return { value, .. } => {
             if let Some(v) = value {
-                walk_expr(v, params, map, decl_params, mark);
+                walk_expr(v, cx, mark);
             }
         }
         Stmt::If {
@@ -127,38 +202,61 @@ fn walk_stmt(
             else_body,
             ..
         } => {
-            walk_expr(cond, params, map, decl_params, mark);
+            walk_expr(cond, cx, mark);
             for s in then_body {
-                walk_stmt(s, params, map, decl_params, mark);
+                walk_stmt(s, cx, mark);
             }
             if let Some(b) = else_body {
                 for s in b {
-                    walk_stmt(s, params, map, decl_params, mark);
+                    walk_stmt(s, cx, mark);
                 }
             }
         }
         Stmt::For { iterable, body, .. } => {
-            walk_expr(iterable, params, map, decl_params, mark);
+            walk_expr(iterable, cx, mark);
             for s in body {
-                walk_stmt(s, params, map, decl_params, mark);
+                walk_stmt(s, cx, mark);
             }
         }
         Stmt::While { cond, body, .. } => {
-            walk_expr(cond, params, map, decl_params, mark);
+            walk_expr(cond, cx, mark);
             for s in body {
-                walk_stmt(s, params, map, decl_params, mark);
+                walk_stmt(s, cx, mark);
             }
         }
         Stmt::Concurrent { body, .. } | Stmt::TierBlock { items: body, .. } => {
             for s in body {
-                walk_stmt(s, params, map, decl_params, mark);
+                walk_stmt(s, cx, mark);
             }
         }
-        // A nested `fn`'s own scope shadows/replaces the type-parameter scope; forwarded sites
-        // inside it are not this function's (the checker rejects them there). Declarations carry
-        // no forwarded expressions of ours.
-        Stmt::Fn(_)
-        | Stmt::Struct(_)
+        // A nested `fn` runs within the enclosing generic's type scope (D2b): forwarded sites
+        // inside it consume the ENCLOSING fn's slots (the hidden slot is captured like any local
+        // by closure conversion), so its body is walked with the enclosing parameters — minus any
+        // the nested declaration's own type parameters shadow (those have no call-site channel;
+        // the checker rejects sites naming them).
+        Stmt::Fn(decl) => {
+            let shadowed: Vec<&str> = decl.type_params.iter().map(|p| p.name.as_str()).collect();
+            let visible: Vec<&str> = cx
+                .params
+                .iter()
+                .copied()
+                .filter(|p| !shadowed.contains(p))
+                .collect();
+            if visible.is_empty() {
+                return;
+            }
+            let inner = WalkCx {
+                params: &visible,
+                map: cx.map,
+                decl_params: cx.decl_params,
+                xt: cx.xt,
+            };
+            for s in &decl.body {
+                walk_stmt(s, &inner, mark);
+            }
+        }
+        // Declarations carry no forwarded expressions of ours.
+        Stmt::Struct(_)
         | Stmt::Class(_)
         | Stmt::Enum(_)
         | Stmt::Trait(_)
@@ -170,59 +268,58 @@ fn walk_stmt(
     }
 }
 
-fn walk_expr(
-    expr: &Expr,
-    params: &[&str],
-    map: &ForwardingMap,
-    decl_params: &HashMap<&str, Vec<&str>>,
-    mark: &mut dyn FnMut(&str, bool),
-) {
+fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
     // Local shorthand: recurse with the same scope/context.
     macro_rules! rec {
         ($e:expr) => {
-            walk_expr($e, params, map, decl_params, mark)
+            walk_expr($e, cx, mark)
         };
     }
     match expr {
-        // THE recipe consumer: a native call-site-typed turbofish naming a bare type parameter.
+        // THE recipe consumer: a native call-site-typed turbofish whose type mentions an enclosing
+        // parameter — the bare `T` or a composite (`List<T>`, D2a). The whole turbofish type is
+        // the slot template.
         Expr::TypedModuleCall { ty, args, .. } => {
-            for p in params {
-                if is_bare_param(ty, p) {
-                    mark(p, true);
-                }
+            let t = cx.to_type(ty);
+            if cx.mentions(&t) {
+                mark(t, true);
             }
             for a in args {
                 rec!(a);
             }
         }
-        // The name-keyed manifest consumer.
+        // The name-keyed manifest consumer: bare parameters only (an attribute type is a bare
+        // struct name by construction).
         Expr::AttributesOf { ty, .. } => {
-            for p in params {
+            for p in cx.params {
                 if is_bare_param(ty, p) {
-                    mark(p, false);
+                    mark(Type::Named(p.to_string(), Vec::new()), false);
                 }
             }
         }
-        // Transitive forwarding: an explicit turbofish call of another forwarding function whose
-        // forwarding slot receives one of OUR bare parameters.
+        // Transitive forwarding: an explicit turbofish call of another forwarding function. Each
+        // of the callee's slot templates, with the call's type arguments substituted in, that
+        // still mentions one of OUR parameters becomes our slot (`g::<T>` against g's `List<U>`
+        // slot demands our `List<T>`).
         Expr::TypedCall {
             name,
             type_args,
             args,
             ..
         } => {
-            if let (Some(fwd), Some(callee_params)) =
-                (map.get(name), decl_params.get(name.as_str()))
+            if let (Some(slots), Some(callee_params)) =
+                (cx.map.get(name), cx.decl_params.get(name.as_str()))
+                && type_args.len() == callee_params.len()
             {
-                for fp in fwd {
-                    if let Some(k) = callee_params.iter().position(|n| *n == fp.name)
-                        && let Some(ta) = type_args.get(k)
-                    {
-                        for p in params {
-                            if is_bare_param(ta, p) {
-                                mark(p, fp.needs_recipe);
-                            }
-                        }
+                let subst: HashMap<String, Type> = callee_params
+                    .iter()
+                    .map(|p| p.to_string())
+                    .zip(type_args.iter().map(|t| cx.to_type(t)))
+                    .collect();
+                for slot in slots {
+                    let sigma = apply_subst(&slot.template, &subst);
+                    if cx.mentions(&sigma) {
+                        mark(sigma, slot.needs_recipe);
                     }
                 }
             }
@@ -236,7 +333,7 @@ fn walk_expr(
             ClosureBody::Expr(e) => rec!(e),
             ClosureBody::Block(stmts) => {
                 for s in stmts {
-                    walk_stmt(s, params, map, decl_params, mark);
+                    walk_stmt(s, cx, mark);
                 }
             }
         },
@@ -311,7 +408,7 @@ fn walk_expr(
                     ClosureBody::Expr(e) => rec!(e),
                     ClosureBody::Block(stmts) => {
                         for s in stmts {
-                            walk_stmt(s, params, map, decl_params, mark);
+                            walk_stmt(s, cx, mark);
                         }
                     }
                 }
