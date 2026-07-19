@@ -17,6 +17,7 @@
 use noeta_embed::{Error, Session, Value};
 use noeta_ext_abi::registry::{
     ExtFn, ExtModule, ExtTier, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
+    TypeArgWrap, TypeRecipe,
 };
 use noeta_ext_abi::{ErrorKind, Host, StdError};
 
@@ -28,6 +29,15 @@ const DEMO_FNS: &[ExtFn] = &[ExtFn {
     ret: RetTy::Concrete(SigType::Int),
 }];
 
+// A **call-site-typed** function the plugin also exposes (`demo.make_default::<T>(): T`) — the proof
+// the typed-call seam works through a per-session instance registry and the session/REPL extend path
+// (`hot_swap` recompiles carrying the checker's `typed_module_call_sites`), not only the std default.
+const DEMO_TYPED_FNS: &[ExtFn] = &[ExtFn {
+    name: "make_default",
+    params: &[],
+    ret: RetTy::TypeArg(TypeArgWrap::Plain),
+}];
+
 fn demo_dispatch(
     func: &str,
     _host: &mut dyn Host,
@@ -35,6 +45,24 @@ fn demo_dispatch(
 ) -> Result<NativeOut, StdError> {
     match func {
         "answer" => Ok(NativeOut::Scalar(Scalar::Int(42))),
+        _ => Err(StdError {
+            kind: ErrorKind::UnknownName,
+            message: format!("no function `{func}`"),
+        }),
+    }
+}
+
+/// Build a default value of the call-site type `recipe` — a scalar zero here (the session test only
+/// asks for `int`), enough to prove the recipe reaches the extension's dispatch.
+fn demo_typed_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+    recipe: &TypeRecipe,
+) -> Result<NativeOut, StdError> {
+    match (func, recipe) {
+        ("make_default", TypeRecipe::Int) => Ok(NativeOut::Scalar(Scalar::Int(0))),
+        ("make_default", _) => Ok(NativeOut::Unit),
         _ => Err(StdError {
             kind: ErrorKind::UnknownName,
             message: format!("no function `{func}`"),
@@ -53,6 +81,8 @@ impl Extension for PluginExtension {
             name: "demo",
             functions: DEMO_FNS,
             dispatch: demo_dispatch,
+            typed_functions: DEMO_TYPED_FNS,
+            typed_dispatch: Some(demo_typed_dispatch),
             ..ExtModule::DEFAULTS
         }]
     }
@@ -238,6 +268,43 @@ fn the_checker_scopes_the_tier_namespace_to_the_session_registry() {
         ),
         other => panic!("the default session must reject the unknown `@audit` tier, got {other:?}"),
     }
+}
+
+// A program calling the plugin's own **call-site-typed** function under a turbofish. The type
+// resolves through the SESSION's registry, and the checker's recipe site rides the session compile
+// into both the initial load and every hot-swap — the deserialize-recipes seam generalized.
+const TYPED_PLUGIN: &str =
+    "use plugin.{demo}\nfn make(): int { return demo.make_default::<int>(); }\n";
+
+#[test]
+fn a_session_dispatches_a_call_site_typed_native_call_and_survives_hot_swap() {
+    // The turbofish call type-checks against the plugin's `typed_functions` (a session-only
+    // extension), compiles carrying the recipe site, and dispatches the plugin's `typed_dispatch`
+    // threaded the resolved recipe — yielding the recipe-built default `0`.
+    let mut s = Session::builder()
+        .with_extensions(vec![&PLUGIN])
+        .load(TYPED_PLUGIN)
+        .expect("the plugin session accepts and compiles its own typed call");
+    assert_eq!(
+        s.call("make", &[]).unwrap(),
+        Value::Int(0),
+        "the recipe-built default must reach the caller"
+    );
+
+    // The REPL/live-reload extend path: a hot-swapped edit recompiles the whole program, which must
+    // re-carry the typed-call site (a swap that dropped it would fail to compile or mis-dispatch).
+    let v2 = "use plugin.{demo}\nfn make(): int { return demo.make_default::<int>(); }\nfn version(): int { return 2; }\n";
+    match s.hot_swap(v2) {
+        Ok(_) => {}
+        Err(e) => {
+            panic!("hot_swap must recompile the typed call under the session registry: {e:?}")
+        }
+    }
+    assert_eq!(
+        s.call("make", &[]).unwrap(),
+        Value::Int(0),
+        "the typed call must still dispatch after a hot swap"
+    );
 }
 
 #[test]

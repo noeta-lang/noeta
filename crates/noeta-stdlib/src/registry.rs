@@ -2420,7 +2420,7 @@ fn quat_dispatch(
 
 // --- the std extension's module table -----------------------------------------------------------
 
-use RetTy::{Concrete, NumericPreserving, SameAsArg};
+use RetTy::{Concrete, NumericPreserving, SameAsArg, TypeArg};
 use SigType::{Dyn, Float, Int, String as Str};
 
 const MATH_FNS: &[ExtFn] = &[
@@ -3822,6 +3822,25 @@ const JSON_FNS: &[ExtFn] = &[
     },
 ];
 
+// The **call-site-typed** doors — the turbofish forms `json.parse::<T>` (aborting) and
+// `json.try_parse::<T>` (recoverable → `Result<T, JsonError>`). A separate table from `JSON_FNS`:
+// the dynamic `parse(text): dyn` and the typed `parse::<T>: T` legitimately share the name
+// `parse`, so they live in disjoint call surfaces. Each declares `RetTy::TypeArg` with the
+// wrapper the checker types the call by; `json_typed_dispatch` produces the matching `NativeOut`
+// tree threaded with the checker-resolved recipe.
+const JSON_TYPED_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "parse",
+        params: &[Str],
+        ret: TypeArg(TypeArgWrap::Plain),
+    },
+    ExtFn {
+        name: "try_parse",
+        params: &[Str],
+        ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
+    },
+];
+
 fn json_dispatch(
     func: &str,
     _host: &mut dyn Host,
@@ -3835,6 +3854,38 @@ fn json_dispatch(
         "stringify" => {
             want_arity(func, args, 1)?;
             Ok(NativeOut::Str(crate::json::stringify(&args[0])))
+        }
+        _ => Err(no_function_error("json", func)),
+    }
+}
+
+/// The `json` module's call-site-typed dispatch (`json.parse::<T>` / `json.try_parse::<T>`): decode
+/// the string argument against the checker-resolved `recipe` into a value of the turbofish `T`.
+/// `parse` is the **aborting** door — a decode failure is `Err(StdError)`, a runtime abort. `try_parse`
+/// is the **recoverable** door — it never uses the `Err` channel, returning the whole `Result` inside
+/// the `NativeOut` (`Ok(value)` on success, `Err(JsonError)` — a path-rich extern — on failure), so
+/// both backends materialize one tree and stay byte-identical to the former hardcoded branch.
+fn json_typed_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+    recipe: &TypeRecipe,
+) -> Result<NativeOut, StdError> {
+    match func {
+        "parse" => {
+            want_arity(func, args, 1)?;
+            crate::json::parse_typed(want_str(func, args, 0)?, recipe)
+        }
+        "try_parse" => {
+            want_arity(func, args, 1)?;
+            Ok(
+                match crate::json::try_parse_typed(want_str(func, args, 0)?, recipe) {
+                    Ok(out) => NativeOut::Ok(Box::new(out)),
+                    Err(error) => {
+                        NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                    }
+                },
+            )
         }
         _ => Err(no_function_error("json", func)),
     }
@@ -4033,6 +4084,9 @@ const CORE_MODULES: &[ExtModule] = &[
         // `json.stringify` introspects an arbitrary value, so its arguments are marshalled deeply.
         deep_marshal: true,
         docs: JSON_DOCS,
+        // The turbofish decode doors (`json.parse::<T>` / `json.try_parse::<T>`).
+        typed_functions: JSON_TYPED_FNS,
+        typed_dispatch: Some(json_typed_dispatch),
         ..ExtModule::DEFAULTS
     },
     // The `task` concurrency module (higher-order-abi H0/H2): its functions need the executor,

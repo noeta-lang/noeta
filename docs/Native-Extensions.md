@@ -12,7 +12,7 @@ Hardcoding native modules created four parallel seams that could drift: a `Nativ
 ## Two crates: `noeta-ext-abi` (the ABI) and `noeta-stdlib` (the batteries)
 
 The contract a native extension implements lives in its own lean crate, **`noeta-ext-abi`**: the
-[registry] vocabulary (`Extension`/`ExtModule`/`ExtType`/`ExtFn`/`SigType`/`RetTy`/`TypeRecipe`,
+[registry] vocabulary (`Extension`/`ExtModule`/`ExtType`/`ExtFn`/`SigType`/`RetTy`/`TypeArgWrap`/`TypeRecipe`,
 `NativeValue`/`NativeOut`/`Scalar`), the `Host` capability seam and its traits, the `ExternValue`
 contract (`ExternBox`), `MapKey`, the async `ExternIo`/`Executor` seam, and the dep-free Ring 1
 primitives. Its only dependencies are `compact_str`/`equivalent`/`hashbrown` — none of core's
@@ -239,9 +239,41 @@ All host-coupled effects — filesystem, clock, PRNG, `env`/`args`, the operatin
 
 **P2p is a capability an *extension* provides, not the host — the whole transport.** When the p2p stack left `std` for the non-default `para` package, `P2p` stopped being a mandatory arm of `Host`; and the transport itself then moved out of the hosts **entirely** into the `para.p2p` extension. The extension owns one `P2pBackend` (`Arc<Mutex<dyn P2p + Send>>`) in per-run ctx state (`ExtState`), created on first use from the host's `real_p2p()` policy: the **real p2panda node** (`noeta-para-p2p-net`) when the host permits real networking *and* the extension is built with its `ring-p2p` feature, otherwise the deterministic **loopback broker** (`noeta_ext_abi::P2pBroker`, dep-free). Both implement `P2p`; the surface reaches either through one `with_p2p` seam. So **no host implements `P2p` at all** — `RealHost` included — and `noeta-host-real` links no p2panda: the entire iroh/QUIC tree travels with the package (a non-`para` `--native` binary is ~4 MB, a `para` one ~27 MB). The wrinkle the seam solves: the async `p2p.receive` leaf is `Send` while `ExtState` is not, so the backend lives behind a `Send` `Arc<Mutex<…>>` the receive descriptor captures at spawn — the ABI that lets an extension own an async-reachable host capability. This is the same "simulate deterministically, deploy real" split as the async executor and isolate scheduler. The network capability (http arc) set the async pattern: `RealHost` overrides `net_spawn` to hand the executor a genuine `RealBody::Async` reqwest future while the sandbox resolves at spawn; `os.exec_async` follows it with a `RealBody::Blocking` subprocess body.
 
-## Case study: `json.parse::<T>`
+## Call-site-typed functions: `module.func::<T>(args)`
 
-The motivating consumer is a native function that builds a value of a type named *only at the call site* — something a user genuinely cannot express in-language. The grammar `module.func::<T>(args)` is an atom (`Expr::TypedModuleCall`). The checker resolves `T` into a neutral `TypeRecipe` (scalar / option / list / string-keyed map / declared-order struct), and a shared lowering bakes it into a `TypedModuleCall` IR node the VM transcribes to `Op::TypedModuleCall`. Both backends marshal the arguments, run the shared recursive `json::parse_typed(text, &recipe)`, and materialize the result — the reference interpreter through its real registered type, the VM through a fresh same-name shape (method dispatch is name-keyed) — so they agree by construction.
+Some native functions build a value of a type named *only at the call site* — `json.parse::<Point>(text)` — something a user genuinely cannot express in-language. Any extension can declare one; the mechanism is registry-driven, not `json`-hardcoded.
+
+**Declaration.** A call-site-typed function lives in a **separate table** from ordinary functions — `ExtModule::typed_functions`, dispatched by `ExtModule::typed_dispatch` — because the turbofish form `f::<T>(x)` is a distinct call surface from a plain `f(x)` (the two may legitimately share a name: `json.parse` is both a dynamic `parse(text): dyn` in `functions` and a typed `parse::<T>: T` in `typed_functions`). Each entry declares `RetTy::TypeArg(wrap)`, where the `TypeArgWrap` says how the turbofish `T` is wrapped in the declared result:
+
+- `TypeArgWrap::Plain` — the result is `T` itself (`json.parse::<T>(): T`, the aborting door).
+- `TypeArgWrap::Option` — the result is `Option<T>`.
+- `TypeArgWrap::Result(SigType)` — the result is `Result<T, E>` where `E` is the named error type (`json.try_parse::<T>(): Result<T, JsonError>`, the recoverable door).
+
+The checker reads the wrap to type the call, and validates arguments against the declared `params` with the ordinary native-argument machinery — so a wrong-arity or wrong-typed argument is the same static `E0007` a plain call gets, and a turbofish on an unknown or non-call-site-typed function is a clear `E0005`.
+
+```rust
+const BUILD_TYPED_FNS: &[ExtFn] = &[ExtFn {
+    name: "make_default",
+    params: &[],
+    ret: RetTy::TypeArg(TypeArgWrap::Plain), // make_default::<T>(): T
+}];
+
+ExtModule {
+    name: "build",
+    typed_functions: BUILD_TYPED_FNS,
+    typed_dispatch: Some(build_typed_dispatch),
+    ..ExtModule::DEFAULTS
+}
+```
+
+**The recipe contract.** The grammar `module.func::<T>(args)` is an atom (`Expr::TypedModuleCall`). The checker resolves `T` into a neutral `TypeRecipe` (scalar / unit / option / list / string-keyed map / declared-order struct — *no* enum/class/unconstrained generic, which have no recipe and are a compile-time error at the call), records it at the call site, and a shared lowering bakes it into a `TypedModuleCall` IR node the VM transcribes to `Op::TypedModuleCall`. At dispatch, both backends marshal the arguments, look up the module's `typed_dispatch`, and call it threaded the `&TypeRecipe`:
+
+```rust
+fn build_typed_dispatch(func: &str, host: &mut dyn Host, args: &[NativeValue], recipe: &TypeRecipe)
+    -> Result<NativeOut, StdError>
+```
+
+The dispatch returns a `NativeOut` tree **already carrying its declared wrapper** — `NativeOut::Ok`/`Err` for a `Result` shape, `NativeOut::Some`/`None` for `Option`, a plain value tree for `Plain` (a `Plain` door signals an unrecoverable failure with `Err(StdError)`, a runtime abort; a recoverable door never uses the `Err` channel, returning its `Err` arm *inside* the `NativeOut`). The backend materializes that one tree with no per-function wrapping logic — the reference interpreter through its real registered type, the VM through a fresh same-name shape (method dispatch is name-keyed) — so the two agree by construction. `json.parse::<T>`/`try_parse::<T>` are registered exactly this way; nothing about them is special-cased in the checker or either backend.
 
 ## Status
 

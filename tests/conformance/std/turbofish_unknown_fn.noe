@@ -1,0 +1,6 @@
+// A turbofish on a nonexistent module function is a static error (E0005): the registry has no
+// call-site-typed `json.bogus`. Resolution is registry-driven, so a typo is caught at check time.
+// expect: error E0005 at 5:10
+use std.json
+x = json.bogus::<int>("x");
+echo x;

@@ -778,10 +778,48 @@ pub(super) fn module_return(
         RetTy::Concrete(s) => sig_to_type_bound(reg, &s, &bind_params(f.params, args)),
         RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
-        // The call-site-typed turbofish form lands in Phase B; until then no registered function
-        // uses it, so a hole is the safe fallback.
-        RetTy::TypeArg => Type::Unknown,
+        // A call-site-typed function is never reached through the plain-call return path — its
+        // result is named by the turbofish and typed in the `Expr::TypedModuleCall` arm (via
+        // `typed_module_result`), so a hole is the safe fallback here.
+        RetTy::TypeArg(_) => Type::Unknown,
     })
+}
+
+/// Resolve a **call-site-typed** module call (`json.parse::<T>`) through the registry's
+/// `typed_functions` table — the single helper the checker's `Expr::TypedModuleCall` arm consults.
+/// Returns `None` when `module.func` is not call-site-typed (an unknown or non-typed function under a
+/// turbofish — a clear error at the call site). When it is, returns `(params, required, result)`:
+/// the declared parameter types (signature variables bound from `arg_types`, so the ordinary
+/// [`Checker::check_args`] machinery applies), the required-argument count, and the call's result
+/// type — `T` itself, `Option<T>`, or `Result<T, E>` per the function's declared
+/// [`registry::TypeArgWrap`], with the turbofish `t` (the resolved `T`) filled in and any named
+/// error type `E` resolved through the registry exactly like every native signature type.
+pub(super) fn typed_module_call(
+    reg: &registry::Registry,
+    module: &str,
+    func: &str,
+    arg_types: &[Type],
+    t: Type,
+) -> Option<(Vec<Type>, usize, Type)> {
+    use registry::{RetTy, SigType, TypeArgWrap};
+    let f = reg.find_typed_function(module, func)?;
+    let bindings = bind_params(f.params, arg_types);
+    let params = f
+        .params
+        .iter()
+        .map(|p| sig_to_type_bound(reg, p, &bindings))
+        .collect();
+    let required = SigType::required_count(f.params);
+    // The wrapper is validated to be `TypeArg` at registry assembly, so the fallback never fires.
+    let result = match f.ret {
+        RetTy::TypeArg(TypeArgWrap::Plain) => t,
+        RetTy::TypeArg(TypeArgWrap::Option) => opt(t),
+        RetTy::TypeArg(TypeArgWrap::Result(e)) => {
+            Type::Result(Box::new(t), Box::new(sig_to_type_bound(reg, &e, &[])))
+        }
+        _ => t,
+    };
+    Some((params, required, result))
 }
 
 /// A bundle method's parameter types under the receiver-at-0 convention (kernel-methods K2):
@@ -814,7 +852,7 @@ pub(super) fn bundle_method_return(
         RetTy::SameAsArg(0) => recv.clone(),
         RetTy::SameAsArg(i) => args.get(i - 1).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
-        RetTy::TypeArg => Type::Unknown,
+        RetTy::TypeArg(_) => Type::Unknown,
     }
 }
 

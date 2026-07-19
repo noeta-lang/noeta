@@ -1118,75 +1118,61 @@ impl Checker {
                 args,
                 span,
             } => {
-                let module = match recv.as_ref() {
+                // The receiver's local binding (`json` from `use std.json`) resolves to the module's
+                // qualified identity through the imports; falling back to the raw binding lets an
+                // unimported/typo'd receiver resolve to nothing and report cleanly below.
+                let binding = match recv.as_ref() {
                     Expr::Ident { name, .. } => name.clone(),
                     _ => String::new(),
                 };
+                let module = self
+                    .imports
+                    .modules
+                    .get(&binding)
+                    .cloned()
+                    .unwrap_or_else(|| binding.clone());
                 // Arguments are synthesized (checked as expressions) regardless of which function.
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
-                // The call-site-typed native functions: `json.parse::<T>` (the aborting
-                // convenience door) and `json.try_parse::<T>` (the recoverable door →
-                // `Result<T, JsonError>`, one error story with `json.decode_typed`). When more
-                // land, this resolves through the registry's `RetTy::TypeArg` functions; the
-                // dynamic `json.parse(s)` keeps its own path, so the shared name does not collide.
-                let recoverable_decode = module == "json" && func == "try_parse";
-                if module == "json" && (func == "parse" || recoverable_decode) {
-                    if arg_types.len() != 1 {
-                        self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!(
-                                "`json.{func}::<T>` takes 1 argument, found {}",
-                                arg_types.len()
-                            ),
-                        );
-                    } else if !matches!(arg_types[0], Type::String)
-                        && !arg_types[0].defers_to_runtime()
-                    {
-                        self.error(
-                            DiagnosticCode::TypeMismatch,
-                            args[0].span(),
-                            format!("`json.{func}` expects a `string`, found `{}`", arg_types[0]),
-                        );
-                    }
-                } else {
-                    self.error(
-                        DiagnosticCode::UnknownName,
-                        *func_span,
-                        format!(
-                            "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
-                        ),
-                    );
-                }
                 self.check_type_ref(ty);
                 let t = from_ref_q(ty, &self.imports.extern_types);
-                // Record the build recipe; a type with no JSON decoding (an enum, class, generic, …)
-                // is an error here.
-                match self.type_to_recipe(&t) {
+                // Record the build recipe for the turbofish `T`; a type with no recipe (an enum,
+                // class, unconstrained generic, …) cannot be built at the call site — a clear error.
+                // Deferred so the diagnostic sits after the function-resolution error, if any.
+                let has_recipe = match self.type_to_recipe(&t) {
                     Some(recipe) => {
                         self.sites.typed_module_call_sites.insert(*span, recipe);
+                        true
+                    }
+                    None => false,
+                };
+                // Resolve `module.func::<T>` through the registry's call-site-typed table. A
+                // turbofish on a non-call-site-typed or unknown function keeps a clear error; a
+                // resolved function validates arity/argument types from its declared signature (the
+                // ordinary `ExtFn` argument machinery) and types the result per its declared wrapper
+                // (`T`, `Option<T>`, or `Result<T, E>`). `json.parse`/`try_parse` are registered
+                // this way — no name is special-cased here.
+                match stdlib::typed_module_call(self.reg(), &module, func, &arg_types, t.clone()) {
+                    Some((params, required, result)) => {
+                        self.check_args(&params, required, &arg_types, args, *span, func);
+                        if !has_recipe {
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("`{t}` cannot be built by `{binding}.{func}::<T>`"),
+                            );
+                        }
+                        result
                     }
                     None => {
                         self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("`{t}` cannot be deserialized from JSON with `json.{func}`"),
+                            DiagnosticCode::UnknownName,
+                            *func_span,
+                            format!(
+                                "`{binding}.{func}::<T>(...)` is not a call-site-typed native function"
+                            ),
                         );
+                        t
                     }
-                }
-                // `json.try_parse::<T>` is recoverable — it yields `Result<T, JsonError>` so a
-                // malformed or mismatched body is a catchable, path-carrying error, not a program
-                // abort (unlike `json.parse::<T>`, the aborting convenience form over the same
-                // decode walk). The error arm is the registered `std.json.JsonError` extern type,
-                // resolved through the registry like every native signature type.
-                if recoverable_decode {
-                    let json_error = Type::Named(
-                        stdlib::qualified_extern(self.reg(), "JsonError"),
-                        Vec::new(),
-                    );
-                    Type::Result(Box::new(t), Box::new(json_error))
-                } else {
-                    t
                 }
             }
             Expr::Invoke {

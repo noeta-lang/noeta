@@ -1,0 +1,6 @@
+// A turbofish on a native function that is NOT call-site-typed is a static error (E0005):
+// `json.stringify` is a plain `stringify(value): string`, not a `::<T>` decode door.
+// expect: error E0005 at 5:10
+use std.json
+x = json.stringify::<int>(5);
+echo x;
