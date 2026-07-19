@@ -134,7 +134,7 @@ fn build_aot_archive() -> Option<(PathBuf, String)> {
         .find_map(|l| l.split_once("native-static-libs:"))
         .map(|(_, libs)| libs.trim().to_string())
         .unwrap_or_default();
-    let archive = workspace().join("target/debug/libnoeta_aot.a");
+    let archive = target_dir().join("debug/libnoeta_aot.a");
     archive.exists().then_some((archive, libs))
 }
 
