@@ -1784,6 +1784,7 @@ mod tests {
     /// is not the only one — activation reaches inside bodies.)
     #[test]
     fn nested_debug_block_is_resolved_in_place() {
+        noeta_stdlib::registry::default_seeded();
         let program = parse_program(
             "fn f(x: int): void {\n\
                  @debug { echo \"dbg ${x}\"; }\n\
@@ -1797,6 +1798,35 @@ mod tests {
         let active = activate_tiers(&program, &["debug"]);
         assert_eq!(echoes_in_fn(&active.program.stmts[0]), 2);
         // An active nested `@debug` block does not produce test roots.
+        assert!(active.tests.is_empty());
+    }
+
+    /// Regression (w7 tier-overflow fix): **two nested** `@debug` tier blocks whose inlined echo
+    /// carries a **nested interpolation hole** (`${ … "${x}" … }` — a `${…}` inside a `${…}`).
+    /// Parsing each hole re-enters the whole grammar, and the inner hole re-enters it again, one level
+    /// deeper — the exact re-entrant path that overflowed the parser before [`parse_hole`] grew its
+    /// stack. A depth-capped "fix" that silently bailed on the deeper block would drop an echo, so
+    /// this pins the full resolution: the inner block's echo is inlined when `debug` is active (two
+    /// echoes in the body), stripped when not (one), and a nested block never yields test roots.
+    #[test]
+    fn nested_tier_blocks_with_nested_hole_are_resolved() {
+        noeta_stdlib::registry::default_seeded();
+        let program = parse_program(
+            "fn f(x: int): void {\n\
+                 @debug {\n\
+                     @debug { echo \"dbg ${ [x][0] } and ${x}\"; }\n\
+                 }\n\
+                 echo \"always ${x}\";\n\
+             }\n",
+        );
+        // Stripped: both `@debug` layers drop, leaving only the unconditional `echo "always"`.
+        let stripped = activate_tiers(&program, &[]);
+        assert_eq!(echoes_in_fn(&stripped.program.stmts[0]), 1);
+        assert!(stripped.tests.is_empty());
+        // Active: the doubly-nested `@debug` echo is inlined in place — two echoes in the body.
+        let active = activate_tiers(&program, &["debug"]);
+        assert_eq!(echoes_in_fn(&active.program.stmts[0]), 2);
+        // A nested `@debug` block produces no test roots, however many layers deep it sits.
         assert!(active.tests.is_empty());
     }
 }

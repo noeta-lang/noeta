@@ -173,7 +173,16 @@ base64 = { version = "0.22", default-features = false, features = ["std"] }
 # `v4`/`v7` features) stay OUT so the Host seam remains the only entropy/time source —
 # `Builder::from_random_bytes`/`from_unix_timestamp_millis` take caller-provided bits.
 uuid = { version = "1", default-features = false }
-chumsky = { version = "1.0.0-alpha.8", features = ["pratt"] }
+# `stacker`: chumsky's `recursive` combinator grows the stack on demand at parse time, so deeply
+# nested input (or a `${…}` hole that re-enters the grammar deep in the parse) cannot overflow a
+# small caller stack. Without it, `recursive` recurses on the bare caller stack — a ~2 MiB test
+# thread overflows at moderate nesting now that the grammar is large.
+chumsky = { version = "1.0.0-alpha.8", features = ["pratt", "stacker"] }
+# On-demand stack growth for the recursive-descent parser: a `${…}` interpolation hole re-enters the
+# full grammar deep in the parse stack, so its construction runs under `stacker::maybe_grow` to keep
+# a small caller stack (a ~2 MiB test thread) from overflowing. Already pulled in transitively by
+# `chumsky`; named directly so the parser can call it.
+stacker = "0.1"
 ariadne = "0.6"
 clap = { version = "4", features = ["derive"] }
 # Filesystem watching for `--watch` (server-hmr W0): restart-on-change dev loop.
