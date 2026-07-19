@@ -188,6 +188,11 @@ pub const CONNECTION_METHODS: &[ExtFn] = &[
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        name: "migrate",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+    ExtFn {
         name: "close",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
@@ -238,6 +243,24 @@ fn connection_method_dispatch(
                 .map_err(|_| io_error("connection lock poisoned"))?;
             driver.notify(&channel).map_err(io_error)?;
             Ok(NativeOut::Unit)
+        }
+        "migrate" => {
+            want_arity(method, args, 1)?;
+            let dir = want_str(method, args, 0)?.to_string();
+            // Discover + checksum the migration files before locking the driver (a filesystem read
+            // over the real project directory, like the SQLite driver opening its file directly).
+            let migrations =
+                crate::migrate::load_dir(std::path::Path::new(&dir)).map_err(migrate_error)?;
+            let conn = conn_of(recv)?;
+            let mut driver = conn
+                .0
+                .lock()
+                .map_err(|_| io_error("connection lock poisoned"))?;
+            // Apply pending migrations through the shared engine and report how many ran (0 = already
+            // up to date), so an app can `conn.migrate("migrations")` at boot.
+            let applied =
+                crate::migrate::apply(&mut **driver, &migrations).map_err(migrate_error)?;
+            Ok(NativeOut::Scalar(Scalar::Int(applied.len() as i64)))
         }
         "close" => {
             want_arity(method, args, 0)?;
@@ -330,4 +353,10 @@ fn io_error(message: impl Into<String>) -> StdError {
         kind: ErrorKind::Io,
         message: message.into(),
     }
+}
+
+/// A migration-engine failure surfaced as the language's IO error, with the engine's file-naming
+/// message preserved.
+fn migrate_error(err: crate::migrate::MigrateError) -> StdError {
+    io_error(err.to_string())
 }

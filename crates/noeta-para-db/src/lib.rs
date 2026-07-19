@@ -143,6 +143,13 @@ const CONNECTION_DOCS: &[(&str, &str)] = &[
          on it (this connection or another). A no-op on a driver without a push channel (SQLite).",
     ),
     (
+        "migrate",
+        "Apply every pending SQL migration under `dir` (default project layout: `migrations/`), each \
+         in its own transaction, and return the number applied (0 when already up to date). Uses the \
+         `_noeta_migrations` tracking table and the same checksum/deleted-file integrity checks as \
+         `noeta migrate`; call it at boot for a self-migrating app.",
+    ),
+    (
         "close",
         "Release the connection. The handle is also freed automatically when the last reference to \
          it drops.",
