@@ -31,15 +31,15 @@ async fn worker_b(): string {
 }
 
 async fn run(): (string, string) {
-    mut a = ""
-    mut b = ""
+    mut ra = ""
+    mut rb = ""
     concurrent {
         ha = spawn worker_a()
         hb = spawn worker_b()
-        a = ha.await
-        b = hb.await
+        ra = ha.await
+        rb = hb.await
     }
-    return (a, b)
+    return (ra, rb)
 }
 
 (a, b) = run().await

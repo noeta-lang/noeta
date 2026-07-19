@@ -31,8 +31,8 @@ enum Status {
     }
 
     // An associated function (no receiver) — called on the bare type name.
-    fn describe_case(s: Status): string {
-        return match s {
+    fn describe_case(status: Status): string {
+        return match status {
             Status.Pending  => "Pending",
             Status.Paid     => "Paid",
             Status.Refunded => "Refunded",

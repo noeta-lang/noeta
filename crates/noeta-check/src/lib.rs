@@ -872,6 +872,12 @@ struct Coloring {
     /// access on `self` *or* any same-type value is permitted (the type-scoped privacy rule). `None`
     /// at top level and inside free functions.
     current_type: Option<String>,
+    /// While checking a declaration the linker MERGED from another module (recognizable by its
+    /// qualified dotted name — the entry's own declarations keep bare names), the no-shadowing
+    /// rule's hoisted-globals half is off: the entry's top-level bindings are not in scope inside
+    /// another module's function body, so a merged fn whose params happen to reuse the entry's
+    /// binding names is no shadow. Set around each dotted-named decl in `check_stmt`.
+    in_merged_decl: bool,
     /// While checking the body of a fn lifted from a **dev-tier block** (`@test`/…, slice 6d), the
     /// type-scoped field-privacy gate is relaxed to white-box access: co-located developer tooling
     /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
@@ -975,6 +981,21 @@ struct Checker {
     /// the destructor check for a value whose type can run no destructor.
     relevance: DestructorRelevance,
     diags: Vec<Diagnostic>,
+}
+
+/// Which scope frames count as "already bound" for [`Checker::check_shadow`] (the no-shadowing
+/// rule, E0055) — chosen per binder family by where the binder physically lands. See
+/// `check_shadow`'s doc for the mapping.
+#[derive(Clone, Copy)]
+enum ShadowScopes {
+    /// Any frame — the binder just pushed a fresh frame, so every hit is a shadow (including a
+    /// duplicate in the same parameter list).
+    All,
+    /// Strictly-enclosing frames only — the binder lands in the *current* frame, where a
+    /// same-frame hit is re-declaration/reassignment with its own existing rules.
+    Enclosing,
+    /// No frames — `lookup` already established the name is unbound; only static names apply.
+    StaticsOnly,
 }
 
 impl Checker {
@@ -1082,6 +1103,76 @@ impl Checker {
             .help(
                 "rename the binding — the prelude's `Ok`/`Err`/`some`/`none`/`panic`/`assert` \
                  cannot be shadowed",
+            );
+        }
+    }
+
+    /// The **no-shadowing** rule (E0055): one name, one meaning, per scope stack. A binder — a
+    /// parameter, `for` variable, match-pattern binding, or fresh local declaration — may not
+    /// reuse a name that already means something: another binding in scope, a top-level function
+    /// or type, or an imported name. Assignment never re-declares (it reassigns, under
+    /// E0006/E0007), and `is`-narrowing refines the *same* binding through `env::bind` directly —
+    /// both bypass this gate by construction, so neither is ever flagged.
+    ///
+    /// Each binder family passes the [`ShadowScopes`] matching where it binds:
+    /// - [`ShadowScopes::All`] — params, `for` vars, pattern binders: they land in a freshly
+    ///   pushed frame, so *any* env hit — an enclosing scope or a duplicate in the same list
+    ///   (`fn(x, x)`) — is a shadow.
+    /// - [`ShadowScopes::Enclosing`] — binders that land in the *current* frame (destructure
+    ///   targets, annotated/`mut` declarations, nested `fn` names): a same-frame hit is
+    ///   re-declaration/reassignment with its own existing rules (and the REPL's persistent
+    ///   global frame re-enters bindings legally), so only strictly-enclosing frames count.
+    /// - [`ShadowScopes::StaticsOnly`] — a fresh bare `x = …` declaration: `lookup` already
+    ///   found nothing (else it would be a reassignment), so only the static names apply. Also
+    ///   skips the hoisted-globals set, which contains this very declaration's own name.
+    fn check_shadow(&mut self, name: &str, span: Span, env: &Env, scopes: ShadowScopes) {
+        if name == "_" || name == "self" {
+            return;
+        }
+        let scope_hit = match scopes {
+            ShadowScopes::All => env::lookup(env, name).is_some(),
+            ShadowScopes::Enclosing => env[..env.len().saturating_sub(1)]
+                .iter()
+                .any(|frame| frame.contains_key(name)),
+            ShadowScopes::StaticsOnly => false,
+        };
+        // The hoisted-globals half applies only to binders BELOW the top level: a top-level
+        // binding/destructure's own name is itself in the hoisted set (collect pass 1), so
+        // checking it at depth 1 would flag every declaration — while any deeper binder that
+        // matches a hoisted global is a genuine shadow, even of one declared later in the file.
+        // Off inside a linker-merged declaration: the entry's globals are not in scope there
+        // (see `Coloring::in_merged_decl`).
+        let include_globals = env.len() > 1 && !self.coloring.in_merged_decl;
+        let shadowed = if scope_hit {
+            Some("a binding already in scope")
+        } else if self.symbols.functions.contains_key(name)
+            || self.imports.imported_fns.contains_key(name)
+        {
+            Some("a top-level function")
+        } else if self.symbols.types.contains(name) || self.symbols.enums.contains_key(name) {
+            Some("a type")
+        } else if self.imports.modules.contains_key(name)
+            || self.imports.namespaces.contains_key(name)
+        {
+            Some("an imported module")
+        } else if self.imports.extern_types.contains_key(name) {
+            Some("an imported type")
+        } else if include_globals && self.symbols.global_binding_names.contains(name) {
+            // Hoisted top-level binding names — a binder inside a function may not shadow a
+            // global even one declared later in the file.
+            Some("a top-level binding")
+        } else {
+            None
+        };
+        if let Some(what) = shadowed {
+            self.error(
+                DiagnosticCode::ShadowedBinding,
+                span,
+                format!("binding `{name}` shadows {what}"),
+            )
+            .help(
+                "every name means one thing per scope — rename this binding (or, for an \
+                 import, bring it in under an alias: `use … as …`)",
             );
         }
     }
@@ -1338,6 +1429,8 @@ impl Checker {
                             self.relevance.locals.insert(*name_span);
                         }
                         // Annotated = a fresh declaration; carry its `mut`-ness for the field-set rule.
+                        // Fresh means it may not shadow an enclosing binding or a static name (E0055).
+                        self.check_shadow(name, *name_span, env, ShadowScopes::Enclosing);
                         if *mut_decl {
                             bind_mut(env, name, expected);
                         } else {
@@ -1365,8 +1458,10 @@ impl Checker {
                                      whose later writes determine the type",
                             );
                         }
-                        // `mut x = …` is a fresh declaration (innermost frame, even if it shadows).
+                        // `mut x = …` is a fresh declaration in the innermost frame — which may
+                        // not shadow an enclosing binding or a static name (E0055).
                         if *mut_decl {
+                            self.check_shadow(name, *name_span, env, ShadowScopes::Enclosing);
                             bind_mut(env, name, vty);
                         } else if matches!(value, Expr::FieldSet { .. } | Expr::Coalesce { .. }) {
                             // Two desugars of compound assignment carry an *intended* type change and
@@ -1425,7 +1520,16 @@ impl Checker {
                                     // keeps its established type, so its shown type stays stable.
                                 }
                                 // Not in scope — a fresh immutable binding in the innermost frame.
-                                None => bind(env, name, vty),
+                                // Unbound in every frame, so only static names can be shadowed.
+                                None => {
+                                    self.check_shadow(
+                                        name,
+                                        *name_span,
+                                        env,
+                                        ShadowScopes::StaticsOnly,
+                                    );
+                                    bind(env, name, vty);
+                                }
                             }
                         }
                     }
@@ -1472,6 +1576,9 @@ impl Checker {
                 };
                 for ((name, name_span), t) in targets.iter().zip(elem_types) {
                     self.check_reserved_name(name, *name_span);
+                    // A destructure target lands in the current frame (a same-frame name is
+                    // reassignment under its own rules) — enclosing frames and statics only.
+                    self.check_shadow(name, *name_span, env, ShadowScopes::Enclosing);
                     if self.type_relevant(&t) {
                         self.relevance.locals.insert(*name_span);
                     }
@@ -1643,24 +1750,48 @@ impl Checker {
             }
             Stmt::Fn(decl) => {
                 self.check_reserved_name(&decl.name, decl.name_span);
-                self.check_fn(decl, env, &[], TargetKind::Function)
+                // A NESTED fn's name is a value binding in the enclosing body (pre-bound into the
+                // current frame by `bind_nested_fns`, hence `Enclosing` — it must not flag
+                // itself). A top-level fn (depth 1) is in `symbols.functions`, where duplicate
+                // declaration has its own rules; the statics half would self-flag it, so skip.
+                if env.len() > 1 {
+                    self.check_shadow(&decl.name, decl.name_span, env, ShadowScopes::Enclosing);
+                }
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || decl.name.contains('.');
+                self.check_fn(decl, env, &[], TargetKind::Function);
+                self.coloring.in_merged_decl = saved;
             }
             Stmt::Struct(r) => {
                 self.check_reserved_name(&r.name, r.name_span);
                 self.check_reserved_type_name(&r.name, r.name_span);
-                self.check_struct(r, env)
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || r.name.contains('.');
+                self.check_struct(r, env);
+                self.coloring.in_merged_decl = saved;
             }
             Stmt::Class(c) => {
                 self.check_reserved_name(&c.name, c.name_span);
                 self.check_reserved_type_name(&c.name, c.name_span);
-                self.check_class(c, env)
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || c.name.contains('.');
+                self.check_class(c, env);
+                self.coloring.in_merged_decl = saved;
             }
             Stmt::Enum(e) => {
                 self.check_reserved_name(&e.name, e.name_span);
                 self.check_reserved_type_name(&e.name, e.name_span);
-                self.check_enum(e, env)
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || e.name.contains('.');
+                self.check_enum(e, env);
+                self.coloring.in_merged_decl = saved;
             }
-            Stmt::Impl(decl) => self.check_standalone_impl(decl),
+            Stmt::Impl(decl) => {
+                let saved = self.coloring.in_merged_decl;
+                self.coloring.in_merged_decl = saved || decl.target.contains('.');
+                self.check_standalone_impl(decl);
+                self.coloring.in_merged_decl = saved;
+            }
             Stmt::Trait(decl) => self.check_trait_decl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
             // A dev-tier block reaching the checker is an *inactive* residual (object-model
@@ -1867,6 +1998,9 @@ impl Checker {
         }
         for p in &decl.params {
             self.check_reserved_name(&p.name, p.name_span);
+            // Params land in the just-pushed frame: any env hit — an enclosing binding or a
+            // duplicate in this very list (`fn(x, x)`) — is a shadow (E0055).
+            self.check_shadow(&p.name, p.name_span, env, ShadowScopes::All);
             bind(env, &p.name, param_type(p, &self.imports.extern_types));
         }
         self.bind_nested_fns(&decl.body, env);

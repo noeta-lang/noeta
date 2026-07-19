@@ -1013,6 +1013,29 @@ fn link_core(
         .iter()
         .flat_map(qualify::bound_value_names)
         .collect();
+    // The **no-shadowing** rule's import half (the checker enforces the binder half as E0055, but
+    // a user-module `use` is consumed by this linker before the checker ever sees it): a value
+    // binding anywhere in a unit may not reuse the local name a `use` binds — one name, one
+    // meaning. Checked per unit (the `use` is file-scoped), for the entry and every dependency
+    // driver alike; only imports that actually resolve to a loaded module or item fire, so a
+    // retained extern `use` (std — the checker's tables cover it) is not double-reported.
+    for stmts in std::iter::once(&entry_program.stmts).chain(dep_drivers.iter().map(|d| &d.stmts)) {
+        let unit_bound: HashSet<String> =
+            stmts.iter().flat_map(qualify::bound_value_names).collect();
+        for stmt in stmts.iter() {
+            if let Stmt::Use { path, names, .. } = stmt {
+                for n in names {
+                    if unit_bound.contains(n.local())
+                        && (module_declares(&module_views, path, &n.name)
+                            || module_with_namespace(&module_views, path, &n.name).is_some())
+                    {
+                        errors.push(shadowed_import_error(entry, path, n));
+                    }
+                }
+            }
+        }
+    }
+
     // Dotted references that missed the entry's QMap (with spans) — filtered against the loaded
     // modules below to diagnose a qualified reference that lacks its `use`.
     let mut dotted_misses: Vec<(String, noeta_span::Span)> = Vec::new();
@@ -1459,6 +1482,29 @@ fn collision_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagn
             ),
         )
         .with_help("rename or remove the conflicting import or declaration"),
+    }
+}
+
+/// Build the `E0020` diagnostic for an import whose local name a value binding in the same unit
+/// also uses (the no-shadowing rule's import half — the binder half is the checker's E0055).
+/// Points at the imported name; the fix is a rename on either side.
+fn shadowed_import_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagnostic {
+    let namespace = path.join(".");
+    LoadDiagnostic {
+        source: entry.clone(),
+        diagnostic: Diagnostic::error(
+            DiagnosticCode::NameCollision,
+            name.span,
+            format!(
+                "imported `{}` collides with a local binding of the same name",
+                name.local()
+            ),
+        )
+        .with_help(format!(
+            "every name means one thing per scope — rename the binding, or import under an \
+             alias (`use {namespace}.{} as …`)",
+            name.name
+        )),
     }
 }
 

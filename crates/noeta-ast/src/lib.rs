@@ -752,6 +752,12 @@ pub struct FnDecl {
     /// available to consumers; the runner is invoked with the activated roots. `None` for an
     /// ordinary fn (the overwhelmingly common case).
     pub tier: Option<TierDecl>,
+    /// The explicit **capture clause** — `fn f(params) use (a, b): Ret { … }`. A named function is
+    /// SEALED: its body sees its parameters, statics (functions/types/imports), and exactly these
+    /// captured value bindings from the declaration site — never the surrounding scope implicitly
+    /// (anonymous closures are the auto-capturing form). Each capture is a **live view** of the
+    /// named binding. Empty for the overwhelmingly common self-contained function.
+    pub captures: Vec<(String, Span)>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }

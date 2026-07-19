@@ -834,6 +834,7 @@ fn empty_fn(name: &str, span: Span) -> FnDecl {
         is_dev_tier: false,
         is_async: false,
         tier: None,
+        captures: Vec::new(),
         body: Vec::new(),
         span,
     }

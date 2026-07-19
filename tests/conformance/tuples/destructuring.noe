@@ -9,8 +9,8 @@
 // expect: stdout "1=one"
 // expect: stdout "2=two"
 // expect: exit 0
-fn divmod(a: int, b: int): (int, int) {
-    return (a / b, a - (a / b) * b);
+fn divmod(num: int, den: int): (int, int) {
+    return (num / den, num - (num / den) * den);
 }
 
 (q, r) = divmod(17, 5);

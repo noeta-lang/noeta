@@ -160,6 +160,9 @@ impl Checker {
                     .collect();
                 for (p, pty) in params.iter().zip(&bound) {
                     self.check_reserved_name(&p.name, p.name_span);
+                    // Closure params land in the just-pushed frame — any env hit is a shadow
+                    // (E0055), enclosing capture and same-list duplicate alike.
+                    self.check_shadow(&p.name, p.name_span, env, crate::ShadowScopes::All);
                     bind(env, &p.name, pty.clone());
                 }
                 // An explicit return annotation is the body's expected type and the closure's return
@@ -552,6 +555,8 @@ impl Checker {
                 env.push(HashMap::new());
                 for p in params {
                     self.check_reserved_name(&p.name, p.name_span);
+                    // Same rule as the check-mode arm: any env hit is a shadow (E0055).
+                    self.check_shadow(&p.name, p.name_span, env, crate::ShadowScopes::All);
                     bind(env, &p.name, param_type(p, &self.imports.extern_types));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the

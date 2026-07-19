@@ -138,13 +138,18 @@ impl Checker {
         match pattern {
             ForPattern::Single { name, name_span } => {
                 self.check_reserved_name(name, *name_span);
+                // The loop variable lands in the loop's just-pushed frame — any env hit is a
+                // shadow (E0055).
+                self.check_shadow(name, *name_span, env, crate::ShadowScopes::All);
                 bind(env, name, elem)
             }
             // `for (a, b, …) in …` destructures each iterated **tuple** element positionally
             // (object-model slice 4b — `.enumerate()` yields `(int, T)` tuples). Each name binds to
             // its element type when the element is a known tuple, else `dyn`.
             ForPattern::Tuple { names, .. } => {
-                for (i, (name, _)) in names.iter().enumerate() {
+                for (i, (name, name_span)) in names.iter().enumerate() {
+                    self.check_reserved_name(name, *name_span);
+                    self.check_shadow(name, *name_span, env, crate::ShadowScopes::All);
                     let t = match &elem {
                         Type::Tuple(els) => els.get(i).cloned().unwrap_or(Type::Unknown),
                         _ => Type::Unknown,
@@ -169,6 +174,9 @@ impl Checker {
                 // from the reserved-name rule so `match o { some(v) => …, none => … }` stays legal.
                 if name != "none" {
                     self.check_reserved_name(name, *span);
+                    // A match-pattern binding lands in the arm's just-pushed frame — any env hit
+                    // is a shadow (E0055).
+                    self.check_shadow(name, *span, env, crate::ShadowScopes::All);
                 }
                 bind(env, name, ty.clone())
             }

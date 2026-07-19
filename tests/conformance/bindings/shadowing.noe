@@ -1,8 +1,9 @@
-// Lexical shadowing: a function parameter shadows a same-named binding in an outer scope
-// for the duration of the call; the outer binding is untouched.
-// expect: stdout "5"
-// expect: stdout "100"
-// expect: exit 0
+// NO shadowing (E0055): one name, one meaning, per scope stack. A binder — here a function
+// parameter — may not reuse a name already bound in a visible scope (`base` is a top-level
+// binding the function body could read). Assignment never re-declares (it reassigns, under
+// E0006/E0007), and `is`-narrowing refines the same binding, so shadowing is never needed.
+// expect: error E0055 at 7:6
+// expect: exit 1
 base = 100;
 fn f(base: int): int { return base; }
 echo f(5);

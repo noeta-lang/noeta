@@ -229,6 +229,12 @@ pub enum DiagnosticCode {
     /// them — e.g. a top-level-only tier used on a method, or a `@test` method that reads `self`
     /// (a test method must be an associated function so the runner can call it with no receiver).
     InvalidDirectiveSite,
+    /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
+    /// that already means something in scope — an enclosing binding, a top-level function or type,
+    /// or an imported name. **One name, one meaning, per scope stack**: assignment already never
+    /// re-declares (it reassigns, E0006/E0007 governing), and `is`-narrowing refines the *same*
+    /// binding, so silent shadowing is never needed and only obscures which meaning a name has.
+    ShadowedBinding,
 }
 
 impl DiagnosticCode {
@@ -289,6 +295,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidTierDeclaration,
         DiagnosticCode::InvalidTierExpression,
         DiagnosticCode::InvalidDirectiveSite,
+        DiagnosticCode::ShadowedBinding,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -349,6 +356,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidTierExpression => "E0052",
             DiagnosticCode::InvalidTraitDeclaration => "E0053",
             DiagnosticCode::InvalidDirectiveSite => "E0054",
+            DiagnosticCode::ShadowedBinding => "E0055",
         }
     }
 

@@ -24,6 +24,6 @@ acc["a"] = 10;
 echo acc.keys();
 echo acc.values();
 
-m = build();
-echo m.values().len();
+built = build();
+echo built.values().len();
 echo snap.values();
