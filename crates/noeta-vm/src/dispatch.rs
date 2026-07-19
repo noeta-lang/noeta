@@ -1320,6 +1320,37 @@ impl<'m> Vm<'m> {
                                 None => {
                                     let shape = v.shape().unwrap();
                                     let Some(proto) = self.method_proto(&shape.name, method) else {
+                                        // The runtime member-call fallback (the field-access-then-
+                                        // call desugar's `dyn` path): no method `method`, but the
+                                        // shape HAS a field of that name — `obj.f(args)` means
+                                        // `(obj.f)(args)`, so call the field's value through the
+                                        // shared closure-call setup (the `Op::Call` machinery).
+                                        // The same order the checker pins statically (a method
+                                        // wins, the field is consulted only on a miss) and the
+                                        // same route the lowered `Field` + `Call` takes — a
+                                        // non-callable field value raises the indirect-call E0007
+                                        // ("... is not callable"), identically in both backends.
+                                        // Left uncached: the method cache memoizes prototypes,
+                                        // and this dyn-only path re-probes per call.
+                                        if let Some(callee_val) =
+                                            shape.slot_of(method).and_then(|s| v.slot_at(s))
+                                        {
+                                            if self.setup_closure_call(
+                                                frames,
+                                                regs,
+                                                top,
+                                                fbase,
+                                                *dst,
+                                                callee_val,
+                                                args,
+                                                *span,
+                                                pc + 1,
+                                            )? {
+                                                continue 'reload;
+                                            }
+                                            pc += 1;
+                                            continue;
+                                        }
                                         return Err(self.error(
                                             DiagnosticCode::UnknownName,
                                             *span,

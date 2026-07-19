@@ -1,0 +1,29 @@
+// The field-call desugar's `dyn` path: when the receiver's type is erased (`c: dyn`), the checker
+// cannot resolve `c.step(...)` statically, so the call stays method dispatch — and the RUNTIME
+// falls back in the same order the checker pins: the method table first, then a field of that
+// name, whose value is called. Both backends implement the fallback at their method-dispatch miss
+// site, so they agree by construction. A method of the same name still wins at runtime (`tag()`).
+// expect: stdout "42"
+// expect: stdout "9"
+// expect: stdout "method"
+// expect: exit 0
+struct Counter {
+    step: (int) -> int
+}
+class Shouter {
+    pub shout: (int) -> int
+    fn tag(): string { return "method" }
+}
+fn call_step(c: dyn): void {
+    echo c.step(41)
+}
+fn call_shout(c: dyn): void {
+    echo c.shout(3)
+}
+fn call_tag(c: dyn): void {
+    echo c.tag()
+}
+call_step(Counter { step: fn(x: int) => x + 1 })
+sh = Shouter { shout: fn(x: int) => x * 3 }
+call_shout(sh)
+call_tag(sh)

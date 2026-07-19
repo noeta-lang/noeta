@@ -2168,11 +2168,21 @@ impl Interpreter {
                 Some(method) => {
                     self.call_method_on(&Rc::clone(object), &Rc::clone(method), args, span)
                 }
-                None => Err(self.runtime_error(
-                    DiagnosticCode::UnknownName,
-                    span,
-                    format!("type `{}` has no method `{name}`", object.def.name()),
-                )),
+                // The runtime member-call fallback (the field-access-then-call desugar's `dyn`
+                // path): no method `name`, but the object HAS a field `name` — `obj.f(args)`
+                // means `(obj.f)(args)`, so call the field's value. The same order the checker
+                // pins statically (a method wins, the field is consulted only on a miss), and the
+                // same route the lowered `Field` + `Call` takes — a non-callable field value
+                // raises the indirect-call E0007 ("`X` is not callable"), identically in both
+                // backends. A type with neither stays the runtime E0005.
+                None => match object.field(name) {
+                    Some(value) => self.call(value, args, span),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        span,
+                        format!("type `{}` has no method `{name}`", object.def.name()),
+                    )),
+                },
             };
         }
         // `status.label()` — an enum instance method (the unified body, object-model slice 3). The
