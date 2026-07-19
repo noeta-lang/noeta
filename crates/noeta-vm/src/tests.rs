@@ -37,12 +37,38 @@ fn aot_helper_export_names_match_the_jit_constants() {
 }
 
 fn run(src: &str) -> RunResult {
+    // Seed the process-default registry explicitly — this suite is an assembling binary (the
+    // registry doc's own instruction), and relying on a sibling test to have seeded first is a
+    // scheduling race. Runs ON the caller's thread: several tests measure `noeta_value`'s
+    // thread-local residency counters around this call, so the run must share their thread (a
+    // test whose program out-recurses the 2 MiB debug test stack wraps ITSELF in
+    // `on_deep_stack` instead — see `record_reassign_reuse_paths`).
+    noeta_stdlib::registry::default_seeded();
     let source = Source::new(SourceId::FIRST, "test.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     VmBackend::new()
         .try_run(&parsed.program)
         .expect("program should be in the M1.0 subset")
+}
+
+/// Run `f` on a deep worker stack — for a test whose front-end recursion (checker
+/// `check`/`synth`, the reuse/drops passes) out-recurses libtest's ~2 MiB debug test thread;
+/// the conformance corpus's `on_deep_stack` precedent. Thread-local counters measured inside
+/// `f` stay consistent because the whole test body moves to the worker.
+fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    const DEEP_STACK: usize = 64 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .stack_size(DEEP_STACK)
+            .spawn_scoped(scope, f)
+            .expect("spawn deep-stack test worker")
+            .join()
+        {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
 }
 
 /// P-AOT L3.2b: prove the dispatch-table binding + native dispatch **in-process**, isolating the
@@ -200,7 +226,7 @@ fn installed_fragments_extend_a_running_debug_vm() {
         &arena,
         "struct P { x: int }\n\
          fn twice(n: int): int { return n * 2 }\n\
-         fn callcb(n: int): int { return cb(n) }\n\
+         fn callcb(n: int) use (cb): int { return cb(n) }\n\
          mut cb = fn(n: int) => n\n\
          mut base = 10\n\
          mut p0 = P { x: 3 }\n\
@@ -319,7 +345,7 @@ fn observational_watch_result_is_memoized_until_the_generation_bumps() {
     let arena = typed_arena::Arena::new();
     let mut vm = debug_session_vm(
         &arena,
-        "mut counter = 0\nfn tick(): int { counter = counter + 1\nreturn counter }\necho counter\n",
+        "mut counter = 0\nfn tick() use (counter): int { counter = counter + 1\nreturn counter }\necho counter\n",
     );
     vm.run_top();
     let frames = vec![Frame {
@@ -1379,9 +1405,12 @@ fn record_reassign_reuse_paths() {
     // in-place hit reuses `p`'s cell across the loop (its displaced HEAP field `tag` released each
     // step), while an aliased reassignment (`snap = q`) copies to preserve `snap`. Run under miri to
     // validate the all-slot overwrite's retain/release accounting (no UAF / double free).
-    let r = run(
-        "class P {\n  n: int\n  tag: string\n  fn show(): string { return \"${self.n} ${self.tag}\"; }\n}\nfn build(): string {\n  mut p = P { n: 0, tag: \"a\" };\n  for i in 0..3 { p = P { n: i, tag: \"t${i}\" }; }\n  return p.show();\n}\necho build();\nmut q = P { n: 1, tag: \"x\" };\nsnap = q;\nq = P { n: 9, tag: \"y\" };\necho q.show();\necho snap.show();\n",
-    );
+    // On a deep stack: this case's front-end recursion out-runs the 2 MiB debug test thread.
+    let r = on_deep_stack(|| {
+        run(
+            "class P {\n  n: int\n  tag: string\n  fn show(): string { return \"${self.n} ${self.tag}\"; }\n}\nfn build(): string {\n  mut p = P { n: 0, tag: \"a\" };\n  for i in 0..3 { p = P { n: i, tag: \"t${i}\" }; }\n  return p.show();\n}\necho build();\nmut q = P { n: 1, tag: \"x\" };\nsnap = q;\nq = P { n: 9, tag: \"y\" };\necho q.show();\necho snap.show();\n",
+        )
+    });
     assert_eq!(r.stdout, "2 t2\n9 y\n1 x\n");
     assert_eq!(r.exit_code, 0);
 }

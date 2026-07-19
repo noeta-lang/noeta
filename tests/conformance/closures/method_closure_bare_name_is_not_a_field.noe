@@ -1,6 +1,7 @@
 // A bare name inside a method-nested closure is an ordinary lexical reference — never the
 // receiver's field (prelude-redesign EX.1: member access is explicit, `self.field`). A global
-// or a method-local that happens to share a field's name captures like any other name; before
+// (imported into the sealed method with `use (…)`) or a method-local that shares a field's
+// name resolves like any other name; before
 // this was pinned, the VM refused to compile such a closure while the reference ran it.
 // expect: stdout "101"
 // expect: stdout "43"
@@ -10,7 +11,7 @@ struct S {
     count: int
     width: int
     other: int
-    fn m(): int {
+    fn m() use (count): int {
         f = fn() => count
         return f() + self.other
     }

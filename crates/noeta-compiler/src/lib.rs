@@ -1214,6 +1214,7 @@ impl ModuleCompiler {
             enclosing_locals,
             name,
             Some(func.span),
+            func.captures.as_deref(),
         )
     }
 
@@ -1237,11 +1238,13 @@ impl ModuleCompiler {
         enclosing_locals: Vec<HashSet<String>>,
         name: Option<String>,
         def_span: Option<Span>,
+        captures: Option<&[String]>,
     ) -> Result<Chunk, Unsupported> {
         let is_method = method.is_some();
         let debug = self.debug;
         let globals = self.global_names();
-        let analysis = freevars::analyze(params, defaults, body, &enclosing_locals, &globals);
+        let analysis =
+            freevars::analyze(params, defaults, body, &enclosing_locals, &globals, captures);
 
         // The capturable layer this function exposes to its own nested closures. A method also
         // exposes `self` (captured by boxing the receiver — aether F3); its FIELDS are deliberately
@@ -1274,6 +1277,8 @@ impl ModuleCompiler {
         let mut fc = FnCompiler::new(self, false, method, upvalues, enclosing_locals);
         fc.celled = analysis.celled;
         fc.local_layer = local_layer;
+        // The sealed-fn write frontier for `binding` (see `FnCompiler::seal`).
+        fc.seal = captures.map(|allow| allow.iter().cloned().collect());
         fc.init_temps(temp_count);
 
         // A method reserves register 0 for the receiver; ordinary functions do not.
@@ -1355,6 +1360,8 @@ impl ModuleCompiler {
             enclosing_locals,
             // A defaulted-parameter / field-default thunk is an anonymous value evaluator.
             None,
+            None,
+            // A thunk evaluates in the definition scope (globals) — no seal of its own.
             None,
         )?;
         let idx = self.protos.len() as u32;
@@ -1488,6 +1495,11 @@ struct FnCompiler<'m> {
     /// The names of this function's own locals that an inner closure captures, so they are
     /// stored as cells (computed by the free-variable analysis before lowering).
     celled: HashSet<String>,
+    /// The SEALED-fn write frontier: `Some(allow)` when this chunk compiles a named fn/method —
+    /// `binding` lets a bare assignment reach a module global only for allow-listed names; every
+    /// other bare-assigned name declares a fresh local (matching the checker and the eval
+    /// backend's scope frontier). `None` for `main`, closures, and thunks.
+    seal: Option<HashSet<String>>,
     /// The enclosing functions' capturable locals (outermost first) — for lowering this
     /// function's own nested closures.
     enclosing_locals: Vec<HashSet<String>>,
@@ -1626,6 +1638,7 @@ impl<'m> FnCompiler<'m> {
             upvalue_index,
             upvalue_mut,
             celled: HashSet::new(),
+            seal: None,
             enclosing_locals,
             local_layer: HashSet::new(),
             loops: Vec::new(),
@@ -1803,6 +1816,7 @@ impl<'m> FnCompiler<'m> {
             &func.body,
             &enclosing,
             &globals,
+            func.captures.as_deref(),
         );
         let mut upvalues = Vec::with_capacity(free.len());
         let mut captures = Vec::with_capacity(free.len());
@@ -2178,7 +2192,8 @@ impl<'m> FnCompiler<'m> {
     /// mutual recursion) resolves to its cell/upvalue exactly as inside any other function.
     fn setup_main_scopes(&mut self, top: &Block) {
         let globals = self.module.global_names();
-        let analysis = freevars::analyze(&[], &[], top, &[], &globals);
+        // `main` (the top level) is never sealed — `None` keeps the full outward rule.
+        let analysis = freevars::analyze(&[], &[], top, &[], &globals, None);
         self.local_layer = &analysis.local - &globals;
         self.celled = &analysis.celled - &globals;
     }
@@ -2647,8 +2662,16 @@ impl<'m> FnCompiler<'m> {
         }
 
         // A global: in `main` only the globals declared so far are visible (matching the
-        // tree-walker's not-yet-declared lookups); inside a function every module global is.
-        let global_mut = if self.is_main {
+        // tree-walker's not-yet-declared lookups); inside a function every module global is —
+        // unless the function is SEALED, where only `use (…)`-listed names reach a global store
+        // (any other name falls through to a fresh local, exactly as the checker typed it).
+        let sealed_out = self
+            .seal
+            .as_ref()
+            .is_some_and(|allow| !allow.contains(name) && !name.starts_with('$'));
+        let global_mut = if sealed_out {
+            None
+        } else if self.is_main {
             self.globals.get(name).map(|info| info.mutable)
         } else {
             self.module.module_globals.get(name).copied()

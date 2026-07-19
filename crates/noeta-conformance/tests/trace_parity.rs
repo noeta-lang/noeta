@@ -143,8 +143,9 @@ fn async_fn_panic_traces_under_the_functions_name() {
 
 #[test]
 fn anonymous_closure_panic_traces_identically() {
+    // The named fn imports the closure binding with `use (f)` — sealed named fns.
     let (vm, eval, source) = both_traces(
-        "mut f = fn(x: int) => panic(\"in closure\")\nfn call_it(): int {\n    return f(1)\n}\nmut r = call_it()\necho r\n",
+        "mut f = fn(x: int) => panic(\"in closure\")\nfn call_it() use (f): int {\n    return f(1)\n}\nmut r = call_it()\necho r\n",
     );
     let vm_story = story(&vm, &source);
     assert_eq!(vm_story, story(&eval, &source), "vm={vm:#?} eval={eval:#?}");

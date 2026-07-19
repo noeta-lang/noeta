@@ -8,8 +8,8 @@ class G {
     fn new(): G { return G { n: 0 }; }
 }
 g = G.new()
-fn sync_add(x: int): void { g.n = g.n + x }
-async fn async_add(x: int): void { g.n = g.n + x }
+fn sync_add(x: int) use (g): void { g.n = g.n + x }
+async fn async_add(x: int) use (g): void { g.n = g.n + x }
 sync_add(10)
 async_add(20).await
 echo g.n

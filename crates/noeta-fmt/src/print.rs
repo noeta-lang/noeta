@@ -931,6 +931,12 @@ impl Printer<'_> {
         parts.push(Doc::text(decl.name.clone()));
         parts.push(self.type_params(&decl.type_params)?);
         parts.push(self.params(&decl.params)?);
+        // The sealed-fn capture clause (`use (a, b)`) — dropping it would silently strip the
+        // body's access to its captured bindings.
+        if !decl.captures.is_empty() {
+            let names: Vec<&str> = decl.captures.iter().map(|(n, _)| n.as_str()).collect();
+            parts.push(Doc::text(format!(" use ({})", names.join(", "))));
+        }
         if let Some(ret) = &decl.ret {
             parts.push(Doc::text(": "));
             parts.push(self.type_ref(ret)?);

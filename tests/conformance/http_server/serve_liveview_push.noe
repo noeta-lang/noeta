@@ -16,7 +16,7 @@ use std.reactive.{signal, computed, view}
 count = signal(0)
 double = computed(fn() { return count.get() * 2 })
 
-async fn session(sock: Socket): bool {
+async fn session(sock: Socket) use (count, double): bool {
     v = view()
     v.expose("count", count)
     v.expose("double", double)

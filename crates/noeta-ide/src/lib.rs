@@ -4622,6 +4622,67 @@ mod tests {
     }
 
     #[test]
+    fn references_include_the_capture_clause_and_sealed_body_uses() {
+        // Sealed fns: `use (tax)` imports the top-level binding, so the clause occurrence and
+        // every body use group with the declaration — a rename must rewrite all of them, or the
+        // renamed program stops compiling.
+        let mut store = test_store();
+        store.open(
+            "file:///cap.noe",
+            "tax = 1\nfn f(p: int) use (tax): int {\n    return p + tax\n}\necho f(2)".to_string(),
+        );
+        // Cursor on the declaration `tax` (line 0): the clause occurrence + the body use.
+        let uses = store
+            .references(
+                "file:///cap.noe",
+                Position {
+                    line: 0,
+                    character: 1,
+                },
+                Encoding::Utf8,
+                false,
+            )
+            .expect("resolves the captured binding");
+        assert_eq!(
+            uses.len(),
+            2,
+            "the `use (tax)` clause + the body read; got {uses:?}"
+        );
+        assert!(
+            uses.iter().any(|(_, r)| r.start.line == 1),
+            "the capture-clause occurrence must be a reference; got {uses:?}"
+        );
+        assert!(
+            uses.iter().any(|(_, r)| r.start.line == 2),
+            "the sealed body's read must group with the same binding; got {uses:?}"
+        );
+    }
+
+    #[test]
+    fn sealed_body_fresh_local_does_not_alias_the_global() {
+        // An UNLISTED bare assignment in a sealed body declares a fresh local (the checker/backends
+        // rule) — DefUse must agree: references to the global exclude the fn's local.
+        let mut store = test_store();
+        store.open(
+            "file:///seal.noe",
+            "mut x = 1\nfn f(): int {\n    x = 2\n    return x\n}\necho x".to_string(),
+        );
+        let uses = store
+            .references(
+                "file:///seal.noe",
+                Position {
+                    line: 0,
+                    character: 5,
+                },
+                Encoding::Utf8,
+                false,
+            )
+            .expect("resolves the global");
+        assert_eq!(uses.len(), 1, "only the top-level `echo x`; got {uses:?}");
+        assert!(uses.iter().all(|(_, r)| r.start.line == 5), "{uses:?}");
+    }
+
+    #[test]
     fn references_span_modules_for_a_function() {
         let dir = temp_workspace(
             "refs_xmod",

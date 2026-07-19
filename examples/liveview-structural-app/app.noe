@@ -40,7 +40,7 @@ fn reordered(xs: List<Row>): List<Row> {
     return out
 }
 
-fn page(): Html {
+fn page() use (rows): Html {
     return @html {
         <ul>${keyed(rows, fn(r) => "${r.id}", row)}</ul>
         <button ${on_click(fn() => rows.update(fn(xs) => xs ~ [Row { id: 4, label: "d" }]))}>append</button>

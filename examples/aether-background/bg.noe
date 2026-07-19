@@ -14,13 +14,13 @@ fn heartbeat(): void {
     echo "  [scheduler] tick"
 }
 
-async fn handle(req: Request): Response {
+async fn handle(req: Request) use (tx): Response {
     echo "request ${req.path()} -> queued background work, replying now"
     background(tx, process).await
     return server.response(202, "accepted")
 }
 
-async fn main(): void {
+async fn main() use (rx, tx): void {
     concurrent {
         spawn work(rx)
         spawn every(2, heartbeat)

@@ -70,6 +70,12 @@ module.exports = grammar({
     // `(a, b)` leading a statement is a tuple expression or a destructuring-assignment target,
     // resolved only when the `=` (or its absence) appears.
     [$._expression, $._pattern],
+    // `a.b` is a member expression in a value position but a module-qualified head when a struct
+    // body (or `.Variant` in a pattern) follows — GLR keeps both until the `{`/args decide, and
+    // struct_literal's dynamic precedence picks the qualified parse where both survive.
+    [$._expression, $.qualified_identifier],
+    // The chain length of a qualified head is decided by what follows (pattern variant vs head).
+    [$.qualified_identifier],
   ],
 
   rules: {
@@ -182,9 +188,13 @@ module.exports = grammar({
       field('name', $.identifier),
       optional($.type_parameters),
       field('parameters', $.parameters),
+      // The sealed-fn capture clause: `fn f(params) use (a, b): Ret { … }` — the explicit
+      // import of surrounding value bindings into a named function's body.
+      optional(field('captures', $.capture_clause)),
       optional(seq(':', field('return_type', $._type))),
       field('body', $.block),
     ),
+    capture_clause: $ => seq('use', '(', commaSep1($.identifier), ')'),
 
     parameters: $ => seq('(', optional(commaSep($.parameter)), ')'),
     parameter: $ => seq(
@@ -498,12 +508,20 @@ module.exports = grammar({
     )),
 
     struct_literal: $ => prec.dynamic(1, seq(
-      field('type', $.identifier),
+      // The head may be module-qualified (`vec.Vec2 { … }`, `geometry.vec.Vec2 { … }`) — the
+      // qualified-references feature; a dotted path directly before `{` is always a type head
+      // (a field path can never take a struct body).
+      field('type', choice($.qualified_identifier, $.identifier)),
       '{',
       optional(commaSep($._struct_field_init)),
       optional(','),
       '}',
     )),
+    // A dotted module-qualified name in a head position (`vec.Vec2`, `geometry.vec.Shape`). The
+    // chain length is ambiguous mid-parse (`geometry.vec.Shape.Circle` in a pattern is a 3-segment
+    // head + variant) — the self-conflict below keeps every length alive until the follower
+    // decides.
+    qualified_identifier: $ => seq($.identifier, repeat1(seq('.', $.identifier))),
     _struct_field_init: $ => choice(
       $.spread_expression,
       seq(field('field', $.identifier), ':', $._expression),
@@ -543,8 +561,9 @@ module.exports = grammar({
     type_pattern: $ => seq('is', field('type', $._type)),
     enum_pattern: $ => prec(1, choice(
       // Qualified: `Type.Variant`, `Type.Variant(binds)` (variant is PascalCase or lowercase).
+      // The type head may itself be module-qualified: `vec.Shape.Circle(r)`.
       seq(
-        field('type', $.identifier),
+        field('type', choice($.qualified_identifier, $.identifier)),
         '.',
         field('variant', choice($.identifier, $.identifier)),
         optional($._variant_args),

@@ -367,6 +367,14 @@ impl Checker {
                     // file (`use std.id.Uuid` → `extern_types["Uuid"]`), like a user type — it is no
                     // longer globally in scope by bare name.
                     && !self.imports.extern_types.contains_key(name)
+                    // A module-qualified type rooted at a retained user import (`use geometry.vec`
+                    // then `vec.Vec2` in an *isolated* check — REPL/session, a docs fragment): the
+                    // linker resolves the dotted head in a full link, and an unlinked fragment
+                    // tolerates it exactly like other unresolved external names (F1). Root-only —
+                    // std namespace members keep their exact-key resolution and stay strict.
+                    && !name
+                        .split_once('.')
+                        .is_some_and(|(root, _)| self.symbols.types.contains(root))
                 {
                     self.error(
                         DiagnosticCode::UnknownType,

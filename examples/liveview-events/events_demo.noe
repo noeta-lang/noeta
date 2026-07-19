@@ -32,7 +32,7 @@ items = signal([
     Item { id: 2, label: "b", done: false },
 ])
 
-fn toggle(id: int): void {
+fn toggle(id: int) use (items): void {
     items.update(fn(xs) => xs.map(fn(x) => if x.id == id then Item { id: x.id, label: x.label, done: !x.done } else x))
 }
 
@@ -42,7 +42,7 @@ fn row(it: Item): Html {
     return @html { <li ${on_click(fn() => toggle(it.id))}>${it.label}</li> }
 }
 
-fn page(): Html {
+fn page() use (count, items, name): Html {
     return @html {
         <button ${on_click(fn() => count.update(fn(n) => n + 1))}>+1</button>
         <button ${on_click(fn() => count.set(0))}>reset</button> <input ${on_input(fn(v) => name.set(v))} placeholder="name">
@@ -55,7 +55,7 @@ fn fire(p: Html, id: string, value: string): void {
     p.handlers.get_or(id, fn(_: string) {})(value)
 }
 
-fn main(): void {
+fn main() use (count, items, name): void {
     p = page()
     // Top-level bindings: +1 = e0, reset = e1, input = e2 (by hole order); markers are emitted.
     echo p.skeleton.contains("data-live-click=\"e0\"")

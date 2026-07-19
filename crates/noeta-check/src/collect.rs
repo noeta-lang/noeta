@@ -104,6 +104,12 @@ impl Checker {
                 _ => {}
             }
         }
+        // Hoist every NESTED fn declaration's name (sealed-fn model): a nested fn's name is an
+        // item of its enclosing body, so recursion/sibling calls resolve even inside sealed
+        // bodies. Walk each top-level fn/method body for `Stmt::Fn` at any depth.
+        for stmt in &program.stmts {
+            collect_nested_fn_names(stmt, true, &mut self.symbols.nested_fn_names);
+        }
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Struct(r) => {
@@ -894,5 +900,215 @@ impl Checker {
         if !recognized.is_empty() {
             self.symbols.attachable.insert(name.to_string(), recognized);
         }
+    }
+}
+
+/// Recursively hoist every **nested** `fn` declaration's name — a `Stmt::Fn` at any depth below
+/// the top level, including inside closure and match-arm bodies. `top_level` is true only for the
+/// program's direct statements (whose `fn`s are ordinary top-level functions, already in
+/// [`Symbols::functions`]).
+fn collect_nested_fn_names(stmt: &Stmt, top_level: bool, out: &mut HashSet<String>) {
+    let body = |stmts: &[Stmt], out: &mut HashSet<String>| {
+        for s in stmts {
+            collect_nested_fn_names(s, false, out);
+        }
+    };
+    let fn_decl = |decl: &FnDecl, is_nested: bool, out: &mut HashSet<String>| {
+        if is_nested {
+            out.insert(decl.name.clone());
+        }
+        for s in &decl.body {
+            collect_nested_fn_names(s, false, out);
+        }
+        for p in &decl.params {
+            if let Some(d) = &p.default {
+                collect_nested_fns_in_expr(d, out);
+            }
+        }
+    };
+    match stmt {
+        Stmt::Fn(decl) => fn_decl(decl, !top_level, out),
+        Stmt::Struct(d) => {
+            d.methods.iter().for_each(|m| fn_decl(m, false, out));
+            d.impls
+                .iter()
+                .flat_map(|b| &b.methods)
+                .for_each(|m| fn_decl(m, false, out));
+        }
+        Stmt::Class(d) => {
+            d.methods.iter().for_each(|m| fn_decl(m, false, out));
+            d.impls
+                .iter()
+                .flat_map(|b| &b.methods)
+                .for_each(|m| fn_decl(m, false, out));
+            if let Some(dtor) = &d.destructor {
+                body(dtor, out);
+            }
+        }
+        Stmt::Enum(d) => {
+            d.methods.iter().for_each(|m| fn_decl(m, false, out));
+            d.impls
+                .iter()
+                .flat_map(|b| &b.methods)
+                .for_each(|m| fn_decl(m, false, out));
+        }
+        Stmt::Impl(d) => d.methods.iter().for_each(|m| fn_decl(m, false, out)),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            collect_nested_fns_in_expr(cond, out);
+            body(then_body, out);
+            if let Some(b) = else_body {
+                body(b, out);
+            }
+        }
+        Stmt::For { iterable, body: b, .. } => {
+            collect_nested_fns_in_expr(iterable, out);
+            body(b, out);
+        }
+        Stmt::While { cond, body: b, .. } => {
+            collect_nested_fns_in_expr(cond, out);
+            body(b, out);
+        }
+        Stmt::Concurrent { body: b, .. } | Stmt::TierBlock { items: b, .. } => body(b, out),
+        Stmt::Binding { value, .. }
+        | Stmt::Destructure { value, .. }
+        | Stmt::Echo { value, .. }
+        | Stmt::Yield { value, .. }
+        | Stmt::Expr { expr: value, .. } => collect_nested_fns_in_expr(value, out),
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_nested_fns_in_expr(v, out);
+            }
+        }
+        Stmt::Trait(_)
+        | Stmt::Namespace { .. }
+        | Stmt::Use { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
+    }
+}
+
+/// Chase statement bodies hiding inside expressions (closure blocks, match-arm blocks) for nested
+/// `fn`s. Containers recurse; leaves carry nothing.
+fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
+    use noeta_ast::{ClosureBody, StrPart};
+    let block = |stmts: &[Stmt], out: &mut HashSet<String>| {
+        for s in stmts {
+            collect_nested_fn_names(s, false, out);
+        }
+    };
+    let closure_body = |body: &ClosureBody, out: &mut HashSet<String>| match body {
+        ClosureBody::Expr(inner) => collect_nested_fns_in_expr(inner, out),
+        ClosureBody::Block(stmts) => block(stmts, out),
+    };
+    match e {
+        Expr::Closure { body, .. } => closure_body(body, out),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_nested_fns_in_expr(scrutinee, out);
+            for arm in arms {
+                closure_body(&arm.body, out);
+            }
+        }
+        Expr::Object(lit) => {
+            for f in &lit.fields {
+                collect_nested_fns_in_expr(&f.value, out);
+            }
+            if let Some(s) = &lit.spread {
+                collect_nested_fns_in_expr(s, out);
+            }
+        }
+        Expr::Unary { operand: inner, .. }
+        | Expr::Member { receiver: inner, .. }
+        | Expr::TupleIndex { receiver: inner, .. }
+        | Expr::Try { expr: inner, .. }
+        | Expr::Await { expr: inner, .. }
+        | Expr::Spawn { future: inner, .. }
+        | Expr::TypeOf { value: inner, .. }
+        | Expr::FieldsOf { value: inner, .. }
+        | Expr::ParamsOf { target: inner, .. }
+        | Expr::As { expr: inner, .. }
+        | Expr::TypeTest { expr: inner, .. }
+        | Expr::FromBytes { blob: inner, .. }
+        | Expr::Channel {
+            capacity: inner, ..
+        } => collect_nested_fns_in_expr(inner, out),
+        Expr::Binary { lhs: a, rhs: b, .. }
+        | Expr::Pipeline {
+            left: a, right: b, ..
+        }
+        | Expr::Range { start: a, end: b, .. }
+        | Expr::Index {
+            receiver: a,
+            index: b,
+            ..
+        }
+        | Expr::Coalesce {
+            value: a,
+            fallback: b,
+            ..
+        }
+        | Expr::FieldSet {
+            receiver: a,
+            value: b,
+            ..
+        } => {
+            collect_nested_fns_in_expr(a, out);
+            collect_nested_fns_in_expr(b, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_nested_fns_in_expr(callee, out);
+            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+        }
+        Expr::TypedModuleCall { recv, args, .. } => {
+            collect_nested_fns_in_expr(recv, out);
+            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+        }
+        // A turbofish call (`f::<T>(args)`) carries only a name and arguments — walk the args.
+        Expr::TypedCall { args, .. } => {
+            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+        }
+        Expr::Invoke {
+            recv, name, args, ..
+        } => {
+            collect_nested_fns_in_expr(recv, out);
+            collect_nested_fns_in_expr(name, out);
+            collect_nested_fns_in_expr(args, out);
+        }
+        Expr::List { items, .. } | Expr::Tuple { items, .. } => {
+            items.iter().for_each(|i| collect_nested_fns_in_expr(i, out))
+        }
+        Expr::Map { entries, .. } => {
+            for (k, v) in entries {
+                collect_nested_fns_in_expr(k, out);
+                collect_nested_fns_in_expr(v, out);
+            }
+        }
+        Expr::Interp { parts, .. } => {
+            for part in parts {
+                if let StrPart::Hole(inner) = part {
+                    collect_nested_fns_in_expr(inner, out);
+                }
+            }
+        }
+        Expr::TierExpr { holes, .. } => {
+            holes.iter().for_each(|h| collect_nested_fns_in_expr(h, out))
+        }
+        Expr::Ident { .. }
+        | Expr::NativeFnRef { .. }
+        | Expr::AttributesOf { .. }
+        | Expr::RolesOf { .. }
+        | Expr::Str { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::F32 { .. }
+        | Expr::F64 { .. }
+        | Expr::IntN { .. }
+        | Expr::Bool { .. } => {}
     }
 }

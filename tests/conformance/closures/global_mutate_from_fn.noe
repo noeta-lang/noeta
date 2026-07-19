@@ -1,8 +1,9 @@
-// A function reassigns a top-level `mut` global (a non-local bare assignment).
+// A function reassigns a top-level `mut` global through its `use (…)` capture — the explicit
+// import a sealed named fn needs for any surrounding value binding; the view is live.
 // expect: stdout "15"
 // expect: exit 0
 mut total = 0;
-fn add_to_total(n: int): void {
+fn add_to_total(n: int) use (total): void {
     total = total + n;
 }
 add_to_total(5);

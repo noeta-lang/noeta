@@ -53,7 +53,7 @@ fn run_before(mws: List<dyn Middleware>, req: Request): ?Response {
     return none
 }
 
-fn handle(req: Request): Response {
+fn handle(req: Request) use (pipeline): Response {
     return match run_before(pipeline, req) {
         some(resp) => resp,
         none => server.response(200, "ok"),

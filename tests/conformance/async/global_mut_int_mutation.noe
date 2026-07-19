@@ -4,7 +4,7 @@
 // expect: stdout "7"
 // expect: exit 0
 mut counter = 0
-async fn bump(x: int): void {
+async fn bump(x: int) use (counter): void {
     counter = counter + x
 }
 bump(3).await

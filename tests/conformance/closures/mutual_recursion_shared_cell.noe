@@ -5,12 +5,12 @@
 // expect: exit 0
 fn run(): int {
     mut hits = 0;
-    fn ping(n: int): int {
+    fn ping(n: int) use (hits): int {
         hits = hits + 1;
         if n == 0 { return 0; }
         return pong(n - 1);
     }
-    fn pong(n: int): int {
+    fn pong(n: int) use (hits): int {
         hits = hits + 1;
         if n == 0 { return 0; }
         return ping(n - 1);

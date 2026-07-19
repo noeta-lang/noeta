@@ -227,14 +227,17 @@ trait Greeter {
       (trait_method
         name: (identifier)
         parameters: (parameters
-          (parameter name: (identifier) type: (primitive_type)))
+          (parameter
+            name: (identifier)
+            type: (primitive_type)))
         return_type: (primitive_type))
       (trait_method
         name: (identifier)
         parameters: (parameters)
         return_type: (primitive_type)
         body: (block
-          (return_statement (string_literal)))))))
+          (return_statement
+            (string_literal)))))))
 
 ================================================================================
 Dyn trait type
@@ -252,7 +255,8 @@ fn welcome(g: dyn Greeter): string {
     parameters: (parameters
       (parameter
         name: (identifier)
-        type: (trait_object_type trait: (identifier))))
+        type: (trait_object_type
+          trait: (identifier))))
     return_type: (primitive_type)
     body: (block
       (return_statement
@@ -260,3 +264,43 @@ fn welcome(g: dyn Greeter): string {
           object: (identifier)
           method: (identifier)
           arguments: (arguments))))))
+
+==================
+Qualified heads: struct literal and enum pattern
+==================
+
+a = vec.Vec2 { x: 1, y: 2 }
+r = match s {
+  geometry.vec.Shape.Circle(radius) => radius,
+  _ => 0,
+}
+
+---
+
+(source_file
+  (assignment_statement
+    (identifier)
+    (struct_literal
+      (qualified_identifier
+        (identifier)
+        (identifier))
+      (identifier)
+      (integer_literal)
+      (identifier)
+      (integer_literal)))
+  (assignment_statement
+    (identifier)
+    (match_expression
+      (identifier)
+      (match_arm
+        (enum_pattern
+          (qualified_identifier
+            (identifier)
+            (identifier)
+            (identifier))
+          (identifier)
+          (identifier))
+        (identifier))
+      (match_arm
+        (wildcard_pattern)
+        (integer_literal)))))

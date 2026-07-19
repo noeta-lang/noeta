@@ -223,6 +223,9 @@ impl Checker {
                     .collect();
                 for (p, pty) in params.iter().zip(&bound) {
                     self.check_reserved_name(&p.name, p.name_span);
+                    // Closure params land in the just-pushed frame — any env hit is a shadow
+                    // (E0059), enclosing capture and same-list duplicate alike.
+                    self.check_shadow(&p.name, p.name_span, env, crate::ShadowScopes::All);
                     bind(env, &p.name, pty.clone());
                 }
                 // An explicit return annotation is the body's expected type and the closure's return
@@ -548,12 +551,22 @@ impl Checker {
                     } else if !self.config.session_mode && !self.is_known_name(name, env) {
                         // A bare reference to a name that resolves to nothing — a genuinely
                         // undefined value (F1), the same static `E0005` as an unknown callee. A
-                        // session defers (a later entry may define it).
-                        self.error(
+                        // session defers (a later entry may define it). In a SEALED named-fn
+                        // body a miss that names a real top-level binding gets the capture hint.
+                        let sealed_global_miss = self.coloring.in_sealed_body
+                            && self.symbols.global_binding_names.contains(name);
+                        let diag = self.error(
                             DiagnosticCode::UnknownName,
                             *span,
                             format!("cannot find `{name}` in this scope"),
                         );
+                        if sealed_global_miss {
+                            diag.help(format!(
+                                "`{name}` is a top-level binding, which a named function does \
+                                 not see implicitly — add `use ({name})` to the signature, or \
+                                 pass it as a parameter"
+                            ));
+                        }
                     }
                     Type::Unknown
                 }
@@ -646,6 +659,8 @@ impl Checker {
                 env.push(HashMap::new());
                 for p in params {
                     self.check_reserved_name(&p.name, p.name_span);
+                    // Same rule as the check-mode arm: any env hit is a shadow (E0059).
+                    self.check_shadow(&p.name, p.name_span, env, crate::ShadowScopes::All);
                     bind(env, &p.name, param_type(p, &self.imports.extern_types));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the

@@ -1,0 +1,39 @@
+// Qualified references at use sites: `use geometry.vec` imports the WHOLE module and binds `vec`
+// as a navigable namespace, so `vec.Vec2 { … }` (struct literal), `vec.Vec2` (annotation),
+// `vec.add(…)` (call), `vec.add` (first-class fn value), and `vec.Shape.Circle(…)` (enum
+// construction + pattern) all resolve — as do the spelled-out FQN forms (`geometry.vec.Vec2`).
+// The linker collapses each qualified head to the declaration's qualified identity, so both
+// backends consume the same flat program as short-name imports.
+// expect: stdout "4,6"
+// expect: stdout "5,8"
+// expect: stdout "9,14"
+// expect: stdout "7"
+// expect: stdout "0"
+// expect: exit 0
+namespace App.Main;
+
+use geometry.vec;
+
+a = vec.Vec2 { x: 1, y: 2 };
+b: vec.Vec2 = geometry.vec.Vec2 { x: 3, y: 4 };
+c = vec.add(a, b);
+echo "${c.x},${c.y}";
+
+d = geometry.vec.add(c, a);
+echo "${d.x},${d.y}";
+
+f = vec.add;
+e = f(c, d);
+echo "${e.x},${e.y}";
+
+s = vec.Shape.Circle(7);
+r = match s {
+    geometry.vec.Shape.Circle(radius) => radius,
+    vec.Shape.Point => 0,
+};
+echo r;
+t = match vec.Shape.Point {
+    vec.Shape.Circle(radius) => radius,
+    _ => 0,
+};
+echo t;

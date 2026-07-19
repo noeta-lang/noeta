@@ -1319,20 +1319,34 @@ where
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen));
 
-        // `Type.Variant(subs)` — qualified constructor.
+        // `Type.Variant(subs)` — qualified constructor. The head may itself be module-qualified
+        // (`vec.Shape.Circle(r)` / `geometry.vec.Shape.Circle(r)`): the last segment is always the
+        // variant, everything before it joins into the dotted type head the linker resolves to the
+        // enum's FQN.
         let qualified = id
             .clone()
-            .then_ignore(just(T::Dot))
-            .then(id.clone())
+            .then(
+                just(T::Dot)
+                    .ignore_then(id.clone())
+                    .repeated()
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
+            )
             .then(bindings.clone().or_not())
-            .map_with(
-                move |(((type_name, _), (variant, _)), binds), e| Pattern::Variant {
+            .map_with(move |(((first, _), mut segments), binds), e| {
+                let (variant, _) = segments.pop().expect("at_least(1) guarantees a variant");
+                let mut type_name = first;
+                for (seg, _) in segments {
+                    type_name.push('.');
+                    type_name.push_str(&seg);
+                }
+                Pattern::Variant {
                     type_name: Some(type_name),
                     variant,
                     bindings: binds.unwrap_or_default(),
                     span: ctx.to_span(e.span()),
-                },
-            );
+                }
+            });
         // `Variant(subs)` — unqualified constructor (e.g. `Ok(x)`); requires the parens.
         let unqualified = id
             .clone()
@@ -1600,8 +1614,48 @@ where
             .at_least(0)
             .collect::<Vec<_>>()
             .delimited_by(just(T::LBrace), just(T::RBrace));
+        // A **qualified** struct literal: `vec.Vec2 { … }` / `geometry.vec.Vec2 { … }` — a dotted
+        // type head (module-qualified reference, resolved to its FQN by the linker) directly
+        // followed by an object body. The body is *mandatory* here: without it the whole atom
+        // backtracks and the dotted path parses as the usual member-access chain, so `a.b` field
+        // access is untouched. Unambiguous even against locals — a field path can never take `{}`.
+        let dotted_object = id
+            .clone()
+            .then(
+                just(T::Dot)
+                    .ignore_then(id.clone())
+                    .repeated()
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
+            )
+            .then(object_body.clone())
+            .map_with(move |(((first, first_span), rest), items), e| {
+                let mut type_name = first;
+                let mut type_name_span = first_span;
+                for (seg, seg_span) in rest {
+                    type_name.push('.');
+                    type_name.push_str(&seg);
+                    type_name_span.end = seg_span.end;
+                }
+                let mut fields = Vec::new();
+                let mut spread = None;
+                for item in items {
+                    match item {
+                        ObjItem::Field(field) => fields.push(field),
+                        ObjItem::Spread(value) => spread = Some(value),
+                    }
+                }
+                Expr::Object(ObjectLit {
+                    type_name,
+                    type_name_span,
+                    fields,
+                    spread,
+                    span: ctx.to_span(e.span()),
+                })
+            });
         // In a control-flow head (`allow_struct == false`) the body is never attached: a trailing
-        // `{ … }` belongs to the block, so `name` parses as a bare identifier.
+        // `{ … }` belongs to the block, so `name` parses as a bare identifier — and the qualified
+        // form is excluded entirely (`if a.b { … }` keeps `{ … }` as the block).
         let object_body_opt = if allow_struct {
             object_body.or_not().boxed()
         } else {
@@ -1632,6 +1686,13 @@ where
                 },
             },
         );
+        // Try the qualified literal first: it demands a dot *and* a body, so on anything else it
+        // backtracks and the bare-head path runs unchanged.
+        let obj_or_ident = if allow_struct {
+            dotted_object.or(obj_or_ident).boxed()
+        } else {
+            obj_or_ident.boxed()
+        };
 
         // Anonymous function: an arrow `fn(params) => expr` or a statement block `fn(params) { … }`,
         // each with an optional return-type annotation `fn(params): Ret …` (mirroring a named `fn`'s
@@ -2642,10 +2703,26 @@ where
             // when it sits on its own line above the declaration (slice 7).
             .then_ignore(just(T::Semicolon).repeated());
 
-        // `#[...] fn name<T: Bound>(params): Ret { body }` — a declaration (the `name` distinguishes
-        // it from the `fn(...) =>` closure expression, which falls through to `expr`). Generic
-        // parameters are optional and only free functions carry them. Leading `#[...]` attributes
-        // attach to the function (no `@derive` — that is type-only codegen).
+        // `fn f(params) use (a, b): Ret { … }` — the optional **capture clause** on a named
+        // function or method. A named fn is SEALED (its body sees params + statics only); each
+        // listed name imports one value binding from the declaration site as a live view. The
+        // clause sits between the parameter list and the return annotation, PHP-style.
+        let capture_clause = just(T::UseKw)
+            .ignore_then(
+                id.clone()
+                    .separated_by(just(T::Comma))
+                    .allow_trailing()
+                    .at_least(1)
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LParen), just(T::RParen)),
+            )
+            .or_not()
+            .map(|captures| captures.unwrap_or_default());
+
+        // `#[...] fn name<T: Bound>(params) use (…): Ret { body }` — a declaration (the `name`
+        // distinguishes it from the `fn(...) =>` closure expression, which falls through to
+        // `expr`). Generic parameters are optional and only free functions carry them. Leading
+        // `#[...]` attributes attach to the function (no `@derive` — that is type-only codegen).
         let fn_decl = attr_decl
             .clone()
             .repeated()
@@ -2656,11 +2733,12 @@ where
             .then(id.clone())
             .then(type_params.clone())
             .then(params_parser(ctx, expr.clone(), true))
+            .then(capture_clause.clone())
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
                 move |(
-                    ((((((attrs, pub_kw), async_kw), name_pair), type_params), params), ret),
+                    (((((((attrs, pub_kw), async_kw), name_pair), type_params), params), captures), ret),
                     body,
                 ),
                       e| {
@@ -2672,6 +2750,7 @@ where
                         params,
                         ret,
                         attrs,
+                        captures,
                         // A top-level function carries any `@<tier>` via a wrapping `TierBlock`, not here.
                         directives: Vec::new(),
                         is_dev_tier: false,
@@ -2795,10 +2874,11 @@ where
             .then_ignore(just(T::FnKw))
             .then(id.clone())
             .then(params_parser(ctx, expr.clone(), true))
+            .then(capture_clause.clone())
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
-                move |(((((decos, async_kw), name_pair), params), ret), body), e| {
+                move |((((((decos, async_kw), name_pair), params), captures), ret), body), e| {
                     let mut directives = Vec::new();
                     let mut attrs = Vec::new();
                     for deco in decos {
@@ -2823,6 +2903,7 @@ where
                         is_dev_tier: false,
                         tier: None,
                         is_async: async_kw.is_some(),
+                        captures,
                         body,
                         span: ctx.to_span(e.span()),
                     }
@@ -3013,6 +3094,9 @@ where
                             is_dev_tier: false,
                             tier: None,
                             is_async: async_kw.is_some(),
+                            // A trait signature declares an interface; a default body that needs
+                            // captures would be an impl concern — none here.
+                            captures: Vec::new(),
                             body: body.unwrap_or_default(),
                             span: ctx.to_span(e.span()),
                         },

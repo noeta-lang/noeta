@@ -257,6 +257,12 @@ pub enum DiagnosticCode {
     /// parameters in order; supply exactly one per parameter, or drop the turbofish and let the
     /// arguments infer them.
     InvalidTypeArguments,
+    /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
+    /// that already means something in scope — an enclosing binding, a top-level function or type,
+    /// or an imported name. **One name, one meaning, per scope stack**: assignment already never
+    /// re-declares (it reassigns, E0006/E0007 governing), and `is`-narrowing refines the *same*
+    /// binding, so silent shadowing is never needed and only obscures which meaning a name has.
+    ShadowedBinding,
 }
 
 impl DiagnosticCode {
@@ -321,6 +327,7 @@ impl DiagnosticCode {
         DiagnosticCode::AwaitCancelled,
         DiagnosticCode::TryErrorMismatch,
         DiagnosticCode::InvalidTypeArguments,
+        DiagnosticCode::ShadowedBinding,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -385,6 +392,7 @@ impl DiagnosticCode {
             DiagnosticCode::AwaitCancelled => "E0056",
             DiagnosticCode::TryErrorMismatch => "E0057",
             DiagnosticCode::InvalidTypeArguments => "E0058",
+            DiagnosticCode::ShadowedBinding => "E0059",
         }
     }
 

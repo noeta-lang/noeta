@@ -1,0 +1,15 @@
+// One name, one meaning — the import half (E0020): a value binding may not reuse the local name
+// a `use` binds (here the whole-module import's `vec` handle). The error points at the import;
+// the fix is renaming the binding or aliasing the import (`use geometry.vec as gv`).
+// expect: error E0020 at 8:14
+// expect: exit 1
+namespace App.Main;
+
+use geometry.vec;
+
+struct Holder {
+    add: int
+}
+
+vec = Holder { add: 5 };
+echo vec.add;

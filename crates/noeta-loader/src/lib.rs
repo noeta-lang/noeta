@@ -928,6 +928,50 @@ fn link_core(
                     // A different declaration under the same local name — ambiguous.
                     Some(_) => errors.push(collision_error(entry, path, name)),
                 },
+                // The dotted path names a whole loaded module (`use geometry.vec` where a module
+                // declares `namespace geometry.vec;`): a **module import**. Merge every `pub`
+                // declaration (qualified, plus its same-module closure); the importing module's
+                // QMap ([`build_module_map`]) aliases each one under the local binding
+                // (`vec.Vec2` → `geometry.vec.Vec2`), so qualified references resolve. Tried only
+                // after item resolution — a module `geometry` exporting an item `vec` keeps today's
+                // item-import meaning.
+                Resolution::NoModule | Resolution::Missing
+                    if module_with_namespace(&module_views, path, &name.name).is_some() =>
+                {
+                    let module = module_with_namespace(&module_views, path, &name.name)
+                        .expect("guard checked the module exists");
+                    let full_path = module.namespace.clone();
+                    match origins.get(name.local()) {
+                        None => {
+                            origins
+                                .insert(name.local().to_string(), Origin::Import(full_path.clone()));
+                            for decl in module.stmts.iter().filter(|s| decl_is_public(s)) {
+                                let Some(dname) = qualifiable_decl_name(decl) else {
+                                    continue;
+                                };
+                                if merged_q.insert(format!("{}.{dname}", full_path.join("."))) {
+                                    let mut decl = decl.clone();
+                                    if let Some(map) = module_maps.get(&full_path) {
+                                        qualify::qualify_stmt(&mut decl, map);
+                                    }
+                                    imported.push(decl);
+                                    merge_module_closure(
+                                        &full_path,
+                                        dname,
+                                        &module_views,
+                                        &module_maps,
+                                        &mut merged_q,
+                                        imported,
+                                    );
+                                }
+                            }
+                        }
+                        // The same module re-imported under the same local name — merge once.
+                        Some(Origin::Import(p)) if *p == full_path => {}
+                        // A different declaration or module under the same local name — ambiguous.
+                        Some(_) => errors.push(collision_error(entry, path, name)),
+                    }
+                }
                 // No loaded module declares this namespace. Whether that is an error depends on how
                 // much of the dependency graph the caller knows — see [`RetainPolicy`]. Either way,
                 // a std extension (`std.http`) and a declared native-dependency root are always
@@ -961,6 +1005,40 @@ fn link_core(
     };
 
     // The entry: its `use`s drive imports; its other statements are the program's tail (in order).
+    // The tail runs as one flat scope, so qualified-chain shadowing must see every top-level
+    // binding, not just the current statement's (`vec = …` in one statement shadows a `vec` module
+    // alias in the next).
+    let entry_bound: HashSet<String> = entry_program
+        .stmts
+        .iter()
+        .flat_map(qualify::bound_value_names)
+        .collect();
+    // The **no-shadowing** rule's import half (the checker enforces the binder half as E0059, but
+    // a user-module `use` is consumed by this linker before the checker ever sees it): a value
+    // binding anywhere in a unit may not reuse the local name a `use` binds — one name, one
+    // meaning. Checked per unit (the `use` is file-scoped), for the entry and every dependency
+    // driver alike; only imports that actually resolve to a loaded module or item fire, so a
+    // retained extern `use` (std — the checker's tables cover it) is not double-reported.
+    for stmts in std::iter::once(&entry_program.stmts).chain(dep_drivers.iter().map(|d| &d.stmts)) {
+        let unit_bound: HashSet<String> =
+            stmts.iter().flat_map(qualify::bound_value_names).collect();
+        for stmt in stmts.iter() {
+            if let Stmt::Use { path, names, .. } = stmt {
+                for n in names {
+                    if unit_bound.contains(n.local())
+                        && (module_declares(&module_views, path, &n.name)
+                            || module_with_namespace(&module_views, path, &n.name).is_some())
+                    {
+                        errors.push(shadowed_import_error(entry, path, n));
+                    }
+                }
+            }
+        }
+    }
+
+    // Dotted references that missed the entry's QMap (with spans) — filtered against the loaded
+    // modules below to diagnose a qualified reference that lacks its `use`.
+    let mut dotted_misses: Vec<(String, noeta_span::Span)> = Vec::new();
     for stmt in &entry_program.stmts {
         match stmt {
             Stmt::Use { path, names, span } => {
@@ -976,9 +1054,9 @@ fn link_core(
             }
             other => {
                 // The entry's own declarations and statements qualify against the entry's map (its
-                // own namespace + its resolved imports).
+                // own namespace + its resolved imports), with the whole tail's bindings in scope.
                 let mut stmt = other.clone();
-                qualify::qualify_stmt(&mut stmt, &entry_map);
+                qualify::qualify_stmt_scoped(&mut stmt, &entry_map, &entry_bound, &mut dotted_misses);
                 entry_stmts.push(stmt);
             }
         }
@@ -1000,6 +1078,37 @@ fn link_core(
                 }
             }
         }
+    }
+
+    // **Qualified references require an import.** A dotted reference that missed the entry's QMap
+    // but resolves to a loaded module's declaration is a spelled-out FQN with no `use` bringing it
+    // in (`geometry.vec.Vec2 { … }` cold). Treating the FQN as its own implicit import was
+    // considered and rejected: it would make a file's dependency set invisible — a second, silent
+    // way to import next to the explicit `use` block the rest of the design leans on. Instead the
+    // reference is a targeted error carrying the exact `use` to add (and a privacy message when
+    // the declaration exists but is not `pub`). Chains suppressed by a local binding never land in
+    // the miss list, so an ordinary member access on a module-named local stays silent; candidates
+    // matching no loaded module fall through to the checker's own unknown-name error.
+    let mut reported: HashSet<&str> = HashSet::new();
+    for (name, span) in &dotted_misses {
+        if !reported.insert(name.as_str()) {
+            continue;
+        }
+        let Some((mpath, dname)) = split_fqn(name, &module_views) else {
+            continue;
+        };
+        let namespace = mpath.join(".");
+        let message = match resolve(&module_views, &mpath, dname) {
+            Resolution::Resolved(_) => format!(
+                "qualified reference `{name}` requires an import — add `use {namespace}`"
+            ),
+            Resolution::Private => format!("`{dname}` is private to module `{namespace}`"),
+            Resolution::Missing | Resolution::NoModule => continue,
+        };
+        errors.push(LoadDiagnostic {
+            source: entry.clone(),
+            diagnostic: Diagnostic::error(DiagnosticCode::UnresolvedImport, *span, message),
+        });
     }
 
     // A standalone `impl Trait for T {}` in a pooled module (a sibling, or a dependency's own module)
@@ -1160,6 +1269,21 @@ fn merge_module_closure(
     }
 }
 
+/// The loaded module whose namespace is exactly `path` + `name` — the target of a **whole-module**
+/// import (`use geometry.vec` where a module declares `namespace geometry.vec;`). `None` when the
+/// dotted path names no loaded module (it is then an item import, an extern, or unresolved).
+fn module_with_namespace<'m, 'a>(
+    modules: &'m [ModuleView<'a>],
+    path: &[String],
+    name: &str,
+) -> Option<&'m ModuleView<'a>> {
+    modules.iter().find(|m| {
+        m.namespace.len() == path.len() + 1
+            && m.namespace[..path.len()] == *path
+            && m.namespace.last().is_some_and(|last| last == name)
+    })
+}
+
 /// Whether some loaded module with namespace `path` declares a top-level, qualifiable `name` — i.e.
 /// `name` is a *user* type or function reachable at `path`, as opposed to an extern (`std.…`, which is
 /// no loaded module) or an opaque-stub fallback. Drives [`build_module_map`]: only names that resolve to
@@ -1188,11 +1312,16 @@ fn build_module_map(
     modules: &[ModuleView],
 ) -> qualify::QMap {
     let mut map = qualify::QMap::new();
+    // Identity entries (`App.Models.User` → itself) look like no-ops but are load-bearing: the
+    // member-chain collapse in `qualify` turns a chain into a flat `Ident(FQN)` only on a map
+    // *hit*, so a spelled-out FQN reference needs its own key to collapse.
     if !own_ns.is_empty() {
         let prefix = own_ns.join(".");
         for stmt in own_stmts {
             if let Some(name) = qualifiable_decl_name(stmt) {
-                map.insert(name.to_string(), format!("{prefix}.{name}"));
+                let qualified = format!("{prefix}.{name}");
+                map.insert(qualified.clone(), qualified.clone());
+                map.insert(name.to_string(), qualified);
             }
         }
     }
@@ -1200,15 +1329,43 @@ fn build_module_map(
         if let Stmt::Use { path, names, .. } = stmt {
             for n in names {
                 if module_declares(modules, path, &n.name) {
-                    map.insert(
-                        n.local().to_string(),
-                        format!("{}.{}", path.join("."), n.name),
-                    );
+                    let qualified = format!("{}.{}", path.join("."), n.name);
+                    map.insert(qualified.clone(), qualified.clone());
+                    map.insert(n.local().to_string(), qualified);
+                } else if let Some(module) = module_with_namespace(modules, path, &n.name) {
+                    // A whole-module import (`use geometry.vec`): every `pub` declaration aliases
+                    // under the local binding — `vec.Vec2` → `geometry.vec.Vec2` — so qualified
+                    // references (struct-literal heads, annotations, patterns, member chains)
+                    // rewrite to the FQN the merged program declares.
+                    let ns = module.namespace.join(".");
+                    for decl in module.stmts.iter().filter(|s| decl_is_public(s)) {
+                        if let Some(dname) = qualifiable_decl_name(decl) {
+                            let qualified = format!("{ns}.{dname}");
+                            map.insert(qualified.clone(), qualified.clone());
+                            map.insert(format!("{}.{dname}", n.local()), qualified);
+                        }
+                    }
                 }
             }
         }
     }
     map
+}
+
+/// Split a dotted reference candidate into `(module path, declaration name)` when its prefix is a
+/// loaded module's namespace — `geometry.vec.Vec2` → `(["geometry", "vec"], "Vec2")`. `None` when
+/// no loaded module matches (an ordinary member chain like `customer.name`). Chain candidates
+/// arrive one prefix at a time (the collapse walk visits every length), so a single split
+/// suffices.
+fn split_fqn<'c>(candidate: &'c str, modules: &[ModuleView]) -> Option<(Vec<String>, &'c str)> {
+    let (prefix, dname) = candidate.rsplit_once('.')?;
+    modules
+        .iter()
+        .find(|m| {
+            m.namespace.len() == prefix.split('.').count()
+                && m.namespace.iter().map(String::as_str).eq(prefix.split('.'))
+        })
+        .map(|m| (m.namespace.clone(), dname))
 }
 
 /// How the linker treats a `use` whose namespace no loaded module declares — the choice turns on
@@ -1325,6 +1482,29 @@ fn collision_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagn
             ),
         )
         .with_help("rename or remove the conflicting import or declaration"),
+    }
+}
+
+/// Build the `E0020` diagnostic for an import whose local name a value binding in the same unit
+/// also uses (the no-shadowing rule's import half — the binder half is the checker's E0059).
+/// Points at the imported name; the fix is a rename on either side.
+fn shadowed_import_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagnostic {
+    let namespace = path.join(".");
+    LoadDiagnostic {
+        source: entry.clone(),
+        diagnostic: Diagnostic::error(
+            DiagnosticCode::NameCollision,
+            name.span,
+            format!(
+                "imported `{}` collides with a local binding of the same name",
+                name.local()
+            ),
+        )
+        .with_help(format!(
+            "every name means one thing per scope — rename the binding, or import under an \
+             alias (`use {namespace}.{} as …`)",
+            name.name
+        )),
     }
 }
 

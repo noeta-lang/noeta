@@ -17,7 +17,7 @@ if g > 0 {
             }
             return n * fact(n - 1);
         }
-        fn inner(n: int): int {
+        fn inner(n: int) use (g): int {
             return helper(n) + g;
         }
         echo fact(5);

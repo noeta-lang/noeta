@@ -11,8 +11,8 @@ class Box {
     fn new(n: int): Box { return Box { n: n }; }
 }
 
-fn bump(b: Box): void {   // `b` is an immutable parameter binding
-    b.n = b.n + 1;        // allowed — a class field mutates in place, no `mut` binding needed
+fn bump(item: Box): void { // `item` is an immutable parameter binding
+    item.n = item.n + 1;   // allowed — a class field mutates in place, no `mut` binding needed
 }
 
 b = Box.new(5);       // an immutable binding

@@ -2326,8 +2326,15 @@ fn unknown_names_are_caught_at_check_time_in_a_file() {
 fn legitimate_forward_and_nested_references_stay_clean() {
     // Top-level fns forward-reference each other (two-pass collect).
     assert!(codes("fn a(): int { return b() }\nfn b(): int { return 1 }\necho a()\n").is_empty());
-    // A fn body forward-references a top-level global declared later (globals are hoisted).
-    assert!(codes("fn use_g(): int { return g }\ng = 10\necho use_g()\n").is_empty());
+    // A fn body reaches a top-level global — declared later, even — through its `use (…)`
+    // capture clause (sealed named fns: the clause is the explicit import; hoisting still
+    // makes the forward declaration visible to it).
+    assert!(codes("fn use_g() use (g): int { return g }\ng = 10\necho use_g()\n").is_empty());
+    // Without the clause the global is out of scope — the sealed-fn E0005.
+    assert_eq!(
+        codes("fn use_g(): int { return g }\ng = 10\necho use_g()\n"),
+        vec!["E0005"]
+    );
     // A nested fn calls a sibling / itself / an enclosing global.
     assert!(
         codes(

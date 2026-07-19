@@ -5,7 +5,7 @@
 // expect: exit 0
 use std.task.{sleep}
 mut log = 0
-async fn work(x: int): void {
+async fn work(x: int) use (log): void {
     log = log + x
     sleep(1).await
     log = log + x

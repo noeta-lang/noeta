@@ -18,18 +18,18 @@ use std.{tracing}
 
 (tx, rx) = channel::<int>(2)
 
-async fn send_one(): string {
+async fn send_one() use (tx): string {
     tx.send(1).await
     return tracing.current_context()
 }
 
-async fn send_two(): string {
+async fn send_two() use (tx): string {
     tx.send(2).await
     tx.close()
     return tracing.current_context()
 }
 
-async fn consumer(): (string, string) {
+async fn consumer() use (rx): (string, string) {
     r1 = rx.recv().await
     c1 = tracing.current_context()
     r2 = rx.recv().await
@@ -40,15 +40,15 @@ async fn consumer(): (string, string) {
 async fn run(): (string, string, string, string) {
     mut seeds = ("", "")
     // Each send happens inside its own traced span, so each message carries a distinct trace.
-    ctx1 = tracing.with_span("first", send_one).await
-    ctx2 = tracing.with_span("second", send_two).await
+    span1 = tracing.with_span("first", send_one).await
+    span2 = tracing.with_span("second", send_two).await
     mut got = ("", "")
     concurrent {
         h = spawn consumer()
         got = h.await
     }
     (s1, s2) = got
-    return (ctx1, ctx2, s1, s2)
+    return (span1, span2, s1, s2)
 }
 
 (ctx1, ctx2, seed1, seed2) = run().await

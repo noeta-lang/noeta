@@ -33,18 +33,18 @@ fn row(t: Todo): Html {
     return @html { <li ${on_click(fn() => toggle(t.id))} class="${if t.done then "done" else "todo"}">${box} ${t.title}</li> }
 }
 
-fn toggle(id: int): void {
+fn toggle(id: int) use (todos): void {
     todos.update(fn(list) => list.map(fn(t) => if t.id == id then Todo { id: t.id, title: t.title, done: !t.done } else t))
 }
 
-fn remaining(): int {
+fn remaining() use (todos): int {
     return todos.get().filter(fn(t) => !t.done).len()
 }
 
 // Every hole reads the signal *directly*, so its `computed` subscribes and re-renders on change. The
 // list uses `keyed` (each `<li>` is its own reactive region, keyed by `t.id`) so toggling one todo
 // pushes only *that* row's markup — the diff drops the rows that did not change.
-fn page(): Html {
+fn page() use (todos): Html {
     return @html {
         <h1>Todos — ${remaining()} of ${todos.get().len()} left</h1>
         <ul>${keyed(todos, fn(t) => "${t.id}", row)}</ul>
@@ -53,7 +53,7 @@ fn page(): Html {
     }
 }
 
-fn complete_all(): void {
+fn complete_all() use (todos): void {
     todos.update(fn(list) => list.map(fn(t) => Todo { id: t.id, title: t.title, done: true }))
 }
 

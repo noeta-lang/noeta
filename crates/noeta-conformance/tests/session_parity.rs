@@ -114,8 +114,9 @@ fn assert_sessions_agree(script: &[Step]) {
 fn persistent_bindings_functions_and_globals_agree() {
     assert_sessions_agree(&[
         Step::Eval("mut acc = 0;"),
-        // A function defined in one entry mutates a global from an earlier entry...
-        Step::Eval("fn bump(): int {\n  acc = acc + 1;\n  return acc;\n}"),
+        // A function defined in one entry mutates a global from an earlier entry through its
+        // `use (…)` capture (sealed named fns — the clause is the explicit import)...
+        Step::Eval("fn bump() use (acc): int {\n  acc = acc + 1;\n  return acc;\n}"),
         // ...and is callable in later entries, seeing the persistent global.
         Step::Eval("echo bump();"),
         Step::Eval("echo bump();"),

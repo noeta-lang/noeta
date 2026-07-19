@@ -278,7 +278,7 @@ fn run_real_isolate_class_global_read_is_a_precise_error() {
         "class Counter { pub n: int\n\
          fn new(): Counter { return Counter { n: 42 } } }\n\
          counter = Counter.new()\n\
-         async fn work(x: int): int { return counter.n + x }\n\
+         async fn work(x: int) use (counter): int { return counter.n + x }\n\
          async fn run(): int {\n\
          mut r = 0\n\
          concurrent { d = isolate work(5); r = d.await }\n\
@@ -305,7 +305,7 @@ fn run_real_isolate_struct_global_ships_by_copy() {
         "isolate_struct_global",
         "struct Config { n: int }\n\
          config = Config { n: 42 }\n\
-         async fn work(x: int): int { return config.n + x }\n\
+         async fn work(x: int) use (config): int { return config.n + x }\n\
          async fn run(): int {\n\
          mut r = 0\n\
          concurrent { d = isolate work(5); r = d.await }\n\

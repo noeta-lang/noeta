@@ -32,6 +32,39 @@ customer = User.new("Ada", 7)
 echo customer.name                          // Ada
 ```
 
+## Qualified references
+
+A declaration can also be referenced by a **module-qualified name** at any use site — a struct literal, an annotation, a call, an enum construction or pattern, even a first-class function value. Importing a whole module binds its last segment as a navigable handle, and once a module is in scope its spelled-out fully-qualified name works too:
+
+```noeta check
+namespace App.Main;
+
+use geometry.vec;                              // the whole module: binds `vec`
+
+a = vec.Vec2 { x: 1, y: 2 }                    // qualified struct literal
+b: vec.Vec2 = vec.Vec2 { x: 3, y: 4 }          // qualified annotation
+c = vec.add(a, b)                              // qualified call
+g = geometry.vec.Vec2 { x: 5, y: 6 }           // the spelled-out FQN, same identity
+f = geometry.vec.add                           // a first-class fn value, FQN too
+s = vec.Shape.Circle(7)                        // qualified enum construction
+r = match s {
+    vec.Shape.Circle(radius) => radius,        // qualified pattern
+    _ => 0,
+}
+```
+
+A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `gv.Vec2`) and merges only `pub` declarations. Item imports keep today's precedence: in `use a.b`, an item `b` exported by module `a` wins over a module named `a.b`.
+
+**Qualified references require an import.** A file's dependency set stays fully readable from its `use` block, so a spelled-out FQN with no import is never a silent implicit import — it is a targeted error carrying the exact line to add:
+
+```text
+[E0019] qualified reference `geometry.vec.Vec2` requires an import — add `use geometry.vec`
+```
+
+(and referencing a non-`pub` declaration by qualified name reports `` `secret` is private to module `geometry.vec` ``).
+
+**One name, one meaning.** A value binding may not reuse the local name a `use` binds — `use geometry.vec` followed by `vec = Holder { … }` is a collision (E0020): rename the binding, or alias the import (`use geometry.vec as gv`). So a dotted chain's root is never ambiguous — it is either the module handle or a local, never both. (The same rule governs binders generally — see [no shadowing, E0059](Functions-and-Closures#sealed-functions--the-use--capture-clause).) Type positions are a separate namespace, so a dotted *type* head like `vec.Vec2` never competes with value bindings at all.
+
 ## Aliasing an import — `as`
 
 An import can be renamed locally with `as`. This is how a file brings in two types that share a short name from different namespaces — each under its own local name:

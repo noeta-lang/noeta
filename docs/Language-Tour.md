@@ -91,11 +91,14 @@ mut i = 0
 while i < 3 { echo i; i += 1 }
 
 for n in [1, 2, 3] { echo n }
-for i in 0..5 { echo i }                    // 0 1 2 3 4  (exclusive range)
-for (i, x) in ["a", "b"].enumerate() {      // destructure the (index, value) tuple
-    echo "${i}:${x}"
+for k in 0..5 { echo k }                    // 0 1 2 3 4  (exclusive range)
+for (idx, x) in ["a", "b"].enumerate() {    // destructure the (index, value) tuple
+    echo "${idx}:${x}"
 }
 ```
+
+(No shadowing: the loop variables pick names distinct from the `mut i` above — one name, one
+meaning, per scope. → E0059 in [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).)
 
 `break` and `continue` work as expected. → [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching).
 

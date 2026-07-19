@@ -1,10 +1,8 @@
-// A local of the same name as a free `fn` shadows it cleanly in CALL position, exactly as it
-// already does in value position (aether F6): inside `run`, the `(int) -> int` parameter `make`
-// wins over the free `fn make()` (arity 0), so `make(5)` is the parameter (returns 50) — not a
-// spurious "expects 0 argument(s), found 1". The free `fn` stays callable outside the shadow.
-// expect: stdout "50"
-// expect: stdout "7"
-// expect: exit 0
+// NO shadowing (E0059), statics included: a parameter may not reuse a free `fn`'s name — inside
+// the body, `make(5)` would silently stop meaning the function. (This reverses the earlier
+// aether-F6 allowance: one name, one meaning, per scope stack. Rename the parameter.)
+// expect: error E0059 at 7:8
+// expect: exit 1
 fn make(): int { return 7; }
 fn run(make: (int) -> int): int {
     return make(5);

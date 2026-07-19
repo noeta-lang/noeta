@@ -10,7 +10,7 @@ class G {
     fn new(): G { return G { n: 0 }; }
 }
 g = G.new()
-async fn work(x: int): void {
+async fn work(x: int) use (g): void {
     g.n = g.n + x
 }
 work(5).await

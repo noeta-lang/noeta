@@ -36,8 +36,9 @@ pub fn free_vars(
     body: &Block,
     enclosing_locals: &[HashSet<String>],
     globals: &HashSet<String>,
+    captures: Option<&[String]>,
 ) -> BTreeSet<String> {
-    let local = local_names(params, body, enclosing_locals, globals);
+    let local = local_names(params, body, enclosing_locals, globals, captures);
 
     let mut enclosing_any: HashSet<String> = HashSet::new();
     for scope in enclosing_locals {
@@ -90,8 +91,9 @@ pub fn analyze(
     body: &Block,
     enclosing_locals: &[HashSet<String>],
     globals: &HashSet<String>,
+    captures: Option<&[String]>,
 ) -> Analysis {
-    let local = local_names(params, body, enclosing_locals, globals);
+    let local = local_names(params, body, enclosing_locals, globals, captures);
     let inner_enclosing = push_layer(enclosing_locals, local.clone());
     let mut nested: BTreeSet<String> = BTreeSet::new();
     collect_nested_frees_block(body, &inner_enclosing, globals, &mut nested);
@@ -115,14 +117,44 @@ fn local_names(
     body: &Block,
     enclosing_locals: &[HashSet<String>],
     globals: &HashSet<String>,
+    captures: Option<&[String]>,
 ) -> HashSet<String> {
-    let mut outer: HashSet<String> = globals.clone();
-    for scope in enclosing_locals {
-        outer.extend(scope.iter().cloned());
-    }
+    // A SEALED fn (named, `captures = Some(allow)`): a bare assignment reaches a surrounding
+    // binding only through the `use (…)` allow-list — every other bare-assigned name is a fresh
+    // local, exactly as the checker typed it. An auto-capturing closure (`None`) keeps the full
+    // outward rule. Reads are unaffected either way (free-variable capture and global loads are
+    // computed from references, not from this locality set).
+    // Synthesized state-machine variables (`$state`, …, unspellable by users) always follow the
+    // auto rule — the async/generator step closure inherits its fn's seal, but its own machinery
+    // must keep reassigning the captured state cells.
+    let mut outer: HashSet<String> = match captures {
+        Some(allow) => allow
+            .iter()
+            .cloned()
+            .chain(synthesized_names(body))
+            .collect(),
+        None => {
+            let mut outer = globals.clone();
+            for scope in enclosing_locals {
+                outer.extend(scope.iter().cloned());
+            }
+            outer
+        }
+    };
+    // Harmless but principled: an allow-listed name that is neither global nor enclosing would
+    // never resolve anyway; keep the set as-is (no filtering) so behavior is order-independent.
+    let _ = &mut outer;
     let mut local: HashSet<String> = params.iter().cloned().collect();
     collect_bindings_block(body, &outer, &mut local);
     local
+}
+
+/// Every `$`-prefixed name a body assigns — the lowering's synthesized state-machine variables,
+/// which are seal-exempt (see `local_names`).
+fn synthesized_names(body: &Block) -> Vec<String> {
+    let mut all: HashSet<String> = HashSet::new();
+    collect_bindings_block(body, &HashSet::new(), &mut all);
+    all.into_iter().filter(|n| n.starts_with('$')).collect()
 }
 
 /// Bindings a block introduces into the current function (recursing into every sub-block and
@@ -318,6 +350,7 @@ fn collect_refs_stmt(
                 &func.body,
                 enclosing,
                 globals,
+                func.captures.as_deref(),
             ));
         }
         Stmt::Decl(_)
@@ -344,6 +377,7 @@ fn collect_refs_rvalue(
                 &func.body,
                 enclosing,
                 globals,
+                func.captures.as_deref(),
             ));
         }
         _ => for_each_rvalue_atom(rvalue, &mut |atom| atom_ref(atom, out)),
@@ -382,6 +416,7 @@ fn collect_nested_frees_stmt(
                 &func.body,
                 enclosing,
                 globals,
+                func.captures.as_deref(),
             ));
         }
         Stmt::If {
@@ -438,6 +473,7 @@ fn collect_nested_frees_rvalue(
             &func.body,
             enclosing,
             globals,
+            func.captures.as_deref(),
         ));
     }
     // No other rvalue nests a function body — atoms cannot contain closures.

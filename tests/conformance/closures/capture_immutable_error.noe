@@ -1,10 +1,11 @@
-// Reassigning an immutable captured local through a closure raises E0006, like any other
-// immutable reassignment. The `count` written inside `bump` is on line 8, column 9.
-// expect: error E0006 at 8:9
+// Reassigning an immutable captured binding through a nested fn (imported with `use (…)` —
+// a named fn is sealed) raises E0006, like any other immutable reassignment. The `count`
+// written inside `bump` is on line 9, column 9.
+// expect: error E0006 at 9:9
 // expect: exit 1
 fn run(): void {
     count = 0;
-    fn bump(): void {
+    fn bump() use (count): void {
         count = count + 1;
     }
     bump();

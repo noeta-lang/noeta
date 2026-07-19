@@ -36,8 +36,8 @@ echo evens
 
 // Tuple destructuring over `enumerate()` (the desugar rides along on the streaming loop).
 mut s = ""
-for (i, c) in ["a", "b", "c"].iter().enumerate() {
-    s = s ~ "${i}:${c}|"
+for (i, ch) in ["a", "b", "c"].iter().enumerate() {
+    s = s ~ "${i}:${ch}|"
 }
 echo s
 

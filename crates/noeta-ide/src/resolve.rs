@@ -538,17 +538,46 @@ impl Resolver {
         self.pop_scope();
     }
 
-    /// Walk a function/closure: parameter defaults resolve in the *definition* scope (not against the
-    /// parameters), so they are walked before the parameter scope is pushed. `region` is the whole
-    /// callable's span — broad enough that completion in an empty or whitespace-only body still offers
-    /// the parameters.
+    /// Walk a function/closure. `sealed` is `Some(captures)` for a NAMED fn/method — the body
+    /// resolves against a fresh scope stack holding only the `use (…)` captures (each aliased to
+    /// the binding it imports, so rename/references treat the clause occurrence, the outer
+    /// binding, and every body use as one group) — and `None` for an auto-capturing closure,
+    /// which keeps the enclosing chain. Parameter defaults resolve in the definition scope —
+    /// sealed like the body for a named fn, the enclosing scope for a closure — never against
+    /// the parameters, so they are walked before the parameter scope is pushed. `region` is the
+    /// whole callable's span — broad enough that completion in an empty or whitespace-only body
+    /// still offers the parameters.
     fn walk_callable(
         &mut self,
         region: Span,
         params: &[Param],
         body_stmts: &[Stmt],
         body_expr: Option<&Expr>,
+        sealed: Option<&[(String, Span)]>,
     ) {
+        let saved_scopes = match sealed {
+            Some(captures) => {
+                // Each capture-clause name is a USE of the binding visible at the declaration
+                // site; inside the body it aliases to that same definition span. An unresolved
+                // capture (checker error) binds to its own span so the body's uses still group.
+                let mut aliases = HashMap::new();
+                for (name, span) in captures {
+                    match self.resolve(name) {
+                        Some(def) => {
+                            self.refs.push((*span, def));
+                            aliases.insert(name.clone(), def);
+                        }
+                        None => {
+                            aliases.insert(name.clone(), *span);
+                        }
+                    }
+                }
+                let saved = std::mem::take(&mut self.scopes);
+                self.scopes.push(aliases);
+                Some(saved)
+            }
+            None => None,
+        };
         for param in params {
             if let Some(default) = &param.default {
                 self.walk_expr(default);
@@ -560,6 +589,9 @@ impl Resolver {
         }
         self.walk_seq(region, body_stmts, body_expr);
         self.pop_scope();
+        if let Some(saved) = saved_scopes {
+            self.scopes = saved;
+        }
     }
 
     fn walk_stmt(&mut self, stmt: &Stmt) {
@@ -590,7 +622,7 @@ impl Resolver {
             Stmt::Fn(decl) => {
                 // The fn name is visible to siblings and to itself (recursion).
                 self.bind(&decl.name, decl.name_span);
-                self.walk_callable(decl.span, &decl.params, &decl.body, None);
+                self.walk_callable(decl.span, &decl.params, &decl.body, None, Some(&decl.captures));
             }
             Stmt::Return { value, .. } => {
                 if let Some(value) = value {
@@ -670,7 +702,13 @@ impl Resolver {
 
     fn walk_methods(&mut self, methods: &[FnDecl]) {
         for method in methods {
-            self.walk_callable(method.span, &method.params, &method.body, None);
+            self.walk_callable(
+                method.span,
+                &method.params,
+                &method.body,
+                None,
+                Some(&method.captures),
+            );
         }
     }
 
@@ -690,8 +728,10 @@ impl Resolver {
             Expr::Closure {
                 params, body, span, ..
             } => match body {
-                ClosureBody::Expr(inner) => self.walk_callable(*span, params, &[], Some(inner)),
-                ClosureBody::Block(stmts) => self.walk_callable(*span, params, stmts, None),
+                ClosureBody::Expr(inner) => {
+                    self.walk_callable(*span, params, &[], Some(inner), None)
+                }
+                ClosureBody::Block(stmts) => self.walk_callable(*span, params, stmts, None, None),
             },
             Expr::Pipeline { left, right, .. } => {
                 self.walk_expr(left);

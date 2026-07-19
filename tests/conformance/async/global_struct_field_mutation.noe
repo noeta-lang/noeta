@@ -5,7 +5,7 @@
 // expect: exit 0
 struct S { pub mut n: int }
 mut s = S { n: 1 }
-async fn grow(x: int): void {
+async fn grow(x: int) use (s): void {
     s.n = s.n + x
 }
 grow(10).await

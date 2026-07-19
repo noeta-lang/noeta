@@ -1,0 +1,10 @@
+namespace geometry.vec;
+
+pub struct Vec2 {
+    x: int
+    y: int
+}
+
+pub fn add(a: Vec2, b: Vec2): Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}
