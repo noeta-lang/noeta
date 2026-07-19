@@ -1,6 +1,6 @@
-// F2b negative: a FORWARDING generic fn is not a first-class value — its hidden type-argument
-// slot is supplied per call, and an erased value would silently miss it. E0058 with a clear help
-// beats a runtime arity surprise.
+// F2b negative (narrowed by D2c): a FORWARDING generic fn referenced BARE — nothing pinning its
+// instantiation — is not a value; its hidden type-argument slot would be silently missing.
+// (With a pinning expected function type the reference IS a value now — forward_fn_value.noe.)
 // expect: error E0058 at 17:5
 // expect: exit 1
 use std.json

@@ -114,6 +114,13 @@ pub struct Sites {
     /// Forwarding generic fns → their hidden-parameter count. Lowering prepends that many hidden
     /// parameters (`$ty0`, `$ty1`, …) to the fn's IR parameter list.
     pub forwarding_fns: HashMap<String, u32>,
+    /// **Forwarding-fn-as-value** sites (poly-deferrals D2c): `Expr::Ident` spans where a
+    /// forwarding generic fn is used as a VALUE with its instantiation pinned by the expected
+    /// type → `(fn name, adopted arity)`. Lowering wraps the reference in a synthesized closure
+    /// whose body calls the fn — the closure's inner call span is this same ident span, which
+    /// keys the resolved hidden atoms in [`Sites::hidden_arg_sites`], so the hidden slots are
+    /// bound into the value (a partial application over the type-argument slots).
+    pub fn_value_sites: HashMap<Span, (String, u32)>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -205,6 +212,8 @@ pub(crate) struct SiteMaps {
     pub(crate) dynamic_attr_sites: HashMap<Span, u32>,
     /// Forwarding fns' hidden-parameter counts — see [`Sites::forwarding_fns`].
     pub(crate) forwarding_fns: HashMap<String, u32>,
+    /// Forwarding-fn-as-value wrap sites — see [`Sites::fn_value_sites`].
+    pub(crate) fn_value_sites: HashMap<Span, (String, u32)>,
 }
 
 impl SiteMaps {
@@ -236,6 +245,7 @@ impl SiteMaps {
             dynamic_recipe_sites: self.dynamic_recipe_sites,
             dynamic_attr_sites: self.dynamic_attr_sites,
             forwarding_fns: self.forwarding_fns,
+            fn_value_sites: self.fn_value_sites,
             destructor_relevance,
         }
     }

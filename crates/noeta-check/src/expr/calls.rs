@@ -97,11 +97,6 @@ impl Checker {
         if lookup(env, name).is_some() {
             return None;
         }
-        // A FORWARDING generic fn is not a first-class value (F2b) — fall through to synthesis,
-        // whose `Ident` arm reports the boundary once.
-        if self.symbols.forwarding.contains_key(name) {
-            return None;
-        }
         // The prelude constructors, typed as the generic constructors they are:
         // `Ok<T, E>(v: T): Result<T, E>` (also the nullary `Ok(): Result<void, E>`),
         // `Err<T, E>(e: E): Result<T, E>`, `some<T>(v: T): Option<T>`. The synthetic `$T`/`$E`
@@ -180,6 +175,19 @@ impl Checker {
                 subst.entry(p.to_string()).or_insert(Type::Unknown);
             }
         }
+        // A FORWARDING generic fn as a value (poly-deferrals D2c): the expectation pinned the
+        // instantiation, so the hidden type-argument slots can be resolved HERE and bound into
+        // the value — lowering wraps the reference in a closure that supplies them (a partial
+        // application over the slots). An instantiation the expectation leaves open (or a
+        // pass-through with no matching enclosing slot) returns `None`: the caller falls back to
+        // synthesis, whose `Ident` arm reports the value boundary once, exactly as before.
+        if self.symbols.forwarding.contains_key(name) {
+            let hidden = self.resolve_value_hidden_slots(name, &subst, &tps, span)?;
+            self.sites.hidden_arg_sites.insert(span, hidden);
+            self.sites
+                .fn_value_sites
+                .insert(span, (name.to_string(), raw_params.len() as u32));
+        }
         Some(Type::Fn {
             params: raw_params
                 .iter()
@@ -187,6 +195,72 @@ impl Checker {
                 .collect(),
             ret: Box::new(subst_or_dyn(&raw_ret, &subst, &tps)),
         })
+    }
+
+    /// Resolve a forwarding fn's hidden slots for a VALUE-position instantiation (D2c): every
+    /// slot template must resolve — concretely (interned into the type-argument table, recipe
+    /// checked) or as a pass-through of the enclosing fn's matching slot. `None` when any slot
+    /// stays open, poisoned, or unbuildable; the caller then falls back to the bare-binding
+    /// boundary (one E0058), so a half-bound value can never exist.
+    fn resolve_value_hidden_slots(
+        &mut self,
+        name: &str,
+        subst: &HashMap<String, Type>,
+        tps: &HashSet<String>,
+        span: Span,
+    ) -> Option<Vec<noeta_ext_abi::HiddenArg>> {
+        if self.symbols.forwarding_poisoned.contains(name) {
+            return None;
+        }
+        let fwd = self.symbols.forwarding.get(name).cloned()?;
+        let mut hidden = Vec::with_capacity(fwd.len());
+        for slot in &fwd {
+            if params_mentioned(&slot.template, tps).iter().any(|p| {
+                subst
+                    .get(p)
+                    .is_none_or(|t| t.defers_to_runtime() || t.contains_unknown())
+            }) {
+                return None;
+            }
+            let sigma = apply_subst(&slot.template, subst);
+            if self.mentions_in_scope_param(&sigma) {
+                let j = self
+                    .coloring
+                    .current_forwarding
+                    .iter()
+                    .position(|t| t == &sigma)?;
+                hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32));
+                continue;
+            }
+            let recipe = self.type_to_recipe(&sigma);
+            if slot.needs_recipe && recipe.is_none() {
+                // Report the precise unbuildable-type error (mirroring the call site) and keep
+                // resolving: the program is already rejected, and falling back to synthesis here
+                // would only stack the generic value-boundary E0058 on top.
+                self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "`{sigma}` cannot be built by the call-site-typed `::<{}>` position of \
+                         `{name}`",
+                        slot.template
+                    ),
+                );
+            }
+            let info = noeta_ext_abi::TypeArgInfo {
+                name: sigma.to_string(),
+                recipe,
+            };
+            let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
+                Some(i) => i,
+                None => {
+                    self.sites.type_arg_table.push(info);
+                    self.sites.type_arg_table.len() - 1
+                }
+            };
+            hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
+        }
+        Some(hidden)
     }
 
     /// If `expr` is a plain call of an unshadowed **generic user function** (`load(text)` — an

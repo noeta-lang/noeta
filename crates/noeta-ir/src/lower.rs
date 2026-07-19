@@ -138,6 +138,10 @@ pub struct LoweringSites<'a> {
     pub dynamic_attr_sites: &'a HashMap<Span, u32>,
     /// Forwarding generic fns → their hidden-parameter count (prepended as `$ty0`, `$ty1`, …).
     pub forwarding_fns: &'a HashMap<String, u32>,
+    /// Forwarding-fn-as-value sites (poly-deferrals D2c): `Expr::Ident` spans → `(fn name,
+    /// adopted arity)`. The reference lowers to a synthesized closure calling the fn; the inner
+    /// call reuses this same span, so `hidden_arg_sites` binds the resolved slots into the value.
+    pub fn_value_sites: &'a HashMap<Span, (String, u32)>,
 }
 
 impl LoweringSites<'static> {
@@ -157,6 +161,7 @@ impl LoweringSites<'static> {
         static HIDDEN: OnceLock<HashMap<Span, Vec<noeta_ext_abi::HiddenArg>>> = OnceLock::new();
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
+        static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         LoweringSites {
             packed_list_sites: PACKED.get_or_init(HashMap::new),
             index_field_sites: SPANS.get_or_init(HashSet::new),
@@ -177,6 +182,7 @@ impl LoweringSites<'static> {
             dynamic_recipe_sites: SLOTS.get_or_init(HashMap::new),
             dynamic_attr_sites: SLOTS.get_or_init(HashMap::new),
             forwarding_fns: COUNTS.get_or_init(HashMap::new),
+            fn_value_sites: FN_VALUES.get_or_init(HashMap::new),
         }
     }
 }
@@ -212,6 +218,7 @@ macro_rules! lowering_sites {
             dynamic_recipe_sites: &$s.dynamic_recipe_sites,
             dynamic_attr_sites: &$s.dynamic_attr_sites,
             forwarding_fns: &$s.forwarding_fns,
+            fn_value_sites: &$s.fn_value_sites,
         }
     };
 }
@@ -1318,6 +1325,58 @@ impl Lowerer<'_> {
             // returns to signal it suspended at an `.await`. Lowers to the dedicated rvalue.
             Expr::Ident { name, span } if name == PENDING_IDENT => {
                 Ok(self.emit(out, Rvalue::Pending { span: *span }, *span))
+            }
+            // A FORWARDING generic fn used as a VALUE (poly-deferrals D2c): the checker resolved
+            // the instantiation's hidden slots at this span — wrap the reference in a synthesized
+            // closure `($fv0, …) => name($fv0, …)` whose inner call carries THIS span, so
+            // `prepend_hidden_args` binds the resolved atoms into the value (a partial
+            // application over the type-argument slots; a `Forward` slot captures the enclosing
+            // `$ty` local like any closure upvalue). The inner callee gets a zero-width span so
+            // it cannot re-trigger this arm.
+            Expr::Ident { name, span } if matches!(self.sites.fn_value_sites.get(span), Some((n, _)) if n == name) =>
+            {
+                let (fname, arity) = self.sites.fn_value_sites[span].clone();
+                let callee_span = Span {
+                    start: span.start,
+                    end: span.start,
+                    source: span.source,
+                };
+                let params: Vec<Param> = (0..arity)
+                    .map(|i| Param {
+                        name: format!("$fv{i}"),
+                        name_span: *span,
+                        ty: None,
+                        default: None,
+                        span: *span,
+                    })
+                    .collect();
+                let call = Expr::Call {
+                    callee: Box::new(Expr::Ident {
+                        name: fname,
+                        span: callee_span,
+                    }),
+                    args: params
+                        .iter()
+                        .map(|p| Expr::Ident {
+                            name: p.name.clone(),
+                            span: *span,
+                        })
+                        .collect(),
+                    span: *span,
+                };
+                // Anonymous like any closure — naming it after the fn would make the wrapper
+                // adopt the fn's hidden parameters at top level (the `forwarding_fns` lookup is
+                // name-keyed); the inner call still traces under the real fn.
+                let func =
+                    self.lower_func(&params, BodyKind::Arrow(&call), *span, false, false, None)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Closure {
+                        func: Rc::new(func),
+                        span: *span,
+                    },
+                    *span,
+                ))
             }
             Expr::Ident { name, span } => Ok(Atom::Var {
                 name: name.clone(),

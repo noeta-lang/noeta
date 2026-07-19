@@ -33,7 +33,7 @@
 //! forwarding is recognized through an EXPLICIT turbofish only (`g::<T>(x)`) — forwarding via
 //! argument inference alone is rejected at the call site with a "spell the turbofish" help.
 
-use crate::subst::{apply_subst, from_ref_q, mentions_param};
+use crate::subst::{apply_subst, bind_type_params, from_ref_q, mentions_param};
 use noeta_ast::{ClosureBody, Expr, FnDecl, Program, Stmt, StrPart, TypeRef};
 use noeta_types::Type;
 use std::collections::{HashMap, HashSet};
@@ -107,6 +107,30 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
             )
         })
         .collect();
+    // Each candidate's raw declared signature (parameter/return types over its own parameters),
+    // for binding an ANNOTATED VALUE BINDING of a forwarding fn (D2c pass-through:
+    // `d: (string) -> Result<T, E> = load` inside another generic — the annotation instantiates
+    // the callee, and any slot still mentioning OUR parameters becomes our slot).
+    let sigs: HashMap<&str, (Vec<Type>, Type)> = fns
+        .iter()
+        .map(|f| {
+            let params: Vec<Type> = f
+                .params
+                .iter()
+                .map(|p| {
+                    p.ty.as_ref()
+                        .map(|t| from_ref_q(t, xt))
+                        .unwrap_or(Type::Unknown)
+                })
+                .collect();
+            let ret = f
+                .ret
+                .as_ref()
+                .map(|t| from_ref_q(t, xt))
+                .unwrap_or(Type::Unknown);
+            (f.name.as_str(), (params, ret))
+        })
+        .collect();
     let mut map: ForwardingMap = HashMap::new();
     let mut poisoned: HashSet<String> = HashSet::new();
     loop {
@@ -135,6 +159,7 @@ pub(crate) fn compute_forwarding(program: &Program, xt: &HashMap<String, String>
                     params: &params,
                     map: &map,
                     decl_params: &decl_params,
+                    sigs: &sigs,
                     xt,
                 };
                 for stmt in &f.body {
@@ -164,6 +189,7 @@ struct WalkCx<'a> {
     params: &'a [&'a str],
     map: &'a ForwardingMap,
     decl_params: &'a HashMap<&'a str, Vec<&'a str>>,
+    sigs: &'a HashMap<&'a str, (Vec<Type>, Type)>,
     xt: &'a HashMap<String, String>,
 }
 
@@ -188,6 +214,41 @@ fn is_bare_param(ty: &TypeRef, param: &str) -> bool {
 fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
     match stmt {
         Stmt::Echo { value: e, .. } | Stmt::Yield { value: e, .. } => walk_expr(e, cx, mark),
+        // An ANNOTATED binding of a forwarding fn as a VALUE (D2c pass-through): the annotation
+        // instantiates the callee's signature; a slot the substitution leaves mentioning OUR
+        // parameters (`d: (string) -> Result<T, E> = load`) becomes our slot — the same
+        // propagation an explicit turbofish call performs.
+        Stmt::Binding {
+            ty: Some(ann),
+            value,
+            ..
+        } => {
+            if let Expr::Ident { name, .. } = value
+                && let (Some(slots), Some(callee_params), Some((raw_params, raw_ret))) = (
+                    cx.map.get(name),
+                    cx.decl_params.get(name.as_str()),
+                    cx.sigs.get(name.as_str()),
+                )
+                && let Type::Fn {
+                    params: ann_params,
+                    ret: ann_ret,
+                } = cx.to_type(ann)
+            {
+                let tps: HashSet<String> = callee_params.iter().map(|p| p.to_string()).collect();
+                let mut subst: HashMap<String, Type> = HashMap::new();
+                for (raw, exp) in raw_params.iter().zip(&ann_params) {
+                    bind_type_params(raw, exp, &tps, &mut subst);
+                }
+                bind_type_params(raw_ret, &ann_ret, &tps, &mut subst);
+                for slot in slots {
+                    let sigma = apply_subst(&slot.template, &subst);
+                    if cx.mentions(&sigma) {
+                        mark(sigma, slot.needs_recipe);
+                    }
+                }
+            }
+            walk_expr(value, cx, mark)
+        }
         Stmt::Binding { value, .. } => walk_expr(value, cx, mark),
         Stmt::Destructure { value, .. } => walk_expr(value, cx, mark),
         Stmt::Expr { expr, .. } => walk_expr(expr, cx, mark),
@@ -249,6 +310,7 @@ fn walk_stmt(stmt: &Stmt, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                 params: &visible,
                 map: cx.map,
                 decl_params: cx.decl_params,
+                sigs: cx.sigs,
                 xt: cx.xt,
             };
             for s in &decl.body {

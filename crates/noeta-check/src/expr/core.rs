@@ -517,19 +517,22 @@ impl Checker {
                     && self.symbols.forwarding.contains_key(name.as_str())
                     && self.symbols.functions.contains_key(name.as_str()) =>
             {
-                // A FORWARDING generic fn is not a first-class value (poly-values F2b): its hidden
-                // type-argument slot is supplied per call, and an erased value would silently miss
-                // it. The clear boundary beats a runtime arity surprise.
+                // A FORWARDING generic fn referenced bare — with NO expectation to pin its
+                // instantiation — is not a value (poly-values F2b): its hidden type-argument slot
+                // would be silently missing. With a pinning expected function type the reference
+                // IS a value (D2c — `instantiate_fn_value` binds the slots into a wrapper); this
+                // arm is only reached when synthesis finds nothing to pin it.
                 self.error(
                     DiagnosticCode::InvalidTypeArguments,
                     *span,
                     format!(
-                        "cannot use `{name}` as a value: its type parameter determines a \
-                         call-site-typed result, which only a direct call can supply"
+                        "cannot use `{name}` as a value here: its type parameter determines a \
+                         call-site-typed result, and nothing pins the instantiation"
                     ),
                 )
                 .help(format!(
-                    "call it directly (`{name}::<T>(...)`), or wrap it in a closure"
+                    "bind it against an expected function type (`f: (string) -> ... = {name}`), \
+                     call it directly (`{name}::<T>(...)`), or wrap it in a closure"
                 ));
                 Type::Unknown
             }
