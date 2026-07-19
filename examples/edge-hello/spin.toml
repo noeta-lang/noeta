@@ -1,0 +1,28 @@
+spin_manifest_version = 2
+
+[application]
+name = "edge-hello"
+version = "0.1.0"
+authors = ["you <you@example.com>"]
+description = "A minimal Noeta HTTP handler, deployed to the edge unchanged."
+
+# One HTTP route mapped to one component. `/...` is a wildcard: every path reaches the handler,
+# which routes internally on `req.path()`.
+[[trigger.http]]
+route = "/..."
+component = "edge-hello"
+
+[component.edge-hello]
+# The artifact `deploy.sh` produces with `noeta build --serve hello.noe`. It is a genuine
+# wasi:http/incoming-handler component — no Spin build step, no cargo, no SDK.
+source = "hello.serve.wasm"
+# Outbound HTTP is allowlisted per component. This app makes no upstream calls, so the list is
+# empty; add hosts here (e.g. "https://api.example.com") before calling `client.get(...)`.
+allowed_outbound_hosts = []
+
+# `noeta build --serve` is not a Spin-native build command, so Spin does not build the artifact
+# for you. `deploy.sh` runs the Noeta build first; if you prefer `spin build` to drive it, wire
+# it up here:
+#   [component.edge-hello.build]
+#   command = "noeta build --serve hello.noe"
+#   watch = ["hello.noe"]
