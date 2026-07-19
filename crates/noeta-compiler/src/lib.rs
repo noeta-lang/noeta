@@ -584,6 +584,18 @@ impl SessionCompiler {
             self.mc
                 .type_of_sites
                 .extend(sites.type_of_sites.iter().map(|(k, v)| (*k, v.clone())));
+            // `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): the checker records one per
+            // deriving struct into its accumulated sites, and lowering already emits the
+            // `Rvalue::DecodeTyped` (via the accumulated `decode_typed_sites`) — but the runtime
+            // registry `json.decode_typed` resolves against is baked from `Module::deserialize_recipes`,
+            // which a REPL entry never populated. Bake the checker's accumulated recipes here, exactly
+            // as the whole-program checked compile does (`compile_with_sites`'s `sites.deserialize_recipes`),
+            // so a type declared at the prompt decodes. The snapshot is the full accumulated set
+            // (latest-wins on a redeclared name once the VM lifts it into a name→recipe map), so a
+            // wholesale replace stays idempotent across entries. The checkerless path has no checker to
+            // derive a recipe (and does not recognize `decode_typed` at all), so this is a checked-session
+            // capability by construction.
+            self.mc.deserialize_recipes = sites.deserialize_recipes.clone();
         }
 
         // Register this entry's globals/types/methods into the persistent tables (all additive:
