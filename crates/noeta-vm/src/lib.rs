@@ -519,12 +519,12 @@ struct Vm<'m> {
     /// runtime backstop for the receiver-dependent dispatches the gate cannot decide.
     pure_eval: bool,
     /// Set when this parallel scheduler is **registered in the stall registry** (isolates I.4c
-    /// real-path deadlock detection): the root parent and every isolate worker register for their
-    /// driving lifetime, so `isolate_in_flight_wait` participates in the global all-parties-blocked
-    /// check that resolves a genuine cross-isolate deadlock to E0010 instead of spinning. `false` for
-    /// the deterministic sandbox and for any parallel VM not driven through a registering entry point
-    /// (which keeps the pre-existing keep-waiting behavior — never a false deadlock).
+    /// real-path deadlock detection); `false` for the sandbox and any parallel VM not driven through a
+    /// registering entry point (which keeps the pre-existing keep-waiting behavior — no false deadlock).
     stall_active: bool,
+    /// Isolate-worker stall slots registered by the parent at spawn but not yet dropped (isolates
+    /// I.4c) — so `active` never lags a starting worker; counted to balance harvest vs teardown drops.
+    registered_workers: usize,
     /// The session-persistent runtime — see [`SessionState`]. Everything else on `Vm` is
     /// per-entry scratch or module-derived tables.
     persist: SessionState,

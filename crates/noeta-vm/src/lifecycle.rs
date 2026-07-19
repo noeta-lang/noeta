@@ -346,6 +346,7 @@ impl<'m> Vm<'m> {
             applied_swaps: 0,
             pure_eval: false,
             stall_active: false,
+            registered_workers: 0,
             persist,
             map_packed,
             methods,
@@ -580,6 +581,12 @@ impl<'m> Vm<'m> {
                 let _ = h.join();
             }
         }
+        // Drop any stall-registry worker slots not released by a harvest (isolates I.4c) — an early
+        // exit joins the worker here without going through `finish_isolate`. Balanced by count, so the
+        // registry returns to a clean `active`.
+        while self.registered_workers > 0 {
+            self.deregister_worker_stall();
+        }
         // Every worker is joined, so nothing borrows the shared region: free any promoted
         // argument graphs (P-PAR S2) — normally already emptied by `finish_isolate` at in-flight
         // count 0; defensive here so the leak oracle's zero-residency balance holds on early
@@ -631,6 +638,7 @@ pub(crate) fn run_isolate_worker(
     wire_globals: Vec<(u32, isolate::Wire)>,
     trace: Option<noeta_stdlib::TraceContext>,
     registry: Option<&'static noeta_stdlib::registry::Registry>,
+    stall_tracked: bool,
     span: Span,
 ) -> Result<isolate::Wire, IsolateFailure> {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
@@ -689,11 +697,11 @@ pub(crate) fn run_isolate_worker(
         })
         .collect();
     let callee = Value::closure(proto, Vec::new());
-    // Register this worker in the stall registry for its driving lifetime (isolates I.4c): it
-    // participates in the global all-parties-blocked deadlock check, so a cross-isolate deadlock
-    // among workers resolves to E0010 rather than spinning.
-    wvm.stall_active = true;
-    let stall = isolate::STALL.scheduler();
+    // Participate in the global all-parties-blocked deadlock check (isolates I.4c) iff the parent
+    // does, so a cross-isolate deadlock among workers resolves to E0010 rather than spinning. The
+    // worker's `active` **slot is registered by the parent at spawn** (not here), so `active` never
+    // lags this thread's startup — the fix for the startup-window false positive.
+    wvm.stall_active = stall_tracked;
     let outcome = match wvm.call_value(callee, arg_vals, span) {
         Ok(future) => {
             let result = wvm.drive_future(future, span);
@@ -702,7 +710,6 @@ pub(crate) fn run_isolate_worker(
         }
         Err(abort) => Err(abort),
     };
-    drop(stall);
     release(callee);
     // Hand the worker's finished collector to the sink (before teardown — destructor ops after the
     // program's own work are not the profile's subject). The `#n` is the sink's running count,

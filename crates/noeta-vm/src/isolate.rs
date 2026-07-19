@@ -213,12 +213,36 @@ impl StallRegistry {
         self.deadlocked.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Register a parallel scheduler for the lifetime of the returned guard (the root parent or an
-    /// isolate worker, around its driving loop).
+    /// Register a parallel scheduler for the lifetime of the returned guard (the root parent, around
+    /// its driving loop).
     pub fn scheduler(&'static self) -> SchedulerGuard {
+        self.register();
+        SchedulerGuard { reg: self }
+    }
+
+    /// Register one more parallel scheduler slot. Used directly (not via the RAII guard) for an
+    /// **isolate worker**, whose slot is added by the *parent* thread at spawn — synchronously with
+    /// `inflight_isolates += 1` — so `active` never lags a spawned-but-not-yet-started worker. That
+    /// lag was the false-positive: the parent, alone-registered while its workers' threads were still
+    /// starting, saw `parked == active` and latched a deadlock on a channel-free join. See
+    /// [`deregister`](Self::deregister) for the matching drop.
+    pub fn register(&self) {
         self.active
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        SchedulerGuard { reg: self }
+    }
+
+    /// Drop one parallel scheduler slot (the worker's, at harvest/teardown on the parent thread; or
+    /// the parent's own, via the guard). The last slot out clears the latched deadlock flag so the
+    /// next program in this process (the test harness runs many) starts from a clean registry.
+    pub fn deregister(&self) {
+        if self
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.deadlocked
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// Mark the calling scheduler parked; return `true` when every live registered scheduler is now
@@ -246,18 +270,7 @@ impl StallRegistry {
 
 impl Drop for SchedulerGuard {
     fn drop(&mut self) {
-        // Last scheduler out clears the latched deadlock flag, so the next program in this process
-        // (the test harness runs many) starts from a clean registry.
-        if self
-            .reg
-            .active
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
-            == 1
-        {
-            self.reg
-                .deadlocked
-                .store(false, std::sync::atomic::Ordering::Release);
-        }
+        self.reg.deregister();
     }
 }
 
