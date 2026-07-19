@@ -83,6 +83,22 @@ pub enum BuiltinTrait {
     Members,
     DynamicCall,
     TryAdd,
+    /// **Validate** (validation arc) — the data-boundary invariant protocol: a type whose values
+    /// can assert their own well-formedness. The required method is
+    /// `validate(): Result<void, E>` where the error `E` is either a plain `string` or any type
+    /// implementing [`BuiltinTrait::Error`] (the principled form — a validator's error then
+    /// converts at `?` like any other `Error`). Deliberately independent of
+    /// [`BuiltinTrait::Display`]: adopting `Validate` never changes a type's rendering. A value of
+    /// a `Validate`-implementing type can be `.validate()`-called anywhere like any method.
+    ///
+    /// **Not derivable** (an invariant cannot be synthesized from fields — the one method is the
+    /// whole point). Beyond presence + arity, the checker pins the return shape to
+    /// `Result<void, string | Error>` (E0015 otherwise), so both the `?`-conversion path and the
+    /// recipe-seam auto-enforcement (validation arc slice 2) can rely on it. When a
+    /// `Validate`-implementing struct is materialized by a recipe door (`json.parse::<T>` /
+    /// `try_parse` / `decode_typed`), its `validate` runs automatically bottom-up on the built
+    /// value; a rejection aborts or is threaded into the door's error channel.
+    Validate,
     /// **Mergeable** (p2p P2) — the state-based CRDT convergence capability: a value that can be
     /// `merge`d with a concurrent replica and converge (commutative/associative/idempotent), which
     /// is what makes it safe to replicate via `synced_signal`. Unlike every other built-in trait it
@@ -161,6 +177,10 @@ impl BuiltinTrait {
             Members => ("Members", Some(("get", Some(1))), None, false),
             DynamicCall => ("DynamicCall", Some(("call", Some(2))), None, false),
             TryAdd => ("TryAdd", Some(("try_add", Some(1))), None, false),
+            // The data-boundary invariant protocol: one nullary method, `validate(): Result<void,
+            // E>`. Not derivable (an invariant is not synthesizable from fields). The return shape
+            // is pinned separately by the checker (`Result<void, string | Error>`).
+            Validate => ("Validate", Some(("validate", Some(0))), None, false),
             // A marker (no user-written method — the CRDT types carry the real merge natively) and
             // not derivable; `intrinsic()` further bars a hand-written `impl`.
             Mergeable => ("Mergeable", None, None, false),
@@ -258,6 +278,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     BuiltinTrait::Members,
     BuiltinTrait::DynamicCall,
     BuiltinTrait::TryAdd,
+    BuiltinTrait::Validate,
     BuiltinTrait::Mergeable,
 ];
 

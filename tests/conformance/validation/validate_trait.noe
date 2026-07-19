@@ -1,0 +1,74 @@
+// The `Validate` builtin trait (validation arc slice 1): a type whose values can assert their
+// own well-formedness. The required method is `validate(): Result<void, E>` where `E` is a plain
+// `string` or any `Error`-implementing type. `.validate()` dispatches like any instance method,
+// and a validator's error converts at `?` like any `Error`. Runs identically on both backends.
+// expect: stdout "ok"
+// expect: stdout "bad: age out of range: 200"
+// expect: stdout "empty name"
+// expect: stdout "guarded: empty name"
+// expect: exit 0
+
+// An `Error`-typed validation failure (the principled form).
+struct RangeError {
+    value: int
+
+    impl Error {
+        fn message(): string { return "age out of range: ${self.value}" }
+    }
+}
+
+struct Person {
+    name: string
+    age: int
+
+    impl Validate {
+        fn validate(): Result<void, RangeError> {
+            if self.age < 0 || self.age > 130 {
+                return Err(RangeError { value: self.age })
+            }
+            return Ok()
+        }
+    }
+}
+
+// A `string`-typed validation failure (the auto-wrapped form).
+struct Label {
+    text: string
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.text == "" {
+                return Err("empty name")
+            }
+            return Ok()
+        }
+    }
+}
+
+// Explicit `.validate()` — a well-formed value, then a rejecting one whose `Error` payload
+// renders through its own `message()`.
+fn describe(p: Person): string {
+    return match p.validate() {
+        Ok() => "ok",
+        Err(e) => "bad: ${e.message()}",
+    }
+}
+
+echo describe(Person { name: "Ada", age: 36 })
+echo describe(Person { name: "Old", age: 200 })
+
+// A `string`-typed validator's error is the bare string.
+echo match (Label { text: "" }).validate() {
+    Ok() => "ok",
+    Err(msg) => msg,
+}
+
+// `?` composes: a validator's error propagates like any `Result` error.
+fn guard(l: Label): Result<string, string> {
+    l.validate()?
+    return Ok("valid: ${l.text}")
+}
+echo match guard(Label { text: "" }) {
+    Ok(s) => s,
+    Err(msg) => "guarded: ${msg}",
+}
