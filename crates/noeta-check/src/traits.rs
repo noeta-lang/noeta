@@ -1206,16 +1206,19 @@ impl Checker {
             // return especially) then binds any parameter the earlier arguments did not
             // (`fn pick<T>(f: () -> T): T`).
             if let Some(expr) = arg_exprs.get(i)
-                && is_deferred_literal_arg(expr)
+                && self.is_deferred_arg(expr, env)
                 && matches!(args[i], Type::Unknown)
             {
                 let expected = erase_type_params(apply_subst(raw, &subst), &tps);
                 // Absorb the (substituted) parameter type into the deferred literal — a `Fn` into a
-                // closure, a `List`/`Map` into a container literal — so its resolved type then binds
-                // any still-unbound type parameter below; a mismatched or unguiding param synthesizes
-                // standalone (unchanged from the closure-only behavior).
+                // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` into a
+                // container literal — so its resolved type then binds any still-unbound type
+                // parameter below; a mismatched or unguiding param synthesizes standalone (unchanged
+                // from the closure-only behavior).
                 args[i] = match (expr, &expected) {
-                    (Expr::Closure { .. }, Type::Fn { .. }) => self.check(expr, &expected, env),
+                    (Expr::Closure { .. } | Expr::Ident { .. }, Type::Fn { .. }) => {
+                        self.check(expr, &expected, env)
+                    }
                     (Expr::List { .. } | Expr::Map { .. }, Type::List(_) | Type::Map(..)) => {
                         self.check(expr, &expected, env)
                     }
@@ -1243,7 +1246,24 @@ impl Checker {
                 );
             }
         }
-        for (pname, bounds) in &generic.params {
+        self.enforce_type_param_bounds(name, &generic.params, &subst, &tps, span);
+        erase_type_params(apply_subst(&generic.raw_ret, &subst), &tps)
+    }
+
+    /// Enforce a polymorphic callable's declared **trait bounds** against a resolved substitution:
+    /// each bound type parameter that the substitution pins to a concrete type must satisfy its
+    /// bounds (`E0025`), exactly as a generic call enforces them. Shared by the call path
+    /// ([`Self::check_generic_call`]) and the value-position instantiation
+    /// ([`Self::instantiate_fn_value`], F1 poly-values), so the two judgments cannot drift.
+    pub(crate) fn enforce_type_param_bounds(
+        &mut self,
+        name: &str,
+        params: &[(String, Vec<BoundReq>)],
+        subst: &HashMap<String, Type>,
+        tps: &HashSet<String>,
+        span: Span,
+    ) {
+        for (pname, bounds) in params {
             let Some(concrete) = subst.get(pname) else {
                 continue; // unconstrained by the arguments — nothing concrete to check against
             };
@@ -1257,7 +1277,7 @@ impl Checker {
                     let want: Vec<Type> = bound
                         .args
                         .iter()
-                        .map(|a| erase_type_params(apply_subst(a, &subst), &tps))
+                        .map(|a| erase_type_params(apply_subst(a, subst), tps))
                         .collect();
                     if !self.satisfies_user_trait(concrete, &bound.name, &want) {
                         let shown = bound_display(&bound.name, &want);
@@ -1300,7 +1320,6 @@ impl Checker {
                 }
             }
         }
-        erase_type_params(apply_subst(&generic.raw_ret, &subst), &tps)
     }
 
     /// Whether `ty` satisfies the built-in trait `trait_name`. A `dyn`/inference-hole satisfies

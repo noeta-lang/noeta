@@ -191,6 +191,16 @@ impl Checker {
                 if let Some(adapted) = self.try_adapt_literal(expr, expected) {
                     return adapted;
                 }
+                // A polymorphic named function in value position instantiates against the expected
+                // `Fn` type (F1, poly-values): `f: (int) -> int = double_generic` and
+                // `results.map(Ok)` see the precise monomorphic signature instead of the erased
+                // one. Subsumption still runs, so an incompatible instantiation reports.
+                if let Expr::Ident { name, span } = expr
+                    && let Some(fn_ty) = self.instantiate_fn_value(name, expected, *span, env)
+                {
+                    self.subsume(&fn_ty, expected, *span);
+                    return fn_ty;
+                }
                 let actual = self.synth(expr, env);
                 self.subsume(&actual, expected, expr.span());
                 actual
@@ -533,7 +543,7 @@ impl Checker {
                 let arg_types: Vec<Type> = args
                     .iter()
                     .map(|a| {
-                        if is_deferred_literal_arg(a) {
+                        if self.is_deferred_arg(a, env) {
                             Type::Unknown
                         } else {
                             self.synth(a, env)
@@ -773,7 +783,25 @@ impl Checker {
                 let pset: HashSet<String> = params.iter().cloned().collect();
                 let mut subst: HashMap<String, Type> = HashMap::new();
                 for f in &lit.fields {
-                    let vty = self.synth(&f.value, env);
+                    // A polymorphic named function assigned to a **concretely `Fn`-typed field**
+                    // instantiates against the field's declared type (F1, poly-values) — the field
+                    // analogue of the parameter/binding absorption — so `Ops { op: double_generic }`
+                    // checks precisely. Any other value synthesizes exactly as before.
+                    let field_fn_expectation =
+                        decls
+                            .iter()
+                            .find(|(n, _)| n == &f.name)
+                            .and_then(|(_, declared)| {
+                                (matches!(declared, Type::Fn { .. })
+                                    && !mentions_param(declared, &params)
+                                    && self.is_deferred_arg(&f.value, env)
+                                    && matches!(f.value, Expr::Ident { .. }))
+                                .then(|| declared.clone())
+                            });
+                    let vty = match &field_fn_expectation {
+                        Some(expected) => self.check(&f.value, expected, env),
+                        None => self.synth(&f.value, env),
+                    };
                     // A literal that sets a private field is only valid inside the declaring type's
                     // own methods (slice 2d) — a `class` with private fields is built externally
                     // through an associated `fn`/constructor, not a bare literal.

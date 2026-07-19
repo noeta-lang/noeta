@@ -1,0 +1,12 @@
+// F1 negative: expected-type instantiation makes a generic function VALUE precisely checked, so a
+// shape that cannot line up with the expectation is a static E0007 instead of a runtime surprise.
+// `first` instantiates against `map`'s expected `(int) -> _` parameter, but its own parameter is a
+// `List<T>` — an `int` element can never flow into it. Both the value's own subsumption (at the
+// reference) and the call's argument check (at the method name) report the mismatch.
+// expect: error E0007 at 12:17
+// expect: error E0007 at 12:6
+// expect: exit 1
+fn first<T>(xs: List<T>): T {
+    return xs[0];
+}
+echo [1, 2].map(first);
