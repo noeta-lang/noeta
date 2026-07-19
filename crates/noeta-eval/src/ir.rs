@@ -1685,8 +1685,9 @@ impl Interpreter {
                     ));
                 };
                 // The call-site-typed native functions: `json.parse::<T>` (aborting) and the
-                // recoverable `json.decode::<T>` → `Result<T, string>` (L2 DI).
-                let recoverable = func == "decode";
+                // recoverable `json.try_parse::<T>` → `Result<T, JsonError>` (one error story
+                // with `json.decode_typed`).
+                let recoverable = func == "try_parse";
                 if module == "json" && (func == "parse" || recoverable) {
                     let Some(Value::Str(text)) = arg_vals.first() else {
                         return Err(self.runtime_error(
@@ -1695,23 +1696,25 @@ impl Interpreter {
                             format!("`json.{func}` expects a `string` argument"),
                         ));
                     };
-                    match noeta_stdlib::json::parse_typed(text, recipe) {
-                        Ok(out) => {
-                            let value = self.materialize_recipe(out, *span)?;
-                            if recoverable {
+                    if recoverable {
+                        // A decode failure is a recoverable `Result.Err(JsonError)` — the
+                        // path-carrying extern error value, wrapped exactly as the VM wraps it.
+                        return match noeta_stdlib::json::try_parse_typed(text, recipe) {
+                            Ok(out) => {
+                                let value = self.materialize_recipe(out, *span)?;
                                 Ok(crate::builtin_enum("Result", "Ok", vec![value]))
-                            } else {
-                                Ok(value)
                             }
-                        }
-                        Err(error) if recoverable => {
-                            // A decode failure is a recoverable `Result.Err(message)`.
-                            Ok(crate::builtin_enum(
+                            Err(error) => Ok(crate::builtin_enum(
                                 "Result",
                                 "Err",
-                                vec![Value::Str(error.message)],
-                            ))
-                        }
+                                vec![Value::Extern(Rc::new(RefCell::new(
+                                    noeta_stdlib::ExternBox::new(error),
+                                )))],
+                            )),
+                        };
+                    }
+                    match noeta_stdlib::json::parse_typed(text, recipe) {
+                        Ok(out) => self.materialize_recipe(out, *span),
                         Err(error) => Err(self.runtime_error(
                             crate::std_error_code(error.kind),
                             *span,

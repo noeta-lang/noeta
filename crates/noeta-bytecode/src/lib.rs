@@ -829,8 +829,9 @@ pub enum Op {
         /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
         recipe: Option<Box<noeta_ext_abi::TypeRecipe>>,
         /// `Result.Ok` / `Result.Err` shape indices — used by the **recoverable** decode variant
-        /// (`json.decode::<T>` → `Result<T, string>`, L2 DI): a decode failure lands as `Result.Err`
-        /// instead of aborting. `json.parse::<T>` ignores them (it aborts on failure).
+        /// (`json.try_parse::<T>` → `Result<T, JsonError>`): a decode failure lands as
+        /// `Result.Err` (a path-carrying `JsonError` extern value) instead of aborting.
+        /// `json.parse::<T>` ignores them (it aborts on failure).
         ok_shape: u32,
         err_shape: u32,
         span: Span,

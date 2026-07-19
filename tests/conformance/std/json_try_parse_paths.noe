@@ -1,0 +1,40 @@
+// A `JsonError` names the exact failure: its `path()` walks from the document root through
+// struct fields, list indices, and map keys; `kind()` classifies it; a malformed document
+// carries the source `line()`/`column()`. `message()` (the `Error` trait's method) composes
+// `path: detail`, and the value displays as that message, so `${e}` interpolates it. Runs
+// identically on both backends.
+// expect: stdout "mismatch at items[2].price: expected float, found JSON string"
+// expect: stdout "missing_field at items[0]: missing field `price` for `Item`"
+// expect: stdout "map value at b: expected int, found JSON boolean"
+// expect: stdout "syntax at line 2 column 3"
+// expect: stdout "interpolated: expected int, found JSON array"
+// expect: exit 0
+use std.json
+
+struct Item { price: float }
+struct Order { items: List<Item> }
+
+echo match json.try_parse::<Order>("{\"items\": [{\"price\": 1.0}, {\"price\": 2.0}, {\"price\": \"three\"}]}") {
+    Ok(o) => "ok",
+    Err(e) => "${e.kind()} at ${e.message()}",
+}
+
+echo match json.try_parse::<Order>("{\"items\": [{}]}") {
+    Ok(o) => "ok",
+    Err(e) => "${e.kind()} at ${e.message()}",
+}
+
+echo match json.try_parse::<Map<string, int>>("{\"a\": 1, \"b\": true}") {
+    Ok(m) => "ok",
+    Err(e) => "map value at ${e.message()}",
+}
+
+echo match json.try_parse::<int>("{\n  bad") {
+    Ok(n) => "ok",
+    Err(e) => "${e.kind()} at line ${e.line() ?? 0} column ${e.column() ?? 0}",
+}
+
+echo match json.try_parse::<int>("[]") {
+    Ok(n) => "ok",
+    Err(e) => "interpolated: ${e}",
+}
