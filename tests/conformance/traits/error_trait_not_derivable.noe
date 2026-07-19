@@ -1,8 +1,0 @@
-// `Error` is not derivable in this slice: the impl is a single hand-written method, and there is
-// no field to mechanically derive a message from. `@derive(Error)` is rejected (E0014).
-// expect: error E0014 at 5:9
-// expect: exit 1
-@derive(Error)
-struct Oops {
-    detail: string
-}

@@ -1,0 +1,9 @@
+// `@derive(Error)` requires the type to HAVE a display story: the synthesized `message()`
+// returns the type's rendering, and without an `impl Display` or `@derive(Display)` that would
+// be an accidental structural dump the author never opted into (E0050).
+// expect: error E0050 at 6:9
+// expect: exit 1
+@derive(Error)
+struct Oops {
+    detail: string
+}

@@ -1,0 +1,31 @@
+// `@derive(Error, via: field)` — the wrapper-error shape: `message()` forwards into the field's
+// own implementation (hand-written or itself derived), so a context-carrying wrapper reports the
+// inner failure without any hand-written method. Runs identically on both backends.
+// expect: stdout "bad digit at 3"
+// expect: stdout "Err(bad digit at 3)"
+// expect: exit 0
+struct ParseFailure {
+    at: int
+
+    impl Error {
+        fn message(): string { return "bad digit at ${self.at}" }
+    }
+}
+
+@derive(Error, via: cause)
+struct Wrapped {
+    context: string
+    cause: ParseFailure
+}
+
+w = Wrapped { context: "loading config", cause: ParseFailure { at: 3 } }
+echo w.message()
+
+fn run(): Result<int, Wrapped> {
+    return Err(Wrapped { context: "boot", cause: ParseFailure { at: 3 } })
+}
+
+echo match run() {
+    Ok(n) => "ok",
+    Err(e) => "Err(${e.message()})",
+}

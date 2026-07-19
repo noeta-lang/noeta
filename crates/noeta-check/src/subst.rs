@@ -310,6 +310,7 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         // reaching here — no primitive is ever `Mergeable`.
         Bt::Clone
         | Bt::Error
+        | Bt::From
         | Bt::Serialize
         | Bt::Deserialize
         | Bt::Index

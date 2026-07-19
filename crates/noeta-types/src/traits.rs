@@ -47,9 +47,27 @@ pub enum BuiltinTrait {
     /// [`BuiltinTrait::Display`]: an error type *may* also implement `Display` (and std's
     /// `JsonError` does), but `impl Error` alone imposes exactly one method — rendering stays
     /// whatever the type's display story already is, so adopting `Error` never changes program
-    /// output. Not derivable in this slice (the impl is a single method; a future derive could
-    /// forward `message` through `Display`'s `to_string`).
+    /// output. Derivable (error-ergonomics): `@derive(Error)` synthesizes
+    /// `fn message(): string { return "${self}" }` — the message IS the type's display story
+    /// (an `impl Display`'s `to_string`, or a derived `Display`'s structural rendering), so the
+    /// derive requires the type to have `Display` at all (E0050 otherwise). `@derive(Error,
+    /// via: field)` instead forwards `message()` into the field's own implementation — the
+    /// wrapper-error shape — requiring the field's type to implement `Error`.
     Error,
+    /// **From** (error-ergonomics arc) — the declared-conversion protocol: `impl From<Source>` on a
+    /// type `Target` declares that a `Source` value converts into a `Target`, provided by one
+    /// associated function `from(value: Source): Target`. The **only generic built-in trait whose
+    /// argument is a real type** (`Serialize`/`Deserialize` take a format token). Declared on the
+    /// **target** (the orphan rule means the source may be an extern type — `impl From<JsonError>`
+    /// on a user error type). A type carries at most ONE `From` impl — impl-block methods flatten
+    /// into the type's method table by name and there is no overloading, so a second `From` (any
+    /// source) is a coherence conflict (E0027); that also keeps the `?` conversion path unique by
+    /// construction. `from` is an ordinary associated function, explicitly callable as
+    /// `Target.from(x)`; the single *implicit* application in the language is the `?` error
+    /// position: a `?` whose `Err` payload type differs from the enclosing function's declared
+    /// error type converts through the target's `From<Source>` impl (E0057 when none exists). Not
+    /// derivable.
+    From,
     Clone,
     Serialize,
     /// **Deserialize** (L2.2 DI) — the structural JSON *decode* capability, the mirror of
@@ -123,9 +141,14 @@ impl BuiltinTrait {
             Equatable => ("Equatable", Some(("eq", Some(1))), None, true),
             Comparable => ("Comparable", Some(("compare", Some(1))), None, true),
             Display => ("Display", Some(("to_string", Some(0))), None, true),
-            // The failure-value protocol: one nullary method, `message(): string`. Not derivable
-            // (a possible future derive via `Display` is a recorded backlog row, not shipped).
-            Error => ("Error", Some(("message", Some(0))), None, false),
+            // The failure-value protocol: one nullary method, `message(): string`. Derivable
+            // (error-ergonomics): the synthesized `message()` returns `"${self}"` — the type's
+            // display story (requires Display, impl'd or derived; E0050 otherwise) — or forwards
+            // into a field's own `message()` via `via:`.
+            Error => ("Error", Some(("message", Some(0))), None, true),
+            // The declared-conversion protocol: one associated function `from(value: Source):
+            // Target`. Not derivable (a conversion body cannot be synthesized from fields).
+            From => ("From", Some(("from", Some(1))), None, false),
             Clone => ("Clone", None, None, true),
             Serialize => ("Serialize", None, None, true),
             Deserialize => ("Deserialize", None, None, true),
@@ -192,7 +215,7 @@ impl BuiltinTrait {
     /// `Serialize<Format>` is parameterized today (arity 1); every other trait is nullary.
     pub fn generic_arity(self) -> usize {
         match self {
-            BuiltinTrait::Serialize | BuiltinTrait::Deserialize => 1,
+            BuiltinTrait::Serialize | BuiltinTrait::Deserialize | BuiltinTrait::From => 1,
             _ => 0,
         }
     }
@@ -224,6 +247,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     BuiltinTrait::Comparable,
     BuiltinTrait::Display,
     BuiltinTrait::Error,
+    BuiltinTrait::From,
     BuiltinTrait::Clone,
     BuiltinTrait::Serialize,
     BuiltinTrait::Deserialize,
@@ -351,6 +375,7 @@ mod tests {
             "Equatable",
             "Comparable",
             "Display",
+            "Error",
             "Add",
             "Sub",
             "Mul",

@@ -821,7 +821,14 @@ impl Checker {
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
                 match &inner {
-                    Type::Result(ok, _) => (**ok).clone(),
+                    Type::Result(ok, err) => {
+                        // The error-position rule (error-ergonomics): a mismatched `Err` type
+                        // either converts through the target's `impl From<Source>` (site recorded
+                        // for lowering) or is E0057.
+                        let err = (**err).clone();
+                        self.check_try_error(&err, *span);
+                        (**ok).clone()
+                    }
                     Type::Option(some) => (**some).clone(),
                     // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
                     // diagnostic, yielding the same deferred type.
