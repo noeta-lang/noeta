@@ -53,6 +53,7 @@ use cmd::build::{cmd_build, cmd_dump};
 use cmd::check::cmd_check;
 use cmd::doc::cmd_doc;
 use cmd::fmt::cmd_fmt;
+use cmd::grammar::cmd_grammar_treesitter;
 use cmd::init::cmd_init;
 use cmd::pm::{cmd_add, cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update};
 use cmd::repl::cmd_repl;
@@ -420,6 +421,14 @@ enum Command {
         #[arg(long, value_name = "remove|add|preserve")]
         semicolons: Option<noeta_fmt::SemicolonStyle>,
     },
+    /// Generate editor grammar artifacts for this project's declared text tiers (text-tiers arc).
+    /// A project's `@tier(<name>, text: "<lang>")` declarations open verbatim `@<name> { … }` bodies
+    /// a *static* editor grammar cannot know about; this emits a per-project overlay so those bodies
+    /// parse (and highlight) as their language. Mirrors the VS Code extension's TextMate generator.
+    Grammar {
+        #[command(subcommand)]
+        target: GrammarTarget,
+    },
     /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock` (package-manager P2.4).
     /// Exactly one source must be given: `--path`, `--git` (with `--tag`), or `--version` (registry).
     /// The manifest edit preserves your formatting and comments; the dependency is then resolved so
@@ -528,6 +537,34 @@ enum Command {
     Scope {
         #[command(subcommand)]
         action: ScopeAction,
+    },
+}
+
+/// Which editor grammar `noeta grammar` targets. Only tree-sitter needs a *generated* per-project
+/// grammar (its parser is compiled, so a project's custom tiers cannot be discovered at load time);
+/// the TextMate side is regenerated live by the VS Code extension itself.
+#[derive(Subcommand)]
+enum GrammarTarget {
+    /// Emit the per-project tree-sitter overlay: `project-tiers.json` (the verbatim-body tier-name
+    /// token list `grammar.js` reads) and `queries/injections.scm` (one language-injection rule per
+    /// tier). Drop these into a `tree-sitter-noeta` grammar checkout and run `tree-sitter generate`
+    /// (or pass `--generate`) to rebuild the parser. Without an output directory the token list is
+    /// printed to stdout.
+    #[command(name = "tree-sitter")]
+    TreeSitter {
+        /// The project to scan for `@tier(name, text: "lang")` declarations (default: the current
+        /// directory). Every `.noe` file beneath it is scanned, plus installed native extensions'
+        /// tiers.
+        #[arg(default_value = ".")]
+        project: PathBuf,
+        /// The `tree-sitter-noeta` grammar directory to write the overlay into. Omit to print the
+        /// `project-tiers.json` token list to stdout instead.
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// After writing, run `tree-sitter generate` in the output directory to rebuild the parser
+        /// (requires the tree-sitter CLI on PATH).
+        #[arg(long, requires = "out")]
+        generate: bool,
     },
 }
 
@@ -787,6 +824,13 @@ pub fn run_cli(
             parens,
             semicolons,
         } => cmd_fmt(&files, check, stdin, parens, semicolons),
+        Command::Grammar { target } => match target {
+            GrammarTarget::TreeSitter {
+                project,
+                out,
+                generate,
+            } => cmd_grammar_treesitter(&project, out.as_deref(), generate),
+        },
         Command::Add {
             key,
             path,

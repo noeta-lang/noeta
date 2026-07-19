@@ -20,6 +20,9 @@ For **Neovim / Helix / Zed**, a
 [tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta)
 parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and
 case-insensitive identifiers faithfully (run `tree-sitter generate` there first; see its README).
+For a project with third-party text tiers (`@tier(<name>, text: "<lang>")`), `noeta grammar
+tree-sitter --out <dir>` emits a per-project overlay so those `@<name> { … }` bodies parse and
+highlight as their language — the static grammar's `@doc` → markdown rule is the fallback.
 
 ## The language server (`noeta lsp`)
 

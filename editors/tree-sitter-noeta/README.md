@@ -21,18 +21,40 @@ The generated parser (`src/parser.c`, `src/grammar.json`, `src/node-types.json`)
 
 ```sh
 npx tree-sitter generate     # grammar.js + src/scanner.c -> src/parser.c
-npx tree-sitter test         # run the corpus in test/
+npm test                     # static corpus (tree-sitter test) + the generated-overlay corpus
 npx tree-sitter parse FILE   # inspect a parse tree
 ```
 
+## Per-project text tiers
+
+A tier block `@name { … }` may open a **verbatim** text body (`@doc`, or any `@tier(<name>, text:
+"<lang>")` a project or extension declares) that the compiler never lexes as code. A *static*
+grammar cannot know which `@name`s open such a body — extensions and programs declare their own — so
+this grammar recognizes only the std default (`doc`) and parses the rest as code.
+
+`noeta grammar tree-sitter --out <this-dir>` closes the gap for a given project (the tree-sitter
+analogue of the VS Code extension's `generated-tiers.tmLanguage.json` generator). It scans the
+project's declared tiers — from the compiler's own tier discovery, plus installed native tiers — and
+writes an overlay into this grammar checkout:
+
+- **`project-tiers.json`** — the verbatim-body tier-name token list `grammar.js` reads. Present, it
+  widens `TEXT_TIER_NAMES` so `@spec { … }` bodies parse as `text_body` prose; absent (or invalid),
+  `grammar.js` falls back to the static `doc`-only set. `.gitignore`d, so a checkout stays static by
+  default.
+- **`queries/injections.scm`** — regenerated with one language-injection rule per tier, so each
+  verbatim body highlights as its declared language.
+
+Re-run `tree-sitter generate` after writing the overlay (or pass `--generate`) to rebuild the parser.
+
 ## Layout
 
-- `grammar.js` — the grammar (source of truth).
-- `src/scanner.c` — external scanner: nestable block comments + automatic newline terminators.
+- `grammar.js` — the grammar (source of truth); its `TEXT_TIER_NAMES` reads an optional `project-tiers.json` overlay.
+- `src/scanner.c` — external scanner: nestable block comments, automatic newline terminators, and verbatim text-tier bodies.
 - `queries/highlights.scm` — the highlight query (capture names follow the tree-sitter conventions).
-- `test/corpus/` — `tree-sitter test` fixtures.
+- `queries/injections.scm` — language injections for text-tier bodies (the static `@doc` → markdown rule; regenerated per-project by `noeta grammar tree-sitter`).
+- `test/corpus/` — the static `tree-sitter test` fixtures; `test/project/` — the generated-overlay corpus (`npm run test:project`).
 
 ## Roadmap
 
-- `queries/injections.scm` (highlight `${…}` interpolation holes as embedded expressions), `locals.scm`, `folds.scm`.
-- Close the two parse gaps (multi-line structured attributes; a scanner mode for `@doc` verbatim text).
+- `queries/locals.scm`, `queries/folds.scm`.
+- Close the remaining parse gap (multi-line structured attribute arguments).

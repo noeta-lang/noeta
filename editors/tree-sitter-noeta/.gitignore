@@ -1,3 +1,7 @@
+# Per-project text-tier overlay — emitted by `noeta grammar tree-sitter` into a working checkout.
+# Kept out of the repo so the in-repo grammar keeps its static `doc`-only fallback.
+project-tiers.json
+
 # Generated parser artifacts — reproduce with `tree-sitter generate`.
 src/parser.c
 src/grammar.json
