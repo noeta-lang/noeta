@@ -1,0 +1,9 @@
+// F2 negative: the number of explicit type arguments must match the function's declared type
+// parameters — one per parameter, in order (E0058).
+// expect: error E0058 at 9:6
+// expect: exit 1
+fn pick<T>(a: T, b: T, first: bool): T {
+    if first { return a; }
+    return b;
+}
+echo pick::<int, string>(1, 2, true);

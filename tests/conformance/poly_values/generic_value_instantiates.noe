@@ -1,0 +1,22 @@
+// F1 (poly-values): a generic NAMED function used in VALUE position with an expected type
+// instantiates against that expectation and carries a precise monomorphic `Fn` type — the runtime
+// value is the same erased closure either way (only the static judgment improves). Here `wrap`
+// instantiates as `fn(int) -> List<int>` inside `map`, and as `fn(string) -> List<string>` at the
+// annotated binding; the precisely-typed results then flow into concretely-typed positions.
+// expect: stdout "[[1], [2], [3]]"
+// expect: stdout "2"
+// expect: stdout "[\"a\"]"
+// expect: exit 0
+fn wrap<T>(x: T): List<T> {
+    return [x];
+}
+
+xs = [1, 2, 3];
+ys = xs.map(wrap);
+echo ys;
+// The element type is precisely `List<int>`: an int-typed use of its element checks.
+n: int = ys[0][0] + 1;
+echo n;
+
+f: (string) -> List<string> = wrap;
+echo f("a");

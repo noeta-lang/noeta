@@ -98,7 +98,7 @@ for (idx, x) in ["a", "b"].enumerate() {    // destructure the (index, value) tu
 ```
 
 (No shadowing: the loop variables pick names distinct from the `mut i` above — one name, one
-meaning, per scope. → E0058 in [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).)
+meaning, per scope. → E0059 in [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).)
 
 `break` and `continue` work as expected. → [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching).
 

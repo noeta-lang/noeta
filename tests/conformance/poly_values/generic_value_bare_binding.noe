@@ -1,0 +1,14 @@
+// F1 fallback, pinned: a BARE (expectation-free) binding of a generic function keeps today's
+// honest gradual value — the erased signature, its parameters `dyn` — so calls through it defer
+// per position exactly as before the instantiation arc. The `dyn` top is the sanctioned escape;
+// no annotation is demanded and no warning fires.
+// expect: stdout "5"
+// expect: stdout "hi"
+// expect: exit 0
+fn id<T>(x: T): T {
+    return x;
+}
+
+f = id;
+echo f(5);
+echo f("hi");

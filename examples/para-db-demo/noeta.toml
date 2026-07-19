@@ -7,6 +7,11 @@ version = "0.1.0"
 # `para.db` and its type as `para.db.Connection`.
 para = { path = "../../packages/para-db" }
 
+# Default database wiring for `noeta migrate`: the migrations and (re-runnable) seeds directories.
+[db]
+migrations = "migrations"
+seeds = "seeds"
+
 # Running a package's native Rust code requires the root app to authorize it (Phase 4 trust gate).
 [trust]
 native = ["para/db"]

@@ -148,6 +148,8 @@ Full treatment in [Error Handling](Error-Handling). In brief:
 - `Option` (`?T`): `some(x)` / `none`; unwrap-or-default with `??`; `.first()`/`.last()`/`.next()`/`.recv()` return options.
 - `Result<T, E>`: `Ok(x)` / `Err(e)` (and `Ok()` for `Result<void, E>`); propagate with `?`.
 
+The constructors — and `panic` — are **first-class values**: `results.map(Ok)`, `xs.map(some)`, or `handler = panic` pass the genuine callable, with the exact arity behavior and error text of a direct call. In an expected-type position they instantiate precisely (`ints.map(Ok)` is `List<Result<int, ?>>`); a bare binding stays a deferred dynamic value. `assert` remains a special form.
+
 ## Iterators
 
 `iter()` on any list, set, or map produces a lazy `Iterator<T>` (a reference value — aliases share the cursor). Adapters fuse; a `for` loop drives an iterator directly.

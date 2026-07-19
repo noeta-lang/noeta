@@ -1,0 +1,11 @@
+// F2 negative: explicit type arguments WIN over argument-derived inference — an argument that
+// disagrees with the explicit binding fails the ordinary assignability check against the
+// substituted parameter type (E0007), rather than silently re-inferring `T`.
+// expect: error E0007 at 11:6
+// expect: error E0007 at 11:6
+// expect: exit 1
+fn pick<T>(a: T, b: T, first: bool): T {
+    if first { return a; }
+    return b;
+}
+echo pick::<string>(1, 2, true);

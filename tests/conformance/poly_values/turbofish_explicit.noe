@@ -1,0 +1,25 @@
+// F2 (poly-values): the turbofish generalizes to ANY user generic function — `f::<T, ...>(args)`
+// binds the named type arguments to the declared type parameters in order. Explicit instantiation
+// carries where the arguments alone cannot pin a parameter (`empty::<int>()` — `T` appears only in
+// the return), and agrees with argument inference where they can. Erased at runtime: both
+// backends run the same call a plain `f(args)` compiles to.
+// expect: stdout "[]"
+// expect: stdout "6"
+// expect: stdout "y"
+// expect: exit 0
+fn empty<T>(): List<T> {
+    return [];
+}
+
+fn pick<T>(a: T, b: T, first: bool): T {
+    if first { return a; }
+    return b;
+}
+
+xs: List<int> = empty::<int>();
+echo xs;
+
+n: int = pick::<int>(1, 2, true);
+echo n + 5;
+
+echo pick::<string>("x", "y", false);

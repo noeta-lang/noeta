@@ -42,7 +42,7 @@ of a closure counter. Without the clause, a reference to a top-level binding is 
 fix spelled out (E0005: *add `use (name)` to the signature, or pass it as a parameter*), and a
 bare assignment to an unlisted name simply declares a fresh local.
 
-**No shadowing (E0058).** One name means one thing per scope stack. A binder — a closure
+**No shadowing (E0059).** One name means one thing per scope stack. A binder — a closure
 parameter, `for` variable, match-pattern binding, or fresh local — may not reuse a name already
 bound in a scope it can see, and a binding may not reuse an imported name or module alias
 (E0020). Sealing is what keeps this ergonomic: named-fn params conflict with nothing because the
@@ -153,6 +153,18 @@ fn run(f: (int) -> int, x: int): int { return f(x) }
 ```
 
 Collection methods are passable as values via **unbound method handles**: `list.len`, `string.upper`, `Stack.size` — each a callable taking the receiver as its first argument (`xss.map(list.len)`).
+
+**Generic functions are values too.** With an expected function type in play — a `map` argument, an annotated binding, a declared `Fn`-typed field or parameter — a generic function instantiates against the expectation and checks precisely; without one it stays the erased, `dyn`-parameter value (calls defer per position):
+
+```noeta
+fn wrap<T>(x: T): List<T> { return [x] }
+
+echo [1, 2].map(wrap)                 // [[1], [2]] — precise: (int) -> List<int>
+g: (string) -> List<string> = wrap    // instantiates from the annotation
+h = wrap                              // bare: the erased value, still callable at any type
+```
+
+The prelude constructors `Ok`/`Err`/`some` — and `panic` — are first-class the same way: `results.map(Ok)` passes the genuine constructor, with a direct call's exact arity behavior and error text. (`assert` stays a special form, and a generic function that forwards `T` into a call-site-typed position — see [Generics & Traits](Generics-and-Traits) — must be called rather than passed.)
 
 ## Calling a closure-valued field
 

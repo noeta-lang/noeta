@@ -1167,6 +1167,48 @@ impl Checker {
         arg_exprs: &[Expr],
         span: Span,
         recv_args: &[Type],
+        hidden_site: Option<Span>,
+        env: &mut Env,
+    ) -> Type {
+        // Seed with the receiver's type arguments (instance call); the call's own arguments then
+        // refine any still-unbound parameters without overwriting the receiver's binding.
+        let seed: HashMap<String, Type> = generic
+            .params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .zip(recv_args.iter().cloned())
+            .filter(|(_, t)| !t.defers_to_runtime())
+            .collect();
+        self.check_generic_call_seeded(
+            name,
+            generic,
+            required,
+            args,
+            arg_exprs,
+            span,
+            seed,
+            hidden_site,
+            env,
+        )
+    }
+
+    /// The seeded core of [`Self::check_generic_call`]: `seed` holds type-parameter bindings that
+    /// **win** over anything the arguments would derive — the receiver's type arguments for an
+    /// instance method call, or (poly-values F2) the EXPLICIT turbofish instantiations of
+    /// `f::<T, ...>(args)`, which is what makes "explicit args win; a conflicting argument is the
+    /// ordinary assignability error against the substituted parameter" true by construction
+    /// (binding uses first-wins `or_insert`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn check_generic_call_seeded(
+        &mut self,
+        name: &str,
+        generic: &GenericInfo,
+        required: usize,
+        args: &mut [Type],
+        arg_exprs: &[Expr],
+        span: Span,
+        seed: HashMap<String, Type>,
+        hidden_site: Option<Span>,
         env: &mut Env,
     ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1186,15 +1228,7 @@ impl Checker {
             );
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
-        // Seed with the receiver's type arguments (instance call); the call's own arguments then
-        // refine any still-unbound parameters without overwriting the receiver's binding.
-        let mut subst: HashMap<String, Type> = generic
-            .params
-            .iter()
-            .map(|(n, _)| n.clone())
-            .zip(recv_args.iter().cloned())
-            .filter(|(_, t)| !t.defers_to_runtime())
-            .collect();
+        let mut subst: HashMap<String, Type> = seed;
         for (i, raw) in generic.raw_params.iter().enumerate() {
             if i >= args.len() {
                 // Omitted trailing defaults — already checked at the declaration.
@@ -1206,16 +1240,19 @@ impl Checker {
             // return especially) then binds any parameter the earlier arguments did not
             // (`fn pick<T>(f: () -> T): T`).
             if let Some(expr) = arg_exprs.get(i)
-                && is_deferred_literal_arg(expr)
+                && self.is_deferred_arg(expr, env)
                 && matches!(args[i], Type::Unknown)
             {
-                let expected = erase_type_params(apply_subst(raw, &subst), &tps);
+                let expected = subst_or_dyn(raw, &subst, &tps);
                 // Absorb the (substituted) parameter type into the deferred literal — a `Fn` into a
-                // closure, a `List`/`Map` into a container literal — so its resolved type then binds
-                // any still-unbound type parameter below; a mismatched or unguiding param synthesizes
-                // standalone (unchanged from the closure-only behavior).
+                // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` into a
+                // container literal — so its resolved type then binds any still-unbound type
+                // parameter below; a mismatched or unguiding param synthesizes standalone (unchanged
+                // from the closure-only behavior).
                 args[i] = match (expr, &expected) {
-                    (Expr::Closure { .. }, Type::Fn { .. }) => self.check(expr, &expected, env),
+                    (Expr::Closure { .. } | Expr::Ident { .. }, Type::Fn { .. }) => {
+                        self.check(expr, &expected, env)
+                    }
                     (Expr::List { .. } | Expr::Map { .. }, Type::List(_) | Type::Map(..)) => {
                         self.check(expr, &expected, env)
                     }
@@ -1243,7 +1280,118 @@ impl Checker {
                 );
             }
         }
-        for (pname, bounds) in &generic.params {
+        self.enforce_type_param_bounds(name, &generic.params, &subst, &tps, span);
+        // A call of a **forwarding** generic (poly-values F2b) must supply its hidden
+        // type-argument slots: resolve each forwarding parameter's instantiation into a table
+        // entry (concrete) or a pass-through of the enclosing fn's own slot (a bare in-scope
+        // type parameter). `hidden_site` is the whole-call span lowering keys on; `None` for a
+        // method call (methods never forward).
+        if let Some(call_span) = hidden_site
+            && let Some(fwd) = self.symbols.forwarding.get(name).cloned()
+        {
+            let mut hidden = Vec::with_capacity(fwd.len());
+            for fp in &fwd {
+                let concrete = subst.get(&fp.name).cloned().unwrap_or(Type::Unknown);
+                match &concrete {
+                    Type::Named(q, qa)
+                        if qa.is_empty() && self.coloring.type_params.contains_key(q) =>
+                    {
+                        match self.coloring.current_forwarding.iter().position(|n| n == q) {
+                            Some(j) => hidden.push(noeta_ext_abi::HiddenArg::Forward(j as u32)),
+                            None => {
+                                self.error(
+                                    DiagnosticCode::InvalidTypeArguments,
+                                    span,
+                                    format!(
+                                        "cannot forward `{q}` into `{name}` here: call-site-typed \
+                                         forwarding is supported in top-level generic functions \
+                                         only"
+                                    ),
+                                )
+                                .help(format!(
+                                    "spell the instantiation with an explicit turbofish \
+                                     (`{name}::<...>`) so `{q}` is recognized as forwarded"
+                                ));
+                            }
+                        }
+                    }
+                    t if t.defers_to_runtime() || t.contains_unknown() => {
+                        self.error(
+                            DiagnosticCode::CannotInfer,
+                            span,
+                            format!(
+                                "cannot infer type parameter `{}` of `{name}`, which determines \
+                                 a call-site-typed result",
+                                fp.name
+                            ),
+                        )
+                        .help(format!("supply it explicitly: `{name}::<...>(...)`"));
+                    }
+                    t if self.mentions_in_scope_param(t) => {
+                        self.error(
+                            DiagnosticCode::InvalidTypeArguments,
+                            span,
+                            format!(
+                                "cannot forward `{t}` into `{name}`: forward the bare type \
+                                 parameter, not a composite type mentioning it"
+                            ),
+                        );
+                    }
+                    concrete_ty => {
+                        let recipe = self.type_to_recipe(concrete_ty);
+                        if fp.needs_recipe && recipe.is_none() {
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "`{concrete_ty}` cannot be built by the call-site-typed \
+                                     `::<T>` position `{}` of `{name}` forwards into",
+                                    fp.name
+                                ),
+                            );
+                        }
+                        let info = noeta_ext_abi::TypeArgInfo {
+                            name: concrete_ty.to_string(),
+                            recipe,
+                        };
+                        let idx = match self.sites.type_arg_table.iter().position(|e| *e == info) {
+                            Some(i) => i,
+                            None => {
+                                self.sites.type_arg_table.push(info);
+                                self.sites.type_arg_table.len() - 1
+                            }
+                        };
+                        hidden.push(noeta_ext_abi::HiddenArg::Table(idx as u32));
+                    }
+                }
+            }
+            self.sites.hidden_arg_sites.insert(call_span, hidden);
+        }
+        subst_or_dyn(&generic.raw_ret, &subst, &tps)
+    }
+
+    /// Whether `t` mentions any type parameter currently in scope — the guard that keeps a
+    /// composite instantiation (`List<T>`) out of a forwarded hidden slot (only the bare
+    /// parameter passes through).
+    pub(crate) fn mentions_in_scope_param(&self, t: &Type) -> bool {
+        let params: Vec<String> = self.coloring.type_params.keys().cloned().collect();
+        mentions_param(t, &params)
+    }
+
+    /// Enforce a polymorphic callable's declared **trait bounds** against a resolved substitution:
+    /// each bound type parameter that the substitution pins to a concrete type must satisfy its
+    /// bounds (`E0025`), exactly as a generic call enforces them. Shared by the call path
+    /// ([`Self::check_generic_call`]) and the value-position instantiation
+    /// ([`Self::instantiate_fn_value`], F1 poly-values), so the two judgments cannot drift.
+    pub(crate) fn enforce_type_param_bounds(
+        &mut self,
+        name: &str,
+        params: &[(String, Vec<BoundReq>)],
+        subst: &HashMap<String, Type>,
+        tps: &HashSet<String>,
+        span: Span,
+    ) {
+        for (pname, bounds) in params {
             let Some(concrete) = subst.get(pname) else {
                 continue; // unconstrained by the arguments — nothing concrete to check against
             };
@@ -1257,7 +1405,7 @@ impl Checker {
                     let want: Vec<Type> = bound
                         .args
                         .iter()
-                        .map(|a| erase_type_params(apply_subst(a, &subst), &tps))
+                        .map(|a| subst_or_dyn(a, subst, tps))
                         .collect();
                     if !self.satisfies_user_trait(concrete, &bound.name, &want) {
                         let shown = bound_display(&bound.name, &want);
@@ -1300,7 +1448,6 @@ impl Checker {
                 }
             }
         }
-        erase_type_params(apply_subst(&generic.raw_ret, &subst), &tps)
     }
 
     /// Whether `ty` satisfies the built-in trait `trait_name`. A `dyn`/inference-hole satisfies

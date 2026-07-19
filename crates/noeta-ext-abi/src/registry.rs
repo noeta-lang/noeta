@@ -379,6 +379,37 @@ pub enum TypeRecipe {
     },
 }
 
+/// One resolved **type-argument bundle** for a forwarded generic instantiation (poly-values F2b):
+/// what a generic function whose type parameter flows into a call-site-typed position needs at
+/// runtime about one concrete instantiation. Generics are erased, so a single compiled body serves
+/// every instantiation — the checker interns these bundles into a program-wide table, each
+/// instantiating call passes its entry's INDEX as a hidden argument, and the forwarded sites
+/// (`json.try_parse::<T>`, `attributes_of::<T>`) resolve their data through it at runtime. A pure
+/// function of the program, identical for both backends by construction.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TypeArgInfo {
+    /// The instantiation's display name (`"Order"`) — what a name-keyed consumer
+    /// (`attributes_of`'s manifest) resolves with.
+    pub name: String,
+    /// The instantiation's build recipe, when the type has one — what a recipe-consuming door
+    /// (`json.try_parse::<T>`) decodes with. `None` for an un-recipeable type: statically
+    /// reachable only when no forwarded site of the callee needs a recipe (the checker rejects a
+    /// recipe-needing instantiation without one at the call site).
+    pub recipe: Option<TypeRecipe>,
+}
+
+/// How an instantiating call supplies one **hidden type-argument slot** of a forwarding generic
+/// function (poly-values F2b). Checker → lowering vocabulary only (lowering turns it into an
+/// ordinary prepended call argument), so it is not serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiddenArg {
+    /// A concrete instantiation: pass this index into the program's [`TypeArgInfo`] table.
+    Table(u32),
+    /// A pass-through: forward the ENCLOSING function's own hidden slot `i` (the caller is itself
+    /// generic and forwards its `T` onward), i.e. the local `$ty<i>`.
+    Forward(u32),
+}
+
 /// One native function's static signature (for the checker and tooling). Dispatch is per-module
 /// (matching on the function name), so an `ExtFn` carries no dispatch pointer of its own.
 #[derive(Debug, Clone, Copy)]

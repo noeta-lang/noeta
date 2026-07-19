@@ -1,10 +1,10 @@
-// NO shadowing (E0058): one name, one meaning, per scope stack. An anonymous closure CAPTURES its
+// NO shadowing (E0059): one name, one meaning, per scope stack. An anonymous closure CAPTURES its
 // surrounding scope, so a closure parameter reusing a captured binding's name is rejected — the
 // body could no longer say which `base` it means. (A NAMED fn is different: it is sealed — it sees
 // no surrounding value bindings unless `use (…)`-captured — so its params conflict with nothing.)
 // Assignment never re-declares (it reassigns, E0006/E0007), and `is`-narrowing refines the same
 // binding, so shadowing is never needed.
-// expect: error E0058 at 10:13
+// expect: error E0059 at 10:13
 // expect: exit 1
 base = 100;
 double = fn(base: int) => base * 2;

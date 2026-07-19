@@ -20,6 +20,56 @@ enum Opt<T> { None; Some(value: T) }
 
 The element type is **tracked through instances and literals**: `Box.new(42)` is a `Box<int>`, and `Box { value: "hi" }` is a `Box<string>`. A mismatch downstream is E0007.
 
+## Explicit instantiation — the turbofish
+
+Any generic function can be instantiated explicitly with `f::<T, ...>(args)`. The type arguments bind to the declared type parameters **in order** (one per parameter — an arity mismatch is E0058, a turbofish on a non-generic function too), and they **win** over argument inference: an argument that disagrees with the explicit binding fails assignability against the substituted parameter (E0007) rather than silently re-inferring `T`.
+
+```noeta
+fn empty<T>(): List<T> { return [] }
+fn pick<T>(a: T, b: T, first: bool): T { if first { return a } return b }
+
+xs: List<int> = empty::<int>()      // T appears only in the return — turbofish carries it
+echo pick::<string>("x", "y", false)
+```
+
+The expected type at an annotated binding can carry the instantiation too — `r: List<int> = empty()` infers `T = int` from the **return position** (the bidirectional checker seeds `T` from the expectation, and the arguments fill only what it leaves open). Inference does not flow through `?`: `o: Order = load(text)?` still spells `load::<Order>(text)`.
+
+Methods have no type parameters of their own — a method is generic over its class's parameters, instantiated by the receiver — so the turbofish surface is free functions (plus the intrinsic forms below).
+
+## Forwarding `T`
+
+Inside a generic function's body, `T` is legal wherever a type goes — including as a turbofish argument to another generic, to a call-site-typed native function (`json.try_parse::<T>`), to `attributes_of::<T>()`, and to `channel::<T>(cap)`:
+
+```noeta check
+use std.{json}
+use std.json.JsonError
+
+struct Order { id: int }
+struct User { name: string }
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+order = load::<Order>("{\"id\": 1}")
+user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation decode
+```
+
+Generics are erased, so one compiled body serves every instantiation; where a forwarded site needs per-instantiation data at runtime (a decode recipe, an attribute type's name), the instantiating call passes it through a hidden argument — invisible in the surface language. The boundaries, all reported statically: forwarding into a call-site-typed position works in **top-level generic functions** (not methods or nested `fn`s); only the **bare** parameter forwards (`List<T>` in a `::<...>` position is E0058); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
+
+## Generic functions as values
+
+A generic function referenced as a **value** in an expected-type position instantiates against the expectation and carries the precise monomorphic function type — no turbofish needed:
+
+```noeta
+fn wrap<T>(x: T): List<T> { return [x] }
+
+ys = [1, 2, 3].map(wrap)             // List<List<int>> — wrap instantiates as (int) -> List<int>
+f: (string) -> List<string> = wrap   // and here as (string) -> List<string>
+```
+
+Declared bounds ride along (`g: (Box, Box) -> Box = biggest` is E0025 when `Box` is not `Comparable`). A bare, expectation-free binding (`f = wrap`) keeps the honest gradual value: the erased signature, parameters `dyn`, calls deferred per position. The runtime value is the same erased function either way — only the static judgment changes.
+
 ## Bounds
 
 Constrain a parameter to a built-in trait with `<T: Trait>`:

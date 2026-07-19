@@ -26,6 +26,13 @@
 //!
 //! **Forward-only.** There are no down/rollback files: a down migration is routinely wrong against
 //! production data, and `--reset` (drop the schema, re-apply from zero) covers the development loop.
+//!
+//! **Seeds.** Plain `.sql` files under a project `seeds/` directory, discovered and ordered by the
+//! very same [`load_dir`] loader migrations use, run **after** migrations by [`seed`]. Seeds are
+//! re-runnable development data, **never** recorded in the tracking table: each runs in its own
+//! transaction every time it is invoked, so idempotency is the seed author's concern (the
+//! `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` idiom). [`seed_only`] refuses to run when migrations
+//! are pending — seeding a stale schema is a footgun.
 
 use std::path::Path;
 
@@ -107,6 +114,13 @@ pub enum MigrateError {
     DeletedApplied { filename: String },
     /// A migration failed while applying; the transaction was rolled back.
     Apply { filename: String, message: String },
+    /// A seed file failed while running; its transaction was rolled back. Distinct from
+    /// [`MigrateError::Apply`] so output names it as a seed, not a migration (seeds are untracked
+    /// dev data — the prior seeds stay committed, the same stop-on-first-failure shape).
+    Seed { filename: String, message: String },
+    /// `migrate seed` (seeds-only) found pending migrations: the schema is stale, so seeding is
+    /// refused (seeding a stale schema is a footgun). Carries how many migrations are pending.
+    PendingMigrations { pending: usize },
     /// A database error outside a single migration (reading the tracking table, `BEGIN`/`COMMIT`).
     Db(String),
     /// A filesystem error discovering or reading migration files.
@@ -139,6 +153,15 @@ impl std::fmt::Display for MigrateError {
                     "migration `{filename}` failed and was rolled back: {message}"
                 )
             }
+            MigrateError::Seed { filename, message } => {
+                write!(f, "seed `{filename}` failed and was rolled back: {message}")
+            }
+            MigrateError::PendingMigrations { pending } => write!(
+                f,
+                "cannot seed: {pending} migration(s) are still pending, so the schema is out of \
+                 date. Run `noeta migrate` first (or `noeta migrate --seed` to migrate then seed) — \
+                 seeding a stale schema is a footgun.",
+            ),
             MigrateError::Db(message) => write!(f, "database error: {message}"),
             MigrateError::Io(message) => write!(f, "{message}"),
             MigrateError::InvalidName(name) => {
@@ -165,6 +188,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Discover every `*.sql` file directly under `dir`, sorted by filename, each with its checksum.
+/// The shared loader for **both** migrations and seeds — [`seed`] reuses it for the `seeds/` dir
+/// (a seed simply ignores the computed checksum, since seeds are not tracked history).
 ///
 /// A missing directory is an error (the caller asked to migrate but there is nowhere to read from);
 /// an *empty* existing directory yields an empty list (migrate is then a clean no-op). Sub-directories
@@ -388,6 +413,58 @@ pub fn reset(
     apply(driver, migrations)
 }
 
+/// Run every **seed** file in `seeds` in filename order, each in its own transaction, returning the
+/// names run. Seeds are re-runnable development data, **never tracked** in [`TRACKING_TABLE`]: this
+/// applies every file every time it is called, so idempotency is the seed author's concern (use
+/// `INSERT OR IGNORE` on SQLite / `ON CONFLICT DO NOTHING` on Postgres to make a re-run a no-op). A
+/// seed uses the same discovery/ordering as a migration — [`load_dir`] loads both — but no checksum
+/// is recorded (a seed is not history). The first failure rolls that seed back and stops, naming the
+/// file, with the prior seeds left committed — the same stop-on-first-failure shape as [`apply`].
+pub fn seed(driver: &mut dyn SqlDriver, seeds: &[Migration]) -> Result<Vec<String>, MigrateError> {
+    let mut done = Vec::with_capacity(seeds.len());
+    for file in seeds {
+        seed_one(driver, file)?;
+        done.push(file.name.clone());
+    }
+    Ok(done)
+}
+
+/// Run one seed file inside its own transaction: `BEGIN`, the verbatim body, `COMMIT` — no tracking
+/// insert (seeds are not history). Any failure rolls back (best-effort) and reports the file.
+fn seed_one(driver: &mut dyn SqlDriver, file: &Migration) -> Result<(), MigrateError> {
+    driver.execute_batch("BEGIN").map_err(MigrateError::Db)?;
+    match driver.execute_batch(&file.sql) {
+        Ok(()) => driver.execute_batch("COMMIT").map_err(MigrateError::Db),
+        Err(message) => {
+            let _ = driver.execute_batch("ROLLBACK");
+            Err(MigrateError::Seed {
+                filename: file.name.clone(),
+                message,
+            })
+        }
+    }
+}
+
+/// Run seeds **only**, requiring the schema to be up to date first: if any migration under
+/// `migrations` is still pending, returns [`MigrateError::PendingMigrations`] and runs no seed
+/// (seeding a stale schema is a footgun). Backs `noeta migrate seed`. Runs the migration integrity
+/// gates (via [`plan`]) as part of the pending check, so a drifted/deleted migration still errors.
+pub fn seed_only(
+    driver: &mut dyn SqlDriver,
+    migrations: &[Migration],
+    seeds: &[Migration],
+) -> Result<Vec<String>, MigrateError> {
+    ensure_tracking_table(driver)?;
+    let applied = read_applied(driver)?;
+    let plan = plan(migrations, &applied)?;
+    if !plan.pending.is_empty() {
+        return Err(MigrateError::PendingMigrations {
+            pending: plan.pending.len(),
+        });
+    }
+    seed(driver, seeds)
+}
+
 /// Build the filename for a new migration: `{prefix}_{slug}.sql`, where `slug` is `name` lowercased
 /// with every run of non-alphanumeric characters collapsed to a single `_`. Pure (the caller supplies
 /// the timestamp `prefix`), so it is testable without a clock.
@@ -413,6 +490,12 @@ pub fn scaffold_filename(prefix: &str, name: &str) -> Result<String, MigrateErro
 /// The starter body written into a freshly scaffolded migration file.
 pub const SCAFFOLD_TEMPLATE: &str = "-- Migration: write forward-only SQL below. This file's contents are checksummed once applied,\n\
      -- so edit it only before it runs; make later changes in a new migration.\n";
+
+/// The starter body written into a freshly scaffolded seed file — re-runnable dev data, so it
+/// documents the idempotent-insert idiom inline.
+pub const SEED_SCAFFOLD_TEMPLATE: &str = "-- Seed: re-runnable development data. This file runs on every `noeta migrate seed` / `--seed`,\n\
+     -- each in its own transaction, and is NOT tracked. Make inserts idempotent so a re-run is a\n\
+     -- no-op: `INSERT OR IGNORE` on SQLite, `... ON CONFLICT DO NOTHING` on Postgres.\n";
 
 #[cfg(test)]
 mod tests {
@@ -510,6 +593,14 @@ mod tests {
         let b = migration("0002_b.sql", "SELECT 2;");
         let plan = plan(&[a, b], &[]).unwrap();
         assert_eq!(plan.pending, vec![0, 1]);
+    }
+
+    #[test]
+    fn seed_scaffold_template_documents_the_idempotent_idiom() {
+        // The seed starter body names both drivers' idempotent-insert idioms, so a re-run is a no-op.
+        assert!(SEED_SCAFFOLD_TEMPLATE.contains("INSERT OR IGNORE"));
+        assert!(SEED_SCAFFOLD_TEMPLATE.contains("ON CONFLICT DO NOTHING"));
+        assert!(SEED_SCAFFOLD_TEMPLATE.contains("NOT tracked"));
     }
 
     #[test]
@@ -702,6 +793,126 @@ mod sqlite_e2e {
         let err = apply(&mut driver, &edited).unwrap_err();
         assert!(matches!(err, MigrateError::ChecksumDrift { .. }));
     }
+
+    fn count(driver: &mut dyn SqlDriver, table: &str) -> i64 {
+        let rows = driver
+            .query(&format!("SELECT COUNT(*) AS n FROM {table}"), &[])
+            .unwrap();
+        match rows[0][0].1 {
+            SqlValue::Int(n) => n,
+            ref other => panic!("expected an int count, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seeds_run_in_filename_order_and_are_never_tracked() {
+        let mut driver = mem();
+        apply(&mut driver, &migrations()).unwrap();
+
+        let seeds = vec![
+            Migration::new(
+                "0002_b.sql",
+                "INSERT INTO users (id, name) VALUES (2, 'Bob');",
+            ),
+            Migration::new(
+                "0001_a.sql",
+                "INSERT INTO users (id, name) VALUES (1, 'Ada');",
+            ),
+        ];
+        // `load_dir` sorts; `seed` runs whatever order it is handed — so sort first, like the callers.
+        let mut ordered = seeds.clone();
+        ordered.sort_by(|a, b| a.name.cmp(&b.name));
+        let ran = seed(&mut driver, &ordered).unwrap();
+        assert_eq!(ran, vec!["0001_a.sql", "0002_b.sql"]);
+        assert_eq!(count(&mut driver, "users"), 2);
+
+        // Seeds are NOT recorded in the tracking table — they are re-runnable data, not history.
+        let tracked = driver
+            .query(
+                &format!("SELECT filename FROM {TRACKING_TABLE} ORDER BY filename"),
+                &[],
+            )
+            .unwrap();
+        let names: Vec<_> = tracked.iter().map(|r| column_text(r, "filename")).collect();
+        assert_eq!(names, vec!["0001_users.sql", "0002_posts.sql"]);
+    }
+
+    #[test]
+    fn a_plain_seed_reruns_every_time_but_an_idempotent_one_is_a_noop() {
+        let mut driver = mem();
+        apply(&mut driver, &migrations()).unwrap();
+
+        // A plain INSERT re-inserts on every run (idempotency is the author's concern).
+        let plain = vec![Migration::new(
+            "0001_plain.sql",
+            "INSERT INTO posts (id, title) VALUES (2, 'again');",
+        )];
+        seed(&mut driver, &plain).unwrap();
+        seed(&mut driver, &plain).unwrap_err(); // second run trips the PK — proves it re-ran
+
+        // The documented idempotent idiom makes a re-run a no-op.
+        let idempotent = vec![Migration::new(
+            "0001_idem.sql",
+            "INSERT OR IGNORE INTO posts (id, title) VALUES (3, 'once');",
+        )];
+        seed(&mut driver, &idempotent).unwrap();
+        let after_first = count(&mut driver, "posts");
+        seed(&mut driver, &idempotent).unwrap();
+        assert_eq!(count(&mut driver, "posts"), after_first);
+    }
+
+    #[test]
+    fn a_failing_seed_stops_and_leaves_the_prior_committed() {
+        let mut driver = mem();
+        apply(&mut driver, &migrations()).unwrap();
+
+        let seeds = vec![
+            Migration::new(
+                "0001_ok.sql",
+                "INSERT INTO users (id, name) VALUES (1, 'Ada');",
+            ),
+            Migration::new("0002_bad.sql", "NONSENSE SQL HERE;"),
+        ];
+        let err = seed(&mut driver, &seeds).unwrap_err();
+        match err {
+            MigrateError::Seed { filename, .. } => assert_eq!(filename, "0002_bad.sql"),
+            other => panic!("expected a seed error, got {other:?}"),
+        }
+        // The first seed committed before the second failed.
+        assert_eq!(count(&mut driver, "users"), 1);
+    }
+
+    #[test]
+    fn seed_only_refuses_when_a_migration_is_pending() {
+        let mut driver = mem();
+        // Apply only the first migration, leaving the second pending.
+        let migrations = migrations();
+        apply(&mut driver, &migrations[..1]).unwrap();
+
+        let seeds = vec![Migration::new(
+            "0001_a.sql",
+            "INSERT INTO users (id, name) VALUES (1, 'Ada');",
+        )];
+        let err = seed_only(&mut driver, &migrations, &seeds).unwrap_err();
+        assert_eq!(err, MigrateError::PendingMigrations { pending: 1 });
+        // No seed ran — `users` is empty (the schema exists from the first migration).
+        assert_eq!(count(&mut driver, "users"), 0);
+    }
+
+    #[test]
+    fn seed_only_runs_seeds_once_the_schema_is_current() {
+        let mut driver = mem();
+        let migrations = migrations();
+        apply(&mut driver, &migrations).unwrap();
+
+        let seeds = vec![Migration::new(
+            "0001_a.sql",
+            "INSERT INTO users (id, name) VALUES (1, 'Ada');",
+        )];
+        let ran = seed_only(&mut driver, &migrations, &seeds).unwrap();
+        assert_eq!(ran, vec!["0001_a.sql"]);
+        assert_eq!(count(&mut driver, "users"), 1);
+    }
 }
 
 /// A full migration round-trip against a **live** PostgreSQL, run only when `NOETA_PG_TEST_DSN` is set
@@ -747,6 +958,30 @@ mod postgres_e2e {
         // Status reports both applied.
         let st = status(&mut driver, &migrations).unwrap();
         assert!(st.iter().all(|s| s.applied));
+
+        // Seeds run against the up-to-date schema, untracked and re-runnable via the Postgres idiom.
+        let seeds = vec![Migration::new(
+            "0001_widgets.sql",
+            "INSERT INTO widgets (id, name) VALUES (3, 'gamma') ON CONFLICT DO NOTHING;",
+        )];
+        let ran = seed_only(&mut driver, &migrations, &seeds).unwrap();
+        assert_eq!(ran, vec!["0001_widgets.sql"]);
+        assert_eq!(
+            driver
+                .query("SELECT COUNT(*) AS n FROM widgets", &[])
+                .unwrap()[0][0]
+                .1,
+            SqlValue::Int(3)
+        );
+        // Re-running the idempotent seed is a no-op (ON CONFLICT DO NOTHING), and it was never tracked.
+        seed(&mut driver, &seeds).unwrap();
+        assert_eq!(
+            driver
+                .query("SELECT COUNT(*) AS n FROM widgets", &[])
+                .unwrap()[0][0]
+                .1,
+            SqlValue::Int(3)
+        );
 
         // Reset wipes and re-applies.
         let reapplied = reset(&mut driver, &migrations).unwrap();

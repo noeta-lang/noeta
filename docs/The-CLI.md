@@ -199,8 +199,9 @@ Parses and type-checks without running or building — the CI/pre-commit gate (t
 ## `noeta migrate`
 
 ```text
-noeta migrate [--db <dsn>] [--dir <path>] [--status] [--dry-run] [--reset [--yes]]
-noeta migrate new <name> [--dir <path>]
+noeta migrate [--db <dsn>] [--dir <path>] [--seeds-dir <path>] [--status] [--dry-run] [--seed] [--reset [--yes]]
+noeta migrate new <name> [--seed] [--dir <path>]
+noeta migrate seed [--db <dsn>] [--dir <path>] [--seeds-dir <path>]
 ```
 
 Applies a project's **plain-SQL migrations** (the para/db layer). Migrations are `.sql` files in a
@@ -208,7 +209,7 @@ Applies a project's **plain-SQL migrations** (the para/db layer). Migrations are
 failure rolls that migration back and stops, naming the file. An applied migration is tracked in a
 `_noeta_migrations` table by a sha256 checksum of its contents — editing an already-applied file, or
 deleting one, is a hard error (history is immutable). Migrations are **forward-only** (no down files):
-`--reset` covers the development loop.
+`--reset` (plus `--seed`) covers the development loop.
 
 | invocation | effect |
 | --- | --- |
@@ -216,7 +217,18 @@ deleting one, is a hard error (history is immutable). Migrations are **forward-o
 | `noeta migrate --status` | list which migrations are applied and which are pending |
 | `noeta migrate --dry-run` | list what would be applied, without touching the database |
 | `noeta migrate new <name>` | scaffold `migrations/<UTC-timestamp>_<name>.sql` |
+| `noeta migrate new --seed <name>` | scaffold `seeds/<UTC-timestamp>_<name>.sql` |
+| `noeta migrate --seed` | apply pending migrations, then run the seed files |
+| `noeta migrate seed` | run the seed files ONLY (errors if any migration is pending) |
 | `noeta migrate --reset --yes` | DESTRUCTIVE: drop the schema and re-apply from zero |
+| `noeta migrate --reset --seed --yes` | the full dev loop: reset → migrate → seed |
+
+**Seeds** are re-runnable development data — plain `.sql` files in a `seeds/` directory, ordered like
+migrations and applied *after* them. Unlike migrations they are **never tracked**: they run in
+filename order, each in its own transaction, **every time** they are invoked, so idempotency is the
+seed author's job (`INSERT OR IGNORE` on SQLite / `... ON CONFLICT DO NOTHING` on Postgres makes a
+re-run a no-op). `noeta migrate seed` runs seeds only and refuses when any migration is still pending
+(seeding a stale schema is a footgun).
 
 The **connection string** is resolved, highest priority first: the `--db <dsn>` flag, the
 `DATABASE_URL` environment variable, then a `[db]` table in `noeta.toml`:
@@ -225,16 +237,19 @@ The **connection string** is resolved, highest priority first: the `--db <dsn>` 
 [db]
 url = "sqlite:app.db"        # any dsn scheme db.connect accepts (sqlite:… / postgres://…)
 migrations = "migrations"    # optional; the migrations directory (default "migrations")
+seeds = "seeds"              # optional; the seeds directory (default "seeds")
 ```
 
-`--dir` overrides the directory per-invocation. `--reset` drops and recreates the schema — on SQLite
-it drops every user table/view/trigger; on PostgreSQL it runs `DROP SCHEMA public CASCADE; CREATE
-SCHEMA public` — and refuses to run without `--yes` or an interactive `yes` typed at the prompt.
+`--dir` / `--seeds-dir` override the migrations / seeds directory per-invocation. `--reset` drops and
+recreates the schema — on SQLite it drops every user table/view/trigger; on PostgreSQL it runs `DROP
+SCHEMA public CASCADE; CREATE SCHEMA public` — and refuses to run without `--yes` or an interactive
+`yes` typed at the prompt.
 
-Exit codes: `0` success; `2` for a usage/config problem (no dsn configured, a missing migrations
-directory, an unconfirmed `--reset`); `1` for a run that failed (connect failure, a SQL error,
-checksum drift, a deleted migration). An app can migrate itself at boot off the same engine with
-`conn.migrate("migrations")` (see [para/db](https://github.com/…/packages/para-db)).
+Exit codes: `0` success; `2` for a usage/config problem (no dsn configured, a missing migrations or
+seeds directory, an unconfirmed `--reset`); `1` for a run that failed (connect failure, a SQL error,
+checksum drift, a deleted migration, or seeding while migrations are pending). An app can migrate and
+seed itself at boot off the same engine with `conn.migrate("migrations")` then `conn.seed("seeds")`
+(see [para/db](https://github.com/…/packages/para-db)).
 
 ## `noeta serve` and `--watch`
 

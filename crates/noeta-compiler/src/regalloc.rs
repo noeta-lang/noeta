@@ -487,7 +487,10 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::LoadPending { dst } | Op::ScopeBeginValue { dst, .. } => f.def = Some(*dst),
         Op::ScopeEndAt { src, .. } => f.uses.push(*src),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
-        Op::AttributesOf { dst, .. } => f.def = Some(*dst),
+        Op::AttributesOf { dst, dynamic, .. } => {
+            f.def = Some(*dst);
+            f.uses.extend(dynamic.iter().copied());
+        }
         Op::RolesOf { dst, .. } => f.def = Some(*dst),
         Op::ParamsOf { dst, src } => {
             f.def = Some(*dst);
@@ -561,9 +564,12 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*callee);
             f.uses.extend(args.iter().copied());
         }
-        Op::TypedModuleCall { dst, args, .. } => {
+        Op::TypedModuleCall {
+            dst, args, dynamic, ..
+        } => {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
+            f.uses.extend(dynamic.iter().copied());
         }
         Op::DecodeTyped {
             dst, name, text, ..
@@ -979,7 +985,12 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::LoadPending { dst } | Op::ScopeBeginValue { dst, .. } => m(dst),
         Op::ScopeEndAt { src, .. } => m(src),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
-        Op::AttributesOf { dst, .. } => m(dst),
+        Op::AttributesOf { dst, dynamic, .. } => {
+            m(dst);
+            if let Some(slot) = dynamic {
+                m(slot);
+            }
+        }
         Op::RolesOf { dst, .. } => m(dst),
         Op::ParamsOf { dst, src } => {
             m(dst);
@@ -1041,10 +1052,15 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
                 m(r);
             }
         }
-        Op::TypedModuleCall { dst, args, .. } => {
+        Op::TypedModuleCall {
+            dst, args, dynamic, ..
+        } => {
             m(dst);
             for r in args.iter_mut() {
                 m(r);
+            }
+            if let Some(slot) = dynamic {
+                m(slot);
             }
         }
         Op::DecodeTyped {

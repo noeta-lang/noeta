@@ -1054,6 +1054,21 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    /// An **explicitly instantiated call of a user generic function** — the general turbofish
+    /// `f::<T, ...>(args)` (poly-values F2). `name` is the callee (a bare identifier — generic
+    /// methods do not exist: a method is generic over its class's parameters only, so the surface
+    /// is free functions); `type_args` are the explicit instantiations, bound to the function's
+    /// declared type parameters in order (arity-checked, E0058). Explicit arguments WIN over
+    /// argument-derived inference; a conflict surfaces as the ordinary argument-assignability
+    /// E0007 against the substituted parameter. Erased at runtime like every generic call — this
+    /// lowers exactly as the plain `f(args)` does.
+    TypedCall {
+        name: String,
+        name_span: Span,
+        type_args: Vec<TypeRef>,
+        args: Vec<Expr>,
+        span: Span,
+    },
     /// The reflection query `roles_of()` / `roles_of::<RoleEnum>()` — the compiler-built
     /// `(declaration, Role)` index (P2.7), returned as a `List<RoleBinding>` (each
     /// `{ target: string, role: Role }`). Compile-time resolved from the attribute manifest's
@@ -1391,6 +1406,7 @@ impl Expr {
             | Expr::FromBytes { span, .. }
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
+            | Expr::TypedCall { span, .. }
             | Expr::RolesOf { span, .. }
             | Expr::ParamsOf { span, .. }
             | Expr::Invoke { span, .. }
@@ -1492,6 +1508,8 @@ impl Expr {
                 ..
             } => recv.mentions(name) || n.mentions(name) || args.mentions(name),
             Expr::TypedModuleCall { recv, args, .. } => recv.mentions(name) || any(args),
+            // The callee is a top-level fn name, never a local binding, so only the arguments count.
+            Expr::TypedCall { args, .. } => any(args),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),
@@ -1581,6 +1599,7 @@ impl Expr {
                 recv, name, args, ..
             } => recv.has_await() || name.has_await() || args.has_await(),
             Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any(args),
+            Expr::TypedCall { args, .. } => any(args),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.has_await() || value.has_await(),

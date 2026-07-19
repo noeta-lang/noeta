@@ -1,0 +1,21 @@
+// F1: a generic function value instantiates against a declared `Fn`-typed FIELD and a declared
+// `Fn`-typed PARAMETER — the two boundary positions beyond a plain binding. The field call goes
+// through the field-access-then-call desugar; the parameter call is an ordinary indirect call.
+// expect: stdout "[3, 3]"
+// expect: stdout "[\"a\", \"a\"]"
+// expect: exit 0
+fn pair<T>(x: T): List<T> {
+    return [x, x];
+}
+
+struct Ops {
+    op: (int) -> List<int>
+}
+
+o = Ops { op: pair };
+echo o.op(3);
+
+fn apply(f: (string) -> List<string>, s: string): List<string> {
+    return f(s);
+}
+echo apply(pair, "a");

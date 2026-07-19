@@ -1,0 +1,47 @@
+// F2b forwarding to the intrinsics: `attributes_of::<T>()` inside a generic fn resolves the
+// concrete attribute type PER-INSTANTIATION through the same hidden slot as a recipe forward
+// (the manifest is name-keyed, so the slot carries the instantiation's name); `channel::<T>` needs
+// no runtime data at all (the message type is checker-only), so it forwards trivially.
+// expect: stdout "handler GET"
+// expect: stdout "worker 3"
+// expect: stdout "9"
+// expect: exit 0
+@attribute
+struct Route {
+    method: string
+}
+
+@attribute
+struct Retry {
+    times: int
+}
+
+#[Route("GET")]
+fn handler(): string {
+    return "ok"
+}
+
+#[Retry(3)]
+fn worker(): string {
+    return "ok"
+}
+
+fn describe<T>(render: (T) -> string): List<string> {
+    mut out: List<string> = []
+    for a in attributes_of::<T>() {
+        out = out ~ ["${a.target} ${render(a.value)}"]
+    }
+    return out
+}
+
+echo describe::<Route>(fn(r) => r.method)[0]
+echo describe::<Retry>(fn(r) => "${r.times}")[0]
+
+async fn relay<T>(v: T): T {
+    (tx, rx) = channel::<T>(1)
+    tx.send(v).await
+    r = rx.recv().await
+    return r ?? v
+}
+
+echo relay::<int>(9).await

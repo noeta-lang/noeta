@@ -1154,6 +1154,11 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
                 hoist_in_expr(a, pre, ctr);
             }
         }
+        Expr::TypedCall { args, .. } => {
+            for a in args {
+                hoist_in_expr(a, pre, ctr);
+            }
+        }
         Expr::FieldSet {
             receiver, value, ..
         } => {

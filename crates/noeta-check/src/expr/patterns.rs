@@ -9,7 +9,7 @@ impl Checker {
     /// is consumed — a binding RHS, an argument, an operand, a `return`), and `false` only when it
     /// is the whole of an expression statement (its value discarded). Block-bodied arms (aether F1)
     /// produce no value — blocks are statement sequences in Noeta — so in value position they are a
-    /// hard error (E0058) rather than silently contributing `unit`; in statement position they are
+    /// hard error (E0059) rather than silently contributing `unit`; in statement position they are
     /// the intended side-effect form.
     pub(crate) fn synth_match(
         &mut self,
@@ -38,7 +38,7 @@ impl Checker {
                 noeta_ast::ClosureBody::Expr(e) => self.synth(e, env),
                 // A statement-block arm (aether F1): check its statements in the arm scope; the
                 // arm's value is `unit`. In value position that is a silent value loss — blocks
-                // never produce values — so reject it (E0058).
+                // never produce values — so reject it (E0059).
                 noeta_ast::ClosureBody::Block(stmts) => {
                     if value_used {
                         self.error(
@@ -157,7 +157,7 @@ impl Checker {
             ForPattern::Single { name, name_span } => {
                 self.check_reserved_name(name, *name_span);
                 // The loop variable lands in the loop's just-pushed frame — any env hit is a
-                // shadow (E0058).
+                // shadow (E0059).
                 self.check_shadow(name, *name_span, env, crate::ShadowScopes::All);
                 bind(env, name, elem)
             }
@@ -193,7 +193,7 @@ impl Checker {
                 if name != "none" {
                     self.check_reserved_name(name, *span);
                     // A match-pattern binding lands in the arm's just-pushed frame — any env hit
-                    // is a shadow (E0058).
+                    // is a shadow (E0059).
                     self.check_shadow(name, *span, env, crate::ShadowScopes::All);
                 }
                 bind(env, name, ty.clone())

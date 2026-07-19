@@ -591,10 +591,15 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(name);
             f(args);
         }
-        Rvalue::TypedModuleCall { args, .. } => args.iter().for_each(&mut *f),
+        Rvalue::TypedModuleCall { args, dynamic, .. } => {
+            args.iter().for_each(&mut *f);
+            // The hidden type-argument slot (F2b) is a read — a closure inside a forwarding fn
+            // captures it like any local.
+            dynamic.iter().for_each(&mut *f);
+        }
+        Rvalue::AttributesOf { dynamic, .. } => dynamic.iter().for_each(&mut *f),
         // No operands (or handled elsewhere).
         Rvalue::Closure { .. }
-        | Rvalue::AttributesOf { .. }
         | Rvalue::RolesOf { .. }
         | Rvalue::ModuleFn { .. }
         | Rvalue::NativeModule { .. } => {}

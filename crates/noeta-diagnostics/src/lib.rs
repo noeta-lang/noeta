@@ -251,6 +251,12 @@ pub enum DiagnosticCode {
     /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
     /// error type, or align the function's declared error type.
     TryErrorMismatch,
+    /// An explicit turbofish instantiation (`f::<T, ...>(args)`) that cannot apply: the callee is
+    /// not a generic function (or not a function at all), or the number of type arguments does not
+    /// match the function's declared type parameters. Type arguments bind to the declaration's
+    /// parameters in order; supply exactly one per parameter, or drop the turbofish and let the
+    /// arguments infer them.
+    InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,
     /// or an imported name. **One name, one meaning, per scope stack**: assignment already never
@@ -320,6 +326,7 @@ impl DiagnosticCode {
         DiagnosticCode::MatchArmNotValue,
         DiagnosticCode::AwaitCancelled,
         DiagnosticCode::TryErrorMismatch,
+        DiagnosticCode::InvalidTypeArguments,
         DiagnosticCode::ShadowedBinding,
     ];
 
@@ -384,7 +391,8 @@ impl DiagnosticCode {
             DiagnosticCode::MatchArmNotValue => "E0055",
             DiagnosticCode::AwaitCancelled => "E0056",
             DiagnosticCode::TryErrorMismatch => "E0057",
-            DiagnosticCode::ShadowedBinding => "E0058",
+            DiagnosticCode::InvalidTypeArguments => "E0058",
+            DiagnosticCode::ShadowedBinding => "E0059",
         }
     }
 

@@ -136,7 +136,7 @@ xs: List<int> = [1, 2, 3]
 count: int = 3
 ```
 
-**There is no shadowing** — one name means one thing per scope stack (E0058). A binder — a closure parameter, `for` variable, or match-pattern binding — may not reuse a name already bound in a scope it can see, and a binding may not reuse an imported name (E0020); rename one side. A plain `name = expr` never introduces a second binding either: the first use in a scope declares it, and a later one (in the same or an inner scope) reassigns it — E0006 if it is immutable, E0007 if the type would change. Named functions make this ergonomic by being **sealed** — their bodies don't see surrounding value bindings at all (import one explicitly with `use (…)`), so their parameters conflict with nothing. See [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).
+**There is no shadowing** — one name means one thing per scope stack (E0059). A binder — a closure parameter, `for` variable, or match-pattern binding — may not reuse a name already bound in a scope it can see, and a binding may not reuse an imported name (E0020); rename one side. A plain `name = expr` never introduces a second binding either: the first use in a scope declares it, and a later one (in the same or an inner scope) reassigns it — E0006 if it is immutable, E0007 if the type would change. Named functions make this ergonomic by being **sealed** — their bodies don't see surrounding value bindings at all (import one explicitly with `use (…)`), so their parameters conflict with nothing. See [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).
 
 **Compound assignment** `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`:
 
