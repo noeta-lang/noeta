@@ -257,6 +257,12 @@ struct SchedState {
     /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
     /// so the differential is indifferent to it by construction.
     ctx_current: Vec<u64>,
+    /// The **strand** currently executing (DAP worker debugging): main is `1`; the scheduler swaps
+    /// a worker-isolate task's strand in around each poll (mirroring `ctx_current`) so the debugger
+    /// reports a breakpoint inside a worker against that worker's DAP thread. `1` outside a polled
+    /// isolate, and `next_strand` (from `2`) hands out ids at each cooperative `isolate` spawn.
+    current_strand: u32,
+    next_strand: u32,
     /// Whether telemetry is enabled, cached from the host at load (native-otel T5d perf): the
     /// enabled state is fixed per host (env-derived at construction), and the channel send/recv
     /// hot paths gate on it — a cached bool is one predictable branch instead of a virtual call.

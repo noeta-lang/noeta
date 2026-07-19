@@ -881,11 +881,13 @@ impl<'m> Vm<'m> {
         // boundary, so `before_op` can't fire while it runs. `None` on every non-profiled run — one
         // predicted branch. `self.module` (a `Copy` `&'m Module`) and `self.profiler` are disjoint
         // fields, borrowed independently of the `frames`/`regs` params.
+        let strand = self.sched.current_strand;
         if let Some(prof) = self.profiler.as_mut() {
             let view = DebugView {
                 module: self.module,
                 frames: &frames[..],
                 regs: &regs[..],
+                strand,
             };
             prof.on_jit_enter(&view, proto as u32);
         }
@@ -917,6 +919,7 @@ impl<'m> Vm<'m> {
                 module: self.module,
                 frames: &frames[..],
                 regs: &regs[..],
+                strand,
             };
             prof.on_jit_exit(&view);
         }

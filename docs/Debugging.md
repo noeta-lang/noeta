@@ -35,6 +35,9 @@ pauses before the first instruction.
 | Capability | Notes |
 |---|---|
 | **Line breakpoints** | Set on any executable line — including lines that compile to spanless instructions (a bare `return x`): a debug-only line table maps every statement. A line with no code (blank, comment) simply doesn't bind. |
+| **Conditional breakpoints** | A breakpoint may carry a **condition** — any boolean expression, evaluated in the paused frame's context on each arrival (the same engine watches use, so it reads frame locals and calls program functions). The breakpoint pauses only when the condition is true. A condition that fails to evaluate **stops anyway** and surfaces the error (DAP convention — never silently skip). |
+| **Hit-count breakpoints** | A breakpoint may carry a **hit count** — `N` / `>=N` (from the Nth hit), `>N`, `=N`/`==N`, `<N`, `<=N`, or `%N` (every Nth). The count advances each time the location is reached *with its condition true*, so conditions and hit counts compose. An unparseable hit count is reported on the breakpoint and it degrades to every-hit. |
+| **Worker-isolate threads** | Each live worker `isolate` appears as its own debug **thread** (named after the spawned function). A breakpoint inside worker code stops on that worker's thread; its stack, locals, watches, and stepping all work there. See [Worker isolates and the all-stop model](#worker-isolates-and-the-all-stop-model). |
 | **Stop on entry** | Pause before the first instruction runs. |
 | **Stepping** | Step over / into / out, **line-granular**: one press advances one visible source line, calls are skipped or descended into as the mode says. |
 | **Call stack** | Every frame with its function name and source position — including frames from functions defined in other modules. |
@@ -142,6 +145,36 @@ the same evaluator, gated twice:
 If a hover shows nothing where you expected a value, evaluate the same expression in a watch or the
 console — those are allowed to run code.
 
+## Worker isolates and the all-stop model
+
+A program that spawns worker isolates (`isolate f(args)`) is fully debuggable: each live worker
+shows up as its own thread in the debugger's Threads view (named after the function it runs), you can
+set breakpoints inside worker code, and when one hits, the debugger pauses on **that worker's
+thread** — its call stack, locals, watches, and stepping all work exactly as they do on the main
+program.
+
+The pause model is **all-stop**: pausing any thread pauses the whole program, and one *Continue*
+resumes it — like the default in gdb and many embedded debuggers. This is a deliberate,
+sound choice for the debugger, not a limitation of the language:
+
+- Under the debugger, worker isolates run **cooperatively on the debug thread** (a single VM, tier-0,
+  JIT unarmed) rather than as the separate OS threads a production `noeta run` uses — the same
+  "trade real-runtime detail for full observability" bargain the debugger already makes by disabling
+  the JIT. Isolates are semantically identical either way (the language's isolate semantics are
+  defined by the cooperative model the differential oracle runs), so you debug the canonical
+  behavior.
+- All-stop then falls out for free and is sound: with one thread there is no cross-thread state to
+  capture from a running sibling, and no risk of a paused worker deadlocking a sibling that is
+  waiting on its channel. Pausing one real OS thread while others run would court exactly those
+  hazards with a debugger attached.
+- Every strand shares the one debug session, so conditional breakpoints, watches, the debug console,
+  and `setVariable` all work inside worker frames, not just on the main program.
+
+Threads come and go as isolates spawn and finish; the Threads view updates with `thread` started /
+exited events. A thread that is *suspended* (an isolate awaiting a channel, or the main program
+awaiting a worker) has no live frames to show while another thread is the one stopped — that is the
+nature of cooperative strands, and it is why the stopped thread is the one whose stack you inspect.
+
 ## Under the hood (short version)
 
 - **Tier-0 execution.** A debug session never arms the JIT; the interpreter exposes a real program
@@ -159,8 +192,13 @@ console — those are allowed to run code.
 
 ## Current limitations
 
-- No conditional / hit-count / logpoint breakpoints, and no data or exception breakpoints.
+- No logpoint breakpoints, and no data or exception breakpoints. (Conditional and hit-count
+  breakpoints **are** supported — see [What works](#what-works).)
 - Column-precise breakpoints are not supported; breakpoints are line-granular.
-- Debugging real OS-thread `isolate`s is out of scope for now: debug the main isolate; worker
-  isolates run to completion undebugged.
+- Under the debugger, worker isolates run cooperatively on the debug thread rather than as separate
+  OS threads, and pausing is **all-stop** — see [Worker isolates and the all-stop
+  model](#worker-isolates-and-the-all-stop-model). A race that only manifests under true OS-thread
+  parallelism is therefore not reproducible under the debugger (as with any single-stepping
+  debugger).
 - The debugger is launch-only (no attach): it always starts the program itself.
+- No reverse debugging (stepping backward / replay).
