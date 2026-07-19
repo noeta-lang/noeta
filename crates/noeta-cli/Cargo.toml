@@ -60,6 +60,8 @@ toml = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `noeta fmt --diff` renders unified diffs of the pending reformat.
+similar = { workspace = true }
 
 [features]
 # The shipped `lang` binary is JIT-enabled by default (milestone P-JIT): real-host `lang run`/

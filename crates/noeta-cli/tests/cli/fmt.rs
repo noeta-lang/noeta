@@ -61,3 +61,47 @@ fn fmt_declines_unparseable_source() {
         .code(1)
         .stderr(predicate::str::contains("does not parse"));
 }
+
+#[test]
+fn fmt_diff_prints_unified_diff_and_exits_nonzero() {
+    let dir = fmt_dir("diff");
+    let file = dir.join("a.noe");
+    std::fs::write(&file, "echo   1\n").unwrap();
+    lang()
+        .args(["fmt", "--diff"])
+        .arg(&file)
+        .assert()
+        .code(1)
+        // A unified diff: file headers + a hunk marker + the -/+ line pair.
+        .stdout(predicate::str::contains("--- a/"))
+        .stdout(predicate::str::contains("+++ b/"))
+        .stdout(predicate::str::contains("@@"))
+        .stdout(predicate::str::contains("-echo   1"))
+        .stdout(predicate::str::contains("+echo 1"));
+    // --diff must not modify the file.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "echo   1\n");
+}
+
+#[test]
+fn fmt_diff_is_silent_and_succeeds_when_clean() {
+    let dir = fmt_dir("diff_clean");
+    let file = dir.join("a.noe");
+    std::fs::write(&file, "echo 1\n").unwrap();
+    lang()
+        .args(["fmt", "--diff"])
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(""); // already canonical → no diff, empty output, exit 0
+}
+
+#[test]
+fn fmt_diff_over_stdin() {
+    lang()
+        .args(["fmt", "--diff", "--stdin"])
+        .write_stdin("echo   1\n")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("-echo   1"))
+        .stdout(predicate::str::contains("+echo 1"));
+}

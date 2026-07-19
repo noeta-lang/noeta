@@ -33,8 +33,11 @@
 //! - **Continuation** a statement broken across lines (pipelines `|>`, method / binary chains)
 //!   indents its continuation one 4-space level under the statement start.
 //! - **Wrapping** off by default ([`FmtConfig::wrap`]); when on, groups break at
-//!   [`FmtConfig::line_width`]. Off means author line breaks are respected, so an already-sane file
-//!   is untouched — which is why the existing corpus needs no reflow.
+//!   [`FmtConfig::line_width`] — over-width collections, argument/parameter lists, pipelines, binary
+//!   chains, method chains, and union types each break one element per line. Off means author line
+//!   breaks are respected, so an already-sane file is untouched — the existing corpus needs no reflow.
+//! - **`// fmt: off` / `// fmt: on`** (own-line markers) fence a verbatim region: the source between
+//!   them is emitted byte-for-byte, un-formatted; an unmatched `off` runs to the end of its scope.
 //! - **`match` arrows** [`FmtConfig::match_arm_arrows`]: `compact` (default) or `align`.
 //!
 //! # Correctness invariants (property-tested over the `.noe` corpus)
@@ -53,9 +56,10 @@
 //! [`doc`] algebra) — total over every parseable program (precedence-minimal parentheses,
 //! restricted-head handling, list-spread re-sugaring, per-member `;`, config-driven match-arm
 //! alignment), **comment reattachment** (leading / trailing / dangling), and **width-driven wrapping**
-//! ([`FmtConfig::wrap`]: default off keeps author breaks and is byte-stable; on, delimited sequences
-//! and pipeline chains break at [`FmtConfig::line_width`]). Front-ends: `noeta fmt` (files/dirs,
-//! `--check`, `--stdin`) and the LSP `textDocument/formatting` provider.
+//! ([`FmtConfig::wrap`]: default off keeps author breaks and is byte-stable; on, delimited sequences,
+//! pipeline / binary / method chains, and union types break at [`FmtConfig::line_width`]) with
+//! **`// fmt: off`** verbatim regions. Front-ends: `noeta fmt` (files/dirs, `--check`, `--diff`,
+//! `--stdin`) and the LSP `textDocument/formatting` provider.
 
 use noeta_diagnostics::Diagnostic;
 use noeta_span::{Source, SourceId};
@@ -845,6 +849,126 @@ mod tests {
         assert_eq!(
             fmt_wrapped("y = aaaa |> bbbb() |> cccc() |> dddd()", 20).unwrap(),
             "y = aaaa\n    |> bbbb()\n    |> cccc()\n    |> dddd()\n"
+        );
+    }
+
+    #[test]
+    fn wrap_breaks_long_binary_chains_leading_operator() {
+        // Fits → flat.
+        assert_eq!(
+            fmt_wrapped("total = aa + bb + cc", 40).unwrap(),
+            "total = aa + bb + cc\n"
+        );
+        // Exceeds width → each operand on its own line, operator leading (continues the line, so it
+        // re-parses to the same left-nested sum).
+        assert_eq!(
+            fmt_wrapped("total = aaaa + bbbb + cccc + dddd", 20).unwrap(),
+            "total = aaaa\n    + bbbb\n    + cccc\n    + dddd\n"
+        );
+        // Idempotent, and re-parses (the safety gate would reject otherwise).
+        let once = fmt_wrapped("total = aaaa + bbbb + cccc + dddd", 20).unwrap();
+        assert_eq!(fmt_wrapped(&once, 20).unwrap(), once);
+    }
+
+    #[test]
+    fn wrap_keeps_precedence_parens_in_a_broken_chain() {
+        // A tighter-binding operand (`bbbb * cccc`) stays a single grouped unit on its line rather
+        // than being flattened into the `+` chain — precedence is preserved across the wrap.
+        assert_eq!(
+            fmt_wrapped("v = aaaa + bbbb * cccc + dddd", 22).unwrap(),
+            "v = aaaa\n    + bbbb * cccc\n    + dddd\n"
+        );
+    }
+
+    #[test]
+    fn wrap_breaks_long_method_chains() {
+        // Fits → flat.
+        assert_eq!(
+            fmt_wrapped("y = xs.map(f).filter(g)", 40).unwrap(),
+            "y = xs.map(f).filter(g)\n"
+        );
+        // Exceeds width → base on the first line, each `.method(…)` on its own indented line.
+        assert_eq!(
+            fmt_wrapped("y = items.map(square).filter(even).take(three)", 24).unwrap(),
+            "y = items\n    .map(square)\n    .filter(even)\n    .take(three)\n"
+        );
+        let once = fmt_wrapped("y = items.map(square).filter(even).take(three)", 24).unwrap();
+        assert_eq!(
+            fmt_wrapped(&once, 24).unwrap(),
+            once,
+            "chain wrap idempotent"
+        );
+    }
+
+    #[test]
+    fn wrap_leaves_single_method_call_inline() {
+        // A lone `.method()` (one dot-link) never chain-wraps — even over-width it stays on one line
+        // (nothing here is breakable), rather than putting the receiver on its own line.
+        assert_eq!(
+            fmt_wrapped("y = some_very_long_receiver_name.some_method()", 20).unwrap(),
+            "y = some_very_long_receiver_name.some_method()\n"
+        );
+    }
+
+    #[test]
+    fn wrap_does_not_resugar_a_set_literal_into_a_chain() {
+        // `#{…}` is a `[..].to_set()` desugar with a `.len()` chain — the set literal must survive.
+        assert_eq!(
+            fmt_wrapped("n = #{1, 2, 3}.len()", 40).unwrap(),
+            "n = #{1, 2, 3}.len()\n"
+        );
+    }
+
+    #[test]
+    fn wrap_breaks_long_union_types() {
+        // Fits → flat.
+        assert_eq!(
+            fmt_wrapped("x: Aa | Bb = y", 40).unwrap(),
+            "x: Aa | Bb = y\n"
+        );
+        // Exceeds width → each member on its own line with a leading `|`.
+        assert_eq!(
+            fmt_wrapped("x: Alpha | Beta | Gamma | Delta = y", 20).unwrap(),
+            "x: Alpha\n    | Beta\n    | Gamma\n    | Delta = y\n"
+        );
+    }
+
+    #[test]
+    fn fmt_off_region_is_verbatim() {
+        // Everything between `// fmt: off` and `// fmt: on` passes through byte-for-byte; code
+        // outside is formatted normally.
+        let src = "echo   1\n// fmt: off\nx   =    [ 1,2,  3 ]\ny=  2\n// fmt: on\necho   3\n";
+        let out = fmt(src).unwrap();
+        assert_eq!(
+            out,
+            "echo 1\n// fmt: off\nx   =    [ 1,2,  3 ]\ny=  2\n// fmt: on\necho 3\n"
+        );
+        // Idempotent.
+        assert_eq!(fmt(&out).unwrap(), out);
+    }
+
+    #[test]
+    fn fmt_off_without_on_runs_to_scope_end() {
+        // An unmatched `// fmt: off` disables formatting to the end of its scope.
+        let src = "fn f() {\n    // fmt: off\n    a   =  1\n    b= 2\n}\necho   9\n";
+        let out = fmt(src).unwrap();
+        assert!(
+            out.contains("    // fmt: off\n    a   =  1\n    b= 2\n"),
+            "got:\n{out}"
+        );
+        // The sibling statement outside the fn's scope is still formatted.
+        assert!(out.contains("echo 9\n"), "got:\n{out}");
+        assert_eq!(fmt(&out).unwrap(), out, "fmt-off idempotent");
+    }
+
+    #[test]
+    fn fmt_off_preserves_interior_comments() {
+        // A comment inside an off-region survives (byte-verbatim), not double-emitted.
+        let src = "// fmt: off\nx=1 // keep me\n// and me\n// fmt: on\necho  2\n";
+        let out = fmt(src).unwrap();
+        assert_eq!(
+            out,
+            "// fmt: off\nx=1 // keep me\n// and me\n// fmt: on\necho 2\n"
         );
     }
 
