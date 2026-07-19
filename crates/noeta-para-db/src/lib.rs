@@ -16,6 +16,7 @@
 
 pub mod conn;
 pub mod driver;
+pub mod migrate;
 #[cfg(feature = "ring-postgres")]
 pub mod pg;
 #[cfg(feature = "ring-sqlite")]

@@ -307,6 +307,23 @@ impl SqlDriver for PostgresDriver {
         Ok(out)
     }
 
+    fn execute_batch(&mut self, sql: &str) -> Result<(), String> {
+        // `batch_execute` runs the whole script (multiple `;`-separated statements) over the simple
+        // query protocol — no placeholder rewrite, so a migration body is executed verbatim in native
+        // Postgres SQL, and `BEGIN`/`COMMIT`/`ROLLBACK` issue cleanly.
+        self.client.batch_execute(sql).map_err(pg_err)
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        // The standard Postgres wipe: drop and recreate the `public` schema. This removes every table,
+        // view, sequence, function, and (crucially) the `_noeta_migrations` tracking table in one step,
+        // leaving an empty schema the runner then re-applies from zero. Targets `public` only; a project
+        // using other schemas resets those itself.
+        self.client
+            .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+            .map_err(pg_err)
+    }
+
     fn listen(&mut self, channel: &str) -> Result<(), String> {
         // `LISTEN` names an identifier, not a bind parameter, so the channel is quoted as one.
         self.client

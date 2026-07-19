@@ -112,7 +112,7 @@ pub fn db_dispatch(
 /// (the swappable-driver seam, DB0). `postgres://…` / `postgresql://…` → the PostgreSQL driver
 /// (`ring-postgres`); `sqlite::memory:` / `:memory:` → in-memory SQLite; `sqlite:PATH` or a bare path
 /// → a SQLite file (`ring-sqlite`). A scheme whose driver feature is off is a clear error.
-fn open_driver(dsn: &str) -> Result<Box<dyn SqlDriver>, String> {
+pub fn open_driver(dsn: &str) -> Result<Box<dyn SqlDriver>, String> {
     if dsn.starts_with("postgres://") || dsn.starts_with("postgresql://") {
         return open_postgres(dsn);
     }
