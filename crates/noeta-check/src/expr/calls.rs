@@ -395,8 +395,7 @@ impl Checker {
                     match fty {
                         Type::Fn { params, ret } => {
                             self.finalize_closure_args(&params, args, arg_exprs, env);
-                            let erased_import =
-                                params.is_empty() && matches!(*ret, Type::Dyn);
+                            let erased_import = params.is_empty() && matches!(*ret, Type::Dyn);
                             if !erased_import {
                                 self.check_args(&params, 0, args, arg_exprs, span, name);
                             }
@@ -558,7 +557,9 @@ impl Checker {
             .get(&(n.clone(), "call".to_string()))
             .cloned()
         {
-            return Some(self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, env));
+            return Some(
+                self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, env),
+            );
         }
         if self.symbols.types.contains(n) || self.symbols.enums.contains_key(n) {
             self.finalize_closure_args(&[], args, arg_exprs, env);

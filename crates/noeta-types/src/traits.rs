@@ -66,6 +66,11 @@ pub enum BuiltinTrait {
     Mergeable,
 }
 
+/// The required-method cell of [`Info`]: the method's name paired with its user-facing arity,
+/// where an arity of `None` is not pinned by the registry (`Callable`'s `call`). `None` overall =
+/// a marker trait with no hand-written method.
+pub type RequiredMethod = Option<(&'static str, Option<usize>)>;
+
 /// The per-variant metadata of a [`BuiltinTrait`]: the name users write, the single method an `impl`
 /// block must provide (with its user-facing arity, i.e. excluding the receiver), the infix operator
 /// it overloads (if any), and whether it may be derived.
@@ -77,7 +82,7 @@ struct Info {
     /// single hand-written method. The arity is itself an `Option`: `None` means the method's
     /// parameter count is **not pinned** by the registry — `Callable`'s `call` may take any number
     /// of parameters, since `obj(args)` forwards whatever the call site supplies.
-    required_method: Option<(&'static str, Option<usize>)>,
+    required_method: RequiredMethod,
     /// The infix operator this trait overloads, for the operator traits; `None` otherwise.
     operator: Option<BinaryOp>,
     /// Whether `@derive(Name)` is accepted for this trait.
@@ -92,7 +97,7 @@ impl BuiltinTrait {
         use BuiltinTrait::*;
         let (name, required_method, operator, derivable): (
             &'static str,
-            Option<(&'static str, Option<usize>)>,
+            RequiredMethod,
             Option<BinaryOp>,
             bool,
         ) = match self {
@@ -148,7 +153,7 @@ impl BuiltinTrait {
     /// The single method an `impl` block must provide (name + user-facing arity), or `None` for a
     /// marker trait whose behavior is fully synthesized. An arity of `None` means the parameter
     /// count is not pinned (`Callable`'s `call` takes whatever the object needs).
-    pub fn required_method(self) -> Option<(&'static str, Option<usize>)> {
+    pub fn required_method(self) -> RequiredMethod {
         self.info().required_method
     }
 
