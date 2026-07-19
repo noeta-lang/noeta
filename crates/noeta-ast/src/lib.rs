@@ -234,6 +234,12 @@ pub struct StructDecl {
     /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
     /// an ordinary declaration.
     pub packed: Option<PackedDirective>,
+    /// The `@validated` directive (validation arc): `Some(span)` marks this type so that literal
+    /// construction (`T { ... }`, incl. a record-update spread) from OUTSIDE its own `impl`/methods
+    /// is a compile error (`E0060`), forcing construction through a validating constructor. `None`
+    /// for an ordinary declaration. Construction inside the type's own methods stays legal, and the
+    /// recipe doors are exempt (they auto-validate).
+    pub validated: Option<Span>,
     pub span: Span,
 }
 
@@ -584,6 +590,11 @@ pub struct ClassDecl {
     /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
     /// an ordinary declaration.
     pub packed: Option<PackedDirective>,
+    /// The `@validated` directive (validation arc): `Some(span)` marks this class so that literal
+    /// construction (`T { ... }`, incl. a record-update spread) from OUTSIDE its own `impl`/methods
+    /// is a compile error (`E0060`), forcing construction through a validating constructor. `None`
+    /// for an ordinary declaration. See [`StructDecl::validated`].
+    pub validated: Option<Span>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.

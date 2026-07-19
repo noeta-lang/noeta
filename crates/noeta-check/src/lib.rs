@@ -859,6 +859,11 @@ struct Symbols {
     /// set, so it runs after `collect` has registered every declaration (a struct's `@role` may name
     /// a `@semantic` enum declared later in the file).
     semantic_enums: HashSet<String>,
+    /// Every struct/class marked `@validated` (validation arc): the types whose literal construction
+    /// (`T { ... }`, incl. a record-update spread) is barred OUTSIDE their own `impl`/methods
+    /// (`E0060`). The construction check consults this set; it runs after `collect` so a
+    /// `@validated` type declared later in the file is still recognized.
+    validated_types: HashSet<String>,
     /// The tier name-space (tier-providers T2): built-ins ∪ this program's `@tier` declarations.
     /// Built by [`Checker::check_tier_decls`] (which also validates each declaration, E0051); the
     /// in-place `TierBlock` arm resolves names and config attributes against it.

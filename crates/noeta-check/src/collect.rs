@@ -195,6 +195,9 @@ impl Checker {
                             self.symbols.column_structs.insert(r.name.clone());
                         }
                     }
+                    if r.validated.is_some() {
+                        self.symbols.validated_types.insert(r.name.clone());
+                    }
                     // A struct's `mut` fields are assignable via `x.f = v` (value-semantic, so the
                     // write is a copy-on-write rebind). Register them exactly as for a class; the
                     // binding-`mut` requirement that distinguishes the two is a slice-2 refinement.
@@ -266,6 +269,9 @@ impl Checker {
                         })
                         .collect();
                     self.symbols.records.insert(c.name.clone(), fields);
+                    if c.validated.is_some() {
+                        self.symbols.validated_types.insert(c.name.clone());
+                    }
                     let muts: HashSet<String> = c
                         .fields
                         .iter()

@@ -1,0 +1,15 @@
+// A `@validated` type literally constructed OUTSIDE its own `impl` is E0060 (validation arc slice
+// 3): the bare literal would bypass the invariant, so construction must go through a validating
+// constructor. The error points at the type name in the literal.
+// expect: error E0060 at 14:5
+// expect: exit 1
+@validated
+struct Email {
+    addr: string
+
+    impl Validate {
+        fn validate(): Result<void, string> { return Ok() }
+    }
+}
+e = Email { addr: "x@y" }
+echo e.addr

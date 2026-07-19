@@ -910,6 +910,34 @@ impl Checker {
                 // false instead).
             } => self.synth_match(scrutinee, arms, *span, env, true),
             Expr::Object(lit) => {
+                // `@validated` (validation arc): a `@validated` type may only be built from OUTSIDE
+                // its own `impl`/methods through a validating constructor. A bare literal or a
+                // record-update spread outside the type would bypass the invariant, so it is E0060.
+                // Construction inside the type's own methods (`current_type`) stays legal; the recipe
+                // doors never reach here (they materialize directly), so they remain exempt and
+                // auto-validate — that is the whole point.
+                if self.symbols.validated_types.contains(&lit.type_name)
+                    && self.coloring.current_type.as_deref() != Some(lit.type_name.as_str())
+                {
+                    let kind = if lit.spread.is_some() {
+                        "a record-update"
+                    } else {
+                        "literal construction"
+                    };
+                    self.error(
+                        DiagnosticCode::ValidatedConstruction,
+                        lit.type_name_span,
+                        format!(
+                            "`{}` is `@validated`: {kind} outside its own `impl` is not allowed",
+                            lit.type_name
+                        ),
+                    )
+                    .help(format!(
+                        "build `{0}` through one of its constructor functions (which runs \
+                         `validate()` and returns `Result<{0}, E>`)",
+                        lit.type_name
+                    ));
+                }
                 if let Some(spread) = &lit.spread {
                     self.synth(spread, env);
                 }

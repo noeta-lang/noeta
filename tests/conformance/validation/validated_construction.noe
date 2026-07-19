@@ -1,0 +1,67 @@
+// `@validated` static construction channeling (validation arc slice 3). A `@validated` struct/class
+// may only be built from OUTSIDE its own `impl` through a constructor that runs `validate()` and
+// returns `Result<T, E>`; a bare literal or record-update outside is a compile error (E0060, see the
+// negative tests). Inside the type's own methods, literal construction and record-update stay legal,
+// and the recipe doors (`json.parse` / `try_parse`) are exempt — they build directly and
+// auto-validate (slice 2). Purely static: no runtime cost, no expression-type change. Both backends.
+// expect: stdout "ok: a@b.com"
+// expect: stdout "missing @: nope"
+// expect: stdout "normalized: a@b.com"
+// expect: stdout "json ok: z@w.com"
+// expect: stdout "json bad: missing @: bad"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+@validated
+struct Email {
+    addr: string
+
+    // The validating constructor — the sanctioned way to build an `Email` from outside. Inside the
+    // type's own methods, literal construction stays legal.
+    fn new(addr: string): Result<Email, string> {
+        e = Email { addr: addr }
+        e.validate()?
+        return Ok(e)
+    }
+
+    // Record-update inside the impl is legal too (it's the type's own code).
+    fn lowered(): Email {
+        return Email { ...self, addr: self.addr.lower() }
+    }
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if !self.addr.contains("@") {
+                return Err("missing @: ${self.addr}")
+            }
+            return Ok()
+        }
+    }
+}
+
+// Built through `new` — the constructor validates and returns a Result.
+echo match Email.new("a@b.com") {
+    Ok(e) => "ok: ${e.addr}",
+    Err(m) => m,
+}
+echo match Email.new("nope") {
+    Ok(e) => "ok: ${e.addr}",
+    Err(m) => m,
+}
+
+// Inside-impl record-update round-trips through the same constructor path.
+echo match Email.new("A@B.COM") {
+    Ok(e) => "normalized: ${e.lowered().addr}",
+    Err(m) => m,
+}
+
+// The recipe door builds a `@validated` type directly (exempt from E0060) and still auto-validates.
+echo match json.try_parse::<Email>("{\"addr\": \"z@w.com\"}") {
+    Ok(e) => "json ok: ${e.addr}",
+    Err(e) => "json bad: ${e.message()}",
+}
+echo match json.try_parse::<Email>("{\"addr\": \"bad\"}") {
+    Ok(e) => "json ok: ${e.addr}",
+    Err(e) => "json bad: ${e.message()}",
+}

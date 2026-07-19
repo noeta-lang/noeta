@@ -1,0 +1,17 @@
+// A record-update (`T { ...base, f: v }`) on a `@validated` type from OUTSIDE its own `impl` is the
+// same error as a bare literal — it is construction, and would bypass the invariant. E0060
+// (validation arc slice 3), pointing at the type name in the update expression.
+// expect: error E0060 at 15:12
+// expect: exit 1
+@validated
+struct Email {
+    addr: string
+
+    impl Validate {
+        fn validate(): Result<void, string> { return Ok() }
+    }
+}
+fn tweak(base: Email): Email {
+    return Email { ...base, addr: "new@x" }
+}
+echo "unreached"
