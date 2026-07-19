@@ -75,6 +75,40 @@ pub fn publish_statement(attestation: &Attestation<'_>, coords: &GitCoords) -> S
     .to_string()
 }
 
+/// The in-toto predicate type naming a Noeta **advisory** attestation (advisory-intake arc, publisher
+/// tier) — the keyless counterpart of a publish attestation, so a monitor can recognize an
+/// owner-issued advisory in the public transparency log.
+pub const ADVISORY_PREDICATE_TYPE: &str = "https://noeta.dev/attestation/advisory/v1";
+
+/// The sha256 (hex) of an advisory's canonical bytes — the **subject digest** a publisher advisory's
+/// keyless bundle attests. Both sides compute it from the advisory's canonical bytes: the scope owner
+/// when building the statement, the consumer from the registry-served advisory it is about to trust.
+pub fn advisory_attested_digest(canonical_bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The in-toto Statement (v1) a publisher advisory keyless-signs: the subject binds
+/// [`advisory_attested_digest`] under the advisory id, the predicate carries the advisory's identity.
+/// Deterministic — the exact bytes the ephemeral key signs.
+pub fn advisory_statement(advisory_id: &str, package: &str, canonical_bytes: &[u8]) -> String {
+    serde_json::json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{
+            "name": format!("advisory/{advisory_id}"),
+            "digest": { "sha256": advisory_attested_digest(canonical_bytes) },
+        }],
+        "predicateType": ADVISORY_PREDICATE_TYPE,
+        "predicate": { "id": advisory_id, "package": package },
+    })
+    .to_string()
+}
+
 /// The consumer-side pin: which OIDC identity is allowed to sign for a scope. Both parts match
 /// exactly — the `issuer` is the OIDC provider (e.g. `https://token.actions.githubusercontent.com`),
 /// the `identity` the certificate's SAN (for GitHub Actions, the workflow ref).

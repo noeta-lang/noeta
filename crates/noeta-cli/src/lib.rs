@@ -55,7 +55,10 @@ use cmd::doc::cmd_doc;
 use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
 use cmd::init::cmd_init;
-use cmd::pm::{cmd_add, cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update};
+use cmd::pm::{
+    cmd_add, cmd_advisory_publish, cmd_advisory_report, cmd_audit, cmd_claim, cmd_key, cmd_publish,
+    cmd_scope, cmd_update, cmd_watch_scope,
+};
 use cmd::repl::cmd_repl;
 use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
 use cmd::serve::{ext_command_clap, ext_command_dispatch};
@@ -542,6 +545,86 @@ enum Command {
         #[command(subcommand)]
         action: ScopeAction,
     },
+    /// Issue or file security advisories (advisory-intake arc). `publish` issues a **publisher**-tier
+    /// advisory for a package in a scope you own — keyless-signed with your OIDC identity, so consumers
+    /// verify it offline. `report` files a **public report** against any package (unauthenticated,
+    /// rate-limited) for an operator or the scope owner to triage.
+    Advisory {
+        #[command(subcommand)]
+        action: AdvisoryCommand,
+    },
+    /// Monitor a scope's advisory **transparency log** over time (advisory-intake arc, tier 6): verify
+    /// the log is an append-only extension of the last run's checkpoint and that no advisory previously
+    /// seen for the scope has silently disappeared — so a registry can't quietly suppress or rewrite a
+    /// scope's advisories after first use. State is pinned in a small file between runs (ideal for a CI
+    /// cron); a detected suppression or rewrite exits non-zero.
+    WatchScope {
+        /// The scope (`company`) to monitor.
+        scope: String,
+        /// Where to keep the pinned watch state between runs (default: under the noeta cache).
+        #[arg(long)]
+        state: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdvisoryCommand {
+    /// Publish (or update) a **publisher**-tier advisory for a package in a scope you own. The advisory
+    /// is keyless-signed with your OIDC identity (ambient CI identity, or `--interactive` browser
+    /// login) and sent authenticated with the scope's publish token (`NOETA_REGISTRY_TOKEN`).
+    Publish {
+        /// The advisory id (e.g. `ACME-2026-0001`).
+        id: String,
+        /// The affected package (`company/package`) — its scope must be one you own.
+        package: String,
+        /// The affected version range, a SemVer requirement (e.g. `">=1.0.0, <1.2.0"`).
+        ranges: String,
+        /// Severity: `low`, `medium`, `high`, or `critical`.
+        severity: String,
+        /// A one-line summary headline.
+        summary: String,
+        /// A longer description (may be multi-line).
+        #[arg(long)]
+        details: Option<String>,
+        /// A link to the full advisory.
+        #[arg(long)]
+        url: Option<String>,
+        /// The first fixed version (informational).
+        #[arg(long)]
+        patched: Option<String>,
+        /// Withdraw (retract) this advisory — a false alarm. Re-issues the same id in the withdrawn
+        /// state (kept in the log, never deleted).
+        #[arg(long)]
+        withdraw: bool,
+        /// Sign keyless via an **interactive browser login** (Sigstore OAuth). For a laptop, where no
+        /// ambient CI identity exists. Without it, the ambient CI identity is used.
+        #[arg(long)]
+        interactive: bool,
+        /// With `--interactive`: print the sign-in URL and prompt for the code instead of opening a
+        /// browser (SSH sessions, containers).
+        #[arg(long, requires = "interactive")]
+        oob: bool,
+    },
+    /// File a **public report** against a package (unauthenticated, rate-limited). A report is not an
+    /// advisory — it is queued for an operator or the scope owner to triage and possibly promote.
+    Report {
+        /// The package (`company/package`) the report is against.
+        package: String,
+        /// A one-line summary of the issue.
+        summary: String,
+        /// The affected version range you believe (a SemVer requirement), if known.
+        #[arg(long)]
+        ranges: Option<String>,
+        /// A longer description (repro steps, impact).
+        #[arg(long)]
+        details: Option<String>,
+        /// A link to more detail.
+        #[arg(long)]
+        url: Option<String>,
+        /// How to identify you (optional — intake is anonymous by default).
+        #[arg(long)]
+        reporter: Option<String>,
+    },
 }
 
 /// Which editor grammar `noeta grammar` targets. Only tree-sitter needs a *generated* per-project
@@ -883,6 +966,49 @@ pub fn run_cli(
             domain.as_deref(),
         ),
         Command::Scope { action } => cmd_scope(&action),
+        Command::Advisory { action } => match action {
+            AdvisoryCommand::Publish {
+                id,
+                package,
+                ranges,
+                severity,
+                summary,
+                details,
+                url,
+                patched,
+                withdraw,
+                interactive,
+                oob,
+            } => cmd_advisory_publish(
+                &id,
+                &package,
+                &ranges,
+                &severity,
+                &summary,
+                details.as_deref(),
+                url.as_deref(),
+                patched.as_deref(),
+                withdraw,
+                interactive,
+                oob,
+            ),
+            AdvisoryCommand::Report {
+                package,
+                summary,
+                ranges,
+                details,
+                url,
+                reporter,
+            } => cmd_advisory_report(
+                &package,
+                &summary,
+                ranges.as_deref(),
+                details.as_deref(),
+                url.as_deref(),
+                reporter.as_deref(),
+            ),
+        },
+        Command::WatchScope { scope, state } => cmd_watch_scope(&scope, state.as_deref()),
     }
 }
 

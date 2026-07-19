@@ -135,6 +135,66 @@ consumer decision: reconcile with the maintainer, then `noeta update` re-resolve
 footprint — resolution *enforces* verification, so a passing build already means every signed
 release verified.
 
+## Security advisories and intake tiers
+
+The registry serves a signed, RUSTSEC-style **advisory feed** of known-bad releases. `noeta audit`
+cross-references every resolved dependency against it and reports any that a live advisory affects.
+The feed is signed with its own key (pinned trust-on-first-use in `noeta.lock`), and each advisory is
+bound into the registry's transparency log, so a compromised registry can neither fabricate an
+advisory nor silently drop one.
+
+Every advisory carries an **intake tier** — how it entered the feed. The registry automates
+*provenance*, never *judgment*:
+
+| Tier | Who issues it | Provenance |
+|---|---|---|
+| `operator` | The registry operator (curated) | The feed signature (the anchor of trust) |
+| `publisher` | A scope's own owner, for a package in their scope | A **keyless Sigstore bundle** the consumer verifies offline against the scope's pinned identity |
+| `imported` | Mirrored from OSV / GHSA / RUSTSEC via an operator-curated name map | The upstream advisory id + link |
+
+The tier is bound into the advisory's signed canonical bytes, so a client can trust which tier it was
+served. A **public report** (anyone may file one) is *not* an advisory — it is unauthenticated intake,
+never in the feed, and only becomes an advisory when an operator or the scope owner promotes it.
+
+### Issuing and reporting from the client
+
+- `noeta advisory publish <id> <package> <ranges> <severity> <summary>` — a scope owner issues a
+  **publisher** advisory for their own package. It is keyless-signed with your OIDC identity (ambient
+  CI, or `--interactive` for a laptop browser login) and sent authenticated with the scope's publish
+  token (`NOETA_REGISTRY_TOKEN`). `--withdraw` retracts one (kept in the log, never deleted).
+- `noeta advisory report <package> <summary>` — anyone files a **public report** (rate-limited). It is
+  queued for triage, not published.
+
+### Per-tier policy — `[trust.advisories]`
+
+By default every tier **warns**: `noeta audit` prints a matched advisory but does not fail. A project
+opts a tier up to `fail` (a CI gate) or down to `off`:
+
+```toml
+[trust.advisories]
+operator  = "fail"     # a curated advisory breaks the build
+publisher = "fail"     # so does an owner-issued one
+imported  = "warn"     # imported feeds are broader — warn, don't fail
+```
+
+A bare `advisories = "fail"` under `[trust]` sets every tier at once. In the audit report a
+`fail`-level hit is marked `✗` (and fails the run); a `warn`-level hit is marked `⚠`. A publisher
+advisory's line also shows the verified signing identity (`[publisher-verified: …]`).
+
+### `noeta watch-scope <scope>` — suppression monitoring
+
+A compromised registry's subtlest attack is to *withhold* an advisory from you specifically. `noeta
+watch-scope` defends against it over time: it pins the advisory feed head, the transparency-log
+checkpoint, and the set of advisory ids ever seen for a scope, then on each run verifies the log is an
+**append-only extension** of the last checkpoint (no history rewrite), that the feed key and log key
+are unchanged, and that **no previously-seen advisory has disappeared**. A rewrite, key change, feed
+rollback, or disappearance exits non-zero. State is kept in a small file (`--state <path>`, else under
+the noeta cache), so it is ideal as a CI cron:
+
+```sh
+noeta watch-scope acme            # first run pins the baseline; later runs detect drift
+```
+
 ## Environment reference
 
 | Variable | Effect |

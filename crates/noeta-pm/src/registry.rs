@@ -717,6 +717,59 @@ impl HttpIndex {
         )))
     }
 
+    /// File a **public report** against a package (advisory-intake arc, tier 4): `POST /v1/reports`.
+    /// Unauthenticated (the registry rate-limits by IP); a report is never an advisory — it is queued
+    /// for triage and only becomes an advisory when an operator or the scope owner promotes it. Returns
+    /// the opaque report id the registry assigned.
+    pub fn file_report(
+        &self,
+        package: &str,
+        summary: &str,
+        ranges: Option<&str>,
+        details: Option<&str>,
+        url: Option<&str>,
+        reporter: Option<&str>,
+    ) -> Result<String, PmError> {
+        let mut body = serde_json::json!({ "package": package, "summary": summary });
+        if let Some(r) = ranges {
+            body["ranges"] = serde_json::json!(r);
+        }
+        if let Some(d) = details {
+            body["details"] = serde_json::json!(d);
+        }
+        if let Some(u) = url {
+            body["url"] = serde_json::json!(u);
+        }
+        if let Some(r) = reporter {
+            body["reporter"] = serde_json::json!(r);
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/reports", self.base))
+            .json(&body)
+            .send()
+            .map_err(|err| {
+                PmError::Network(format!("filing a report for `{package}` failed: {err}"))
+            })?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            let id = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("id").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            return Ok(id);
+        }
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(PmError::Network(format!(
+            "registry rejected the report for `{package}`: {detail}"
+        )))
+    }
+
     /// The transparency log's current **signed checkpoint** (namespace-protection #1): `GET
     /// /v1/log/checkpoint`.
     pub fn log_checkpoint(&self) -> Result<LogCheckpoint, PmError> {
@@ -1275,6 +1328,69 @@ impl HttpIndex {
             verified += 1;
         }
         Ok(Some((verified, unlogged)))
+    }
+
+    /// Publish a **publisher-tier** advisory for a package in a scope the caller owns (advisory-intake
+    /// arc, tier 2): `POST /v1/scopes/{scope}/advisories`, owner-authenticated with the scope's publish
+    /// token (`NOETA_REGISTRY_TOKEN`). `advisory` supplies the content (its `tier` should be
+    /// [`crate::advisory::AdvisoryTier::Publisher`]); `bundle` is the keyless Sigstore attestation over
+    /// the advisory's canonical bytes, stored verbatim and verified offline by consumers. Returns the
+    /// registry's status message.
+    pub fn publish_scope_advisory(
+        &self,
+        scope: &str,
+        advisory: &crate::advisory::Advisory,
+        bundle: &str,
+    ) -> Result<String, PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "publishing a scope advisory needs a token — set NOETA_REGISTRY_TOKEN to the scope's \
+                 publish token"
+                    .to_string(),
+            )
+        })?;
+        let mut body = serde_json::json!({
+            "id": advisory.id,
+            "package": advisory.package,
+            "ranges": advisory.ranges,
+            "severity": advisory.severity,
+            "summary": advisory.summary,
+            "details": advisory.details,
+            "url": advisory.url,
+            "withdrawn": advisory.withdrawn,
+            "bundle": bundle,
+        });
+        if let Some(patched) = &advisory.patched {
+            body["patched"] = serde_json::json!(patched);
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/scopes/{scope}/advisories", self.base))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "publishing an advisory for scope `{scope}` failed: {err}"
+                ))
+            })?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("advisory `{}` published", advisory.id));
+            return Ok(msg);
+        }
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(PmError::Auth(format!(
+            "registry rejected the advisory for `{scope}`: {detail}"
+        )))
     }
 }
 
@@ -2788,6 +2904,9 @@ mod wire_fixture_tests {
         assert!(!a.withdrawn);
         assert_eq!(a.seq, 0);
         assert_eq!(a.log_index, Some(0));
+        // The intake tier is carried and defaults to operator (advisory-intake arc); the fixture's
+        // signature verifying above already proves the tier is bound into the canonical bytes.
+        assert_eq!(a.tier, crate::advisory::AdvisoryTier::Operator);
         // And it matches the versions the fixture yanked/patched story says it should.
         assert!(a.affects(&Version::new(1, 0, 0)));
         assert!(!a.affects(&Version::new(1, 2, 0)));

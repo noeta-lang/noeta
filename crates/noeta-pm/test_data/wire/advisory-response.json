@@ -1,6 +1,7 @@
 {
   "status": "advisory published",
   "id": "NOETA-2026-0001",
+  "tier": "operator",
   "seq": 0,
   "log_index": 0
 }

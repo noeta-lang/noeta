@@ -206,6 +206,58 @@ pub struct Trust {
     /// catch a compromised release before it auto-propagates to consumers. An existing lockfile pin is
     /// unaffected (already your choice); only fresh selection is held back. `None` = off (default).
     pub publish_cooldown: Option<u64>,
+    /// Per-advisory-tier policy (advisory-intake arc, tier 5): whether an advisory of a given intake
+    /// tier (`operator`/`publisher`/`imported`) makes `noeta audit` **fail** the build, merely **warn**,
+    /// or is ignored (`off`). Default: every tier warns; a project opts a tier up to `fail` for CI.
+    pub advisories: AdvisoryPolicy,
+}
+
+/// What a matched advisory of a given intake tier does to an `noeta audit` run (advisory-intake arc,
+/// tier 5). Default [`AdvisoryAction::Warn`] — surfaced, but not a build failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AdvisoryAction {
+    /// A matched advisory of this tier is printed but does not fail the audit.
+    #[default]
+    Warn,
+    /// A matched advisory of this tier fails the audit (a non-zero exit — a CI gate).
+    Fail,
+    /// Advisories of this tier are ignored entirely (neither printed as a hit nor counted).
+    Off,
+}
+
+impl AdvisoryAction {
+    fn parse(s: &str) -> Result<AdvisoryAction, String> {
+        match s {
+            "warn" => Ok(AdvisoryAction::Warn),
+            "fail" => Ok(AdvisoryAction::Fail),
+            "off" => Ok(AdvisoryAction::Off),
+            other => Err(format!(
+                "`{other}` must be one of \"fail\", \"warn\", \"off\""
+            )),
+        }
+    }
+}
+
+/// The consumer's per-tier advisory policy (advisory-intake arc, tier 5). Which intake tiers act as
+/// build **failures** versus **warnings** in `noeta audit`. Configured under `[trust.advisories]`
+/// (per-tier keys) or a bare `advisories = "fail"` (all tiers). Default: all three warn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdvisoryPolicy {
+    pub operator: AdvisoryAction,
+    pub publisher: AdvisoryAction,
+    pub imported: AdvisoryAction,
+}
+
+impl AdvisoryPolicy {
+    /// The action for an advisory whose intake tier is the wire string `tier` (`operator`/`publisher`/
+    /// `imported`). An unknown/absent tier is treated as `operator` (the default tier a feed serves).
+    pub fn action_for(&self, tier: &str) -> AdvisoryAction {
+        match tier {
+            "publisher" => self.publisher,
+            "imported" => self.imported,
+            _ => self.operator,
+        }
+    }
 }
 
 /// The consumer's `[trust].require_provenance` policy: demand verified provenance from no scope
@@ -1249,13 +1301,57 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
             Some(parse_duration(s)?)
         }
     };
+    let advisories = parse_advisory_policy(trust_table)?;
     Ok(Trust {
         native: parse_list("native")?,
         commands: parse_list("commands")?,
         require_provenance,
         require_transparency,
         publish_cooldown,
+        advisories,
     })
+}
+
+/// Parse `[trust].advisories` (advisory-intake arc, tier 5): either a bare action string applied to
+/// every tier (`advisories = "fail"`), or a sub-table with per-tier keys
+/// (`[trust.advisories]` / `operator = "fail"`, `publisher = "warn"`, `imported = "off"`). Absent →
+/// every tier warns (the default).
+fn parse_advisory_policy(trust_table: &toml::Table) -> Result<AdvisoryPolicy, String> {
+    let Some(value) = trust_table.get("advisories") else {
+        return Ok(AdvisoryPolicy::default());
+    };
+    // A bare string sets every tier at once.
+    if let Some(s) = value.as_str() {
+        let action =
+            AdvisoryAction::parse(s).map_err(|err| format!("`trust.advisories`: {err}"))?;
+        return Ok(AdvisoryPolicy {
+            operator: action,
+            publisher: action,
+            imported: action,
+        });
+    }
+    let table = value
+        .as_table()
+        .ok_or("`trust.advisories` must be an action string (\"fail\"/\"warn\"/\"off\") or a table of per-tier actions")?;
+    let mut policy = AdvisoryPolicy::default();
+    for (key, v) in table {
+        let s = v.as_str().ok_or_else(|| {
+            format!("`trust.advisories.{key}` must be a string (\"fail\"/\"warn\"/\"off\")")
+        })?;
+        let action =
+            AdvisoryAction::parse(s).map_err(|err| format!("`trust.advisories.{key}`: {err}"))?;
+        match key.as_str() {
+            "operator" => policy.operator = action,
+            "publisher" => policy.publisher = action,
+            "imported" => policy.imported = action,
+            other => {
+                return Err(format!(
+                    "`trust.advisories.{other}` is not a tier (use `operator`, `publisher`, or `imported`)"
+                ));
+            }
+        }
+    }
+    Ok(policy)
 }
 
 /// Parse the `[registries]` table (private-registries arc): a map of scope (`company`) → source string
@@ -1778,6 +1874,57 @@ mod tests {
         assert!(m.trust().native.contains("acme/simd"));
         assert!(m.trust().commands.contains("acme/scaffold"));
         assert!(!m.trust().commands.contains("acme/imgfx"));
+    }
+
+    #[test]
+    fn advisory_policy_defaults_to_all_warn() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        let p = m.trust().advisories;
+        assert_eq!(p.operator, AdvisoryAction::Warn);
+        assert_eq!(p.publisher, AdvisoryAction::Warn);
+        assert_eq!(p.imported, AdvisoryAction::Warn);
+        assert_eq!(p.action_for("imported"), AdvisoryAction::Warn);
+    }
+
+    #[test]
+    fn advisory_policy_bare_string_sets_every_tier() {
+        let m = Manifest::parse(
+            "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n[trust]\nadvisories = \"fail\"\n",
+        )
+        .unwrap();
+        let p = m.trust().advisories;
+        assert_eq!(p.operator, AdvisoryAction::Fail);
+        assert_eq!(p.publisher, AdvisoryAction::Fail);
+        assert_eq!(p.imported, AdvisoryAction::Fail);
+    }
+
+    #[test]
+    fn advisory_policy_per_tier_table() {
+        let m = Manifest::parse(
+            "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n\
+             [trust.advisories]\noperator = \"fail\"\npublisher = \"fail\"\nimported = \"off\"\n",
+        )
+        .unwrap();
+        let p = m.trust().advisories;
+        assert_eq!(p.operator, AdvisoryAction::Fail);
+        assert_eq!(p.publisher, AdvisoryAction::Fail);
+        assert_eq!(p.imported, AdvisoryAction::Off);
+    }
+
+    #[test]
+    fn advisory_policy_rejects_a_bad_action_or_tier() {
+        assert!(
+            Manifest::parse(
+                "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n[trust]\nadvisories = \"spicy\"\n"
+            )
+            .is_err()
+        );
+        assert!(
+            Manifest::parse(
+                "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n[trust.advisories]\nnope = \"fail\"\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]
