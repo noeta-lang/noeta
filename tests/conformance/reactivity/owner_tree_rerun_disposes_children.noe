@@ -1,0 +1,25 @@
+// Reactivity S4b — the nested owner tree (SolidJS-style). An effect that creates a *child* effect on
+// every run owns that child; when the parent reruns it disposes last run's child before creating this
+// run's. So a later change to a signal the children read reruns only the ONE live child, not an
+// accumulating pile. The parent reads `outer`; its child reads `dep`.
+//
+//   first flush : parent runs, creates child#1  → "child dep=0"
+//   outer.set(1): parent reruns, disposes child#1, creates child#2 → "child dep=0"
+//   dep.set(5)  : only child#2 is live → "child dep=5" ONCE (not twice)
+// expect: stdout "child dep=0"
+// expect: stdout "child dep=0"
+// expect: stdout "child dep=5"
+// expect: stdout "done"
+// expect: exit 0
+use std.reactive.{signal, effect}
+outer = signal(0)
+dep = signal(0)
+effect(fn() {
+    outer.get()
+    effect(fn() {
+        echo "child dep=${dep.get()}"
+    })
+})
+outer.set(1)
+dep.set(5)
+echo "done"

@@ -1,0 +1,31 @@
+// Reactivity S4b — deep nesting and disposal cascade. A root effect owns a child effect, which owns a
+// grandchild effect that reads `dep`. One parent rerun tears the whole subtree down (grandchild first,
+// reverse creation order) and rebuilds it, so `dep` drives exactly one live grandchild. Disposing the
+// root then cascades the whole subtree away, so a further `dep` change fires nothing.
+//
+//   first flush : subtree built → "gc dep=0"
+//   root.set(1) : subtree rebuilt → "gc dep=0"
+//   dep.set(9)  : one live grandchild → "gc dep=9"
+//   e.dispose() : root + child + grandchild all gone
+//   dep.set(10) : nothing fires
+// expect: stdout "gc dep=0"
+// expect: stdout "gc dep=0"
+// expect: stdout "gc dep=9"
+// expect: stdout "done"
+// expect: exit 0
+use std.reactive.{signal, effect}
+root = signal(0)
+dep = signal(0)
+e = effect(fn() {
+    root.get()
+    effect(fn() {
+        effect(fn() {
+            echo "gc dep=${dep.get()}"
+        })
+    })
+})
+root.set(1)
+dep.set(9)
+e.dispose()
+dep.set(10)
+echo "done"

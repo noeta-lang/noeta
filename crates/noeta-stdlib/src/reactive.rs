@@ -57,12 +57,16 @@ pub const EFFECT_TYPE_IDENTITY: &str = "std.reactive.Effect";
 pub const VIEW_TYPE_IDENTITY: &str = "std.reactive.View";
 
 const VAR_A: SigType = SigType::Var(0);
+const OPT_BOOL: SigType = SigType::Optional(&SigType::Bool);
 
 pub const REACTIVE_CTX_FNS: &[ExtFn] = &[
-    // `signal(v: A) -> Signal<A>` — a reactive cell.
+    // `signal(v: A, dedupe?: bool) -> Signal<A>` — a reactive cell. With `dedupe = true` the signal
+    // suppresses re-firing dependents when a `set`/`update` lands a value **equal to the current one
+    // under the language's `==`** (opt-in; the default and an omitted flag keep the always-fire
+    // behavior). See [`signal_ctx_method_dispatch`].
     ExtFn {
         name: "signal",
-        params: &[VAR_A],
+        params: &[VAR_A, OPT_BOOL],
         ret: RetTy::Concrete(SigType::Generic(SIGNAL_TYPE_NAME, &[VAR_A])),
     },
     // `computed(fn() -> A) -> Computed<A>` — a lazy memoized derivation.
@@ -166,6 +170,9 @@ pub(crate) struct ReactiveExt {
     views: std::cell::RefCell<Vec<ViewState>>,
     /// Reused drain buffer for [`distribute_changes`] — a hot set→flush loop allocates nothing.
     changed_scratch: std::cell::RefCell<Vec<NodeId>>,
+    /// Reused drain buffer for [`release_reclaimed`] — the owner-tree cell reclaim (S4b) allocates
+    /// nothing in the steady state.
+    reclaimed_scratch: std::cell::RefCell<Vec<Retained>>,
     /// Whether the opt-in flush telemetry is on (server-hmr L4 / native-otel T5e): resolved once
     /// per run on first use — `tel_enabled()` AND `NOETA_TRACE_REACTIVE` truthy — then a plain
     /// bool read on the hot path. `None` until the first flush asks.
@@ -192,6 +199,7 @@ fn reactive_state_init() -> Box<dyn Any> {
         effects: std::cell::RefCell::new(Vec::new()),
         views: std::cell::RefCell::new(Vec::new()),
         changed_scratch: std::cell::RefCell::new(Vec::new()),
+        reclaimed_scratch: std::cell::RefCell::new(Vec::new()),
         trace: std::cell::Cell::new(None),
     })
 }
@@ -210,6 +218,31 @@ pub(crate) fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) 
         // A signal read is compromised only by tracking, but one shared predicate keeps the gate
         // reasoning one sentence long; refine per-type only if a bench demands it.
         ctx.set_read_gate(COMPUTED_TYPE_IDENTITY, open);
+    }
+}
+
+/// Release the arena cells of owner-tree children the graph disposed since the last drain
+/// (reactivity S4b) — the client half of the value-generic core's reclaim buffer. Cheap when empty
+/// (the steady state); called after every read/flush/dispose so a body that creates-then-drops
+/// reactive nodes each run reclaims their backing cells on the spot rather than at scope end.
+pub(crate) fn release_reclaimed<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
+    let mut buf = ext.reclaimed_scratch.borrow_mut();
+    buf.clear();
+    ext.graph.drain_reclaimed_into(&mut buf);
+    if buf.is_empty() {
+        return;
+    }
+    // Take ownership out of the borrow so `release_retained` (which needs `&mut ctx`) cannot alias
+    // the scratch cell, then hand the buffer back for reuse.
+    let cells: Vec<Retained> = std::mem::take(&mut buf);
+    drop(buf);
+    for cell in &cells {
+        ctx.release_retained(*cell);
+    }
+    let mut buf = ext.reclaimed_scratch.borrow_mut();
+    if buf.is_empty() {
+        *buf = cells;
+        buf.clear();
     }
 }
 
@@ -251,6 +284,8 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
         })
         .is_err();
     sync_gates(ctx, ext);
+    // Release the cells of any owner-tree children the reruns disposed (reactivity S4b).
+    release_reclaimed(ctx, ext);
     // The flush subscriber (server-hmr L1): every change path funnels through here (a top-level
     // `set`/`update`/effect-creation/synced-merge drives a flush even when no effect is queued;
     // a set *inside* a flush lands in the graph's change log and is drained by this outer call),
@@ -317,6 +352,8 @@ pub fn hotswap_dispose_effects<C: NativeCtx + ?Sized>(ctx: &mut C) {
         ext.graph.dispose(node);
         ctx.release_retained(body);
     }
+    // Each root effect's dispose cascades to its owner-tree children (S4b) — release their cells.
+    release_reclaimed(ctx, ext);
     sync_gates(ctx, ext);
 }
 
@@ -347,6 +384,8 @@ pub fn hotswap_dispose_handles<C: NativeCtx + ?Sized>(ctx: &mut C, handles: &[Sl
     for node in nodes {
         ext.graph.dispose(node);
     }
+    // A disposed handle may own owner-tree children (S4b) — release their cells.
+    release_reclaimed(ctx, ext);
     sync_gates(ctx, ext);
 }
 
@@ -410,7 +449,9 @@ impl ReactiveSource for ReactiveSourceHandle {
     fn create_source(&self, _ctx: &mut dyn NativeCtx, cell: Retained) -> NodeId {
         let ext = self.state.borrow();
         let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
-        ext.graph.signal(cell)
+        // A foreign source is a ROOT node: the extension owns its cell and lifetime, so it must never
+        // be adopted into the owner tree and torn down by a rerun of whatever body constructed it.
+        ext.graph.signal_root(cell)
     }
 
     fn read_source(&self, _ctx: &mut dyn NativeCtx, node: NodeId) -> Retained {
@@ -509,6 +550,8 @@ fn binding_value_json<C: NativeCtx + ?Sized>(
                 memo
             });
             sync_gates(ctx, ext);
+            // The recompute may have torn down owner-tree children (S4b) — release their cells.
+            release_reclaimed(ctx, ext);
             if let Some(e) = aborted {
                 return Err(e);
             }
@@ -755,14 +798,33 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
 ) -> Result<CtxOut, CtxError> {
     match func {
         "signal" => {
-            ctx_arity(func, args, 1)?;
+            // `signal(v)` or `signal(v, dedupe: bool)` — the second arg is the opt-in
+            // change-suppression flag (trailing-optional, default off).
+            if args.is_empty() || args.len() > 2 {
+                return Err(noeta_ext_abi::arity_error(func, 1, args.len()).into());
+            }
+            let dedupe = match args.get(1) {
+                Some(&flag) => match ctx.view(flag)? {
+                    noeta_ext_abi::registry::NativeValue::Scalar(
+                        noeta_ext_abi::registry::Scalar::Bool(b),
+                    ) => b,
+                    _ => {
+                        return Err(StdError {
+                            kind: ErrorKind::ArgType,
+                            message: "signal: the dedupe flag must be a bool".to_string(),
+                        }
+                        .into());
+                    }
+                },
+                None => false,
+            };
             let cell = ctx.retain(args[0])?;
             let state = state_of(ctx);
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
             let node = ext.graph.signal(cell);
             Ok(CtxOut::Out(NativeOut::Extern(
-                noeta_ext_abi::ExternBox::new(SignalBox { node, cell }),
+                noeta_ext_abi::ExternBox::new(SignalBox { node, cell, dedupe }),
             )))
         }
         "computed" => {
@@ -776,7 +838,9 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             let state = state_of(ctx);
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
-            let node = ext.graph.computed(body);
+            // The memo cell is seeded into the node too, so an owner-tree teardown (S4b) can reclaim
+            // it even for a computed that is disposed before it is ever read.
+            let node = ext.graph.computed(body, memo);
             // Created dirty — the memo gate is now closed until the first read.
             sync_gates(ctx, ext);
             Ok(CtxOut::Out(NativeOut::Extern(
@@ -789,8 +853,16 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             let state = state_of(ctx);
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+            // A *root* effect (created at top level, not inside a running body) joins the hot-swap
+            // epoch registry, which owns its body-cell release. A *child* effect (created inside a
+            // `computed`/`effect` body — `tracking()` is true) is owned by the enclosing node in the
+            // S4b owner tree: its node and body cell are reclaimed when that owner reruns/disposes, so
+            // it must NOT also be in the registry (a stale entry over a reused slot would misfire).
+            let is_root = !ext.graph.tracking();
             let node = ext.graph.effect(body);
-            ext.effects.borrow_mut().push((node, body));
+            if is_root {
+                ext.effects.borrow_mut().push((node, body));
+            }
             // Run it once now (subscribing it to the signals it reads) — unless we are already
             // inside a flush, which will drain it (no nested flush; reactivity S4).
             if !ext.graph.is_flushing() {
@@ -827,11 +899,11 @@ pub fn signal_ctx_method_dispatch<C: NativeCtx + ?Sized>(
     recv: Slot,
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
-    let (node, cell) = {
+    let (node, cell, dedupe) = {
         let mut parts = None;
         ctx.with_extern(recv, &mut |e| {
             let b = signal_box(e);
-            parts = Some((b.node, b.cell));
+            parts = Some((b.node, b.cell, b.dedupe));
         })?;
         parts.expect("a Signal receiver wraps a SignalBox")
     };
@@ -851,6 +923,17 @@ pub fn signal_ctx_method_dispatch<C: NativeCtx + ?Sized>(
         }
         "set" => {
             ctx_arity(method, args, 1)?;
+            // Opt-in value-equality suppression (reactivity S0 note): a dedupe signal whose new value
+            // is `==` its current one changes nothing — no store, no dirty, no flush, so dependents do
+            // not re-fire. Default (non-dedupe) signals always fire, preserving the prior behavior.
+            if dedupe {
+                let current = ctx.retained_get(cell)?;
+                let unchanged = ctx.values_equal(current, args[0])?;
+                ctx.free(current);
+                if unchanged {
+                    return Ok(CtxOut::Out(NativeOut::Unit));
+                }
+            }
             ctx.retained_set(cell, args[0])?;
             let state = state_of(ctx);
             let ext = state.borrow();
@@ -874,7 +957,18 @@ pub fn signal_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             }
             let current = ctx.retained_get(cell)?;
             let updated = ctx.call(args[0], &[current])?;
-            ctx.free(current);
+            // Opt-in value-equality suppression, exactly as `set`: if `update` lands a value `==` the
+            // current one, do nothing (the updater's own side effects, if any, already ran).
+            if dedupe {
+                let unchanged = ctx.values_equal(current, updated)?;
+                ctx.free(current);
+                if unchanged {
+                    ctx.free(updated);
+                    return Ok(CtxOut::Out(NativeOut::Unit));
+                }
+            } else {
+                ctx.free(current);
+            }
             ctx.retained_set(cell, updated)?;
             ctx.free(updated);
             let ext = state.borrow();
@@ -924,6 +1018,8 @@ pub fn computed_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 memo
             });
             sync_gates(ctx, ext);
+            // A recompute reruns the computed's body, which may have disposed owned children (S4b).
+            release_reclaimed(ctx, ext);
             if let Some(e) = aborted {
                 return Err(e);
             }
@@ -957,6 +1053,8 @@ pub fn effect_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             // Prune the hot-swap epoch registry so a later swap never double-releases this body.
             ext.effects.borrow_mut().retain(|(n, _)| *n != node);
             sync_gates(ctx, ext);
+            // Disposing an effect cascades to its owner-tree children (S4b) — release their cells.
+            release_reclaimed(ctx, ext);
             // The node held only ids; the body's arena cell is ours to release (its closure —
             // and whatever it captured — drops at its last reference, destructor-aware).
             ctx.release_retained(body);
@@ -1004,7 +1102,9 @@ macro_rules! reactive_box {
     };
 }
 
-reactive_box!(SignalBox, SIGNAL_TYPE_IDENTITY, "<signal>", { node: NodeId, cell: Retained });
+reactive_box!(SignalBox, SIGNAL_TYPE_IDENTITY, "<signal>", {
+    node: NodeId, cell: Retained, dedupe: bool
+});
 reactive_box!(ComputedBox, COMPUTED_TYPE_IDENTITY, "<computed>", {
     node: NodeId, body: Retained, memo: Retained
 });

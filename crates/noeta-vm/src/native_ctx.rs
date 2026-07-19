@@ -361,6 +361,11 @@ impl NativeCtx for VmCtx<'_, '_> {
         Ok(Some(self.insert(payload)))
     }
 
+    fn values_equal(&mut self, a: Slot, b: Slot) -> CtxResult<bool> {
+        // The language's `==` verbatim (borrowed views — no reference taken, no release).
+        Ok(noeta_value::value_eq(self.get(a)?, self.get(b)?))
+    }
+
     fn with_extern(
         &mut self,
         slot: Slot,
