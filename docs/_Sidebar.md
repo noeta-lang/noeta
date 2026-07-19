@@ -27,6 +27,7 @@
 - [Generics & Traits](Generics-and-Traits)
 - [The Type System](Type-System)
 - [Error Handling](Error-Handling)
+- [Validation](Validation)
 - [Modules & Visibility](Modules)
 - [Fixed-Width Ints & Packed Types](Fixed-Width-Integers)
 - [Attributes & Reflection](Attributes-and-Reflection)

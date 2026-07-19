@@ -230,6 +230,8 @@ echo match json.try_parse::<Point>("{\"x\": 1}") {   // recoverable: a Result, n
 
 The typed forms support nested structs, `List<T>`, `Map`, and optional fields (an absent field becomes `none`). Numeric widening follows `int <: f32 <: float` (a JSON integer satisfies `float`, a fractional number does not satisfy `int`). `parse::<T>` and `try_parse::<T>` are a deliberate pairing over one decode walk: reach for `parse::<T>` when a bad document is a bug (config you ship), `try_parse::<T>` when it is input (a request body). With `parse::<T>` a shape/type mismatch is E0007 and a missing required field E0009 — messages carry the same path precision `JsonError` does.
 
+**Decode-time validation.** If a decoded type (or any nested field type) implements [`Validate`](Validation), its `validate()` runs automatically on the freshly-built value, bottom-up — so a shape-correct document with a broken *invariant* (a negative price, a port out of range) is rejected at the boundary. `parse::<T>` aborts on a validation failure (E0007); `try_parse::<T>` and `decode_typed` thread it into `Result.Err(JsonError)` with the same `field[i]: <message>` path. See [Validation](Validation).
+
 ### `JsonError`
 
 Every recoverable decode failure — from `try_parse::<T>` or `decode_typed` — is a `JsonError` (importable as `use std.json.JsonError`), the standard library's first [`Error`](Error-Handling#the-error-trait) implementor. It also implements `Display`, so `${e}` interpolates its message.
