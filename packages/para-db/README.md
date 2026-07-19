@@ -44,43 +44,78 @@ migrations use — so a migration is all-or-nothing, and a failed run leaves eve
 applied. (Do not put `BEGIN`/`COMMIT` in a migration file — the runner owns the transaction.)
 
 **Forward-only.** There are deliberately no down/rollback files: a down migration is routinely wrong
-against real production data. Development uses `--reset` (drop the schema and re-apply from zero)
-instead. `--reset` is destructive and driver-specific: on SQLite it drops every user table/view/
-trigger; on PostgreSQL it runs `DROP SCHEMA public CASCADE; CREATE SCHEMA public` (the `public` schema
-only).
+against real production data — the production answer is to roll *forward* with a new migration.
+Development uses `--reset` (drop the schema and re-apply from zero), and **seeds** (below) refill the
+rebuilt schema with dev data — so `noeta migrate --reset --seed` is the whole development loop. `--reset`
+is destructive and driver-specific: on SQLite it drops every user table/view/trigger; on PostgreSQL it
+runs `DROP SCHEMA public CASCADE; CREATE SCHEMA public` (the `public` schema only).
+
+## Seeds — re-runnable development data
+
+Where a migration is immutable schema *history*, a **seed** is throwaway development *data*: sample
+rows to develop and demo against. Seeds are plain `.sql` files in a project `seeds/` directory,
+discovered and ordered by the very same filename-sort convention migrations use, and applied **after**
+migrations.
+
+The rerun semantics are deliberately honest and different from migrations. **Seeds run in filename
+order, each in its own transaction, every time they are invoked — and are never recorded in the
+tracking table.** They are not history, so there is no checksum and no "already applied" skip: running
+seeds twice runs every file twice. Idempotency is therefore the seed author's job — write inserts that
+a re-run turns into a no-op:
+
+```sql
+-- SQLite
+INSERT OR IGNORE INTO users (id, name) VALUES (1, 'Ada');
+-- PostgreSQL
+INSERT INTO users (id, name) VALUES (1, 'Ada') ON CONFLICT DO NOTHING;
+```
+
+A mid-seed failure stops at that file (naming it) with the prior seeds committed — the same
+stop-on-first-failure shape as migrations, minus the tracking.
 
 ### CLI
 
 ```
-noeta migrate                 # apply every pending migration, printing each applied file
-noeta migrate --status        # table of applied / pending migrations
-noeta migrate --dry-run       # list what would be applied, without touching the database
-noeta migrate new <name>      # scaffold migrations/<timestamp>_<name>.sql
-noeta migrate --reset --yes   # DESTRUCTIVE: drop the schema and re-apply from zero
+noeta migrate                      # apply every pending migration, printing each applied file
+noeta migrate --status             # table of applied / pending migrations
+noeta migrate --dry-run            # list what would be applied, without touching the database
+noeta migrate new <name>           # scaffold migrations/<timestamp>_<name>.sql
+noeta migrate new --seed <name>    # scaffold seeds/<timestamp>_<name>.sql
+noeta migrate --seed               # apply pending migrations, then run the seed files
+noeta migrate seed                 # run the seed files ONLY (errors if any migration is pending)
+noeta migrate --reset --yes        # DESTRUCTIVE: drop the schema and re-apply from zero
+noeta migrate --reset --seed --yes # the full dev loop: reset -> migrate -> seed
 ```
 
-The connection string is resolved, highest priority first, from the `--db <dsn>` flag, the
-`DATABASE_URL` environment variable, then a `[db]` table in `noeta.toml`:
+`noeta migrate seed` refuses to run when any migration is still pending — seeding a stale schema is a
+footgun; run `noeta migrate` first, or `noeta migrate --seed` to migrate then seed in one step. The
+connection string is resolved, highest priority first, from the `--db <dsn>` flag, the `DATABASE_URL`
+environment variable, then a `[db]` table in `noeta.toml`:
 
 ```toml
 [db]
 url = "sqlite:app.db"        # or postgres://…  — the same dsn schemes db.connect accepts
 migrations = "migrations"    # optional; the directory (default "migrations"), overridable with --dir
+seeds = "seeds"              # optional; the directory (default "seeds"), overridable with --seeds-dir
 ```
 
 `--reset` refuses to run without either `--yes` or an interactive `yes` typed at the prompt.
 
 ### At boot (self-migrating apps)
 
-An aether server (or any program) can migrate itself at startup off the same engine:
+An aether server (or any program) can migrate itself at startup off the same engine, and optionally
+seed after — seeding is never implicit, an app opts in explicitly and controls the order (migrate,
+then seed):
 
 ```noe
 conn = db.connect(env.get("DATABASE_URL") ?? "sqlite:app.db")
 applied = conn.migrate("migrations")   // returns the count applied; a no-op when up to date
+seeded  = conn.seed("seeds")           // runs every seed file every time; returns how many ran
 ```
 
-`conn.migrate(dir)` applies every pending migration under `dir` and returns how many it applied,
-with the same tracking table and integrity checks as the CLI.
+`conn.migrate(dir)` applies every pending migration under `dir` and returns how many it applied, with
+the same tracking table and integrity checks as the CLI. `conn.seed(dir)` runs every seed file under
+`dir` (untracked, re-runnable) and returns how many it ran.
 
 ## TLS (PostgreSQL)
 

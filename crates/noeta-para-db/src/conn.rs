@@ -193,6 +193,11 @@ pub const CONNECTION_METHODS: &[ExtFn] = &[
         ret: RetTy::Concrete(SigType::Int),
     },
     ExtFn {
+        name: "seed",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+    ExtFn {
         name: "close",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
@@ -261,6 +266,24 @@ fn connection_method_dispatch(
             let applied =
                 crate::migrate::apply(&mut **driver, &migrations).map_err(migrate_error)?;
             Ok(NativeOut::Scalar(Scalar::Int(applied.len() as i64)))
+        }
+        "seed" => {
+            want_arity(method, args, 1)?;
+            let dir = want_str(method, args, 0)?.to_string();
+            // Discover + order the seed files with the same loader migrations use (a real-filesystem
+            // read over the project's `seeds/` directory), before locking the driver.
+            let seeds =
+                crate::migrate::load_dir(std::path::Path::new(&dir)).map_err(migrate_error)?;
+            let conn = conn_of(recv)?;
+            let mut driver = conn
+                .0
+                .lock()
+                .map_err(|_| io_error("connection lock poisoned"))?;
+            // Run every seed (untracked, re-runnable) through the shared engine and report how many
+            // ran, so an app can `conn.seed("seeds")` at boot after `conn.migrate(...)`. Seeding is
+            // never implicit — the app opts in and controls the order (migrate, then seed).
+            let ran = crate::migrate::seed(&mut **driver, &seeds).map_err(migrate_error)?;
+            Ok(NativeOut::Scalar(Scalar::Int(ran.len() as i64)))
         }
         "close" => {
             want_arity(method, args, 0)?;

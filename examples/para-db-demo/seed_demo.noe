@@ -1,0 +1,31 @@
+// Seeding at boot (aether DB6): after `conn.migrate(dir)` brings the schema up to date, `conn.seed(dir)`
+// runs every re-runnable `.sql` file under a `seeds/` directory — dev data, NOT tracked history, so it
+// runs every time. Idempotent inserts (INSERT OR IGNORE) make a re-run a no-op. Run from the repo root
+// so the relative paths resolve:
+//
+//   noeta run examples/para-db-demo/seed_demo.noe
+use para.db
+
+conn = db.connect("sqlite::memory:")
+
+// 1. Migrate: create the schema (and its tracked seed rows Ada/Bob from migration 0002).
+applied = conn.migrate("examples/para-db-demo/migrations")
+echo "applied ${applied} migration(s)"
+
+// 2. Seed: add re-runnable dev users. Returns how many seed files ran (never a no-op skip — seeds are
+//    not tracked, so every file runs every call).
+seeded = conn.seed("examples/para-db-demo/seeds")
+echo "ran ${seeded} seed file(s)"
+
+// 3. Seeding again runs the same files again — but the INSERT OR IGNORE idiom keeps the data stable.
+conn.seed("examples/para-db-demo/seeds")
+
+rows = conn.query("SELECT id, name FROM users ORDER BY id", [])
+echo "users -> ${rows.len()}"
+for row in rows {
+    id = row["id"]
+    name = row["name"]
+    echo "  #${id} ${name}"
+}
+
+conn.close()

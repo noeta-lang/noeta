@@ -18,26 +18,41 @@ use noeta_pm::manifest;
 /// The default migrations directory when none is configured or passed.
 const DEFAULT_DIR: &str = "migrations";
 
+/// The default seeds directory when none is configured or passed.
+const DEFAULT_SEEDS_DIR: &str = "seeds";
+
 /// The environment variable consulted for the connection string (after `--db`, before `[db] url`).
 const DATABASE_URL_ENV: &str = "DATABASE_URL";
 
+/// A `migrate new` scaffold request: a name, an optional target directory, and whether it is a seed.
+pub(crate) struct NewArgs {
+    pub(crate) name: String,
+    pub(crate) dir: Option<PathBuf>,
+    pub(crate) seed: bool,
+}
+
 /// The parsed `noeta migrate` invocation.
 pub(crate) struct MigrateArgs {
-    /// `Some((name, dir))` for `migrate new <name>`; `None` for the apply/status/reset flags.
-    pub(crate) new: Option<(String, Option<PathBuf>)>,
+    /// `Some(..)` for `migrate new <name>`; `None` for the apply/status/reset flags.
+    pub(crate) new: Option<NewArgs>,
+    /// `migrate seed` — run seeds only (against an up-to-date schema).
+    pub(crate) seed_only: bool,
     pub(crate) db: Option<String>,
     pub(crate) dir: Option<PathBuf>,
+    pub(crate) seeds_dir: Option<PathBuf>,
     pub(crate) status: bool,
     pub(crate) dry_run: bool,
     pub(crate) reset: bool,
+    /// `--seed`: after applying migrations (or `--reset`), also run the seed files.
+    pub(crate) seed: bool,
     pub(crate) yes: bool,
 }
 
 /// Run `noeta migrate`.
 pub(crate) fn cmd_migrate(args: MigrateArgs) -> ExitCode {
     // `migrate new` is database-free: scaffold a file and return.
-    if let Some((name, dir)) = args.new {
-        return match scaffold_new(&name, dir.as_deref()) {
+    if let Some(new) = args.new {
+        return match scaffold_new(&new.name, new.dir.as_deref(), new.seed) {
             Ok(path) => {
                 println!("Created {}", path.display());
                 ExitCode::SUCCESS
@@ -63,6 +78,18 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) -> ExitCode {
         Err(err) => return run_error(&format!("cannot open database: {err}")),
     };
     let driver = driver.as_mut();
+
+    // `migrate seed` — run seeds only, refusing if any migration is still pending.
+    if args.seed_only {
+        let seeds = match load_seeds(args.seeds_dir.as_deref()) {
+            Ok(seeds) => seeds,
+            Err(exit) => return exit,
+        };
+        return match migrate::seed_only(driver, &migrations, &seeds) {
+            Ok(ran) => report_seeds(&ran),
+            Err(err) => run_error(&err.to_string()),
+        };
+    }
 
     if args.status {
         return match migrate::status(driver, &migrations) {
@@ -104,17 +131,26 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) -> ExitCode {
                 for name in &applied {
                     println!("  applied {name}");
                 }
-                ExitCode::SUCCESS
+                // `--reset --seed`: the full dev loop — reseed the freshly rebuilt schema.
+                if args.seed {
+                    run_seeds(driver, args.seeds_dir.as_deref())
+                } else {
+                    ExitCode::SUCCESS
+                }
             }
             Err(err) => run_error(&err.to_string()),
         };
     }
 
-    // Default: apply every pending migration.
+    // Default: apply every pending migration, then seed if `--seed`.
     match migrate::apply(driver, &migrations) {
         Ok(applied) if applied.is_empty() => {
             println!("Already up to date ({} migration(s)).", migrations.len());
-            ExitCode::SUCCESS
+            if args.seed {
+                run_seeds(driver, args.seeds_dir.as_deref())
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Ok(applied) => {
             println!(
@@ -125,31 +161,72 @@ pub(crate) fn cmd_migrate(args: MigrateArgs) -> ExitCode {
             for name in &applied {
                 println!("  applied {name}");
             }
-            ExitCode::SUCCESS
+            if args.seed {
+                run_seeds(driver, args.seeds_dir.as_deref())
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(err) => run_error(&err.to_string()),
     }
 }
 
-/// Scaffold `migrations/<UTC-timestamp>_<slug>.sql` (creating the directory), returning the new path.
-fn scaffold_new(name: &str, dir: Option<&Path>) -> Result<PathBuf, String> {
-    let dir = dir
-        .map(Path::to_path_buf)
-        .or_else(|| manifest_dir_value(|db| db.migrations.clone()).map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_DIR));
+/// Load the seed files for `--seed` / `--reset --seed`, then run them, mapping the outcome to an exit
+/// code. A missing seeds directory when `--seed` was explicitly requested is a usage error (nothing
+/// to seed from); an empty one is a clean no-op.
+fn run_seeds(driver: &mut dyn noeta_para_db::driver::SqlDriver, flag: Option<&Path>) -> ExitCode {
+    let seeds = match load_seeds(flag) {
+        Ok(seeds) => seeds,
+        Err(exit) => return exit,
+    };
+    match migrate::seed(driver, &seeds) {
+        Ok(ran) => report_seeds(&ran),
+        Err(err) => run_error(&err.to_string()),
+    }
+}
+
+/// Discover the seed files under the resolved seeds directory. Returns the parsed exit code (a usage
+/// error naming the missing directory) on failure, so both `run_seeds` and the seeds-only path share it.
+fn load_seeds(flag: Option<&Path>) -> Result<Vec<migrate::Migration>, ExitCode> {
+    let dir = resolve_seeds_dir(flag);
+    migrate::load_dir(&dir).map_err(|err| usage_error(&err.to_string()))
+}
+
+/// Print the seed-run summary (an empty run is an explicit no-op line).
+fn report_seeds(ran: &[String]) -> ExitCode {
+    if ran.is_empty() {
+        println!("No seed files to run.");
+    } else {
+        println!("Ran {} seed file(s):", ran.len());
+        for name in ran {
+            println!("  seeded {name}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Scaffold a new migration or seed file (creating the directory), returning the new path. A migration
+/// goes under the migrations directory with the checksum warning; a seed goes under the seeds directory
+/// with the idempotent-idiom template. Both use the same UTC-timestamp-prefixed, slugified filename.
+fn scaffold_new(name: &str, dir: Option<&Path>, seed: bool) -> Result<PathBuf, String> {
+    let (dir, template, label) = if seed {
+        (
+            resolve_seeds_dir(dir),
+            migrate::SEED_SCAFFOLD_TEMPLATE,
+            "seeds",
+        )
+    } else {
+        (resolve_dir(dir), SCAFFOLD_TEMPLATE, "migrations")
+    };
     let filename = migrate::scaffold_filename(&utc_timestamp(), name)
         .map_err(|e: MigrateError| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        format!(
-            "cannot create migrations directory `{}`: {e}",
-            dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create {label} directory `{}`: {e}", dir.display()))?;
     let path = dir.join(filename);
     if path.exists() {
         return Err(format!("`{}` already exists", path.display()));
     }
-    std::fs::write(&path, SCAFFOLD_TEMPLATE)
+    std::fs::write(&path, template)
         .map_err(|e| format!("cannot write `{}`: {e}", path.display()))?;
     Ok(path)
 }
@@ -159,6 +236,13 @@ fn resolve_dir(flag: Option<&Path>) -> PathBuf {
     flag.map(Path::to_path_buf)
         .or_else(|| manifest_dir_value(|db| db.migrations.clone()).map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DIR))
+}
+
+/// Resolve the seeds directory: the `--seeds-dir` flag, else `[db] seeds`, else `seeds/`.
+fn resolve_seeds_dir(flag: Option<&Path>) -> PathBuf {
+    flag.map(Path::to_path_buf)
+        .or_else(|| manifest_dir_value(|db| db.seeds.clone()).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SEEDS_DIR))
 }
 
 /// Resolve the connection string, highest priority first: the `--db` flag, `DATABASE_URL`, then the
