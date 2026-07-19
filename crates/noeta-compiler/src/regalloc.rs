@@ -475,6 +475,7 @@ fn op_facts(op: &Op) -> OpFacts {
         | Op::MakeFuture { dst, src }
         | Op::RunFuture { dst, src, .. }
         | Op::PollFuture { dst, src, .. }
+        | Op::ScopeReady { dst, src, .. }
         | Op::Spawn { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
@@ -483,7 +484,8 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*capacity);
         }
-        Op::LoadPending { dst } => f.def = Some(*dst),
+        Op::LoadPending { dst } | Op::ScopeBeginValue { dst, .. } => f.def = Some(*dst),
+        Op::ScopeEndAt { src, .. } => f.uses.push(*src),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => f.def = Some(*dst),
         Op::RolesOf { dst, .. } => f.def = Some(*dst),
@@ -965,6 +967,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         | Op::MakeFuture { dst, src }
         | Op::RunFuture { dst, src, .. }
         | Op::PollFuture { dst, src, .. }
+        | Op::ScopeReady { dst, src, .. }
         | Op::Spawn { dst, src, .. } => {
             m(dst);
             m(src);
@@ -973,7 +976,8 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(capacity);
         }
-        Op::LoadPending { dst } => m(dst),
+        Op::LoadPending { dst } | Op::ScopeBeginValue { dst, .. } => m(dst),
+        Op::ScopeEndAt { src, .. } => m(src),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => m(dst),
         Op::RolesOf { dst, .. } => m(dst),

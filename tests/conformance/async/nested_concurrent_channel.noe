@@ -1,0 +1,48 @@
+// Track A.7 — a rendezvous channel handoff ACROSS nesting levels. The consumer (`drain`) lives inside
+// `worker`'s inner `concurrent`; the producer (`feed`) is a sibling of `worker` in the OUTER scope. Over
+// a capacity-0 channel, each `send` parks until the recv takes it. This only terminates if the inner
+// scope's consumer interleaves with the outer scope's producer across polls — under the old atomic drive
+// the inner join would try to run the consumer to completion within one poll of `worker`, and since the
+// producer can't run until that poll returns, it would deadlock. The genuine suspension point lets them
+// alternate: send 1, recv 1, send 2, recv 2, send 3, recv 3. Both backends drive the handoff identically.
+// expect: stdout "send 1"
+// expect: stdout "recv 1"
+// expect: stdout "send 2"
+// expect: stdout "recv 2"
+// expect: stdout "send 3"
+// expect: stdout "recv 3"
+// expect: stdout "sum=6"
+// expect: exit 0
+async fn worker(rx: Receiver<int>): int {
+    mut sum = 0
+    concurrent {
+        inner = spawn drain(rx)
+        sum = inner.await
+    }
+    return sum
+}
+async fn drain(rx: Receiver<int>): int {
+    mut total = 0
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        if keep { echo "recv " ~ v }
+        total = total + v
+        running = keep
+    }
+    return total
+}
+async fn feed(tx: Sender<int>): void {
+    for i in 1..4 {
+        echo "send " ~ i
+        tx.send(i).await
+    }
+    tx.close()
+}
+concurrent {
+    (tx, rx) = channel::<int>(0)
+    w = spawn worker(rx)
+    spawn feed(tx)
+    echo "sum=" ~ w.await
+}

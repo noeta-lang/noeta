@@ -358,6 +358,7 @@ impl<'m> Vm<'m> {
             deserialize_recipes,
             sched: SchedState {
                 scopes: Vec::new(),
+                scope_closed: Vec::new(),
                 ctx_current: Vec::new(),
                 current_strand: 1,
                 next_strand: 2,

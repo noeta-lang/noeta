@@ -3375,6 +3375,31 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            Rvalue::ScopeBegin { span } => {
+                // Open a scope and yield its index (Track A.7): the value form of `Op::ScopeBegin`, used
+                // by the async desugar's split `concurrent { }` to thread the index to its join test.
+                self.code.push(Op::ScopeBeginValue { dst, span: *span });
+                Ok(())
+            }
+            Rvalue::ScopeReady { scope, span } => {
+                // Whether the scope at index `scope` is fully drained (Track A.7) — the boolean the
+                // split `concurrent { }`'s join poll-state tests each poll.
+                let src = self.atom_reg(scope)?;
+                self.code.push(Op::ScopeReady {
+                    dst,
+                    src,
+                    span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::ScopeEndAt { scope, span } => {
+                // Close the drained scope at index `scope` (Track A.7): the value form of `ScopeEnd`
+                // that closes a specific scope by index (a sibling's scope may still be open above it).
+                // `dst` is unused (the effect is the close); the desugar discards it.
+                let src = self.atom_reg(scope)?;
+                self.code.push(Op::ScopeEndAt { src, span: *span });
+                Ok(())
+            }
             Rvalue::SpawnIsolate { callee, args, span } => {
                 // Spawn a call as a fresh isolate (I.4b): carry the callee + unbuilt args so a real
                 // isolate can copy-marshal them; the sandbox builds `callee(args)` and registers a

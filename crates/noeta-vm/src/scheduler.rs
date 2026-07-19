@@ -21,7 +21,16 @@ pub(crate) struct SchedState {
     /// each a list of the tasks `spawn`ed in it. The scope owns one reference to each task's future (and
     /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
     /// `scopes`; both round-robin identically, so the differential holds by construction.
+    ///
+    /// A closed scope is **tombstoned** (task list drained, `scope_closed[i]` set), not removed, so scope
+    /// indices stay stable for handles (Track A.7): a split `concurrent { }` in one task may finish while
+    /// a *sibling* task's own `concurrent` scope is still open above it — out of structured-stack order —
+    /// so popping the top would corrupt the sibling. Trailing tombstones are trimmed on close (the common
+    /// LIFO case), so the Vec stays bounded by the concurrently-open high-water mark.
     pub(crate) scopes: Vec<Vec<Task>>,
+    /// Whether each `scopes` slot is a closed tombstone (Track A.7). Parallel to `scopes`. Mirrors the
+    /// tree-walker's `scope_closed`.
+    pub(crate) scope_closed: Vec<bool>,
     /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
     /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
     /// client). This cell always belongs to whichever strand is executing — the main strand (root)
@@ -647,7 +656,7 @@ impl<'m> Vm<'m> {
         for &cid in &holds {
             self.add_producer_hold(cid);
         }
-        let scope_idx = self.sched.scopes.len() - 1;
+        let scope_idx = self.innermost_open();
         let task_idx = self.sched.scopes[scope_idx].len();
         // The child inherits a snapshot of the spawner's task-local context (T5a).
         let context = self.sched.ctx_current.clone();
@@ -908,13 +917,54 @@ impl<'m> Vm<'m> {
         ))
     }
 
+    /// Open a structured-concurrency scope and return its (stable) index (Track A.7). Appends a fresh
+    /// slot, so the new scope is the innermost; a subsequent `spawn` in the same straight-line segment
+    /// lands in it. Mirrors the tree-walker's `open_scope`.
+    pub(crate) fn open_scope(&mut self) -> usize {
+        self.sched.scopes.push(Vec::new());
+        self.sched.scope_closed.push(false);
+        self.sched.scopes.len() - 1
+    }
+
+    /// The innermost still-open scope index (Track A.7) — the highest non-tombstoned slot. Used by
+    /// `spawn` and the synchronous join/close (a split `concurrent { }` closes by its *captured* index).
+    /// Panics only for a `spawn`/join with no open scope, which is E0041 at check. Mirrors the tree-walker.
+    pub(crate) fn innermost_open(&self) -> usize {
+        self.sched
+            .scope_closed
+            .iter()
+            .rposition(|closed| !closed)
+            .expect("an open concurrency scope")
+    }
+
+    /// Close the (already-drained) scope at index `si` (Track A.7): release each task's producer holds,
+    /// future, and result (destructor-aware, mirroring the old `ScopeEnd` reclaim), tombstone the slot,
+    /// then trim trailing tombstones so the Vec stays bounded (the common LIFO case reclaims at once).
+    /// Closing by index — not popping the top — keeps a sibling scope still open above it intact. Mirrors
+    /// the tree-walker's `close_scope`.
+    pub(crate) fn close_scope(&mut self, si: usize) {
+        let scope = std::mem::take(&mut self.sched.scopes[si]);
+        for mut task in scope {
+            self.release_task_holds(&mut task.holds);
+            self.release_value(task.future);
+            if let Some(result) = task.result {
+                self.release_value(result);
+            }
+        }
+        self.sched.scope_closed[si] = true;
+        while self.sched.scope_closed.last() == Some(&true) {
+            self.sched.scopes.pop();
+            self.sched.scope_closed.pop();
+        }
+    }
+
     /// Join the innermost scope (Track A.3b): drive tasks round-robin until the innermost scope's tasks
     /// all complete. Each round polls **all** open scopes (A.7) so an outer scope's siblings interleave
     /// with the inner join; the loop exits on the *innermost* scope alone (outer scopes are joined by
     /// their own `ScopeEnd`). On a round where nothing completed, advance the logical clock; a pending
     /// scope with no timer to advance is a deterministic deadlock.
     pub(crate) fn join_scope(&mut self, span: Span) -> Result<(), Abort> {
-        let si = self.sched.scopes.len() - 1;
+        let si = self.innermost_open();
         loop {
             // Snapshot the wake generation before polling (P-PAR S3): progress a worker makes
             // *during* this round then returns the stall wait immediately instead of parking.

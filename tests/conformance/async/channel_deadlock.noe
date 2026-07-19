@@ -3,7 +3,10 @@
 // no task completes, no channel op makes progress, and no timer can advance the logical clock. The
 // cooperative scheduler detects this stall and aborts with E0010 (same block-point/progress machinery
 // that keeps a live producer/consumer pair from false-positiving). Both backends detect it identically.
-// expect: error E0010 at 17:18
+// The stall surfaces at the outermost driver (`run().await`): the inner `concurrent` join is a genuine
+// suspension point (Track A.7), so `run()` yields `$pending` up rather than dead-looping inside its own
+// join, and the top-level await is where no timer can advance the clock.
+// expect: error E0010 at 24:6
 // expect: exit 1
 async fn stuck(rx: Receiver<int>): int {
     r = rx.recv().await

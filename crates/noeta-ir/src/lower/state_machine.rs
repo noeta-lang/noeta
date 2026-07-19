@@ -28,6 +28,17 @@ pub(super) const POLL_FN: &str = "$poll";
 /// The async desugar's pending sentinel: a state-machine step returns `$pending` when it suspends at
 /// an `.await`. The IR lowering (`Expr::Ident` arm) turns it into [`Rvalue::Pending`].
 pub(super) const PENDING_IDENT: &str = "$pending";
+/// The A.7 nested-`concurrent` desugar's scope primitives. A `concurrent { }` block inside an async fn
+/// is split into state-machine states as `$scN = $scope_begin(); <body>; <join poll-state on
+/// $scope_ready($scN)>; $scope_end()` — so the join is a real suspension point (the inner scope's tasks
+/// interleave with the outer scope's siblings across polls) instead of an in-place drive-to-completion
+/// loop. `$scope_begin()` opens the scope and yields its index; `$scope_ready(idx)` is the join's
+/// per-poll readiness test; `$scope_end()` closes the (already-drained) scope. Lexer-forbidden `$` names,
+/// so they never collide with source identifiers. Turned into [`Rvalue::ScopeBegin`]/[`Rvalue::ScopeReady`]
+/// / [`Stmt::ScopeEnd`] by the IR lowering (`Expr::Call` arm).
+pub(super) const SCOPE_BEGIN_FN: &str = "$scope_begin";
+pub(super) const SCOPE_READY_FN: &str = "$scope_ready";
+pub(super) const SCOPE_END_FN: &str = "$scope_end";
 
 /// Which suspend primitive a state-machine desugar is built for — a generator's `yield` (pull) or an
 /// async fn's `.await` (poll). Selects the terminator flavours and the completion protocol: a generator
@@ -185,6 +196,13 @@ enum Term {
         result: String,
         next: usize,
     },
+    /// Nested-`concurrent` join suspend point (poll-state, Track A.7). `scope` is the hoisted cell
+    /// holding the index `$scope_begin()` returned for this block's scope; `next` is the state to resume
+    /// at once every task in that scope has completed. Renders (at its own state `idx`): if
+    /// `$scope_ready(scope)`, advance to `next` and continue; otherwise stay at `idx` and `return
+    /// $pending` — so the outer scheduler round-robins this scope's tasks with the enclosing scope's
+    /// siblings across polls, and the next poll re-enters here to re-test the (state-preserving) scope.
+    JoinPoll { scope: String, next: usize },
 }
 
 impl Term {
@@ -258,6 +276,22 @@ impl Term {
                     span,
                 });
                 // pending: stay here and yield control up as `$pending`.
+                out.push(assign_state(idx as i64, span));
+                out.push(AstStmt::Return {
+                    value: Some(pending_expr(span)),
+                    span,
+                });
+            }
+            Term::JoinPoll { scope, next } => {
+                // if $scope_ready($scope) { $state = next; continue }
+                out.push(AstStmt::If {
+                    cond: scope_ready_call(ident(scope, span), span),
+                    then_body: vec![assign_state(*next as i64, span), AstStmt::Continue { span }],
+                    else_body: None,
+                    span,
+                });
+                // pending: stay here and yield control up as `$pending`, so the scheduler advances the
+                // clock and re-polls this scope's tasks (and the outer scope's siblings) before we retry.
                 out.push(assign_state(idx as i64, span));
                 out.push(AstStmt::Return {
                     value: Some(pending_expr(span)),
@@ -626,6 +660,35 @@ impl Flattener<'_> {
                 self.blocks[body_exit].term = Term::Goto(head);
                 after
             }
+            // A `concurrent { }` block inside an async fn (Track A.7): split it across states so its
+            // join becomes a genuine suspension point. `$scope_begin()` opens the scope (its index
+            // bound to a hoisted cell); the body's `spawn`s land in it and the body's own `.await`s
+            // become poll-states; a `JoinPoll` state then suspends until every task in the scope has
+            // completed, so the inner scope's tasks interleave with the outer scope's siblings across
+            // polls; finally `$scope_end()` closes the drained scope. Contrast the synchronous path
+            // (`lower.rs`'s `AstStmt::Concurrent` for the top level / a non-async fn), which drives
+            // the scope to completion in place — correct there, as nothing outer is left to interleave.
+            AstStmt::Concurrent { body, span } if mode == SuspendMode::Async => {
+                let scope_cell = format!("$scope{}", self.fresh());
+                self.record(&scope_cell, true, false);
+                self.blocks[cur].stmts.push(bare_assign_expr(
+                    &scope_cell,
+                    scope_begin_call(*span),
+                    *span,
+                ));
+                let body_exit = self.lower_seq(body, cur, loop_ctx);
+                let join = self.new_block();
+                self.blocks[body_exit].term = Term::Goto(join);
+                let next = self.new_block();
+                self.blocks[join].term = Term::JoinPoll {
+                    scope: scope_cell.clone(),
+                    next,
+                };
+                self.blocks[next]
+                    .stmts
+                    .push(scope_end_stmt(&scope_cell, *span));
+                next
+            }
             // No `yield` and no escaping control flow: emit verbatim — it runs whole within this state
             // (a `match`, a self-contained `for`/`while`/`if`). Its own `break`/`continue` target
             // itself, so it needs no state interaction.
@@ -687,6 +750,10 @@ fn stmt_has_await(stmt: &AstStmt) -> bool {
         }
         AstStmt::While { cond, body, .. } => cond.has_await() || body_has_await(body),
         AstStmt::For { iterable, body, .. } => iterable.has_await() || body_has_await(body),
+        // A `concurrent { }` block is itself a suspend point (Track A.7): its join lowers to a poll-state
+        // (see the `AstStmt::Concurrent` arm of `lower_one`), so an enclosing `if`/`while` must flatten
+        // for the split to take effect — regardless of whether the body contains explicit `.await`s.
+        AstStmt::Concurrent { .. } => true,
         _ => false,
     }
 }
@@ -1093,6 +1160,38 @@ fn pending_expr(span: Span) -> Expr {
     ident(PENDING_IDENT, span)
 }
 
+/// `$scope_begin()` — open a concurrency scope and yield its index (lowered to [`Rvalue::ScopeBegin`]).
+fn scope_begin_call(span: Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(ident(SCOPE_BEGIN_FN, span)),
+        args: vec![],
+        span,
+    }
+}
+
+/// `$scope_ready(scope)` — the join poll-state's readiness test (lowered to [`Rvalue::ScopeReady`]).
+fn scope_ready_call(scope: Expr, span: Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(ident(SCOPE_READY_FN, span)),
+        args: vec![scope],
+        span,
+    }
+}
+
+/// `$scope_end(scope);` — close the drained scope by index (lowered to [`Rvalue::ScopeEndAt`]), as an
+/// expression statement. The index (not "innermost") because a sibling task's `concurrent` scope may
+/// still be open above this one — they close out of structured-stack order under interleaving.
+fn scope_end_stmt(scope: &str, span: Span) -> AstStmt {
+    AstStmt::Expr {
+        expr: Expr::Call {
+            callee: Box::new(ident(SCOPE_END_FN, span)),
+            args: vec![ident(scope, span)],
+            span,
+        },
+        span,
+    }
+}
+
 /// Whether a statement sequence contains a `break`/`continue` that escapes to an **enclosing** loop —
 /// i.e. one not absorbed by a `while`/`for` within the sequence. An `if` is transparent to control
 /// flow (its `break` targets the outer loop); a `while`/`for` absorbs its own (no labels); a `match`
@@ -1480,6 +1579,8 @@ fn block_mentions(block: &BlockBuf, name: &str) -> bool {
             // A poll-state reads its awaited-future cell and writes its result cell — so both are
             // referenced here (they also span states, which keeps them hoisted).
             Term::AwaitPoll { future, result, .. } => name == future || name == result,
+            // A join poll-state reads its scope-index cell (which also spans states, keeping it hoisted).
+            Term::JoinPoll { scope, .. } => name == scope,
             Term::Goto(_) | Term::Done => false,
         }
 }

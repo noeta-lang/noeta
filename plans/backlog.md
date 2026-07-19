@@ -18,7 +18,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | Item | Source / trigger |
 |---|---|
 | **`obj.f(args)` on a closure-valued field** — parsed unconditionally as method dispatch (E0005); needs the field-access-then-call desugar. With it: the `Callable`/`Members` protocols | M1.8 tail + coroutines Track-I. Trigger: member-handles / user iterators holding a `next` closure |
-| Nested `concurrent` inside a *spawned task's own body* runs atomically within that task's poll | A.7 residual |
 | Prelude constructors (`Ok`/`Err`/`some`) and `panic` as first-class *values* | slice F2 residue. Exotic; needs hand-matched runtime arity/error text |
 | **Editions S3/S4** — the first real edition-gated behavior (S3, pending a deliberate language divergence) and edition-aware diagnostics + a `noeta fix` migrator (S4, depends on S3) | editions arc. Trigger: a breaking language change we want to ship |
 | **`@derive(FromJson)` — typed JSON deserialization** (the type declaration as the parsing spec; `Result<T, JsonError>` with path-carrying errors; missing `Option<T>` → `none`, missing `T` → error). Was gated on the inferred-static type system — **that landed, so this is now buildable.** Open decisions: Ring 2 vs Ring 3 placement; shape-only vs validating-constructor hook | design proposal (2026-06). *(active — the acceptance test for the type-system track)* |

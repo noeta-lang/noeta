@@ -453,6 +453,27 @@ pub enum Rvalue {
     /// `spawn e` (Track A.3b): register the future `future` as a task in the current concurrency scope
     /// and yield a handle (itself a `Future<T>`). Legal only inside a `ScopeBegin`/`ScopeEnd` region.
     Spawn { future: Atom, span: Span },
+    /// Open a structured-concurrency scope and yield its **index** (Track A.7): the value form of
+    /// `Stmt::ScopeBegin`, emitted only by the async desugar (the synthetic `$scope_begin()`) when a
+    /// `concurrent { }` block inside an async fn is split into state-machine states. The returned int is
+    /// threaded to the block's join poll-state ([`Self::ScopeReady`]) so the join checks *this* scope's
+    /// completion rather than whatever scope is innermost at re-poll time (a nested `concurrent` in a
+    /// sub-task may have pushed a deeper scope above it). The statement-position `Stmt::ScopeBegin` (used
+    /// by the synchronous, non-flattened `concurrent` lowering) is unchanged.
+    ScopeBegin { span: Span },
+    /// Whether every task in the scope at index `scope` has completed or been cancelled (Track A.7) —
+    /// the boolean the async desugar's `concurrent` join poll-state tests each poll. Emitted only by the
+    /// async desugar (the synthetic `$scope_ready(idx)`); when false the step suspends (`$pending`) so
+    /// the scheduler round-robins the inner scope's tasks with the outer scope's siblings across polls,
+    /// instead of driving the inner scope to completion inside one poll of the outer task.
+    ScopeReady { scope: Atom, span: Span },
+    /// Close the (already-drained) scope at index `scope` (Track A.7): release its tasks' futures and
+    /// results and tombstone the slot. The value form of `Stmt::ScopeEnd` that closes a **specific**
+    /// scope by index rather than the innermost — necessary because a split `concurrent { }` in one task
+    /// may finish while a *sibling* task's own `concurrent` scope is still open above it on the stack, so
+    /// the two close out of structured-stack order. Emitted only by the async desugar (the synthetic
+    /// `$scope_end(idx)`); the join happened already at the [`Self::ScopeReady`] poll-state, so no drive.
+    ScopeEndAt { scope: Atom, span: Span },
     /// `isolate f(args)` (isolates I.4b): spawn the call as a concurrent unit in a **fresh isolate**.
     /// Unlike [`Self::Spawn`], the callee and arguments are carried **unbuilt** — an isolate can run on
     /// a real OS thread (out-of-oracle), where a pre-built future (which captures its args in the parent

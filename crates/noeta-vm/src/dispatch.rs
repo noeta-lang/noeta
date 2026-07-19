@@ -2293,8 +2293,36 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::ScopeBegin => {
-                        // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
-                        self.sched.scopes.push(Vec::new());
+                        // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list
+                        // (A.7 tombstone model — `open_scope` pushes both `scopes` and `scope_closed`).
+                        self.open_scope();
+                        pc += 1;
+                    }
+                    Op::ScopeBeginValue { dst, .. } => {
+                        // Open a scope and yield its index (Track A.7): the value form of `ScopeBegin`,
+                        // used by the async desugar's split `concurrent { }` to thread the index to its
+                        // join poll-state. Mirrors `noeta-eval`'s `Rvalue::ScopeBegin`.
+                        let idx = self.open_scope() as i64;
+                        set_reg(regs, fbase, *dst, Value::int(idx));
+                        pc += 1;
+                    }
+                    Op::ScopeReady { dst, src, span } => {
+                        // Whether every task in the scope at index `src` has completed or been cancelled
+                        // (Track A.7) — the boolean the split `concurrent { }`'s join poll-state tests
+                        // each poll. A stale/out-of-range index reads ready (defensive; unreachable for a
+                        // clean program). Mirrors `noeta-eval`'s `Rvalue::ScopeReady`.
+                        let Some(idx) = regs[fbase + *src as usize].as_int() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "internal: scope_ready expects a scope index".to_string(),
+                            ));
+                        };
+                        let ready =
+                            self.sched.scopes.get(idx as usize).is_none_or(|s| {
+                                s.iter().all(|t| t.result.is_some() || t.cancelled)
+                            });
+                        set_reg(regs, fbase, *dst, Value::bool(ready));
                         pc += 1;
                     }
                     Op::Spawn { dst, src, .. } => {
@@ -2313,7 +2341,7 @@ impl<'m> Vm<'m> {
                             for &cid in &holds {
                                 self.add_producer_hold(cid);
                             }
-                            let scope_idx = self.sched.scopes.len() - 1;
+                            let scope_idx = self.innermost_open();
                             let task_idx = self.sched.scopes[scope_idx].len();
                             // The child inherits a snapshot of the spawner's task-local context
                             // (T5a): a task spawned inside `with_span` parents its spans there.
@@ -2355,25 +2383,29 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::ScopeEnd { span } => {
-                        // Join the scope (drive every task to completion), then pop it and release the
-                        // tasks' owned futures and results.
+                        // Join the scope (drive every task to completion), then close the innermost scope
+                        // and release the tasks' owned futures and results. The synchronous (non-flattened)
+                        // path is strictly LIFO, so the innermost scope is this one.
                         self.join_scope(*span)?;
-                        if let Some(scope) = self.sched.scopes.pop() {
-                            for mut task in scope {
-                                // End any producer holds this task still carries (isolates I.4c): a
-                                // completed task already released them at completion (list emptied),
-                                // so this only fires for a task the scope reclaims before it finished
-                                // (e.g. a cancelled `race` loser) — its captured sender is now gone.
-                                self.release_task_holds(&mut task.holds);
-                                // Destructor-aware: a task's future holds the async body's captured
-                                // locals in its state-machine cells. A completed task's cells are spent,
-                                // but a **cancelled** task (a `race` loser) abandoned its future mid-body
-                                // with a live captured value — release it here so its destructor runs.
-                                self.release_value(task.future);
-                                if let Some(result) = task.result {
-                                    self.release_value(result);
-                                }
-                            }
+                        let si = self.innermost_open();
+                        self.close_scope(si);
+                        pc += 1;
+                    }
+                    Op::ScopeEndAt { src, span } => {
+                        // Close the (already-drained) scope at index `src` (Track A.7): release its tasks
+                        // (destructor-aware) and tombstone the slot. Closes by index — not innermost — so
+                        // a sibling task's still-open scope above it survives. The join happened at the
+                        // `ScopeReady` poll-state, so there is nothing to drive. Mirrors `noeta-eval`'s
+                        // `Rvalue::ScopeEndAt`.
+                        let Some(idx) = regs[fbase + *src as usize].as_int() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "internal: scope_end expects a scope index".to_string(),
+                            ));
+                        };
+                        if (idx as usize) < self.sched.scopes.len() {
+                            self.close_scope(idx as usize);
                         }
                         pc += 1;
                     }

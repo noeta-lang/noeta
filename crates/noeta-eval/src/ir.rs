@@ -311,30 +311,19 @@ impl Interpreter {
             }
             noeta_ir::Stmt::Break { .. } => Ok(Flow::Break),
             noeta_ir::Stmt::Continue { .. } => Ok(Flow::Continue),
-            // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
+            // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list (A.7 tombstone
+            // model — `open_scope` pushes both `scopes` and `scope_closed`).
             noeta_ir::Stmt::ScopeBegin { .. } => {
-                self.scopes.push(Vec::new());
+                self.open_scope();
                 Ok(Flow::Normal)
             }
-            // Close the scope: drive every remaining task to completion (the join), then pop it —
-            // releasing the tasks' futures and results (automatic under `Rc`).
+            // Close the scope: drive every remaining task to completion (the join), then close the
+            // innermost scope — releasing the tasks' futures and results (destructor-aware). The
+            // synchronous (non-flattened) path is strictly LIFO, so the innermost scope is this one.
             noeta_ir::Stmt::ScopeEnd { span } => {
                 self.join_scope(*span)?;
-                if let Some(scope) = self.scopes.pop() {
-                    // Destructor-aware release of each task's future/result (the VM's `ScopeEnd` mirror):
-                    // a **cancelled** task (a `race` loser) abandoned its future mid-body with a live
-                    // captured value, whose destructor must run at its last reference here.
-                    for mut task in scope {
-                        // End any producer holds still carried (isolates I.4c): a completed task
-                        // already released them (list emptied); this only fires for one reclaimed
-                        // before it finished (e.g. a cancelled `race` loser). The VM's mirror.
-                        self.release_task_holds(&mut task.holds);
-                        self.destroy_value(task.future);
-                        if let Some(result) = task.result {
-                            self.destroy_value(result);
-                        }
-                    }
-                }
+                let si = self.innermost_open();
+                self.close_scope(si);
                 Ok(Flow::Normal)
             }
             noeta_ir::Stmt::If {
@@ -1508,7 +1497,7 @@ impl Interpreter {
                 for &cid in &holds {
                     self.add_producer_hold(cid);
                 }
-                let scope_idx = self.scopes.len() - 1;
+                let scope_idx = self.innermost_open();
                 let task_idx = self.scopes[scope_idx].len();
                 // The child inherits a snapshot of the spawner's task-local context (T5a).
                 let context = self.ctx_current.clone();
@@ -1524,6 +1513,46 @@ impl Interpreter {
                     ScopeId::from_index(scope_idx),
                     TaskId::from_index(task_idx),
                 ))
+            }
+            // `$scope_begin()` (Track A.7): open a structured-concurrency scope and yield its index, so
+            // the async desugar's split `concurrent { }` can thread that index to its join poll-state.
+            // The value form of `Stmt::ScopeBegin`; mirrors the VM's `Op::ScopeBeginValue`.
+            noeta_ir::Rvalue::ScopeBegin { .. } => Ok(Value::Int(self.open_scope() as i64)),
+            // `$scope_ready(scope)` (Track A.7): whether every task in the scope at index `scope` has
+            // completed or been cancelled — the boolean the split `concurrent { }`'s join poll-state
+            // tests each poll. A stale/out-of-range index reads ready (defensive; unreachable for a
+            // clean program). Mirrors the VM's `Op::ScopeReady`.
+            noeta_ir::Rvalue::ScopeReady { scope, span } => {
+                let scope = self.eval_ir_atom(scope, frame)?;
+                let Value::Int(idx) = scope else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "internal: $scope_ready expects a scope index".to_string(),
+                    ));
+                };
+                let ready = self
+                    .scopes
+                    .get(idx as usize)
+                    .is_none_or(|s| s.iter().all(|t| t.result.is_some() || t.cancelled));
+                Ok(Value::Bool(ready))
+            }
+            // `$scope_end(scope)` (Track A.7): close the drained scope at index `scope` — release its
+            // tasks (destructor-aware) and tombstone the slot. Closes by index, not innermost, so a
+            // sibling's still-open scope above it survives. Mirrors the VM's `Op::ScopeEndAt`.
+            noeta_ir::Rvalue::ScopeEndAt { scope, span } => {
+                let scope = self.eval_ir_atom(scope, frame)?;
+                let Value::Int(idx) = scope else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "internal: $scope_end expects a scope index".to_string(),
+                    ));
+                };
+                if (idx as usize) < self.scopes.len() {
+                    self.close_scope(idx as usize);
+                }
+                Ok(Value::Unit)
             }
             // `isolate f(args)` (isolates I.4b). The tree-walker only ever runs the deterministic
             // sandbox, where an isolate is observationally a cooperative task: build the future by
@@ -1543,7 +1572,7 @@ impl Interpreter {
                 for &cid in &holds {
                     self.add_producer_hold(cid);
                 }
-                let scope_idx = self.scopes.len() - 1;
+                let scope_idx = self.innermost_open();
                 let task_idx = self.scopes[scope_idx].len();
                 // The child inherits a snapshot of the spawner's task-local context (T5a).
                 let context = self.ctx_current.clone();
