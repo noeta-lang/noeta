@@ -120,6 +120,11 @@ pub struct LoweringSites<'a> {
     /// Namespace-group member-access sites (`http.client`) → the resolved concrete module identity,
     /// emitted as an [`Rvalue::NativeModule`] instead of a field load.
     pub namespace_module_sites: &'a HashMap<Span, String>,
+    /// `?`-conversion sites (error-ergonomics): `Expr::Try` spans whose `Err` payload converts
+    /// through the enclosing function's error type → that target type's name. The `?` operand is
+    /// rewritten to `match v { Ok($t) => Ok($t), Err($t) => Err(Target.from($t)) }` — ordinary IR,
+    /// so both backends (and the JIT) convert identically by construction.
+    pub try_conversion_sites: &'a HashMap<Span, String>,
 }
 
 impl LoweringSites<'static> {
@@ -149,6 +154,7 @@ impl LoweringSites<'static> {
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
             bundle_call_sites: PAIRS.get_or_init(HashMap::new),
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
+            try_conversion_sites: NAMES.get_or_init(HashMap::new),
         }
     }
 }
@@ -178,6 +184,7 @@ macro_rules! lowering_sites {
             f32_literal_sites: &$s.f32_literal_sites,
             bundle_call_sites: &$s.bundle_call_sites,
             namespace_module_sites: &$s.namespace_module_sites,
+            try_conversion_sites: &$s.try_conversion_sites,
         }
     };
 }
@@ -510,6 +517,54 @@ struct Lowerer<'a> {
 /// resolves by name (never captures). These are the only names that can appear as a bare
 /// reassignment target inside an async/generator body while denoting a global, so they are the
 /// set the state-machine desugar excludes from cell-hoisting.
+/// Build the synthetic conversion `match` a `?`-conversion site (error-ergonomics) lowers its
+/// operand through: `match <operand> { Ok($try) => Ok($try), Err($try) => Err(Target.from($try)) }`.
+/// The operand is the `?`'s own operand expression (evaluated exactly once, as the match
+/// scrutinee); the `$try` binding name cannot collide with user bindings (`$` is not writable in
+/// source), and every synthetic node reuses the `?`'s span so diagnostics and tracebacks keep
+/// pointing at the `?`.
+fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
+    let ident = |name: &str| Expr::Ident {
+        name: name.to_string(),
+        span,
+    };
+    let call = |callee: Expr, args: Vec<Expr>| Expr::Call {
+        callee: Box::new(callee),
+        args,
+        span,
+    };
+    let arm = |variant: &str, body: Expr| noeta_ast::MatchArm {
+        pattern: noeta_ast::Pattern::Variant {
+            type_name: None,
+            variant: variant.to_string(),
+            bindings: vec![noeta_ast::Pattern::Binding {
+                name: "$try".to_string(),
+                span,
+            }],
+            span,
+        },
+        body: noeta_ast::ClosureBody::Expr(Box::new(body)),
+        span,
+    };
+    let from_call = call(
+        Expr::Member {
+            receiver: Box::new(ident(target)),
+            name: "from".to_string(),
+            name_span: span,
+            span,
+        },
+        vec![ident("$try")],
+    );
+    Expr::Match {
+        scrutinee: Box::new(operand.clone()),
+        arms: vec![
+            arm("Ok", call(ident("Ok"), vec![ident("$try")])),
+            arm("Err", call(ident("Err"), vec![from_call])),
+        ],
+        span,
+    }
+}
+
 fn module_global_names(program: &AstProgram) -> HashSet<String> {
     program
         .stmts
@@ -1779,7 +1834,21 @@ impl Lowerer<'_> {
                 Ok(Atom::Temp(dst))
             }
             Expr::Try { expr, span } => {
-                let operand = self.lower_expr(expr, out)?;
+                // A `?`-conversion site (error-ergonomics): the checker resolved this span's `Err`
+                // payload to convert through `Target.from` (`impl From<Source>` on the enclosing
+                // function's error type). Rewrite the operand to a synthetic
+                // `match v { Ok($t) => Ok($t), Err($t) => Err(Target.from($t)) }` — built as AST
+                // and lowered through the ordinary match/call paths (the `TierExpr` construction
+                // pattern), so both backends and the drop/reuse passes see plain IR and the
+                // conversion is identical by construction. The ordinary propagation then applies
+                // unchanged to the converted `Result`.
+                let operand = match self.sites.try_conversion_sites.get(span) {
+                    Some(target) => {
+                        let converted = try_conversion_match(expr, target, *span);
+                        self.lower_expr(&converted, out)?
+                    }
+                    None => self.lower_expr(expr, out)?,
+                };
                 Ok(self.emit(
                     out,
                     Rvalue::Try {

@@ -1,0 +1,23 @@
+// A type carries at most ONE `From` conversion: impl-block methods flatten into the type's
+// method table by name (no overloading), so a second `From` impl — whatever its source — would
+// make both the `from` dispatch and the `?` conversion path ambiguous. The textually-later impl
+// is a coherence conflict (E0027), keeping "exactly one declared conversion path" true by
+// construction.
+// expect: error E0027 at 18:10
+// expect: exit 1
+struct A { n: int }
+struct B { s: string }
+
+struct C {
+    m: string
+
+    impl From<A> {
+        fn from(e: A): C { return C { m: "a${e.n}" } }
+    }
+
+    impl From<B> {
+        fn from(e: B): C { return C { m: "b${e.s}" } }
+    }
+}
+
+echo "unreached"

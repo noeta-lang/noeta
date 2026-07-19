@@ -152,6 +152,7 @@ impl Checker {
                             .chain(r.impls.iter().map(|b| b.trait_name.as_str())),
                     );
                     self.record_derived(&r.name, &r.derives);
+                    self.record_from_impls(&r.name, &r.impls);
                     self.record_attribute(&r.name, r.attribute.as_deref());
                     self.symbols.generic_types.insert(
                         r.name.clone(),
@@ -267,6 +268,7 @@ impl Checker {
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
                     self.record_derived(&c.name, &c.derives);
+                    self.record_from_impls(&c.name, &c.impls);
                     // Attributes are structs only: `@attribute` on a class is an error (E0029).
                     if c.attribute.is_some() {
                         self.error(
@@ -389,6 +391,7 @@ impl Checker {
                             .chain(e.impls.iter().map(|b| b.trait_name.as_str())),
                     );
                     self.record_derived(&e.name, &e.derives);
+                    self.record_from_impls(&e.name, &e.impls);
                     self.symbols.generic_types.insert(
                         e.name.clone(),
                         e.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -818,6 +821,23 @@ impl Checker {
                     .entry(name.to_string())
                     .or_default()
                     .push((d.name.clone(), via.clone()));
+            }
+        }
+    }
+
+    /// Record a type's declared `From` conversions (error-ergonomics): each in-body
+    /// `impl From<Source>` block registers its resolved source type under the target, so a `?`
+    /// site can look up `(source → target)` regardless of statement order. Arity/validity of the
+    /// block is checked in pass 2 (`check_trait_impl`); a malformed block records nothing.
+    pub(crate) fn record_from_impls(&mut self, target: &str, impls: &[noeta_ast::ImplBlock]) {
+        for block in impls {
+            if block.trait_name == BuiltinTrait::From.name() && block.trait_args.len() == 1 {
+                let source = from_ref_q(&block.trait_args[0], &self.imports.extern_types);
+                self.symbols
+                    .from_impls
+                    .entry(target.to_string())
+                    .or_default()
+                    .push(source);
             }
         }
     }

@@ -786,6 +786,14 @@ struct Symbols {
     /// an instantiated bound `T: Keyed<int>`) and UT4 `dyn Trait` coercion. Populated in pass 1;
     /// coherence (one impl per trait per type) keeps a single entry per pair honest.
     user_trait_impls: HashMap<String, HashMap<String, Vec<Type>>>,
+    /// Declared `From` conversions (error-ergonomics): target type name → the source types its
+    /// in-body `impl From<Source>` blocks declare, resolved at collection so a `?` site can consult
+    /// them regardless of statement order. Coherence allows at most one `From` impl per type (the
+    /// `from` method flattens into the method table by name; no overloading), so a well-formed
+    /// program has at most one source here and a `(source → target)` lookup is unambiguous by
+    /// construction (a duplicate is E0027 and records both — harmlessly, since the program is
+    /// rejected).
+    from_impls: HashMap<String, Vec<Type>>,
     /// The subset of [`Checker::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.

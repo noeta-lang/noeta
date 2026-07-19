@@ -244,6 +244,13 @@ pub enum DiagnosticCode {
     /// the await fails loudly. Cancel-aware code uses `h.join(): Result<T, Cancelled>` to observe
     /// the cancelled outcome instead.
     AwaitCancelled,
+    /// A `?` would propagate an `Err` payload whose type neither matches the enclosing function's
+    /// declared error type nor has a declared conversion into it. `?` auto-converts the error
+    /// **only** through an `impl From<Source>` on the function's error type (the one implicit
+    /// conversion position in the language); with no such conversion the propagation would smuggle
+    /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
+    /// error type, or align the function's declared error type.
+    TryErrorMismatch,
 }
 
 impl DiagnosticCode {
@@ -306,6 +313,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidDirectiveSite,
         DiagnosticCode::MatchArmNotValue,
         DiagnosticCode::AwaitCancelled,
+        DiagnosticCode::TryErrorMismatch,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -368,6 +376,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidDirectiveSite => "E0054",
             DiagnosticCode::MatchArmNotValue => "E0055",
             DiagnosticCode::AwaitCancelled => "E0056",
+            DiagnosticCode::TryErrorMismatch => "E0057",
         }
     }
 

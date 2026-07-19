@@ -87,6 +87,13 @@ pub struct Sites {
     /// that makes lowering emit a narrow `Const::F32` instead of the default `Const::Float`. A pure
     /// function of the program (both backends narrow identically), like the other site maps.
     pub f32_literal_sites: HashSet<Span>,
+    /// `?`-conversion sites (error-ergonomics): each `Expr::Try` span whose `Err` payload type
+    /// differs from the enclosing function's declared error type **and** converts through that
+    /// target's `impl From<Source>` → the target error type's name. Lowering rewrites the `?`
+    /// operand at these spans to convert the `Err` payload (`Err(e)` → `Err(Target.from(e))`)
+    /// before the ordinary propagation, so both backends convert identically by construction. A
+    /// pure function of the program, like the other site maps.
+    pub try_conversion_sites: HashMap<Span, String>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -166,6 +173,8 @@ pub(crate) struct SiteMaps {
     pub(crate) bundle_call_sites: HashMap<Span, (String, String)>,
     /// Namespace-group member-access sites — see [`Sites::namespace_module_sites`].
     pub(crate) namespace_module_sites: HashMap<Span, String>,
+    /// `?`-conversion sites (error-ergonomics) — see [`Sites::try_conversion_sites`].
+    pub(crate) try_conversion_sites: HashMap<Span, String>,
 }
 
 impl SiteMaps {
@@ -191,6 +200,7 @@ impl SiteMaps {
             f32_literal_sites: self.f32_literal_sites,
             bundle_call_sites: self.bundle_call_sites,
             namespace_module_sites: self.namespace_module_sites,
+            try_conversion_sites: self.try_conversion_sites,
             destructor_relevance,
         }
     }
