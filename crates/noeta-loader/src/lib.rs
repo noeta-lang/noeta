@@ -1013,6 +1013,9 @@ fn link_core(
         .iter()
         .flat_map(qualify::bound_value_names)
         .collect();
+    // Dotted references that missed the entry's QMap (with spans) — filtered against the loaded
+    // modules below to diagnose a qualified reference that lacks its `use`.
+    let mut dotted_misses: Vec<(String, noeta_span::Span)> = Vec::new();
     for stmt in &entry_program.stmts {
         match stmt {
             Stmt::Use { path, names, span } => {
@@ -1030,7 +1033,7 @@ fn link_core(
                 // The entry's own declarations and statements qualify against the entry's map (its
                 // own namespace + its resolved imports), with the whole tail's bindings in scope.
                 let mut stmt = other.clone();
-                qualify::qualify_stmt_scoped(&mut stmt, &entry_map, &entry_bound);
+                qualify::qualify_stmt_scoped(&mut stmt, &entry_map, &entry_bound, &mut dotted_misses);
                 entry_stmts.push(stmt);
             }
         }
@@ -1054,40 +1057,35 @@ fn link_core(
         }
     }
 
-    // **Implicit FQN imports**: a bare fully-qualified reference (`geometry.vec.Vec2 { … }`,
-    // `geometry.vec.add(a, b)`) with no `use` at all acts as its own import — the manifest already
-    // imports a dependency to a namespace, so anything under a loaded module's namespace is
-    // addressable by spelling it out. Every dotted reference candidate in the entry and each
-    // dependency driver (the same closed unit whose `use`s drive imports above) that resolves to a
-    // loaded module's `pub` declaration merges exactly like an explicit import — qualified, deduped
-    // through `merged_q`, dragging its same-module closure. No local name binds (nothing to
-    // collide); a candidate that resolves to nothing is just an ordinary member chain and is
-    // skipped (the checker reports a genuinely-unknown name).
-    for stmts in std::iter::once(&entry_program.stmts).chain(dep_drivers.iter().map(|d| &d.stmts)) {
-        for stmt in stmts {
-            for candidate in qualify::referenced_names(stmt) {
-                let Some((mpath, dname)) = split_fqn(&candidate, &module_views) else {
-                    continue;
-                };
-                if let Resolution::Resolved(decl) = resolve(&module_views, &mpath, dname)
-                    && merged_q.insert(candidate.clone())
-                {
-                    let mut decl = *decl;
-                    if let Some(map) = module_maps.get(&mpath) {
-                        qualify::qualify_stmt(&mut decl, map);
-                    }
-                    imported.push(decl);
-                    merge_module_closure(
-                        &mpath,
-                        dname,
-                        &module_views,
-                        &module_maps,
-                        &mut merged_q,
-                        &mut imported,
-                    );
-                }
-            }
+    // **Qualified references require an import.** A dotted reference that missed the entry's QMap
+    // but resolves to a loaded module's declaration is a spelled-out FQN with no `use` bringing it
+    // in (`geometry.vec.Vec2 { … }` cold). Treating the FQN as its own implicit import was
+    // considered and rejected: it would make a file's dependency set invisible — a second, silent
+    // way to import next to the explicit `use` block the rest of the design leans on. Instead the
+    // reference is a targeted error carrying the exact `use` to add (and a privacy message when
+    // the declaration exists but is not `pub`). Chains suppressed by a local binding never land in
+    // the miss list, so an ordinary member access on a module-named local stays silent; candidates
+    // matching no loaded module fall through to the checker's own unknown-name error.
+    let mut reported: HashSet<&str> = HashSet::new();
+    for (name, span) in &dotted_misses {
+        if !reported.insert(name.as_str()) {
+            continue;
         }
+        let Some((mpath, dname)) = split_fqn(name, &module_views) else {
+            continue;
+        };
+        let namespace = mpath.join(".");
+        let message = match resolve(&module_views, &mpath, dname) {
+            Resolution::Resolved(_) => format!(
+                "qualified reference `{name}` requires an import — add `use {namespace}`"
+            ),
+            Resolution::Private => format!("`{dname}` is private to module `{namespace}`"),
+            Resolution::Missing | Resolution::NoModule => continue,
+        };
+        errors.push(LoadDiagnostic {
+            source: entry.clone(),
+            diagnostic: Diagnostic::error(DiagnosticCode::UnresolvedImport, *span, message),
+        });
     }
 
     // A standalone `impl Trait for T {}` in a pooled module (a sibling, or a dependency's own module)
@@ -1325,20 +1323,6 @@ fn build_module_map(
                         }
                     }
                 }
-            }
-        }
-    }
-    // Bare FQN references with **no `use` at all** (`geometry.vec.Vec2 { … }` cold): every dotted
-    // reference this module spells that resolves to `<loaded module>.<pub decl>` gets an identity
-    // key, so its member chains collapse like an import's would. The FQN *is* the import — the
-    // matching declaration merge is the implicit-import pass in `link_core`.
-    for stmt in own_stmts {
-        for candidate in qualify::referenced_names(stmt) {
-            if !map.contains_key(&candidate)
-                && let Some((mpath, dname)) = split_fqn(&candidate, modules)
-                && matches!(resolve(modules, &mpath, dname), Resolution::Resolved(_))
-            {
-                map.insert(candidate.clone(), candidate);
             }
         }
     }

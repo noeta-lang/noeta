@@ -41,7 +41,11 @@ pub type QMap = HashMap<String, String>;
 /// rewriter; always `false` for the collector). The member-chain collapse below keys on this — a
 /// hit may be an identity rewrite (`geometry.vec.add` → itself), which a string-changed test would
 /// miss.
-type NameVisitor<'a> = dyn FnMut(&mut String, NameKind) -> bool + 'a;
+///
+/// The [`Span`](noeta_span::Span) is supplied at the positions that can carry a **dotted**
+/// reference (type annotations, literal/pattern heads, member chains) so a map miss can be
+/// reported at its source location — the unresolved-FQN diagnostic; `None` elsewhere.
+type NameVisitor<'a> = dyn FnMut(&mut String, NameKind, Option<noeta_span::Span>) -> bool + 'a;
 
 /// Where a visited name sits, so the rewriter can apply position-appropriate shadowing rules.
 /// Type positions (annotations, literal heads, pattern heads, decl names) share no namespace with
@@ -65,15 +69,15 @@ enum NameKind {
 /// `A | B`, `(A, B)`, and `(A) -> B` all qualify their nominal leaves.
 fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
     match ty {
-        TypeRef::Named { name, args, .. } => {
-            visit(name, NameKind::Type);
+        TypeRef::Named { name, args, span } => {
+            visit(name, NameKind::Type, Some(*span));
             for a in args {
                 q_typeref(a, visit);
             }
         }
         // A trait object qualifies its trait name like any nominal leaf.
         TypeRef::DynTrait { trait_name, .. } => {
-            visit(trait_name, NameKind::Type);
+            visit(trait_name, NameKind::Type, None);
         }
         TypeRef::Optional { inner, .. } => q_typeref(inner, visit),
         TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
@@ -95,17 +99,35 @@ fn q_opt_typeref(ty: &mut Option<TypeRef>, visit: &mut NameVisitor) {
 /// it and its nested expressions/bodies carry, through `map`. A no-op when the map is empty (a
 /// non-namespaced file stays byte-identical).
 pub fn qualify_stmt(stmt: &mut Stmt, map: &QMap) {
-    qualify_stmt_scoped(stmt, map, &HashSet::new());
-}
-
-/// [`qualify_stmt`] with **additional surrounding value bindings**: the entry program's tail runs
-/// as one flat scope, so a top-level `vec = …` in one statement shadows a `vec` module alias in a
-/// *later* statement — the caller passes the program-wide bound set here. A lone declaration
-/// (imports, closures) needs only its own bindings, which are always collected.
-pub fn qualify_stmt_scoped(stmt: &mut Stmt, map: &QMap, outer_bound: &HashSet<String>) {
+    // Nothing to rewrite and no caller interested in misses: skip the walk, keeping the
+    // non-namespaced-file byte-identity fast path.
     if map.is_empty() {
         return;
     }
+    qualify_stmt_scoped(stmt, map, &HashSet::new(), &mut Vec::new());
+}
+
+/// [`qualify_stmt`] with **additional surrounding value bindings** and a **dotted-miss collector**.
+///
+/// The entry program's tail runs as one flat scope, so a top-level `vec = …` in one statement
+/// shadows a `vec` module alias in a *later* statement — the caller passes the program-wide bound
+/// set as `outer_bound`. A lone declaration (imports, closures) needs only its own bindings, which
+/// are always collected.
+///
+/// Every **dotted** name that misses the map (and isn't shadow-suppressed) is pushed into
+/// `dotted_misses` with its span: the linker filters these against the loaded modules to report a
+/// qualified reference that *would* resolve but lacks its `use` — qualified references always
+/// require an import, so the miss becomes a targeted E0019 with the exact `use` to add.
+pub fn qualify_stmt_scoped(
+    stmt: &mut Stmt,
+    map: &QMap,
+    outer_bound: &HashSet<String>,
+    dotted_misses: &mut Vec<(String, noeta_span::Span)>,
+) {
+    // No empty-map fast path here: even with nothing to rewrite, the walk still collects dotted
+    // misses — an entry with no namespace and no imports referencing `geometry.vec.Vec2` must
+    // still get the missing-`use` diagnostic. (The plain `qualify_stmt` keeps the fast path.)
+    //
     // Every value name this statement binds anywhere (params, `x = …`, destructures, `for` vars,
     // closure params, pattern bindings), plus the caller's surrounding bindings. A dotted value
     // chain whose root is one of these is a field/method access on the local, not a
@@ -114,7 +136,7 @@ pub fn qualify_stmt_scoped(stmt: &mut Stmt, map: &QMap, outer_bound: &HashSet<St
     // the pre-existing meaning of the chain.
     let mut bound = bound_value_names(stmt);
     bound.extend(outer_bound.iter().cloned());
-    walk_stmt(stmt, &mut |name, kind| {
+    walk_stmt(stmt, &mut |name, kind, span| {
         if kind == NameKind::ValueChain
             && name
                 .split('.')
@@ -127,6 +149,11 @@ pub fn qualify_stmt_scoped(stmt: &mut Stmt, map: &QMap, outer_bound: &HashSet<St
             *name = qualified.clone();
             true
         } else {
+            if name.contains('.')
+                && let Some(span) = span
+            {
+                dotted_misses.push((name.clone(), span));
+            }
             false
         }
     });
@@ -142,7 +169,7 @@ pub fn referenced_names(stmt: &Stmt) -> HashSet<String> {
     let mut names = HashSet::new();
     // The walk needs `&mut` (it is shared with the rewriter); clone so the source is untouched.
     let mut scratch = stmt.clone();
-    walk_stmt(&mut scratch, &mut |name, _kind| {
+    walk_stmt(&mut scratch, &mut |name, _kind, _span| {
         names.insert(name.clone());
         // Never a "match": the collector has no QMap, so the member-chain collapse stays inert
         // and the walk keeps its shape (the collected dotted candidates are a harmless superset).
@@ -467,7 +494,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             // A **top-level** function's own name qualifies (like a type's); a method's does not —
             // methods resolve through their type, so `q_fn` (shared with methods) never touches the
             // name, and the rewrite lives here on the `Stmt::Fn` arm only.
-            visit(&mut decl.name, NameKind::Type);
+            visit(&mut decl.name, NameKind::Type, None);
             // A `@tier(…, config: T)` / `@tier(…, expr: T)` declaration's type names a type in this
             // module — visit it like any type reference, so it qualifies in lockstep with the
             // handler's return (`q_fn` below): else E0051's expr-tier return-match compares `T`
@@ -475,16 +502,16 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             // drag the type's declaration into the merged program (cross-module linker fix).
             if let Some(tier) = &mut decl.tier {
                 if let Some((config, _)) = &mut tier.config {
-                    visit(config, NameKind::Type);
+                    visit(config, NameKind::Type, None);
                 }
                 if let Some((expr, _)) = &mut tier.expr {
-                    visit(expr, NameKind::Type);
+                    visit(expr, NameKind::Type, None);
                 }
             }
             q_fn(decl, visit);
         }
         Stmt::Class(decl) => {
-            visit(&mut decl.name, NameKind::Type);
+            visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
@@ -503,7 +530,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             }
         }
         Stmt::Struct(decl) => {
-            visit(&mut decl.name, NameKind::Type);
+            visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
@@ -519,7 +546,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             }
         }
         Stmt::Enum(decl) => {
-            visit(&mut decl.name, NameKind::Type);
+            visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.attrs {
                 q_attr(a, visit);
@@ -539,7 +566,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Trait(decl) => {
             // A trait's name qualifies like a type's (cross-module `dyn Trait` / `impl` resolution);
             // its method signatures name types in this module, so qualify them in lockstep.
-            visit(&mut decl.name, NameKind::Type);
+            visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
             for m in &mut decl.methods {
                 q_fn(&mut m.sig, visit);
@@ -575,7 +602,7 @@ fn q_fn(decl: &mut FnDecl, visit: &mut NameVisitor) {
 fn q_type_params(params: &mut [TypeParam], visit: &mut NameVisitor) {
     for p in params {
         for b in &mut p.bounds {
-            visit(&mut b.name, NameKind::Type);
+            visit(&mut b.name, NameKind::Type, None);
             for a in &mut b.args {
                 q_typeref(a, visit);
             }
@@ -616,7 +643,7 @@ fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
     // The trait name qualifies iff it is a user-defined trait (L1) — `visit` only rewrites names in
     // the module map (local/imported user traits); a built-in trait (`Add`, `Clone`) is absent from
     // it and left as-is.
-    visit(&mut b.trait_name, NameKind::Type);
+    visit(&mut b.trait_name, NameKind::Type, None);
     for m in &mut b.methods {
         q_fn(m, visit);
     }
@@ -625,8 +652,8 @@ fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
 fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
     // The `impl Trait for Target` target names a user type in this module → visit it. The trait name
     // qualifies iff it is a user trait (built-ins are absent from the module map).
-    visit(&mut decl.trait_name, NameKind::Type);
-    visit(&mut decl.target, NameKind::Type);
+    visit(&mut decl.trait_name, NameKind::Type, None);
+    visit(&mut decl.target, NameKind::Type, None);
     for m in &mut decl.methods {
         q_fn(m, visit);
     }
@@ -635,7 +662,7 @@ fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
 /// Walk a `#[Attr(...)]` data attribute: its name is a `@attribute` struct, and its literal
 /// arguments may themselves name nominal types (a struct/enum/type-ref literal).
 fn q_attr(a: &mut Attribute, visit: &mut NameVisitor) {
-    visit(&mut a.name, NameKind::Type);
+    visit(&mut a.name, NameKind::Type, None);
     for arg in &mut a.args {
         q_attr_value(&mut arg.value, visit);
     }
@@ -652,17 +679,17 @@ fn q_attr_value(av: &mut AttrValue, visit: &mut NameVisitor) {
         AttrValue::Enum {
             enum_name, args, ..
         } => {
-            visit(enum_name, NameKind::Type);
+            visit(enum_name, NameKind::Type, None);
             args.iter_mut().for_each(|a| q_attr_value(a, visit));
         }
         AttrValue::Struct { type_name, fields } => {
-            visit(type_name, NameKind::Type);
+            visit(type_name, NameKind::Type, None);
             fields
                 .iter_mut()
                 .for_each(|(_, val)| q_attr_value(val, visit));
         }
         AttrValue::TypeRef(name) => {
-            visit(name, NameKind::Type);
+            visit(name, NameKind::Type, None);
         }
         AttrValue::Str(_) | AttrValue::Int(_) | AttrValue::Float(_) | AttrValue::Bool(_) => {}
     }
@@ -675,11 +702,11 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         // enum-path base (`E.Empty`), or a type used as a first-class value — is a `Var` atom at
         // runtime bound under the (now-qualified) type name, so it must qualify too. Only names the
         // map holds (type names) are touched; ordinary bindings pass through.
-        Expr::Ident { name, .. } => {
-            visit(name, NameKind::Value);
+        Expr::Ident { name, span } => {
+            visit(name, NameKind::Value, Some(*span));
         }
         Expr::Object(lit) => {
-            visit(&mut lit.type_name, NameKind::Type);
+            visit(&mut lit.type_name, NameKind::Type, Some(lit.type_name_span));
             for f in &mut lit.fields {
                 q_expr(&mut f.value, visit);
             }
@@ -877,16 +904,17 @@ fn collapse_qualified_chain(e: &mut Expr, visit: &mut NameVisitor) -> bool {
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(".");
-        if !visit(&mut dotted, NameKind::ValueChain) {
+        let prefix_span = noeta_span::Span {
+            start: segments[0].1.start,
+            end: segments[k - 1].1.end,
+            source: segments[0].1.source,
+        };
+        if !visit(&mut dotted, NameKind::ValueChain, Some(prefix_span)) {
             continue;
         }
         let mut collapsed = Expr::Ident {
             name: dotted,
-            span: noeta_span::Span {
-                start: segments[0].1.start,
-                end: segments[k - 1].1.end,
-                source: segments[0].1.source,
-            },
+            span: prefix_span,
         };
         for (name, name_span) in &segments[k..] {
             let span = noeta_span::Span {
@@ -912,10 +940,11 @@ fn q_pattern(p: &mut Pattern, visit: &mut NameVisitor) {
         Pattern::Variant {
             type_name,
             bindings,
+            span,
             ..
         } => {
             if let Some(n) = type_name {
-                visit(n, NameKind::Type);
+                visit(n, NameKind::Type, Some(*span));
             }
             bindings.iter_mut().for_each(|b| q_pattern(b, visit));
         }
