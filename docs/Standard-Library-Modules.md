@@ -139,8 +139,10 @@ Process execution and system introspection. Under the sandbox the introspection 
 |---|---|---|
 | `pid` | `pid() -> int` | The child's OS process id. |
 | `wait` | `wait() -> ExecResult` | Blocks until the child exits; returns its status + captured output. Idempotent. |
+| `wait_async` | `wait_async() -> Future<ExecResult>` | The awaitable twin of `wait`: an async context awaits the child's exit. In the sandbox it resolves deterministically; on the real host the wait runs on the blocking pool, genuinely overlapping the isolate's other tasks. |
 | `try_wait` | `try_wait() -> ?ExecResult` | Non-blocking poll: `some(result)` if exited, `none` if still running. |
 | `kill` | `kill() -> void` | Forcefully terminates the child (idempotent). A later `wait` sees the killed status. |
+| `signal` | `signal(name: string) -> void` | Send a named OS signal to the child — the general form of `kill`. The name is case-insensitive and the `SIG` prefix is optional (`"TERM"`, `"sighup"`, `"KILL"`). Supported: `HUP`, `INT`, `QUIT`, `KILL`, `USR1`, `USR2`, `TERM`, `CONT`, `STOP`; an unknown name is E0021. Idempotent (signalling an exited child is a no-op). On non-Unix hosts only `KILL`/`TERM` are expressible. |
 | `read_line` | `read_line() -> ?string` | Streams the child's stdout a line at a time **while it runs** (blocks until a line is ready), `none` at end of output. `wait` still returns the whole capture. |
 | `read` | `read(n: int) -> ?string` | Up to `n` **characters** from stdout (POSIX-read shape: blocks only until at least one is ready), sharing the `read_line` cursor; `none` at EOF. |
 | `read_err_line` | `read_err_line() -> ?string` | Streams **stderr** a line at a time on its own cursor. |
@@ -175,8 +177,8 @@ File IO. Under `noeta run` this is real disk; the conformance sandbox uses an in
 | `mkdir` | `mkdir(path: string) -> void` (creates ancestors, like `mkdir -p`) |
 | `list` | `list() -> List<string>` / `list(dir: string) -> List<string>` |
 | `open` | `open(path: string, mode: string) -> FileHandle` |
-| `read_async` / `write_async` / `append_async` | the `Future`-returning variants (see [Concurrency](Concurrency)) |
-| `exists_async` / `remove_async` / `list_async` | async metadata twins — same semantics as their sync forms, awaited |
+| `read_async` / `read_bytes_async` / `write_async` / `append_async` | the `Future`-returning variants (see [Concurrency](Concurrency)) |
+| `exists_async` / `remove_async` / `list_async` / `is_dir_async` / `mkdir_async` | async metadata & directory twins — same semantics as their sync forms, awaited |
 
 ### File handles
 
@@ -203,9 +205,11 @@ echo reader.read_line() ?? "<eof>"   // alpha
 
 | Function | Signature | Notes |
 |---|---|---|
-| `stringify` | `stringify(value: dyn) -> string` | Sorted object keys; `none`/unit → `null`. |
+| `stringify` | `stringify(value: dyn) -> string` | Maps in sorted-key order, objects in declared field order; `none`/unit → `null`. The same engine as `@derive(Serialize<Json>)`'s `to_json()`. |
 | `parse` | `parse(text: string) -> dyn` | Objects → maps, arrays → lists, `null` → unit. Malformed is E0007. |
-| `parse::<T>` | `parse::<T>(text: string) -> T` | **Typed** decode into a real value. |
+| `parse::<T>` | `parse::<T>(text: string) -> T` | **Typed** decode into a real value; **aborts** on failure — the convenience form. |
+| `try_parse::<T>` | `try_parse::<T>(text: string) -> Result<T, JsonError>` | The **recoverable** twin of `parse::<T>` — the exact same decode walk, failures as a catchable `JsonError`. |
+| `decode_typed` | `decode_typed(name: string, text: string) -> Result<dyn, JsonError>` | Decode by **runtime** type name (router/DI-facing), backed by `@derive(Deserialize<Json>)` recipes. |
 
 ```noeta check
 struct Point { x: int  y: int }
@@ -217,9 +221,25 @@ v = json.parse("{\"name\":\"Niro\",\"age\":3}")
 echo v["name"]                                       // Niro
 
 p = json.parse::<Point>("{\"x\":1,\"y\":2}")         // a real Point (methods callable)
+
+echo match json.try_parse::<Point>("{\"x\": 1}") {   // recoverable: a Result, not an abort
+    Ok(q)  => "at ${q.x}",
+    Err(e) => e.message(),                           // missing field `y` for `Point`
+}
 ```
 
-The typed form supports nested structs, `List<T>`, `Map`, and optional fields (an absent field becomes `none`). A shape/type mismatch is E0007; a missing required field is E0009. Numeric widening follows `int <: f32 <: float` (a JSON integer satisfies `float`, a fractional number does not satisfy `int`).
+The typed forms support nested structs, `List<T>`, `Map`, and optional fields (an absent field becomes `none`). Numeric widening follows `int <: f32 <: float` (a JSON integer satisfies `float`, a fractional number does not satisfy `int`). `parse::<T>` and `try_parse::<T>` are a deliberate pairing over one decode walk: reach for `parse::<T>` when a bad document is a bug (config you ship), `try_parse::<T>` when it is input (a request body). With `parse::<T>` a shape/type mismatch is E0007 and a missing required field E0009 — messages carry the same path precision `JsonError` does.
+
+### `JsonError`
+
+Every recoverable decode failure — from `try_parse::<T>` or `decode_typed` — is a `JsonError` (importable as `use std.json.JsonError`), the standard library's first [`Error`](Error-Handling#the-error-trait) implementor. It also implements `Display`, so `${e}` interpolates its message.
+
+| Method | Returns | Notes |
+|---|---|---|
+| `message()` | `string` | The composed message — `items[2].price: expected float, found JSON string`. The `Error` trait's method; also its `Display`. |
+| `kind()` | `string` | `"syntax"`, `"mismatch"`, `"missing_field"`, or `"unknown_type"`. |
+| `path()` | `string` | The path from the document root (`items[2].price`); empty for document-level failures. |
+| `line()` / `column()` | `?int` | 1-based source position for `"syntax"` failures; `none` otherwise. |
 
 ## `reactive`
 

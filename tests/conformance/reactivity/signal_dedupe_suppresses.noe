@@ -1,0 +1,18 @@
+// Reactivity S0 — opt-in value-equality suppression. `signal(v, true)` enables the dedupe flag: a
+// `set`/`update` landing a value equal to the current one (under the language's `==`) does NOT re-fire
+// dependents. Here the effect prints on creation (0), skips the two equal sets, and reruns only on the
+// two that actually change the value (1, then 2). `.update` obeys the same rule: `+ 0` is a no-op.
+// expect: stdout "count=0"
+// expect: stdout "count=1"
+// expect: stdout "count=2"
+// expect: exit 0
+use std.reactive.{signal, effect}
+count = signal(0, true)
+effect(fn() {
+    echo "count=${count.get()}"
+})
+count.set(0)               // equal to 0 → suppressed, no rerun
+count.set(1)               // changes → rerun
+count.update(fn(n) => n)   // equal to 1 → suppressed
+count.set(1)               // equal to 1 → suppressed
+count.set(2)               // changes → rerun

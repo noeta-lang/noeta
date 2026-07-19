@@ -1,0 +1,6 @@
+// `json.parse::<T>` takes exactly one string argument; zero arguments is a static E0007, validated
+// through the function's declared signature — not a hand-rolled arity check.
+// expect: error E0007 at 5:5
+use std.json
+x = json.parse::<int>();
+echo x;

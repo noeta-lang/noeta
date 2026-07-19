@@ -1,0 +1,25 @@
+// Track A.8 — user-facing cancellation. `h.cancel()` marks a task cancelled exactly as a `race`
+// loser (cooperative — it never resumes past its last suspension), and `h.join()` observes the
+// outcome as a typed `Result<T, Cancelled>`. Here `work` is spawned, allowed to reach its `sleep`
+// suspension (via the top-level `sleep(1).await`), then cancelled while suspended — so its "end"
+// line never prints — and `join` reports the `Err(Cancelled)` arm. Both backends agree.
+// expect: stdout "work start"
+// expect: stdout "cancelled"
+// expect: exit 0
+use std.task.{sleep}
+async fn work(): int {
+    echo "work start"
+    sleep(10).await
+    echo "work end"
+    return 5
+}
+concurrent {
+    h = spawn work()
+    sleep(1).await
+    h.cancel()
+    r = h.join()
+    echo match r {
+        Ok(v)  => "ok=" ~ v,
+        Err(_) => "cancelled",
+    }
+}

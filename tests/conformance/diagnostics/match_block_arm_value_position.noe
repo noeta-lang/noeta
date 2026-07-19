@@ -1,0 +1,14 @@
+// A block-bodied match arm (`pattern => { stmts }`, aether F1) produces no value — blocks are
+// statement sequences in Noeta, so a block-bodied function yields `unit` unless it `return`s. Using
+// such an arm where the `match`'s value is consumed (here a binding RHS) would silently contribute
+// `unit`, so it is a compile error (E0055) rather than a silent value loss. The fix is a value
+// expression (`=> <expr>`) or moving the `match` to statement position.
+// expect: error E0055 at 11:5
+// expect: exit 1
+x = 2
+r = match x {
+    1 => "one",
+    2 => { t = "tw"; t ~ "o" },
+    _ => "many",
+}
+echo "r=" ~ r

@@ -40,6 +40,19 @@ pub(crate) fn binding_targets(stmt: &Stmt) -> Vec<&str> {
     }
 }
 
+/// Whether a console fragment is a pure **observation** — every top-level statement is an
+/// expression, so it reads state without binding, assigning, or looping (watch-memoization). Only
+/// such a watch has its rendered result memoized within a stop; anything with a binding/assignment
+/// (or a loop/branch that could mutate) is treated as a potential state change that always re-runs
+/// and bumps the stop generation. (A call that mutates through a function is invisible here — the
+/// watch contract is that a watch is observational, exactly as it is in any debugger.)
+fn is_observational(program: &Program) -> bool {
+    program
+        .stmts
+        .iter()
+        .all(|stmt| matches!(stmt, Stmt::Expr { .. }))
+}
+
 /// A ready-to-apply hot-reload fragment (server-hmr W1) — the compiler-free hand-off the VM applies.
 /// The watcher thread (which owns parsing, checking, and diffing) turns its `SwapPlan` into this
 /// plain record when depositing, so [`HotChannel`] — and thus the VM core — never names the compiler.
@@ -213,6 +226,15 @@ impl<'m> Vm<'m> {
         let Some(session) = self.debug_session.as_mut() else {
             return Err("this run has no debug session (fragments need a session launch)".into());
         };
+        // A real install relocates the new wrapper onto proto 0 and pushes it to the tail — and
+        // because `extend` recycles proto 0, that tail index is *reused* by the next install. Any
+        // compiled-wrapper entry the U3 memo still holds therefore points at a proto this swap is
+        // about to overwrite, so re-running it would run the wrong code ("the fragment did not
+        // produce a value"). Drop the memo here: an install happens only on a compile *miss* (never
+        // on a plain step, so cross-step reuse of an unchanged watch is untouched), and it is
+        // exactly the event after which those cached indices go stale. The entry this install is
+        // about to produce is memoized by the caller *after* we return, so it survives.
+        session.memo.clear();
         let arena = session.arena;
         let mut extended = session.compiler.extend(fragment)?;
         // (1) Relocate the entry; proto 0 stays the program's `main`.
@@ -363,19 +385,82 @@ impl<'m> Vm<'m> {
         program: &Program,
         frame: usize,
         scope: &[String],
-        pure: bool,
+        kind: EvalKind,
         text: &str,
         frames: &[Frame],
         regs: &[Value],
     ) -> DebugEvalOutcome {
-        match self.eval_fragment_owned(program, frame, scope, pure, Some(text), frames, regs) {
+        // Watch-result memo (watch-memoization): an *observational* watch — every top-level
+        // statement is an expression, so it reads state without binding/assigning/looping — is the
+        // one shape a watch panel re-renders unchanged on every stop. Serve its rendered result from
+        // the per-stop cache when nothing has bumped the generation since, so re-rendering the same
+        // watch at the same stop does not re-run it (the compiled-wrapper memo above skips the
+        // *compile* but still executes the fragment; this skips the execution too). A watch that
+        // binds/assigns, or any console entry, is a potential mutation: it always runs and bumps the
+        // generation, invalidating every result cached at the prior generation.
+        let memoize = kind == EvalKind::Watch && is_observational(program);
+        if memoize && let Some(hit) = self.watch_result_lookup(text, frame) {
+            return hit;
+        }
+        let outcome = match self.eval_fragment_owned(
+            program,
+            frame,
+            scope,
+            kind.is_pure(),
+            Some(text),
+            frames,
+            regs,
+        ) {
             Ok(v) => {
-                let text = v.display();
+                let rendered = v.display();
                 let ty = v.type_display();
                 release(v);
-                DebugEvalOutcome::Value { text, ty }
+                DebugEvalOutcome::Value { text: rendered, ty }
             }
             Err(msg) => DebugEvalOutcome::Error(msg),
+        };
+        // Cache a successful observational watch; a mutating watch or a console entry bumps the stop
+        // generation so any cached watch re-evaluates on its next render (a hover does neither).
+        match kind {
+            EvalKind::Watch if memoize => {
+                if let DebugEvalOutcome::Value { text: v, ty } = &outcome {
+                    self.watch_result_store(text, frame, v.clone(), ty.clone());
+                }
+            }
+            EvalKind::Watch | EvalKind::Console => self.bump_stop_generation(),
+            EvalKind::Hover => {}
+        }
+        outcome
+    }
+
+    /// Return a memoized observational-watch result if one is cached for `(text, frame)` at the
+    /// current stop generation (watch-memoization); `None` on a miss or a stale (older-generation)
+    /// entry.
+    fn watch_result_lookup(&self, text: &str, frame: usize) -> Option<DebugEvalOutcome> {
+        let session = self.debug_session.as_ref()?;
+        let (generation, value, ty) = session.result_memo.get(&(text.to_string(), frame))?;
+        (*generation == session.stop_generation).then(|| DebugEvalOutcome::Value {
+            text: value.clone(),
+            ty: ty.clone(),
+        })
+    }
+
+    /// Cache an observational-watch result under `(text, frame)`, stamped with the current stop
+    /// generation (watch-memoization).
+    fn watch_result_store(&mut self, text: &str, frame: usize, value: String, ty: String) {
+        if let Some(session) = self.debug_session.as_mut() {
+            let generation = session.stop_generation;
+            session
+                .result_memo
+                .insert((text.to_string(), frame), (generation, value, ty));
+        }
+    }
+
+    /// Advance the stop generation, invalidating every memoized watch result (watch-memoization). A
+    /// no-op when there is no debug session.
+    pub(crate) fn bump_stop_generation(&mut self) {
+        if let Some(session) = self.debug_session.as_mut() {
+            session.stop_generation += 1;
         }
     }
 
@@ -418,6 +503,7 @@ impl<'m> Vm<'m> {
                 module: self.module,
                 frames,
                 regs,
+                strand: self.sched.current_strand,
             };
             let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
                 return Err(format!("no frame {frame} in the paused stack"));
@@ -652,6 +738,9 @@ impl<'m> Vm<'m> {
                 let ty = v.type_display();
                 let old = std::mem::replace(&mut regs[slot], v);
                 self.release_value(old);
+                // A register write is a state mutation: bump the generation so any memoized watch
+                // re-evaluates on its next render (watch-memoization).
+                self.bump_stop_generation();
                 DebugEvalOutcome::Value { text, ty }
             }
             Err(msg) => DebugEvalOutcome::Error(msg),

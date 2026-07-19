@@ -56,6 +56,11 @@ pub struct RunOptions {
     pub host: Box<dyn noeta_stdlib::Host>,
     pub executor: Box<dyn noeta_stdlib::Executor>,
     pub collector: noeta_value::CollectorMode,
+    /// The safepoint-GC step (memory-management 6.x): how many further live objects accumulate
+    /// before an in-run cycle collection is requested at the next safepoint. `None` = the
+    /// process default (`NOETA_GC_THRESHOLD`, else 10k). Tests pin small values to exercise
+    /// mid-run collection deterministically on tiny heaps.
+    pub gc_threshold: Option<usize>,
     pub tiering: Tiering,
     /// Attached debugger (`noeta dap`). Callers pair this with [`Tiering::Off`] — see the
     /// observability contract on [`Tiering`].
@@ -118,6 +123,7 @@ impl Default for RunOptions {
             host: Box::new(noeta_stdlib::SandboxHost::new()),
             executor: Box::new(noeta_stdlib::SandboxExecutor::new()),
             collector: noeta_value::CollectorMode::Trace,
+            gc_threshold: None,
             tiering: Tiering::default(),
             debugger: None,
             profiler: None,
@@ -186,6 +192,12 @@ impl VmBackend {
     /// combination — not another copy of the protocol (audit-1 finding 14).
     pub fn run_module_with(&self, module: &Module, opts: RunOptions) -> RunOutcome {
         noeta_value::set_collector_mode(opts.collector);
+        // Arm the in-run safepoint-GC trigger for this run (thread-local = per-isolate); teardown
+        // disarms it. See `Vm::maybe_safepoint_gc`.
+        noeta_value::safepoint_gc_arm(
+            opts.gc_threshold
+                .unwrap_or_else(noeta_value::safepoint_gc_default_threshold),
+        );
         // The arena owning each debug-session/hot-swap module snapshot lives here, for
         // exactly the run's duration: an escaped fragment value stays resolvable until the
         // program exits.
@@ -200,6 +212,8 @@ impl VmBackend {
                 compiler: Box::new(session),
                 arena: &arena,
                 memo: HashMap::new(),
+                result_memo: HashMap::new(),
+                stop_generation: 0,
             });
         }
         vm.hot_mailbox = opts.hot_mailbox;
@@ -537,6 +551,7 @@ impl VmBackend {
         factory: IsolateFactory,
     ) -> (RunResult, Vec<TraceFrame>) {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
         let mut vm = Vm::load(&module, host, executor);
         vm.isolates.parallel_isolates = true;
         vm.isolates.isolate_module = Some(Arc::clone(&module));
@@ -754,6 +769,15 @@ impl Backend for VmBackend {
 /// session (REPL-on-VM) can run one entry's `main` against the shared globals *without* the teardown a
 /// later entry's bindings still depend on; the single-shot path just runs them back to back.
 pub(crate) fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult {
+    // Register the root parent in the stall registry for its driving lifetime, so a genuine
+    // real-path cross-isolate deadlock resolves to E0010 instead of spinning (isolates I.4c). Inert
+    // in the deterministic sandbox (non-parallel).
+    let _stall = if vm.isolates.parallel_isolates {
+        vm.stall_active = true;
+        Some(crate::isolate::STALL.scheduler())
+    } else {
+        None
+    };
     vm.run_top();
     vm.teardown(mode)
 }

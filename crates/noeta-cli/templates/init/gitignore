@@ -1,0 +1,10 @@
+# Compiled Noeta artifacts (`noeta build`): bundles, wasm images, and anything
+# built into build/. (Commit `noeta.lock` — it pins your dependency resolution.)
+*.noeb
+*.wasm
+/build/
+
+# Profiler output (`noeta profile`)
+*.folded
+*.speedscope.json
+flamegraph.svg

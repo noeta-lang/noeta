@@ -1,0 +1,27 @@
+// A self-recursive nested `fn` declared inside a **doubly nested** top-level block (a `while` inside an
+// `if`), alongside a nested `fn` that references top-level globals (`helper`, `g`). The recursive `fact`
+// resolves to its own celled binding while `inner` still reaches the module globals by name — the two
+// resolution paths coexist in the same top-level block scope.
+// expect: stdout "120"
+// expect: stdout "110"
+// expect: exit 0
+fn helper(n: int): int {
+    return n * 2;
+}
+mut g = 100;
+if g > 0 {
+    while true {
+        fn fact(n: int): int {
+            if n <= 1 {
+                return 1;
+            }
+            return n * fact(n - 1);
+        }
+        fn inner(n: int) use (g): int {
+            return helper(n) + g;
+        }
+        echo fact(5);
+        echo inner(5);
+        break;
+    }
+}

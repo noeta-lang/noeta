@@ -62,7 +62,7 @@ fn matches<K, T: Keyed<K>>(item: T, k: K): bool {
 echo matches(Door { code: 7 }, 7)     // true
 ```
 
-An instantiated bound must match the trait's arity (`T: Keyed<int, string>` on a one-parameter trait is E0014), and built-in traits take no bound arguments.
+An instantiated bound must match the trait's arity (`T: Keyed<int, string>` on a one-parameter trait is E0014), and built-in traits take no bound arguments. (`From<Source>` is the one built-in whose *impl* carries a type argument — `impl From<JsonError> { … }` — but it is not usable as an instantiated bound.)
 
 The bound also types the **body**: on a `T`-typed value, a method the bound's trait declares resolves at the bound's instantiation — under `<T: Keyed<int>>`, `item.key()` is an `int` and `item.same(x)` demands an `int`, so a wrong argument, return, or arity is E0007 at the definition, before any call site exists. A method no bound declares stays leniently deferred.
 
@@ -75,6 +75,8 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Equatable` | `eq(other): bool` | `==` `!=` |
 | `Comparable` | `compare(other): Ordering` | `< <= > >=` |
 | `Display` | `to_string(): string` | `echo`, `${…}` |
+| `Error` | `message(): string` | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
+| `From<Source>` | `from(value: Source): Target` — associated | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at--impl-fromsource) |
 | `Add` | `add(other): T` | `+` |
 | `Sub` | `sub(other): T` | `-` |
 | `Mul` | `mul(other): T` | `*` |
@@ -84,6 +86,7 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Index` | `get(i): T` | `a[i]` |
 | `Length` | `len(): int` | `x.len()` on a `<T: Length>` parameter |
 | `Iterable` | `iter(): Iterator<T>` | `for x in o` |
+| `Callable` | `call(...)` — any arity | `obj(args)` |
 | `Clone` | — | structural clone |
 
 `Ordering` is a namable built-in enum (`Ordering.Less` / `Equal` / `Greater`); calling `.compare()` on a primitive returns it.
@@ -106,6 +109,19 @@ class Money {
 echo (Money.new(3) < Money.new(5))   // true
 ```
 
+**`Callable` makes an object invocable.** A type implementing `Callable` with a `call` method can be applied like a function — `obj(args)` dispatches to `obj.call(args)`, with the receiver's state in scope. The arity is the method's own (the protocol does not pin it), and the call is arity/argument-checked against the method's signature like any method call. A user type without a `call` method is statically not callable (E0007).
+
+```noeta
+class Adder {
+    pub base: int
+    impl Callable {
+        fn call(x: int): int { return self.base + x }
+    }
+}
+add10 = Adder { base: 10 }
+echo add10(5)     // 15
+```
+
 There is also a **standalone** `impl Trait for T { ... }`, which must target a type declared in the same module — an orphan target is E0013, a wrong or missing required method is E0015. A standalone impl of a **user** trait may carry method bodies (hoisted onto the target type); an impl of a **built-in** trait must stay an empty-body marker (a body is E0015 — those methods live in the type's own body).
 
 **Default methods fall back.** A user trait's method *with* a body is a **default**: an implementor may omit it, and the omitted method falls back to the trait's default body — hoisted onto the implementing type, so it dispatches like any method (a default that mentions `self` is an instance method and may call the trait's required methods; a self-less default is an associated fn, called on the type). A method the impl provides always overrides its default. A **generic** trait implements at an instantiation — `impl Keyed<int> { … }`, `impl Keyed<string> for Tag { … }`, `@derive(Keyed<string>)` — and its defaults substitute the type parameters through their signatures and bodies before hoisting; a bare `impl Keyed`/`@derive(Keyed)` on a generic trait is an arity error naming the parameters.
@@ -119,6 +135,7 @@ There is also a **standalone** `impl Trait for T { ... }`, which must target a t
 | `Equatable` | Structural equality. |
 | `Comparable` | Field-wise ordering, in declaration order (recurses into nested objects and enum payloads). On an **enum**: variant declaration order first (`Low < Medium < High`), then payload fields. Also what `.sorted()` uses. |
 | `Display` | A structural `to_string` — a **marker**: the structural default you already get, kept so a competing hand-written `impl Display` is a coherence error. |
+| `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
 | `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
 | `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). |
 

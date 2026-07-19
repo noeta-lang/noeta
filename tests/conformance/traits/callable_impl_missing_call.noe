@@ -1,0 +1,11 @@
+// `impl Callable` must define the protocol's required method `call` (E0015). The arity is free —
+// but the method itself is not optional.
+// expect: error E0015 at 8:10
+// expect: exit 1
+class Broken {
+    pub x: int
+
+    impl Callable {
+    }
+}
+b = Broken { x: 1 }

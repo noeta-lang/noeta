@@ -1094,8 +1094,10 @@ enum Stream {
 /// are idempotent.
 #[derive(Debug)]
 struct ChildProc {
-    child: std::process::Child,
-    /// The child's OS pid, captured at spawn (stays valid after reap for `pid()`).
+    /// The OS child, `None` once ownership has been handed to a `wait_async` background waiter (the
+    /// waiter reaps it and publishes the outcome through [`ChildProc::awaiting`]).
+    child: Option<std::process::Child>,
+    /// The child's OS pid, captured at spawn (stays valid after reap for `pid()`/`signal()`).
     pid: i64,
     stdout: Arc<SharedStream>,
     stderr: Arc<SharedStream>,
@@ -1110,6 +1112,10 @@ struct ChildProc {
     stdin: Option<std::process::ChildStdin>,
     /// The reaped outcome, cached so a second `wait`/`try_wait` returns it without re-waiting.
     result: Option<ExecResult>,
+    /// Set once `wait_async` detaches the child onto a background waiter: a synchronous `wait`/
+    /// `try_wait` on the same handle then observes the outcome through this shared slot rather than
+    /// the (now moved-out) [`ChildProc::child`].
+    awaiting: Option<Arc<WaitSlot>>,
 }
 
 impl ChildProc {
@@ -1131,6 +1137,200 @@ impl ChildProc {
         result
     }
 }
+
+/// The shared exit slot a `wait_async` background waiter publishes to (process-signals arc): the
+/// blocking body reaps the detached child and stores the outcome here, so a later synchronous
+/// `wait`/`try_wait` on the same handle can block on / poll it. The single hop between the off-thread
+/// waiter and the isolate's synchronous process API.
+#[derive(Debug, Default)]
+struct WaitSlot {
+    done: Mutex<Option<ExecResult>>,
+    ready: std::sync::Condvar,
+}
+
+/// The real host's `wait_async` descriptor: it owns the detached child (and its drain threads), so
+/// its blocking body reaps on the runtime's blocking pool — genuinely overlapping the isolate — then
+/// publishes the outcome to the shared [`WaitSlot`] before yielding it. The `Ready` variant short-
+/// circuits an already-reaped child (nothing to wait on).
+struct RealProcWaitIo {
+    handle: u64,
+    ready: Option<ExecResult>,
+    child: Option<std::process::Child>,
+    stdout: Arc<SharedStream>,
+    stderr: Arc<SharedStream>,
+    stdout_join: Option<std::thread::JoinHandle<()>>,
+    stderr_join: Option<std::thread::JoinHandle<()>>,
+    slot: Option<Arc<WaitSlot>>,
+}
+
+impl std::fmt::Debug for RealProcWaitIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealProcWaitIo")
+            .field("handle", &self.handle)
+            .field("ready", &self.ready.is_some())
+            .finish()
+    }
+}
+
+impl RealProcWaitIo {
+    /// Reap the detached child: wait for exit, join the drain threads, snapshot the captured output,
+    /// publish the outcome to the shared slot, and return it. Runs on the blocking pool (real host)
+    /// or synchronously at spawn (fallback) — either way off the child's owning registry.
+    fn reap(&mut self) -> Result<NativeOut, StdError> {
+        if let Some(result) = self.ready.take() {
+            return Ok(NativeOut::Extern(ExternBox::new(result)));
+        }
+        let mut child = self
+            .child
+            .take()
+            .expect("a pending RealProcWaitIo always owns the child");
+        let status = child.wait().map_err(|e| io_error(format!("wait: {e}")))?;
+        if let Some(h) = self.stdout_join.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.stderr_join.take() {
+            let _ = h.join();
+        }
+        let result = ExecResult {
+            status: i64::from(status.code().unwrap_or(-1)),
+            stdout: self.stdout.snapshot(),
+            stderr: self.stderr.snapshot(),
+        };
+        if let Some(slot) = self.slot.take() {
+            *slot.done.lock().unwrap() = Some(result.clone());
+            slot.ready.notify_all();
+        }
+        Ok(NativeOut::Extern(ExternBox::new(result)))
+    }
+}
+
+impl ExternIo for RealProcWaitIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        self.reap()
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        if let Some(result) = self.ready.take() {
+            return Some(RealBody::Blocking(Box::new(move || {
+                Ok(NativeOut::Extern(ExternBox::new(result)))
+            })));
+        }
+        let mut child = self.child.take();
+        let stdout = Arc::clone(&self.stdout);
+        let stderr = Arc::clone(&self.stderr);
+        let mut stdout_join = self.stdout_join.take();
+        let mut stderr_join = self.stderr_join.take();
+        let slot = self.slot.take();
+        Some(RealBody::Blocking(Box::new(move || {
+            let mut child = child.take().expect("pending waiter owns the child");
+            let status = child.wait().map_err(|e| io_error(format!("wait: {e}")))?;
+            if let Some(h) = stdout_join.take() {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_join.take() {
+                let _ = h.join();
+            }
+            let result = ExecResult {
+                status: i64::from(status.code().unwrap_or(-1)),
+                stdout: stdout.snapshot(),
+                stderr: stderr.snapshot(),
+            };
+            if let Some(slot) = slot {
+                *slot.done.lock().unwrap() = Some(result.clone());
+                slot.ready.notify_all();
+            }
+            Ok(NativeOut::Extern(ExternBox::new(result)))
+        })))
+    }
+}
+
+/// A `wait_async` descriptor for a child a *previous* `wait_async` already detached: it owns no
+/// child, only a clone of the shared [`WaitSlot`], and blocks on it — so a second (or racing)
+/// `wait_async` resolves to the same outcome the first waiter publishes.
+#[derive(Debug)]
+struct SlotWaitIo {
+    slot: Arc<WaitSlot>,
+}
+
+fn await_slot(slot: &WaitSlot) -> ExecResult {
+    let mut done = slot.done.lock().unwrap();
+    while done.is_none() {
+        done = slot.ready.wait(done).unwrap();
+    }
+    done.clone().expect("slot filled")
+}
+
+impl ExternIo for SlotWaitIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        Ok(NativeOut::Extern(ExternBox::new(await_slot(&self.slot))))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let slot = Arc::clone(&self.slot);
+        Some(RealBody::Blocking(Box::new(move || {
+            Ok(NativeOut::Extern(ExternBox::new(await_slot(&slot))))
+        })))
+    }
+}
+
+/// Map a Noeta [`noeta_stdlib::os::Signal`] to `nix`'s (Unix only).
+#[cfg(unix)]
+fn nix_signal(signal: noeta_stdlib::os::Signal) -> nix::sys::signal::Signal {
+    use nix::sys::signal::Signal as N;
+    use noeta_stdlib::os::Signal;
+    match signal {
+        Signal::Hup => N::SIGHUP,
+        Signal::Int => N::SIGINT,
+        Signal::Quit => N::SIGQUIT,
+        Signal::Kill => N::SIGKILL,
+        Signal::Usr1 => N::SIGUSR1,
+        Signal::Usr2 => N::SIGUSR2,
+        Signal::Term => N::SIGTERM,
+        Signal::Cont => N::SIGCONT,
+        Signal::Stop => N::SIGSTOP,
+    }
+}
+
+/// Deliver `signal` to a spawned child. On Unix this is `kill(2)` (via `nix`'s safe wrapper) on the
+/// child's pid (working whether or not the child has been detached onto a `wait_async` waiter);
+/// `ESRCH` (already exited) is a harmless no-op, matching `kill`'s idempotence. On non-Unix hosts
+/// only `Kill`/`Term` are expressible (a forceful terminate); any other signal is an `Io` error.
+#[cfg(unix)]
+fn deliver_signal(proc: &mut ChildProc, signal: noeta_stdlib::os::Signal) -> Result<(), StdError> {
+    let pid = nix::unistd::Pid::from_raw(proc.pid as i32);
+    match nix::sys::signal::kill(pid, nix_signal(signal)) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(e) => Err(io_error(format!("signal SIG{}: {e}", signal.label()))),
+    }
+}
+
+#[cfg(not(unix))]
+fn deliver_signal(proc: &mut ChildProc, signal: noeta_stdlib::os::Signal) -> Result<(), StdError> {
+    use noeta_stdlib::os::Signal;
+    match signal {
+        Signal::Kill | Signal::Term => {
+            if let Some(child) = proc.child.as_mut() {
+                let _ = child.kill();
+            }
+            Ok(())
+        }
+        other => Err(io_error(format!(
+            "signal SIG{}: only KILL/TERM are supported on this platform",
+            other.label()
+        ))),
+    }
+}
+
+/// Forcefully signal a detached child by pid — the fallback `os_proc_kill` uses once the child has
+/// been moved onto a `wait_async` waiter (Unix only; a no-op elsewhere).
+#[cfg(unix)]
+fn kill_pid(pid: i64, signal: noeta_stdlib::os::Signal) {
+    // Best-effort: ESRCH (already exited) and any other error are ignored (idempotent kill).
+    let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), nix_signal(signal));
+}
+
+#[cfg(not(unix))]
+fn kill_pid(_pid: i64, _signal: noeta_stdlib::os::Signal) {}
 
 /// The real host's async exec descriptor: its real body runs the subprocess on the executor's
 /// blocking pool (a `Command::output` is exactly a blocking op), so `os.exec_async` genuinely
@@ -1259,7 +1459,7 @@ impl Os for RealHost {
         self.procs.insert(
             id,
             ChildProc {
-                child,
+                child: Some(child),
                 pid,
                 stdout,
                 stderr,
@@ -1269,6 +1469,7 @@ impl Os for RealHost {
                 stderr_cursor: 0,
                 stdin,
                 result: None,
+                awaiting: None,
             },
         );
         Ok(id)
@@ -1286,8 +1487,21 @@ impl Os for RealHost {
         if let Some(result) = &proc.result {
             return Ok(result.clone());
         }
+        // `wait_async` detached the child onto a background waiter: block on its shared slot until
+        // the waiter publishes the outcome, then cache it here so this stays idempotent.
+        if let Some(slot) = proc.awaiting.clone() {
+            let mut done = slot.done.lock().unwrap();
+            while done.is_none() {
+                done = slot.ready.wait(done).unwrap();
+            }
+            let result = done.clone().expect("slot filled");
+            proc.result = Some(result.clone());
+            return Ok(result);
+        }
         let status = proc
             .child
+            .as_mut()
+            .expect("a not-yet-detached child is always present")
             .wait()
             .map_err(|e| io_error(format!("wait: {e}")))?;
         Ok(proc.reap(status))
@@ -1301,8 +1515,18 @@ impl Os for RealHost {
         if let Some(result) = &proc.result {
             return Ok(Some(result.clone()));
         }
+        // Detached onto a `wait_async` waiter: poll its slot without blocking.
+        if let Some(slot) = proc.awaiting.clone() {
+            let result = slot.done.lock().unwrap().clone();
+            if let Some(result) = &result {
+                proc.result = Some(result.clone());
+            }
+            return Ok(result);
+        }
         match proc
             .child
+            .as_mut()
+            .expect("a not-yet-detached child is always present")
             .try_wait()
             .map_err(|e| io_error(format!("try_wait: {e}")))?
         {
@@ -1316,9 +1540,67 @@ impl Os for RealHost {
             .procs
             .get_mut(&handle)
             .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
-        // Killing an already-exited child returns `InvalidInput`; that is a harmless no-op here.
-        let _ = proc.child.kill();
+        match proc.child.as_mut() {
+            // Killing an already-exited child returns `InvalidInput`; that is a harmless no-op here.
+            Some(child) => {
+                let _ = child.kill();
+            }
+            // The child was detached onto a `wait_async` waiter; signal it by pid instead.
+            None => kill_pid(proc.pid, noeta_stdlib::os::Signal::Kill),
+        }
         Ok(())
+    }
+
+    fn os_proc_signal(
+        &mut self,
+        handle: u64,
+        signal: noeta_stdlib::os::Signal,
+    ) -> Result<(), StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+        deliver_signal(proc, signal)
+    }
+
+    fn os_proc_wait_spawn(&mut self, handle: u64) -> Box<dyn ExternIo> {
+        let Some(proc) = self.procs.get_mut(&handle) else {
+            // Unknown handle: a descriptor that surfaces the error when awaited (mirrors the
+            // default `ProcWaitIo`, whose `run_sync` errors through `os_proc_wait`).
+            return Box::new(noeta_stdlib::os::ProcWaitIo { handle });
+        };
+        // Already reaped: hand back the cached outcome, nothing to wait on.
+        if let Some(result) = proc.result.clone() {
+            return Box::new(RealProcWaitIo {
+                handle,
+                ready: Some(result),
+                child: None,
+                stdout: Arc::clone(&proc.stdout),
+                stderr: Arc::clone(&proc.stderr),
+                stdout_join: None,
+                stderr_join: None,
+                slot: None,
+            });
+        }
+        // Already detached by an earlier `wait_async`: block on the shared slot rather than the
+        // (moved-out) child, so a second `wait_async` still resolves.
+        if let Some(slot) = proc.awaiting.clone() {
+            return Box::new(SlotWaitIo { slot });
+        }
+        // First `wait_async`: detach the child + its drain threads onto the descriptor and leave a
+        // shared slot behind so synchronous `wait`/`try_wait` still observe the outcome.
+        let slot = Arc::new(WaitSlot::default());
+        proc.awaiting = Some(Arc::clone(&slot));
+        Box::new(RealProcWaitIo {
+            handle,
+            ready: None,
+            child: proc.child.take(),
+            stdout: Arc::clone(&proc.stdout),
+            stderr: Arc::clone(&proc.stderr),
+            stdout_join: proc.stdout_join.take(),
+            stderr_join: proc.stderr_join.take(),
+            slot: Some(slot),
+        })
     }
 
     fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {

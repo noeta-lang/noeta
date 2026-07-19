@@ -53,7 +53,13 @@ use cmd::build::{cmd_build, cmd_dump};
 use cmd::check::cmd_check;
 use cmd::doc::cmd_doc;
 use cmd::fmt::cmd_fmt;
-use cmd::pm::{cmd_add, cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update};
+use cmd::grammar::cmd_grammar_treesitter;
+use cmd::init::cmd_init;
+use cmd::migrate::cmd_migrate;
+use cmd::pm::{
+    cmd_add, cmd_advisory_promote, cmd_advisory_publish, cmd_advisory_report, cmd_advisory_reports,
+    cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update, cmd_watch_scope,
+};
 use cmd::repl::cmd_repl;
 use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
 use cmd::serve::{ext_command_clap, ext_command_dispatch};
@@ -77,6 +83,25 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Scaffold a new Noeta project: a `noeta.toml` wiring the std dev tiers (`@test`,
+    /// `@bench`, `@doc`, `@debug`) into a `development` target beside an explicit
+    /// `production` baseline, a `src/main.noe` exercising each tier, `.gitignore`, the
+    /// `.vscode/` run profiles the Noeta extension understands, and the agent surface —
+    /// `AGENTS.md` (how to drive the toolchain, CLI and MCP) plus `SYNTAX.md`, the full
+    /// language reference generated from the embedded guide. Never overwrites an existing
+    /// file, so it is safe in a non-empty directory.
+    Init {
+        /// Directory to initialize (default: the current directory; created if missing).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Package name as `company/package` (default: `local/<directory-name>` — change
+        /// `local` to your registry scope before publishing).
+        #[arg(long)]
+        name: Option<String>,
+        /// Skip `git init` when the directory is not already inside a git repository.
+        #[arg(long)]
+        no_git: bool,
+    },
     /// Run a program file.
     Run {
         /// Path to a `.noe` file.
@@ -358,6 +383,13 @@ enum Command {
         /// so the hot *line* within a function is visible. Sampling only.
         #[arg(long)]
         lines: bool,
+        /// Arm the **tier-1 JIT** while sampling (default: tier-0 pinned). Hot prototypes run native
+        /// and their wall time is sampled at the JIT trampoline, so the profile reflects what
+        /// actually ships; tier-1 frames are labeled ` [jit]` in the flamegraph. Wall-clock sampling
+        /// only (the op-clock cannot see native code) and ignored with `--instrument`/`--alloc`.
+        /// Function-level attribution inside JIT frames — not line-level.
+        #[arg(long)]
+        jit: bool,
     },
     // (`Serve` was a variant here until higher-order-abi H6 — `noeta serve` is now an
     // extension-contributed command, `noeta-stdlib/src/serve.rs::SERVE_COMMAND`, wired
@@ -381,6 +413,10 @@ enum Command {
         /// if any exist (for CI).
         #[arg(long)]
         check: bool,
+        /// Do not write. Print a unified diff of the pending reformat for each file (empty output +
+        /// exit 0 when everything is already formatted; exit non-zero when any diff is shown).
+        #[arg(long)]
+        diff: bool,
         /// Read source from stdin and write the formatted result to stdout (editor "format on save").
         #[arg(long)]
         stdin: bool,
@@ -392,6 +428,14 @@ enum Command {
         /// simple statement), or `preserve` (keep as written). Defaults to the manifest, then `remove`.
         #[arg(long, value_name = "remove|add|preserve")]
         semicolons: Option<noeta_fmt::SemicolonStyle>,
+    },
+    /// Generate editor grammar artifacts for this project's declared text tiers (text-tiers arc).
+    /// A project's `@tier(<name>, text: "<lang>")` declarations open verbatim `@<name> { … }` bodies
+    /// a *static* editor grammar cannot know about; this emits a per-project overlay so those bodies
+    /// parse (and highlight) as their language. Mirrors the VS Code extension's TextMate generator.
+    Grammar {
+        #[command(subcommand)]
+        target: GrammarTarget,
     },
     /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock` (package-manager P2.4).
     /// Exactly one source must be given: `--path`, `--git` (with `--tag`), or `--version` (registry).
@@ -501,6 +545,215 @@ enum Command {
     Scope {
         #[command(subcommand)]
         action: ScopeAction,
+    },
+    /// Issue or file security advisories (advisory-intake arc). `publish` issues a **publisher**-tier
+    /// advisory for a package in a scope you own — keyless-signed with your OIDC identity, so consumers
+    /// verify it offline. `report` files a **public report** against any package (unauthenticated,
+    /// rate-limited) for an operator or the scope owner to triage.
+    Advisory {
+        #[command(subcommand)]
+        action: AdvisoryCommand,
+    },
+    /// Monitor a scope's advisory **transparency log** over time (advisory-intake arc, tier 6): verify
+    /// the log is an append-only extension of the last run's checkpoint and that no advisory previously
+    /// seen for the scope has silently disappeared — so a registry can't quietly suppress or rewrite a
+    /// scope's advisories after first use. State is pinned in a small file between runs (ideal for a CI
+    /// cron); a detected suppression or rewrite exits non-zero.
+    WatchScope {
+        /// The scope (`company`) to monitor.
+        scope: String,
+        /// Where to keep the pinned watch state between runs (default: under the noeta cache).
+        #[arg(long)]
+        state: Option<PathBuf>,
+    },
+    /// Apply the project's SQL migrations (para/db). With no flags, applies every pending migration
+    /// under the migrations directory (default `migrations/`), each in its own transaction, printing
+    /// each file. The database connection string is resolved from `--db`, else `DATABASE_URL`, else
+    /// the `[db] url` in `noeta.toml`. Forward-only: there are no down migrations — use `--reset` in
+    /// development.
+    Migrate {
+        /// `noeta migrate new <name>` — scaffold the next migration file. When omitted, the flags below
+        /// select apply / status / dry-run / reset.
+        #[command(subcommand)]
+        action: Option<MigrateAction>,
+        /// The database connection string (overrides `DATABASE_URL` and `[db] url`).
+        #[arg(long, value_name = "DSN")]
+        db: Option<String>,
+        /// The migrations directory (overrides `[db] migrations`; default `migrations`).
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+        /// Show which migrations are applied and which are pending, then exit.
+        #[arg(long)]
+        status: bool,
+        /// List the migrations that would be applied without touching the database.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// DESTRUCTIVE: drop the whole schema and re-apply every migration from zero. Requires `--yes`
+        /// (or an interactive confirmation).
+        #[arg(long)]
+        reset: bool,
+        /// Skip the interactive confirmation for `--reset` (for scripts/CI).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// The `noeta migrate` sub-actions that are not plain flags.
+#[derive(Subcommand)]
+enum MigrateAction {
+    /// Scaffold the next migration file: `migrations/<UTC-timestamp>_<name>.sql`.
+    New {
+        /// A short description, slugified into the filename (e.g. "add users table").
+        name: String,
+        /// The migrations directory to create the file in (default `migrations`).
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdvisoryCommand {
+    /// Publish (or update) a **publisher**-tier advisory for a package in a scope you own. The advisory
+    /// is keyless-signed with your OIDC identity (ambient CI identity, or `--interactive` browser
+    /// login) and sent authenticated with the scope's publish token (`NOETA_REGISTRY_TOKEN`).
+    Publish {
+        /// The advisory id (e.g. `ACME-2026-0001`).
+        id: String,
+        /// The affected package (`company/package`) — its scope must be one you own.
+        package: String,
+        /// The affected version range, a SemVer requirement (e.g. `">=1.0.0, <1.2.0"`).
+        ranges: String,
+        /// Severity: `low`, `medium`, `high`, or `critical`.
+        severity: String,
+        /// A one-line summary headline.
+        summary: String,
+        /// A longer description (may be multi-line).
+        #[arg(long)]
+        details: Option<String>,
+        /// A link to the full advisory.
+        #[arg(long)]
+        url: Option<String>,
+        /// The first fixed version (informational).
+        #[arg(long)]
+        patched: Option<String>,
+        /// Withdraw (retract) this advisory — a false alarm. Re-issues the same id in the withdrawn
+        /// state (kept in the log, never deleted).
+        #[arg(long)]
+        withdraw: bool,
+        /// Sign keyless via an **interactive browser login** (Sigstore OAuth). For a laptop, where no
+        /// ambient CI identity exists. Without it, the ambient CI identity is used.
+        #[arg(long)]
+        interactive: bool,
+        /// With `--interactive`: print the sign-in URL and prompt for the code instead of opening a
+        /// browser (SSH sessions, containers).
+        #[arg(long, requires = "interactive")]
+        oob: bool,
+    },
+    /// File a **public report** against a package (unauthenticated, rate-limited). A report is not an
+    /// advisory — it is queued for an operator or the scope owner to triage and possibly promote.
+    Report {
+        /// The package (`company/package`) the report is against.
+        package: String,
+        /// A one-line summary of the issue.
+        summary: String,
+        /// The affected version range you believe (a SemVer requirement), if known.
+        #[arg(long)]
+        ranges: Option<String>,
+        /// A longer description (repro steps, impact).
+        #[arg(long)]
+        details: Option<String>,
+        /// A link to more detail.
+        #[arg(long)]
+        url: Option<String>,
+        /// How to identify you (optional — intake is anonymous by default).
+        #[arg(long)]
+        reporter: Option<String>,
+    },
+    /// List the public reports queued for triage — what's **promotable** (advisory-intake residual a).
+    /// Without `--scope`, the operator triage queue (needs `NOETA_REGISTRY_ADMIN_TOKEN`); with it, the
+    /// scope owner's own queue (only their packages' reports; needs the scope's `NOETA_REGISTRY_TOKEN`).
+    /// Defaults to the `pending` (promotable) reports.
+    Reports {
+        /// Show a scope owner's own queue (their packages' reports), authenticated with the scope token.
+        /// Without it, the operator queue (admin token).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Filter by status (`pending` | `promoted` | `dismissed`). Defaults to `pending`; pass `--all`
+        /// to list every status.
+        #[arg(long)]
+        status: Option<String>,
+        /// List reports of every status (overrides the default `pending` filter).
+        #[arg(long)]
+        all: bool,
+    },
+    /// **Promote** a queued report into a signed advisory (advisory-intake residual a). The advisory is
+    /// prefilled from the report (package, ranges, summary, details, url) — you supply the triaged `--id`
+    /// and `--severity`. As an **operator** (`--operator`, admin token) it becomes an `operator`-tier
+    /// advisory; otherwise the report package's **scope owner** promotes it into a keyless-signed
+    /// `publisher`-tier advisory (exactly like `advisory publish`), authenticated with the scope token.
+    Promote {
+        /// The report id to promote (from `noeta advisory reports`).
+        report: String,
+        /// The advisory id to issue (e.g. `NOETA-2026-0001` or `ACME-2026-0001`).
+        #[arg(long)]
+        id: String,
+        /// Severity: `low`, `medium`, `high`, or `critical`.
+        #[arg(long)]
+        severity: String,
+        /// Override the affected range (default: the report's `ranges`, if any).
+        #[arg(long)]
+        ranges: Option<String>,
+        /// Override the summary (default: the report's summary).
+        #[arg(long)]
+        summary: Option<String>,
+        /// Override the details (default: the report's details).
+        #[arg(long)]
+        details: Option<String>,
+        /// Override the link (default: the report's url).
+        #[arg(long)]
+        url: Option<String>,
+        /// The first fixed version (informational).
+        #[arg(long)]
+        patched: Option<String>,
+        /// Promote as the **operator** (admin token → an `operator`-tier advisory, no keyless bundle).
+        /// Without it, the report package's scope owner promotes into a `publisher`-tier advisory.
+        #[arg(long)]
+        operator: bool,
+        /// (Scope-owner path) Sign keyless via an **interactive browser login** instead of the ambient
+        /// CI identity.
+        #[arg(long)]
+        interactive: bool,
+        /// With `--interactive`: print the sign-in URL and prompt for the code (SSH sessions, containers).
+        #[arg(long, requires = "interactive")]
+        oob: bool,
+    },
+}
+
+/// Which editor grammar `noeta grammar` targets. Only tree-sitter needs a *generated* per-project
+/// grammar (its parser is compiled, so a project's custom tiers cannot be discovered at load time);
+/// the TextMate side is regenerated live by the VS Code extension itself.
+#[derive(Subcommand)]
+enum GrammarTarget {
+    /// Emit the per-project tree-sitter overlay: `project-tiers.json` (the verbatim-body tier-name
+    /// token list `grammar.js` reads) and `queries/injections.scm` (one language-injection rule per
+    /// tier). Drop these into a `tree-sitter-noeta` grammar checkout and run `tree-sitter generate`
+    /// (or pass `--generate`) to rebuild the parser. Without an output directory the token list is
+    /// printed to stdout.
+    #[command(name = "tree-sitter")]
+    TreeSitter {
+        /// The project to scan for `@tier(name, text: "lang")` declarations (default: the current
+        /// directory). Every `.noe` file beneath it is scanned, plus installed native extensions'
+        /// tiers.
+        #[arg(default_value = ".")]
+        project: PathBuf,
+        /// The `tree-sitter-noeta` grammar directory to write the overlay into. Omit to print the
+        /// `project-tiers.json` token list to stdout instead.
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// After writing, run `tree-sitter generate` in the output directory to rebuild the parser
+        /// (requires the tree-sitter CLI on PATH).
+        #[arg(long, requires = "out")]
+        generate: bool,
     },
 }
 
@@ -655,6 +908,7 @@ pub fn run_cli(
     let cli =
         <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     match cli.command {
+        Command::Init { path, name, no_git } => cmd_init(&path, &name, no_git),
         Command::Run {
             file,
             tier,
@@ -739,6 +993,7 @@ pub fn run_cli(
             format,
             out,
             lines,
+            jit,
         } => cmd_profile(
             &file,
             instrument,
@@ -748,15 +1003,24 @@ pub fn run_cli(
             format.as_deref(),
             out,
             lines,
+            jit,
         ),
         Command::Cache { action } => cmd_cache(&action),
         Command::Fmt {
             files,
             check,
+            diff,
             stdin,
             parens,
             semicolons,
-        } => cmd_fmt(&files, check, stdin, parens, semicolons),
+        } => cmd_fmt(&files, check, diff, stdin, parens, semicolons),
+        Command::Grammar { target } => match target {
+            GrammarTarget::TreeSitter {
+                project,
+                out,
+                generate,
+            } => cmd_grammar_treesitter(&project, out.as_deref(), generate),
+        },
         Command::Add {
             key,
             path,
@@ -804,6 +1068,102 @@ pub fn run_cli(
             domain.as_deref(),
         ),
         Command::Scope { action } => cmd_scope(&action),
+        Command::Advisory { action } => match action {
+            AdvisoryCommand::Publish {
+                id,
+                package,
+                ranges,
+                severity,
+                summary,
+                details,
+                url,
+                patched,
+                withdraw,
+                interactive,
+                oob,
+            } => cmd_advisory_publish(
+                &id,
+                &package,
+                &ranges,
+                &severity,
+                &summary,
+                details.as_deref(),
+                url.as_deref(),
+                patched.as_deref(),
+                withdraw,
+                interactive,
+                oob,
+            ),
+            AdvisoryCommand::Report {
+                package,
+                summary,
+                ranges,
+                details,
+                url,
+                reporter,
+            } => cmd_advisory_report(
+                &package,
+                &summary,
+                ranges.as_deref(),
+                details.as_deref(),
+                url.as_deref(),
+                reporter.as_deref(),
+            ),
+            AdvisoryCommand::Reports { scope, status, all } => {
+                let status = if all {
+                    None
+                } else {
+                    Some(status.as_deref().unwrap_or("pending").to_string())
+                };
+                cmd_advisory_reports(scope.as_deref(), status.as_deref())
+            }
+            AdvisoryCommand::Promote {
+                report,
+                id,
+                severity,
+                ranges,
+                summary,
+                details,
+                url,
+                patched,
+                operator,
+                interactive,
+                oob,
+            } => cmd_advisory_promote(
+                &report,
+                &id,
+                &severity,
+                ranges.as_deref(),
+                summary.as_deref(),
+                details.as_deref(),
+                url.as_deref(),
+                patched.as_deref(),
+                operator,
+                interactive,
+                oob,
+            ),
+        },
+        Command::WatchScope { scope, state } => cmd_watch_scope(&scope, state.as_deref()),
+        Command::Migrate {
+            action,
+            db,
+            dir,
+            status,
+            dry_run,
+            reset,
+            yes,
+        } => {
+            let new = action.map(|MigrateAction::New { name, dir }| (name, dir));
+            cmd_migrate(cmd::migrate::MigrateArgs {
+                new,
+                db,
+                dir,
+                status,
+                dry_run,
+                reset,
+                yes,
+            })
+        }
     }
 }
 

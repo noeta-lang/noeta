@@ -21,6 +21,27 @@ pub trait Debugger: Send {
     /// register windows — so a pause can build a stack trace and read locals. May block until the
     /// user resumes.
     fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction;
+
+    /// Called by the VM immediately after it services a paused side effect that mutated the frame —
+    /// a [`DebugAction::SetVariable`] register write — and **before** the request's `reply` unblocks
+    /// the client. A debugger that publishes a captured stack for another thread to read (the DAP
+    /// adapter) refreshes it here, so a `variables`/`stackTrace` that races in right behind the
+    /// `setVariable` response observes the write rather than the stale pause-time snapshot (the
+    /// trampoline would otherwise only refresh on its next `before_op`, after the reply). The default
+    /// is a no-op — a debugger that reads the live view directly on its own thread needs nothing.
+    fn after_side_effect(&mut self, _view: &DebugView) {}
+
+    /// A new worker-isolate **strand** began (DAP worker debugging): `id` is its stable strand id
+    /// (the DAP `threadId` the adapter reports; the main program is always strand `1`) and `name`
+    /// the spawned function's debug name. Called by the scheduler at the `isolate f(args)` spawn,
+    /// while the debugger is installed (not during a pause), so a DAP adapter can emit a `thread`
+    /// *started* event and register the strand as a debuggable thread. Default no-op — a debugger
+    /// that does not model threads needs nothing.
+    fn on_strand_started(&mut self, _id: u32, _name: &str) {}
+
+    /// A worker-isolate strand finished (its root task completed): the DAP adapter emits a
+    /// `thread` *exited* event and drops the strand from its live-thread set. Default no-op.
+    fn on_strand_exited(&mut self, _id: u32) {}
 }
 
 /// A profiler observing tier-0 execution (the `noeta profile` engine implements it). Like the
@@ -35,6 +56,19 @@ pub trait ProfileHook: Send {
     /// Called before each interpreted instruction with a read-only view of the live call stack. The
     /// hook does its own timing/counting and must not block.
     fn before_op(&mut self, view: &DebugView);
+    /// Called at the tier-1 **trampoline**, just before a compiled prototype's native code runs
+    /// (`Vm::jit_enter`), with the live call stack and the prototype `proto` about to execute
+    /// natively. This is the profiler's shadow-state seam for tier-1 sampling: native code hits no
+    /// interpreter op boundary, so [`ProfileHook::before_op`] cannot fire while it runs — the sampler
+    /// records here which JIT frame it will attribute the native segment's wall time to. The default
+    /// is a no-op (the instrumenting/allocation collectors only run tier-0, so they never see this).
+    /// Only reached on a profiled run whose JIT is armed (`noeta profile --jit`).
+    fn on_jit_enter(&mut self, _view: &DebugView, _proto: u32) {}
+    /// Called at the tier-1 trampoline, just after the compiled prototype's native code returns to
+    /// the interpreter (bail / return / a pushed callee). The sampler banks the wall time that
+    /// accrued during the native segment onto the frame recorded by the matching
+    /// [`on_jit_enter`](ProfileHook::on_jit_enter). Default no-op.
+    fn on_jit_exit(&mut self, _view: &DebugView) {}
     /// Downcast hatch: reclaim the concrete collector (and its accumulated results) after the run.
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
 }
@@ -124,9 +158,9 @@ pub enum DebugAction {
 #[derive(Debug)]
 pub struct DebugEvalRequest {
     /// The parsed fragment (the adapter parses the console string; statements are allowed — a
-    /// trailing bare expression is the fragment's value). On a session run with `allow_calls` the
-    /// VM compiles it through the adopted session (closures included, tooling-unification T5);
-    /// hover walks its trailing expression read-only.
+    /// trailing bare expression is the fragment's value). On a session run whose [`EvalKind`] allows
+    /// calls the VM compiles it through the adopted session (closures included, tooling-unification
+    /// T5); a hover walks its trailing expression read-only.
     pub program: Program,
     /// The raw console string `program` was parsed from — the memo key (U3): a re-evaluated watch
     /// (same text, same scope shape) reuses its compiled wrapper instead of appending a new one.
@@ -142,12 +176,51 @@ pub struct DebugEvalRequest {
     /// binding whose value expression sits to the right of its name). Same names the checker gate
     /// used, so a fragment referencing an out-of-scope name is already refused before it reaches here.
     pub scope: Vec<String>,
-    /// Whether the fragment may run **code** (calls, closures, statements). `false` for a hover — a
-    /// hover must stay side-effect-free, so it evaluates paths/operators only and refuses a call.
-    pub allow_calls: bool,
+    /// Which surface the request came from (the DAP `context`) — see [`EvalKind`]. It decides three
+    /// things: whether the fragment may run code (a hover may not), whether its result is
+    /// **memoized** within the current stop (only an observational watch is), and whether running it
+    /// **bumps the stop generation** (a console entry / a mutating watch does, invalidating cached
+    /// watch results).
+    pub kind: EvalKind,
     /// Where the rendered outcome is sent back. Only strings cross this channel — the runtime values
     /// are thread-local, so they are rendered on the run worker before the reply travels back.
     pub reply: Sender<DebugEvalOutcome>,
+}
+
+/// What surface a debug `evaluate` came from — the DAP `context` field, mapped to how the VM treats
+/// the fragment (tooling-unification, watch-memoization):
+///
+/// - [`EvalKind::Hover`] (`context: "hover"`) — read-only: the fragment must be a single
+///   side-effect-free expression and no code runs. Never memoized, never bumps the generation.
+/// - [`EvalKind::Watch`] (`context: "watch"`) — a re-rendered observation. An *observational* watch
+///   (all top-level statements are expressions) has its rendered result **memoized** by
+///   `(text, frame)` at the current stop generation, so re-rendering the same watch at the same stop
+///   does not re-run it. A watch that instead binds/assigns/loops is treated as a mutation: it runs
+///   fresh and bumps the generation.
+/// - [`EvalKind::Console`] (`context: "repl"`, the debug console, or any other context) — an
+///   explicit user entry that may mutate program/session state. It always runs fresh and bumps the
+///   stop generation, invalidating every memoized watch result at the prior generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalKind {
+    /// A debug hover — read-only, no code runs.
+    Hover,
+    /// A watch-panel expression — memoized when observational.
+    Watch,
+    /// A debug-console entry — always runs, bumps the stop generation.
+    Console,
+}
+
+impl EvalKind {
+    /// Whether the fragment may run **code** (calls, closures, statements). Only a hover may not — it
+    /// must stay side-effect-free, evaluating paths/operators only and refusing a call.
+    pub fn allows_calls(self) -> bool {
+        !matches!(self, EvalKind::Hover)
+    }
+
+    /// Whether the fragment is evaluated on the read-only (pure) surface — a hover.
+    pub fn is_pure(self) -> bool {
+        matches!(self, EvalKind::Hover)
+    }
 }
 
 /// The result of a [`DebugEvalRequest`]: the rendered value + type, or an error message. Strings only,
@@ -191,12 +264,23 @@ pub struct DebugView<'a> {
     pub(crate) module: &'a Module,
     pub(crate) frames: &'a [Frame],
     pub(crate) regs: &'a [Value],
+    /// The **strand** currently executing (DAP worker debugging): the main program is strand `1`,
+    /// each `isolate f(args)` a fresh id. The debugger reports this as the stopped `threadId`, so a
+    /// breakpoint inside a worker isolate surfaces against that worker's thread. `1` on every
+    /// non-isolate run (and for the profiler's views, which do not model threads).
+    pub(crate) strand: u32,
 }
 
 impl<'a> DebugView<'a> {
     /// Number of live frames on the call stack.
     pub fn depth(&self) -> usize {
         self.frames.len()
+    }
+
+    /// The strand id currently executing — the DAP `threadId` a pause reports (see the `strand`
+    /// field). `1` is the main program; each live worker isolate has its own id.
+    pub fn strand_id(&self) -> u32 {
+        self.strand
     }
 
     /// The prototype index of the frame at call-stack index `i` — a stable per-function key (into

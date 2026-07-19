@@ -11,8 +11,9 @@
       "url": "https://acme.dev/advisories/NOETA-2026-0001",
       "withdrawn": false,
       "seq": 0,
-      "signature": "e95b4688c3090b77166a0c63008c4ea155085dbe269071ea51b87e4deed22b579d80233de826062d09fa3c7b85990dd09c01751f69625a4a3e5a183defcbd90d",
-      "log_index": 0
+      "signature": "d86457233df62aa5359cae30b4129efb211ba5d52ced13078e3fb5dcac68176df2d1b787820a9a623483f7d57084007833a891211910ac2f01870722a44c060b",
+      "log_index": 0,
+      "tier": "operator"
     }
   ]
 }

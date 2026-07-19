@@ -1,0 +1,57 @@
+// A keyed LiveView list whose *structure* changes at runtime — the append / prepend / remove /
+// reorder showcase. Each button mutates the `rows` signal; the server reconciles the keyed region and
+// pushes the **minimal** structural ops (insert / remove / move), not a re-render of the whole list.
+// Reorder emits a `move`, so the moved row keeps its DOM element and reactive scope (its state and
+// focus survive). Driven end-to-end by `crates/noeta-cli/tests/keyed_structural.rs`.
+//
+//   noeta serve examples/liveview-structural-app/app.noe   →   open http://localhost:8080
+use para.html.{render, Html, handle, keyed, on_click}
+use std.reactive.signal
+use std.http.server
+use std.http.{Request, Response}
+
+struct Row {
+    id: int
+    label: string
+}
+
+rows = signal([
+    Row { id: 1, label: "a" },
+    Row { id: 2, label: "b" },
+    Row { id: 3, label: "c" },
+])
+
+fn row(r: Row): Html {
+    return @html { <li>${r.label}</li> }
+}
+
+// Move the row with id 1 to sit just after the row with id 3 — a reorder the keyed diff resolves with
+// a single `move`, not a re-render.
+fn reordered(xs: List<Row>): List<Row> {
+    moved = xs.filter(fn(x) => x.id == 1)
+    rest = xs.filter(fn(x) => x.id != 1)
+    mut out: List<Row> = []
+    for x in rest {
+        out = out ~ [x]
+        if x.id == 3 {
+            out = out ~ moved
+        }
+    }
+    return out
+}
+
+fn page() use (rows): Html {
+    return @html {
+        <ul>${keyed(rows, fn(r) => "${r.id}", row)}</ul>
+        <button ${on_click(fn() => rows.update(fn(xs) => xs ~ [Row { id: 4, label: "d" }]))}>append</button>
+        <button ${on_click(fn() => rows.update(fn(xs) => [Row { id: 0, label: "z" }] ~ xs))}>prepend</button>
+        <button ${on_click(fn() => rows.update(fn(xs) => xs.filter(fn(x) => x.id != 2)))}>remove</button>
+        <button ${on_click(fn() => rows.update(fn(xs) => reordered(xs)))}>reorder</button>
+    }
+}
+
+fn fetch(req: Request): Response {
+    return handle(req, "Keyed structural", page)
+}
+
+server.serve(8080, fetch)

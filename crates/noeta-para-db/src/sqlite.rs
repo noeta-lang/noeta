@@ -130,6 +130,47 @@ impl SqlDriver for SqliteDriver {
         Ok(out)
     }
 
+    fn execute_batch(&mut self, sql: &str) -> Result<(), String> {
+        // rusqlite's `execute_batch` runs every `;`-separated statement in the script — exactly what a
+        // migration file body (and the runner's `BEGIN`/`COMMIT`) needs, and what the single-statement
+        // `execute` cannot do.
+        self.conn.execute_batch(sql).map_err(|e| e.to_string())
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        // Drop every user object. SQLite has no `DROP SCHEMA`, so enumerate `sqlite_master` and drop
+        // each table/view/trigger (an index is dropped with its table; the `sqlite_%` internal objects
+        // are left alone). Foreign-key enforcement is turned off for the duration so drop order among
+        // referencing tables never matters.
+        let objects: Vec<(String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT type, name FROM sqlite_master \
+                     WHERE type IN ('table', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+        };
+        let mut script = String::from("PRAGMA foreign_keys = OFF;\n");
+        for (kind, name) in objects {
+            // `kind` is a fixed sqlite_master token (table/view/trigger); the name is quoted so an
+            // arbitrary identifier cannot break out of the statement.
+            let quoted = name.replace('"', "\"\"");
+            script.push_str(&format!(
+                "DROP {} IF EXISTS \"{quoted}\";\n",
+                kind.to_uppercase()
+            ));
+        }
+        script.push_str("PRAGMA foreign_keys = ON;\n");
+        self.conn.execute_batch(&script).map_err(|e| e.to_string())
+    }
+
     fn listen(&mut self, channel: &str) -> Result<(), String> {
         // Subscribe this connection to `channel` on the process bus. The update hook auto-publishes a
         // changed table's name, and `notify` publishes explicitly; both wake a watcher listening here.

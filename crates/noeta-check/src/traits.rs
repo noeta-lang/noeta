@@ -53,7 +53,21 @@ impl Checker {
             }
             return;
         }
-        if !trait_args.is_empty() {
+        // `From` is the one built-in whose `impl` carries a real type argument
+        // (`impl From<Source>`); every other built-in impl is bare. The argument's resolution is
+        // validated below (E0013 for a ghost name), and the resolved source was recorded at
+        // collection ([`Self::record_from_impls`]).
+        if trait_name == BuiltinTrait::From.name() {
+            if trait_args.len() != 1 {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    trait_span,
+                    "`From` takes exactly one type argument (`impl From<Source>`)".to_string(),
+                );
+                return;
+            }
+            self.check_type_ref(&trait_args[0]);
+        } else if !trait_args.is_empty() {
             self.error(
                 DiagnosticCode::InvalidImpl,
                 trait_span,
@@ -109,17 +123,50 @@ impl Checker {
                     "the `{trait_name}` trait requires the `{req_name}` method"
                 ));
             }
-            Some(m) if m.params.len() != req_arity => {
+            // An arity of `None` is not pinned by the registry (`Callable`'s `call` takes whatever
+            // the object needs — `obj(args)` forwards the call site's arguments).
+            Some(m) if req_arity.is_some_and(|arity| m.params.len() != arity) => {
+                let arity = req_arity.expect("guarded by is_some_and");
                 self.error(
                     DiagnosticCode::InvalidImpl,
                     m.name_span,
                     format!(
-                        "`{req_name}` must take {req_arity} parameter(s), found {}",
+                        "`{req_name}` must take {arity} parameter(s), found {}",
                         m.params.len()
                     ),
                 );
             }
             Some(_) => {}
+        }
+        // `From`'s `from` is an ASSOCIATED conversion — it builds a new target value from its
+        // argument, so a body referencing `self` has no receiver to refer to — and an annotated
+        // parameter must agree with the impl's declared source type.
+        if t == BuiltinTrait::From
+            && let Some(m) = methods.iter().find(|m| m.name == "from")
+        {
+            if m.body.iter().any(|s| s.mentions("self")) {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    "`from` must be an associated function — a conversion has no `self`"
+                        .to_string(),
+                )
+                .help("construct and return the new value from the `from` parameter alone");
+            }
+            if let (Some(arg), Some(param)) = (trait_args.first(), m.params.first()) {
+                let want = from_ref_q(arg, &self.imports.extern_types);
+                let got = field_type(&param.ty, &self.imports.extern_types);
+                if !Self::sig_types_compatible(&want, &got) {
+                    self.error(
+                        DiagnosticCode::InvalidImpl,
+                        param.name_span,
+                        format!(
+                            "`from` converts the declared source `{want}`, but its parameter is \
+                             `{got}`"
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -510,15 +557,21 @@ impl Checker {
         standalone: &[(String, Span)],
     ) {
         // Source order is derives, then in-body impls, then standalone impls: this scan reports the
-        // textually-later duplicate and names where the first one is.
-        let mut seen: HashMap<&str, Span> = HashMap::new();
-        let occurrences = derives
+        // textually-later duplicate and names where the first one is. `From` is deliberately
+        // covered by the same name-keyed rule: an impl block's methods flatten into the type's
+        // method table by NAME (there is no overloading), so a type can carry exactly one `from` —
+        // one declared conversion. A second `From` impl (same source or another) is exactly the
+        // ambiguity the `?` conversion must never see — two declared paths into the target — and
+        // collides here (E0027).
+        let mut seen: HashMap<String, Span> = HashMap::new();
+        let occurrences: Vec<(String, Span)> = derives
             .iter()
-            .map(|d| (d.name.as_str(), d.span))
-            .chain(impls.iter().map(|b| (b.trait_name.as_str(), b.trait_span)))
-            .chain(standalone.iter().map(|(name, span)| (name.as_str(), *span)));
+            .map(|d| (d.name.clone(), d.span))
+            .chain(impls.iter().map(|b| (b.trait_name.clone(), b.trait_span)))
+            .chain(standalone.iter().map(|(name, span)| (name.clone(), *span)))
+            .collect();
         for (name, span) in occurrences {
-            match seen.get(name) {
+            match seen.get(&name) {
                 Some(_first) => {
                     self.error(
                         DiagnosticCode::ConflictingTraitImpl,
@@ -534,6 +587,68 @@ impl Checker {
                     seen.insert(name, span);
                 }
             }
+        }
+    }
+
+    /// The `?` **error-position rule** (error-ergonomics): a `?` on a `Result` whose `Err` payload
+    /// type differs from the enclosing function's declared error type either **converts** through
+    /// the target's declared `impl From<Source>` (the site is recorded for lowering — the one
+    /// implicit conversion position in the language) or is `E0057`. Runs only when both sides are
+    /// resolved: a `dyn`/hole on either side, an undeclared return, or a type parameter in scope
+    /// defers to runtime exactly as before, and an assignable error (a union member, for instance)
+    /// propagates unconverted as it always did. Exactly-one-path is by construction: sources are
+    /// matched by type equality, and coherence admits at most one `From` impl per target type, so
+    /// no `?` site ever sees two candidate conversions.
+    pub(crate) fn check_try_error(&mut self, err: &Type, span: Span) {
+        let Type::Result(_, declared) = self.coloring.current_ret.clone() else {
+            return; // no declared `Result` context — `?` behaves exactly as before
+        };
+        let declared = *declared;
+        if err.defers_to_runtime() || declared.defers_to_runtime() {
+            return;
+        }
+        if *err == declared || self.arg_assignable(err, &declared) {
+            return;
+        }
+        // A side naming an in-scope type parameter is not yet a concrete type — defer to the
+        // instantiation (gradual, like every other parameter-typed judgement).
+        if !self.concrete_error_type(err) || !self.concrete_error_type(&declared) {
+            return;
+        }
+        if let Type::Named(target, _) = &declared
+            && self
+                .symbols
+                .from_impls
+                .get(target)
+                .is_some_and(|sources| sources.iter().any(|s| s == err))
+        {
+            self.sites.try_conversion_sites.insert(span, target.clone());
+            return;
+        }
+        let d = self.error(
+            DiagnosticCode::TryErrorMismatch,
+            span,
+            format!(
+                "`?` propagates an `Err` of type `{err}`, but the function returns \
+                 `Result<_, {declared}>` and `{declared}` declares no `From<{err}>` conversion"
+            ),
+        );
+        if let Type::Named(target, _) = &declared {
+            d.help(format!(
+                "add `impl From<{err}> {{ fn from(value: {err}): {target} {{ … }} }}` inside \
+                 `{target}`, or align the function's declared error type"
+            ));
+        } else {
+            d.help("align the function's declared error type with the propagated error");
+        }
+    }
+
+    /// Whether an error-position type is resolved enough for the `?` rule to judge: anything but a
+    /// `Named` head that is an in-scope generic type parameter (those defer to the instantiation).
+    fn concrete_error_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Named(n, _) => !self.coloring.type_params.contains_key(n),
+            _ => true,
         }
     }
 
@@ -639,6 +754,40 @@ impl Checker {
                         )
                         .help("delegate `Comparable` through a field whose type orders");
                     }
+                } else if t == BuiltinTrait::Error {
+                    // The forward is `self.f.message()` — the via field's type must itself
+                    // implement `Error`, or the delegation dispatches into nothing (the same
+                    // judgement as a user-trait `via:`). A field typed as one of the deriving
+                    // type's own generic parameters defers to the instantiation site.
+                    let params: Vec<String> = self
+                        .symbols
+                        .generic_types
+                        .get(type_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let field_ty = self
+                        .symbols
+                        .records
+                        .get(type_name)
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == via_name))
+                        .map(|(_, ty)| ty.clone());
+                    if let Some(ty) = field_ty
+                        && !mentions_param(&ty, &params)
+                        && !self.satisfies(&ty, BuiltinTrait::Error)
+                    {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            *via_span,
+                            format!(
+                                "`via: {via_name}` forwards `message()` to the field, but its \
+                                 type (`{ty}`) does not implement `Error`"
+                            ),
+                        )
+                        .help(
+                            "the field's type needs an `impl Error` (or its own \
+                             `@derive(Error)`)",
+                        );
+                    }
                 }
                 continue;
             }
@@ -657,16 +806,37 @@ impl Checker {
             }
             if !t.derivable() {
                 self.error(
-                        DiagnosticCode::UnknownTrait,
+                    DiagnosticCode::UnknownTrait,
+                    spec.span,
+                    format!("`{}` is not a derivable trait", spec.name),
+                )
+                .help(
+                    "derivable traits are `Equatable`, `Comparable`, `Display`, `Error`, \
+                         `Clone`, `Serialize<Format>`, `Deserialize<Format>`; mark attribute \
+                         records with the `@attribute` directive",
+                );
+                continue;
+            }
+            // `@derive(Error)`'s synthesized `message()` returns `"${self}"` — the type's display
+            // story — so the type must HAVE one: an `impl Display` (whose `to_string` the
+            // rendering dispatches to) or a `@derive(Display)` (the structural rendering, opted
+            // into). Without either, the "message" would be an accidental structural dump.
+            if t == BuiltinTrait::Error {
+                let ty = Type::Named(type_name.to_string(), Vec::new());
+                if !self.satisfies(&ty, BuiltinTrait::Display) {
+                    self.error(
+                        DiagnosticCode::UnderivableTrait,
                         spec.span,
-                        format!("`{}` is not a derivable trait", spec.name),
+                        format!(
+                            "cannot derive `Error` for `{type_name}`: it does not implement \
+                             `Display`, so `message()` has no rendering to return"
+                        ),
                     )
                     .help(
-                        "derivable traits are `Equatable`, `Comparable`, `Display`, `Clone`, \
-                         `Serialize<Format>`, `Deserialize<Format>`; mark attribute records with the \
-                         `@attribute` directive",
+                        "add `@derive(Display)` or an `impl Display`, or delegate with \
+                         `@derive(Error, via: <field>)`",
                     );
-                continue;
+                }
             }
             // Generic arity: `Serialize` requires one type argument (`Serialize<Json>`); every other
             // derivable trait is nullary.

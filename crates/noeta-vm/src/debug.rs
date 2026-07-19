@@ -51,6 +51,102 @@ pub fn resolve_breakpoints(
     stops
 }
 
+/// One editor breakpoint request carrying its optional DAP `condition` and `hitCondition`
+/// expressions (conditional / hit-count breakpoints). The strings are opaque here — the wire
+/// adapter compiles a `condition` to a console fragment and parses a `hitCondition` into a
+/// hit-count matcher; this module only carries them from a requested line to the resolved
+/// `(proto, pc)` so the adapter can attach them to the right instruction.
+#[derive(Debug, Clone)]
+pub struct RequestedBreakpoint {
+    /// The 1-based source line the client asked to break on.
+    pub line: u32,
+    /// A DAP `condition`: an expression evaluated in the paused frame; the breakpoint only stops
+    /// when it is true. `None` for an unconditional breakpoint.
+    pub condition: Option<String>,
+    /// A DAP `hitCondition`: a hit-count expression (`N`, `>N`, `%N`, …); the breakpoint stops only
+    /// on hits the expression admits. `None` for every-hit.
+    pub hit_condition: Option<String>,
+}
+
+/// A breakpoint resolved to a `(proto, pc)` instruction position, carrying the `condition` /
+/// `hitCondition` the requesting line asked for (conditional / hit-count breakpoints).
+#[derive(Debug, Clone)]
+pub struct ResolvedBreakpoint {
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+}
+
+/// Resolve editor breakpoint requests **with their conditions** (conditional / hit-count
+/// breakpoints) into a map from each `(proto, pc)` instruction position to the `condition` /
+/// `hitCondition` of the line it resolves to. Same line-table resolution as [`resolve_breakpoints`]
+/// (the first pc of each requested line, per prototype), but keyed so the wire adapter can attach a
+/// per-breakpoint condition and hit-count matcher. A line that resolves in several prototypes (e.g.
+/// a generic instantiated twice) attaches the same condition to each — the natural behavior.
+pub fn resolve_conditional_breakpoints(
+    module: &Module,
+    sources: &SourceMap,
+    requested: &HashMap<String, Vec<RequestedBreakpoint>>,
+) -> HashMap<(u32, usize), ResolvedBreakpoint> {
+    let mut stops = HashMap::new();
+    for (proto_idx, chunk) in module.protos.iter().enumerate() {
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
+        for entry in &chunk.line_table {
+            let source = sources.source(entry.span.source);
+            let line = source.line_col(entry.span.start).line;
+            let Some(bp) = requested_breakpoint(requested, source.name(), line) else {
+                continue;
+            };
+            if seen.insert((entry.span.source.0, line)) {
+                stops.insert(
+                    (proto_idx as u32, entry.pc as usize),
+                    ResolvedBreakpoint {
+                        condition: bp.condition.clone(),
+                        hit_condition: bp.hit_condition.clone(),
+                    },
+                );
+            }
+        }
+    }
+    stops
+}
+
+/// The requested breakpoint on `line` of the file named `source_name`, if any — the conditional
+/// twin of [`line_requested`], returning the matched [`RequestedBreakpoint`] so its condition
+/// travels to the resolved stop.
+fn requested_breakpoint<'a>(
+    requested: &'a HashMap<String, Vec<RequestedBreakpoint>>,
+    source_name: &str,
+    line: u32,
+) -> Option<&'a RequestedBreakpoint> {
+    requested.iter().find_map(|(path, bps)| {
+        if path_matches(path, source_name) {
+            bps.iter().find(|bp| bp.line == line)
+        } else {
+            None
+        }
+    })
+}
+
+/// Every `(proto, pc)` that begins a source statement — the instruction positions a breakpoint can
+/// resolve to and a landed step stops on, taken straight from each prototype's debug **line table**
+/// ([`Chunk::line_table`], one entry per statement).
+///
+/// These are the only pcs at which a pause sees every in-scope local **materialized** in its
+/// register. Mid-statement, a named local can be caught in the window between the `Drop` that frees
+/// its old value and the `Move` that writes its new one — its pinned register momentarily reads
+/// `unit`. Breakpoints and steps never land off a statement start, so they never observe this; a
+/// resume-budget (`limit`) pause, which would otherwise trip at an arbitrary op, defers to the next
+/// member of this set for exactly the same guarantee.
+pub fn statement_starts(module: &Module) -> HashSet<(u32, usize)> {
+    let mut starts = HashSet::new();
+    for (proto_idx, chunk) in module.protos.iter().enumerate() {
+        for entry in &chunk.line_table {
+            starts.insert((proto_idx as u32, entry.pc as usize));
+        }
+    }
+    starts
+}
+
 /// Whether `line` in the file named `source_name` is a requested breakpoint. Matches the editor's
 /// path against the compiler's source name exactly, by canonical path, or (last resort) by file name.
 fn line_requested(requested: &HashMap<String, Vec<u32>>, source_name: &str, line: u32) -> bool {

@@ -161,7 +161,7 @@ impl Checker {
                 for (p, pty) in params.iter().zip(&bound) {
                     self.check_reserved_name(&p.name, p.name_span);
                     // Closure params land in the just-pushed frame — any env hit is a shadow
-                    // (E0055), enclosing capture and same-list duplicate alike.
+                    // (E0058), enclosing capture and same-list duplicate alike.
                     self.check_shadow(&p.name, p.name_span, env, crate::ShadowScopes::All);
                     bind(env, &p.name, pty.clone());
                 }
@@ -565,7 +565,7 @@ impl Checker {
                 env.push(HashMap::new());
                 for p in params {
                     self.check_reserved_name(&p.name, p.name_span);
-                    // Same rule as the check-mode arm: any env hit is a shadow (E0055).
+                    // Same rule as the check-mode arm: any env hit is a shadow (E0058).
                     self.check_shadow(&p.name, p.name_span, env, crate::ShadowScopes::All);
                     bind(env, &p.name, param_type(p, &self.imports.extern_types));
                 }
@@ -760,7 +760,10 @@ impl Checker {
                 scrutinee,
                 arms,
                 span,
-            } => self.synth_match(scrutinee, arms, *span, env),
+                // Reached through `synth`/`check` — the match is a sub-expression, so its value is
+                // used (a statement-position match routes through `Stmt::Expr` with `value_used`
+                // false instead).
+            } => self.synth_match(scrutinee, arms, *span, env, true),
             Expr::Object(lit) => {
                 if let Some(spread) = &lit.spread {
                     self.synth(spread, env);
@@ -833,7 +836,14 @@ impl Checker {
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
                 match &inner {
-                    Type::Result(ok, _) => (**ok).clone(),
+                    Type::Result(ok, err) => {
+                        // The error-position rule (error-ergonomics): a mismatched `Err` type
+                        // either converts through the target's `impl From<Source>` (site recorded
+                        // for lowering) or is E0057.
+                        let err = (**err).clone();
+                        self.check_try_error(&err, *span);
+                        (**ok).clone()
+                    }
                     Type::Option(some) => (**some).clone(),
                     // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
                     // diagnostic, yielding the same deferred type.
@@ -1123,68 +1133,61 @@ impl Checker {
                 args,
                 span,
             } => {
-                let module = match recv.as_ref() {
+                // The receiver's local binding (`json` from `use std.json`) resolves to the module's
+                // qualified identity through the imports; falling back to the raw binding lets an
+                // unimported/typo'd receiver resolve to nothing and report cleanly below.
+                let binding = match recv.as_ref() {
                     Expr::Ident { name, .. } => name.clone(),
                     _ => String::new(),
                 };
+                let module = self
+                    .imports
+                    .modules
+                    .get(&binding)
+                    .cloned()
+                    .unwrap_or_else(|| binding.clone());
                 // Arguments are synthesized (checked as expressions) regardless of which function.
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
-                // The only call-site-typed native function today is `json.parse::<T>(text)`. (When
-                // more land, this resolves through the registry's `RetTy::TypeArg` functions; the
-                // dynamic `json.parse(s)` keeps its own path, so the shared name does not collide.)
-                // `json.parse::<T>` (aborting) and `json.decode::<T>` (recoverable → `Result<T, string>`,
-                // L2 DI) are the call-site-typed native functions.
-                let recoverable_decode = module == "json" && func == "decode";
-                if module == "json" && (func == "parse" || recoverable_decode) {
-                    if arg_types.len() != 1 {
-                        self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!(
-                                "`json.{func}::<T>` takes 1 argument, found {}",
-                                arg_types.len()
-                            ),
-                        );
-                    } else if !matches!(arg_types[0], Type::String)
-                        && !arg_types[0].defers_to_runtime()
-                    {
-                        self.error(
-                            DiagnosticCode::TypeMismatch,
-                            args[0].span(),
-                            format!("`json.{func}` expects a `string`, found `{}`", arg_types[0]),
-                        );
-                    }
-                } else {
-                    self.error(
-                        DiagnosticCode::UnknownName,
-                        *func_span,
-                        format!(
-                            "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
-                        ),
-                    );
-                }
                 self.check_type_ref(ty);
                 let t = from_ref_q(ty, &self.imports.extern_types);
-                // Record the build recipe; a type with no JSON decoding (an enum, class, generic, …)
-                // is an error here.
-                match self.type_to_recipe(&t) {
+                // Record the build recipe for the turbofish `T`; a type with no recipe (an enum,
+                // class, unconstrained generic, …) cannot be built at the call site — a clear error.
+                // Deferred so the diagnostic sits after the function-resolution error, if any.
+                let has_recipe = match self.type_to_recipe(&t) {
                     Some(recipe) => {
                         self.sites.typed_module_call_sites.insert(*span, recipe);
+                        true
+                    }
+                    None => false,
+                };
+                // Resolve `module.func::<T>` through the registry's call-site-typed table. A
+                // turbofish on a non-call-site-typed or unknown function keeps a clear error; a
+                // resolved function validates arity/argument types from its declared signature (the
+                // ordinary `ExtFn` argument machinery) and types the result per its declared wrapper
+                // (`T`, `Option<T>`, or `Result<T, E>`). `json.parse`/`try_parse` are registered
+                // this way — no name is special-cased here.
+                match stdlib::typed_module_call(self.reg(), &module, func, &arg_types, t.clone()) {
+                    Some((params, required, result)) => {
+                        self.check_args(&params, required, &arg_types, args, *span, func);
+                        if !has_recipe {
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("`{t}` cannot be built by `{binding}.{func}::<T>`"),
+                            );
+                        }
+                        result
                     }
                     None => {
                         self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("`{t}` cannot be deserialized from JSON with `json.{func}`"),
+                            DiagnosticCode::UnknownName,
+                            *func_span,
+                            format!(
+                                "`{binding}.{func}::<T>(...)` is not a call-site-typed native function"
+                            ),
                         );
+                        t
                     }
-                }
-                // `json.decode::<T>` is recoverable — it yields `Result<T, string>` so a malformed
-                // body is a catchable error, not a program abort (unlike `json.parse::<T>`).
-                if recoverable_decode {
-                    Type::Result(Box::new(t), Box::new(Type::String))
-                } else {
-                    t
                 }
             }
             Expr::Invoke {

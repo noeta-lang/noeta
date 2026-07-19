@@ -1,0 +1,34 @@
+// Interplay (error-ergonomics): a `@derive(Error)` type works as a `?`-conversion TARGET — the
+// derive synthesizes `message()`, the `impl From<Source>` declares the conversion, and a `?` on
+// the source error converts and propagates a value whose `message()` is the derived rendering.
+// expect: stdout "Ok(7)"
+// expect: stdout "caught: AppError {detail: \"code 3\"}"
+// expect: exit 0
+struct LowError { code: int }
+
+@derive(Display, Error)
+struct AppError {
+    detail: string
+
+    impl From<LowError> {
+        fn from(e: LowError): AppError {
+            return AppError { detail: "code ${e.code}" }
+        }
+    }
+}
+
+fn low(fail: bool): Result<int, LowError> {
+    if fail { return Err(LowError { code: 3 }) }
+    return Ok(7)
+}
+
+fn app(fail: bool): Result<int, AppError> {
+    n = low(fail)?
+    return Ok(n)
+}
+
+echo app(false)
+echo match app(true) {
+    Ok(n) => "ok",
+    Err(e) => "caught: ${e.message()}",
+}

@@ -63,8 +63,18 @@ pub fn lean_runner_path() -> Option<PathBuf> {
         );
         return None;
     }
-    let path = workspace().join("target/debug").join(bin);
+    // The inner cargo inherits `CARGO_TARGET_DIR`, so the artifact lands there when the
+    // test run overrides it — the workspace-default `target/` is only the fallback.
+    let path = target_dir().join("debug").join(bin);
     path.exists().then_some(path)
+}
+
+/// The cargo target directory the inner builds actually use: `CARGO_TARGET_DIR` when the test
+/// environment overrides it (inherited by every spawned cargo), else the workspace default.
+pub fn target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace().join("target"))
 }
 
 /// Create a private temp *directory* holding several named `.noe` files and return the directory.

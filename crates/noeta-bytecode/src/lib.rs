@@ -673,6 +673,23 @@ pub enum Op {
     },
     /// Open a structured-concurrency scope (Track A.3b) — the start of a lowered `concurrent { }`.
     ScopeBegin,
+    /// `dst = scope_begin()` (Track A.7): open a scope and yield its **index** — the value form of
+    /// [`Self::ScopeBegin`], emitted by the async desugar's split `concurrent { }` so the block's join
+    /// poll-state ([`Self::ScopeReady`]) can test *this* scope by index rather than whatever scope is
+    /// innermost at re-poll time. Cannot fail (no span).
+    ScopeBeginValue {
+        dst: Reg,
+        span: Span,
+    },
+    /// `dst = scope_ready(src)` (Track A.7): whether every task in the scope whose index is in `src` has
+    /// completed or been cancelled — the boolean the split `concurrent { }`'s join poll-state tests each
+    /// poll (false ⇒ the step suspends, so the scheduler interleaves the inner scope's tasks with the
+    /// outer scope's siblings). Carries a span (the operand must be a scope index).
+    ScopeReady {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
     /// `dst = spawn(src)` (Track A.3b): register the future in `src` as a task in the current scope and
     /// yield a handle (a `Future<T>`). Carries a span (the operand must be a future).
     Spawn {
@@ -695,6 +712,14 @@ pub enum Op {
     /// Close the current concurrency scope (Track A.3b): drive every task spawned in it to completion
     /// (the join), then pop the scope. Carries a span (a task body can fault at the join).
     ScopeEnd {
+        span: Span,
+    },
+    /// Close the (already-drained) scope whose index is in `src` (Track A.7): release its tasks and
+    /// tombstone the slot — the value-directed close a split `concurrent { }` emits, which closes a
+    /// **specific** scope by index (a sibling task's scope may still be open above it) rather than the
+    /// innermost. No join (the `ScopeReady` poll-state already drained it). Carries a span.
+    ScopeEndAt {
+        src: Reg,
         span: Span,
     },
     /// `dst = channel(capacity)` (isolates I.1): create a bounded channel with the buffer size in
@@ -803,19 +828,15 @@ pub enum Op {
         /// Boxed (P-VMT-OPSZ): a `TypeRecipe` is 48 bytes and only a call-site-typed native call
         /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
         recipe: Option<Box<noeta_ext_abi::TypeRecipe>>,
-        /// `Result.Ok` / `Result.Err` shape indices — used by the **recoverable** decode variant
-        /// (`json.decode::<T>` → `Result<T, string>`, L2 DI): a decode failure lands as `Result.Err`
-        /// instead of aborting. `json.parse::<T>` ignores them (it aborts on failure).
-        ok_shape: u32,
-        err_shape: u32,
         span: Span,
     },
     /// The **router-facing** runtime JSON decode (`json.decode_typed(name, text)` → `Result<dyn,
-    /// string>`, L2.2 DI): decode the JSON in register `text` into the type named by the runtime
+    /// JsonError>`, L2.2 DI): decode the JSON in register `text` into the type named by the runtime
     /// string in register `name`, using the recipe registered for a `@derive(Deserialize<Json>)`
     /// type (baked into [`Module::deserialize_recipes`]). Fully recoverable — a malformed body **or**
-    /// an unknown/unregistered type name lands as `Result.Err` (`err_shape`); a successful decode as
-    /// `Result.Ok` (`ok_shape`) wrapping the materialized value.
+    /// an unknown/unregistered type name lands as `Result.Err` (`err_shape`) wrapping a
+    /// path-carrying `JsonError` extern value; a successful decode as `Result.Ok` (`ok_shape`)
+    /// wrapping the materialized value.
     DecodeTyped {
         dst: Reg,
         name: Reg,
@@ -1759,6 +1780,9 @@ fn op_repr(
             format!("LoadPending r{dst} <- pending")
         }
         Op::ScopeBegin => "ScopeBegin".to_string(),
+        Op::ScopeBeginValue { dst, .. } => format!("ScopeBeginValue r{dst} <- scope_begin"),
+        Op::ScopeReady { dst, src, .. } => format!("ScopeReady  r{dst} <- ready r{src}"),
+        Op::ScopeEndAt { src, .. } => format!("ScopeEndAt  scope r{src}"),
         Op::SpawnIsolate {
             dst, callee, args, ..
         } => {

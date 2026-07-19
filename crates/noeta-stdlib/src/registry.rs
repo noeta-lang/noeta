@@ -260,6 +260,20 @@ const CORE_TYPES: &[ExtType] = &[
         docs: FILE_HANDLE_DOCS,
         ..ExtType::DEFAULTS
     },
+    // `JsonError` (error-machinery arc) — the JSON decode failure: pure, content-equal data (the
+    // `ExecResult` model), std's first `Error` implementor. Declares `Error` + `Display` through
+    // the registration (the extern-type analogue of a user `impl`), so `<E: Error>` bounds accept
+    // it and it renders as its composed message.
+    ExtType {
+        name: crate::json::JSON_ERROR_TYPE_NAME,
+        namespace: "std.json",
+        methods: JSON_ERROR_METHODS,
+        dispatch: json_error_method_dispatch,
+        key_capable: false, // a decode failure is not a map key
+        traits: &["Error", "Display"],
+        docs: JSON_ERROR_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // `ExecResult` (stdlib-gaps) — pure, content-equal subprocess outcome (the `Response` model).
     ExtType {
         name: crate::os::EXEC_RESULT_TYPE_NAME,
@@ -1899,6 +1913,19 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Unit),
     },
+    // Signalling (process-signals arc): the general form of `kill` — send a named OS signal.
+    ExtFn {
+        name: "signal",
+        params: &[Str],
+        ret: Concrete(SigType::Unit),
+    },
+    // `wait_async` (process-signals arc): the awaitable twin of `wait` — yields a
+    // `Future<ExecResult>`. Deterministic in the sandbox; genuinely overlapping on the real host.
+    ExtFn {
+        name: "wait_async",
+        params: &[],
+        ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
+    },
     // Streaming (process-streaming arc): consume stdout line-by-line or by character count while
     // the child runs, read stderr, and feed / close its stdin. `wait` still returns the whole
     // captured output.
@@ -1972,6 +1999,18 @@ fn process_method_dispatch(
             want_arity(method, args, 0)?;
             host.os_proc_kill(id)?;
             Ok(NativeOut::Unit)
+        }
+        "signal" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            let signal = crate::os::Signal::parse(name)
+                .ok_or_else(|| crate::os::unknown_signal_error(name))?;
+            host.os_proc_signal(id, signal)?;
+            Ok(NativeOut::Unit)
+        }
+        "wait_async" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(host.os_proc_wait_spawn(id))))
         }
         "read_line" => {
             want_arity(method, args, 0)?;
@@ -2125,6 +2164,13 @@ fn fs_dispatch(
                 path.to_string(),
             )))))
         }
+        "read_bytes_async" => {
+            want_arity(func, args, 1)?;
+            let path = want_str(func, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(
+                crate::FsIo::ReadBytes(path.to_string()),
+            ))))
+        }
         "write_async" | "append_async" => {
             want_arity(func, args, 2)?;
             let path = want_str(func, args, 0)?.to_string();
@@ -2136,16 +2182,23 @@ fn fs_dispatch(
             };
             Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
         }
-        // The async metadata twins (extern-types X6).
-        "exists_async" | "remove_async" => {
+        // The async metadata twins (extern-types X6; the directory pair is A.10 residue).
+        "exists_async" | "remove_async" | "is_dir_async" => {
             want_arity(func, args, 1)?;
             let path = want_str(func, args, 0)?.to_string();
-            let io = if func == "exists_async" {
-                crate::FsIo::Exists(path)
-            } else {
-                crate::FsIo::Remove(path)
+            let io = match func {
+                "exists_async" => crate::FsIo::Exists(path),
+                "is_dir_async" => crate::FsIo::IsDir(path),
+                _ => crate::FsIo::Remove(path),
             };
             Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
+        }
+        "mkdir_async" => {
+            want_arity(func, args, 1)?;
+            let path = want_str(func, args, 0)?.to_string();
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(crate::FsIo::Mkdir(
+                path,
+            )))))
         }
         "list_async" => {
             // 0-or-1 args, mirroring the sync `list` (whole sandbox vs one directory).
@@ -2367,7 +2420,7 @@ fn quat_dispatch(
 
 // --- the std extension's module table -----------------------------------------------------------
 
-use RetTy::{Concrete, NumericPreserving, SameAsArg};
+use RetTy::{Concrete, NumericPreserving, SameAsArg, TypeArg};
 use SigType::{Dyn, Float, Int, String as Str};
 
 const MATH_FNS: &[ExtFn] = &[
@@ -2689,6 +2742,10 @@ const FS_DOCS: &[(&str, &str)] = &[
         "Read the whole file at `path` as raw `bytes`.",
     ),
     (
+        "read_bytes_async",
+        "Async `read_bytes` — yields a `Future<bytes>`.",
+    ),
+    (
         "read_lines",
         "Read the file at `path` and split it into a list of lines (newlines removed).",
     ),
@@ -2709,6 +2766,7 @@ const FS_DOCS: &[(&str, &str)] = &[
     ("exists", "Whether a file or directory exists at `path`."),
     ("exists_async", "Async `exists`."),
     ("is_dir", "Whether `path` exists and is a directory."),
+    ("is_dir_async", "Async `is_dir` — yields a `Future<bool>`."),
     (
         "list",
         "The entry names of a directory (the given path, or the current directory).",
@@ -2718,6 +2776,7 @@ const FS_DOCS: &[(&str, &str)] = &[
         "mkdir",
         "Create the directory at `path`, including any missing parent directories.",
     ),
+    ("mkdir_async", "Async `mkdir` — yields a `Future<void>`."),
     (
         "open",
         "Open the file at `path` in mode `\"r\"`/`\"w\"`/`\"a\"`, returning a `FileHandle` cursor for \
@@ -3196,6 +3255,14 @@ const PROCESS_DOCS: &[(&str, &str)] = &[
         "The exit status if the process has finished, else `none`, without blocking.",
     ),
     ("kill", "Terminate the process."),
+    (
+        "signal",
+        "Send a named OS signal (e.g. `\"TERM\"`, `\"HUP\"`) to the process — the general form of `kill`.",
+    ),
+    (
+        "wait_async",
+        "Await the process's exit, yielding a `Future<ExecResult>` — the async twin of `wait`.",
+    ),
     ("read", "Read available bytes from the process's stdout."),
     ("read_line", "Read the next line from the process's stdout."),
     (
@@ -3235,6 +3302,10 @@ const VIEW_METHOD_DOCS: &[(&str, &str)] = &[
     (
         "expose",
         "Expose a named value into the view for the client.",
+    ),
+    (
+        "unexpose",
+        "Drop a named binding and dispose its handle — a diff never pushes it again and its scope reclaims.",
     ),
 ];
 
@@ -3518,6 +3589,12 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Bytes),
     },
+    // A.10 residue: the async twin of `read_bytes` — a `Future<bytes>`.
+    ExtFn {
+        name: "read_bytes_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Bytes)),
+    },
     ExtFn {
         name: "read",
         params: &[Str],
@@ -3583,6 +3660,18 @@ const FS_FNS: &[ExtFn] = &[
         name: "mkdir",
         params: &[Str],
         ret: Concrete(SigType::Unit),
+    },
+    // A.10 residue: the async directory twins — `is_dir_async` → `Future<bool>`, `mkdir_async`
+    // → `Future<void>`. `list_async` already covers directory listing.
+    ExtFn {
+        name: "is_dir_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Bool)),
+    },
+    ExtFn {
+        name: "mkdir_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Unit)),
     },
     // `list([dir])` — the directory argument is trailing-optional (the http-arc H4 machinery,
     // which post-dates this function's old "checker special-cases the arity" note).
@@ -3733,6 +3822,25 @@ const JSON_FNS: &[ExtFn] = &[
     },
 ];
 
+// The **call-site-typed** doors — the turbofish forms `json.parse::<T>` (aborting) and
+// `json.try_parse::<T>` (recoverable → `Result<T, JsonError>`). A separate table from `JSON_FNS`:
+// the dynamic `parse(text): dyn` and the typed `parse::<T>: T` legitimately share the name
+// `parse`, so they live in disjoint call surfaces. Each declares `RetTy::TypeArg` with the
+// wrapper the checker types the call by; `json_typed_dispatch` produces the matching `NativeOut`
+// tree threaded with the checker-resolved recipe.
+const JSON_TYPED_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "parse",
+        params: &[Str],
+        ret: TypeArg(TypeArgWrap::Plain),
+    },
+    ExtFn {
+        name: "try_parse",
+        params: &[Str],
+        ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
+    },
+];
+
 fn json_dispatch(
     func: &str,
     _host: &mut dyn Host,
@@ -3748,6 +3856,131 @@ fn json_dispatch(
             Ok(NativeOut::Str(crate::json::stringify(&args[0])))
         }
         _ => Err(no_function_error("json", func)),
+    }
+}
+
+/// The `json` module's call-site-typed dispatch (`json.parse::<T>` / `json.try_parse::<T>`): decode
+/// the string argument against the checker-resolved `recipe` into a value of the turbofish `T`.
+/// `parse` is the **aborting** door — a decode failure is `Err(StdError)`, a runtime abort. `try_parse`
+/// is the **recoverable** door — it never uses the `Err` channel, returning the whole `Result` inside
+/// the `NativeOut` (`Ok(value)` on success, `Err(JsonError)` — a path-rich extern — on failure), so
+/// both backends materialize one tree and stay byte-identical to the former hardcoded branch.
+fn json_typed_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+    recipe: &TypeRecipe,
+) -> Result<NativeOut, StdError> {
+    match func {
+        "parse" => {
+            want_arity(func, args, 1)?;
+            crate::json::parse_typed(want_str(func, args, 0)?, recipe)
+        }
+        "try_parse" => {
+            want_arity(func, args, 1)?;
+            Ok(
+                match crate::json::try_parse_typed(want_str(func, args, 0)?, recipe) {
+                    Ok(out) => NativeOut::Ok(Box::new(out)),
+                    Err(error) => {
+                        NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                    }
+                },
+            )
+        }
+        _ => Err(no_function_error("json", func)),
+    }
+}
+
+/// The `JsonError` instance methods (error-machinery arc): pure reads over the decode failure —
+/// the `ExecResult` accessor model. `message` is `impl Error`'s required method; `to_string` is
+/// `impl Display`'s (both declared on the type's registration below), and both return the same
+/// composed message the value also displays as.
+const JSON_ERROR_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "message",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "kind",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "path",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "line",
+        params: &[],
+        ret: Concrete(SigType::Option(&Int)),
+    },
+    ExtFn {
+        name: "column",
+        params: &[],
+        ret: Concrete(SigType::Option(&Int)),
+    },
+];
+
+const JSON_ERROR_DOCS: &[(&str, &str)] = &[
+    (
+        "message",
+        "The composed human message — the path-prefixed detail (`items[2].price: expected float, \
+         found JSON number`). The `Error` trait's required method.",
+    ),
+    (
+        "to_string",
+        "Same as `message()` — the `Display` rendering, so `${e}` interpolates the message.",
+    ),
+    (
+        "kind",
+        "What went wrong: `\"syntax\"` (malformed document), `\"mismatch\"` (wrong value kind), \
+         `\"missing_field\"`, or `\"unknown_type\"` (a `decode_typed` name with no recipe).",
+    ),
+    (
+        "path",
+        "The path from the document root to the failing value (`items[2].price`); empty for a \
+         document-level failure.",
+    ),
+    (
+        "line",
+        "The 1-based source line of a `syntax` failure, `none` otherwise.",
+    ),
+    (
+        "column",
+        "The 1-based source column of a `syntax` failure, `none` otherwise.",
+    ),
+];
+
+fn json_error_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    use crate::json::{JSON_ERROR_TYPE_NAME, JsonError};
+    let Some(error) = recv.as_any().downcast_ref::<JsonError>() else {
+        return Err(type_error(method, JSON_ERROR_TYPE_NAME));
+    };
+    want_arity(method, args, 0)?;
+    let opt_int = |v: Option<u32>| match v {
+        Some(n) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Int(i64::from(n))))),
+        None => NativeOut::None,
+    };
+    match method {
+        // `message` (Error) and `to_string` (Display) are the same composed message by design.
+        "message" | "to_string" => Ok(NativeOut::Str(error.message())),
+        "kind" => Ok(NativeOut::Str(error.kind.label().to_string())),
+        "path" => Ok(NativeOut::Str(error.path.clone())),
+        "line" => Ok(opt_int(error.line)),
+        "column" => Ok(opt_int(error.column)),
+        _ => Err(crate::no_method_error(JSON_ERROR_TYPE_NAME, method)),
     }
 }
 
@@ -3851,6 +4084,9 @@ const CORE_MODULES: &[ExtModule] = &[
         // `json.stringify` introspects an arbitrary value, so its arguments are marshalled deeply.
         deep_marshal: true,
         docs: JSON_DOCS,
+        // The turbofish decode doors (`json.parse::<T>` / `json.try_parse::<T>`).
+        typed_functions: JSON_TYPED_FNS,
+        typed_dispatch: Some(json_typed_dispatch),
         ..ExtModule::DEFAULTS
     },
     // The `task` concurrency module (higher-order-abi H0/H2): its functions need the executor,

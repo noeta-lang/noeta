@@ -1,0 +1,12 @@
+// A `struct` (value type) global's field mutated from an `async fn` also stores through the global —
+// `s.n = s.n + x` is a reassignment of the global `s`, resolved via the global slot, not a captured
+// state-machine cell.
+// expect: stdout "11"
+// expect: exit 0
+struct S { pub mut n: int }
+mut s = S { n: 1 }
+async fn grow(x: int) use (s): void {
+    s.n = s.n + x
+}
+grow(10).await
+echo s.n

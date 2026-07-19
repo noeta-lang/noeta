@@ -414,6 +414,7 @@ fn compile_to_mc(
     let main = {
         let mut fc = FnCompiler::new(&mut module, true, None, Vec::new(), Vec::new());
         fc.init_temps(ir.temp_count);
+        fc.setup_main_scopes(&ir.top);
         for stmt in &ir.top.stmts {
             fc.stmt(stmt)?;
         }
@@ -584,6 +585,18 @@ impl SessionCompiler {
             self.mc
                 .type_of_sites
                 .extend(sites.type_of_sites.iter().map(|(k, v)| (*k, v.clone())));
+            // `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): the checker records one per
+            // deriving struct into its accumulated sites, and lowering already emits the
+            // `Rvalue::DecodeTyped` (via the accumulated `decode_typed_sites`) — but the runtime
+            // registry `json.decode_typed` resolves against is baked from `Module::deserialize_recipes`,
+            // which a REPL entry never populated. Bake the checker's accumulated recipes here, exactly
+            // as the whole-program checked compile does (`compile_with_sites`'s `sites.deserialize_recipes`),
+            // so a type declared at the prompt decodes. The snapshot is the full accumulated set
+            // (latest-wins on a redeclared name once the VM lifts it into a name→recipe map), so a
+            // wholesale replace stays idempotent across entries. The checkerless path has no checker to
+            // derive a recipe (and does not recognize `decode_typed` at all), so this is a checked-session
+            // capability by construction.
+            self.mc.deserialize_recipes = sites.deserialize_recipes.clone();
         }
 
         // Register this entry's globals/types/methods into the persistent tables (all additive:
@@ -596,6 +609,7 @@ impl SessionCompiler {
         let main = {
             let mut fc = FnCompiler::new(&mut self.mc, true, None, Vec::new(), Vec::new());
             fc.init_temps(ir.temp_count);
+            fc.setup_main_scopes(&ir.top);
             for stmt in &ir.top.stmts {
                 fc.stmt(stmt)?;
             }
@@ -1287,6 +1301,7 @@ impl ModuleCompiler {
                 });
             }
         }
+        fc.hoist_nested_fn_cells(&body.stmts);
         for stmt in &body.stmts {
             fc.stmt(stmt)?;
         }
@@ -2066,26 +2081,20 @@ impl<'m> FnCompiler<'m> {
         }
 
         let celled = self.celled.contains(name);
-        let reg = self.alloc_reg();
-        if celled {
-            // Pre-create the cell (holding unit) and bind the name, so the body's references to
-            // itself source this cell; the closure value is stored into it once built.
-            let unit = self.alloc_reg();
-            let k = self.add_const(Const::Unit);
-            self.code.push(Op::LoadConst { dst: unit, k });
-            self.code.push(Op::MakeCell {
-                dst: reg,
-                src: unit,
-            });
-            self.scopes.last_mut().unwrap().insert(
-                name.to_string(),
-                Var {
-                    reg,
-                    mutable: false,
-                    celled: true,
-                },
-            );
-        }
+        // A celled nested `fn` lives in a cell the block's hoist pass (`hoist_nested_fn_cells`)
+        // pre-created before any sibling body was lowered — so a forward or mutual reference
+        // (`even` calling `odd` declared later, or two mutually recursive fns) already sources a
+        // live cell. Reuse that binding; fall back to creating the cell here if this declaration
+        // was reached without a preceding hoist (defensive — every block hoists before lowering).
+        let cell_reg = if celled {
+            let existing = self.scopes.last().and_then(|s| s.get(name)).copied();
+            Some(match existing {
+                Some(var) if var.celled => var.reg,
+                _ => self.make_fn_cell(name),
+            })
+        } else {
+            None
+        };
         let (upvalues, captures) = self.resolve_captures(func)?;
         let enclosing = self.child_enclosing();
         let proto = self
@@ -2098,13 +2107,84 @@ impl<'m> FnCompiler<'m> {
             proto,
             captures,
         });
-        if celled {
-            self.code.push(Op::CellSet { cell: reg, src: t });
+        if let Some(cell) = cell_reg {
+            self.code.push(Op::CellSet { cell, src: t });
         } else {
             // `t` holds a just-built closure read nowhere else — the local adopts it (consuming move).
             self.declare_local(name, t, true, false, func.span);
         }
         Ok(())
+    }
+
+    /// Create a fresh unit-holding cell for a nested `fn` binding `name`, binding it (celled) in the
+    /// current scope and returning the cell's register. The closure value is stored into the cell
+    /// (`CellSet`) once built. Shared by the block hoist pass and [`Self::declare_fn`]'s fallback.
+    fn make_fn_cell(&mut self, name: &str) -> Reg {
+        let reg = self.alloc_reg();
+        let unit = self.alloc_reg();
+        let k = self.add_const(Const::Unit);
+        self.code.push(Op::LoadConst { dst: unit, k });
+        self.code.push(Op::MakeCell {
+            dst: reg,
+            src: unit,
+        });
+        self.scopes.last_mut().unwrap().insert(
+            name.to_string(),
+            Var {
+                reg,
+                mutable: false,
+                celled: true,
+            },
+        );
+        reg
+    }
+
+    /// Pre-create the upvalue cells for a block's **directly nested `fn` declarations** (F1 forward /
+    /// mutual capture) — the codegen mirror of the checker's `bind_nested_fns`. A captured (celled)
+    /// nested `fn` is bound to a fresh unit-holding cell *before* any sibling body is lowered, so a
+    /// forward reference (`a` calling `b` declared later) or mutual recursion (`even`/`odd`) sources a
+    /// live cell instead of failing to resolve ("a capture that could not be sourced from the
+    /// enclosing frame"). The closure value is stored into the cell when [`Self::declare_fn`] reaches
+    /// its declaration. Only celled fns need a cell; a `fn` nobody captures binds directly as a plain
+    /// local at its declaration site. Nested `fn`s in sub-blocks (an `if` body, a match arm) are
+    /// hoisted by that block's own scope, so only the direct statements are scanned here — matching
+    /// the strictly-lexical visibility a non-`fn` local keeps (a forward reference to one is E0005).
+    fn hoist_nested_fn_cells(&mut self, stmts: &[Stmt]) {
+        // At `main`'s global depth a top-level `fn` is a global (resolved by name regardless of
+        // order via `register_globals`), never a cell — so nothing to hoist.
+        if self.at_global_depth() {
+            return;
+        }
+        for stmt in stmts {
+            if let Stmt::Decl(Decl::Fn { name, .. }) = stmt
+                && self.celled.contains(name)
+                && !self.scopes.last().is_some_and(|s| s.contains_key(name))
+            {
+                self.make_fn_cell(name);
+            }
+        }
+    }
+
+    /// Prime `main`'s closure-conversion state from its top-level body. Unlike an ordinary function
+    /// (compiled through [`Self::compile_chunk`], which runs the free-variable analysis and seeds
+    /// `celled`/`local_layer`), `main` is lowered by iterating `ir.top.stmts` directly, so without
+    /// this its `celled`/`local_layer` sets stay empty. That empties the celling decision for a `fn`
+    /// nested in a **top-level block** (`while { fn rec(){ ... rec() ... } }`): the block's hoist
+    /// pass finds nothing to cell, so the self-reference resolves to a `LoadGlobal` no one stores
+    /// (E0005), diverging from the reference interpreter which runs it fine.
+    ///
+    /// `main`'s peculiarity is that its **depth-0** bindings are module globals, not frame locals
+    /// (see [`Self::at_global_depth`]). The free-variable analysis, which treats every binding as a
+    /// local, is therefore filtered by the module-global set: a top-level `fn`/`mut`/import stays a
+    /// global (referenced by name, never captured), while a binding introduced inside a top-level
+    /// block — the only genuine `main` locals — is kept, so a nested `fn` that captures it (self or
+    /// mutual recursion) resolves to its cell/upvalue exactly as inside any other function.
+    fn setup_main_scopes(&mut self, top: &Block) {
+        let globals = self.module.global_names();
+        // `main` (the top level) is never sealed — `None` keeps the full outward rule.
+        let analysis = freevars::analyze(&[], &[], top, &[], &globals, None);
+        self.local_layer = &analysis.local - &globals;
+        self.celled = &analysis.celled - &globals;
     }
 
     fn return_stmt(&mut self, value: Option<&Atom>, _span: Span) -> Result<(), Unsupported> {
@@ -2250,6 +2330,7 @@ impl<'m> FnCompiler<'m> {
                     unreachable!("a tuple for-pattern is desugared to projections in IR lowering")
                 }
             }
+            self.hoist_nested_fn_cells(&body.stmts);
             for stmt in &body.stmts {
                 self.stmt(stmt)?;
             }
@@ -2329,6 +2410,7 @@ impl<'m> FnCompiler<'m> {
                     unreachable!("a tuple for-pattern is desugared to projections in IR lowering")
                 }
             }
+            self.hoist_nested_fn_cells(&body.stmts);
             for stmt in &body.stmts {
                 self.stmt(stmt)?;
             }
@@ -2428,6 +2510,7 @@ impl<'m> FnCompiler<'m> {
     fn block(&mut self, block: &Block) -> Result<(), Unsupported> {
         self.scopes.push(HashMap::new());
         let result = (|| {
+            self.hoist_nested_fn_cells(&block.stmts);
             for stmt in &block.stmts {
                 self.stmt(stmt)?;
             }
@@ -3338,6 +3421,31 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            Rvalue::ScopeBegin { span } => {
+                // Open a scope and yield its index (Track A.7): the value form of `Op::ScopeBegin`, used
+                // by the async desugar's split `concurrent { }` to thread the index to its join test.
+                self.code.push(Op::ScopeBeginValue { dst, span: *span });
+                Ok(())
+            }
+            Rvalue::ScopeReady { scope, span } => {
+                // Whether the scope at index `scope` is fully drained (Track A.7) — the boolean the
+                // split `concurrent { }`'s join poll-state tests each poll.
+                let src = self.atom_reg(scope)?;
+                self.code.push(Op::ScopeReady {
+                    dst,
+                    src,
+                    span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::ScopeEndAt { scope, span } => {
+                // Close the drained scope at index `scope` (Track A.7): the value form of `ScopeEnd`
+                // that closes a specific scope by index (a sibling's scope may still be open above it).
+                // `dst` is unused (the effect is the close); the desugar discards it.
+                let src = self.atom_reg(scope)?;
+                self.code.push(Op::ScopeEndAt { src, span: *span });
+                Ok(())
+            }
             Rvalue::SpawnIsolate { callee, args, span } => {
                 // Spawn a call as a fresh isolate (I.4b): carry the callee + unbuilt args so a real
                 // isolate can copy-marshal them; the sandbox builds `callee(args)` and registers a
@@ -3448,16 +3556,12 @@ impl<'m> FnCompiler<'m> {
                 let args = self.atom_regs(args)?;
                 let module_id = self.module.intern_name(module);
                 let func_id = self.module.intern_name(func);
-                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
-                let err_shape = self.module.builtin_enum_shape("Result", "Err");
                 self.code.push(Op::TypedModuleCall {
                     dst,
                     module: module_id,
                     func: func_id,
                     args,
                     recipe: recipe.clone().map(Box::new),
-                    ok_shape,
-                    err_shape,
                     span: *span,
                 });
                 Ok(())
@@ -4312,6 +4416,7 @@ impl<'m> FnCompiler<'m> {
             self.scopes.push(HashMap::new());
             self.emit_pattern(&arm.pattern, s, &mut fail_jumps);
             let body = (|| {
+                self.hoist_nested_fn_cells(&arm.body.stmts);
                 for stmt in &arm.body.stmts {
                     self.stmt(stmt)?;
                 }

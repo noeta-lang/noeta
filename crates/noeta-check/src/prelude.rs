@@ -30,6 +30,7 @@ impl Checker {
             .type_kinds
             .insert("Attributed".to_string(), noeta_types::TypeKind::Struct);
         self.register_type_enum();
+        self.register_cancelled();
         self.register_semantic_prelude();
         self.register_tier_prelude();
         self.register_extension_attributes();
@@ -234,6 +235,25 @@ impl Checker {
                 ("text".to_string(), Type::String),
             ],
         );
+    }
+
+    /// Register the prelude `Cancelled` enum (Track A.8) — the typed marker `h.join()` returns as
+    /// the `Err` of its `Result<T, Cancelled>` when the joined task was cancelled. A single
+    /// payload-free variant (`Cancelled.Cancelled`), so it is matchable bare and `Send` — modeled
+    /// on `Ordering`. Registered like any prelude type, so a user declaration of the same name
+    /// shadows it and both backends materialize the matching shape.
+    pub(crate) fn register_cancelled(&mut self) {
+        self.symbols.types.insert("Cancelled".to_string());
+        self.symbols.enums.insert(
+            "Cancelled".to_string(),
+            vec![VariantInfo {
+                name: "Cancelled".to_string(),
+                fields: Vec::new(),
+            }],
+        );
+        self.symbols
+            .type_kinds
+            .insert("Cancelled".to_string(), noeta_types::TypeKind::Enum);
     }
 
     /// Register the prelude `Type` enum — the ADT `type_of` returns, mirroring the type lattice so

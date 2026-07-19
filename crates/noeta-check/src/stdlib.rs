@@ -39,7 +39,7 @@ pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIV
 /// registered type. This is what the checker stores in `Type::Named` so a native type is never
 /// conflated with a same-short-named user type; runtime values carry the same qualified identity
 /// (`ExternValue::type_identity`), so the two sides key dispatch and `is`/`as` identically.
-fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
+pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
     reg.resolve_type(n)
         .map_or_else(|| n.to_string(), registry::ExtType::qualified)
 }
@@ -259,6 +259,9 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
         Type::Named(n, args) if n == ITERATOR => {
             iterator_method(name, args.first().unwrap_or(&Type::Dyn))
         }
+        Type::Named(n, args) if n == FUTURE => {
+            future_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
         Type::Named(n, args) if n == SENDER => {
             sender_method(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -280,6 +283,23 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
         }
         _ => None,
     }
+}
+
+/// A task handle `Future<T>` (Track A.8) — the cancellation surface a `spawn`/`isolate` handle
+/// exposes. `cancel()` marks the task cancelled (idempotent, `void`); `join()` drives it and reports
+/// its outcome as a typed `Result<T, Cancelled>` (`Ok(v)` on completion, `Err(Cancelled)` if
+/// cancelled) — the explicit, cancel-aware counterpart to plain `.await: T` (which errors E0056 on a
+/// cancelled task). Every `Future<T>` advertises them, since a spawn handle is itself a `Future<T>`;
+/// on a bare (never-spawned) future `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
+fn future_method(name: &str, elem: &Type) -> Option<Type> {
+    Some(match name {
+        "cancel" => Type::Unit,
+        "join" => Type::Result(
+            Box::new(elem.clone()),
+            Box::new(Type::Named("Cancelled".to_string(), Vec::new())),
+        ),
+        _ => return None,
+    })
 }
 
 /// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
@@ -492,6 +512,11 @@ pub(super) fn method_params(
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
+        // `Future<T>` cancellation methods (Track A.8): both nullary.
+        Type::Named(n, _) if n == FUTURE => Some(match name {
+            "cancel" | "join" => vec![],
+            _ => return None,
+        }),
         Type::Named(n, args) if n == SENDER => {
             let elem = args.first().cloned().unwrap_or(Type::Dyn);
             Some(match name {
@@ -753,10 +778,48 @@ pub(super) fn module_return(
         RetTy::Concrete(s) => sig_to_type_bound(reg, &s, &bind_params(f.params, args)),
         RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
-        // The call-site-typed turbofish form lands in Phase B; until then no registered function
-        // uses it, so a hole is the safe fallback.
-        RetTy::TypeArg => Type::Unknown,
+        // A call-site-typed function is never reached through the plain-call return path — its
+        // result is named by the turbofish and typed in the `Expr::TypedModuleCall` arm (via
+        // `typed_module_result`), so a hole is the safe fallback here.
+        RetTy::TypeArg(_) => Type::Unknown,
     })
+}
+
+/// Resolve a **call-site-typed** module call (`json.parse::<T>`) through the registry's
+/// `typed_functions` table — the single helper the checker's `Expr::TypedModuleCall` arm consults.
+/// Returns `None` when `module.func` is not call-site-typed (an unknown or non-typed function under a
+/// turbofish — a clear error at the call site). When it is, returns `(params, required, result)`:
+/// the declared parameter types (signature variables bound from `arg_types`, so the ordinary
+/// [`Checker::check_args`] machinery applies), the required-argument count, and the call's result
+/// type — `T` itself, `Option<T>`, or `Result<T, E>` per the function's declared
+/// [`registry::TypeArgWrap`], with the turbofish `t` (the resolved `T`) filled in and any named
+/// error type `E` resolved through the registry exactly like every native signature type.
+pub(super) fn typed_module_call(
+    reg: &registry::Registry,
+    module: &str,
+    func: &str,
+    arg_types: &[Type],
+    t: Type,
+) -> Option<(Vec<Type>, usize, Type)> {
+    use registry::{RetTy, SigType, TypeArgWrap};
+    let f = reg.find_typed_function(module, func)?;
+    let bindings = bind_params(f.params, arg_types);
+    let params = f
+        .params
+        .iter()
+        .map(|p| sig_to_type_bound(reg, p, &bindings))
+        .collect();
+    let required = SigType::required_count(f.params);
+    // The wrapper is validated to be `TypeArg` at registry assembly, so the fallback never fires.
+    let result = match f.ret {
+        RetTy::TypeArg(TypeArgWrap::Plain) => t,
+        RetTy::TypeArg(TypeArgWrap::Option) => opt(t),
+        RetTy::TypeArg(TypeArgWrap::Result(e)) => {
+            Type::Result(Box::new(t), Box::new(sig_to_type_bound(reg, &e, &[])))
+        }
+        _ => t,
+    };
+    Some((params, required, result))
 }
 
 /// A bundle method's parameter types under the receiver-at-0 convention (kernel-methods K2):
@@ -789,7 +852,7 @@ pub(super) fn bundle_method_return(
         RetTy::SameAsArg(0) => recv.clone(),
         RetTy::SameAsArg(i) => args.get(i - 1).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
-        RetTy::TypeArg => Type::Unknown,
+        RetTy::TypeArg(_) => Type::Unknown,
     }
 }
 

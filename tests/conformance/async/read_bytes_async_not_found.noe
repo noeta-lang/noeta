@@ -1,0 +1,9 @@
+// A.10 residue — the async twin agrees with the sync op on failure: `fs.read_bytes_async` of a path
+// absent from the sandbox is the same runtime E0021 (IoError) as `fs.read_bytes`, surfaced when the
+// future is awaited. Identical in both backends.
+// expect: error E0021 at 6:1
+use std.{fs}
+async fn run(): bytes {
+    return fs.read_bytes_async("ghost.bin").await
+}
+echo run().await.len()

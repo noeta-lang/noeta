@@ -1,0 +1,23 @@
+// Explicitness pinned: a declared `From` conversion applies ONLY in the `?` error position. An
+// ordinary `return Err(...)` (or any assignment) with a mismatched error type stays the plain
+// type mismatch it always was (E0007) — nothing converts implicitly outside `?`; write
+// `Err(HighError.from(e))` to convert explicitly.
+// expect: error E0007 at 20:16
+// expect: exit 1
+struct LowError { code: int }
+
+struct HighError {
+    detail: string
+
+    impl From<LowError> {
+        fn from(e: LowError): HighError {
+            return HighError { detail: "wrapped ${e.code}" }
+        }
+    }
+}
+
+fn high(): Result<int, HighError> {
+    return Err(LowError { code: 7 })
+}
+
+echo high()

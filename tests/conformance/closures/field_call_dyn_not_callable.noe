@@ -1,0 +1,13 @@
+// The runtime member-call fallback on a `dyn` receiver reaches a field that holds a NON-function:
+// the call routes through the indirect-call machinery and raises its E0007 ("... is not
+// callable") — the same error `g = c.count; g(1)` would raise — not a spurious "no method".
+// Identical in both backends (the differential oracle).
+// expect: error E0007 at 11:10
+// expect: exit 1
+struct Counter {
+    count: int
+}
+fn poke(c: dyn): void {
+    echo c.count(1)
+}
+poke(Counter { count: 3 })

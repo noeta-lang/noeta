@@ -876,6 +876,21 @@ impl<'m> Vm<'m> {
             None if entry_pc == 0 => self.jit_maybe_compile(proto)?,
             None => return None,
         };
+        // Trampoline profiler seam (`noeta profile --jit`, tier-1 sampling): record the JIT frame the
+        // sampler attributes the upcoming native segment's wall time to — native code hits no op
+        // boundary, so `before_op` can't fire while it runs. `None` on every non-profiled run — one
+        // predicted branch. `self.module` (a `Copy` `&'m Module`) and `self.profiler` are disjoint
+        // fields, borrowed independently of the `frames`/`regs` params.
+        let strand = self.sched.current_strand;
+        if let Some(prof) = self.profiler.as_mut() {
+            let view = DebugView {
+                module: self.module,
+                frames: &frames[..],
+                regs: &regs[..],
+                strand,
+            };
+            prof.on_jit_enter(&view, proto as u32);
+        }
         let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
         let regs_ptr = regs.as_mut_ptr();
         let globals_ptr = self.persist.globals.as_mut_ptr();
@@ -898,6 +913,16 @@ impl<'m> Vm<'m> {
                 entry_pc,
             )
         };
+        // Trampoline exit: bank the native segment's wall time onto the frame recorded above.
+        if let Some(prof) = self.profiler.as_mut() {
+            let view = DebugView {
+                module: self.module,
+                frames: &frames[..],
+                regs: &regs[..],
+                strand,
+            };
+            prof.on_jit_exit(&view);
+        }
         Some(match raw {
             noeta_jit_abi::OUTCOME_CALLED => JitOutcome::Called,
             noeta_jit_abi::OUTCOME_ABORTED => JitOutcome::Abort,

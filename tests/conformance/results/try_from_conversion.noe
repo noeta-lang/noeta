@@ -1,0 +1,34 @@
+// `?`-boundary error conversion (error-ergonomics): a `?` whose `Err` payload type differs from
+// the enclosing function's declared error type converts through the target's declared
+// `impl From<Source>` — `Err(e)` becomes `Err(Target.from(e))` before the ordinary propagation.
+// The success path is untouched (no conversion runs), and `from` is an ordinary associated
+// function, explicitly callable as `Target.from(x)`. Runs identically on both backends.
+// expect: stdout "Ok(42)"
+// expect: stdout "Err(HighError {detail: \"wrapped 7\"})"
+// expect: stdout "explicit: wrapped 1"
+// expect: exit 0
+struct LowError { code: int }
+
+struct HighError {
+    detail: string
+
+    impl From<LowError> {
+        fn from(e: LowError): HighError {
+            return HighError { detail: "wrapped ${e.code}" }
+        }
+    }
+}
+
+fn low(fail: bool): Result<int, LowError> {
+    if fail { return Err(LowError { code: 7 }) }
+    return Ok(40)
+}
+
+fn high(fail: bool): Result<int, HighError> {
+    n = low(fail)?
+    return Ok(n + 2)
+}
+
+echo high(false)
+echo high(true)
+echo "explicit: ${HighError.from(LowError { code: 1 }).detail}"

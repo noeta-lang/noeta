@@ -20,6 +20,9 @@ For **Neovim / Helix / Zed**, a
 [tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta)
 parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and
 case-insensitive identifiers faithfully (run `tree-sitter generate` there first; see its README).
+For a project with third-party text tiers (`@tier(<name>, text: "<lang>")`), `noeta grammar
+tree-sitter --out <dir>` emits a per-project overlay so those `@<name> { … }` bodies parse and
+highlight as their language — the static grammar's `@doc` → markdown rule is the fallback.
 
 ## The language server (`noeta lsp`)
 
@@ -64,12 +67,21 @@ Every `@role`-bearing declaration gets a **CodeLens** (`⚑ Layer.Handler · tra
 running it — or **Trace Call Paths from Here** in the Architecture sidebar's context menu, or
 **Noeta: Trace Call Paths** from the palette for the whole role surface — opens the **trace view**:
 the same static call-graph walk `noeta mcp`'s `trace` tool serves, rendered as a role-colored
-**boundary rail** (click a boundary to highlight every path reaching it, double-click to jump to
-it) over collapsible call trees whose indent rails are tinted by role, so the layers read as
-colored bands. Every row jumps to source; the walk's honesty markers are visible — dynamic and
-external callees dimmed, *passed-as-value* references badged (a callback registration is part of
-the flow but never a syntactic call), recursion marked, truncation explicit — and trivial
-low-level calls stay hidden behind a toggle so the architectural shape stays foregrounded.
+**boundary rail** (each pill a toggle: click to highlight every path reaching that boundary —
+the other pills mute while one is active — double-click to jump to it) over collapsible call
+trees whose indent rails are tinted by role, so the layers read as colored bands. Every row jumps
+to source; the walk's honesty markers are visible — dynamic and external callees dimmed,
+*passed-as-value* references badged (a callback registration is part of the flow but never a
+syntactic call), recursion marked, truncation explicit — and trivial low-level calls stay hidden
+behind a toggle so the architectural shape stays foregrounded.
+
+The header's **Tree | Lanes** switcher turns the same trace into the **swimlane view**: the call
+trees collapsed to the *role graph* — one column per role, a card per role-bearing function, and
+edges connecting each bearer to the nearest bearers it reaches (the non-role intermediate calls
+collapse away; a connection that exists only through a passed-as-value chain renders dashed). It
+is the layered architecture diagram — Handler → Service → Store as columns — derived from the
+code, never hand-drawn. The boundary rail filters here too: an active boundary dims everything
+except its upstream cards and edges.
 
 ## Profiling
 

@@ -1,0 +1,11 @@
+// The field-call desugar composes with generics: a `Box<T>` holding a function value calls it
+// through the instantiated field type — `Box<(int) -> int>`'s field types as `(int) -> int`, so
+// the call is arity/argument-checked and its result is `int`. The same substitution value-position
+// member access uses (one shared field-type computation, so the two positions cannot drift).
+// expect: stdout "9"
+// expect: exit 0
+struct Box<T> {
+    value: T
+}
+b = Box { value: fn(x: int) => x * 3 }
+echo b.value(3)

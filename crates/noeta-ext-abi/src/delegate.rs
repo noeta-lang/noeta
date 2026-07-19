@@ -208,6 +208,16 @@ macro_rules! __delegate_host_capability {
             fn os_proc_kill(&mut self, handle: u64) -> Result<(), $crate::StdError> {
                 self.$field.os_proc_kill(handle)
             }
+            fn os_proc_signal(
+                &mut self,
+                handle: u64,
+                signal: $crate::os::Signal,
+            ) -> Result<(), $crate::StdError> {
+                self.$field.os_proc_signal(handle, signal)
+            }
+            fn os_proc_wait_spawn(&mut self, handle: u64) -> Box<dyn $crate::ExternIo> {
+                self.$field.os_proc_wait_spawn(handle)
+            }
             fn os_proc_read_line(
                 &mut self,
                 handle: u64,

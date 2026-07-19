@@ -1,0 +1,38 @@
+// Isolates I.4c — a **capacity-0 rendezvous** channel: `send` hands the message off directly and
+// completes only once a receiver has *taken* it (unlike a buffered channel, the sender never gets
+// ahead). So a producer and consumer over a `channel::<int>(0)` strictly alternate with no lead: the
+// send parks until the recv, then the send unblocks — the sharpest observable of the handoff. Order:
+// send 0, recv 0, send 1, recv 1, send 2, recv 2. Both backends drive the cooperative handoff
+// identically. Contrast `channel_interleave.noe` (capacity 1), where the producer runs one ahead.
+// expect: stdout "send 0"
+// expect: stdout "recv 0"
+// expect: stdout "send 1"
+// expect: stdout "recv 1"
+// expect: stdout "send 2"
+// expect: stdout "recv 2"
+// expect: stdout "done"
+// expect: exit 0
+async fn producer(tx: Sender<int>): void {
+    for i in 0..3 {
+        echo "send " ~ i
+        tx.send(i).await
+    }
+    tx.close()
+}
+async fn consumer(rx: Receiver<int>): void {
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0 - 1, false) }
+        if keep {
+            echo "recv " ~ v
+        }
+        running = keep
+    }
+}
+concurrent {
+    (tx, rx) = channel::<int>(0)
+    spawn producer(tx)
+    spawn consumer(rx)
+}
+echo "done"

@@ -1,0 +1,35 @@
+// Isolates I.4c — explicit `close()` still works and is **idempotent**: closing twice (and closing a
+// channel whose producer would have auto-closed it anyway) is harmless. The producer closes the
+// channel explicitly, then the auto-close path also fires when it returns — the consumer still drains
+// 0+1+2 = 3 and sees a single `none`. Both backends agree.
+// expect: stdout "3"
+// expect: exit 0
+async fn producer(tx: Sender<int>): void {
+    for i in 0..3 {
+        tx.send(i).await
+    }
+    tx.close()
+    tx.close()
+}
+async fn consumer(rx: Receiver<int>): int {
+    mut total = 0
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        total = total + v
+        running = keep
+    }
+    return total
+}
+async fn run(): int {
+    (tx, rx) = channel::<int>(2)
+    mut result = 0
+    concurrent {
+        spawn producer(tx)
+        h = spawn consumer(rx)
+        result = h.await
+    }
+    return result
+}
+echo run().await

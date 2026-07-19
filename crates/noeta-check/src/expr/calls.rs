@@ -121,6 +121,41 @@ impl Checker {
             }
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
+                // A local binding that names — or shadows — a callable value takes precedence over
+                // a same-named free function, so the call position agrees with value position
+                // (which already prefers the local). With a concrete `Fn` type — a bare `fn`
+                // reference bound to a name (`d = double; d(3)`), or a `(A) -> R` parameter that
+                // shadows a free `fn` — the call is arity/type-checked against those params rather
+                // than silently deferred or misrouted to the free function's signature. A
+                // `dyn`/`Unknown` local (an untyped closure value) stays deferred, its arguments
+                // unchecked as before.
+                if let Some(Type::Fn { params, ret }) = lookup(env, name) {
+                    let params = params.clone();
+                    let ret = (**ret).clone();
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
+                    // A selectively-imported module function bound to a name (`f = sqrt`) erases to
+                    // `fn() -> dyn` — its real, often-variadic signature can't be a fixed param
+                    // list — so that placeholder carries no checkable arity and its call stays
+                    // deferred (as it was before this branch existed). Every other function value
+                    // is checked: too many arguments, or a supplied argument of the wrong type, is
+                    // caught. Arity's *lower* bound is not enforced — a function value does not
+                    // record which of its parameters carry defaults, so `required` is `0`.
+                    let erased_import = params.is_empty() && matches!(ret, Type::Dyn);
+                    if !erased_import {
+                        self.check_args(&params, 0, args, arg_exprs, span, name);
+                    }
+                    return ret;
+                }
+                // A local binding of a user OBJECT type invoked as a value (`obj(args)`) — the
+                // `Callable` protocol: typed as `obj.call(args)` when the type provides a `call`
+                // method; a known user type without one is statically not callable (E0007).
+                if let Some(recv @ Type::Named(..)) = lookup(env, name) {
+                    let recv = recv.clone();
+                    if let Some(ret) = self.synth_callable_object(&recv, args, arg_exprs, span, env)
+                    {
+                        return ret;
+                    }
+                }
                 if let Some(sig) = self.symbols.functions.get(name) {
                     let required = sig.required;
                     // A generic function is instantiated per call: bind its type parameters from the
@@ -233,8 +268,9 @@ impl Checker {
                 .or_else(|| self.resolve_namespace_module(receiver, env));
                 if let Some(qm) = module_id {
                     // The router-facing runtime decode `json.decode_typed(name, text)` (L2.2 DI): a
-                    // 2-string-arg call whose result is `Result<dyn, string>` (it decodes a JSON body
-                    // into the type named by a *runtime* string, recoverably). It is not a registered
+                    // 2-string-arg call whose result is `Result<dyn, JsonError>` (it decodes a JSON
+                    // body into the type named by a *runtime* string, recoverably — the same
+                    // path-carrying error story as `json.try_parse::<T>`). It is not a registered
                     // native signature — `Result` has no `SigType` — so it is typed here directly, its
                     // call span recorded so lowering emits the dedicated `Rvalue::DecodeTyped`.
                     if name == "decode_typed"
@@ -255,7 +291,11 @@ impl Checker {
                             name,
                         );
                         self.sites.decode_typed_sites.insert(call_span);
-                        return Type::Result(Box::new(Type::Dyn), Box::new(Type::String));
+                        let json_error = Type::Named(
+                            stdlib::qualified_extern(self.reg(), "JsonError"),
+                            Vec::new(),
+                        );
+                        return Type::Result(Box::new(Type::Dyn), Box::new(json_error));
                     }
                     if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
                         let required =
@@ -356,6 +396,50 @@ impl Checker {
                     }
                     return self
                         .call_user_method(name, &sig, args, arg_exprs, span, recv_args, env);
+                }
+                // `obj.f(args)` where `f` is a FIELD of the receiver's type — the
+                // **field-access-then-call desugar**: no method `f` exists (a real method wins in
+                // call position, checked above; in value position the field already wins, so the
+                // two positions agree with `g = obj.f; g(x)` as the escape hatch when both exist).
+                // A `Fn`-typed field is checked exactly like a call through a `Fn`-typed local
+                // (same arity/argument checking, same `required = 0` because a function value does
+                // not record defaults), and the call span is recorded so lowering emits field-get
+                // + indirect call instead of method dispatch. A `dyn`/hole field stays deferred —
+                // lowered as a field call, its misuse caught by the runtime's "not callable"
+                // (E0007). A field of any other concrete type is statically not callable (E0007) —
+                // the method table was already consulted, so nothing can resolve this at runtime.
+                if let Type::Named(n, recv_args) = &recv
+                    && let Some(fty) = self.record_field_type(n, name, recv_args)
+                {
+                    if !self.field_visible(n, name) {
+                        self.report_private_field(n, name, FieldAccess::Read, span);
+                    }
+                    self.sites.field_call_sites.insert(call_span);
+                    match fty {
+                        Type::Fn { params, ret } => {
+                            self.finalize_closure_args(&params, args, arg_exprs, env);
+                            let erased_import = params.is_empty() && matches!(*ret, Type::Dyn);
+                            if !erased_import {
+                                self.check_args(&params, 0, args, arg_exprs, span, name);
+                            }
+                            return *ret;
+                        }
+                        t if t.defers_to_runtime() => {
+                            self.finalize_closure_args(&[], args, arg_exprs, env);
+                            return t;
+                        }
+                        t => {
+                            self.finalize_closure_args(&[], args, arg_exprs, env);
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "field `{name}` of `{n}` has type `{t}` and is not callable"
+                                ),
+                            );
+                            return Type::Unknown;
+                        }
+                    }
                 }
                 // A method call on an in-scope TYPE PARAMETER resolves through its user-trait
                 // bounds, typed at the bound's instantiation (`<T: Keyed<int>>` → `x.key(): int`,
@@ -461,10 +545,58 @@ impl Checker {
                 ret
             }
             _ => {
-                self.synth(callee, env);
+                let ty = self.synth(callee, env);
+                // Any other callee expression whose static type is a user OBJECT type — the
+                // `Callable` protocol for computed callees (`make()(args)`, `pipeline[0](x)`).
+                if let Some(ret) = self.synth_callable_object(&ty, args, arg_exprs, span, env) {
+                    return ret;
+                }
                 Type::Unknown
             }
         }
+    }
+
+    /// Type an OBJECT invoked as a value — the **`Callable` protocol** (`obj(args)` means
+    /// `obj.call(args)`): when `recv` names a user type providing a `call` method, the call types
+    /// against that method's signature (generics instantiate from the receiver's type arguments,
+    /// exactly like an explicit method call). A known user type *without* a `call` method is
+    /// statically not callable — E0007 with the protocol as the help — since the method set of a
+    /// user type is closed. `None` when `recv` is not a resolvable user type (an extern type, a
+    /// type parameter, `dyn`): those stay lenient/deferred exactly as before.
+    pub(crate) fn synth_callable_object(
+        &mut self,
+        recv: &Type,
+        args: &mut [Type],
+        arg_exprs: &[Expr],
+        span: Span,
+        env: &mut Env,
+    ) -> Option<Type> {
+        let Type::Named(n, recv_args) = recv else {
+            return None;
+        };
+        if let Some(sig) = self
+            .symbols
+            .methods
+            .get(&(n.clone(), "call".to_string()))
+            .cloned()
+        {
+            return Some(
+                self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, env),
+            );
+        }
+        if self.symbols.types.contains(n) || self.symbols.enums.contains_key(n) {
+            self.finalize_closure_args(&[], args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("type `{n}` is not callable"),
+            )
+            .help(format!(
+                "implement `Callable` with a `call` method to make a `{n}` invocable as `value(...)`"
+            ));
+            return Some(Type::Unknown);
+        }
+        None
     }
 
     /// Check a call to a resolved user method or associated function (`Box.new(...)`, `obj.m(...)`).

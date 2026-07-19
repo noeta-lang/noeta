@@ -52,7 +52,12 @@ noeta-prof = { workspace = true }
 noeta-fmt = { workspace = true }
 noeta-pm = { workspace = true, features = ["fmt-config", "registry-http", "provenance", "keyless"] }
 noeta-mcp = { workspace = true }
+# The `noeta migrate` verb opens a driver and drives the migration engine directly (both drivers so
+# SQLite and Postgres migrate from the stock binary).
+noeta-para-db = { workspace = true, features = ["ring-sqlite", "ring-postgres"] }
 sha2 = { workspace = true }
+# `migrate new` stamps a UTC-timestamp filename prefix.
+time = { version = "0.3", default-features = false, features = ["std"] }
 clap = { workspace = true }
 # `--watch` restart-on-change dev loop (server-hmr W0).
 notify = { workspace = true }
@@ -60,13 +65,15 @@ toml = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `noeta fmt --diff` renders unified diffs of the pending reformat.
+similar = { workspace = true }
 
 [features]
 # The shipped `lang` binary is JIT-enabled by default (milestone P-JIT): real-host `lang run`/
 # `bench` drive the tier-1 JIT under hot-counter promotion. `--no-default-features` builds a
 # Cranelift-free interpreter-only binary (identical behaviour, smaller build).
 default = ["jit"]
-jit = ["noeta-vm/jit", "noeta-runner/jit"]
+jit = ["noeta-vm/jit", "noeta-runner/jit", "noeta-prof/jit"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

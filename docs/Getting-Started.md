@@ -109,6 +109,7 @@ The `noeta` binary is more than a runner. In brief:
 
 | Command | What it does |
 |---|---|
+| `noeta init [dir]` | Scaffold a new project: manifest, `src/main.noe`, editor run profiles, agent docs. See [The CLI](The-CLI#noeta-init). |
 | `noeta run <file>` | Type-check and execute a program. |
 | `noeta repl` | Interactive REPL. |
 | `noeta test <file>` | Run the program's `@test` blocks. See [Testing](Testing). |

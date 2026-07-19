@@ -22,6 +22,42 @@ use crate::transparency::hex_to_array;
 const ADVISORY_PREFIX: &str = "noeta-advisory-v1";
 const FEED_PREFIX: &str = "noeta-advisory-feed-v1";
 
+/// How an advisory entered the feed — its **intake tier** (advisory-intake arc). Bound into the
+/// canonical signing bytes (and thus the transparency-log leaf), so a client can trust *which* tier the
+/// registry served and apply a per-tier policy. Deserialized from the wire's lowercase spelling;
+/// defaults to [`AdvisoryTier::Operator`] for a feed (or a registry) that predates the field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AdvisoryTier {
+    /// Operator-curated, admin-issued — the anchor tier (and the default).
+    #[default]
+    Operator,
+    /// Issued by a scope's own owner for their own scope, carrying a keyless `bundle` a consumer
+    /// verifies offline against the scope's pinned identity.
+    Publisher,
+    /// Mirrored from an external ecosystem (OSV/GHSA/RUSTSEC) via the operator-curated name map,
+    /// carrying `upstream_id`/`upstream_url`.
+    Imported,
+}
+
+impl AdvisoryTier {
+    /// The canonical lowercase spelling — the exact bytes the registry appends to the signed record, so
+    /// the client's `canonical_bytes` reproduces the signature.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AdvisoryTier::Operator => "operator",
+            AdvisoryTier::Publisher => "publisher",
+            AdvisoryTier::Imported => "imported",
+        }
+    }
+}
+
+impl std::fmt::Display for AdvisoryTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One security advisory as served by the registry's advisory feed. Field order/shape mirrors the
 /// server's wire form (`toWire`); `details`/`url` default to empty, `patched` is optional.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -56,13 +92,35 @@ pub struct Advisory {
     /// logged.
     #[serde(default)]
     pub log_index: Option<u64>,
+    /// The intake tier (advisory-intake arc). Bound into [`Self::canonical_bytes`]; defaults to
+    /// [`AdvisoryTier::Operator`] for a feed that predates the field.
+    #[serde(default)]
+    pub tier: AdvisoryTier,
+    /// The keyless Sigstore bundle for a [`AdvisoryTier::Publisher`] advisory — the scope owner's
+    /// offline-verifiable attestation over this advisory's canonical bytes. `None` for other tiers.
+    #[serde(default)]
+    pub bundle: Option<String>,
+    /// The upstream advisory id (e.g. `GHSA-…`, `RUSTSEC-…`) for an [`AdvisoryTier::Imported`]
+    /// advisory. `None` for other tiers.
+    #[serde(default)]
+    pub upstream_id: Option<String>,
+    /// A link to the upstream advisory (imported tier). `None` for other tiers.
+    #[serde(default)]
+    pub upstream_url: Option<String>,
+    /// The CVSS v3.x vector an imported advisory's severity band was derived from, when the upstream
+    /// carried one. Unsigned/informational (NOT in [`Self::canonical_bytes`]) — the trusted decision is
+    /// the `severity` band; `noeta audit` re-derives the base score from this for display. `None`
+    /// otherwise.
+    #[serde(default)]
+    pub cvss: Option<String>,
 }
 
 impl Advisory {
     /// The exact bytes the registry signed — reproduced identically so the signature verifies. MUST
     /// match the server's `canonicalBytes`. `details` is folded in as a SHA-256 digest (it may be
     /// multi-line); `state` binds the withdrawn flag so an advisory can't be silently un-retracted
-    /// under the same signature.
+    /// under the same signature; `tier` is the trailing field (appended by the advisory-intake arc) so
+    /// a client can trust which intake tier the registry served.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let details_hash = hex_encode(&Sha256::digest(self.details.as_bytes()));
         let state = if self.withdrawn {
@@ -71,8 +129,14 @@ impl Advisory {
             "active"
         };
         format!(
-            "{ADVISORY_PREFIX}\n{}\n{}\n{}\n{}\n{state}\n{}\n{details_hash}\n{}\n",
-            self.id, self.package, self.ranges, self.severity, self.summary, self.url,
+            "{ADVISORY_PREFIX}\n{}\n{}\n{}\n{}\n{state}\n{}\n{details_hash}\n{}\n{}\n",
+            self.id,
+            self.package,
+            self.ranges,
+            self.severity,
+            self.summary,
+            self.url,
+            self.tier.as_str(),
         )
         .into_bytes()
     }
@@ -172,6 +236,11 @@ mod tests {
             seq: 0,
             signature: String::new(),
             log_index: None,
+            tier: AdvisoryTier::Operator,
+            bundle: None,
+            upstream_id: None,
+            upstream_url: None,
+            cvss: None,
         };
         a.signature = hex_encode(&sk.sign(&a.canonical_bytes()).to_bytes());
         a

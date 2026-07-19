@@ -37,7 +37,10 @@ use crate::{
 };
 
 mod state_machine;
-use state_machine::{PENDING_IDENT, POLL_FN, SuspendMode, body_has_yield, desugar_state_machine};
+use state_machine::{
+    PENDING_IDENT, POLL_FN, SCOPE_BEGIN_FN, SCOPE_END_FN, SCOPE_READY_FN, SuspendMode,
+    body_has_yield, desugar_state_machine,
+};
 
 /// A construct the lowering does not yet handle. Carried back so the caller can skip the
 /// program (the transitional differential's "outside the IR subset" bucket), mirroring the
@@ -102,6 +105,10 @@ pub struct LoweringSites<'a> {
     /// **Bound**-handle sites (`value.method` in value position, EX.2b) → emitted as an
     /// [`Rvalue::BoundHandle`] (the receiver captured) instead of a field load.
     pub bound_handle_sites: &'a HashSet<Span>,
+    /// Field-call sites: `obj.f(args)` call spans the checker resolved to a **field** of the
+    /// receiver's type → lowered as [`Rvalue::Field`] then [`Rvalue::Call`] (the field-access-
+    /// then-call desugar) instead of [`Rvalue::Method`], so `obj.f(args)` means `(obj.f)(args)`.
+    pub field_call_sites: &'a HashSet<Span>,
     /// Bare float-literal spans the checker adapted into an `f32` context (`mut x: f32 = 1.5`,
     /// P-NUM-SYM). Unlike `f64` (bit-identical to `float`), `f32` is a *distinct 32-bit*
     /// representation, so an adapted literal must lower to a narrow [`Const::F32`] rather than the
@@ -113,6 +120,11 @@ pub struct LoweringSites<'a> {
     /// Namespace-group member-access sites (`http.client`) → the resolved concrete module identity,
     /// emitted as an [`Rvalue::NativeModule`] instead of a field load.
     pub namespace_module_sites: &'a HashMap<Span, String>,
+    /// `?`-conversion sites (error-ergonomics): `Expr::Try` spans whose `Err` payload converts
+    /// through the enclosing function's error type → that target type's name. The `?` operand is
+    /// rewritten to `match v { Ok($t) => Ok($t), Err($t) => Err(Target.from($t)) }` — ordinary IR,
+    /// so both backends (and the JIT) convert identically by construction.
+    pub try_conversion_sites: &'a HashMap<Span, String>,
 }
 
 impl LoweringSites<'static> {
@@ -138,9 +150,11 @@ impl LoweringSites<'static> {
             construction_sites: REPRS.get_or_init(HashMap::new),
             handle_sites: HANDLES.get_or_init(HashMap::new),
             bound_handle_sites: SPANS.get_or_init(HashSet::new),
+            field_call_sites: SPANS.get_or_init(HashSet::new),
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
             bundle_call_sites: PAIRS.get_or_init(HashMap::new),
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
+            try_conversion_sites: NAMES.get_or_init(HashMap::new),
         }
     }
 }
@@ -166,9 +180,11 @@ macro_rules! lowering_sites {
             construction_sites: &$s.construction_sites,
             handle_sites: &$s.handle_sites,
             bound_handle_sites: &$s.bound_handle_sites,
+            field_call_sites: &$s.field_call_sites,
             f32_literal_sites: &$s.f32_literal_sites,
             bundle_call_sites: &$s.bundle_call_sites,
             namespace_module_sites: &$s.namespace_module_sites,
+            try_conversion_sites: &$s.try_conversion_sites,
         }
     };
 }
@@ -324,11 +340,14 @@ pub fn hoist_impl_methods_with_registry(
         AstStmt::Enum(d) => body_references_trait(&d.impls, &d.derives),
         _ => false,
     });
-    // A builtin `via:` derive (`@derive(Comparable, via: amount)`) and a native derive recipe
+    // A builtin `via:` derive (`@derive(Comparable, via: amount)`), a plain `@derive(Error)`
+    // (whose `message()` is synthesized, error-ergonomics), and a native derive recipe
     // (`@derive(Inspect)`, layer 4) synthesize methods even with no user trait in the program.
     let derive_needs = |derives: &[noeta_ast::DeriveSpec]| {
         derives.iter().any(|d| {
-            d.via.is_some() || registry.is_some_and(|r| r.find_ext_derive(&d.name).is_some())
+            d.via.is_some()
+                || d.name == "Error"
+                || registry.is_some_and(|r| r.find_ext_derive(&d.name).is_some())
         })
     };
     let body_needs = body_needs
@@ -387,6 +406,10 @@ pub fn hoist_impl_methods_with_registry(
                 noeta_ast::derive::plan_user_trait_derive(t, fields, methods, spec)
             } else if spec.via.is_some() {
                 noeta_ast::derive::plan_builtin_via(&spec.name, name, fields, spec)
+            } else if spec.name == "Error" {
+                // A plain `@derive(Error)` (error-ergonomics): synthesize the checker-validated
+                // `fn message(): string { return "${self}" }` — the type's display story.
+                Ok(noeta_ast::derive::plan_error_derive(spec.span))
             } else if let Some(d) = registry.and_then(|r| r.find_ext_derive(&spec.name)) {
                 // A native derive recipe (layer 4): forwards into the extension's handlers.
                 let methods: Vec<(String, usize, String)> = d
@@ -440,6 +463,7 @@ pub fn lower_with_sites_opts(
             .into_iter()
             .collect(),
         registry,
+        module_globals: module_global_names(program),
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -490,6 +514,77 @@ struct Lowerer<'a> {
     /// (instance-registry IR5): an `@json` block's `ExtTier::handler` is looked up here, so an
     /// embed session's own extension-declared expression tier lowers against *its* registry.
     registry: &'static noeta_ext_abi::registry::Registry,
+    /// Every top-level binding/`fn` name — the module globals. Threaded into the async/generator
+    /// state-machine desugar so a **bare reassignment of a global** (`g.n = …`, `counter = …`) is
+    /// kept as a global store rather than mis-hoisted into a state-machine cell (which would
+    /// initialize a fresh `none` upvalue and shadow the real global — the reference reads a stale
+    /// value). A global is never a capturable local, mirroring the compiler's free-variable
+    /// analysis (which already filters globals out of captures).
+    module_globals: HashSet<String>,
+}
+
+/// The top-level binding and `fn` names of a program — the module globals a nested function
+/// resolves by name (never captures). These are the only names that can appear as a bare
+/// reassignment target inside an async/generator body while denoting a global, so they are the
+/// set the state-machine desugar excludes from cell-hoisting.
+/// Build the synthetic conversion `match` a `?`-conversion site (error-ergonomics) lowers its
+/// operand through: `match <operand> { Ok($try) => Ok($try), Err($try) => Err(Target.from($try)) }`.
+/// The operand is the `?`'s own operand expression (evaluated exactly once, as the match
+/// scrutinee); the `$try` binding name cannot collide with user bindings (`$` is not writable in
+/// source), and every synthetic node reuses the `?`'s span so diagnostics and tracebacks keep
+/// pointing at the `?`.
+fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
+    let ident = |name: &str| Expr::Ident {
+        name: name.to_string(),
+        span,
+    };
+    let call = |callee: Expr, args: Vec<Expr>| Expr::Call {
+        callee: Box::new(callee),
+        args,
+        span,
+    };
+    let arm = |variant: &str, body: Expr| noeta_ast::MatchArm {
+        pattern: noeta_ast::Pattern::Variant {
+            type_name: None,
+            variant: variant.to_string(),
+            bindings: vec![noeta_ast::Pattern::Binding {
+                name: "$try".to_string(),
+                span,
+            }],
+            span,
+        },
+        body: noeta_ast::ClosureBody::Expr(Box::new(body)),
+        span,
+    };
+    let from_call = call(
+        Expr::Member {
+            receiver: Box::new(ident(target)),
+            name: "from".to_string(),
+            name_span: span,
+            span,
+        },
+        vec![ident("$try")],
+    );
+    Expr::Match {
+        scrutinee: Box::new(operand.clone()),
+        arms: vec![
+            arm("Ok", call(ident("Ok"), vec![ident("$try")])),
+            arm("Err", call(ident("Err"), vec![from_call])),
+        ],
+        span,
+    }
+}
+
+fn module_global_names(program: &AstProgram) -> HashSet<String> {
+    program
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            AstStmt::Binding { name, .. } => Some(name.clone()),
+            AstStmt::Fn(decl) => Some(decl.name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build the narrowing-identity map (see [`Lowerer::type_aliases`]) from a program's `use`
@@ -946,7 +1041,7 @@ impl Lowerer<'_> {
     ) -> Result<Func, Unsupported> {
         let outer = self.temps;
         self.temps = 0;
-        let param_names = params.iter().map(|p| p.name.clone()).collect();
+        let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
         // Defaults are evaluated in the captured scope at call time, each in its own frame, so
         // lower each as a self-contained thunk (this also restores `self.temps` to 0 between
         // thunks, keeping the body's numbering independent).
@@ -970,7 +1065,7 @@ impl Lowerer<'_> {
                 // bare-assignment locality must match what the checker typed for the fn.
                 self.synth_step_name = name.clone();
                 self.synth_step_captures = captures.clone();
-                self.lower_generator(stmts, span)?
+                self.lower_generator(stmts, span, &param_names)?
             }
             // An `async fn` (Track A) lowers to a lazy `Future` over its body — `make_future(thunk)` —
             // not the body's statements directly (like a generator, but a single deferred computation
@@ -981,7 +1076,7 @@ impl Lowerer<'_> {
                 // inherits the seal.
                 self.synth_step_name = name.clone();
                 self.synth_step_captures = captures.clone();
-                self.lower_async(stmts, span)?
+                self.lower_async(stmts, span, &param_names)?
             }
             BodyKind::Block(stmts) => self.lower_body(stmts)?,
         };
@@ -1019,9 +1114,20 @@ impl Lowerer<'_> {
     /// rejected by the checker (E0039, "not yet supported — Track G.2") and never reaches a *run*; if
     /// one survives in a check-failed program it stays a `Stmt::Yield` inside a segment and lowers
     /// through the interim discard arm, keeping lowering total.
-    fn lower_generator(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let desugar =
-            desugar_state_machine(stmts, span, self.sites.for_stream_sites, SuspendMode::Gen);
+    fn lower_generator(
+        &mut self,
+        stmts: &[AstStmt],
+        span: Span,
+        params: &[String],
+    ) -> Result<Block, Unsupported> {
+        let desugar = desugar_state_machine(
+            stmts,
+            span,
+            self.sites.for_stream_sites,
+            SuspendMode::Gen,
+            &self.module_globals,
+            params,
+        );
         // The sealed step closure must keep writing the machine's PERSISTENT locals — the
         // desugar's hoisted prelude cells (`$state`, awaited-future cells, and any USER local
         // that lives across a suspend) — through the enclosing scope. Extend the armed seal
@@ -1033,6 +1139,7 @@ impl Lowerer<'_> {
                 _ => None,
             }));
         }
+
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -1063,9 +1170,20 @@ impl Lowerer<'_> {
     /// `return e` completes the future with the raw `e` (so `?`'s injected error-return propagates
     /// unchanged); the driver/`.await` wraps completion vs pending. Unlike A.1's thunk, this can suspend
     /// mid-body and resume — the mechanism A.3b's concurrency needs to run a sibling while one task waits.
-    fn lower_async(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let desugar =
-            desugar_state_machine(stmts, span, self.sites.for_stream_sites, SuspendMode::Async);
+    fn lower_async(
+        &mut self,
+        stmts: &[AstStmt],
+        span: Span,
+        params: &[String],
+    ) -> Result<Block, Unsupported> {
+        let desugar = desugar_state_machine(
+            stmts,
+            span,
+            self.sites.for_stream_sites,
+            SuspendMode::Async,
+            &self.module_globals,
+            params,
+        );
         // The sealed step closure must keep writing the machine's PERSISTENT locals — the
         // desugar's hoisted prelude cells (`$state`, awaited-future cells, and any USER local
         // that lives across a suspend) — through the enclosing scope. Extend the armed seal
@@ -1077,6 +1195,7 @@ impl Lowerer<'_> {
                 _ => None,
             }));
         }
+
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -1410,6 +1529,37 @@ impl Lowerer<'_> {
                         *span,
                     ));
                 }
+                // The A.7 nested-`concurrent` desugar's scope primitives (synthetic `$`-names the async
+                // state machine emits when it splits a `concurrent { }` block — see `state_machine.rs`).
+                // `$scope_begin()` opens a scope and yields its index; `$scope_ready(idx)` is the join
+                // poll-state's readiness test; `$scope_end()` closes the drained scope (`Stmt::ScopeEnd`,
+                // whose join is a no-op here since the poll-states already drained it, then pops).
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if name == SCOPE_BEGIN_FN && args.is_empty() {
+                        return Ok(self.emit(out, Rvalue::ScopeBegin { span: *span }, *span));
+                    }
+                    if name == SCOPE_READY_FN
+                        && let [arg] = args.as_slice()
+                    {
+                        let scope = self.lower_expr(arg, out)?;
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::ScopeReady { scope, span: *span },
+                            *span,
+                        ));
+                    }
+                    if name == SCOPE_END_FN
+                        && let [arg] = args.as_slice()
+                    {
+                        let scope = self.lower_expr(arg, out)?;
+                        // Effect-only (closes the scope); no value binding — `Stmt::Eval`, not a `let`.
+                        out.push(Stmt::Eval {
+                            rvalue: Rvalue::ScopeEndAt { scope, span: *span },
+                            span: *span,
+                        });
+                        return Ok(Atom::Const(Const::Unit));
+                    }
+                }
                 // A call whose callee is a member access is a method call; otherwise an
                 // ordinary call. Evaluation order matches the tree-walker's `eval_call`:
                 // receiver/callee first, then arguments left-to-right.
@@ -1439,6 +1589,33 @@ impl Lowerer<'_> {
                         ));
                     }
                     let receiver = self.lower_expr(receiver, out)?;
+                    // A field-call site (`obj.f(args)` where the checker resolved `f` to a FIELD of
+                    // the receiver's type): the field-access-then-call desugar — load the field,
+                    // then call the loaded value, exactly the `Field` + `Call` sequence the
+                    // spelled-out `g = obj.f; g(args)` lowers to. The field is loaded **before**
+                    // the arguments, matching the `(obj.f)(args)` callee-first evaluation order.
+                    if self.sites.field_call_sites.contains(span) {
+                        let callee = self.emit(
+                            out,
+                            Rvalue::Field {
+                                receiver,
+                                name: name.clone(),
+                                name_span: *name_span,
+                                span: *span,
+                            },
+                            *span,
+                        );
+                        let arg_atoms = self.lower_args(args, out)?;
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::Call {
+                                callee,
+                                args: arg_atoms,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
                     let arg_atoms = self.lower_args(args, out)?;
                     // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
                     // this call span in `width_sites`. Emit the width-carrying `WidthIntMethod` so both
@@ -1704,7 +1881,21 @@ impl Lowerer<'_> {
                 Ok(Atom::Temp(dst))
             }
             Expr::Try { expr, span } => {
-                let operand = self.lower_expr(expr, out)?;
+                // A `?`-conversion site (error-ergonomics): the checker resolved this span's `Err`
+                // payload to convert through `Target.from` (`impl From<Source>` on the enclosing
+                // function's error type). Rewrite the operand to a synthetic
+                // `match v { Ok($t) => Ok($t), Err($t) => Err(Target.from($t)) }` — built as AST
+                // and lowered through the ordinary match/call paths (the `TierExpr` construction
+                // pattern), so both backends and the drop/reuse passes see plain IR and the
+                // conversion is identical by construction. The ordinary propagation then applies
+                // unchanged to the converted `Result`.
+                let operand = match self.sites.try_conversion_sites.get(span) {
+                    Some(target) => {
+                        let converted = try_conversion_match(expr, target, *span);
+                        self.lower_expr(&converted, out)?
+                    }
+                    None => self.lower_expr(expr, out)?,
+                };
                 Ok(self.emit(
                     out,
                     Rvalue::Try {

@@ -76,7 +76,7 @@ fn page(): Html {
 
 There is **no `v-for` / template-directive syntax** — `@html` is lightweight interpolation, not a template compiler, so loops and conditionals are ordinary Noeta expressions (`.map`, `.filter`, `if…then…else`) over `Html` values. Nested `@html` bodies are verbatim text, **not** strings, so a `${…}` hole inside one may contain double quotes (`${if t.done then "done" else "todo"}`) with none of string interpolation's nested-quote limitation.
 
-### Keyed lists — per-row reactivity
+### Keyed lists — per-row reactivity and structural patching
 
 A plain `${todos.get().map(row)}` loop is **one** reactive region: any change re-renders the whole list into a single `innerHTML`. For a large list where one item changes, that is a lot of wire traffic. `keyed` makes **each row its own reactive region**, so a change to one row pushes only that row's markup — the diff drops every row that is unchanged:
 
@@ -86,7 +86,15 @@ A plain `${todos.get().map(row)}` loop is **one** reactive region: any change re
 
 `keyed(source, key_of, render_row)` takes the **signal itself** (not a snapshot), a stable string key per item, and the row renderer. Each row becomes a persistent `computed` that re-derives *its* item from the signal by key: on any change every row recomputes, but a row whose rendered markup is unchanged produces a value-equal string, so the transport sends nothing for it. Toggling one todo in a 1000-row list pushes exactly one row.
 
-The key **set** is captured when the page first renders. A row that later disappears clears (its region renders empty); an *added* row has no region yet — so **add / remove / reorder still re-renders the parent region**. Per-row *content* is what becomes incremental; structural changes are a future refinement. Use `keyed` for lists whose rows mutate in place (a todo toggling done, a price ticking); a plain `.map` is fine for small or rarely-changing lists.
+**Structural changes patch in place too.** When the *set* or *order* of keys changes — a row appended, prepended, removed, or reordered — the session reconciles the key sequence and pushes the **minimal** structural ops rather than re-rendering the parent:
+
+- a **new** key renders alone and is inserted at its position (`insert-before`), carrying its markup inline;
+- a **removed** key's row is torn down alone (`remove`) and its per-row reactive scope is reclaimed on the spot (`view.unexpose` disposes the row `computed`);
+- a **reordered** key `move`s its existing DOM element — the row's content is *not* re-rendered, so its DOM identity, form state, and focus survive the reorder.
+
+The diff is the standard keyed-children algorithm (Vue 3's `patchKeyedChildren`, the same shape as Solid's and Inferno's reconcile): surviving rows are anchored on their **longest increasing subsequence**, so a reorder moves the *fewest* rows — swapping two adjacent items is a single `move`, not two. Each row rides the reactive **owner tree**: it is an owned child scope keyed by its key, kept while its key stays in the set and disposed the moment the key leaves. Toggling, adding, removing, and reordering a 1000-row list each touch exactly the rows that changed.
+
+Use `keyed` for any list a client edits — rows mutating in place *or* rows coming and going; a plain `.map` is fine for small or rarely-changing lists that render whole.
 
 ### Reactivity: read the signal *inside* the hole
 
@@ -103,7 +111,7 @@ n = todos.get()                            // read happens here, outside any hol
 return @html { <h1>${n.len()} items</h1> } // NOT reactive — the hole captured a value
 ```
 
-`examples/liveview-todos/` is a full example — a **keyed** loop of nested rows, a computed count, a conditional status line, escaped text, and a "complete all" event. Each row is its own reactive region (keyed by `t.id`), so toggling a single todo pushes exactly one row; the count and status update from the same signal read, and the unchanged rows and total are left alone.
+`examples/liveview-todos/` is a full example — a **keyed** loop of nested rows, a computed count, a conditional status line, escaped text, and a "complete all" event. Each row is its own reactive region (keyed by `t.id`), so toggling a single todo pushes exactly one row; the count and status update from the same signal read, and the unchanged rows and total are left alone. `examples/liveview-structural-app/` drives the structural side — buttons that append, prepend, remove, and reorder a keyed list, each pushing a lone insert / remove / move.
 
 ## Events
 
@@ -117,7 +125,6 @@ A hole in **attribute position** (`class="${…}"`, `title="${…}"`) is detecte
 
 ## Current limitations (v1)
 
-- **Structural list changes** (add / remove / reorder rows) re-render the parent region rather than patching in place. Per-row *content* is incremental via [`keyed`](#keyed-lists--per-row-reactivity); the row *set* is captured at first render.
 - **Single-worker**: signals are per-isolate, so a LiveView app runs single-worker (`--parallel` documents this).
 
 ## See also

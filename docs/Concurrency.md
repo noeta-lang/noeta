@@ -48,13 +48,25 @@ async fn nap(name: string, ms: int): int {
 }
 ```
 
-`.await` inside a closure is E0040 (function coloring), and a conditionally-evaluated mid-expression `.await` (e.g. the right side of `&&`) is E0040 — an unconditional one is hoisted automatically.
+`.await` is legal in every **value position**. An unconditional mid-expression `.await` (a call argument, an operand, a list element) is hoisted to statement position automatically, left to right. A **conditionally-evaluated** `.await` — the right side of `&&`/`||`, a `??` fallback, or a `match`/`if…then…else` arm body — is rewritten into control flow so it runs exactly when the surrounding expression would evaluate it (laziness is preserved: a `??` fallback is awaited only when the value is `none`/`Err`; a `match` arm only when it is selected).
+
+What stays E0040: `.await` inside a **closure** (function coloring — a closure is a fresh callable, not the enclosing async context), and `.await` in a **condition or loop head** — an `if`/`while` condition or a `for` iterable — which cannot be hoisted without changing when the head evaluates. Awaiting a non-future is also E0040.
+
+| Position | `.await` allowed? |
+|---|---|
+| Statement value (`x = f().await`, `return`, `echo`, `?`) | ✅ |
+| Unconditional sub-expression (call arg, operand, element) | ✅ (hoisted) |
+| `&&` / `||` right operand | ✅ (guarded) |
+| `??` fallback | ✅ (guarded, lazy) |
+| `match` / `if…then…else` arm body | ✅ (guarded) |
+| `if` / `while` condition, `for` iterable (heads) | ❌ E0040 |
+| Inside a closure | ❌ E0040 |
 
 ## Structured concurrency
 
 A `concurrent { … }` scope runs tasks concurrently and joins them at the closing brace. Inside it:
 
-- **`spawn expr()`** schedules a future as a task, yielding a handle you can `.await`.
+- **`spawn expr()`** schedules a future as a task, yielding a handle you can `.await` (or `.cancel()` / `.join()` — see [Cancellation](#cancellation)).
 - **`isolate f(args)`** runs in a fresh isolate (own heap, true parallelism); its arguments and result must be `Send` (see below).
 
 ```noeta
@@ -79,6 +91,44 @@ concurrent {
 | `race(list)` | Returns the first result; losers are cancelled cooperatively. |
 | `map_bounded(items, n, f)` | Applies async `f` to each item with at most `n` in flight; results in item order. |
 
+### Nested `concurrent` interleaves
+
+A `concurrent { … }` block opened **inside a spawned task's own body** is a genuine suspension point, not an atomic step: its join yields out of the task's poll while the inner scope's tasks are still pending, so those inner tasks interleave with the outer scope's siblings across scheduler rounds (rather than the inner scope being driven to completion inside one poll of the outer task). Two sibling tasks that each open their own `concurrent` therefore run interleaved, not one-after-the-other. Scopes close by identity, so a nested block can finish while a sibling's block is still open — structured guarantees (a block joins all its tasks before it returns) hold regardless of interleaving. Under the sandbox clock the interleaving is deterministic and both backends agree.
+
+### Cancellation
+
+A task handle (what `spawn`/`isolate` return — itself a `Future<T>`) can be cancelled. Cancellation is exactly what a `race` loser gets: a **cooperative** stop at the task's next suspension point. The task is never polled again, its captured locals' destructors run when its future is reclaimed at the scope's close, and it counts as done for the join — so cancelling frees no differently than a normal join (residency stays 0).
+
+| Operation | Behavior |
+|---|---|
+| `h.cancel(): void` | Marks the task cancelled — idempotent, and a **no-op on an already-completed task** (its result is preserved). The task stops at its last suspension; the code past that point never runs. |
+| `h.join(): Result<T, Cancelled>` | Drives the task and reports its outcome: `Ok(v)` if it completed, `Err(Cancelled)` if it was cancelled. The explicit, cancel-aware way to await. |
+| `h.await: T` | Unchanged for the common case. On a **cancelled** task it fails loudly (`E0056`) — a cancelled task never produces a value, so awaiting one is a bug. Cancel-aware code uses `h.join()` instead. |
+
+```noeta
+use std.task.{sleep}
+async fn work(): int {
+    sleep(10).await
+    return 5                            // never reached once cancelled
+}
+
+concurrent {
+    h = spawn work()
+    sleep(1).await                      // let `work` reach its suspension
+    h.cancel()                          // cooperative stop
+    echo match h.join() {
+        Ok(v)  => "done=" ~ v,
+        Err(_) => "cancelled",          // ← taken
+    }
+}
+```
+
+**The "stops at next suspension" contract.** Cancellation is cooperative and deterministic: it takes effect where the task is already parked (its last `.await`), never by interrupting running code. A task with no further suspension points that is already executing runs to its natural end.
+
+**`join` vs `await`.** `join` is the pairing for cancellable work — it keeps the typed cancelled outcome in the language's ordinary `Result`/`match` vocabulary, while plain `await` stays `T` for the overwhelmingly-common uncancelled path and fails loudly (`E0056`) rather than silently if it ever meets a cancelled task (Noeta has no exceptions to catch, so a silent zero would be unsound). `cancel`/`join` are offered on every `Future<T>` because a handle *is* a `Future<T>`; on a bare (never-spawned) future `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
+
+The `Cancelled` marker is a payload-free prelude enum — matchable (`Err(Cancelled.Cancelled)`, or just `Err(_)`), and `Send`. Cancelling a producer task composes with channels: its `Sender` **producer hold** releases when its future is reclaimed at the scope's close, auto-closing the channel exactly as a completed producer's would.
+
 ## Isolates and `Send`
 
 An **isolate** is a shared-nothing unit of execution — its own heap, communicating only by message. `isolate f(args)` runs `f` on a fresh isolate with real parallelism.
@@ -89,6 +139,8 @@ Only `Send` values may cross an isolate boundary, and the **value/reference axis
 - **`!Send`**: reference types (`class` — they have identity and shared mutation) and `dyn`.
 
 Sending a `!Send` value across an isolate is E0042.
+
+The rule also covers **globals**, not just a call's arguments and result: an isolate runs in a fresh heap and snapshots the module's value-type globals by copy, but a reference `class` global has identity and cannot be copied across — so it is **not** shared. A worker that reads such a global fails at that use naming the global, its type, and the fix (make it a value `struct`, or pass the value-type data it holds as arguments) rather than silently observing a stale duplicate. A `class` global an isolate never reads is fine — only a read triggers the error.
 
 ## Channels
 
@@ -124,8 +176,18 @@ concurrent {
 
 - `channel::<T>(cap)` returns `(Sender<T>, Receiver<T>)`; both ends are `Send`.
 - `tx.send(v).await` — async; applies backpressure when the buffer is full.
-- `tx.close()` — marks the channel closed.
+- `tx.close()` — marks the channel closed (idempotent — closing twice is harmless).
 - `rx.recv().await` — `some(v)` while values remain, `none` once closed and drained.
+
+### Channel semantics
+
+| Behavior | Rule |
+|---|---|
+| **Buffered** (`cap >= 1`) | `send` completes as soon as the message is enqueued into an open buffer with room; a full buffer applies backpressure (the `send` parks until a `recv` frees a slot). |
+| **Rendezvous** (`cap == 0`) | A direct hand-off: `send` parks until a receiver *takes* the message, and `recv` parks until a sender offers one — the send completes **after** the receive (observable ordering; the sender never runs ahead). |
+| **Auto-close** | When every spawned task/isolate that holds a `Sender` for a channel has completed, the channel **closes on its own** — receivers drain the buffer, then observe `none` instead of blocking forever. A `Sender` kept only by a long-lived enclosing scope (never handed to a producer) does not trigger this; use `tx.close()` for that. |
+| **Explicit close** | `tx.close()` still works and is idempotent; it composes with auto-close (whichever happens first closes the channel). |
+| **Deadlock** | A channel that can make no progress — every party blocked on channel ops with no live counterparty, no timer, and no pending IO — is a deterministic deadlock: the sandbox catches it as `E0010`, and the real (parallel) scheduler raises the same `E0010` rather than spinning. |
 
 ## Determinism
 

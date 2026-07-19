@@ -356,6 +356,16 @@ impl Os for BrowserHost {
         ))
     }
 
+    fn os_proc_signal(
+        &mut self,
+        _handle: u64,
+        _signal: noeta_stdlib::os::Signal,
+    ) -> Result<(), StdError> {
+        Err(io_error(
+            "no child process exists: a browser tab has no subprocesses".to_string(),
+        ))
+    }
+
     fn os_proc_read_line(&mut self, _handle: u64) -> Result<Option<String>, StdError> {
         Err(io_error(
             "no child process exists: a browser tab has no subprocesses".to_string(),

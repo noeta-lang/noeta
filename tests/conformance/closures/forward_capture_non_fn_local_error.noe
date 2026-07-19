@@ -1,0 +1,14 @@
+// A nested `fn` may forward-reference a sibling nested `fn`, but a plain `let`/value local stays
+// strictly lexical: referencing one declared textually *later* is E0005 (unknown name), not a
+// forward capture. Only `fn` declarations are hoisted; value bindings are not. The offending
+// reference to the not-yet-declared `later` is on line 9, column 16.
+// expect: error E0005 at 9:16
+// expect: exit 1
+fn run(): int {
+    fn peek(): int {
+        return later;
+    }
+    later = 5;
+    return peek();
+}
+echo run();

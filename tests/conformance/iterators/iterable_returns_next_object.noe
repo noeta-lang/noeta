@@ -1,0 +1,35 @@
+// The Iterable → member-handle composition: `impl Iterable`'s `iter()` may return a
+// `next`-driven user iterator object instead of a list — `for x in bag` calls `iter()`, then
+// drives the returned handle's `next` closure until `none`. Both backends drain at their
+// snapshot site, so they agree by construction (the differential oracle).
+// expect: stdout "5"
+// expect: stdout "6"
+// expect: stdout "7"
+// expect: exit 0
+struct Cursor {
+    next: () -> ?int
+}
+
+class Bag {
+    pub lo: int
+    pub hi: int
+
+    impl Iterable {
+        fn iter(): Cursor {
+            mut n = self.lo
+            hi = self.hi
+            return Cursor {
+                next: fn(): ?int {
+                    if n >= hi { return none }
+                    n = n + 1
+                    return some(n - 1)
+                }
+            }
+        }
+    }
+}
+
+bag = Bag { lo: 5, hi: 8 }
+for x in bag {
+    echo x
+}

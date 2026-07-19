@@ -1,0 +1,38 @@
+// Implementing the `Callable` trait makes an object invocable as a value: `obj(args)` dispatches
+// to its `call` method (M1.8b, the last protocol trait to gain behavior). The arity is the
+// method's own — the registry does not pin it — and the receiver's state is in scope like any
+// method call. Dispatch is structural at runtime (the method table), like `iter`/`to_string`;
+// `impl Callable` is the validated way to provide the method. Works through a local, a computed
+// callee expression, and a `dyn`-typed binding (the runtime path both backends implement in
+// their shared indirect-call machinery — the differential oracle).
+// expect: stdout "15"
+// expect: stdout "25"
+// expect: stdout "35"
+// expect: stdout "12"
+// expect: exit 0
+class Adder {
+    pub base: int
+
+    fn new(base: int): Adder { return Adder { base: base } }
+
+    impl Callable {
+        fn call(x: int): int {
+            return self.base + x
+        }
+    }
+}
+
+add10 = Adder.new(10)
+echo add10(5)
+echo Adder.new(20)(5)
+d: dyn = Adder.new(30)
+echo d(5)
+
+// A two-parameter `call` — the arity is not pinned by the protocol.
+class Mul {
+    impl Callable {
+        fn call(a: int, b: int): int { return a * b }
+    }
+}
+m = Mul {}
+echo m(3, 4)

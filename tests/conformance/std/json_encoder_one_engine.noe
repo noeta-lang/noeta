@@ -1,0 +1,26 @@
+// ONE encoder serves both serialization doors: `json.stringify(v)` and the
+// `@derive(Serialize<Json>)` method `v.to_json()` both marshal the value into the neutral tree
+// and run the single shared text engine (`json_text::stringify`), so their bytes are identical
+// by construction — for every kind. Key order is per aggregate kind, identical in both doors:
+// a MAP serializes in sorted-key order (its canonical order), an OBJECT in declared field
+// order. This case pins the two doors byte-for-byte so an engine split would fail here.
+// expect: stdout "{"title":"order","tags":["a","b"],"counts":{"x":1,"y":2}}"
+// expect: stdout "doors agree: true"
+// expect: stdout "map keys sorted: {"a":1,"b":2}"
+// expect: exit 0
+use std.json
+
+@derive(Serialize<Json>)
+struct Report {
+    title: string
+    tags: List<string>
+    counts: Map<string, int>
+}
+
+r = Report { title: "order", tags: ["a", "b"], counts: {"y": 2, "x": 1} }
+
+echo r.to_json()
+echo "doors agree: ${r.to_json() == json.stringify(r)}"
+
+// The map door alone: keys arrive sorted regardless of literal order — in both doors.
+echo "map keys sorted: " ~ json.stringify({"b": 2, "a": 1})

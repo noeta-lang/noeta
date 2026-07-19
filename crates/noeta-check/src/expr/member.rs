@@ -346,6 +346,44 @@ impl Checker {
         }
     }
 
+    /// The declared type of field `name` on the user type `n`, **instantiated at the receiver's
+    /// type arguments** — the one field-type computation shared by value-position member access
+    /// ([`Self::synth_member`]) and the field-call desugar in the call arm, so the two positions
+    /// can never disagree on what `obj.f` is. Substitutes the type's generic parameters from
+    /// `recv_args` (a field of a `Box<int>` reads as `int`); a parameter the receiver leaves
+    /// unresolved erases to `dyn` — except inside the generic type's OWN body, where `T` is in
+    /// scope and must stay `T` (`fn get(): T { return self.value }`, prelude-redesign EX.1).
+    /// `None` when `n` has no such field.
+    pub(crate) fn record_field_type(
+        &self,
+        n: &str,
+        name: &str,
+        recv_args: &[Type],
+    ) -> Option<Type> {
+        let ty = self
+            .symbols
+            .records
+            .get(n)
+            .and_then(|fields| fields.iter().find(|(fname, _)| fname == name))
+            .map(|(_, ty)| ty.clone())?;
+        let params = self
+            .symbols
+            .generic_types
+            .get(n)
+            .cloned()
+            .unwrap_or_default();
+        let subst: HashMap<String, Type> = params
+            .iter()
+            .cloned()
+            .zip(recv_args.iter().cloned())
+            .collect();
+        let pset: HashSet<String> = params
+            .into_iter()
+            .filter(|p| !self.coloring.type_params.contains_key(p))
+            .collect();
+        Some(erase_type_params(apply_subst(&ty, &subst), &pset))
+    }
+
     pub(crate) fn synth_member(
         &mut self,
         receiver: &Expr,
@@ -438,12 +476,7 @@ impl Checker {
         }
         let recv = self.synth(receiver, env);
         if let Type::Named(n, recv_args) = &recv
-            && let Some(ty) = self
-                .symbols
-                .records
-                .get(n)
-                .and_then(|fields| fields.iter().find(|(fname, _)| fname == name))
-                .map(|(_, ty)| ty.clone())
+            && let Some(ty) = self.record_field_type(n, name, recv_args)
         {
             // A private field is readable only inside its declaring type's own methods (slice 2d).
             if !self.field_visible(n, name) {
@@ -459,29 +492,7 @@ impl Checker {
             {
                 self.sites.index_field_sites.insert(member_span);
             }
-            // Substitute the class's type parameters from the receiver's type arguments, so a field
-            // of a `Box<int>` reads as `int`. An unresolved parameter (the receiver's arguments are
-            // unknown, e.g. from a literal) erases to `dyn` rather than leaking the parameter name.
-            let params = self
-                .symbols
-                .generic_types
-                .get(n)
-                .cloned()
-                .unwrap_or_default();
-            let subst: HashMap<String, Type> = params
-                .iter()
-                .cloned()
-                .zip(recv_args.iter().cloned())
-                .collect();
-            // Inside the generic type's OWN body (`self.value` in a method of `Box<T>`), `T` is in
-            // scope and must stay `T` — erasing it to `dyn` would break `fn get(): T { return
-            // self.value }` (prelude-redesign EX.1: this path now serves what the retired bare
-            // field read did). Only parameters NOT in scope erase.
-            let pset: HashSet<String> = params
-                .into_iter()
-                .filter(|p| !self.coloring.type_params.contains_key(p))
-                .collect();
-            return erase_type_params(apply_subst(&ty, &subst), &pset);
+            return ty;
         }
         // `value.method` in value position — a **bound** method handle (EX.2b): the receiver is
         // captured at bind time; the handle is `Fn(params) -> ret` (no receiver parameter). Checked

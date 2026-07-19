@@ -134,7 +134,7 @@ fn build_aot_archive() -> Option<(PathBuf, String)> {
         .find_map(|l| l.split_once("native-static-libs:"))
         .map(|(_, libs)| libs.trim().to_string())
         .unwrap_or_default();
-    let archive = workspace().join("target/debug/libnoeta_aot.a");
+    let archive = target_dir().join("debug/libnoeta_aot.a");
     archive.exists().then_some((archive, libs))
 }
 
@@ -396,6 +396,50 @@ fn repl_checked_codegen_gives_type_of_full_fidelity() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Type.List(Type.Dyn)"));
+}
+
+#[test]
+fn repl_checked_registers_deserialize_recipes_for_prompt_declared_types() {
+    // aether F2 / L2.2 DI: `@derive(Deserialize<Json>)` on a type DECLARED AT THE PROMPT must bake
+    // its decode recipe into the running session, so `json.decode_typed(name, text)` resolves it —
+    // the checked-session analogue of what a whole-program `noeta run` already does. The struct is
+    // declared in an early entry and decoded in a LATER one (with an intervening entry), proving the
+    // recipe persists across the session, not just within the entry that declared it.
+    lang()
+        .arg("repl")
+        .write_stdin(
+            "use std.json\n\
+             @derive(Deserialize<Json>)\n\
+             struct User { name: string  age: int }\n\
+             echo 1;\n\
+             echo json.decode_typed(\"User\", \"{\\\"name\\\": \\\"Ada\\\", \\\"age\\\": 7}\");\n\
+             echo json.decode_typed(\"Ghost\", \"{}\");\n",
+        )
+        .assert()
+        .success()
+        // A valid body materializes a real `User` (its fields are reachable, not an opaque handle)…
+        .stdout(
+            predicate::str::contains("Ok(User {name: \"Ada\", age: 7})")
+                // …and an unregistered type is a recoverable `Err`, never an abort.
+                .and(predicate::str::contains(
+                    "Err(unknown deserializable type `Ghost`)",
+                )),
+        );
+    // The checkerless (`--no-check`) session has no checker to derive the recipe (and never
+    // recognizes `decode_typed` as the router-facing form), so the call is an ordinary — unknown —
+    // module function there. A documented degraded-mode limitation, not a regression.
+    lang()
+        .arg("repl")
+        .arg("--no-check")
+        .write_stdin(
+            "use std.json\n\
+             @derive(Deserialize<Json>)\n\
+             struct User { name: string  age: int }\n\
+             json.decode_typed(\"User\", \"{}\")\n",
+        )
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("has no function `decode_typed`"));
 }
 
 #[test]

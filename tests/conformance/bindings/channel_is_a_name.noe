@@ -20,7 +20,7 @@ topic = Topic.new("news")
 echo topic.name()
 
 // A local binding named `channel` is equally fine (in its own fn: a top-level `channel` binding
-// would be a visible global, which the method parameter above may not shadow — E0055).
+// would be a visible global, which the method parameter above may not shadow — E0058).
 fn as_local(): int {
     channel = 42
     return channel

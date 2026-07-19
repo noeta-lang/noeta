@@ -1,0 +1,33 @@
+// Track A.6b-residual — `.await` in a `??` fallback (a conditionally-evaluated value position). The
+// state-machine desugar runs the fallback (and its await) only on the `none`/`Err` path, so laziness
+// holds: when the value is `some`, the fallback is never awaited (no "fetched" line). An await on the
+// `??` VALUE side is unconditional and hoisted as usual, so it always runs.
+// expect: stdout "have 5"
+// expect: stdout "fetched 99"
+// expect: stdout "have 99"
+// expect: stdout "wrapped 7"
+// expect: stdout "done 7"
+// expect: exit 0
+use std.task.{sleep}
+async fn fetch(): int {
+    sleep(1).await
+    echo "fetched 99"
+    return 99
+}
+async fn get(opt: ?int): int {
+    return opt ?? fetch().await
+}
+async fn wrap(n: int): ?int {
+    sleep(1).await
+    return some(n)
+}
+async fn run(): int {
+    a = get(some(5)).await
+    echo "have ${a}"
+    b = get(none).await
+    echo "have ${b}"
+    c = wrap(7).await ?? 0
+    echo "wrapped ${c}"
+    return c
+}
+echo "done " ~ run().await

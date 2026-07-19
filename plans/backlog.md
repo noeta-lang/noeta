@@ -17,16 +17,12 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| Forward / mutual capture among nested `fn`s (a closure capturing a local declared after it) | slice F1 residue. Trigger: a program with forward references between nested closures |
-| **`obj.f(args)` on a closure-valued field** — parsed unconditionally as method dispatch (E0005); needs the field-access-then-call desugar. With it: the `Callable`/`Members` protocols | M1.8 tail + coroutines Track-I. Trigger: member-handles / user iterators holding a `next` closure |
-| **`.await` in the remaining conditional positions** — `??` fallback (needs Option-aware unwrap desugar) and `match`/`if…then…else` arm bodies. Condition/loop heads stay rejected by design | A.6b residual (E0040) |
-| Nested `concurrent` inside a *spawned task's own body* runs atomically within that task's poll | A.7 residual |
-| **A bare top-level `fn` used as a value loses its parameter types** (`fn(T) -> R` becomes `fn() -> R`) | http-server S5. Low blast radius; workaround: annotated closure |
-| A free `fn` and a local of the same name don't shadow cleanly in value position | aether F6 |
-| `@derive(Deserialize<Json>)` recipes don't register through the checkerless REPL `extend` path | aether F2 |
+| **`Members`/`DynamicCall` protocol dispatch** — registered in the trait table (`get(name)` / `call(name, args)`) but with no behavior: no language construct consumes dynamic member access today (`obj.f(args)` field-calls, `Callable`, and `next`-driven iterators all shipped without it). Deliberately deferred rather than shipping speculative machinery | M1.8b tail (the last unwired protocol names). Trigger: a concrete consumer — a dynamic-proxy/ORM-style use case, or reflection-driven member access |
 | Prelude constructors (`Ok`/`Err`/`some`) and `panic` as first-class *values* | slice F2 residue. Exotic; needs hand-matched runtime arity/error text |
 | **Editions S3/S4** — the first real edition-gated behavior (S3, pending a deliberate language divergence) and edition-aware diagnostics + a `noeta fix` migrator (S4, depends on S3) | editions arc. Trigger: a breaking language change we want to ship |
-| **`@derive(FromJson)` — typed JSON deserialization** (the type declaration as the parsing spec; `Result<T, JsonError>` with path-carrying errors; missing `Option<T>` → `none`, missing `T` → error). Was gated on the inferred-static type system — **that landed, so this is now buildable.** Open decisions: Ring 2 vs Ring 3 placement; shape-only vs validating-constructor hook | design proposal (2026-06). *(active — the acceptance test for the type-system track)* |
+| **Validating-constructor hook for typed JSON decode** — a type-supplied validation step the decode walk runs after the shape check (`json.try_parse::<T>` currently materializes any shape-correct document; a `T` with invariants — a non-negative price, a non-empty name — cannot reject). The shape-only core SHIPPED in the error-machinery arc (`json.try_parse::<T>(text) -> Result<T, JsonError>` with path-carrying errors + `decode_typed`'s migration onto `JsonError`; the `@derive(FromJson)` design's remaining open decision) | error-machinery arc (2026-07), splitting the 2026-06 `FromJson` proposal. Trigger: first real invariant-carrying decode target |
+| **Multi-source `From` impls on one target** — `impl From<JsonError>` + `impl From<IoError>` on the same `AppError`. Barred today by construction: impl-block methods flatten into the type's method table by NAME (no overloading), so a second `From` is a coherence conflict (E0027); supporting it needs source-typed dispatch for `from` (overloading or mangled per-source methods) — a new dispatch category. The `?`-conversion checker side (`try_conversion_sites` keyed by resolved source) is already shaped for it | error-ergonomics arc (2026-07). Trigger: a real pipeline funneling ≥2 error types into one wrapper |
+| **`From<Source>` as a generic bound** (`<T: From<int>>`) — `From` impls are recorded with their instantiation, but the built-in bound checker (`satisfies`) is name-only; an instantiated *built-in* bound needs the user-trait bound machinery (`TraitBound` args) extended to built-ins. Explicit `Target.from(x)` calls and the `?` position work today | error-ergonomics arc (2026-07). Trigger: first generic helper wanting to construct over a conversion |
 | Const generics → explicit SIMD (`Simd<T, N>`) | bitwise Tier P. Trigger: user-code SIMD demand the columnar/autovectorization path can't meet |
 | Range-*checked* narrowing conversions (`checked_to_u8(): u8?`) alongside the wrapping casts | bitwise W4 note. Trigger: first fallible-narrowing use case |
 | E7 — editor injection for `${…}` holes inside foreign-language expr-tier bodies | expr-tiers, gated on the text-tiers editor grammar slices |
@@ -35,26 +31,27 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| **Channel v1 limits:** capacity-0 rendezvous deadlocks; no auto-close when all senders drop (`close()` is explicit); a genuine cross-isolate deadlock on the *real* path hangs (spin-yield) rather than erroring — the sandbox is the oracle that catches it as E0010 | isolates I.4c |
-| **Real-isolate worker environment limits:** workers snapshot only marshallable globals (a `class`-instance global is skipped → fails at use); worker teardown skips cycle collection | isolates I.4b |
-| User-facing `h.cancel()` + a typed cancelled outcome (today cancellation is race/scope-internal) | A.8 scope decision |
 | App-lifetime `TaskScope` patterns: DI-managed workers, durable queues, schedulers; overlaps the "background-work extensions" proposal below | §7.2 design. Framework/extension patterns, not language constructs |
-| More async IO leaves: async directory ops, `read_bytes_async` — each is one more `IoRequest`/`IoOutcome` variant | A.10 residue |
-| `std.process`: signal sending and `wait_async` | process-streaming arc scope cut *(active, small)* |
-| **In-run safepoint cycle collection** — both cycle reapers run only at clean exit; a program building cycles in a loop has unbounded peak residency | memory-management 6.x *(active — the main GC follow-up)* |
+| Safepoint GC inside **re-entrant runs**: mid-run collection is gated to the outermost interpreter loop (a nested run's outer register stacks live in Rust locals the poll cannot enumerate), so cycles built inside `map`-applied closures, `NativeCtx`-driven loops (the HTTP serve loop), or a single mammoth un-awaited task body still accumulate until the next outermost safepoint / exit. Rooting the outer stacks (an active-stack registry) would lift the gate | memory-management 6.x follow-up (safepoint GC shipped; this is the residual scope) |
 | Intrusive free-list registry — closes the trace collector's ~10% acyclic overhead on alloc-churn micro-benches | memory-management 6.4 |
-| DAP: debug worker isolates (adapter reports a single hardcoded thread; workers run undebugged). Also: conditional/hit-count breakpoints, reverse debugging | debug-adapter deferred |
-| Postgres TLS: a libpq-style `require`-without-verify mode | aether F9 sub-item |
 
 ## Reactivity & web
 
 | Item | Source / trigger |
 |---|---|
-| **Keyed-list structural changes** — `keyed()` captures the key set at first render; add/remove/reorder still re-renders the parent region (per-row incrementality covers in-place mutation only) | LiveView. Trigger: large mutable lists with churn *(active — the known LiveView gap)* |
-| Nested reactive owner tree (SolidJS-style: a rerunning effect/computed owns and disposes child nodes) | reactivity S4b. Trigger: reactive nodes created inside a repeatedly-running body |
-| Opt-in value-equality suppression on `set` (an equal value need not re-fire dependents) | reactivity S0 note. Must stay opt-in |
-| OTEL: metrics + logs signals (counters/histograms/gauges, log export) — a plan sketch lived in `plans/native-otel/metrics-logs.md` (git history) | native-otel follow-on arc |
+| OTEL: **observable/async instruments** (`ObservableCounter`/`ObservableGauge` with pull callbacks) — sync `counter`/`up_down_counter`/`histogram`/`gauge` shipped; callback-driven instruments deferred | native-otel metrics-logs, §deferred |
+| OTEL: **histogram views / custom buckets / delta temporality** — every histogram uses the OTel default explicit bounds and only cumulative is emitted (the `Temporality::Delta` variant exists but is unused); custom bucket config, per-instrument views, and delta export deferred | native-otel metrics-logs, §deferred |
+| OTEL: **metrics cardinality limits** — no per-metric attribute-set cap today (unbounded `BTreeMap` per instrument); a hard cardinality-limit policy slice deferred | native-otel metrics-logs, §deferred |
+| OTEL: **stdout/structured-logging bridge** — `std.log` records go to the OTLP sink only; mirroring them to stdout (a `print`-bridge) is a separate decision, deferred | native-otel metrics-logs, §decision 3 |
 | Synced **store** (a whole reactive dataset, the §9.12 merge point) and `.history()`/time-travel over the p2p append log | p2p "later/open" R&D |
+
+## Database (para/db)
+
+| Item | Source / trigger |
+| --- | --- |
+| **Down / rollback migrations** — v1 is deliberately forward-only (down migrations are routinely wrong against real production data; `--reset` covers development). Optional paired `*.down.sql` files + a `noeta migrate down [--to <file>]` verb, applied newest-first in their own transactions | migration engine (aether DB6, 2026-07-19). Trigger: a concrete need for a scripted rollback beyond `--reset` |
+| **Per-dialect migration overrides** — v1 runs each migration body verbatim in the target dialect's native SQL (write portable SQL). A `migrations/postgres/` (or `sqlite/`) sub-directory shadowing a base file for a divergent backend (e.g. `SERIAL` vs `AUTOINCREMENT`), selected by the connected driver's dialect. `load_dir` already ignores sub-directories, leaving room for this | migration engine (aether DB6, 2026-07-19). Trigger: a project genuinely needing to target both SQLite and Postgres from one migration set |
+| **Out-of-order migration detection** — the runner applies pending files in filename-sort order and gates history integrity via checksum + deleted-file checks; it does not warn when a *newly added* migration sorts before an already-applied one (a rebase inserting an earlier prefix). Timestamps make this rare; a warning (not a hard error, to keep legitimate merges unblocked) could flag it | migration engine (aether DB6, 2026-07-19). Trigger: an out-of-order incident in practice |
 
 ## Packages, registry & distribution
 
@@ -65,24 +62,19 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | TUF-based Sigstore trust-root refresh (today: build-time-embedded root + env override); registry-side keyless *requirement* is a policy flag away | keyless-signing v-next |
 | Per-dependency **capability enforcement** (a dep's `[trust]` grant actually bounding what it can reach) — research phase; static effect analysis is the tractable first step | package-manager phase-4 L3 |
 | Git-deps of *published* packages aren't expressible in the index `Dep` shape | package-manager v-next |
-| **Advisory intake beyond operator-curated:** self-service scope-owner advisories; a public report/triage queue; OSV/GHSA/RUSTSEC import with name mapping; a transparency-log suppression monitor (`noeta watch-scope`). Decide the trust model (who publishes vs who reports) first | namespace-protection arc (2026-07-15) |
-| Hosted edge-platform proof (Fastly/Fermyon Spin) + an edge deployment docs page | wasm W4.2. Needs an account; stays a user action |
+| **Advisory-intake residuals** (arc landed 2026-07-19: three-tier feed — operator/publisher/imported — + public report queue + `noeta watch-scope`; merged both repos, unpushed). ~~(a) client verb to **promote a report**~~ ✅ DONE — `noeta advisory promote <report-id>` (operator via `NOETA_REGISTRY_ADMIN_TOKEN` → operator advisory; scope owner → keyless publisher advisory, prefilled from the report) + `noeta advisory reports [--scope S]`; new `GET /v1/reports/{id}`. ~~(b) **CVSS-vector scoring**~~ ✅ DONE — CVSS v3.1 base-metric equations both sides (`src/cvss.ts` / `noeta-pm::cvss`, unit-tested vs published vectors); import derives the band from an OSV `CVSS_V3` / GHSA vector, `noeta audit` shows band + re-derived score; text severity is the fallback. ~~(c) per-ecosystem source adapters + pagination~~ ✅ DONE — `src/sources.ts`: OSV api.osv.dev (per mapped package), GHSA GraphQL (`GITHUB_TOKEN`), RUSTSEC OSV feed, paginated, per-source env-gated, dedup by upstream id; `OSV_IMPORT_URL` kept as manual override. **(d) OPEN — design only:** `watch-scope` state is a local file; a shared/attested watch ledger — see the sketch in [`plans/attested-watch-ledger.md`](attested-watch-ledger.md) (recommendation: near-term opt-in committed signed-state file; long-term witness cosigning à la CT/Sigsum; trigger = a second registry operator or a cross-party compliance need) | advisory-intake arc (2026-07-19) |
+| Hosted edge-platform proof (Fastly/Fermyon Spin) — **guide + script pre-written** (`docs/Edge-Deployment.md`, `examples/edge-hello/`; the `--serve` component verified serving on local Spin 4.0.2 — all routes + real entropy/wall-clock). **Remaining:** an account + one `spin deploy` + screenshot/notes; and Fastly Compute confirmation (unverified — its SDK world differs from the `wasi:http` proxy world we emit) | wasm W4.2. Needs an account; stays a user action |
+| **Package the prebuilt `noeta-wasm-serve` component with the toolchain** — the bridge to offline one-click `noeta build --serve`. Today it resolves via `NOETA_WASM_SERVE` → sibling `noeta-wasm-serve.wasm` → on-demand `cargo build` (`wasm32-wasip2`); a binary-only released toolchain has neither of the first two, so `--serve` can't build offline there. Same distribution decision already pending for the AOT runtime + wasip1 runner | wasm W4.2 follow-on (surfaced writing `docs/Edge-Deployment.md`) |
 | Desktop packaging (Tauri); with it the p2p packaging polish (within-feature DCE pruning, capability-gating) | M3 roadmap item; the one roadmap entry the README carries |
-| A first-class `Uuid` type (string-typed today) | id-entropy scope cut |
 
 ## Tooling
 
 | Item | Source / trigger |
 |---|---|
-| Profiler: tier-1 (JIT-on) sampling — poll at JIT trampoline points. (Allocation and per-isolate profiles have since shipped: `--alloc`, per-worker flamegraphs) | profiler arc |
 | Profiler: continuous / attach-to-running-`serve` profiling; differential A/B flamegraph compare; column-precise attribution | profiler deferred tail |
-| tree-sitter: per-project generated grammar for third-party text tiers (a static grammar can't know which `@name` opens a verbatim body; the TextMate side ships a generator) | text-tiers / Documentation-and-Tiers |
-| Debug console: persistent `mut` bindings across entries; watch-memoization | tooling-unification deferred |
 | MCP: prompts, semantic/embedding retrieval, long-lived analysis sessions, TCP transport | mcp deferred |
-| `noeta fmt`: width-wrapping of long binary/method chains and unions; `--diff`; `// fmt: off`; broader `[fmt]` config | fmt deferred (optional by design) |
 | REPL: JIT at the prompt | repl-on-vm follow-on. Trigger: demand |
-| Salsa: deleted-file inputs are never freed (growth stopped, memory not reclaimed); intra-check cancellation granularity (a token poll inside `noeta-check`) | audit F9 residuals |
-| Flaky tests (pre-existing, timing-under-load): `noeta-dap` `set_variable_writes_a_frame_local…`; MCP `runaway_continue` | audit final verification. Worth a dedicated session *(active, small)* |
+| Salsa: a deleted file's **fixed-size input struct** cannot be freed — salsa 0.27 has no public input-delete API (append-only input table; `evict_lru`/revision-GC act only on LRU tracked functions). Mitigated, not fully closed: on deletion `noeta_db::release_source` reclaims all *unbounded* content (input text + downstream `ast`/`Sites`/`Module` memos, overwritten with empty-program equivalents) and `WorkspaceCache` reuses tombstoned slots for the next new file, so the input table is bounded by the *concurrent* file high-water mark. Remaining residual: N distinct files created-then-deleted with no later adds leaves N small empty input slots. Closes if salsa gains real input deletion (upstream) or we switch to an interned-path input keyed by a reusable id. | audit F9 residual a (partial) |
 
 ## Performance
 
@@ -107,6 +99,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 ## Design proposals (no slice yet)
 
-- **Vulnerability-intake trust model** — see the advisory row above; the design decision (operator / scope-owner / promote-from-report) precedes any code.
+- ~~**Vulnerability-intake trust model**~~ — DECIDED + built (advisory-intake arc, 2026-07-19): three tiers (operator-issued / scope-owner self-service with keyless provenance / OSV-GHSA-RUSTSEC import via operator-curated name map), a public report queue that only becomes an advisory on operator/owner promote, and `noeta watch-scope`. See the advisory-intake residuals row above for what's left.
 - **Packed-field-kind enum dedup** — four phase-appropriate `PackedKind` encodings; revisit only if a shared public layout vocabulary earns its keep across the package boundary (the `PackedView` ABI may already be that vocabulary — check before building).
 - **WASM revisit conditions** (recorded, not planned): direct wasm codegen only on perf data; wasm-threads isolates only on multi-core edge demand; p2p-in-browser is its own arc.

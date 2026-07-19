@@ -1,0 +1,21 @@
+// Precedence when a type declares BOTH a field `f` and a method `f` (nothing rejects the
+// collision at the declaration): in CALL position the method wins — `s.f(1)` dispatches the
+// instance method; in VALUE position the field wins (pinned since EX.2b: "a same-named field
+// keeps winning member access") — `s.f` reads the field, and calling the read value runs the
+// stored closure. The two rules mirror each other: `g = obj.f; g(x)` is the escape hatch that
+// always reaches the field. `(s.f)(1)` is NOT an escape hatch — parentheses are transparent in
+// the AST, so it is the same method call.
+// expect: stdout "101"
+// expect: stdout "2"
+// expect: stdout "101"
+// expect: exit 0
+struct S {
+    f: (int) -> int
+    base: int
+    fn f(x: int): int { return self.base + x }
+}
+s = S { f: fn(x: int) => x + 1, base: 100 }
+echo s.f(1)
+g = s.f
+echo g(1)
+echo (s.f)(1)

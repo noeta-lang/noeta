@@ -51,6 +51,7 @@ pub struct Manifest {
     targets: BTreeMap<String, Target>,
     trust: Trust,
     registries: Registries,
+    db: DbConfig,
 }
 
 /// The `[registries]` table (private-registries arc) — a map from a **scope** (`company`) to the
@@ -206,6 +207,72 @@ pub struct Trust {
     /// catch a compromised release before it auto-propagates to consumers. An existing lockfile pin is
     /// unaffected (already your choice); only fresh selection is held back. `None` = off (default).
     pub publish_cooldown: Option<u64>,
+    /// Per-advisory-tier policy (advisory-intake arc, tier 5): whether an advisory of a given intake
+    /// tier (`operator`/`publisher`/`imported`) makes `noeta audit` **fail** the build, merely **warn**,
+    /// or is ignored (`off`). Default: every tier warns; a project opts a tier up to `fail` for CI.
+    pub advisories: AdvisoryPolicy,
+}
+
+/// The `[db]` table — a project's default database wiring for `noeta migrate` (and any tooling that
+/// wants a declared DSN). Both keys are optional: `url` is the connection string (the same dsn schemes
+/// `db.connect` accepts) and `migrations` is the directory holding the `.sql` migration files
+/// (default `migrations/`). The CLI layers a `--db`/`--dir` flag and the `DATABASE_URL` env var over
+/// these, so a project can declare a default here and still override per-invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DbConfig {
+    /// The database connection string, if declared. `None` = not configured here (resolve from a flag
+    /// or `DATABASE_URL`).
+    pub url: Option<String>,
+    /// The migrations directory, if declared. `None` = the default (`migrations/`).
+    pub migrations: Option<String>,
+}
+
+/// What a matched advisory of a given intake tier does to an `noeta audit` run (advisory-intake arc,
+/// tier 5). Default [`AdvisoryAction::Warn`] — surfaced, but not a build failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AdvisoryAction {
+    /// A matched advisory of this tier is printed but does not fail the audit.
+    #[default]
+    Warn,
+    /// A matched advisory of this tier fails the audit (a non-zero exit — a CI gate).
+    Fail,
+    /// Advisories of this tier are ignored entirely (neither printed as a hit nor counted).
+    Off,
+}
+
+impl AdvisoryAction {
+    fn parse(s: &str) -> Result<AdvisoryAction, String> {
+        match s {
+            "warn" => Ok(AdvisoryAction::Warn),
+            "fail" => Ok(AdvisoryAction::Fail),
+            "off" => Ok(AdvisoryAction::Off),
+            other => Err(format!(
+                "`{other}` must be one of \"fail\", \"warn\", \"off\""
+            )),
+        }
+    }
+}
+
+/// The consumer's per-tier advisory policy (advisory-intake arc, tier 5). Which intake tiers act as
+/// build **failures** versus **warnings** in `noeta audit`. Configured under `[trust.advisories]`
+/// (per-tier keys) or a bare `advisories = "fail"` (all tiers). Default: all three warn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdvisoryPolicy {
+    pub operator: AdvisoryAction,
+    pub publisher: AdvisoryAction,
+    pub imported: AdvisoryAction,
+}
+
+impl AdvisoryPolicy {
+    /// The action for an advisory whose intake tier is the wire string `tier` (`operator`/`publisher`/
+    /// `imported`). An unknown/absent tier is treated as `operator` (the default tier a feed serves).
+    pub fn action_for(&self, tier: &str) -> AdvisoryAction {
+        match tier {
+            "publisher" => self.publisher,
+            "imported" => self.imported,
+            _ => self.operator,
+        }
+    }
 }
 
 /// The consumer's `[trust].require_provenance` policy: demand verified provenance from no scope
@@ -739,6 +806,7 @@ impl Manifest {
         let dependencies = parse_dependencies(&table)?;
         let trust = parse_trust(&table)?;
         let registries = parse_registries(&table)?;
+        let db = parse_db(&table)?;
         let mut targets = BTreeMap::new();
 
         let Some(targets_value) = table.get("targets") else {
@@ -748,6 +816,7 @@ impl Manifest {
                 targets,
                 trust,
                 registries,
+                db,
             });
         };
         let targets_table = targets_value
@@ -830,6 +899,7 @@ impl Manifest {
             targets,
             trust,
             registries,
+            db,
         })
     }
 
@@ -846,6 +916,11 @@ impl Manifest {
     /// The `[trust]` grants — the authority this manifest extends to its dependencies (Phase 4).
     pub fn trust(&self) -> &Trust {
         &self.trust
+    }
+
+    /// The `[db]` table — the project's default database wiring (`noeta migrate`).
+    pub fn db(&self) -> &DbConfig {
+        &self.db
     }
 
     /// The declared dependencies, keyed by local **import root** (the dependency-table key).
@@ -1177,6 +1252,29 @@ fn parse_dependency_map(deps: &toml::Table) -> Result<BTreeMap<String, Dependenc
 /// entry is validated as an identity (so a typo'd grant is a hard error, not a silently ineffective
 /// one). An absent `[trust]` table yields empty grants — the safe default (no dependency may run
 /// native code or add a command).
+/// Parse the optional `[db]` table into a [`DbConfig`]. Both keys (`url`, `migrations`) are optional
+/// strings; a present-but-wrong-typed value fails loudly rather than being silently ignored.
+fn parse_db(table: &toml::Table) -> Result<DbConfig, String> {
+    let Some(value) = table.get("db") else {
+        return Ok(DbConfig::default());
+    };
+    let db_table = value.as_table().ok_or("`db` must be a table")?;
+    let string_key = |key: &str| -> Result<Option<String>, String> {
+        match db_table.get(key) {
+            None => Ok(None),
+            Some(v) => Ok(Some(
+                v.as_str()
+                    .ok_or_else(|| format!("`db.{key}` must be a string"))?
+                    .to_string(),
+            )),
+        }
+    };
+    Ok(DbConfig {
+        url: string_key("url")?,
+        migrations: string_key("migrations")?,
+    })
+}
+
 fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
     let Some(value) = table.get("trust") else {
         return Ok(Trust::default());
@@ -1249,13 +1347,57 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
             Some(parse_duration(s)?)
         }
     };
+    let advisories = parse_advisory_policy(trust_table)?;
     Ok(Trust {
         native: parse_list("native")?,
         commands: parse_list("commands")?,
         require_provenance,
         require_transparency,
         publish_cooldown,
+        advisories,
     })
+}
+
+/// Parse `[trust].advisories` (advisory-intake arc, tier 5): either a bare action string applied to
+/// every tier (`advisories = "fail"`), or a sub-table with per-tier keys
+/// (`[trust.advisories]` / `operator = "fail"`, `publisher = "warn"`, `imported = "off"`). Absent →
+/// every tier warns (the default).
+fn parse_advisory_policy(trust_table: &toml::Table) -> Result<AdvisoryPolicy, String> {
+    let Some(value) = trust_table.get("advisories") else {
+        return Ok(AdvisoryPolicy::default());
+    };
+    // A bare string sets every tier at once.
+    if let Some(s) = value.as_str() {
+        let action =
+            AdvisoryAction::parse(s).map_err(|err| format!("`trust.advisories`: {err}"))?;
+        return Ok(AdvisoryPolicy {
+            operator: action,
+            publisher: action,
+            imported: action,
+        });
+    }
+    let table = value
+        .as_table()
+        .ok_or("`trust.advisories` must be an action string (\"fail\"/\"warn\"/\"off\") or a table of per-tier actions")?;
+    let mut policy = AdvisoryPolicy::default();
+    for (key, v) in table {
+        let s = v.as_str().ok_or_else(|| {
+            format!("`trust.advisories.{key}` must be a string (\"fail\"/\"warn\"/\"off\")")
+        })?;
+        let action =
+            AdvisoryAction::parse(s).map_err(|err| format!("`trust.advisories.{key}`: {err}"))?;
+        match key.as_str() {
+            "operator" => policy.operator = action,
+            "publisher" => policy.publisher = action,
+            "imported" => policy.imported = action,
+            other => {
+                return Err(format!(
+                    "`trust.advisories.{other}` is not a tier (use `operator`, `publisher`, or `imported`)"
+                ));
+            }
+        }
+    }
+    Ok(policy)
 }
 
 /// Parse the `[registries]` table (private-registries arc): a map of scope (`company`) → source string
@@ -1468,6 +1610,36 @@ fn provider_of(target: &str, tier: &str, value: &toml::Value) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- `[db]` (migration wiring) -------------------------------------------------------------
+
+    #[test]
+    fn parses_a_db_table() {
+        let m = Manifest::parse(
+            "[db]\n\
+             url = \"postgres://u:p@h/db\"\n\
+             migrations = \"db/migrations\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.db().url.as_deref(), Some("postgres://u:p@h/db"));
+        assert_eq!(m.db().migrations.as_deref(), Some("db/migrations"));
+    }
+
+    #[test]
+    fn a_missing_db_table_is_the_default() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"0.1.0\"\n").expect("valid");
+        assert_eq!(m.db(), &DbConfig::default());
+        assert!(m.db().url.is_none());
+    }
+
+    #[test]
+    fn a_wrongly_typed_db_url_is_an_error() {
+        let err = Manifest::parse("[db]\nurl = 5\n").unwrap_err();
+        assert!(
+            err.to_string().contains("`db.url` must be a string"),
+            "{err}"
+        );
+    }
 
     // --- `[registries]` (private-registries arc) -----------------------------------------------
 
@@ -1778,6 +1950,57 @@ mod tests {
         assert!(m.trust().native.contains("acme/simd"));
         assert!(m.trust().commands.contains("acme/scaffold"));
         assert!(!m.trust().commands.contains("acme/imgfx"));
+    }
+
+    #[test]
+    fn advisory_policy_defaults_to_all_warn() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        let p = m.trust().advisories;
+        assert_eq!(p.operator, AdvisoryAction::Warn);
+        assert_eq!(p.publisher, AdvisoryAction::Warn);
+        assert_eq!(p.imported, AdvisoryAction::Warn);
+        assert_eq!(p.action_for("imported"), AdvisoryAction::Warn);
+    }
+
+    #[test]
+    fn advisory_policy_bare_string_sets_every_tier() {
+        let m = Manifest::parse(
+            "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n[trust]\nadvisories = \"fail\"\n",
+        )
+        .unwrap();
+        let p = m.trust().advisories;
+        assert_eq!(p.operator, AdvisoryAction::Fail);
+        assert_eq!(p.publisher, AdvisoryAction::Fail);
+        assert_eq!(p.imported, AdvisoryAction::Fail);
+    }
+
+    #[test]
+    fn advisory_policy_per_tier_table() {
+        let m = Manifest::parse(
+            "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n\
+             [trust.advisories]\noperator = \"fail\"\npublisher = \"fail\"\nimported = \"off\"\n",
+        )
+        .unwrap();
+        let p = m.trust().advisories;
+        assert_eq!(p.operator, AdvisoryAction::Fail);
+        assert_eq!(p.publisher, AdvisoryAction::Fail);
+        assert_eq!(p.imported, AdvisoryAction::Off);
+    }
+
+    #[test]
+    fn advisory_policy_rejects_a_bad_action_or_tier() {
+        assert!(
+            Manifest::parse(
+                "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n[trust]\nadvisories = \"spicy\"\n"
+            )
+            .is_err()
+        );
+        assert!(
+            Manifest::parse(
+                "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n[trust.advisories]\nnope = \"fail\"\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -103,6 +103,8 @@ spin deploy                # deploy to a Spin-compatible cloud (Fermyon et al.; 
 
 Any host that speaks the `wasi:http` proxy world can serve the component — that is the point of targeting the standard interface rather than a vendor SDK.
 
+For a step-by-step deployment walkthrough — the `spin.toml` fields, routing/env/outbound limits, the full edge capability table, a troubleshooting matrix, and Fastly Compute as a secondary target — see [Edge Deployment](Edge-Deployment). A complete buildable example lives in `examples/edge-hello/`.
+
 ### What a handler world looks like
 
 Per request, the program gets a fresh deterministic-by-default world with the real-world capabilities a request handler needs: wall clock, entropy (uuids), an in-memory scratch filesystem, and outbound HTTP. There are no subprocesses and no cross-request state — persistent state belongs in the upstream services the handler calls, which is the shape edge platforms enforce on every language.

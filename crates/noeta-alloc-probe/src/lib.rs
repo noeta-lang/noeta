@@ -32,6 +32,15 @@ pub fn thread_allocated() -> u64 {
     THREAD_ALLOCATED.with(|c| c.get())
 }
 
+/// Currently-live bytes: the sum of outstanding allocation sizes right now (each `alloc` adds its
+/// layout size, each `dealloc` subtracts it). Unlike [`peak_during`]'s transient high-water mark,
+/// this is the **residency** — what a heap-retention regression test brackets across repeated
+/// work to prove a data structure is not accumulating (audit F9: salsa deleted-input reclamation).
+/// Always 0 unless the process registered [`TrackingAlloc`] as its `#[global_allocator]`.
+pub fn live_bytes() -> usize {
+    LIVE.load(Ordering::Relaxed)
+}
+
 /// Currently-live bytes (sum of outstanding allocation sizes).
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 /// High-water mark of [`LIVE`] since the last [`peak_during`] reset.

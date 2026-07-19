@@ -1,0 +1,17 @@
+// An `async fn` that MUTATES a `class` global's field (`g.n = g.n + x`) must resolve the global as a
+// global — `LoadGlobal`/`StoreGlobal` — exactly as a synchronous function does, never mis-capture it
+// into the state machine's cell environment. A regression once initialized that upvalue with a fresh
+// `MakeEnum` (Option.none) instead of the real global, so the body read a stale enum → "no field `n`
+// on enum". A module global is never a state-machine cell.
+// expect: stdout "5"
+// expect: exit 0
+class G {
+    pub mut n: int
+    fn new(): G { return G { n: 0 }; }
+}
+g = G.new()
+async fn work(x: int) use (g): void {
+    g.n = g.n + x
+}
+work(5).await
+echo g.n

@@ -267,6 +267,18 @@ impl NativeCtx for VmCtx<'_, '_> {
 
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>> {
         let value = self.get(future)?;
+        // A combinator (`all`/`race`/`map_bounded`) polling a task handle the user already
+        // cancelled fails loudly (Track A.8, E0056) — the same contract `.await` enforces — rather
+        // than spinning to a deadlock.
+        if self.vm.handle_cancelled(value) {
+            self.vm.error(
+                DiagnosticCode::AwaitCancelled,
+                self.span,
+                "cannot await a cancelled task; use `.join()` to observe the cancelled outcome"
+                    .to_string(),
+            );
+            return Err(CtxError::Abort);
+        }
         match self.vm.poll_once(value, self.span) {
             Ok(Poll::Ready(result)) => {
                 // A borrowed seed cannot be spent in place (the entry is the caller's) — the
@@ -288,7 +300,10 @@ impl NativeCtx for VmCtx<'_, '_> {
 
     fn drive(&mut self, future: Slot) -> CtxResult<Slot> {
         let value = self.get(future)?;
-        match self.vm.drive_future(value, self.span) {
+        // No safepoint view: a `NativeCtx` drive runs beneath an extension's Rust frame, whose
+        // locals (and this ctx's own slot table) can hold values the VM cannot enumerate — so the
+        // drive loop never collects here (the enclosing dispatch loop's polls still do).
+        match self.vm.drive_future(value, self.span, None) {
             Ok(result) => {
                 // A borrowed seed cannot be spent in place — fresh owned slot (see `poll`).
                 if future < self.seeded {
@@ -359,6 +374,11 @@ impl NativeCtx for VmCtx<'_, '_> {
             .expect("some carries a payload");
         retain(payload);
         Ok(Some(self.insert(payload)))
+    }
+
+    fn values_equal(&mut self, a: Slot, b: Slot) -> CtxResult<bool> {
+        // The language's `==` verbatim (borrowed views — no reference taken, no release).
+        Ok(noeta_value::value_eq(self.get(a)?, self.get(b)?))
     }
 
     fn with_extern(

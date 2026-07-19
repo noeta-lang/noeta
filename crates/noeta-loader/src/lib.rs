@@ -1013,7 +1013,7 @@ fn link_core(
         .iter()
         .flat_map(qualify::bound_value_names)
         .collect();
-    // The **no-shadowing** rule's import half (the checker enforces the binder half as E0055, but
+    // The **no-shadowing** rule's import half (the checker enforces the binder half as E0058, but
     // a user-module `use` is consumed by this linker before the checker ever sees it): a value
     // binding anywhere in a unit may not reuse the local name a `use` binds — one name, one
     // meaning. Checked per unit (the `use` is file-scoped), for the entry and every dependency
@@ -1486,7 +1486,7 @@ fn collision_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagn
 }
 
 /// Build the `E0020` diagnostic for an import whose local name a value binding in the same unit
-/// also uses (the no-shadowing rule's import half — the binder half is the checker's E0055).
+/// also uses (the no-shadowing rule's import half — the binder half is the checker's E0058).
 /// Points at the imported name; the fix is a rename on either side.
 fn shadowed_import_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagnostic {
     let namespace = path.join(".");

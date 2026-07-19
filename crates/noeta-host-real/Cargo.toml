@@ -50,6 +50,13 @@ ring-http-client = ["dep:reqwest"]
 # `std.tracing`.
 telemetry = ["dep:serde_json", "ring-http-client", "reqwest/json"]
 
+# `kill(2)` for `Process::signal`/detached-child `kill` (process-signals arc) — the one POSIX call
+# std's `Child` doesn't expose (it only offers SIGKILL). `nix`'s *safe* wrapper keeps this crate
+# `unsafe`-free (workspace lint `unsafe_code = "forbid"`). Unix-only; non-Unix hosts fall back to
+# std's forceful terminate for KILL/TERM and reject other signals.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
 [dev-dependencies]
 criterion = { workspace = true }
 

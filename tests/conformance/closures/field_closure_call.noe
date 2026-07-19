@@ -1,0 +1,36 @@
+// The field-access-then-call desugar (M1.8 tail): `obj.f(args)` where `f` is a FIELD of function
+// type means `(obj.f)(args)` — load the field, call the loaded value. Before this, the call was
+// parsed unconditionally as method dispatch and failed at runtime with E0005 "no method `f`".
+// The parenthesized spelling and the spelled-out binding are the same program: parentheses are
+// transparent in the AST, so all three forms lower to the identical field-get + indirect call.
+// Works on a value `struct` and a reference `class` alike, and a captured variable in the stored
+// closure behaves exactly as it would called through a local.
+// expect: stdout "42"
+// expect: stdout "42"
+// expect: stdout "42"
+// expect: stdout "hello!"
+// expect: stdout "12"
+// expect: exit 0
+struct Counter {
+    step: (int) -> int
+}
+c = Counter { step: fn(x: int) => x + 1 }
+echo c.step(41)
+echo (c.step)(41)
+g = c.step
+echo g(41)
+
+class Greeter {
+    pub suffix: string
+    pub shout: (string) -> string
+}
+bang = "!"
+gr = Greeter { suffix: bang, shout: fn(s: string) => s ~ bang }
+echo gr.shout("hello")
+
+// A zero-argument closure field, and the result feeding further arithmetic.
+struct Lazy {
+    thunk: () -> int
+}
+l = Lazy { thunk: fn() => 7 }
+echo l.thunk() + 5

@@ -1,0 +1,31 @@
+// Track A.7 + A.8 — a `race` inside a spawned task's own `concurrent` block. `nested()` is spawned in
+// the outer scope; its inner `concurrent` races three workers. `y` (sleep 1) wins at t=1; `x`/`z` are
+// cancelled cooperatively (their "end" never prints). Cancellation must work across the suspension point
+// the inner join now is: the losers are marked cancelled and the inner scope closes by its captured index
+// (a `race` loser is reclaimed at the scope close exactly as a normal join), then `nested()` completes and
+// the outer await observes the winner. Deterministic (ties break by list order); both backends agree.
+// expect: stdout "x start"
+// expect: stdout "y start"
+// expect: stdout "z start"
+// expect: stdout "y end"
+// expect: stdout "winner=1"
+// expect: exit 0
+use std.task.{sleep, race}
+async fn work(name: string, ms: int): int {
+    echo name ~ " start"
+    sleep(ms).await
+    echo name ~ " end"
+    return ms
+}
+async fn nested(): int {
+    mut w = 0
+    concurrent {
+        rs = [spawn work("x", 3), spawn work("y", 1), spawn work("z", 2)]
+        w = race(rs)
+    }
+    return w
+}
+concurrent {
+    h = spawn nested()
+    echo "winner=" ~ h.await
+}

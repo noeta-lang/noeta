@@ -31,6 +31,8 @@ pub(crate) fn attr_field_type(ty: noeta_ext_abi::registry::AttrFieldType) -> Typ
 
 pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "Ordering",
+    // The typed cancelled marker (Track A.8): the `Err` payload of `h.join(): Result<T, Cancelled>`.
+    "Cancelled",
     "Type",
     "Semantic",
     "RoleBinding",
@@ -307,6 +309,8 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         // `Type::Named` and so resolve through the seeded `trait_impls` table in `satisfies`, never
         // reaching here — no primitive is ever `Mergeable`.
         Bt::Clone
+        | Bt::Error
+        | Bt::From
         | Bt::Serialize
         | Bt::Deserialize
         | Bt::Index

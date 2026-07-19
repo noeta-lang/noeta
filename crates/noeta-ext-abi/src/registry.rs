@@ -95,6 +95,15 @@ pub enum NativeOut {
     None,
     /// `Option::Some(x)` — a present optional value.
     Some(Box<NativeOut>),
+    /// `Result::Ok(x)` — the success arm of a **call-site-typed** function whose declared return is
+    /// `Result<T, E>` (`json.try_parse::<T>`). A recoverable typed dispatch builds the whole `Result`
+    /// itself — success as `Ok`, failure as [`NativeOut::Err`] carrying the error value — so the
+    /// backend materializes one tree with no per-function wrapping logic (the twin of the
+    /// [`NativeOut::Some`]/[`NativeOut::None`] pair the `Option` wrap already uses).
+    Ok(Box<NativeOut>),
+    /// `Result::Err(e)` — the failure arm of a `Result<T, E>`-shaped call-site-typed function. The
+    /// boxed value is the error (typically a [`NativeOut::Extern`] carrying a path-rich error type).
+    Err(Box<NativeOut>),
     /// A registered extern-type value (extern-types X1) — `Uuid`, a `FileHandle`, … Each
     /// backend wraps it in its single extern hosting variant.
     Extern(crate::ExternBox),
@@ -289,8 +298,29 @@ pub enum RetTy {
     NumericPreserving,
     /// The result type is named at the call site by a turbofish (`json.parse::<T>(): T`). The
     /// concrete `T` arrives as a [`TypeRecipe`] the checker records at the call site and the backend
-    /// threads into the dispatch (call-site-typed construction).
-    TypeArg,
+    /// threads into the [`ExtModule::typed_dispatch`] (call-site-typed construction). The
+    /// [`TypeArgWrap`] says how `T` is wrapped in the declared result — `T` itself, `Option<T>`, or
+    /// `Result<T, E>` — which is exactly what the checker needs to type the call and (by the
+    /// author-contract the dispatch mirrors) what shape of [`NativeOut`] tree the dispatch returns.
+    TypeArg(TypeArgWrap),
+}
+
+/// How a [`RetTy::TypeArg`] function's turbofish `T` is wrapped in the declared result type — the
+/// three shapes a call-site-typed native function may return. The checker maps the wrap onto the
+/// call's static type; the dispatch produces the matching [`NativeOut`] tree (a plain value tree,
+/// a [`NativeOut::Some`]/[`NativeOut::None`], or a [`NativeOut::Ok`]/[`NativeOut::Err`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeArgWrap {
+    /// The result is `T` itself (`json.parse::<T>(): T`, the aborting convenience door — a decode
+    /// failure is a runtime abort, so the dispatch returns the plain value tree or a `StdError`).
+    Plain,
+    /// The result is `Option<T>` — a present decode is [`NativeOut::Some`], an absent one
+    /// [`NativeOut::None`].
+    Option,
+    /// The result is `Result<T, E>` where `E` is the named error type (`json.try_parse::<T>():
+    /// Result<T, JsonError>`, the recoverable door). Success is [`NativeOut::Ok`], a decode failure
+    /// [`NativeOut::Err`] carrying the error value — never a `StdError` abort.
+    Result(SigType),
 }
 
 impl RetTy {
@@ -306,8 +336,16 @@ impl RetTy {
                 .unwrap_or_else(|| "dyn".to_string()),
             // `int` when every argument is concretely `int`, else `float`.
             RetTy::NumericPreserving => "int | float".to_string(),
-            // Named at the call site by a turbofish (`json.parse::<T>(): T`).
-            RetTy::TypeArg => "T /* call-site type: name it with ::<T> */".to_string(),
+            // Named at the call site by a turbofish, in its declared wrapper.
+            RetTy::TypeArg(TypeArgWrap::Plain) => {
+                "T /* call-site type: name it with ::<T> */".to_string()
+            }
+            RetTy::TypeArg(TypeArgWrap::Option) => {
+                "Option<T> /* call-site type: ::<T> */".to_string()
+            }
+            RetTy::TypeArg(TypeArgWrap::Result(e)) => {
+                format!("Result<T, {}> /* call-site type: ::<T> */", e.render())
+            }
         }
     }
 }
@@ -382,6 +420,21 @@ impl ExtFn {
 pub type ModuleDispatch =
     fn(func: &str, host: &mut dyn Host, args: &[NativeValue]) -> Result<NativeOut, StdError>;
 
+/// A module's **call-site-typed** dispatch (`json.parse::<T>`): like [`ModuleDispatch`], but the
+/// checker-resolved [`TypeRecipe`] for the turbofish `T` is threaded in, so the function builds a
+/// value of the caller-named type. Reached only for a function in [`ExtModule::typed_functions`]
+/// (each declaring [`RetTy::TypeArg`]); the returned [`NativeOut`] tree already carries the declared
+/// wrapper ([`NativeOut::Ok`]/[`NativeOut::Err`] for a `Result` shape, [`NativeOut::Some`]/`None`
+/// for an `Option`), so the backend materializes it with no per-function wrapping. A `Plain` door
+/// signals an unrecoverable failure with `Err(StdError)` (a runtime abort); a recoverable door
+/// never uses the `Err` channel — it returns the `Err` arm inside the `NativeOut`.
+pub type TypedDispatch = fn(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+    recipe: &TypeRecipe,
+) -> Result<NativeOut, StdError>;
+
 /// A native module: its surface name, its function signatures, and its shared dispatch.
 #[derive(Debug, Clone, Copy)]
 pub struct ExtModule {
@@ -419,6 +472,16 @@ pub struct ExtModule {
     /// table covers both [`ExtModule::functions`] and [`ExtModule::ctx_functions`]; third-party
     /// extensions get the same field for free (their literals use `..ExtModule::DEFAULTS`).
     pub docs: &'static [(&'static str, &'static str)],
+    /// The module's **call-site-typed** functions (`json.parse::<T>` / `try_parse::<T>`): signatures
+    /// whose result type is named at the call site by a turbofish. Each declares [`RetTy::TypeArg`]
+    /// (the wrapper shape) and routes to [`ExtModule::typed_dispatch`] with the checker-resolved
+    /// [`TypeRecipe`]. A **separate** table from [`ExtModule::functions`] because the turbofish form
+    /// (`f::<T>(x)`) is a distinct call surface from a plain call (`f(x)`) — the two may legitimately
+    /// share a name (`json.parse` is both a dynamic `parse(text): dyn` and a typed `parse::<T>: T`),
+    /// so this table's names live in their own space. Default empty; a name is unique within it.
+    pub typed_functions: &'static [ExtFn],
+    /// The shared dispatch for [`ExtModule::typed_functions`] (`None` when the table is empty).
+    pub typed_dispatch: Option<TypedDispatch>,
 }
 
 impl ExtModule {
@@ -435,6 +498,8 @@ impl ExtModule {
         ring: None,
         bundles: &[],
         docs: &[],
+        typed_functions: &[],
+        typed_dispatch: None,
     };
 }
 
@@ -1250,6 +1315,17 @@ impl Registry {
             .find(|f| f.name == func)
     }
 
+    /// Find a registered **call-site-typed** function's signature (`json.parse::<T>`) — the
+    /// turbofish surface, resolved out of [`ExtModule::typed_functions`]. The single predicate the
+    /// checker's `Expr::TypedModuleCall` arm and both backends' typed dispatch consult, so all three
+    /// agree on which `module.func::<T>` is call-site-typed.
+    pub fn find_typed_function(&self, module: &str, func: &str) -> Option<&'static ExtFn> {
+        self.find_module(module)?
+            .typed_functions
+            .iter()
+            .find(|f| f.name == func)
+    }
+
     /// Find a registered **higher-order** function's signature (higher-order-abi H0).
     pub fn find_ctx_function(&self, module: &str, func: &str) -> Option<&'static ExtFn> {
         self.find_module(module)?
@@ -1507,7 +1583,9 @@ impl Registry {
         use crate::NativeOut as O;
         match out {
             O::Extern(e) => self.debug_verify_extern(owner, func, &**e),
-            O::Some(inner) => self.debug_verify_out(owner, func, inner),
+            O::Some(inner) | O::Ok(inner) | O::Err(inner) => {
+                self.debug_verify_out(owner, func, inner)
+            }
             O::List(items) => {
                 for item in items {
                     self.debug_verify_out(owner, func, item);
@@ -1839,7 +1917,35 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     unit.name()
                 ));
             }
-            for f in module.functions.iter().chain(module.ctx_functions) {
+            // A declared call-site-typed surface with no dispatch to route it to would type-check
+            // `f::<T>(...)` calls that then fail as "no function" at runtime.
+            if !module.typed_functions.is_empty() && module.typed_dispatch.is_none() {
+                return Err(format!(
+                    "module `{}` (unit `{}`) declares typed_functions but no typed_dispatch",
+                    module.name,
+                    unit.name()
+                ));
+            }
+            // Every call-site-typed function must declare `RetTy::TypeArg` — the turbofish is what
+            // names its result; a `Concrete`/`SameAsArg`/… return in this table would leave the
+            // checker with no way to type the call and the recipe unthreaded.
+            for f in module.typed_functions {
+                if !matches!(f.ret, RetTy::TypeArg(_)) {
+                    return Err(format!(
+                        "call-site-typed function `{}` of module `{}` (unit `{}`) must declare a \
+                         `RetTy::TypeArg` return (its result is named by the turbofish `::<T>`)",
+                        f.name,
+                        module.name,
+                        unit.name()
+                    ));
+                }
+            }
+            for f in module
+                .functions
+                .iter()
+                .chain(module.ctx_functions)
+                .chain(module.typed_functions)
+            {
                 validate_optional_tail(f, &format!("module `{}`", module.name), unit.name())?;
             }
         }

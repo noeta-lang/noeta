@@ -360,8 +360,13 @@ enum Color { Red; Green }
     fn ast_pretty_prints_with_spans() {
         let out = ast(&prep());
         assert!(out.ast.starts_with("(program @0.."));
-        assert!(out.ast.contains("(fn handle"));
-        assert!(out.ast.contains("(struct Route"));
+        // Attributes/directives print between the head and the name
+        // (`(#[Route("/x")] fn handle [n]`, `(struct @attribute … Route [path]`),
+        // so assert on head + name/params without anchoring `(head name` adjacency.
+        assert!(out.ast.contains("fn handle [n]"));
+        assert!(out.ast.contains("#[Route"));
+        assert!(out.ast.contains("(struct "));
+        assert!(out.ast.contains("Route [path]"));
     }
 
     #[test]

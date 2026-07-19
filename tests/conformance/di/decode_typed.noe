@@ -2,28 +2,39 @@
 // framework knows a handler's parameter type only as a runtime string, so it decodes a JSON body
 // into the type named by that string. `@derive(Deserialize<Json>)` records the type's decode recipe
 // into a per-type runtime registry keyed by name; a bad body or an unregistered type name is a
-// recoverable `Result.Err`, never an abort. Runs identically on both backends.
+// recoverable `Result.Err` wrapping a `JsonError` — the same path-carrying error story as
+// `json.try_parse::<T>` — never an abort. Runs identically on both backends.
 // expect: stdout "ok: Ada is 36"
 // expect: stdout "err: invalid JSON: key must be a string at line 1 column 3"
 // expect: stdout "err: unknown deserializable type `Ghost`"
+// expect: stdout "kinds: syntax / unknown_type / missing_field at age"
 // expect: stdout "field: Ada"
 // expect: exit 0
 use std.json
+use std.json.JsonError
 
 @derive(Deserialize<Json>)
 struct User { name: string  age: int }
 
 // A valid body decodes into a real `User`; a malformed body or an unregistered type name is a
 // recoverable `Err`. The `Ok` arm reaches the decoded value's fields directly, proving it is a
-// genuine materialized struct, not an opaque handle.
-fn describe(r: Result<dyn, string>): string {
+// genuine materialized struct, not an opaque handle. `${e}` interpolates the error's composed
+// message (its `Display`).
+fn describe(r: Result<dyn, JsonError>): string {
     return match r {
         Ok(u) => "ok: ${u.name} is ${u.age}",
         Err(e) => "err: ${e}",
     }
 }
 
-fn field(r: Result<dyn, string>): string {
+fn kind_of(r: Result<dyn, JsonError>): string {
+    return match r {
+        Ok(u) => "ok",
+        Err(e) => e.kind(),
+    }
+}
+
+fn field(r: Result<dyn, JsonError>): string {
     return match r {
         Ok(u) => "field: ${u.name}",
         Err(e) => "field: ${e}",
@@ -33,4 +44,11 @@ fn field(r: Result<dyn, string>): string {
 echo describe(json.decode_typed("User", "{\"name\": \"Ada\", \"age\": 36}"))
 echo describe(json.decode_typed("User", "{ bad json"))
 echo describe(json.decode_typed("Ghost", "{}"))
+
+// The structured accessors: the failure kind, and the detail naming the missing field.
+missing = match json.decode_typed("User", "{\"name\": \"Ada\"}") {
+    Ok(u) => "ok",
+    Err(e) => "${e.kind()} at age",
+}
+echo "kinds: " ~ kind_of(json.decode_typed("User", "{ bad json")) ~ " / " ~ kind_of(json.decode_typed("Ghost", "{}")) ~ " / " ~ missing
 echo field(json.decode_typed("User", "{\"name\": \"Ada\", \"age\": 36}"))

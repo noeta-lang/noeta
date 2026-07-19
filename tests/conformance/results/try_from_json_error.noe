@@ -1,0 +1,37 @@
+// The motivating `?`-conversion case (error-ergonomics): `json.try_parse::<T>` yields
+// `Result<T, JsonError>`; a pipeline returning its own `AppError` converts the extern
+// `JsonError` at the `?` boundary through `impl From<JsonError>` declared on `AppError` —
+// the conversion lives on the TARGET (the user type), since the extern source cannot carry a
+// user impl (orphan rule). Runs identically on both backends.
+// expect: stdout "Ok(Ada)"
+// expect: stdout "decode failed with kind syntax"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct User { name: string  age: int }
+
+struct AppError {
+    kind: string
+
+    impl From<JsonError> {
+        fn from(e: JsonError): AppError {
+            return AppError { kind: e.kind() }
+        }
+    }
+
+    impl Error {
+        fn message(): string { return "decode failed with kind ${self.kind}" }
+    }
+}
+
+fn load(text: string): Result<string, AppError> {
+    u = json.try_parse::<User>(text)?
+    return Ok(u.name)
+}
+
+echo load("{\"name\": \"Ada\", \"age\": 36}")
+echo match load("{ nope") {
+    Ok(n) => "unreached",
+    Err(e) => e.message(),
+}

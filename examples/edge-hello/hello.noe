@@ -1,0 +1,39 @@
+// edge-hello — a minimal HTTP handler that deploys to the edge unchanged.
+//
+// The same program runs three ways from one source:
+//   noeta serve hello.noe --port 8080     # locally, on a real socket
+//   noeta build --serve hello.noe         # → hello.serve.wasm, a wasi:http component
+//   spin up  /  spin deploy               # under Fermyon Spin (see spin.toml + deploy.sh)
+//
+// A handler is just a `(Request) -> Response`. Routing is ordinary code that dispatches on
+// `req.path()`; there is no framework or runtime hook. The capabilities used below — request
+// ids from real entropy, the wall clock — are exactly the ones a `wasi:http` handler world
+// provides at the edge (see docs/Edge-Deployment.md for the full capability table).
+
+use std.http.server
+use std.http.{Request, Response}
+use std.id
+use std.datetime
+
+fn handle(req: Request): Response {
+    if req.path() == "/" {
+        return server.response(200, "hello from the edge\n")
+    }
+    if req.path() == "/health" {
+        return server.response(200, "ok")
+    }
+    // Echo the request shape back — method, path, and body — as a tiny debugging aid.
+    if req.path() == "/echo" {
+        return server.response(200, "${req.method()} ${req.path()}\n${req.body()}")
+    }
+    // Mint a request id from real entropy and stamp it with the wall clock: both are
+    // capabilities the edge handler world genuinely provides.
+    if req.path() == "/whoami" {
+        request_id = id.uuid_v7()
+        at = datetime.now().unix_ms()
+        return server.response(200, "request ${request_id} at ${at}\n")
+    }
+    return server.response(404, "not found\n")
+}
+
+server.serve(8080, handle)

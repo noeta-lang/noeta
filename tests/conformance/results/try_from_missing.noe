@@ -1,0 +1,17 @@
+// A `?` whose `Err` payload type differs from the enclosing function's declared error type and
+// has NO declared conversion is E0057: `?` never smuggles a differently-typed error out of a
+// function, and the only implicit conversion position in the language is a `?` backed by an
+// explicit `impl From<Source>` on the target.
+// expect: error E0057 at 13:9
+// expect: exit 1
+struct LowError { code: int }
+struct HighError { detail: string }
+
+fn low(): Result<int, LowError> { return Err(LowError { code: 7 }) }
+
+fn high(): Result<int, HighError> {
+    n = low()?
+    return Ok(n + 1)
+}
+
+echo high()

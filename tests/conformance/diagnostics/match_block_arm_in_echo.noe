@@ -1,0 +1,9 @@
+// The value-position rule (E0055) is not special to a binding RHS: a `match` whose value is
+// consumed anywhere — here as the operand of `echo` — rejects a block-bodied arm just the same,
+// since the block would contribute `unit` where the printed value is expected.
+// expect: error E0055 at 7:5
+// expect: exit 1
+echo match 1 {
+    1 => { x = "hi"; x },
+    _ => "bye",
+}

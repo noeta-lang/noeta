@@ -13,6 +13,106 @@ repository / unit-of-work, and a typed `@sql` block tier.
   (stage writes during a request, flush them as one batch); `@sql { … }` — a typed SQL statement with
   `${…}` bound-param holes.
 
+## Migrations — evolve the schema over time
+
+`para/db` ships a migration engine, surfaced as the `noeta migrate` CLI verb and the programmatic
+`conn.migrate(dir)` method. There is one engine (in `noeta-para-db`); the CLI and the Noeta method are
+thin callers, so both drivers migrate through the same code.
+
+**Migrations are plain SQL files** in a project `migrations/` directory, one statement or many per
+file, applied in the order their filenames sort. `noeta migrate new <name>` scaffolds the next file
+with a **UTC-timestamp prefix** — `YYYYMMDDHHMMSS_<name>.sql`. Timestamps are the default because they
+never collide when two branches each add a migration (a sequential `0007_…` would); the engine sorts
+lexicographically over the whole filename, so any monotonic scheme (including zero-padded sequence
+numbers) also works. A migration body is run **verbatim in the target database's native SQL** — there
+is no cross-dialect translation, so write portable SQL (a per-dialect `migrations/postgres/` overlay
+is a planned option, not in v1).
+
+**A tracking table `_noeta_migrations`** records, for each applied migration, its `filename`, a
+**sha256 `checksum`** of the file contents, and `applied_at`. Two integrity checks run before anything
+is applied, both hard errors that name the file:
+
+- **Checksum drift** — an already-applied migration's file was edited. History is immutable; revert
+  the edit or make the change in a new migration.
+- **Deleted applied migration** — a file recorded as applied is gone. Restore it, or `--reset` in
+  development.
+
+**Transactionality.** Each migration runs inside its own transaction — `BEGIN`, the file body, the
+tracking-row insert, `COMMIT`. The first failure rolls that migration back and stops, reporting the
+exact file. Postgres has fully transactional DDL; SQLite is transactional for the ordinary DDL
+migrations use — so a migration is all-or-nothing, and a failed run leaves every prior migration
+applied. (Do not put `BEGIN`/`COMMIT` in a migration file — the runner owns the transaction.)
+
+**Forward-only.** There are deliberately no down/rollback files: a down migration is routinely wrong
+against real production data. Development uses `--reset` (drop the schema and re-apply from zero)
+instead. `--reset` is destructive and driver-specific: on SQLite it drops every user table/view/
+trigger; on PostgreSQL it runs `DROP SCHEMA public CASCADE; CREATE SCHEMA public` (the `public` schema
+only).
+
+### CLI
+
+```
+noeta migrate                 # apply every pending migration, printing each applied file
+noeta migrate --status        # table of applied / pending migrations
+noeta migrate --dry-run       # list what would be applied, without touching the database
+noeta migrate new <name>      # scaffold migrations/<timestamp>_<name>.sql
+noeta migrate --reset --yes   # DESTRUCTIVE: drop the schema and re-apply from zero
+```
+
+The connection string is resolved, highest priority first, from the `--db <dsn>` flag, the
+`DATABASE_URL` environment variable, then a `[db]` table in `noeta.toml`:
+
+```toml
+[db]
+url = "sqlite:app.db"        # or postgres://…  — the same dsn schemes db.connect accepts
+migrations = "migrations"    # optional; the directory (default "migrations"), overridable with --dir
+```
+
+`--reset` refuses to run without either `--yes` or an interactive `yes` typed at the prompt.
+
+### At boot (self-migrating apps)
+
+An aether server (or any program) can migrate itself at startup off the same engine:
+
+```noe
+conn = db.connect(env.get("DATABASE_URL") ?? "sqlite:app.db")
+applied = conn.migrate("migrations")   // returns the count applied; a no-op when up to date
+```
+
+`conn.migrate(dir)` applies every pending migration under `dir` and returns how many it applied,
+with the same tracking table and integrity checks as the CLI.
+
+## TLS (PostgreSQL)
+
+The Postgres driver uses a pure-Rust rustls connector (the `ring` crypto provider — no OpenSSL / C
+build — and the bundled Mozilla root store, so no system trust store is needed). The connection URL's
+`sslmode` parameter selects the behavior, mirroring libpq. Two independent security properties vary:
+whether the connection **must** be encrypted, and whether the server's certificate is **authenticated**
+(verified against the trust store).
+
+| `sslmode` | Encrypted? | Certificate verified? | Notes |
+| --- | --- | --- | --- |
+| `disable` | ❌ | — | Always plaintext. Use only over an already-trusted local socket. |
+| `prefer` *(default)* | when offered | ✅ (when TLS negotiated) | Try TLS and verify against the bundled roots, else fall back to plaintext. The safe default. |
+| `require` | ✅ | ❌ | **Encrypted but NOT authenticated** — libpq parity. See the warning below. |
+| `verify-ca` | ✅ | ✅ | Mandatory TLS, certificate verified against the bundled roots. |
+| `verify-full` | ✅ | ✅ (incl. hostname) | Mandatory TLS, full certificate verification. The strongest mode. |
+
+```noe
+conn = db.connect("postgres://user:pass@host:5432/db?sslmode=require")
+```
+
+> **`sslmode=require` is encrypted, not authenticated.** It negotiates TLS (so a passive
+> eavesdropper on the wire sees only ciphertext) but does **not** verify the server's certificate —
+> so it does **not** defend against an active man-in-the-middle who substitutes their own
+> certificate. This matches libpq's `sslmode=require`, and is deliberately distinct from `verify-ca`
+> / `verify-full`. Reach for it only when the network path to the server is already trusted (e.g. a
+> private link) but the server presents a self-signed or otherwise unverifiable certificate. When the
+> server has a real CA-issued certificate, prefer `verify-full`; the default `prefer` already verifies
+> whenever TLS is negotiated.
+
+An unrecognized `sslmode` value is a clear error before any connection is attempted.
+
 ## Reactive queries — keep the UI in sync with the database
 
 `para.db` integrates with `std.reactive`, so a query can be a **reactive value**: when the data

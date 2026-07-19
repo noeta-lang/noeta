@@ -1,0 +1,33 @@
+// Track A.6b-residual — `.await` in a `match` arm body (a conditionally-evaluated value position). The
+// desugar dispatches on the scrutinee, captures the selected arm's pattern bindings, and runs that
+// arm's await in statement position (a poll-state), so a binding (`v`) survives across the suspend and
+// a local live across the whole match (`base`) is preserved. Only the taken arm's await runs.
+// expect: stdout "base 100"
+// expect: stdout "dbl 42"
+// expect: stdout "r1 142"
+// expect: stdout "base 100"
+// expect: stdout "r2 99"
+// expect: exit 0
+use std.task.{sleep}
+async fn dbl(n: int): int {
+    sleep(1).await
+    echo "dbl ${n * 2}"
+    return n * 2
+}
+async fn pick(opt: ?int): int {
+    base = 100
+    echo "base ${base}"
+    r = match opt {
+        some(v) => base + dbl(v).await,
+        none => 99,
+    }
+    return r
+}
+async fn run(): int {
+    a = pick(some(21)).await
+    echo "r1 ${a}"
+    b = pick(none).await
+    echo "r2 ${b}"
+    return a + b
+}
+z = run().await

@@ -1,0 +1,3 @@
+# Build outputs from `noeta build --serve` / `--wasm` and Spin's local state.
+*.wasm
+.spin/

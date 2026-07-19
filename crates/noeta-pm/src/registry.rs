@@ -596,6 +596,53 @@ struct ScopeResponse {
     public_key: Option<String>,
 }
 
+/// One public report as served by the registry's triage endpoints (advisory-intake arc, tier 4). A
+/// report is raw intake — it becomes an advisory only when an operator or the scope owner promotes it
+/// (`noeta advisory promote`), prefilling the advisory from these fields.
+#[cfg(feature = "registry-http")]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Report {
+    /// The opaque report id.
+    pub id: String,
+    /// The package the report is against, `company/package`.
+    pub package: String,
+    /// The affected version range the reporter believes, if any.
+    #[serde(default)]
+    pub ranges: Option<String>,
+    /// The one-line summary.
+    pub summary: String,
+    /// The reporter's longer description, if any.
+    #[serde(default)]
+    pub details: Option<String>,
+    /// A link the reporter provided, if any.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The reporter's self-identification, if any.
+    #[serde(default)]
+    pub reporter: Option<String>,
+    /// `pending` | `promoted` | `dismissed`.
+    pub status: String,
+    /// The advisory id this report was promoted into, once promoted.
+    #[serde(default)]
+    pub advisory_id: Option<String>,
+    /// When the report was filed (ISO-8601).
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+#[cfg(feature = "registry-http")]
+#[derive(serde::Deserialize)]
+struct ReportsResponse {
+    #[serde(default)]
+    reports: Vec<Report>,
+}
+
+#[cfg(feature = "registry-http")]
+#[derive(serde::Deserialize)]
+struct ReportResponse {
+    report: Report,
+}
+
 #[cfg(feature = "registry-http")]
 impl HttpIndex {
     /// A client for the registry at `base` (e.g. `https://registry.noeta.dev`). The publish token,
@@ -614,6 +661,14 @@ impl HttpIndex {
             token: std::env::var("NOETA_REGISTRY_TOKEN").ok(),
             client,
         })
+    }
+
+    /// Override the bearer token this client presents (advisory-intake residual a). The default token is
+    /// the scope publish token (`NOETA_REGISTRY_TOKEN`); the operator promote/list path presents an
+    /// admin token instead. `None` clears it (an unauthenticated client).
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
     }
 
     fn url_for(&self, name: &str) -> String {
@@ -714,6 +769,59 @@ impl HttpIndex {
             .unwrap_or_else(|| status.to_string());
         Err(PmError::Auth(format!(
             "registry rejected the policy for `{scope}`: {detail}"
+        )))
+    }
+
+    /// File a **public report** against a package (advisory-intake arc, tier 4): `POST /v1/reports`.
+    /// Unauthenticated (the registry rate-limits by IP); a report is never an advisory — it is queued
+    /// for triage and only becomes an advisory when an operator or the scope owner promotes it. Returns
+    /// the opaque report id the registry assigned.
+    pub fn file_report(
+        &self,
+        package: &str,
+        summary: &str,
+        ranges: Option<&str>,
+        details: Option<&str>,
+        url: Option<&str>,
+        reporter: Option<&str>,
+    ) -> Result<String, PmError> {
+        let mut body = serde_json::json!({ "package": package, "summary": summary });
+        if let Some(r) = ranges {
+            body["ranges"] = serde_json::json!(r);
+        }
+        if let Some(d) = details {
+            body["details"] = serde_json::json!(d);
+        }
+        if let Some(u) = url {
+            body["url"] = serde_json::json!(u);
+        }
+        if let Some(r) = reporter {
+            body["reporter"] = serde_json::json!(r);
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/reports", self.base))
+            .json(&body)
+            .send()
+            .map_err(|err| {
+                PmError::Network(format!("filing a report for `{package}` failed: {err}"))
+            })?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            let id = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("id").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            return Ok(id);
+        }
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(PmError::Network(format!(
+            "registry rejected the report for `{package}`: {detail}"
         )))
     }
 
@@ -881,23 +989,33 @@ pub struct VerifiedLog {
     pub public_key: String,
 }
 
+/// The coordinates identifying one logged release for transparency-log verification
+/// (namespace-protection #1): identity, version, and the git coordinates the registry resolved it
+/// to, plus the optional license claim to cross-check (`None` skips the license check — e.g.
+/// lockfile-driven verification, where the lock carries no license).
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+#[derive(Debug)]
+pub struct ReleaseCoords<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub url: &'a str,
+    pub tag: &'a str,
+    pub sha: &'a str,
+    pub license: Option<&'a str>,
+}
+
 #[cfg(all(feature = "registry-http", feature = "provenance"))]
 impl HttpIndex {
     /// Verify a resolved release is **included** in the transparency log at a **signed** checkpoint
     /// (namespace-protection #1). `pinned_key` is the log public key the caller already trusts; `None`
-    /// adopts the served key (trust-on-first-use). The release is identified by its coordinates
-    /// (`name`/`version`/`url`/`tag`/`sha`), which must match the logged record. Returns the verified
+    /// adopts the served key (trust-on-first-use). The release is identified by its [`ReleaseCoords`],
+    /// which must match the logged record. Returns the verified
     /// checkpoint to pin. This proves, without trusting the registry, that the release we're about to
     /// use is publicly logged under a key the log operator controls — a compromised registry can't
     /// quietly serve an unlogged forgery.
     pub fn verify_release_logged(
         &self,
-        name: &str,
-        version: &str,
-        url: &str,
-        tag: &str,
-        sha: &str,
-        license: Option<&str>,
+        coords: &ReleaseCoords<'_>,
         pinned_key: Option<&str>,
     ) -> Result<VerifiedLog, PmError> {
         use crate::transparency;
@@ -915,7 +1033,7 @@ impl HttpIndex {
                     .to_string(),
             ));
         }
-        self.verify_inclusion_at(name, version, url, tag, sha, license, &cp)?;
+        self.verify_inclusion_at(coords, &cp)?;
         Ok(VerifiedLog {
             tree_size: cp.tree_size,
             root_hex: cp.root_hash,
@@ -930,15 +1048,18 @@ impl HttpIndex {
     /// then checks every release against it).
     pub fn verify_inclusion_at(
         &self,
-        name: &str,
-        version: &str,
-        url: &str,
-        tag: &str,
-        sha: &str,
-        license: Option<&str>,
+        coords: &ReleaseCoords<'_>,
         cp: &LogCheckpoint,
     ) -> Result<(), PmError> {
         use crate::transparency;
+        let &ReleaseCoords {
+            name,
+            version,
+            url,
+            tag,
+            sha,
+            license,
+        } = coords;
         let incl = self.log_inclusion(name, version)?.ok_or_else(|| {
             PmError::Trust(format!("`{name}`@{version} is not in the transparency log"))
         })?;
@@ -1263,6 +1384,212 @@ impl HttpIndex {
         }
         Ok(Some((verified, unlogged)))
     }
+
+    /// Publish a **publisher-tier** advisory for a package in a scope the caller owns (advisory-intake
+    /// arc, tier 2): `POST /v1/scopes/{scope}/advisories`, owner-authenticated with the scope's publish
+    /// token (`NOETA_REGISTRY_TOKEN`). `advisory` supplies the content (its `tier` should be
+    /// [`crate::advisory::AdvisoryTier::Publisher`]); `bundle` is the keyless Sigstore attestation over
+    /// the advisory's canonical bytes, stored verbatim and verified offline by consumers. Returns the
+    /// registry's status message.
+    pub fn publish_scope_advisory(
+        &self,
+        scope: &str,
+        advisory: &crate::advisory::Advisory,
+        bundle: &str,
+    ) -> Result<String, PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "publishing a scope advisory needs a token — set NOETA_REGISTRY_TOKEN to the scope's \
+                 publish token"
+                    .to_string(),
+            )
+        })?;
+        let mut body = serde_json::json!({
+            "id": advisory.id,
+            "package": advisory.package,
+            "ranges": advisory.ranges,
+            "severity": advisory.severity,
+            "summary": advisory.summary,
+            "details": advisory.details,
+            "url": advisory.url,
+            "withdrawn": advisory.withdrawn,
+            "bundle": bundle,
+        });
+        if let Some(patched) = &advisory.patched {
+            body["patched"] = serde_json::json!(patched);
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/scopes/{scope}/advisories", self.base))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .map_err(|err| {
+                PmError::Network(format!(
+                    "publishing an advisory for scope `{scope}` failed: {err}"
+                ))
+            })?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("advisory `{}` published", advisory.id));
+            return Ok(msg);
+        }
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(PmError::Auth(format!(
+            "registry rejected the advisory for `{scope}`: {detail}"
+        )))
+    }
+
+    /// List reports in the triage queue (advisory-intake residual a). With `scope`, the scope owner's own
+    /// queue (`GET /v1/scopes/{scope}/reports`, scope-token authenticated); without, the operator queue
+    /// (`GET /v1/reports`, admin-token authenticated). `status` filters (`pending` for what's promotable).
+    /// The bearer token this client carries decides which identity is presented.
+    pub fn list_reports(
+        &self,
+        scope: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<Report>, PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "listing reports needs a token — set NOETA_REGISTRY_TOKEN (scope owner) or \
+                 NOETA_REGISTRY_ADMIN_TOKEN (operator)"
+                    .to_string(),
+            )
+        })?;
+        let mut url = match scope {
+            Some(s) => format!("{}/v1/scopes/{s}/reports", self.base),
+            None => format!("{}/v1/reports", self.base),
+        };
+        if let Some(s) = status {
+            url.push_str(&format!("?status={s}"));
+        }
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|err| PmError::Network(format!("listing reports failed: {err}")))?;
+        let status_code = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status_code.is_success() {
+            let parsed: ReportsResponse = serde_json::from_str(&text)
+                .map_err(|err| PmError::Network(format!("malformed reports response: {err}")))?;
+            return Ok(parsed.reports);
+        }
+        Err(PmError::Auth(format!(
+            "registry rejected the report listing: {}",
+            error_detail(&text, status_code)
+        )))
+    }
+
+    /// Fetch one report by id (advisory-intake residual a): `GET /v1/reports/{id}`, authorized as the
+    /// operator or the report package's scope owner (whichever token this client carries). Used by
+    /// `noeta advisory promote` to prefill the advisory from the report. `Ok(None)` on 404.
+    pub fn get_report(&self, id: &str) -> Result<Option<Report>, PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "fetching a report needs a token — set NOETA_REGISTRY_TOKEN (scope owner) or \
+                 NOETA_REGISTRY_ADMIN_TOKEN (operator)"
+                    .to_string(),
+            )
+        })?;
+        let resp = self
+            .client
+            .get(format!("{}/v1/reports/{id}", self.base))
+            .bearer_auth(token)
+            .send()
+            .map_err(|err| PmError::Network(format!("fetching report `{id}` failed: {err}")))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status_code = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status_code.is_success() {
+            let parsed: ReportResponse = serde_json::from_str(&text)
+                .map_err(|err| PmError::Network(format!("malformed report response: {err}")))?;
+            return Ok(Some(parsed.report));
+        }
+        Err(PmError::Auth(format!(
+            "registry rejected fetching report `{id}`: {}",
+            error_detail(&text, status_code)
+        )))
+    }
+
+    /// Promote a report into an advisory (advisory-intake residual a): `POST /v1/reports/{id}/promote`.
+    /// The bearer token this client carries decides the tier server-side — the admin token yields an
+    /// `operator` advisory (`bundle` is `None`); a scope publish token yields a `publisher` advisory and
+    /// MUST carry a keyless `bundle` over the advisory's canonical bytes. Returns the registry's status
+    /// message. `advisory` supplies the triaged fields (id, ranges, severity, summary, …).
+    pub fn promote_report(
+        &self,
+        report_id: &str,
+        advisory: &crate::advisory::Advisory,
+        bundle: Option<&str>,
+    ) -> Result<String, PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "promoting a report needs a token — set NOETA_REGISTRY_TOKEN (scope owner) or \
+                 NOETA_REGISTRY_ADMIN_TOKEN (operator)"
+                    .to_string(),
+            )
+        })?;
+        let mut body = serde_json::json!({
+            "id": advisory.id,
+            "package": advisory.package,
+            "ranges": advisory.ranges,
+            "severity": advisory.severity,
+            "summary": advisory.summary,
+            "details": advisory.details,
+            "url": advisory.url,
+            "withdrawn": advisory.withdrawn,
+        });
+        if let Some(patched) = &advisory.patched {
+            body["patched"] = serde_json::json!(patched);
+        }
+        if let Some(bundle) = bundle {
+            body["bundle"] = serde_json::json!(bundle);
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/reports/{report_id}/promote", self.base))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .map_err(|err| {
+                PmError::Network(format!("promoting report `{report_id}` failed: {err}"))
+            })?;
+        let status_code = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status_code.is_success() {
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("report `{report_id}` promoted"));
+            return Ok(msg);
+        }
+        Err(PmError::Auth(format!(
+            "registry rejected promoting report `{report_id}`: {}",
+            error_detail(&text, status_code)
+        )))
+    }
+}
+
+/// Pull the `error` string out of a registry JSON error body, falling back to the HTTP status.
+#[cfg(feature = "registry-http")]
+fn error_detail(text: &str, status: reqwest::StatusCode) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| status.to_string())
 }
 
 /// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub
@@ -2284,26 +2611,48 @@ mod http_tests {
 
         // First use (no pinned key) adopts the served key and verifies the whole chain.
         let verified = index
-            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", Some("MIT"), None)
+            .verify_release_logged(
+                &ReleaseCoords {
+                    name: "acme/imgfx",
+                    version: "1.0.0",
+                    url: "u",
+                    tag: "t",
+                    sha: "abc",
+                    license: Some("MIT"),
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(verified.tree_size, 1);
         assert_eq!(verified.public_key, pub_hex);
         assert_eq!(verified.root_hex, root_hex);
         // A caller that doesn't know the license (lockfile-driven verification) skips that check.
         index
-            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", None, None)
+            .verify_release_logged(
+                &ReleaseCoords {
+                    name: "acme/imgfx",
+                    version: "1.0.0",
+                    url: "u",
+                    tag: "t",
+                    sha: "abc",
+                    license: None,
+                },
+                None,
+            )
             .unwrap();
 
         // The record binds the license: an index serving a *different* license than it logged is
         // caught as equivocation.
         let err = index
             .verify_release_logged(
-                "acme/imgfx",
-                "1.0.0",
-                "u",
-                "t",
-                "abc",
-                Some("GPL-3.0-only"),
+                &ReleaseCoords {
+                    name: "acme/imgfx",
+                    version: "1.0.0",
+                    url: "u",
+                    tag: "t",
+                    sha: "abc",
+                    license: Some("GPL-3.0-only"),
+                },
                 None,
             )
             .unwrap_err();
@@ -2312,12 +2661,14 @@ mod http_tests {
         // A wrong pinned log key is rejected — the checkpoint signature won't verify against it.
         let err = index
             .verify_release_logged(
-                "acme/imgfx",
-                "1.0.0",
-                "u",
-                "t",
-                "abc",
-                Some("MIT"),
+                &ReleaseCoords {
+                    name: "acme/imgfx",
+                    version: "1.0.0",
+                    url: "u",
+                    tag: "t",
+                    sha: "abc",
+                    license: Some("MIT"),
+                },
                 Some(&"00".repeat(32)),
             )
             .unwrap_err();
@@ -2647,7 +2998,17 @@ mod wire_fixture_tests {
         });
         let index = HttpIndex::new(base).unwrap();
         let verified = index
-            .verify_release_logged(NAME, "1.2.0", URL, "v1.2.0", SHA_120, Some(LICENSE), None)
+            .verify_release_logged(
+                &ReleaseCoords {
+                    name: NAME,
+                    version: "1.2.0",
+                    url: URL,
+                    tag: "v1.2.0",
+                    sha: SHA_120,
+                    license: Some(LICENSE),
+                },
+                None,
+            )
             .unwrap();
         let cp = fixture_value("log-checkpoint-response.json");
         assert_eq!(verified.tree_size, cp["tree_size"].as_u64().unwrap());
@@ -2662,12 +3023,14 @@ mod wire_fixture_tests {
         // The record binds the license: claiming a different one is caught as equivocation.
         let err = index
             .verify_release_logged(
-                NAME,
-                "1.2.0",
-                URL,
-                "v1.2.0",
-                SHA_120,
-                Some("GPL-3.0-only"),
+                &ReleaseCoords {
+                    name: NAME,
+                    version: "1.2.0",
+                    url: URL,
+                    tag: "v1.2.0",
+                    sha: SHA_120,
+                    license: Some("GPL-3.0-only"),
+                },
                 None,
             )
             .unwrap_err();
@@ -2739,6 +3102,9 @@ mod wire_fixture_tests {
         assert!(!a.withdrawn);
         assert_eq!(a.seq, 0);
         assert_eq!(a.log_index, Some(0));
+        // The intake tier is carried and defaults to operator (advisory-intake arc); the fixture's
+        // signature verifying above already proves the tier is bound into the canonical bytes.
+        assert_eq!(a.tier, crate::advisory::AdvisoryTier::Operator);
         // And it matches the versions the fixture yanked/patched story says it should.
         assert!(a.affects(&Version::new(1, 0, 0)));
         assert!(!a.affects(&Version::new(1, 2, 0)));

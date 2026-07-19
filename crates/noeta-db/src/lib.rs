@@ -279,9 +279,11 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
 #[salsa::tracked(returns(ref))]
 pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
-    from_check_output(noeta_check::check_all_with_editions(
+    from_check_output(noeta_check::check_all_cancellable(
         &parsed.0.program,
         source_edition_map(db, src),
+        false,
+        &|| db.unwind_if_revision_cancelled(),
     ))
 }
 
@@ -293,13 +295,11 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
 #[salsa::tracked(returns(ref))]
 pub fn checked_ide(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
-    from_check_output(noeta_check::check_all_with(
+    from_check_output(noeta_check::check_all_cancellable(
         &parsed.0.program,
-        noeta_check::CheckOptions {
-            record_expr_types: true,
-            editions: source_edition_map(db, src),
-            ..noeta_check::CheckOptions::default()
-        },
+        source_edition_map(db, src),
+        true,
+        &|| db.unwind_if_revision_cancelled(),
     ))
 }
 
@@ -469,6 +469,41 @@ pub fn workspace_with_deps(
         }
     }
     Workspace::new(db, members, dep_inputs)
+}
+
+/// Reclaim the resident content of a [`SourceProgram`] whose file was **deleted** from a workspace
+/// (audit F9 residual a). salsa 0.27 has **no public API to delete an input**: inputs live in an
+/// append-only table (`salsa::input`), and the only teardown paths (`evict_lru`, revision GC) act on
+/// LRU-configured *tracked functions*, never on inputs or on non-LRU memos. So a source that vanishes
+/// cannot have its input slot freed. What *can* be reclaimed is everything unbounded the slot anchors:
+///
+/// 1. the input's own **text** (the largest per-file allocation) — cleared to the empty string;
+/// 2. every **downstream memo** keyed on this source — `tokens_in`/`ast_in` and, when the source was
+///    ever linked as an entry, `linked_from`/`linked_checked*_from`/`linked_bytecode_from` — which
+///    salsa would otherwise keep resident at full size (a stale-but-live AST/`Module`/type-index)
+///    until an LRU eviction that never comes. Clearing the text *invalidates* those memos but does
+///    not shrink them; reading each leaf query once here **recomputes it over the now-empty source**,
+///    so salsa overwrites the fat memo in place with an empty-program equivalent.
+///
+/// The fixed-size input struct itself (its `Id` and now-empty fields) stays resident — a bounded,
+/// per-deleted-file remainder salsa 0.27 cannot free. The [`WorkspaceCache`](crate) reuses these
+/// tombstones for the next genuinely-new file (see `noeta-ide`'s `workspace::sync`), so the input
+/// table is bounded by the *concurrent* file high-water mark, not the total ever seen.
+///
+/// `ws` is the source's (former) workspace — the recompute keys the workspace-parametric leaves on
+/// it. Idempotent: releasing an already-emptied source is a cheap re-confirmation.
+pub fn release_source(db: &mut LangDatabase, ws: Workspace, src: SourceProgram) {
+    use salsa::Setter as _;
+    // 1. Free the source text and name (the unbounded per-file allocations the input holds).
+    src.set_name(db).to(String::new());
+    src.set_text(db).to(String::new());
+    // 2. Overwrite the fat downstream memos with empty-program equivalents by recomputing each leaf
+    //    over the emptied source. The workspace-parametric family is what an editor session populates
+    //    (every open document links through `tokens_in`/`ast_in` and, as an entry, the `linked_*`
+    //    queries); reading the two leaves below transitively recomputes all of them, tiny.
+    let _ = ast_in(db, ws, src); // recomputes tokens_in + ast_in
+    let _ = linked_checked_ide_from(db, ws, src); // recomputes linked_from + the ide check as entry
+    let _ = linked_bytecode_from(db, ws, src); // recomputes linked_checked_from + linked_from + Module
 }
 
 /// Flatten a rename map to the `[local0, global0, …]` pairs a [`DepModule`] stores.
@@ -658,9 +693,11 @@ pub fn linked_checked_from(
     match &linked_from(db, ws, entry).0 {
         // The shared helper maps every checker output field — both the LSP track's
         // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
-        Ok(program) => from_check_output(noeta_check::check_all_with_editions(
+        Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
             workspace_editions(db, ws),
+            false,
+            &|| db.unwind_if_revision_cancelled(),
         )),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
@@ -688,13 +725,11 @@ pub fn linked_checked_ide_from(
     entry: SourceProgram,
 ) -> Checked {
     match &linked_from(db, ws, entry).0 {
-        Ok(program) => from_check_output(noeta_check::check_all_with(
+        Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
-            noeta_check::CheckOptions {
-                record_expr_types: true,
-                editions: workspace_editions(db, ws),
-                ..noeta_check::CheckOptions::default()
-            },
+            workspace_editions(db, ws),
+            true,
+            &|| db.unwind_if_revision_cancelled(),
         )),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
@@ -788,6 +823,63 @@ mod tests {
     }
 
     #[test]
+    fn a_long_check_is_cancelled_mid_module_by_a_concurrent_write() {
+        // audit F9 residual (b): a whole-program check is ONE salsa query, so before the
+        // per-declaration cancellation poll a pending input write could not take effect until the
+        // entire module had been checked. With the poll, a superseded check unwinds promptly.
+        seed_std();
+        let mut db = LangDatabase::default();
+        // A large module whose *check* dominates: many top-level declarations, each a real
+        // check/infer unit, so `check_all` runs long enough for a concurrent write to land mid-run.
+        let mut text = String::new();
+        for i in 0..20_000 {
+            text.push_str(&format!(
+                "fn f{i}(x: int): int {{\n  y = x + {i}\n  return y * 2\n}}\n"
+            ));
+        }
+        let source = Source::new(SourceId::FIRST, "big.noe", &text);
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+
+        // Warm lex+parse so the reader's `checked` skips straight to `check_all`: the ONLY long,
+        // cancellable work left is the checker's per-declaration loop, so an observed cancellation
+        // is attributable to the poll under test (not to a lex/parse query boundary).
+        let _ = ast(&db, src);
+
+        let reader_db = db.clone();
+        let handle = std::thread::spawn(move || {
+            // The long check; `catch` absorbs the cancellation unwind into an `Err`.
+            salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                checked(&reader_db, src).diagnostics.len()
+            }))
+        });
+
+        // Let the reader get into the check, then write — this flags cancellation for the reader's
+        // in-flight query and blocks until it unwinds.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let start = std::time::Instant::now();
+        {
+            use salsa::Setter as _;
+            src.set_text(&mut db).to("echo 1;\n".to_string());
+        }
+        let write_elapsed = start.elapsed();
+
+        let outcome = handle.join().expect("reader thread panicked");
+        assert!(
+            outcome.is_err(),
+            "the in-flight check must unwind with salsa::Cancelled, got {outcome:?}"
+        );
+        // Prompt: the write returned once the reader aborted at its next per-declaration poll, not
+        // after grinding through all 20k declarations.
+        assert!(
+            write_elapsed < std::time::Duration::from_secs(5),
+            "cancellation must be prompt, write blocked for {write_elapsed:?}"
+        );
+        // The session is not corrupted by the unwind: the next query recomputes cleanly over the
+        // new (now-tiny) text.
+        assert!(checked(&db, src).diagnostics.is_empty());
+    }
+
+    #[test]
     fn pipeline_flows_through_queries() {
         let (db, src) = db_and_src("echo 1 + 2;\n");
         assert!(tokens(&db, src).0.diagnostics.is_empty());
@@ -857,6 +949,10 @@ mod tests {
 
     #[test]
     fn module_graph_links_checks_and_compiles_a_used_module() {
+        // Self-seed the process-default registry: these module-graph tests run the checker, which
+        // resolves against the registry — depending on a sibling test to seed it first is a test-
+        // isolation hazard (order is not guaranteed across runs).
+        seed_std();
         let db = LangDatabase::default();
         let entry = Source::new(
             SourceId(0),
@@ -902,6 +998,7 @@ mod tests {
     fn module_graph_reproduces_the_standalone_loader() {
         // The salsa link must produce the byte-identical merge of the text-based loader — the tie
         // that keeps the query layer behavior-preserving (and the differential oracle valid).
+        seed_std();
         let entry_text = "namespace App.Main;\nuse App.A.Foo;\nf = Foo { x: 1 };\necho f.x;\n";
         let a_text = "namespace App.A;\npub class Foo { x: int }\n";
         let raw = noeta_loader::RawModule {
@@ -941,6 +1038,7 @@ mod tests {
         // the other's parse. (Pointer identity of the memoized `ast` is the same signal the
         // `queries_are_memoized_stable` test uses.)
         use salsa::Setter as _;
+        seed_std();
         let mut db = LangDatabase::default();
         let entry = Source::new(
             SourceId(0),
@@ -986,6 +1084,7 @@ mod tests {
         // an entry — memoized per (ws, entry) — while the per-source workspace-aware parse
         // (`ast_in`) memoizes ONCE per file across both links. This is the sharing that lets the
         // editor keep one workspace per directory instead of one per open document.
+        seed_std();
         let db = LangDatabase::default();
         let main = Source::new(
             SourceId(0),
@@ -1042,6 +1141,7 @@ mod tests {
     fn workspace_with_deps_resolves_cross_package_use() {
         // package-manager P2.1c: a dependency package keyed `hi` (its own root segment is `greet`)
         // links into the salsa graph; the entry's `use hi.hello.greeting` resolves after re-root.
+        seed_std();
         let db = LangDatabase::default();
         let entry = Source::new(
             SourceId(0),

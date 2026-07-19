@@ -156,6 +156,13 @@ impl<'m> Vm<'m> {
         // with ops that carry their own `base` field). `chunk` borrows `*module` (an `&'m Module`
         // copied out of `self`), so it is independent of the `&mut self` the arms use.
         'reload: loop {
+            // Safepoint-GC poll at the frame transfer (memory-management 6.x): one predicted
+            // thread-local-bool read when idle. A frame transfer is a safe point by construction —
+            // every active register window holds exactly its owned references (the same invariant
+            // the abort teardown releases by), so the full root set is enumerable.
+            if noeta_value::safepoint_gc_pending() {
+                self.maybe_safepoint_gc(frames, regs);
+            }
             // Re-read the module each frame transfer, NOT once per dispatch: a debug-console
             // fragment install ([`Vm::install_fragment`], tooling-unification T4) swaps
             // `self.module` to an extended snapshot mid-run, and the next frame must resolve
@@ -237,6 +244,13 @@ impl<'m> Vm<'m> {
             // (the branch's own location) *before* `pc` is reassigned to it.
             macro_rules! osr_backedge {
                 ($target:expr) => {
+                    // Safepoint-GC poll at the taken loop back-edge (memory-management 6.x): the
+                    // other half of the poll placement (see the `'reload` poll above), so a loop
+                    // that never calls still reaches a safepoint each iteration. One predicted
+                    // thread-local-bool read when idle.
+                    if ($target as usize) <= pc && noeta_value::safepoint_gc_pending() {
+                        self.maybe_safepoint_gc(&*frames, &*regs);
+                    }
                     #[cfg(feature = "jit")]
                     {
                         let _osr_t = $target as usize;
@@ -257,12 +271,14 @@ impl<'m> Vm<'m> {
                 // frame's `pc` is synced first so the view resolves the right current line. It never
                 // pauses, so unlike the debugger it needs no take/restore: it borrows only the frame
                 // stack + registers (dispatch params, not `self`) and `module` (a local reference).
+                let strand = self.sched.current_strand;
                 if let Some(prof) = self.profiler.as_mut() {
                     frames[top].pc = pc;
                     let view = DebugView {
                         module,
                         frames: &frames[..],
                         regs: &regs[..],
+                        strand,
                     };
                     prof.before_op(&view);
                 }
@@ -285,11 +301,18 @@ impl<'m> Vm<'m> {
                                 module,
                                 frames: &frames[..],
                                 regs: &regs[..],
+                                strand,
                             };
                             dbg.before_op(proto as u32, pc, &view)
                         };
                         match action {
-                            DebugAction::Continue => break,
+                            DebugAction::Continue => {
+                                // The program resumes (continue or a landed step): the observed
+                                // state may change before the next stop, so advance the generation
+                                // and invalidate every memoized watch result (watch-memoization).
+                                self.bump_stop_generation();
+                                break;
+                            }
                             DebugAction::Terminate => {
                                 self.debugger = Some(dbg);
                                 return Err(Abort);
@@ -302,19 +325,20 @@ impl<'m> Vm<'m> {
                                     text,
                                     frame,
                                     scope,
-                                    allow_calls,
+                                    kind,
                                     reply,
                                 } = req;
                                 // Every evaluate compiles through the adopted session (T5): full
-                                // language for a watch/console, and for a hover
-                                // (`allow_calls = false`) the same engine gated to the read-only
-                                // surface (T6) — one evaluator, not two.
+                                // language for a watch/console, and for a hover the same engine
+                                // gated to the read-only surface (T6) — one evaluator, not two. The
+                                // `kind` also drives watch-memoization (cache reuse + generation
+                                // bumping) inside `debug_eval_fragment`.
                                 let outcome = if self.debug_session.is_some() {
                                     self.debug_eval_fragment(
                                         &program,
                                         frame,
                                         &scope,
-                                        !allow_calls,
+                                        kind,
                                         &text,
                                         &frames[..],
                                         &regs[..],
@@ -354,6 +378,19 @@ impl<'m> Vm<'m> {
                                             .to_string(),
                                     )
                                 };
+                                // Refresh the adapter-visible snapshot with the just-written
+                                // register BEFORE unblocking the client, so a `variables`/
+                                // `stackTrace` racing in behind this response reads the new value
+                                // rather than the stale pause-time capture.
+                                {
+                                    let view = DebugView {
+                                        module,
+                                        frames: &frames[..],
+                                        regs: &regs[..],
+                                        strand,
+                                    };
+                                    dbg.after_side_effect(&view);
+                                }
                                 let _ = reply.send(outcome);
                             }
                         }
@@ -381,6 +418,25 @@ impl<'m> Vm<'m> {
                         // `Value::unbound` sentinel (P-JIT globals); every other value is a real binding.
                         let v = self.persist.globals[global.0 as usize];
                         if v.is_unbound() {
+                            // In a worker isolate, an unbound slot may be a global the parent could
+                            // not ship (isolates I.4b) — a `class` (reference identity), a captured
+                            // closure, a `Local` channel. Name it + its type + the fix, instead of
+                            // the misleading "cannot find `x`" (the global clearly exists in source).
+                            if let Some(ty) = self.isolates.unshippable_globals.get(&global.0) {
+                                return Err(self.error(
+                                    DiagnosticCode::NotSend,
+                                    *span,
+                                    format!(
+                                        "the global `{}` of type `{ty}` cannot be shared with an \
+                                         isolate — only value types cross an isolate boundary (a \
+                                         reference `class` has identity, a captured closure and a \
+                                         cooperative channel hold heap state). Make it a value \
+                                         type, or pass the value-type data it holds to the isolate \
+                                         as arguments.",
+                                        module.global_name(*global)
+                                    ),
+                                ));
+                            }
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
                                 *span,
@@ -658,8 +714,6 @@ impl<'m> Vm<'m> {
                         func: func_id,
                         args,
                         recipe,
-                        ok_shape,
-                        err_shape,
                         span,
                     } => {
                         // Resolve the interned module/func names (`module` is the outer loop-local
@@ -676,59 +730,51 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        // The call-site-typed native functions: `json.parse::<T>` (aborting) and the
-                        // recoverable `json.decode::<T>` → `Result<T, string>` (L2 DI).
-                        let recoverable = func == "decode";
-                        if mod_name == "json" && (func == "parse" || recoverable) {
-                            let text = args
-                                .first()
-                                .map(|r| regs[fbase + *r as usize])
-                                .and_then(|v| v.as_string());
-                            let Some(text) = text else {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!("`json.{func}` expects a `string` argument"),
-                                ));
-                            };
-                            match noeta_stdlib::json::parse_typed(&text, recipe) {
-                                Ok(out) => {
-                                    let value = materialize_recipe(out);
-                                    let value = if recoverable {
-                                        Value::enum_value(
-                                            self.persist.shapes[*ok_shape as usize],
-                                            vec![value],
-                                        )
-                                    } else {
-                                        value
-                                    };
-                                    set_reg(regs, fbase, *dst, value);
-                                }
-                                Err(error) if recoverable => {
-                                    // A decode failure is a recoverable `Result.Err(message)`.
-                                    let msg = Value::string(&error.message);
-                                    let err = Value::enum_value(
-                                        self.persist.shapes[*err_shape as usize],
-                                        vec![msg],
-                                    );
-                                    set_reg(regs, fbase, *dst, err);
-                                }
-                                Err(error) => {
-                                    return Err(self.error(
-                                        stdlib_error_code(error.kind),
-                                        *span,
-                                        error.message,
-                                    ));
-                                }
-                            }
-                        } else {
+                        // Route through the registry's call-site-typed seam: the module's
+                        // `typed_dispatch`, threaded the recipe, builds the whole `NativeOut` tree
+                        // (already carrying its declared wrapper — `Ok`/`Err` for a `Result` shape,
+                        // `Some`/`None` for `Option`), which materializes to a value of `T`. No
+                        // function name is special-cased — `json.parse`/`try_parse` are registered
+                        // like any extension's call-site-typed functions.
+                        let reg = self.reg();
+                        let Some(ext_mod) = reg
+                            .find_module(mod_name)
+                            .filter(|_| reg.find_typed_function(mod_name, func).is_some())
+                        else {
                             return Err(self.error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            format!(
-                                "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
-                            ),
-                        ));
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!(
+                                    "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
+                                ),
+                            ));
+                        };
+                        let Some(typed_dispatch) = ext_mod.typed_dispatch else {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!(
+                                    "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
+                                ),
+                            ));
+                        };
+                        // A reflective module (`json`) marshals its arguments deeply; every other
+                        // uses the cheap shallow projection — the same decision the plain module
+                        // dispatch makes.
+                        let nargs: Vec<noeta_stdlib::NativeValue> = args
+                            .iter()
+                            .map(|r| {
+                                let v = regs[fbase + *r as usize];
+                                if ext_mod.deep_marshal {
+                                    v.to_native_deep()
+                                } else {
+                                    marshal_native_arg(v)
+                                }
+                            })
+                            .collect();
+                        match typed_dispatch(func, &mut *self.persist.host, &nargs, recipe) {
+                            Ok(out) => set_reg(regs, fbase, *dst, materialize_recipe(out)),
+                            Err(error) => return Err(self.std_dispatch_error(error, *span)),
                         }
                         pc += 1;
                     }
@@ -740,15 +786,16 @@ impl<'m> Vm<'m> {
                         err_shape,
                         span,
                     } => {
-                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown type
-                        // name, a non-string operand, or a malformed body all land as `Result.Err`; a
-                        // good decode is `Result.Ok(value)` wrapping the materialized struct. Mirrors
-                        // the recoverable `json.decode::<T>` branch above, but the recipe is looked up by
-                        // runtime type name rather than baked at the call site.
-                        let err = |vm: &Self, msg: String| {
+                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown
+                        // type name, a non-string operand, or a malformed body all land as
+                        // `Result.Err` wrapping a path-carrying `JsonError` (the same error story
+                        // as `json.try_parse::<T>`). Mirrors the recoverable `try_parse` branch
+                        // above, but the recipe is looked up by runtime type name rather than
+                        // baked at the call site.
+                        let err = |vm: &Self, error: noeta_stdlib::json::JsonError| {
                             Value::enum_value(
                                 vm.persist.shapes[*err_shape as usize],
-                                vec![Value::string(&msg)],
+                                vec![Value::extern_value(noeta_stdlib::ExternBox::new(error))],
                             )
                         };
                         let name_val = regs[fbase + *name as usize].as_string();
@@ -761,14 +808,19 @@ impl<'m> Vm<'m> {
                             ));
                         };
                         let value = match self.deserialize_recipes.get(&type_name) {
-                            None => err(self, format!("unknown deserializable type `{type_name}`")),
-                            Some(recipe) => match noeta_stdlib::json::parse_typed(&text, recipe) {
-                                Ok(out) => Value::enum_value(
-                                    self.persist.shapes[*ok_shape as usize],
-                                    vec![materialize_recipe(out)],
-                                ),
-                                Err(error) => err(self, error.message),
-                            },
+                            None => err(
+                                self,
+                                noeta_stdlib::json::JsonError::unknown_type(&type_name),
+                            ),
+                            Some(recipe) => {
+                                match noeta_stdlib::json::try_parse_typed(&text, recipe) {
+                                    Ok(out) => Value::enum_value(
+                                        self.persist.shapes[*ok_shape as usize],
+                                        vec![materialize_recipe(out)],
+                                    ),
+                                    Err(error) => err(self, error),
+                                }
+                            }
                         };
                         set_reg(regs, fbase, *dst, value);
                         pc += 1;
@@ -994,6 +1046,16 @@ impl<'m> Vm<'m> {
                             )?;
                             continue 'reload;
                         }
+                        // The member-handle iterator (coroutines Track-I trigger): a user object
+                        // with no `iter` but a callable `next` member — a method, or a
+                        // closure-valued field — drains into a materialized snapshot list,
+                        // exactly like the tree-walker.
+                        if v.is_object() && self.has_user_next(v) {
+                            let list = self.drain_next_object(v, *span)?;
+                            set_reg(regs, fbase, *dst, list);
+                            pc += 1;
+                            continue;
+                        }
                         // Snapshot the elements to iterate: a packed list materializes into an owned
                         // boxed snapshot (so `ListLen`/`ListGet` never see the flat form); a list's
                         // elements, a set's canonical elements, or a map's values in sorted-key order
@@ -1015,6 +1077,17 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *src as usize];
                         match v.list_len() {
                             Some(n) => {
+                                set_reg(regs, fbase, *dst, Value::int(n as i64));
+                                pc += 1;
+                            }
+                            // `iter()` returned a `next`-driven user iterator object (the
+                            // Iterable → member-handle composition): drain it into the snapshot
+                            // register, exactly as the tree-walker's `iter_elements` does, so the
+                            // loop's `ListGet` reads the materialized elements.
+                            None if self.has_user_next(v) => {
+                                let list = self.drain_next_object(v, *span)?;
+                                let n = list.list_len().expect("the drain returns a list");
+                                set_reg(regs, fbase, *src, list);
                                 set_reg(regs, fbase, *dst, Value::int(n as i64));
                                 pc += 1;
                             }
@@ -1301,6 +1374,37 @@ impl<'m> Vm<'m> {
                                 None => {
                                     let shape = v.shape().unwrap();
                                     let Some(proto) = self.method_proto(&shape.name, method) else {
+                                        // The runtime member-call fallback (the field-access-then-
+                                        // call desugar's `dyn` path): no method `method`, but the
+                                        // shape HAS a field of that name — `obj.f(args)` means
+                                        // `(obj.f)(args)`, so call the field's value through the
+                                        // shared closure-call setup (the `Op::Call` machinery).
+                                        // The same order the checker pins statically (a method
+                                        // wins, the field is consulted only on a miss) and the
+                                        // same route the lowered `Field` + `Call` takes — a
+                                        // non-callable field value raises the indirect-call E0007
+                                        // ("... is not callable"), identically in both backends.
+                                        // Left uncached: the method cache memoizes prototypes,
+                                        // and this dyn-only path re-probes per call.
+                                        if let Some(callee_val) =
+                                            shape.slot_of(method).and_then(|s| v.slot_at(s))
+                                        {
+                                            if self.setup_closure_call(
+                                                frames,
+                                                regs,
+                                                top,
+                                                fbase,
+                                                *dst,
+                                                callee_val,
+                                                args,
+                                                *span,
+                                                pc + 1,
+                                            )? {
+                                                continue 'reload;
+                                            }
+                                            pc += 1;
+                                            continue;
+                                        }
                                         return Err(self.error(
                                             DiagnosticCode::UnknownName,
                                             *span,
@@ -2247,7 +2351,12 @@ impl<'m> Vm<'m> {
                         // the frame teardown can no longer see the future — skipping this on the
                         // error path (e.g. a detected async deadlock) orphans it (the refcount
                         // anomaly the strengthened leak oracle catches). `drive_future` borrows.
-                        let value = self.drive_future(future, *span);
+                        // The consumed future rides `transient_roots` across the drive: with its
+                        // register emptied, only this Rust local owns it, and a mid-drive safepoint
+                        // collection must still see it as a root.
+                        self.transient_roots.push(future);
+                        let value = self.drive_future(future, *span, Some((frames, regs)));
+                        self.transient_roots.pop();
                         self.release_value(future);
                         let value = value?;
                         set_reg(regs, fbase, *dst, value);
@@ -2259,6 +2368,18 @@ impl<'m> Vm<'m> {
                         let future = regs[fbase + *src as usize];
                         let result = match self.poll_once(future, *span)? {
                             Poll::Ready(value) => make_some(value),
+                            // A cancelled handle awaited inside an `async fn` body would otherwise
+                            // suspend forever on a `none`; fail loudly (Track A.8, E0056) instead —
+                            // the same contract top-level `.await` (`drive_future`) enforces.
+                            Poll::Pending if self.handle_cancelled(future) => {
+                                return Err(self.error(
+                                    DiagnosticCode::AwaitCancelled,
+                                    *span,
+                                    "cannot await a cancelled task; use `.join()` to observe the \
+                                     cancelled outcome"
+                                        .to_string(),
+                                ));
+                            }
                             Poll::Pending => make_none(),
                         };
                         set_reg(regs, fbase, *dst, result);
@@ -2270,8 +2391,36 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::ScopeBegin => {
-                        // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
-                        self.sched.scopes.push(Vec::new());
+                        // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list
+                        // (A.7 tombstone model — `open_scope` pushes both `scopes` and `scope_closed`).
+                        self.open_scope();
+                        pc += 1;
+                    }
+                    Op::ScopeBeginValue { dst, .. } => {
+                        // Open a scope and yield its index (Track A.7): the value form of `ScopeBegin`,
+                        // used by the async desugar's split `concurrent { }` to thread the index to its
+                        // join poll-state. Mirrors `noeta-eval`'s `Rvalue::ScopeBegin`.
+                        let idx = self.open_scope() as i64;
+                        set_reg(regs, fbase, *dst, Value::int(idx));
+                        pc += 1;
+                    }
+                    Op::ScopeReady { dst, src, span } => {
+                        // Whether every task in the scope at index `src` has completed or been cancelled
+                        // (Track A.7) — the boolean the split `concurrent { }`'s join poll-state tests
+                        // each poll. A stale/out-of-range index reads ready (defensive; unreachable for a
+                        // clean program). Mirrors `noeta-eval`'s `Rvalue::ScopeReady`.
+                        let Some(idx) = regs[fbase + *src as usize].as_int() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "internal: scope_ready expects a scope index".to_string(),
+                            ));
+                        };
+                        let ready =
+                            self.sched.scopes.get(idx as usize).is_none_or(|s| {
+                                s.iter().all(|t| t.result.is_some() || t.cancelled)
+                            });
+                        set_reg(regs, fbase, *dst, Value::bool(ready));
                         pc += 1;
                     }
                     Op::Spawn { dst, src, .. } => {
@@ -2284,17 +2433,27 @@ impl<'m> Vm<'m> {
                             future
                         } else {
                             retain(future);
-                            let scope_idx = self.sched.scopes.len() - 1;
+                            // Senders captured in the spawned future are producer holds (isolates
+                            // I.4c auto-close); count them onto their channels for the task's life.
+                            let holds = Self::collect_producer_channels(future);
+                            for &cid in &holds {
+                                self.add_producer_hold(cid);
+                            }
+                            let scope_idx = self.innermost_open();
                             let task_idx = self.sched.scopes[scope_idx].len();
                             // The child inherits a snapshot of the spawner's task-local context
                             // (T5a): a task spawned inside `with_span` parents its spans there.
                             let context = self.sched.ctx_current.clone();
+                            let strand = self.sched.current_strand;
                             self.sched.scopes[scope_idx].push(Task {
                                 future,
                                 result: None,
                                 cancelled: false,
                                 polling: false,
                                 context,
+                                holds,
+                                strand,
+                                isolate_strand: None,
                             });
                             Value::make_handle(
                                 ScopeId::from_index(scope_idx),
@@ -2322,20 +2481,30 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::ScopeEnd { span } => {
-                        // Join the scope (drive every task to completion), then pop it and release the
-                        // tasks' owned futures and results.
-                        self.join_scope(*span)?;
-                        if let Some(scope) = self.sched.scopes.pop() {
-                            for task in scope {
-                                // Destructor-aware: a task's future holds the async body's captured
-                                // locals in its state-machine cells. A completed task's cells are spent,
-                                // but a **cancelled** task (a `race` loser) abandoned its future mid-body
-                                // with a live captured value — release it here so its destructor runs.
-                                self.release_value(task.future);
-                                if let Some(result) = task.result {
-                                    self.release_value(result);
-                                }
-                            }
+                        // Join the scope (drive every task to completion), then close the innermost scope
+                        // and release the tasks' owned futures and results (close_scope: producer holds
+                        // I.4c + destructor-aware future release). The synchronous (non-flattened) path
+                        // is strictly LIFO, so the innermost scope is this one.
+                        self.join_scope(*span, Some((frames, regs)))?;
+                        let si = self.innermost_open();
+                        self.close_scope(si);
+                        pc += 1;
+                    }
+                    Op::ScopeEndAt { src, span } => {
+                        // Close the (already-drained) scope at index `src` (Track A.7): release its tasks
+                        // (destructor-aware) and tombstone the slot. Closes by index — not innermost — so
+                        // a sibling task's still-open scope above it survives. The join happened at the
+                        // `ScopeReady` poll-state, so there is nothing to drive. Mirrors `noeta-eval`'s
+                        // `Rvalue::ScopeEndAt`.
+                        let Some(idx) = regs[fbase + *src as usize].as_int() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "internal: scope_end expects a scope index".to_string(),
+                            ));
+                        };
+                        if (idx as usize) < self.sched.scopes.len() {
+                            self.close_scope(idx as usize);
                         }
                         pc += 1;
                     }
@@ -2375,6 +2544,7 @@ impl<'m> Vm<'m> {
                                 buffer: std::collections::VecDeque::new(),
                                 capacity: cap as usize,
                                 closed: false,
+                                producers: 0,
                             }
                         };
                         self.persist.channels.push(channel);

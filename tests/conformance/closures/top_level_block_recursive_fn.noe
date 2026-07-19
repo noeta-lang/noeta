@@ -1,0 +1,17 @@
+// A self-recursive nested `fn` declared inside a **top-level block** (a `while` body, not inside an
+// enclosing function). `main`'s depth-0 bindings are module globals, but a `fn` nested in a top-level
+// block is a genuine `main` local, so its self-reference must resolve to its own celled binding — the
+// upvalue path — not a `LoadGlobal` no one stores. This was a VM-only E0005 (the reference interpreter
+// ran it fine); the compiler now seeds `main`'s closure-conversion state from its top-level body.
+// expect: stdout "15"
+// expect: exit 0
+while true {
+    fn rec(n: int): int {
+        if n <= 0 {
+            return 0;
+        }
+        return n + rec(n - 1);
+    }
+    echo rec(5);
+    break;
+}

@@ -1,0 +1,30 @@
+// Nested block-bodied match arms (aether F1) in statement position: a block arm may itself contain
+// another statement-position `match` with block arms. Each runs for side effects and yields `unit`;
+// arms lower in the enclosing frame, so a `return` from an inner block arm exits the whole function.
+// expect: stdout "outer-a"
+// expect: stdout "inner-1"
+// expect: stdout "outer-b"
+// expect: stdout "inner-2"
+// expect: stdout "done"
+// expect: exit 0
+fn route(a: int, b: int): void {
+    match a {
+        1 => {
+            echo "outer-a"
+            match b {
+                1 => { echo "inner-1" },
+                _ => { echo "inner-other" },
+            }
+        },
+        _ => {
+            echo "outer-b"
+            match b {
+                2 => { echo "inner-2" },
+                _ => { echo "inner-other" },
+            }
+        },
+    }
+}
+route(1, 1)
+route(9, 2)
+echo "done"

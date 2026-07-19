@@ -236,6 +236,7 @@ fn op_clock_sampling_is_deterministic() {
     let mode = Mode::Sample {
         clock: SampleClock::Ops { every: 1000 },
         lines: false,
+        jit: false,
     };
     let a = noeta_prof::profile(&path, mode);
     let b = noeta_prof::profile(&path, mode);
@@ -259,6 +260,7 @@ fn sampling_attributes_most_samples_to_the_hot_function() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: false,
+            jit: false,
         },
     );
     assert_eq!(report.exit_code, 0, "{}", report.stderr);
@@ -298,6 +300,7 @@ fn op_clock_rate_changes_the_sample_count_proportionally() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 2000 },
             lines: false,
+            jit: false,
         },
     );
     let fine = noeta_prof::profile(
@@ -305,6 +308,7 @@ fn op_clock_rate_changes_the_sample_count_proportionally() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: false,
+            jit: false,
         },
     );
     let c = coarse.flamegraph.unwrap().total;
@@ -323,6 +327,7 @@ fn folded_lines_are_well_formed() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: false,
+            jit: false,
         },
     );
     for line in noeta_prof::render_folded(&report).lines() {
@@ -351,6 +356,7 @@ fn wall_clock_sampling_produces_a_profile() {
         Mode::Sample {
             clock: SampleClock::Wall { hz: 2000 },
             lines: false,
+            jit: false,
         },
     );
     assert_eq!(report.exit_code, 0, "{}", report.stderr);
@@ -392,6 +398,7 @@ fn svg_renders_a_flamegraph() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: false,
+            jit: false,
         },
     );
     let svg = String::from_utf8(noeta_prof::render(&report, Format::Svg).expect("svg renders"))
@@ -411,6 +418,7 @@ fn speedscope_is_valid_and_well_formed() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: false,
+            jit: false,
         },
     );
     let flame_total = report.flamegraph.as_ref().unwrap().total;
@@ -458,6 +466,7 @@ fn frame_table_is_structured_and_line_attribution_overrides_the_leaf_line() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: true,
+            jit: false,
         },
     );
     let flame = report.flamegraph.as_ref().unwrap();
@@ -501,6 +510,7 @@ fn speedscope_frame_table_is_deterministic_under_the_op_clock() {
     let mode = Mode::Sample {
         clock: SampleClock::Ops { every: 1000 },
         lines: false,
+        jit: false,
     };
     let a = noeta_prof::profile(&path, mode);
     let b = noeta_prof::profile(&path, mode);
@@ -536,6 +546,7 @@ fn line_attribution_labels_the_leaf_with_its_source_line() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: true,
+            jit: false,
         },
     );
     let flame = report.flamegraph.as_ref().unwrap();
@@ -568,6 +579,7 @@ fn line_attribution_is_off_by_default() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: false,
+            jit: false,
         },
     );
     let flame = report.flamegraph.as_ref().unwrap();
@@ -586,6 +598,7 @@ fn top_functions_ranks_the_hot_leaf_with_its_percentage() {
         Mode::Sample {
             clock: SampleClock::Ops { every: 1000 },
             lines: false,
+            jit: false,
         },
     );
     let top = noeta_prof::top_functions(&report, 5);
@@ -828,5 +841,154 @@ fn isolates_get_their_own_profiles() {
     assert!(
         folded.contains("isolate crunch #1;"),
         "folded has thread-rooted isolate sections:\n{folded}"
+    );
+}
+
+// ---- Tier-1 (JIT-on) sampling ----------------------------------------------------------------------
+
+/// A long-running, JIT-friendly program: a pure-arithmetic hot loop (`hot`) called many times from
+/// the top level, so both the callee and the top-level driver cross the promotion threshold and run
+/// native long enough for the wall sampler to land ticks inside the JIT trampoline. Only the
+/// `jit`-feature test consumes it (the feature-less tests reuse the smaller `HOT_SRC`).
+#[cfg(feature = "jit")]
+const TIER1_SRC: &str = "fn hot(n: int): int {\n\
+     \x20   mut acc = 0\n\
+     \x20   mut i = 0\n\
+     \x20   while i < n { acc = acc + i * 2 - (i / 3); i = i + 1; }\n\
+     \x20   return acc;\n\
+     }\n\
+     mut total = 0\n\
+     mut k = 0\n\
+     while k < 4000 { total = total + hot(20000); k = k + 1; }\n\
+     echo total;\n";
+
+/// With the `jit` feature, `noeta profile --jit` arms the production tier-1 JIT: hot prototypes run
+/// native and the sampler attributes their wall time at the trampoline, labeled ` [jit]`. We assert
+/// on *presence* (the run is statistical), not counts.
+#[cfg(feature = "jit")]
+#[test]
+fn tier1_sampling_labels_the_hot_jit_frame() {
+    let path = fixture("tier1_hot", TIER1_SRC);
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Wall { hz: 2000 },
+            lines: false,
+            jit: true,
+        },
+    );
+    assert_eq!(report.exit_code, 0, "clean tier-1 run: {}", report.stderr);
+
+    // The JIT promoted at least one prototype (the `--jit-stats`-style promotion signal).
+    assert!(
+        report.jit_compiled.unwrap_or(0) >= 1,
+        "the JIT promoted a prototype: {:?}",
+        report.jit_compiled
+    );
+
+    let flame = report
+        .flamegraph
+        .as_ref()
+        .expect("a sampling run fills a flamegraph");
+    let labels: Vec<&str> = flame.frames.iter().map(|f| f.label.as_str()).collect();
+
+    // Some frame is labeled tier-1 (native code got sampled at the trampoline).
+    assert!(
+        flame
+            .frames
+            .iter()
+            .any(|f| f.label.ends_with(noeta_prof::TIER1_MARKER)),
+        "some frame carries the tier-1 marker: {labels:?}"
+    );
+    // And a tier-1-labeled frame names the hot function — its native time is attributed to `hot`,
+    // not misattributed to whatever interpreter frame ran right after native code bailed back.
+    assert!(
+        flame
+            .frames
+            .iter()
+            .any(|f| f.name == "hot" && f.label.ends_with(noeta_prof::TIER1_MARKER)),
+        "the hot function has tier-1 (native) samples: {labels:?}"
+    );
+    // A tier-1 frame is function-level: its label is exactly `<name> [jit]` (no leaf `:line` suffix —
+    // native code merges several source lines per segment, so line-level attribution is withheld).
+    for f in &flame.frames {
+        if f.label.ends_with(noeta_prof::TIER1_MARKER) {
+            assert_eq!(
+                f.label,
+                format!("{}{}", f.name, noeta_prof::TIER1_MARKER),
+                "tier-1 label is `<name> [jit]`, no leaf-line suffix"
+            );
+        }
+    }
+    // The tier-1 marker surfaces in the folded artifact too.
+    let folded = noeta_prof::render_folded(&report);
+    assert!(
+        folded.contains(noeta_prof::TIER1_MARKER),
+        "folded output carries the tier-1 marker:\n{folded}"
+    );
+}
+
+/// A tier-0 (`jit: false`) sampling run is unchanged: no prototype is promoted, no frame is
+/// tier-1-labeled — exactly the classic profile. Holds regardless of the `jit` feature.
+#[test]
+fn tier0_sampling_has_no_jit_frames() {
+    // A smaller (single-call) hot loop — op-clock, JIT unarmed, so it stays a quick interpreter run.
+    let path = fixture("tier0_plain", HOT_SRC);
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+            jit: false,
+        },
+    );
+    assert_eq!(report.exit_code, 0, "clean run: {}", report.stderr);
+    assert_eq!(
+        report.jit_compiled, None,
+        "a tier-0 run promotes nothing (JIT unarmed)"
+    );
+    let flame = report
+        .flamegraph
+        .expect("a sampling run fills a flamegraph");
+    assert!(
+        !flame
+            .frames
+            .iter()
+            .any(|f| f.label.ends_with(noeta_prof::TIER1_MARKER)),
+        "no frame is tier-1-labeled on a tier-0 run"
+    );
+    // The hot function is still attributed (interpreter samples), bare-labeled.
+    assert!(
+        flame.frames.iter().any(|f| f.name == "hot"),
+        "the hot function is still sampled tier-0"
+    );
+}
+
+/// Without the `jit` feature, `jit: true` is honored but the JIT is a no-op: the run stays observably
+/// tier-0 (nothing promoted, no tier-1 frames), and the profile is otherwise a normal sampling run.
+#[cfg(not(feature = "jit"))]
+#[test]
+fn tier1_flag_without_the_feature_stays_tier0() {
+    // A quick interpreter run (the JIT is a no-op in this build, so keep the loop small).
+    let path = fixture("tier1_nofeat", HOT_SRC);
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+            jit: true,
+        },
+    );
+    assert_eq!(report.exit_code, 0, "clean run: {}", report.stderr);
+    assert_eq!(report.jit_compiled, None, "no JIT in this build");
+    let flame = report
+        .flamegraph
+        .expect("a sampling run fills a flamegraph");
+    assert!(
+        !flame
+            .frames
+            .iter()
+            .any(|f| f.label.ends_with(noeta_prof::TIER1_MARKER)),
+        "no tier-1 frames without the jit feature"
     );
 }

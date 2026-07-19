@@ -32,6 +32,27 @@ pub trait SqlDriver: Send {
     /// Run a query, returning every row as column-name → value pairs. `Err(message)` on error.
     fn query(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, String>;
 
+    /// Execute a **multi-statement** SQL script with no bind parameters — the whole `sql` string, which
+    /// may contain several `;`-separated statements, run in order. [`SqlDriver::execute`] runs a
+    /// *single* statement (rusqlite/Postgres both prepare one); this is the companion the migration
+    /// runner ([`crate::migrate`]) needs to apply a migration file's verbatim body and to issue
+    /// `BEGIN`/`COMMIT`/`ROLLBACK`. The body is passed through **unrewritten** (no `?`→`$N`
+    /// translation), so a migration is written in the target dialect's native SQL. A driver that
+    /// cannot run a script leaves the default error.
+    fn execute_batch(&mut self, sql: &str) -> Result<(), String> {
+        let _ = sql;
+        Err("this driver does not support multi-statement batch execution".to_string())
+    }
+
+    /// **Destructively** reset the database to an empty schema — drop every object this connection
+    /// owns. The dialect-specific wipe lives in each driver (SQLite drops every user table/view/
+    /// trigger; Postgres `DROP SCHEMA public CASCADE; CREATE SCHEMA public`), so the migration runner
+    /// stays backend-agnostic. Backs `noeta migrate --reset`; a driver that cannot safely wipe itself
+    /// leaves the default error.
+    fn reset(&mut self) -> Result<(), String> {
+        Err("this driver does not support a schema reset".to_string())
+    }
+
     /// **Change notifications** (reactive DB↔UI, aether DB5) — subscribe this connection to a
     /// notification `channel` (Postgres `LISTEN`). A driver without a push channel leaves the default
     /// (unsupported), so the reactive layer degrades to in-process invalidation only.

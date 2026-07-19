@@ -2,7 +2,8 @@
 // conditionally-evaluated value position) is now supported: the state-machine desugar rewrites it into
 // control flow (`mut $sc = a; if $sc { $sc = b.await }`) so the guarded await runs only when the
 // operator would evaluate it, preserving short-circuit semantics. (This was rejected with E0040 before
-// A.6b; a `??` fallback or `match`-arm-body await is still rejected — those remain A.6b follow-ons.)
+// A.6b; the sibling conditional positions — a `??` fallback and a `match`/`if…then…else` arm body — are
+// now supported too, see `await_coalesce`/`await_match_arm`/`await_if_then_else`.)
 // expect: stdout "true"
 // expect: exit 0
 async fn flag(): bool { return true }

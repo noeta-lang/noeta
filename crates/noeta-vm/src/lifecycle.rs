@@ -7,6 +7,8 @@
 
 use crate::*;
 
+use crate::scheduler::SchedState;
+
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
 /// `RealHost` + `RealExecutor`), so `noeta-vm` stays free of `noeta-host-real`/tokio. `Send + Sync` so the
 /// worker closure can carry a clone across the thread boundary.
@@ -62,6 +64,16 @@ pub(crate) enum Channel {
         buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
         capacity: usize,
         closed: bool,
+        /// Live **producer holds** of this channel (isolates I.4c auto-close): the count of spawned
+        /// tasks/isolates that captured a `Sender<T>` for it. Incremented when such a producer is
+        /// spawned, decremented when it completes; when the count returns to 0 (having been positive)
+        /// the channel **auto-closes**, so a blocked receiver drains then observes `none` instead of
+        /// deadlocking. Keyed on producer-task lifecycle rather than raw sender-value RC because the
+        /// enclosing async/top-level scope retains a structural sender (a cell or global) until it
+        /// ends — which is too late to signal "no more sends". A channel whose sender is only ever
+        /// used structurally (never handed to a producer task) has 0 holds and relies on explicit
+        /// `close()`, exactly as before.
+        producers: u32,
     },
     Shared(Arc<isolate::ChannelCore>),
 }
@@ -91,6 +103,23 @@ pub(crate) struct Task {
     /// instead of leaking between interleaved tasks. Plain `u64`s (span ids), not values — no
     /// refcount traffic, invisible to the GC and the leak oracle.
     pub(crate) context: Vec<u64>,
+    /// The channels this task holds a **producer hold** on (isolates I.4c auto-close): the channel
+    /// indices of every `Sender<T>` it captured at spawn. Each is decremented when the task's future
+    /// is released (on completion or at `ScopeEnd`), auto-closing the channel when its last producer
+    /// is gone. Emptied once decremented, so a completed task's early release and the scope's
+    /// end-of-life sweep never double-count.
+    pub(crate) holds: Vec<usize>,
+    /// The **strand** this task belongs to (DAP worker debugging): a plain `spawn`/`concurrent`
+    /// task inherits its spawner's strand (they are cooperative concurrency *within* one logical
+    /// thread); a worker-isolate root task gets a fresh id. The scheduler swaps this into
+    /// `SchedState::current_strand` around each poll, so a breakpoint inside the task reports the
+    /// right DAP thread. `1` (the main strand) on ordinary runs.
+    pub(crate) strand: u32,
+    /// `Some(id)` iff this is a worker-isolate **root** task (the cooperative `isolate f(args)`
+    /// spawn, DAP worker debugging): its `id` equals `strand`, and its completion fires the
+    /// debugger's `on_strand_exited` (a `thread` exited event). `None` for every other task —
+    /// including sub-tasks a worker spawns, which merely inherit the strand.
+    pub(crate) isolate_strand: Option<u32>,
 }
 
 /// One traced future (native-otel T5c): the future-completion hook's entry. `future` is a
@@ -316,6 +345,8 @@ impl<'m> Vm<'m> {
             hot_mailbox: None,
             applied_swaps: 0,
             pure_eval: false,
+            stall_active: false,
+            registered_workers: 0,
             persist,
             map_packed,
             methods,
@@ -327,7 +358,10 @@ impl<'m> Vm<'m> {
             deserialize_recipes,
             sched: SchedState {
                 scopes: Vec::new(),
+                scope_closed: Vec::new(),
                 ctx_current: Vec::new(),
+                current_strand: 1,
+                next_strand: 2,
                 tel_on,
                 traced_futures: Vec::new(),
             },
@@ -335,6 +369,8 @@ impl<'m> Vm<'m> {
             reentry_pool: Vec::new(),
             cache_pool: Vec::new(),
             run_depth: 0,
+            transient_roots: Vec::new(),
+            gc_suspended: false,
             isolates: IsolateState {
                 parallel_isolates: false,
                 isolate_module: None,
@@ -345,6 +381,7 @@ impl<'m> Vm<'m> {
                 shared_region: noeta_value::SharedRegion::new(),
                 promote_memo: HashMap::new(),
                 promote_sources: Vec::new(),
+                unshippable_globals: HashMap::new(),
             },
             out: RunOutput {
                 stdout: String::new(),
@@ -441,6 +478,14 @@ fn is_last_heap_owner() -> bool {
     SESSION_HEAP_OWNERS.with(|c| c.get()) == 0
 }
 
+/// The number of live session heap-owners on this thread — the safepoint-GC gate's input: a
+/// mid-run trace sweep is sound only when at most this VM's own session shares the thread's heap
+/// registry (a sibling session's live objects are not in this VM's roots). See
+/// [`Vm::maybe_safepoint_gc`].
+pub(crate) fn session_heap_owner_count() -> usize {
+    SESSION_HEAP_OWNERS.with(|c| c.get())
+}
+
 impl<'m> Vm<'m> {
     /// Tear the VM down after its entry chunk(s) ran and drain the [`RunResult`]: reap reference
     /// cycles, drain channel buffers, clear the reactive graph, destroy the globals in reverse binding
@@ -448,6 +493,11 @@ impl<'m> Vm<'m> {
     /// workers. Split from [`Vm::run_top`] so a session runs this **once** at the end rather than after
     /// every entry (REPL-on-VM R0); leak residency must reach zero here.
     pub(crate) fn teardown(&mut self, mode: noeta_value::CollectorMode) -> RunResult {
+        // Exit reached: suspend + disarm the safepoint-GC trigger. The destructor bodies teardown
+        // runs below execute against a heap mid-surgery, and the exit collections reclaim
+        // everything a pending safepoint would have.
+        self.gc_suspended = true;
+        noeta_value::safepoint_gc_disarm();
         // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
         // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
         // different points: the **trace** marks from the live globals *before* teardown (the frame stack
@@ -548,6 +598,12 @@ impl<'m> Vm<'m> {
                 let _ = h.join();
             }
         }
+        // Drop any stall-registry worker slots not released by a harvest (isolates I.4c) — an early
+        // exit joins the worker here without going through `finish_isolate`. Balanced by count, so the
+        // registry returns to a clean `active`.
+        while self.registered_workers > 0 {
+            self.deregister_worker_stall();
+        }
         // Every worker is joined, so nothing borrows the shared region: free any promoted
         // argument graphs (P-PAR S2) — normally already emptied by `finish_isolate` at in-flight
         // count 0; defensive here so the leak oracle's zero-residency balance holds on early
@@ -597,8 +653,10 @@ pub(crate) fn run_isolate_worker(
     proto: u32,
     iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
+    unshippable_globals: Vec<(u32, String)>,
     trace: Option<noeta_stdlib::TraceContext>,
     registry: Option<&'static noeta_stdlib::registry::Registry>,
+    stall_tracked: bool,
     span: Span,
 ) -> Result<isolate::Wire, IsolateFailure> {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
@@ -643,6 +701,9 @@ pub(crate) fn run_isolate_worker(
         wvm.persist.globals[*slot as usize] = value;
         wvm.persist.global_order.push(*slot);
     }
+    // Record the globals the parent could not ship (isolates I.4b): their slots stay unbound, but
+    // reading one now names the offending global + type instead of "cannot find `x`".
+    wvm.isolates.unshippable_globals = unshippable_globals.into_iter().collect();
     let arg_vals: Vec<Value> = iso_args
         .iter()
         .map(|a| match a {
@@ -656,16 +717,32 @@ pub(crate) fn run_isolate_worker(
             isolate::IsoArg::Borrowed(root) => root.value(),
         })
         .collect();
+    // Arm the worker's own safepoint-GC trigger (per-isolate: all trigger state is thread-local),
+    // so a cycle-building isolate body bounds its residency at its own safepoints.
+    noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
     let callee = Value::closure(proto, Vec::new());
+    // Participate in the global all-parties-blocked deadlock check (isolates I.4c) iff the parent
+    // does, so a cross-isolate deadlock among workers resolves to E0010 rather than spinning. The
+    // worker's `active` **slot is registered by the parent at spawn** (not here), so `active` never
+    // lags this thread's startup — the fix for the startup-window false positive.
+    wvm.stall_active = stall_tracked;
+    // This depth-0 call/drive holds `callee` (and then `future`) only in Rust locals — root them
+    // through `transient_roots` so a safepoint collection inside the body stays exact.
+    wvm.transient_roots.push(callee);
     let outcome = match wvm.call_value(callee, arg_vals, span) {
         Ok(future) => {
-            let result = wvm.drive_future(future, span);
+            wvm.transient_roots.push(future);
+            let result = wvm.drive_future(future, span, Some((&[], &[])));
             release(future);
             result
         }
         Err(abort) => Err(abort),
     };
+    wvm.transient_roots.clear();
     release(callee);
+    // Worker teardown below runs destructors against a heap being dismantled — stop collecting.
+    wvm.gc_suspended = true;
+    noeta_value::safepoint_gc_disarm();
     // Hand the worker's finished collector to the sink (before teardown — destructor ops after the
     // program's own work are not the profile's subject). The `#n` is the sink's running count,
     // assigned under the push's own lock so concurrent isolates never collide.
@@ -702,17 +779,34 @@ pub(crate) fn run_isolate_worker(
         }),
     };
     // Tear the worker down so its thread-local heap returns to zero residency: release the JIT
-    // inline caches' closure pins (S4.2), destroy globals in reverse declaration order, then
-    // drain any channel buffers.
+    // inline caches' closure pins (S4.2), reap reference cycles, destroy globals in reverse
+    // declaration order, then drain any channel buffers. This mirrors the main heap's
+    // [`Vm::teardown`] exit reapers (isolates I.4b worker-teardown gap): a worker body can strand a
+    // reference cycle (`a.next = b; b.next = a` on a `class`) that refcounting alone never reclaims,
+    // so without a cycle pass here it — and its `__destruct` — leaked until the thread died. `gc_
+    // suspended` is already set (above), and `reclaim_cycle_garbage` manages it around each
+    // destructor, so these explicit collections run correctly after the safepoint trigger is
+    // disarmed. The worker always collects in `Trace` mode (set at entry).
     #[cfg(feature = "jit")]
     for v in std::mem::take(&mut wvm.tier1.jit_cache_pins) {
         release(v);
     }
-    for slot in wvm.persist.global_order.clone().into_iter().rev() {
-        let value = std::mem::replace(&mut wvm.persist.globals[slot as usize], Value::unbound());
-        if !value.is_unbound() {
-            wvm.release_value(value);
-        }
+    // Pre-teardown trace: the frame stack is unwound, so the still-bound globals (plus the arena /
+    // traced-future roots released below) are the whole root set — sweep everything unreachable
+    // from them, running each dead member's `__destruct` exactly once (container-before-contained),
+    // exactly as the main heap does. This reclaims a cycle already stranded mid-run.
+    {
+        let mut roots: Vec<Value> = wvm
+            .persist
+            .globals
+            .iter()
+            .copied()
+            .filter(|v| !v.is_unbound())
+            .collect();
+        roots.extend(wvm.persist.ext_arena.iter().copied().flatten());
+        roots.extend(wvm.sched.traced_futures.iter().map(|t| t.future));
+        let garbage = collect_trace(&roots);
+        wvm.reclaim_cycle_garbage(garbage);
     }
     for chan in std::mem::take(&mut wvm.persist.channels) {
         if let Channel::Local { buffer, .. } = chan {
@@ -733,6 +827,18 @@ pub(crate) fn run_isolate_worker(
     for traced in std::mem::take(&mut wvm.sched.traced_futures) {
         wvm.release_value(traced.future);
     }
+    for slot in wvm.persist.global_order.clone().into_iter().rev() {
+        let value = std::mem::replace(&mut wvm.persist.globals[slot as usize], Value::unbound());
+        if !value.is_unbound() {
+            wvm.release_value(value);
+        }
+    }
+    // Backup collection: a reference `class` cycle rooted in the globals survives the destruction
+    // above (each member still holds the other), but with the globals now gone there are no roots
+    // left — trace from an empty root set to reclaim it, running each member's `__destruct` exactly
+    // once. The main heap's teardown ends the same way.
+    let garbage = collect_trace(&[]);
+    wvm.reclaim_cycle_garbage(garbage);
     message
 }
 
@@ -894,7 +1000,7 @@ impl<'m> Vm<'m> {
     /// a destructor — but a destructor-bearing value **captured** by a cycle's closure is itself dead,
     /// and this is where its `__destruct` fires. Intra-cycle order is best-effort (spec §6); the eval
     /// reaper mirrors the behavior so the differential agrees on order-independent programs.
-    fn reclaim_cycle_garbage(&mut self, garbage: noeta_gc::Garbage) {
+    pub(crate) fn reclaim_cycle_garbage(&mut self, garbage: noeta_gc::Garbage) {
         let noeta_gc::Garbage {
             fresh,
             already_destructed,
@@ -907,6 +1013,10 @@ impl<'m> Vm<'m> {
         // either way. Restored after (a no-op at clean exit, but correct if a safepoint ever calls this).
         let saved_mode = noeta_value::collector_mode();
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        // Suspend the safepoint poll while the dead subgraph is pinned and half-freed: a destructor
+        // body (exit reclaim only — safepoint garbage is destructor-free by construction) runs the
+        // dispatch loop, whose polls must not start a nested collection over this state.
+        let saved_suspended = std::mem::replace(&mut self.gc_suspended, true);
         for &g in fresh.iter().chain(&already_destructed) {
             retain(g);
         }
@@ -941,6 +1051,7 @@ impl<'m> Vm<'m> {
             g.gc_free_shallow();
         }
         noeta_value::set_collector_mode(saved_mode);
+        self.gc_suspended = saved_suspended;
     }
 
     /// Store `value` in the embed-handle table (server-hmr F3), taking ownership of its reference,

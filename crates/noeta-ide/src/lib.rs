@@ -256,8 +256,10 @@ impl DocumentStore {
         let key = workspace_key(uri);
         if self.buffers.keys().any(|open| workspace_key(open) == key) {
             self.refresh_workspace(&key);
-        } else {
-            self.workspaces.remove(&key);
+        } else if let Some(cache) = self.workspaces.remove(&key) {
+            // Last document in the directory closed: reclaim the whole workspace's resident content
+            // before dropping it (audit F9 residual a) — salsa keeps the memos alive otherwise.
+            cache.release_all(&mut self.db);
         }
     }
 
@@ -3339,9 +3341,9 @@ mod tests {
         let on_doc = store.hover_tier("file:///a.noe", Position::new(0, 1), Encoding::Utf16);
         assert_eq!(
             on_doc.as_ref().map(|(d, _)| d.as_str()),
-            Some(concat!(
+            Some(
                 "documentation tier `@doc` — markdown prose that attaches to the declaration it precedes (a fn, method, or type), or documents the module when none follows. Surfaces in hover, the docs browser, and `noeta doc`"
-            ))
+            )
         );
     }
 

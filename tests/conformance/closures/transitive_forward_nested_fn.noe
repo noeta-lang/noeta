@@ -1,0 +1,12 @@
+// A forward reference threads through an intermediate nested `fn`: `a` calls `b`, `b` calls `c`,
+// and `c` is declared last of the three. All three forward references resolve through the block's
+// hoisted nested-fn bindings.
+// expect: stdout "111"
+// expect: exit 0
+fn run(): int {
+    fn a(): int { return b() + 1; }
+    fn b(): int { return c() + 10; }
+    fn c(): int { return 100; }
+    return a();
+}
+echo run();

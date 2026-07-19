@@ -16,6 +16,7 @@
 
 pub mod conn;
 pub mod driver;
+pub mod migrate;
 #[cfg(feature = "ring-postgres")]
 pub mod pg;
 #[cfg(feature = "ring-sqlite")]
@@ -140,6 +141,13 @@ const CONNECTION_DOCS: &[(&str, &str)] = &[
         "notify",
         "Fire a change notification on a channel (Postgres `NOTIFY`) — wakes any `db.watch` listening \
          on it (this connection or another). A no-op on a driver without a push channel (SQLite).",
+    ),
+    (
+        "migrate",
+        "Apply every pending SQL migration under `dir` (default project layout: `migrations/`), each \
+         in its own transaction, and return the number applied (0 when already up to date). Uses the \
+         `_noeta_migrations` tracking table and the same checksum/deleted-file integrity checks as \
+         `noeta migrate`; call it at boot for a self-migrating app.",
     ),
     (
         "close",

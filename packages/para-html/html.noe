@@ -13,7 +13,7 @@
 // over signals. See `examples/liveview-counter/`.
 namespace para.html
 
-use std.reactive.{signal, computed, view, Signal, Computed}
+use std.reactive.{signal, computed, view, Signal, Computed, View}
 use std.http.server
 use std.http.{Request, Response, Socket}
 use std.json
@@ -32,6 +32,11 @@ pub struct Html {
     holes: List<dyn>
     ids: List<string>
     handlers: Map<string, (string) -> void>
+    // Keyed-list regions on this page (one per `${keyed(…)}` hole). The websocket session reconciles
+    // each after every event: it diffs the region's key sequence and pushes minimal structural ops
+    // (insert / remove / move) so add / prepend / remove / reorder patch in place instead of
+    // re-rendering the parent. Empty for a page with no keyed lists.
+    regions: List<KeyedRegion>
 }
 
 // The typed DOM events a template binds. This enum is the single source of truth for the event path:
@@ -125,7 +130,7 @@ fn prefix_markers(s: string, p: string): string {
 fn render_value(v: dyn): string {
     single = v.as<Html>()
     if single != none {
-        return prefix_markers((single ?? Html { skeleton: "", holes: [], ids: [], handlers: {} }).skeleton, "s")
+        return prefix_markers((single ?? Html { skeleton: "", holes: [], ids: [], handlers: {}, regions: [] }).skeleton, "s")
     }
     many = v.as<List<Html>>()
     if many != none {
@@ -142,18 +147,31 @@ fn render_value(v: dyn): string {
 
 // A **keyed** list of rows (`${keyed(todos, key_of, row)}`) — each row is its *own* persistent
 // reactive region, so a change to one row pushes only that row's new markup over the wire (the diff
-// drops rows whose rendered value is unchanged), instead of re-`innerHTML`-ing the whole list. The
-// row `computed`s are built once (over the *current* keys) and expanded by `render` into the parent
-// template's holes. `ids` are the per-row markers; `rows` the per-row `Computed<string>`s (kept
-// `dyn`, like `Html.holes`, so `view.expose` accepts them and the field stays a built-in).
+// drops rows whose rendered value is unchanged), instead of re-`innerHTML`-ing the whole list. On
+// top of that, *structural* changes to the key sequence — append, prepend, remove, reorder — patch
+// in place: `render` seeds the region's rows, and the websocket `session` reconciles it after every
+// event, emitting minimal insert / remove / move ops (see [`reconcile_region`]).
 //
-// The key *set* is captured at build time: a row that later disappears clears (its computed renders
-// empty), but an *added* row has no region — add/remove/reorder still re-renders the parent region.
-// Per-row *content* is what becomes incremental.
+// `Keyed` carries the ingredients **deferred** (not pre-expanded): the current key sequence, and per
+// key a row `computed`, its wrapper markup, and its inline handlers. All three are captured while the
+// element type `T` is still known, then erased — so the value the template hole carries is a plain
+// non-generic `Keyed` the checker can recover with `val.as<Keyed>()`.
 struct Keyed {
-    ids: List<string>
-    rows: List<dyn>
-    handlers: Map<string, (string) -> void>
+    keys_now: () -> List<string>
+    make_row: (string) -> dyn
+    row_handlers: (string) -> Map<string, (string) -> void>
+}
+
+// A keyed region as the session reconciles it: the stable region id (one per `${keyed(…)}` hole,
+// assigned by `render`), the last-rendered key sequence (`prev`, a `signal` so it survives across
+// events), and the erased row operations. A row that stays in the set keeps its `computed`; a row
+// that leaves is unexposed (its scope torn down); a row that joins gets a fresh `computed`.
+pub struct KeyedRegion {
+    region: string
+    prev: Signal<List<string>>
+    keys_now: () -> List<string>
+    make_row: (string) -> dyn
+    row_handlers: (string) -> Map<string, (string) -> void>
 }
 
 // One row's persistent `computed`: it re-derives *its* item from the source signal by key on every
@@ -177,31 +195,259 @@ fn keyed_row<T>(
     })
 }
 
-// Build a `Keyed` from a list signal: a stable key per item and a persistent per-row `computed`.
-// `source` is the signal itself (not a snapshot) so each row can re-read it; `key_of` gives a row's
-// stable identity; `render_row` renders one item to an `@html` value.
+// One row's inline handlers, key-namespaced (`<key>-eN`) exactly as `prefix_markers` rewrites the
+// row's `data-live-*` attributes when it is folded — so a click on the (stable-id) element routes to
+// the registered closure. Re-derives the item from the source by key, so a row appended after first
+// render still finds its handlers.
+fn row_handlers_of<T>(
+    source: Signal<List<T>>,
+    key: string,
+    key_of: (T) -> string,
+    render_row: (T) -> Html,
+): Map<string, (string) -> void> {
+    cur = source.get().filter(fn(x) => key_of(x) == key)
+    if cur.len() == 0 {
+        return {}
+    }
+    rh = render_row(cur[0]).handlers
+    mut out: Map<string, (string) -> void> = {}
+    for hid in rh.keys() {
+        out = out.set("${key}-${hid}", rh.get_or(hid, fn(_: string) {}))
+    }
+    return out
+}
+
+// Build a `Keyed` from a list signal: a stable key per item and, deferred, a persistent per-row
+// `computed`. `source` is the signal itself (not a snapshot) so each row can re-read it; `key_of`
+// gives a row's stable identity; `render_row` renders one item to an `@html` value. The three erased
+// closures capture the typed `source`/`key_of`/`render_row` so `render` and the session can build,
+// expand, and reconcile the region without `T`.
 pub fn keyed<T>(
     source: Signal<List<T>>,
     key_of: (T) -> string,
     render_row: (T) -> Html,
 ): Keyed {
-    mut ids: List<string> = []
-    mut rows: List<dyn> = []
-    mut handlers: Map<string, (string) -> void> = {}
-    for item in source.get() {
-        k = key_of(item)
-        ids = ids ~ ["row-${k}"]
-        rows = rows ~ [keyed_row(source, k, key_of, render_row)]
-        // Hoist this row's inline handlers under key-namespaced ids (`<key>-eN`), matching how
-        // `prefix_markers` rewrites the row's `data-live-*` attributes when the row is folded. The row
-        // rebuilds its closures on every change, but each carries the same captured key/id, so a
-        // click on the (stable-id) element routes to the registered closure.
-        rh = render_row(item).handlers
-        for hid in rh.keys() {
-            handlers = handlers.set("${k}-${hid}", rh.get_or(hid, fn(_: string) {}))
+    return Keyed {
+        keys_now: fn() => source.get().map(key_of),
+        make_row: fn(k: string) => keyed_row(source, k, key_of, render_row),
+        row_handlers: fn(k: string) => row_handlers_of(source, k, key_of, render_row),
+    }
+}
+
+// The full marker id for a row: `<region>-row-<key>`. Region-namespaced so two keyed lists on one
+// page whose keys collide (both `"1"`) still get disjoint DOM ids.
+fn row_id(region: string, key: string): string {
+    return "${region}-row-${key}"
+}
+
+// Reject a key sequence with a repeat — two rows sharing a key would collide on one DOM id, so the
+// per-row diff could never tell them apart. Fail loudly and early rather than silently corrupt.
+fn ensure_unique_keys(keys: List<string>): void {
+    mut seen: List<string> = []
+    for k in keys {
+        if seen.contains(k) {
+            panic("keyed: duplicate key '${k}' — a keyed list's keys must be unique")
+        }
+        seen = seen ~ [k]
+    }
+}
+
+// The structural op kinds a keyed diff emits — the single source of truth for the wire `t` tag.
+enum KeyOpKind {
+    Remove
+    Insert
+    Move
+}
+
+// One structural op: `kind` on the row `key`, positioned immediately before the row `before` (or at
+// the region end when `before` is `""`). `render`/reconcile turn this into the wire op, resolving
+// `key`/`before` to region-namespaced marker ids and filling an insert's markup.
+struct KeyOp {
+    kind: KeyOpKind
+    key: string
+    before: string
+}
+
+// The longest-increasing-subsequence of `seq`, returned as the set (list) of *indices* into `seq`
+// that participate — the O(n^2) DP with parent backtracking. Used by [`keyed_plan`] to find the
+// largest run of survivors already in relative order: those keep their DOM position while every
+// other survivor moves. Standard O(n log n) LIS collapses to this at these list sizes.
+fn lis_indices(seq: List<int>): List<int> {
+    n = seq.len()
+    if n == 0 {
+        return []
+    }
+    mut dp: List<int> = []
+    mut par: List<int> = []
+    mut i = 0
+    while i < n {
+        dp = dp ~ [1]
+        par = par ~ [-1]
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        mut j = 0
+        while j < i {
+            if seq[j] < seq[i] && dp[j] + 1 > dp[i] {
+                dp[i] = dp[j] + 1
+                par[i] = j
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    mut best = 0
+    i = 1
+    while i < n {
+        if dp[i] > dp[best] {
+            best = i
+        }
+        i = i + 1
+    }
+    mut out: List<int> = []
+    mut k = best
+    while k != -1 {
+        out = out ~ [k]
+        k = par[k]
+    }
+    return out.reverse()
+}
+
+// The keyed reconciliation: diff the previous key sequence into the next one and emit the **minimal**
+// structural ops. This is the standard keyed-children algorithm (Vue 3's `patchKeyedChildren` / Solid
+// & Inferno's reconcile): anchor the surviving rows on their longest increasing subsequence — those
+// stay put — and insert / move everything else, walking `next` back-to-front so each op positions its
+// row before an already-placed successor. Removals come first (so later `before` refs never name a
+// gone row); inserts/moves follow in that backward order. `before == ""` means "at the region end".
+fn keyed_plan(prev: List<string>, next: List<string>): List<KeyOp> {
+    mut ops: List<KeyOp> = []
+    for k in prev {
+        if !next.contains(k) {
+            ops = ops ~ [KeyOp { kind: KeyOpKind.Remove, key: k, before: "" }]
         }
     }
-    return Keyed { ids: ids, rows: rows, handlers: handlers }
+    // Survivors (in both), in `next` order, tagged with their position in `prev`.
+    mut pos: Map<string, int> = {}
+    mut pi = 0
+    for k in prev {
+        pos = pos.set(k, pi)
+        pi = pi + 1
+    }
+    mut seq: List<int> = []
+    mut seq_keys: List<string> = []
+    for k in next {
+        if prev.contains(k) {
+            seq = seq ~ [pos.get_or(k, 0)]
+            seq_keys = seq_keys ~ [k]
+        }
+    }
+    keep_idx = lis_indices(seq)
+    mut keep: List<string> = []
+    mut si = 0
+    for k in seq_keys {
+        if keep_idx.contains(si) {
+            keep = keep ~ [k]
+        }
+        si = si + 1
+    }
+    mut before = ""
+    mut j = next.len() - 1
+    while j >= 0 {
+        k = next[j]
+        if !prev.contains(k) {
+            ops = ops ~ [KeyOp { kind: KeyOpKind.Insert, key: k, before: before }]
+        } else if !keep.contains(k) {
+            ops = ops ~ [KeyOp { kind: KeyOpKind.Move, key: k, before: before }]
+        }
+        before = k
+        j = j - 1
+    }
+    return ops
+}
+
+// A compact, deterministic description of the structural ops a key-sequence change patches — the
+// same minimal plan `reconcile_region` applies, but without markup or exposure. An introspection and
+// testing aid: given the previous and next key order it names exactly the insert / remove / move ops.
+// Ops are `; `-joined; `ins`/`mv` name the successor key they land before (`@end` at the tail).
+pub fn keyed_op_stream(prev: List<string>, next: List<string>): string {
+    plan = keyed_plan(prev, next)
+    mut parts: List<string> = []
+    for op in plan {
+        anchor = if op.before == "" then "@end" else op.before
+        tag = match op.kind {
+            KeyOpKind.Remove => "rm ${op.key}",
+            KeyOpKind.Insert => "ins ${op.key} ${anchor}",
+            KeyOpKind.Move => "mv ${op.key} ${anchor}",
+        }
+        parts = parts ~ [tag]
+    }
+    return parts.join("; ")
+}
+
+// The result of reconciling one region for one event: the wire frame to push (empty when the key
+// sequence did not change) and the page's updated handler table (rows in/out change the set of bound
+// closures).
+pub struct Reconcile {
+    frame: string
+    handlers: Map<string, (string) -> void>
+}
+
+// Reconcile one keyed region against the current key sequence and produce its structural patch.
+// Removed rows are **unexposed** (`view.unexpose` disposes the per-row `computed` — its reactive
+// scope is reclaimed on the spot, so a churning list leaves residency flat); inserted rows get a
+// fresh `computed`, exposed under their marker id, with their initial markup carried inline in the
+// op; moved rows keep their `computed` and their DOM element (state and focus survive the reorder).
+// The content of surviving rows still rides the ordinary per-row diff — this only moves the boxes.
+pub fn reconcile_region(reg: KeyedRegion, v: View, handlers: Map<string, (string) -> void>): Reconcile {
+    keys_now = reg.keys_now
+    make_row = reg.make_row
+    row_handlers = reg.row_handlers
+    prev = reg.prev.get()
+    next = keys_now()
+    if prev == next {
+        return Reconcile { frame: "", handlers: handlers }
+    }
+    ensure_unique_keys(next)
+    plan = keyed_plan(prev, next)
+    mut h = handlers
+    mut parts: List<string> = []
+    for op in plan {
+        rid = row_id(reg.region, op.key)
+        before_ref = if op.before == "" then "@end" else row_id(reg.region, op.before)
+        match op.kind {
+            KeyOpKind.Remove => {
+                v.unexpose(rid)
+                // The row is gone from the source, so re-deriving its handlers yields nothing — drop
+                // by its `<key>-` id namespace instead (the same one `keyed`/`prefix_markers` use).
+                prefix = "${op.key}-"
+                for hid in h.keys() {
+                    if hid.starts_with(prefix) {
+                        h = h.remove(hid)
+                    }
+                }
+                parts = parts ~ ["{\"t\":\"rm\",\"id\":\"${rid}\"}"]
+            },
+            KeyOpKind.Insert => {
+                c = make_row(op.key)
+                v.expose(rid, c)
+                rh = row_handlers(op.key)
+                for hid in rh.keys() {
+                    h = h.set(hid, rh.get_or(hid, fn(_: string) {}))
+                }
+                inner = computed_string(c)
+                html = "<span data-live-html=\"${rid}\">${inner}</span>"
+                parts = parts ~ ["{\"t\":\"ins\",\"id\":\"${rid}\",\"before\":\"${before_ref}\",\"html\":${json.stringify(html)}}"]
+            },
+            KeyOpKind.Move => {
+                parts = parts ~ ["{\"t\":\"mv\",\"id\":\"${rid}\",\"before\":\"${before_ref}\"}"]
+            },
+        }
+    }
+    reg.prev.set(next)
+    joined = parts.join(",")
+    frame = "{\"type\":\"keyed\",\"region\":\"${reg.region}\",\"ops\":[${joined}]}"
+    return Reconcile { frame: frame, handlers: h }
 }
 
 // Fold `from`'s inline handlers into `into` under `prefix` — the same prefix `prefix_markers` gives
@@ -237,6 +483,7 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
     mut exposed: List<dyn> = []
     mut ids: List<string> = []
     mut handlers: Map<string, (string) -> void> = {}
+    mut regions: List<KeyedRegion> = []
     mut i = 0
     for s in statics {
         skeleton = skeleton ~ s
@@ -246,19 +493,33 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
             keyed_val = val.as<Keyed>()
             binding = val.as<Binding>()
             if keyed_val != none {
-                // A keyed list: expand into one `data-live-html` region *per row*, exposing each
-                // row's own persistent `computed`. A change to one row diffs only that row. The rows'
-                // inline handlers (already key-namespaced by `keyed`) come along.
-                k = keyed_val ?? Keyed { ids: [], rows: [], handlers: {} }
-                handlers = merge_handlers(handlers, k.handlers, "")
-                mut j = 0
-                for rid in k.ids {
-                    rc = k.rows[j]
+                // A keyed list: expand into one `data-live-html` region *per row* (exposing each row's
+                // own persistent `computed`, so a change to one row diffs only that row), then close
+                // with a hidden end-anchor the session inserts before when appending. Record a
+                // `KeyedRegion` so the session can reconcile structural changes after each event.
+                k = keyed_val ?? Keyed { keys_now: fn() => [], make_row: fn(_: string) => computed(fn() => ""), row_handlers: fn(_: string) => {} }
+                region = "k${i}"
+                keys_now = k.keys_now
+                make_row = k.make_row
+                row_handlers = k.row_handlers
+                keys = keys_now()
+                ensure_unique_keys(keys)
+                for key in keys {
+                    rid = row_id(region, key)
+                    rc = make_row(key)
                     ids = ids ~ [rid]
                     exposed = exposed ~ [rc]
                     skeleton = skeleton ~ "<span data-live-html=\"${rid}\">" ~ computed_string(rc) ~ "</span>"
-                    j = j + 1
+                    handlers = merge_handlers(handlers, row_handlers(key), "")
                 }
+                skeleton = skeleton ~ "<span data-live-keyed=\"${region}\" hidden></span>"
+                regions = regions ~ [KeyedRegion {
+                    region: region,
+                    prev: signal(keys),
+                    keys_now: k.keys_now,
+                    make_row: k.make_row,
+                    row_handlers: k.row_handlers,
+                }]
             } else if in_tag(skeleton) && binding != none {
                 // Attribute position, inline event handler: register the closure and emit the event's
                 // wire marker (`data-live-click="eN"`) so a client event routes straight to it.
@@ -283,7 +544,7 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
                 skeleton = skeleton ~ "<span ${marker}=\"${hid}\">" ~ c.get() ~ "</span>"
                 child = val.as<Html>()
                 if child != none {
-                    handlers = merge_handlers(handlers, (child ?? Html { skeleton: "", holes: [], ids: [], handlers: {} }).handlers, "s-")
+                    handlers = merge_handlers(handlers, (child ?? Html { skeleton: "", holes: [], ids: [], handlers: {}, regions: [] }).handlers, "s-")
                 }
                 children = val.as<List<Html>>()
                 if children != none {
@@ -297,7 +558,7 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
         }
         i = i + 1
     }
-    return Html { skeleton: skeleton, holes: exposed, ids: ids, handlers: handlers }
+    return Html { skeleton: skeleton, holes: exposed, ids: ids, handlers: handlers, regions: regions }
 }
 
 // A row's initial rendered value for the first-paint skeleton. `c` is a `Computed<string>` carried
@@ -323,9 +584,28 @@ fn live_js(): string {
     document.querySelectorAll('[data-live-html="' + name + '"]').forEach((el) => { el.innerHTML = text; });
   };
   const apply = (values) => { for (const n of Object.keys(values)) { state[n] = values[n]; render(n); } };
+  const anchor = (id) => id === "@end" ? null : document.querySelector('[data-live-html="' + id + '"]');
+  const keyed = (frame) => {
+    const end = document.querySelector('[data-live-keyed="' + frame.region + '"]');
+    for (const op of frame.ops) {
+      if (op.t === "rm") {
+        const el = document.querySelector('[data-live-html="' + op.id + '"]');
+        if (el) el.remove();
+        continue;
+      }
+      const before = op.before === "@end" ? end : anchor(op.before);
+      if (!before) continue;
+      if (op.t === "ins") { before.insertAdjacentHTML("beforebegin", op.html); }
+      else if (op.t === "mv") {
+        const el = document.querySelector('[data-live-html="' + op.id + '"]');
+        if (el) before.parentNode.insertBefore(el, before);
+      }
+    }
+  };
   const handle = (frame) => {
     if (frame.type === "snapshot") apply(frame.values);
     else if (frame.type === "patch") apply(frame.changes);
+    else if (frame.type === "keyed") keyed(frame);
     else if (frame.type === "reload") location.reload();
     else if (frame.type === "error") console.error("noeta live:", frame.message);
   };
@@ -371,6 +651,9 @@ async fn session(sock: Socket, render_page: () -> Html): bool {
         v.expose(page.ids[i], c)
         i = i + 1
     }
+    // The dispatch table is mutable across the session: a keyed row that joins registers its inline
+    // handlers, a row that leaves drops them (see `reconcile_region`).
+    mut handlers = page.handlers
     sock.send(v.snapshot())
     mut going = true
     while going {
@@ -385,9 +668,19 @@ async fn session(sock: Socket, render_page: () -> Html): bool {
                 raw_value = evt["value"]
                 name = "${raw_name}"
                 value = "${raw_value}"
-                if page.handlers.has(name) {
-                    handler = page.handlers.get_or(name, fn(_: string) {})
+                if handlers.has(name) {
+                    handler = handlers.get_or(name, fn(_: string) {})
                     handler(value)
+                }
+            }
+            // Structural reconcile first — a keyed list may have gained, lost, or reordered rows;
+            // push its minimal insert/remove/move ops, and unexpose/expose the affected row bindings
+            // so the content diff that follows neither pushes a gone row nor re-pushes a fresh one.
+            for reg in page.regions {
+                res = reconcile_region(reg, v, handlers)
+                handlers = res.handlers
+                if res.frame != "" {
+                    sock.send(res.frame)
                 }
             }
             patch = v.diff() ?? ""

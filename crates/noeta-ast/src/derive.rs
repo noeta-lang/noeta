@@ -28,8 +28,8 @@
 
 use crate::pretty::type_ref_str;
 use crate::{
-    BinaryOp, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, ObjectLit, Param, Stmt, TraitDecl,
-    TypeRef,
+    BinaryOp, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, ObjectLit, Param, Stmt, StrPart,
+    TraitDecl, TypeRef,
 };
 use noeta_span::Span;
 
@@ -404,6 +404,23 @@ pub fn plan_builtin_via(
                 },
             ))
         }
+        // `Error` forwards the failure description into the field's own `message()` — the wrapper
+        // shape (`@derive(Error, via: cause)` on a type holding an inner error). The checker
+        // requires the field's type to implement `Error` (E0050), like the other via forwards.
+        "Error" => {
+            let decl = FnDecl {
+                ret: Some(named("string", span)),
+                ..empty_fn("message", span)
+            };
+            Ok(one(
+                decl,
+                Expr::Call {
+                    callee: Box::new(member(self_f(), "message", span)),
+                    args: Vec::new(),
+                    span,
+                },
+            ))
+        }
         "Add" => operator(BinaryOp::Add, "add"),
         "Sub" => operator(BinaryOp::Sub, "sub"),
         "Mul" => operator(BinaryOp::Mul, "mul"),
@@ -412,12 +429,32 @@ pub fn plan_builtin_via(
         other => Err(DerivePlanError::new(
             format!("`via:` delegation does not support `{other}`"),
             format!(
-                "the delegable built-ins are Equatable, Comparable, Display, Add, Sub, Mul, Div, \
-                 Concat; implement `impl {other}` explicitly (field `{}`)",
+                "the delegable built-ins are Equatable, Comparable, Display, Error, Add, Sub, \
+                 Mul, Div, Concat; implement `impl {other}` explicitly (field `{}`)",
                 field.name
             ),
         )),
     }
+}
+
+/// The methods a plain `@derive(Error)` synthesizes (error-ergonomics): one
+/// `fn message(): string { return "${self}" }` — the failure description IS the type's display
+/// story. The interpolation routes through the same rendering `echo` uses, so an `impl Display`'s
+/// hand-written `to_string()` is what `message()` returns, and a `@derive(Display)` type renders
+/// structurally — either way `message()` and the value's ordinary rendering can never disagree.
+/// The checker requires the deriving type to have `Display` at all (impl'd or derived, E0050
+/// otherwise): without it the "message" would be an accidental structural dump the author never
+/// opted into.
+pub fn plan_error_derive(span: Span) -> Vec<FnDecl> {
+    let decl = FnDecl {
+        ret: Some(named("string", span)),
+        ..empty_fn("message", span)
+    };
+    let body = Expr::Interp {
+        parts: vec![StrPart::Hole(ident("self", span))],
+        span,
+    };
+    vec![synth_fn(&decl, ret_stmt(body, span), span)]
 }
 
 /// The methods a **native** (extension-registered) derive synthesizes (derive layer 4): each is a

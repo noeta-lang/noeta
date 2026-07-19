@@ -194,6 +194,8 @@ fn debug_session_vm<'a>(arena: &'a typed_arena::Arena<Module>, src: &str) -> Vm<
         compiler: Box::new(compiler),
         arena,
         memo: HashMap::new(),
+        result_memo: HashMap::new(),
+        stop_generation: 0,
     });
     vm
 }
@@ -303,7 +305,7 @@ fn console_fragment_evaluation_is_bounded() {
     let text = "mut i = 0\nwhile true { i = i + 1 }";
     let program = fragment(text);
     let DebugEvalOutcome::Error(message) =
-        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
     else {
         panic!("a runaway fragment must be stopped, not hang");
     };
@@ -313,14 +315,82 @@ fn console_fragment_evaluation_is_bounded() {
     let text = "base + 1";
     let program = fragment(text);
     let DebugEvalOutcome::Value { text: v, .. } =
-        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
     else {
         panic!("the session must survive a budget trip");
     };
     assert_eq!(v, "11");
 }
 
-/// U3 (tooling-unification): a re-evaluated watch — same text, same scope shape — reuses its
+/// Watch-memoization: an *observational* watch (`tick()`) has its rendered result memoized within
+/// a stop — a repeated render returns the cached value WITHOUT re-running the fragment (visible
+/// because `tick()` mutates a global on each real run) — and bumping the stop generation
+/// invalidates the memo so the next render re-evaluates.
+#[test]
+fn observational_watch_result_is_memoized_until_the_generation_bumps() {
+    let arena = typed_arena::Arena::new();
+    let mut vm = debug_session_vm(
+        &arena,
+        "mut counter = 0\nfn tick(): int { counter = counter + 1\nreturn counter }\necho counter\n",
+    );
+    vm.run_top();
+    let frames = vec![Frame {
+        proto: 0,
+        base: 0,
+        pc: 0,
+        ret_dst: 0,
+        ret_transform: RetTransform::None,
+        upvalues: Vec::new(),
+    }];
+    let regs = vec![Value::unit(); vm.module.protos[0].num_registers as usize];
+
+    let text = "tick()";
+    let program = fragment(text);
+    // First watch render runs `tick()` (counter 0 → 1).
+    let DebugEvalOutcome::Value { text: v1, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Watch, text, &frames, &regs)
+    else {
+        panic!("first watch eval should succeed");
+    };
+    assert_eq!(v1, "1");
+    // A repeated render at the same generation is a memo HIT — `tick()` does not run, so the value
+    // stays 1 rather than advancing to 2.
+    let DebugEvalOutcome::Value { text: v2, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Watch, text, &frames, &regs)
+    else {
+        panic!("second watch eval should succeed");
+    };
+    assert_eq!(v2, "1", "a memoized watch must not re-run its fragment");
+
+    // Bumping the generation (what a resume/step or a console mutation does) invalidates the memo:
+    // the next render re-runs `tick()` (counter 1 → 2).
+    vm.bump_stop_generation();
+    let DebugEvalOutcome::Value { text: v3, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Watch, text, &frames, &regs)
+    else {
+        panic!("third watch eval should succeed");
+    };
+    assert_eq!(v3, "2", "a generation bump invalidates the watch memo");
+
+    // A CONSOLE entry is never memoized and always re-runs — each call advances the counter.
+    let DebugEvalOutcome::Value { text: c1, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
+    else {
+        panic!("console eval should succeed");
+    };
+    assert_eq!(c1, "3");
+    let DebugEvalOutcome::Value { text: c2, .. } =
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
+    else {
+        panic!("console eval should succeed");
+    };
+    assert_eq!(
+        c2, "4",
+        "a console entry is not memoized — it re-runs every time"
+    );
+}
+
+/// U3 (tooling-unification): a re-evaluated fragment — same text, same scope shape — reuses its
 /// compiled wrapper instead of appending a fresh proto + slot to the session per step.
 #[test]
 fn watch_fragments_are_memoized_by_text_and_scope() {
@@ -345,7 +415,7 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
     let text = "twice(base) + 1";
     let program = fragment(text);
     let DebugEvalOutcome::Value { text: v1, .. } =
-        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
     else {
         panic!("first eval should succeed");
     };
@@ -355,7 +425,7 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
 
     // Same text, same scope shape → memo hit: nothing appends, the value is fresh.
     let DebugEvalOutcome::Value { text: v2, .. } =
-        vm.debug_eval_fragment(&program, 0, &[], false, text, &frames, &regs)
+        vm.debug_eval_fragment(&program, 0, &[], EvalKind::Console, text, &frames, &regs)
     else {
         panic!("second eval should succeed");
     };
@@ -373,9 +443,15 @@ fn watch_fragments_are_memoized_by_text_and_scope() {
 
     // Different text → a fresh compile (the memo is per-expression, not a single slot).
     let other = fragment("twice(base) + 2");
-    let DebugEvalOutcome::Value { text: v3, .. } =
-        vm.debug_eval_fragment(&other, 0, &[], false, "twice(base) + 2", &frames, &regs)
-    else {
+    let DebugEvalOutcome::Value { text: v3, .. } = vm.debug_eval_fragment(
+        &other,
+        0,
+        &[],
+        EvalKind::Console,
+        "twice(base) + 2",
+        &frames,
+        &regs,
+    ) else {
         panic!("third eval should succeed");
     };
     assert_eq!(v3, "22");
@@ -2355,5 +2431,71 @@ fn lib_rs_stays_decomposed() {
         "src/lib.rs is {lines} lines (budget {BUDGET}). The god-file is regrowing — land new \
          subsystems in their own module (see the module map at the top of lib.rs and \
          plans/audit/audit-1-vm-runtime.md finding 1) instead of raising the budget."
+    );
+}
+
+/// Isolates I.4b worker-teardown gap: a worker isolate that strands reference cycles
+/// (`a.next = b; b.next = a` on a reference `class`) must reap them at its **own** teardown —
+/// refcounting alone never reclaims a cycle, and before the fix the worker's teardown ran no cycle
+/// pass, so the cycle (and its `__destruct`) leaked until the thread died. The value heap is
+/// thread-local, so `live_count()` measured on the worker's own thread *is* the worker heap's
+/// residency; it must return to the pre-run baseline (delta 0), exactly as the main heap's
+/// [`Vm::teardown`] guarantees. Drives `run_isolate_worker` directly (real isolates are CLI/
+/// out-of-oracle, so the differential leak oracle never samples this path).
+#[test]
+fn worker_teardown_reaps_stranded_reference_cycles() {
+    use std::sync::Arc;
+    let _ = noeta_stdlib::registry::default_seeded();
+    let src = "class Node { pub mut next: ?Node\n\
+         fn new(): Node { return Node { next: none } } }\n\
+         fn spin(count: int): int {\n\
+         mut i = 0\n\
+         while i < count {\n\
+         a = Node.new()\n\
+         b = Node.new()\n\
+         a.next = some(b)\n\
+         b.next = some(a)\n\
+         i = i + 1\n\
+         }\n\
+         return i\n\
+         }\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let module = Arc::new(compile(&parsed.program).expect("in subset"));
+    let proto = module
+        .protos
+        .iter()
+        .position(|p| p.name.as_deref() == Some("spin"))
+        .expect("spin proto") as u32;
+    let factory: crate::IsolateFactory = Arc::new(|| {
+        (
+            Box::new(noeta_stdlib::SandboxHost::new()) as Box<dyn noeta_stdlib::Host>,
+            Box::new(noeta_stdlib::SandboxExecutor::new()) as Box<dyn noeta_stdlib::Executor>,
+        )
+    });
+    let residual = std::thread::spawn(move || {
+        let before = noeta_value::live_count();
+        let result = crate::lifecycle::run_isolate_worker(
+            &module,
+            &factory,
+            None,
+            proto,
+            vec![crate::isolate::IsoArg::Copied(crate::isolate::Wire::Int(5))],
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            noeta_span::Span::new(0, 0),
+        );
+        assert!(result.is_ok(), "spin returns an int");
+        noeta_value::live_count() as i64 - before as i64
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        residual, 0,
+        "the worker's own teardown must reap its stranded cycles (residency 0)"
     );
 }

@@ -24,6 +24,7 @@ use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, TypeRef, UnaryOp};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
+mod cycles;
 pub mod drop_audit;
 mod ids;
 mod ir;
@@ -33,7 +34,7 @@ mod ops;
 mod value;
 
 pub(crate) use ids::{ChannelId, ScopeId, TaskId};
-pub use leak::live_count;
+pub use leak::{live_count, live_peak, reset_peak, set_safepoint_threshold};
 pub use value::{IterState, ListRepr, Value};
 use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
 
@@ -381,7 +382,7 @@ pub struct EnumDef {
     /// closures capturing the definition (global) scope — exactly like a struct/class's `methods`.
     /// An instance call `value.m(...)` and an associated call `Enum.f(...)` both resolve here; the
     /// distinction (a value receiver vs. a bare type-name receiver) is made at the call site.
-    methods: HashMap<String, Rc<Closure>>,
+    pub(crate) methods: HashMap<String, Rc<Closure>>,
 }
 
 impl EnumDef {
@@ -417,7 +418,7 @@ struct VariantInfo {
 pub struct EnumValue {
     enum_name: String,
     variant: String,
-    data: Vec<Value>,
+    pub(crate) data: Vec<Value>,
     /// The variant's declaration index — derived `Comparable`'s primary key (variant order, then
     /// payload). Type metadata like the VM `Shape::variant_index`: **excluded from `PartialEq`**
     /// (equality compares name/variant/data).
@@ -478,12 +479,12 @@ impl EnumValue {
 pub struct TypeDef {
     name: String,
     fields: Vec<FieldSpec>,
-    methods: HashMap<String, Rc<Closure>>,
+    pub(crate) methods: HashMap<String, Rc<Closure>>,
     /// The class's `destruct` block lowered to a parameterless Core-IR [`noeta_ir::Func`], if any —
     /// run by the runtime when the last reference to an instance drops (not directly callable),
     /// with the instance's fields and `self` bound into its scope. Shared so an `ObjectValue` can
     /// reach it.
-    destructor: Option<Rc<noeta_ir::Func>>,
+    pub(crate) destructor: Option<Rc<noeta_ir::Func>>,
     /// Whether this came from a `struct X {...}` struct (vs. a `class`). Cosmetic in M0.
     is_struct: bool,
     /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**
@@ -553,7 +554,7 @@ struct FieldSpec {
 /// `Rc<BTreeMap>` cannot. Borrows are always released promptly (snapshot-then-release) so a method
 /// or destructor that re-enters and mutates the same instance never hits a borrow conflict.
 pub struct ObjectValue {
-    def: Rc<TypeDef>,
+    pub(crate) def: Rc<TypeDef>,
     /// The field values in **slot order**, parallel to `def.fields` (`slots[i]` is the value of
     /// `def.fields[i]`). This mirrors the VM's `Payload::Object { shape, slots }` — the layout
     /// groundwork P-PACK Phase 1 needs — replacing the former name-keyed `BTreeMap`: a `Vec` index
@@ -561,7 +562,7 @@ pub struct ObjectValue {
     /// shared `def`, not per instance. An opaque `use`-import is constructed with a per-literal `def`
     /// whose fields are the literal's keys in sorted order (matching the VM's opaque shape), so even
     /// dynamic-field imports fit the uniform slot model.
-    slots: RefCell<Vec<Value>>,
+    pub(crate) slots: RefCell<Vec<Value>>,
     /// A monotonic per-run **creation sequence** (object-model slice 2c): the instance's allocation
     /// age. The cycle reaper finalizes reclaimed members in reverse-creation order (newest-first) by
     /// this key, matching the VM's `ObjHeader::seq` so cyclic `destruct` order agrees across backends.
@@ -709,7 +710,7 @@ pub struct Closure {
     /// matching the VM's globals-only default thunks.
     defaults: Vec<Option<noeta_ir::Thunk>>,
     body: Rc<noeta_ir::Func>,
-    captured: Rc<Scope>,
+    pub(crate) captured: Rc<Scope>,
     /// The declared name (`"f"`, `"Type.method"`) for the abort traceback — the eval twin of the
     /// VM's `Chunk::name`. `None` for an anonymous closure value.
     name: Option<String>,
@@ -791,6 +792,40 @@ fn register_mutated_object(obj: &Rc<ObjectValue>) {
     });
 }
 
+/// The still-live captured-scope candidates (upgraded, deduplicated by pointer) — the safepoint
+/// collector's seed set. **Peeked, not drained**: live and deferred entries must stay registered
+/// for the exit reapers; entries whose target the collection frees fail their next upgrade and are
+/// pruned by [`prune_cycle_registries`].
+pub(crate) fn captured_scope_candidates() -> Vec<Rc<Scope>> {
+    CAPTURED_SCOPES.with(|r| {
+        let mut seen = std::collections::HashSet::new();
+        r.borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|s| seen.insert(Rc::as_ptr(s) as usize))
+            .collect()
+    })
+}
+
+/// The still-live mutated-object candidates — see [`captured_scope_candidates`].
+pub(crate) fn mutated_object_candidates() -> Vec<Rc<ObjectValue>> {
+    MUTATED_OBJECTS.with(|r| {
+        let mut seen = std::collections::HashSet::new();
+        r.borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|o| seen.insert(Rc::as_ptr(o) as usize))
+            .collect()
+    })
+}
+
+/// Drop dead weak entries from both candidate registries (after a safepoint collection freed
+/// their targets), bounding the registries to the live candidate set.
+pub(crate) fn prune_cycle_registries() {
+    CAPTURED_SCOPES.with(|r| r.borrow_mut().retain(|w| w.strong_count() > 0));
+    MUTATED_OBJECTS.with(|r| r.borrow_mut().retain(|w| w.strong_count() > 0));
+}
+
 impl Drop for Closure {
     fn drop(&mut self) {
         leak::dec();
@@ -809,7 +844,7 @@ impl std::fmt::Debug for Closure {
 
 /// A name binding and whether it may be reassigned.
 struct Binding {
-    value: Value,
+    pub(crate) value: Value,
     mutable: bool,
 }
 
@@ -820,11 +855,11 @@ struct Binding {
 /// them by clearing the bindings of any captured scope still live after global teardown,
 /// so heap residency reaches 0 on this backend (the leak oracle's gate).
 struct Scope {
-    vars: RefCell<HashMap<String, Binding>>,
+    pub(crate) vars: RefCell<HashMap<String, Binding>>,
     /// Binding names in declaration order, so the runtime can destroy them in reverse
     /// declaration order at scope exit — the deterministic destruction order the spec wants.
-    order: RefCell<Vec<String>>,
-    parent: Option<Rc<Scope>>,
+    pub(crate) order: RefCell<Vec<String>>,
+    pub(crate) parent: Option<Rc<Scope>>,
     /// The SEALED-fn frontier: `Some(allow)` on a named fn's call scope. An outward write walk
     /// (`assign`/`assign_force`/`take_mut`) crossing this scope may continue to the parent only
     /// for names in `allow` (the `use (…)` captures) — any other name reports `NotFound`, so the
@@ -1089,6 +1124,11 @@ struct Task {
     /// `ctx_current` at `spawn`, swapped in around each poll of this task's step — the tree-walker
     /// mirror of the VM's field.
     context: Vec<u64>,
+    /// The channels this task holds a **producer hold** on (isolates I.4c auto-close): the indices of
+    /// every `Sender<T>` it captured. Decremented when the task's future is reclaimed (on completion
+    /// or at scope end), auto-closing a channel when its last producer is gone. The VM's `Task.holds`
+    /// mirror. Emptied once decremented so completion and scope-end never double-count.
+    holds: Vec<usize>,
 }
 
 /// One traced future (native-otel T5c) — the tree-walker mirror of the VM's entry. `future` is a
@@ -1121,6 +1161,48 @@ struct Channel {
     buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
     capacity: usize,
     closed: bool,
+    /// Live **producer holds** (isolates I.4c auto-close): spawned tasks/isolates that captured a
+    /// `Sender` for this channel. Born at 0 (the `channel()` split does not count); when it returns
+    /// to 0 after being positive the channel auto-closes. The tree-walker mirror of the VM
+    /// `Channel::Local::producers`.
+    producers: u32,
+}
+
+/// The channel indices of every `Sender<T>` reachable from a spawned future's captures (isolates
+/// I.4c auto-close): a cycle-safe walk of the tree-walker value graph. It follows a closure's
+/// **immediate captured-scope bindings** (never its parent-scope chain up to the globals), so it
+/// collects the same producer holds the VM's `gc_children`-based walk does (whose closures likewise
+/// carry only explicit captures) and both backends agree.
+pub(crate) fn collect_producer_channels(root: &Value) -> Vec<usize> {
+    fn walk(v: &Value, out: &mut Vec<usize>, seen: &mut HashSet<*const Scope>) {
+        match v {
+            Value::Sender(id) => out.push(id.index()),
+            Value::Future(inner) => walk(inner, out, seen),
+            Value::BoundMethod(recv, _) => walk(recv, out, seen),
+            Value::Function(closure) => {
+                let scope: &Rc<Scope> = &closure.captured;
+                if seen.insert(Rc::as_ptr(scope)) {
+                    for binding in scope.vars.borrow().values() {
+                        walk(&binding.value, out, seen);
+                    }
+                }
+            }
+            Value::Tuple(items) | Value::Set(items, _) => {
+                items.iter().for_each(|it| walk(it, out, seen));
+            }
+            Value::List(ListRepr::Boxed { items, .. }) => {
+                items.iter().for_each(|it| walk(it, out, seen));
+            }
+            Value::Map(entries, _) => entries.values().for_each(|it| walk(it, out, seen)),
+            Value::Enum(e) => e.data.iter().for_each(|it| walk(it, out, seen)),
+            Value::Object(o) => o.slots.borrow().iter().for_each(|it| walk(it, out, seen)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    walk(root, &mut out, &mut seen);
+    out
 }
 
 /// One program's worth of evaluation state.
@@ -1162,7 +1244,16 @@ struct Interpreter {
     /// join at `}` drive the tasks round-robin. A handle references a task by its `(scope, task)`
     /// position here. Mirrors the VM's `scopes` field; both round-robin identically, so the differential
     /// holds by construction.
+    ///
+    /// A closed scope is **tombstoned** (its task list drained and `scope_closed[i]` set), not removed,
+    /// so scope indices stay stable for handles (Track A.7): a split `concurrent { }` may close while a
+    /// sibling task's scope is still open above it, i.e. out of structured-stack order, so popping the
+    /// top would corrupt the sibling. Trailing tombstones are trimmed on close (the common LIFO case), so
+    /// the Vec stays bounded by the concurrently-open high-water mark.
     scopes: Vec<Vec<Task>>,
+    /// Whether each `scopes` slot is a closed tombstone (Track A.7). Parallel to `scopes`; the only extra
+    /// state a stable-index scope stack needs. Mirrors the VM's `scope_closed`.
+    scope_closed: Vec<bool>,
     /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
     /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
     /// client). Belongs to whichever strand is executing — the main strand (root) by default; the
@@ -1289,6 +1380,7 @@ impl Interpreter {
             host,
             executor,
             scopes: Vec::new(),
+            scope_closed: Vec::new(),
             ctx_current: Vec::new(),
             traced_futures: Vec::new(),
             channels: Vec::new(),
@@ -1411,6 +1503,31 @@ impl Interpreter {
     /// `destruct` at *its* last reference. A non-aggregate, or an aliased aggregate (refcount > 1),
     /// simply lets its `Rc` drop here — memory is reclaimed, no destructor fires (deferred to the
     /// final reference, §2). Closure-captured values are out of §4 scope (Phase 6 owns capture).
+    /// Register one producer hold on channel `cid` (isolates I.4c): a spawned task/isolate captured a
+    /// `Sender` for it. The tree-walker mirror of the VM's `add_producer_hold`.
+    pub(crate) fn add_producer_hold(&mut self, cid: usize) {
+        self.channels[cid].producers += 1;
+    }
+
+    /// End one producer hold on channel `cid` (isolates I.4c): its task completed or was reclaimed.
+    /// Auto-closes the channel when its last producer is gone, marking channel progress so a parked
+    /// receiver re-polls and observes the close. The VM's `end_producer_hold` mirror.
+    pub(crate) fn end_producer_hold(&mut self, cid: usize) {
+        if noeta_stdlib::channel::producer_left(&mut self.channels[cid].producers) {
+            self.channels[cid].closed = true;
+            self.channel_progress += 1;
+        }
+    }
+
+    /// Release the producer holds a task recorded, if not already released (isolates I.4c) — on the
+    /// task's completion, or at scope end for a task that never completed. Empties the list so the two
+    /// paths never double-count. The VM's `release_task_holds` mirror.
+    pub(crate) fn release_task_holds(&mut self, holds: &mut Vec<usize>) {
+        for cid in std::mem::take(holds) {
+            self.end_producer_hold(cid);
+        }
+    }
+
     fn destroy_value(&mut self, value: Value) {
         match value {
             Value::Object(obj) => self.destroy_object(obj),
@@ -1563,6 +1680,17 @@ impl Interpreter {
     /// Materialize the elements a `for` loop iterates over: a list/set in canonical order, a
     /// map's values in key order, or a user object's `Iterable` (`iter`) list. Shared by the
     /// AST walker's `exec_for` and the Core-IR interpreter so both agree by construction.
+    /// Whether a value is a user object exposing a `next` member — a declared method, or a field
+    /// (whose value the drain calls through the ordinary member-call path; a non-callable one
+    /// raises the indirect-call error there). The gate for `next`-driven user iteration,
+    /// mirrored by the VM's shape-based gate.
+    fn has_user_next(v: &Value) -> bool {
+        matches!(
+            v,
+            Value::Object(o) if o.def.methods.contains_key("next") || o.field("next").is_some()
+        )
+    }
+
     fn iter_elements(&mut self, iterable: Value, span: Span) -> Eval<Vec<Value>> {
         match &iterable {
             Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
@@ -1571,10 +1699,12 @@ impl Interpreter {
             // Iterating a map yields its values, in deterministic key order.
             Value::Map(entries, _) => Ok(entries.values().cloned().collect()),
             // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
-            // `iter` method returns.
+            // `iter` method returns — or, composing with the member-handle iterator below, the
+            // `next`-driven user iterator object it returns.
             Value::Object(object) if object.def.methods.contains_key("iter") => {
                 match self.call_method(iterable.clone(), "iter", Vec::new(), span)? {
                     Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
+                    other if Self::has_user_next(&other) => self.drain_next_object(other, span),
                     other => Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
                         span,
@@ -1582,11 +1712,49 @@ impl Interpreter {
                     )),
                 }
             }
+            // The **member-handle iterator** (coroutines Track-I trigger): a user object with no
+            // `iter` but a callable `next` member — a method, or (through the member-call
+            // fallback) a closure-valued field — drives iteration directly: `next()` until
+            // `none`, each `some(x)` contributing an element. Eager like the `Iterable` list
+            // path (user iteration snapshots; lazy streaming remains built-in `Iterator<T>`'s).
+            Value::Object(_) if Self::has_user_next(&iterable) => {
+                self.drain_next_object(iterable.clone(), span)
+            }
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!("cannot iterate over {}", other.type_name()),
             )),
+        }
+    }
+
+    /// Drain a `next`-driven user iterator object into its element list: call the object's `next`
+    /// member — dispatched through the ordinary member-call path, so a method or a closure-valued
+    /// field both work — until it returns `none`; each `some(x)` contributes `x`. A step that is
+    /// not a built-in option is E0007, identically in both backends.
+    fn drain_next_object(&mut self, obj: Value, span: Span) -> Eval<Vec<Value>> {
+        let mut elements = Vec::new();
+        loop {
+            let step = self.call_method(obj.clone(), "next", Vec::new(), span)?;
+            let payload = match &step {
+                Value::Enum(e) if e.enum_name == "Option" && e.variant == "some" => {
+                    e.data.first().cloned().unwrap_or(Value::Unit)
+                }
+                Value::Enum(e) if e.enum_name == "Option" && e.variant == "none" => {
+                    return Ok(elements);
+                }
+                other => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "iterator `next` must return an option, found {}",
+                            other.type_name()
+                        ),
+                    ));
+                }
+            };
+            elements.push(payload);
         }
     }
 
@@ -2208,11 +2376,21 @@ impl Interpreter {
                 Some(method) => {
                     self.call_method_on(&Rc::clone(object), &Rc::clone(method), args, span)
                 }
-                None => Err(self.runtime_error(
-                    DiagnosticCode::UnknownName,
-                    span,
-                    format!("type `{}` has no method `{name}`", object.def.name()),
-                )),
+                // The runtime member-call fallback (the field-access-then-call desugar's `dyn`
+                // path): no method `name`, but the object HAS a field `name` — `obj.f(args)`
+                // means `(obj.f)(args)`, so call the field's value. The same order the checker
+                // pins statically (a method wins, the field is consulted only on a miss), and the
+                // same route the lowered `Field` + `Call` takes — a non-callable field value
+                // raises the indirect-call E0007 ("`X` is not callable"), identically in both
+                // backends. A type with neither stays the runtime E0005.
+                None => match object.field(name) {
+                    Some(value) => self.call(value, args, span),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        span,
+                        format!("type `{}` has no method `{name}`", object.def.name()),
+                    )),
+                },
             };
         }
         // `status.label()` — an enum instance method (the unified body, object-model slice 3). The
@@ -2356,7 +2534,13 @@ impl Interpreter {
                 "send" => {
                     self.expect_std_arity(name, &args, 1, span)?;
                     let value = args.into_iter().next().unwrap();
-                    return Ok(Value::ChannelSend(id, Rc::new(value)));
+                    return Ok(Value::ChannelSend(
+                        id,
+                        Rc::new(value),
+                        Rc::new(std::cell::Cell::new(
+                            noeta_stdlib::channel::SendPhase::Fresh,
+                        )),
+                    ));
                 }
                 "close" => {
                     self.expect_std_arity(name, &args, 0, span)?;
@@ -2372,6 +2556,24 @@ impl Interpreter {
         {
             self.expect_std_arity(name, &args, 0, span)?;
             return Ok(Value::ChannelRecv(*id));
+        }
+        // Task-handle cancellation methods (Track A.8): `h.cancel()` marks the task cancelled
+        // exactly as a `race` loser (idempotent; a no-op on a completed task or a bare future),
+        // `h.join()` drives it and reports the typed `Result<T, Cancelled>` outcome. Offered on any
+        // `Future<T>`, since a spawn/isolate handle is itself a `Future<T>`. The VM's mirror.
+        if matches!(receiver, Value::Handle(..) | Value::Future(_)) {
+            match name {
+                "cancel" => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    self.cancel_task(&receiver);
+                    return Ok(Value::Unit);
+                }
+                "join" => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    return self.join_task(receiver, span);
+                }
+                _ => {}
+            }
         }
         // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
         // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
@@ -2876,6 +3078,13 @@ impl Interpreter {
         // FileHandle discipline).
         let result = reg.dispatch_method(&mut **cell.borrow_mut(), name, &mut *self.host, &nargs);
         match result {
+            // Async WORK from an extern-type method (e.g. `Process.wait_async`, process-signals
+            // arc): ticket the descriptor on the executor and hand back the async-IO future —
+            // mirrors the module-function path in `call_std_function` and the VM.
+            Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
+                let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
+                Ok(Value::AsyncIo(id))
+            }
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
         }
@@ -3340,11 +3549,29 @@ impl Interpreter {
             // A bound handle (`f = x.method`, EX.2b): dispatch the method on the captured receiver.
             Value::BoundMethod(recv, method) => self.call_method(*recv, &method, args, span),
             Value::Function(closure) => self.call_closure(&closure, args, span),
-            other => Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!("{} is not callable", other.type_name()),
-            )),
+            other => {
+                // The **`Callable` protocol**: an object (or enum value) invoked as a value —
+                // `obj(args)` dispatches to its `call` METHOD, the protocol's required method.
+                // Structural at runtime like the other protocol dispatches (`iter`, `to_string`):
+                // the method table is what is consulted, and `impl Callable { fn call(...) }` is
+                // the validated way to populate it. Deliberately method-only — a closure-valued
+                // FIELD named `call` does not make the object invocable (that is member-call
+                // territory: `obj.call(args)` reaches it) — so both backends gate identically.
+                if matches!(&other, Value::Object(o) if o.def.methods.contains_key("call")) {
+                    return self.call_method(other, "call", args, span);
+                }
+                if let Value::Enum(e) = &other
+                    && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
+                    && def.method("call").is_some()
+                {
+                    return self.call_method(other, "call", args, span);
+                }
+                Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("{} is not callable", other.type_name()),
+                ))
+            }
         }
     }
 
@@ -3357,6 +3584,9 @@ impl Interpreter {
                 arity_message("function", required, closure.params.len(), args.len()),
             ));
         }
+        // Safepoint-GC poll at the call boundary (memory-management 6.x) — with the loop
+        // polls, this bounds a recursion-driven cycle builder too.
+        cycles::poll_safepoint();
         let supplied = args.len();
         let call_scope = match &closure.body.captures {
             Some(allow) => Scope::sealed_child(&closure.captured, allow),
@@ -3398,6 +3628,8 @@ impl Interpreter {
                 arity_message("method", required, method.params.len(), args.len()),
             ));
         }
+        // Safepoint-GC poll at the call boundary — see `call_closure`.
+        cycles::poll_safepoint();
         let supplied = args.len();
         let call_scope = match &method.body.captures {
             Some(allow) => Scope::sealed_child(&method.captured, allow),
@@ -3755,44 +3987,73 @@ impl Interpreter {
                     None => Ok(None),
                 }
             }
-            // `tx.send(v)` (isolates I.1): enqueue when the buffer has room (ready → unit), else
-            // suspend (pending) until a `recv` frees a slot. Sending on a closed channel is a bug
-            // (E0010) — the receiver would never see it.
-            Value::ChannelSend(id, value) => {
+            // `tx.send(v)` (isolates I.1 + I.4c rendezvous): the shared `channel` policy decides the
+            // action from the channel's scalar state and this send's rendezvous phase (carried on the
+            // future's `Rc<Cell>`, so it persists across the same awaited future's re-polls).
+            Value::ChannelSend(id, value, phase_cell) => {
+                use noeta_stdlib::channel::{SendAction, SendPhase};
                 let id = *id;
+                let phase = phase_cell.get();
                 let chan = &self.channels[id.index()];
-                if chan.closed {
-                    return Err(self.runtime_error(
+                let action = noeta_stdlib::channel::poll_send(
+                    chan.capacity,
+                    chan.buffer.len(),
+                    chan.closed,
+                    phase,
+                );
+                match action {
+                    // Sending on a closed channel is a bug (E0010) — the receiver would never see it.
+                    SendAction::Closed => Err(self.runtime_error(
                         DiagnosticCode::Panic,
                         span,
                         "cannot send on a closed channel".to_string(),
-                    ));
-                }
-                if chan.buffer.len() < chan.capacity {
-                    let value = (**value).clone();
-                    // The sender's trace context rides the message (T5d) — the VM's envelope,
-                    // mirrored.
-                    let context = self.outbound_trace_context();
-                    self.channels[id.index()].buffer.push_back((value, context));
-                    self.channel_progress += 1;
-                    Ok(Some(Value::Unit))
-                } else {
-                    Ok(None)
+                    )),
+                    // Buffered deliver (complete now) or rendezvous deposit (park until taken): the
+                    // message enters the one queue either way.
+                    SendAction::DeliverBuffered | SendAction::Deposit => {
+                        let value = (**value).clone();
+                        // The sender's trace context rides the message (T5d) — the VM's envelope,
+                        // mirrored.
+                        let context = self.outbound_trace_context();
+                        self.channels[id.index()].buffer.push_back((value, context));
+                        self.channel_progress += 1;
+                        if action == SendAction::Deposit {
+                            // A rendezvous send parks, recording that its message is now in the
+                            // handoff, and completes only once a receiver takes it.
+                            phase_cell.set(SendPhase::Deposited);
+                            Ok(None)
+                        } else {
+                            Ok(Some(Value::Unit))
+                        }
+                    }
+                    // Rendezvous: the deposited message has been taken — complete.
+                    SendAction::Complete => {
+                        self.channel_progress += 1;
+                        Ok(Some(Value::Unit))
+                    }
+                    SendAction::Park => Ok(None),
                 }
             }
             // `rx.recv()` (isolates I.1): dequeue the next message (ready → `some(v)`), yield `none`
             // once the channel is closed and drained, else suspend (pending) on an empty open buffer.
             Value::ChannelRecv(id) => {
                 let id = *id;
-                if let Some((value, context)) = self.channels[id.index()].buffer.pop_front() {
-                    // Seed the receiving strand from the message's context (T5d).
-                    self.seed_context_from_message(context);
-                    self.channel_progress += 1;
-                    Ok(Some(builtin_enum("Option", "some", vec![value])))
-                } else if self.channels[id.index()].closed {
-                    Ok(Some(builtin_enum("Option", "none", vec![])))
-                } else {
-                    Ok(None)
+                let chan = &self.channels[id.index()];
+                match noeta_stdlib::channel::poll_recv(chan.buffer.len(), chan.closed) {
+                    noeta_stdlib::channel::RecvAction::Deliver => {
+                        let (value, context) = self.channels[id.index()]
+                            .buffer
+                            .pop_front()
+                            .expect("non-empty");
+                        // Seed the receiving strand from the message's context (T5d).
+                        self.seed_context_from_message(context);
+                        self.channel_progress += 1;
+                        Ok(Some(builtin_enum("Option", "some", vec![value])))
+                    }
+                    noeta_stdlib::channel::RecvAction::ClosedEmpty => {
+                        Ok(Some(builtin_enum("Option", "none", vec![])))
+                    }
+                    noeta_stdlib::channel::RecvAction::Park => Ok(None),
                 }
             }
             other => Ok(Some(other.clone())),
@@ -3830,6 +4091,14 @@ impl Interpreter {
                     if let Some(value) = polled? {
                         self.scopes[si][ti].result = Some(value);
                         completed = true;
+                        // The task is done, so its **producer holds** end now — auto-closing any
+                        // channel whose last producer just completed, while the scope is still open,
+                        // so a sibling receiver drains then observes `none` (isolates I.4c). The
+                        // future is left for `ScopeEnd` to reclaim, so captured-local destructors
+                        // still fire at the join (unchanged, both backends agree); only the producer
+                        // accounting resolves eagerly here. The VM's mirror.
+                        let mut holds = std::mem::take(&mut self.scopes[si][ti].holds);
+                        self.release_task_holds(&mut holds);
                     }
                 }
                 ti += 1;
@@ -3854,13 +4123,53 @@ impl Interpreter {
         }
     }
 
+    /// Open a structured-concurrency scope and return its (stable) index (Track A.7). Appends a fresh
+    /// slot, so the new scope is the innermost; a subsequent `spawn` in the same straight-line segment
+    /// lands in it. The tree-walker mirror of the VM's scope open.
+    fn open_scope(&mut self) -> usize {
+        self.scopes.push(Vec::new());
+        self.scope_closed.push(false);
+        self.scopes.len() - 1
+    }
+
+    /// The innermost still-open scope index (Track A.7) — the highest non-tombstoned slot. Used by
+    /// `spawn` and the synchronous join/close (a split `concurrent { }` closes by *captured* index).
+    /// Panics only for a `spawn`/join with no open scope, which is E0041 at check.
+    fn innermost_open(&self) -> usize {
+        self.scope_closed
+            .iter()
+            .rposition(|closed| !closed)
+            .expect("an open concurrency scope")
+    }
+
+    /// Close the (already-drained) scope at index `si` (Track A.7): release each task's producer holds,
+    /// future, and result (destructor-aware, mirroring `Stmt::ScopeEnd`), tombstone the slot, then trim
+    /// trailing tombstones so the Vec stays bounded (the common LIFO case reclaims immediately). Closing
+    /// by index — not popping the top — keeps sibling scopes that are still open above it intact. The
+    /// tree-walker mirror of the VM's `close_scope`.
+    fn close_scope(&mut self, si: usize) {
+        let scope = std::mem::take(&mut self.scopes[si]);
+        for mut task in scope {
+            self.release_task_holds(&mut task.holds);
+            self.destroy_value(task.future);
+            if let Some(result) = task.result {
+                self.destroy_value(result);
+            }
+        }
+        self.scope_closed[si] = true;
+        while self.scope_closed.last() == Some(&true) {
+            self.scopes.pop();
+            self.scope_closed.pop();
+        }
+    }
+
     /// Join the innermost scope (Track A.3b): drive tasks round-robin until the innermost scope's tasks
     /// all complete. Each round polls **all** open scopes (A.7) so an outer scope's siblings interleave
     /// with the inner join; the loop exits on the innermost scope alone. On a round where nothing
     /// completed, advance the logical clock; a pending scope with no timer to advance is a deterministic
     /// deadlock.
     fn join_scope(&mut self, span: Span) -> Eval<()> {
-        let si = self.scopes.len() - 1;
+        let si = self.innermost_open();
         loop {
             let before = self.channel_progress;
             let progressed = self.poll_all_scopes_round(span)?;
@@ -3890,10 +4199,35 @@ impl Interpreter {
     /// they interleave; advances the logical clock when nothing progresses; deadlocks if nothing can
     /// advance.
     fn drive_future(&mut self, future: Value, span: Span) -> Eval<Value> {
+        // `.await` on a cancelled task is a **loud error** (Track A.8, E0056) — a cancelled task
+        // never produces a value. Cancel-aware code uses `h.join()` (the same drive, cancelled
+        // outcome reported) instead. The VM's `drive_future` mirror.
+        match self.drive_future_outcome(future, span)? {
+            Some(value) => Ok(value),
+            None => Err(self.runtime_error(
+                DiagnosticCode::AwaitCancelled,
+                span,
+                "cannot await a cancelled task; use `.join()` to observe the cancelled outcome"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// The shared drive loop behind `.await` ([`Self::drive_future`]) and `h.join()`
+    /// ([`Self::join_task`]) (Track A.8): drive the target to completion, interleaving open scopes
+    /// each round. `Some(value)` on completion, `None` when the target is a task **handle whose task
+    /// was cancelled** (never polled again, never gets a result). The tree-walker mirror of the VM's
+    /// `drive_future_outcome`.
+    fn drive_future_outcome(&mut self, future: Value, span: Span) -> Eval<Option<Value>> {
         loop {
             let before = self.channel_progress;
             if let Some(value) = self.poll_once(&future, span)? {
-                return Ok(value);
+                return Ok(Some(value));
+            }
+            // A cancelled handle never becomes ready — report the cancelled outcome rather than
+            // spinning to a deadlock. Checked after the poll so a sibling's cancel this round shows.
+            if self.handle_cancelled(&future) {
+                return Ok(None);
             }
             // Interleave: run every open scope's tasks one round (so awaiting a handle — or a `sleep` —
             // inside a `concurrent` block lets siblings at all levels make progress).
@@ -3912,6 +4246,35 @@ impl Interpreter {
                 ));
             }
         }
+    }
+
+    /// Drive a task handle for `h.join()` (Track A.8) and report its outcome as a typed
+    /// `Result<T, Cancelled>`: `Ok(value)` once the task completes, `Err(Cancelled)` if it was
+    /// cancelled. The cancel-aware counterpart to `.await` (which raises E0056 on a cancelled task).
+    /// The tree-walker mirror of the VM's `join_task`.
+    fn join_task(&mut self, future: Value, span: Span) -> Eval<Value> {
+        match self.drive_future_outcome(future, span)? {
+            Some(value) => Ok(builtin_enum("Result", "Ok", vec![value])),
+            None => Ok(builtin_enum(
+                "Result",
+                "Err",
+                vec![builtin_enum("Cancelled", "Cancelled", Vec::new())],
+            )),
+        }
+    }
+
+    /// Whether `future` is a task **handle** whose task has been cancelled (Track A.8) — the terminal
+    /// state after `h.cancel()` (or a `race` loser). The tree-walker mirror of the VM's
+    /// `handle_cancelled`.
+    fn handle_cancelled(&self, future: &Value) -> bool {
+        if let Value::Handle(si, ti) = future {
+            return self
+                .scopes
+                .get(si.index())
+                .and_then(|s| s.get(ti.index()))
+                .is_some_and(|task| task.result.is_none() && task.cancelled);
+        }
+        false
     }
 
     fn expect_arity(
@@ -4894,6 +5257,8 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         // `timestamp_ms` — extern-types X2).
         NativeOut::None => builtin_enum("Option", "none", Vec::new()),
         NativeOut::Some(inner) => builtin_enum("Option", "some", vec![materialize_native(*inner)]),
+        NativeOut::Ok(inner) => builtin_enum("Result", "Ok", vec![materialize_native(*inner)]),
+        NativeOut::Err(inner) => builtin_enum("Result", "Err", vec![materialize_native(*inner)]),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
         // work is ticketed at the dispatch return (extern-types X5), never materialized.
@@ -5037,7 +5402,9 @@ fn value_to_json(value: &Value) -> String {
 /// JSON serializer consumes. Numbers become scalars; strings, enum variants, and the opaque
 /// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
 /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`] (objects in declared field order).
-/// Mirrors the VM's [`noeta_value::Value::to_native_deep`] so both backends agree.
+/// Mirrors the VM's [`noeta_value::Value::to_native_deep`] so both backends agree — per-
+/// representation glue, mirrored by design (see `plans/backend-mirror.md`); divergence is caught
+/// by `std/json_encoder_one_engine.noe` and the differential.
 fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
     use noeta_stdlib::{NativeValue, Scalar};
     match value {

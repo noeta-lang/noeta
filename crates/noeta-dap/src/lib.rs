@@ -34,9 +34,11 @@ use std::thread::{self, JoinHandle};
 use serde_json::{Value, json};
 
 use debugger::{
-    DapDebugger, FrameInfo, Paused, Resume, StepMode, parse_console_fragment, resolve_breakpoints,
+    DapDebugger, FrameInfo, Paused, RequestedBreakpoint, Resume, StepMode, ThreadRegistry,
+    compile_resolved_breakpoints, parse_console_fragment, parse_hit_condition,
+    resolve_conditional_breakpoints,
 };
-use noeta_vm::DebugEvalOutcome;
+use noeta_vm::{DebugEvalOutcome, EvalKind};
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
 /// The debuggee is a single logical thread of execution; the DAP UI still needs a thread id to hang
@@ -69,8 +71,9 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
     // at all — it runs exactly as `noeta run` does; breakpoints and stop-on-entry are ignored by
     // contract.
     let mut no_debug = false;
-    // Requested breakpoints, keyed by the editor's source path → 1-based lines.
-    let mut breakpoints: HashMap<String, Vec<u32>> = HashMap::new();
+    // Requested breakpoints, keyed by the editor's source path → each line with its (validated)
+    // `condition` / `hitCondition` (conditional / hit-count breakpoints).
+    let mut breakpoints: HashMap<String, Vec<RequestedBreakpoint>> = HashMap::new();
     // Present once a run is launched: `resume_tx` unblocks a paused worker; `terminate` abandons a
     // running one. Both target the current run's debugger.
     let mut resume_tx: Option<Sender<Resume>> = None;
@@ -78,6 +81,9 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
     // The current run's captured pause, shared with its worker: `Some` only while the program is
     // paused, so `stackTrace`/`scopes`/`variables` read the live stop and nothing otherwise.
     let mut paused: Option<Paused> = None;
+    // The current run's live-thread registry (DAP worker debugging): worker isolate strands are
+    // added/removed by the run's debugger; the `threads` handler reads it. `Some` once a run starts.
+    let mut threads: Option<ThreadRegistry> = None;
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
     while let Ok(Some(request)) = read_message(&mut reader) {
@@ -94,13 +100,23 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                 let _ = tx.send(response(&request, json!({})));
             }
             "setBreakpoints" => {
-                let (path, lines) = parse_breakpoints(&request);
-                let verified: Vec<Value> = lines
+                // Parse each breakpoint's `condition` / `hitCondition` and validate them here
+                // (parsing needs no compiled module): an invalid one is reported in this response
+                // and degraded to a plain breakpoint, per the spec ("error → plain breakpoint with
+                // a reported problem"). The surviving specs are resolved to instructions at launch.
+                let (path, specs) = parse_breakpoints(&request);
+                let verified: Vec<Value> = specs
                     .iter()
-                    .map(|line| json!({ "verified": true, "line": line }))
+                    .map(|(spec, problem)| {
+                        let mut bp = json!({ "verified": true, "line": spec.line });
+                        if let Some(message) = problem {
+                            bp["message"] = json!(message);
+                        }
+                        bp
+                    })
                     .collect();
                 if let Some(path) = path {
-                    breakpoints.insert(path, lines);
+                    breakpoints.insert(path, specs.into_iter().map(|(spec, _)| spec).collect());
                 }
                 let _ = tx.send(response(&request, json!({ "breakpoints": verified })));
             }
@@ -108,10 +124,7 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                 let _ = tx.send(response(&request, json!({})));
             }
             "threads" => {
-                let _ = tx.send(response(
-                    &request,
-                    json!({ "threads": [ { "id": MAIN_THREAD_ID, "name": "main" } ] }),
-                ));
+                let _ = tx.send(response(&request, threads_body(&threads)));
             }
             // The client has finished configuring; compile + start the program under the debugger.
             "configurationDone" => {
@@ -121,12 +134,17 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                         let (r_tx, r_rx) = mpsc::channel::<Resume>();
                         let term = Arc::new(AtomicBool::new(false));
                         let paused_state: Paused = Arc::new(Mutex::new(None));
+                        // The live-thread registry (DAP worker debugging), shared with the run's
+                        // debugger so `threads` sees worker isolates as they come and go.
+                        let registry: ThreadRegistry = Arc::new(Mutex::new(Vec::new()));
                         resume_tx = Some(r_tx);
                         terminate = Some(Arc::clone(&term));
                         paused = Some(Arc::clone(&paused_state));
+                        threads = Some(Arc::clone(&registry));
                         workers.push(spawn_run(
                             path,
                             breakpoints.clone(),
+                            registry,
                             stop_on_entry,
                             no_debug,
                             term,
@@ -235,7 +253,8 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
 #[allow(clippy::too_many_arguments)]
 fn spawn_run(
     path: PathBuf,
-    breakpoints: HashMap<String, Vec<u32>>,
+    breakpoints: HashMap<String, Vec<RequestedBreakpoint>>,
+    threads: ThreadRegistry,
     stop_on_entry: bool,
     no_debug: bool,
     terminate: Arc<AtomicBool>,
@@ -252,12 +271,20 @@ fn spawn_run(
             // Run Without Debugging: no hook, no breakpoints — the plain-run fast path.
             Ok(compiled) if no_debug => session::run_compiled(compiled, None),
             Ok(mut compiled) => {
-                let stops = resolve_breakpoints(&compiled.module, &compiled.sources, &breakpoints);
+                // Resolve each requested breakpoint to its instruction(s), carrying its condition /
+                // hit-count expression, then compile those into the runnable per-breakpoint state.
+                let resolved = resolve_conditional_breakpoints(
+                    &compiled.module,
+                    &compiled.sources,
+                    &breakpoints,
+                );
+                let stops = compile_resolved_breakpoints(resolved);
                 // The launch's session checker moves into the debugger (C3): console fragments
                 // check on this worker, against everything the program declared and bound.
                 let checker = std::mem::take(&mut compiled.checker);
                 let hook = Box::new(DapDebugger::new(
                     stops,
+                    threads,
                     stop_on_entry,
                     terminate,
                     compiled.sources.clone(),
@@ -305,6 +332,10 @@ fn capabilities() -> Value {
         // The Variables-panel edit (U1): a local's value can be replaced while paused; the new
         // value is any console-evaluable expression (frame locals visible).
         "supportsSetVariable": true,
+        // Conditional / hit-count breakpoints: a breakpoint may carry a `condition` (evaluated in
+        // the paused frame) and/or a `hitCondition` (a hit-count expression).
+        "supportsConditionalBreakpoints": true,
+        "supportsHitConditionalBreakpoints": true,
     })
 }
 
@@ -326,22 +357,29 @@ fn launch_flag(request: &Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The `(source.path, [line])` of a `setBreakpoints` request. Lines come from `breakpoints[].line`
-/// (the current form) or `lines[]` (the legacy form); the path may be absent for an unnamed buffer.
-fn parse_breakpoints(request: &Value) -> (Option<String>, Vec<u32>) {
+/// The `(source.path, [breakpoint])` of a `setBreakpoints` request, each breakpoint paired with an
+/// optional **problem** message (a rejected `condition` / `hitCondition`, conditional / hit-count
+/// breakpoints). Breakpoints come from `breakpoints[]` (`{ line, condition?, hitCondition? }`, the
+/// current form) or `lines[]` (the legacy line-only form); the path may be absent for an unnamed
+/// buffer. A `hitCondition` that does not parse — or a `condition` that does not parse as an
+/// expression — is dropped (the breakpoint degrades to plain) and its message returned for the
+/// response's `Breakpoint.message`.
+#[allow(clippy::type_complexity)]
+fn parse_breakpoints(
+    request: &Value,
+) -> (Option<String>, Vec<(RequestedBreakpoint, Option<String>)>) {
     let args = request.get("arguments");
     let path = args
         .and_then(|a| a.get("source"))
         .and_then(|s| s.get("path"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let lines = args
+    let specs = args
         .and_then(|a| a.get("breakpoints"))
         .and_then(Value::as_array)
         .map(|bps| {
             bps.iter()
-                .filter_map(|b| b.get("line").and_then(Value::as_u64))
-                .map(|l| l as u32)
+                .filter_map(parse_one_breakpoint)
                 .collect::<Vec<_>>()
         })
         .or_else(|| {
@@ -350,12 +388,66 @@ fn parse_breakpoints(request: &Value) -> (Option<String>, Vec<u32>) {
                 .map(|ls| {
                     ls.iter()
                         .filter_map(Value::as_u64)
-                        .map(|l| l as u32)
+                        .map(|l| {
+                            (
+                                RequestedBreakpoint {
+                                    line: l as u32,
+                                    condition: None,
+                                    hit_condition: None,
+                                },
+                                None,
+                            )
+                        })
                         .collect()
                 })
         })
         .unwrap_or_default();
-    (path, lines)
+    (path, specs)
+}
+
+/// One `breakpoints[]` entry → a [`RequestedBreakpoint`] and an optional problem message. `None`
+/// (skip) if it carries no `line`. A `condition` / `hitCondition` is validated here (parse only, no
+/// module needed); an invalid one is dropped and reported so the breakpoint degrades to plain.
+fn parse_one_breakpoint(b: &Value) -> Option<(RequestedBreakpoint, Option<String>)> {
+    let line = b.get("line").and_then(Value::as_u64)? as u32;
+    let mut problems: Vec<String> = Vec::new();
+
+    let condition = b
+        .get("condition")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| {
+            if parse_console_fragment(s).is_some() {
+                Some(s.to_string())
+            } else {
+                problems.push(format!("ignoring unparseable condition `{s}`"));
+                None
+            }
+        });
+
+    let hit_condition = b
+        .get("hitCondition")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| match parse_hit_condition(s) {
+            Ok(_) => Some(s.to_string()),
+            Err(message) => {
+                problems.push(message);
+                None
+            }
+        });
+
+    let problem = (!problems.is_empty()).then(|| problems.join("; "));
+    Some((
+        RequestedBreakpoint {
+            line,
+            condition,
+            hit_condition,
+        },
+        problem,
+    ))
 }
 
 fn output_event(category: &str, text: &str) -> Value {
@@ -368,6 +460,19 @@ fn exited_event(exit_code: i32) -> Value {
 
 fn terminated_event() -> Value {
     event("terminated", json!({}))
+}
+
+/// The `threads` response body (DAP worker debugging): the main program (thread `1`) plus one entry
+/// per live worker isolate, read from the run's shared registry. Before a run starts (no registry)
+/// it is just the main thread — a client that lists threads early still gets a valid answer.
+fn threads_body(threads: &Option<ThreadRegistry>) -> Value {
+    let mut list = vec![json!({ "id": MAIN_THREAD_ID, "name": "main" })];
+    if let Some(registry) = threads {
+        for entry in registry.lock().unwrap().iter() {
+            list.push(json!({ "id": entry.id, "name": entry.name }));
+        }
+    }
+    json!({ "threads": list })
 }
 
 /// Run `f` against the current pause snapshot. `None` when no run is active or it isn't paused (the
@@ -492,8 +597,15 @@ fn evaluate(
         .and_then(|a| a.get("frameId"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
-    // A hover must not run code (VS Code fires it on mouse-over); a watch / debug console may.
-    let allow_calls = args.and_then(|a| a.get("context")).and_then(Value::as_str) != Some("hover");
+    // Map the DAP `context` to how the VM treats the fragment (watch-memoization): a hover is
+    // read-only (no code runs); a watch is a re-rendered observation whose result is memoized within
+    // a stop; anything else (the debug console `repl`, clipboard, …) is an explicit console entry
+    // that may mutate state and so bumps the stop generation.
+    let kind = match args.and_then(|a| a.get("context")).and_then(Value::as_str) {
+        Some("hover") => EvalKind::Hover,
+        Some("watch") => EvalKind::Watch,
+        _ => EvalKind::Console,
+    };
     let program = parse_console_fragment(expression).ok_or("could not parse the expression")?;
     // Evaluation reads the paused frames on the run worker — there must be a paused program.
     if with_paused(paused, |_| ()).is_none() {
@@ -506,7 +618,7 @@ fn evaluate(
             program,
             text: expression.to_string(),
             frame,
-            allow_calls,
+            kind,
             reply: reply_tx,
         })
         .map_err(|_| "the program is no longer running".to_string())?;
@@ -1046,6 +1158,143 @@ mod tests {
         );
         // ...and the frame local is untouched.
         assert_eq!(session.evaluate("xs.len()")["body"]["result"], "3");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// A `tick`-counting fixture for the watch-memoization tests: `tick()` returns the running count
+    /// of how many times it was called (it reassigns a `mut` global), so re-running it is *visible*
+    /// as an incremented result. Breaking on the first `echo` line of `probe` (line 7) leaves both
+    /// globals bound.
+    fn tick_fixture() -> String {
+        let path = fixture(
+            "watch_memo",
+            "mut counter = 0\n\
+             fn tick(): int {\n    \
+             counter = counter + 1\n    \
+             return counter\n}\n\
+             fn probe(): void {\n    \
+             echo \"a\"\n    \
+             echo \"b\"\n}\n\
+             probe()\n",
+        );
+        path.to_str().unwrap().to_string()
+    }
+
+    /// Launch `program`, break on `line`, and return the running session paused there.
+    fn launch_stopped_at(program: &str, line: i64) -> Session {
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": line } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+        session
+    }
+
+    /// Watch-memoization: an observational watch (`tick()`) is evaluated ONCE per stop — a repeated
+    /// render at the same stop returns the memoized result without re-running it — and the memo is
+    /// invalidated on a step, so the watch runs afresh at the next stop.
+    #[test]
+    fn watch_results_are_memoized_within_a_stop_and_reevaluated_after_a_step() {
+        let program = tick_fixture();
+        let mut session = launch_stopped_at(&program, 7);
+
+        // First render runs `tick()` (counter 0 → 1); the second render at the SAME stop is a memo
+        // hit — the same value, and `tick()` did NOT run again (counter is still 1).
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "1");
+        assert_eq!(
+            session.evaluate("tick()")["body"]["result"],
+            "1",
+            "a repeated watch at the same stop is memoized — it must not re-run"
+        );
+
+        // Stepping to the next line is a new stop: the memo is invalidated and `tick()` runs again
+        // (counter 1 → 2), and re-rendering at THIS stop is memoized at the new value.
+        session.step("next");
+        assert_eq!(
+            session.evaluate("tick()")["body"]["result"],
+            "2",
+            "a step invalidates the watch memo — the watch re-evaluates"
+        );
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "2");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// Watch-memoization: a debug-console (`repl`) entry that mutates state, and a `setVariable`
+    /// write, each invalidate the memoized watch results — the next render re-evaluates against the
+    /// changed state.
+    #[test]
+    fn console_mutation_and_set_variable_invalidate_memoized_watches() {
+        let program = tick_fixture();
+        let mut session = launch_stopped_at(&program, 7);
+
+        // Prime the watch memo (counter 0 → 1), then confirm the memo hit.
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "1");
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "1");
+
+        // A console entry (`repl` context) reassigns the global — an explicit mutation. It bumps the
+        // stop generation, so the next watch render re-runs `tick()` against `counter == 100`.
+        let mutate = session.evaluate_in("counter = 100", "repl");
+        assert_eq!(mutate["success"], true, "{mutate:#?}");
+        assert_eq!(
+            session.evaluate("tick()")["body"]["result"],
+            "101",
+            "a console mutation invalidates the watch memo"
+        );
+        // ...and re-rendering at the same stop is memoized again (still 101 — `tick()` did not run).
+        assert_eq!(session.evaluate("tick()")["body"]["result"], "101");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// Watch-memoization: a `setVariable` write to a paused frame local invalidates a watch reading
+    /// that local — the memoized value does not go stale.
+    #[test]
+    fn set_variable_invalidates_a_watch_on_the_written_local() {
+        let path = fixture(
+            "watch_memo_setvar",
+            "fn probe(): void {\n    \
+             mut n = 10\n    \
+             echo n\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+        let mut session = launch_stopped_at(&program, 3);
+
+        // Prime a watch on the frame local `n` (memoized at 10).
+        assert_eq!(session.evaluate("n")["body"]["result"], "10");
+        assert_eq!(session.evaluate("n")["body"]["result"], "10");
+
+        // Write the local through the Variables panel; this bumps the generation.
+        session.send("scopes", json!({ "frameId": 0 }));
+        let scopes = session.response("scopes");
+        let var_ref = scopes["body"]["scopes"][0]["variablesReference"]
+            .as_i64()
+            .unwrap();
+        session.send(
+            "setVariable",
+            json!({ "variablesReference": var_ref, "name": "n", "value": "99" }),
+        );
+        assert_eq!(session.response("setVariable")["success"], true);
+
+        // The watch re-evaluates and sees the written value — not the stale memo.
+        assert_eq!(
+            session.evaluate("n")["body"]["result"],
+            "99",
+            "setVariable invalidates a watch reading the written local"
+        );
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();
@@ -1591,6 +1840,300 @@ mod tests {
         assert_eq!(top["name"], "add");
         assert_eq!(top["line"], 3);
 
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// The `stackTrace` frames as `[(name, line)]`, innermost-first, for the given thread.
+    fn stack_frames(session: &mut Session, thread_id: i64) -> Vec<(String, i64)> {
+        session.send("stackTrace", json!({ "threadId": thread_id }));
+        let frames = session.response("stackTrace");
+        frames["body"]["stackFrames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["name"].as_str().unwrap().to_string(),
+                    f["line"].as_i64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// DAP worker debugging: a breakpoint inside a worker-isolate body pauses that worker — the
+    /// `thread` started event and the `stopped` both carry the worker's `threadId` (strand `2`, the
+    /// first isolate), `threads` lists it alongside `main`, and its stack + locals are readable.
+    #[test]
+    fn a_breakpoint_inside_a_worker_isolate_stops_on_the_worker_thread() {
+        // `worker` runs as `isolate worker(21)`; break on `echo doubled` (line 3), inside it.
+        let path = fixture(
+            "worker_isolate",
+            "async fn worker(n: int): int {\n    \
+             mut doubled = n + n\n    \
+             echo doubled\n    \
+             return doubled\n}\n\
+             concurrent {\n    \
+             h = isolate worker(21)\n    \
+             echo h.await\n\
+             }\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 3 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+
+        // The worker isolate is announced as a new thread (strand 2) — distinct from the main
+        // thread's own `started` event (id 1, emitted by the run worker at launch).
+        let started = session.recv_until(|m| {
+            m["type"] == "event"
+                && m["event"] == "thread"
+                && m["body"]["reason"] == "started"
+                && m["body"]["threadId"].as_i64() != Some(MAIN_THREAD_ID)
+        });
+        let worker_id = started["body"]["threadId"].as_i64().unwrap();
+        assert_eq!(worker_id, 2, "the first isolate is strand 2");
+
+        let stopped = session.wait_stopped();
+        assert_eq!(stopped["body"]["reason"], "breakpoint");
+        assert_eq!(
+            stopped["body"]["threadId"], worker_id,
+            "the stop is reported on the worker thread"
+        );
+
+        // `threads` now lists the worker alongside `main`.
+        session.send("threads", json!({}));
+        let threads = session.response("threads");
+        let ids: Vec<i64> = threads["body"]["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_i64().unwrap())
+            .collect();
+        assert!(ids.contains(&MAIN_THREAD_ID), "main present: {ids:?}");
+        assert!(ids.contains(&worker_id), "worker present: {ids:?}");
+
+        // The worker's stack + locals are readable at the stop: `worker` at line 3, n=21, doubled=42.
+        let frames = stack_frames(&mut session, worker_id);
+        assert_eq!(frames[0], ("worker".to_string(), 3), "stack: {frames:?}");
+        session.send("scopes", json!({ "frameId": 0 }));
+        let var_ref = session.response("scopes")["body"]["scopes"][0]["variablesReference"]
+            .as_i64()
+            .unwrap();
+        session.send("variables", json!({ "variablesReference": var_ref }));
+        let vars = session.response("variables");
+        let vars = vars["body"]["variables"].as_array().unwrap();
+        // `doubled` is materialized in a frame register and reads back at the stop. (`worker` is an
+        // `async fn` — the isolate boundary — so its parameter `n` lives in the coroutine state
+        // rather than a frame register; async-state locals are a separate debug-visibility concern.)
+        let doubled = vars
+            .iter()
+            .find(|v| v["name"] == "doubled")
+            .unwrap_or_else(|| panic!("no local `doubled` in {vars:#?}"));
+        assert_eq!(doubled["value"], "42");
+
+        // The worker's paused frame can evaluate expressions too (the debug session serves every
+        // strand): `doubled + 1` runs in the worker's context.
+        assert_eq!(session.evaluate("doubled + 1")["body"]["result"], "43");
+
+        // Continue runs the worker to completion; the program prints and terminates.
+        session.send("continue", json!({ "threadId": worker_id }));
+        session.disconnect_and_join();
+    }
+
+    /// A conditional breakpoint stops only when its condition holds (conditional breakpoints): the
+    /// loop hits the breakpoint line every iteration, but it only pauses on the iteration where
+    /// `i == 3`, reading the frame local `i` at the stop.
+    #[test]
+    fn a_conditional_breakpoint_stops_only_when_true() {
+        let path = fixture(
+            "cond_bp",
+            "fn count(): void {\n    \
+             mut i = 0\n    \
+             while i < 6 {\n        \
+             i = i + 1\n        \
+             echo i\n    \
+             }\n}\n\
+             count()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        // Break on `echo i` (line 5) only when `i == 3`.
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [
+                { "line": 5, "condition": "i == 3" }
+            ] }),
+        );
+        let bps = session.response("setBreakpoints");
+        assert_eq!(bps["body"]["breakpoints"][0]["verified"], true);
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+        // It stopped on the iteration where `i == 3` — not the first, not any other.
+        assert_eq!(session.evaluate("i")["body"]["result"], "3");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        // No further stop: the condition is never true again, so the program runs to the end.
+        session.recv_until(|m| m["type"] == "event" && m["event"] == "terminated");
+        session.disconnect_and_join();
+    }
+
+    /// Hit-count breakpoints: `%2` stops on every second hit, `>3` from the fourth hit on. The loop
+    /// prints `1..=4` (four hits), so `%2` stops at hits 2 and 4 and `>3` stops once (hit 4).
+    #[test]
+    fn hit_count_breakpoints_gate_on_the_hit_number() {
+        let source = "fn count(): void {\n    \
+             mut i = 0\n    \
+             while i < 4 {\n        \
+             i = i + 1\n        \
+             echo i\n    \
+             }\n}\n\
+             count()\n";
+
+        // `%2`: first stop on the 2nd hit (i == 2), next on the 4th (i == 4); then the loop ends.
+        let path = fixture("hit_mod", source);
+        let program = path.to_str().unwrap().to_string();
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [
+                { "line": 5, "hitCondition": "%2" }
+            ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+        assert_eq!(session.evaluate("i")["body"]["result"], "2");
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+        assert_eq!(session.evaluate("i")["body"]["result"], "4");
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.recv_until(|m| m["type"] == "event" && m["event"] == "terminated");
+        session.disconnect_and_join();
+
+        // `>3`: the only stop is the 4th (last) hit (i == 4).
+        let path = fixture("hit_gt", source);
+        let program = path.to_str().unwrap().to_string();
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [
+                { "line": 5, "hitCondition": ">3" }
+            ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+        assert_eq!(session.evaluate("i")["body"]["result"], "4");
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.recv_until(|m| m["type"] == "event" && m["event"] == "terminated");
+        session.disconnect_and_join();
+    }
+
+    /// A breakpoint condition that fails to evaluate stops with a message (conditional breakpoints):
+    /// DAP convention is to stop rather than silently skip, and the `stopped` event carries the
+    /// error in its `description`.
+    #[test]
+    fn a_condition_eval_error_stops_with_a_message() {
+        let path = fixture(
+            "cond_err",
+            "fn probe(): void {\n    \
+             mut i = 0\n    \
+             echo i\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        // `nope` is not in scope — the condition aborts at run time; the breakpoint stops anyway.
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [
+                { "line": 3, "condition": "nope > 0" }
+            ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+
+        let stopped = session.wait_stopped();
+        assert_eq!(stopped["body"]["reason"], "breakpoint");
+        let description = stopped["body"]["description"].as_str().unwrap_or("");
+        assert!(
+            description.contains("condition"),
+            "stop names the condition problem: {stopped:#?}"
+        );
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// An invalid `hitCondition` is reported on the `setBreakpoints` response and the breakpoint
+    /// degrades to plain (stops on the first hit), per the spec.
+    #[test]
+    fn an_invalid_hit_condition_is_reported_and_degrades_to_plain() {
+        let path = fixture(
+            "bad_hit",
+            "fn probe(): void {\n    \
+             mut i = 7\n    \
+             echo i\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [
+                { "line": 3, "hitCondition": "nonsense" }
+            ] }),
+        );
+        let bps = session.response("setBreakpoints");
+        let bp = &bps["body"]["breakpoints"][0];
+        assert_eq!(bp["verified"], true);
+        assert!(
+            bp["message"].as_str().unwrap_or("").contains("hit count"),
+            "the bad hit condition is reported: {bp:#?}"
+        );
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        // Degraded to plain: it still stops (on the first — only — hit).
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();
     }

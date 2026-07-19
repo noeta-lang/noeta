@@ -1,0 +1,31 @@
+// v7 UUIDs are time-ordered (extern-types X2): the 48-bit unix-millisecond prefix leads the
+// bytes, so the `Uuid` value order (byte order, via the extern contract) IS creation-time order.
+// On the sandbox the logical clock is deterministic, so advancing it with `time.sleep` between
+// draws pins the ordering — an earlier draw always compares `Less` than a later one, and sorting
+// a shuffled list restores time order. Both backends agree (the differential oracle).
+// expect: stdout "Ordering.Less"
+// expect: stdout "Ordering.Greater"
+// expect: stdout "Ordering.Equal"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+use std.{id, time}
+
+a = id.uuid_v7();
+time.sleep(10);
+b = id.uuid_v7();
+time.sleep(10);
+c = id.uuid_v7();
+
+// Earlier creation time sorts before later, regardless of the random tail — through `.compare()`,
+// i.e. exactly the ordering `< <= > >=`, sets, and `sorted` observe.
+echo a.compare(b);
+echo c.compare(a);
+echo b.compare(b);
+
+// Sorting a shuffled list of v7 ids restores time order, deterministically.
+ordered = [c, a, b].sorted();
+echo ordered[0] == a;
+echo ordered[1] == b;
+echo ordered[2] == c;

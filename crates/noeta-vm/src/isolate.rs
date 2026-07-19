@@ -38,6 +38,13 @@ use noeta_bytecode::Builtin;
 pub struct ChannelCore {
     inner: Mutex<ChannelInner>,
     capacity: usize,
+    /// Live **producer holds** across every isolate holding a `Sender` for this channel (isolates
+    /// I.4c auto-close): the count of spawned isolates that captured a sender. Atomic because
+    /// isolates on distinct threads add/drop concurrently. Born at 0 (the `channel()` split does not
+    /// count); incremented when a sender is shipped into an isolate, decremented when that isolate
+    /// completes. When it returns to 0 (having been positive) the channel auto-closes so a blocked
+    /// receiver drains then observes `none`.
+    producers: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -46,14 +53,6 @@ struct ChannelInner {
     // propagation envelope, crossing the thread with the payload.
     queue: VecDeque<(Wire, Option<TraceContext>)>,
     closed: bool,
-}
-
-/// The state of a send at a poll (isolates I.4c): the buffer has `Room`, is `Full` (suspend), or the
-/// channel is `Closed` (a bug — the receiver would never see it).
-pub enum SendState {
-    Room,
-    Full,
-    Closed,
 }
 
 /// The outcome of a receive poll (isolates I.4c): a message `Got`, the buffer is `Empty` (suspend), or
@@ -73,29 +72,60 @@ impl ChannelCore {
                 closed: false,
             }),
             capacity,
+            producers: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
-    /// Whether a send could proceed right now, without marshalling a message (so a full-buffer poll
-    /// stays cheap). The caller marshals and [`try_send`](Self::try_send)s only on `Room`.
-    pub fn send_state(&self) -> SendState {
-        let inner = self.inner.lock().expect("channel mutex poisoned");
-        if inner.closed {
-            SendState::Closed
-        } else if inner.queue.len() < self.capacity {
-            SendState::Room
+    /// Register one more **producer hold** (isolates I.4c auto-close): a `Sender` endpoint shipped
+    /// into an isolate that captured it, so the cross-thread producer population grows by one.
+    pub fn add_producer(&self) {
+        self.producers
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Register that one **producer hold** ended (its isolate completed). Auto-closes the channel and
+    /// returns `true` when the **last** producer is now gone, so a blocked receiver drains then
+    /// observes `none`. Bumps [`WAKE`] on the closing drop — a parked consumer on another thread
+    /// re-polls and sees the close.
+    pub fn drop_producer(&self) -> bool {
+        // `fetch_sub` returns the previous value; hitting 1→0 is the last-producer drop.
+        if self
+            .producers
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.close();
+            true
         } else {
-            SendState::Full
+            false
         }
     }
 
-    /// Push a marshalled message if there is still room and the channel is open (re-checked under the
-    /// lock, so a race after [`send_state`](Self::send_state) is safe); returns whether it was pushed.
-    /// A successful push is cross-thread progress, so it bumps [`WAKE`] — a consumer's scheduler
-    /// parked in `isolate_in_flight_wait` re-polls immediately instead of sleeping out its quantum.
-    pub fn try_send(&self, msg: Wire, context: Option<TraceContext>) -> bool {
+    /// The shared-policy [`SendAction`](noeta_stdlib::channel::SendAction) for a send at the given
+    /// rendezvous [`phase`](noeta_stdlib::channel::SendPhase), decided from the live queue state
+    /// without marshalling a message (so a full-buffer / not-yet-taken poll stays cheap). The caller
+    /// marshals and [`try_push`](Self::try_push)es only on `DeliverBuffered`/`Deposit`.
+    pub fn send_action(
+        &self,
+        phase: noeta_stdlib::channel::SendPhase,
+    ) -> noeta_stdlib::channel::SendAction {
+        let inner = self.inner.lock().expect("channel mutex poisoned");
+        noeta_stdlib::channel::poll_send(self.capacity, inner.queue.len(), inner.closed, phase)
+    }
+
+    /// Push a marshalled message if the channel is still open and can accept it — buffered channels
+    /// on room, a capacity-0 rendezvous channel on an empty handoff (re-checked under the lock, so a
+    /// race after [`send_action`](Self::send_action) is safe); returns whether it was pushed. A push
+    /// is cross-thread progress, so it bumps [`WAKE`] — a consumer's scheduler parked in
+    /// `isolate_in_flight_wait` re-polls immediately instead of sleeping out its quantum.
+    pub fn try_push(&self, msg: Wire, context: Option<TraceContext>) -> bool {
         let mut inner = self.inner.lock().expect("channel mutex poisoned");
-        if !inner.closed && inner.queue.len() < self.capacity {
+        let has_room = if self.capacity == 0 {
+            inner.queue.is_empty() // rendezvous: one-slot handoff
+        } else {
+            inner.queue.len() < self.capacity
+        };
+        if !inner.closed && has_room {
             inner.queue.push_back((msg, context));
             drop(inner);
             WAKE.notify();
@@ -131,6 +161,116 @@ impl ChannelCore {
     /// channel could yet be fed/drained by another isolate thread (rather than declaring a deadlock).
     pub fn is_open(&self) -> bool {
         !self.inner.lock().expect("channel mutex poisoned").closed
+    }
+}
+
+/// Global **stall registry** for real-path deadlock detection (isolates I.4c). `active` counts the
+/// parallel schedulers currently driving (the root parent plus every in-flight isolate worker);
+/// `parked` counts how many are simultaneously blocked in `isolate_in_flight_wait` — a state reached
+/// only with no local progress, no timer, and no pending IO. When `parked == active` and no
+/// cross-thread progress arrives within the confirm window, no scheduler can wake any other: a
+/// genuine all-parties-blocked deadlock, resolved to E0010 instead of spinning forever. Only
+/// schedulers registered via [`scheduler`](StallRegistry::scheduler) participate, so a parallel VM
+/// driven outside a registering entry point keeps the pre-existing keep-waiting behavior. Process-
+/// wide like [`WAKE`]; a CLI process runs one program.
+pub struct StallRegistry {
+    active: std::sync::atomic::AtomicUsize,
+    parked: std::sync::atomic::AtomicUsize,
+    /// Latched once any scheduler confirms the global deadlock, so **every** parked party observes it
+    /// and unwinds — otherwise the first detector returns and unparks, and the rest stay blocked
+    /// forever (and the parent hangs joining them). Cleared when the last scheduler de-registers, so a
+    /// subsequent program in the same process (the test harness) starts clean.
+    deadlocked: std::sync::atomic::AtomicBool,
+}
+
+/// The one process-wide stall registry (see [`StallRegistry`]).
+pub static STALL: StallRegistry = StallRegistry::new();
+
+/// An RAII registration of one parallel scheduler in the [`STALL`] registry: increments `active` on
+/// creation, decrements it on drop (so an unwinding abort de-registers cleanly).
+pub struct SchedulerGuard {
+    reg: &'static StallRegistry,
+}
+
+impl StallRegistry {
+    const fn new() -> StallRegistry {
+        StallRegistry {
+            active: std::sync::atomic::AtomicUsize::new(0),
+            parked: std::sync::atomic::AtomicUsize::new(0),
+            deadlocked: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Latch the global deadlock and wake every parked party so each observes it and unwinds.
+    pub fn set_deadlocked(&self) {
+        self.deadlocked
+            .store(true, std::sync::atomic::Ordering::Release);
+        WAKE.notify();
+    }
+
+    /// Whether the global deadlock has been latched (every party should now unwind with E0010).
+    pub fn is_deadlocked(&self) -> bool {
+        self.deadlocked.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Register a parallel scheduler for the lifetime of the returned guard (the root parent, around
+    /// its driving loop).
+    pub fn scheduler(&'static self) -> SchedulerGuard {
+        self.register();
+        SchedulerGuard { reg: self }
+    }
+
+    /// Register one more parallel scheduler slot. Used directly (not via the RAII guard) for an
+    /// **isolate worker**, whose slot is added by the *parent* thread at spawn — synchronously with
+    /// `inflight_isolates += 1` — so `active` never lags a spawned-but-not-yet-started worker. That
+    /// lag was the false-positive: the parent, alone-registered while its workers' threads were still
+    /// starting, saw `parked == active` and latched a deadlock on a channel-free join. See
+    /// [`deregister`](Self::deregister) for the matching drop.
+    pub fn register(&self) {
+        self.active
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Drop one parallel scheduler slot (the worker's, at harvest/teardown on the parent thread; or
+    /// the parent's own, via the guard). The last slot out clears the latched deadlock flag so the
+    /// next program in this process (the test harness runs many) starts from a clean registry.
+    pub fn deregister(&self) {
+        if self
+            .active
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.deadlocked
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Mark the calling scheduler parked; return `true` when every live registered scheduler is now
+    /// parked (a candidate global deadlock, to be confirmed against a wake window).
+    pub fn park(&self) -> bool {
+        let parked = self
+            .parked
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        parked >= self.active.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mark the calling scheduler no longer parked.
+    pub fn unpark(&self) {
+        self.parked
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Whether every live registered scheduler is currently parked.
+    pub fn all_parked(&self) -> bool {
+        let active = self.active.load(std::sync::atomic::Ordering::Acquire);
+        active > 0 && self.parked.load(std::sync::atomic::Ordering::Acquire) >= active
+    }
+}
+
+impl Drop for SchedulerGuard {
+    fn drop(&mut self) {
+        self.reg.deregister();
     }
 }
 
@@ -327,6 +467,19 @@ pub fn marshal(
         return Ok(Wire::Map(out));
     }
     if value.is_object() {
+        // A reference `class` must NEVER cross an isolate boundary by copy (isolates I.4b): it has
+        // **identity**, and deep-copying it into the worker's fresh heap would silently break that
+        // — two heaps each with their own "the" instance, mutations invisible across the boundary.
+        // Value `struct`s copy freely (no identity); classes are refused so the spawn site skips the
+        // global (and flags a precise diagnostic at use) instead of shipping a stale duplicate. The
+        // checker already rejects a `class` *argument*/*result* (E0042); this closes the *global*
+        // path the checker's argument/result classifier does not see.
+        if value
+            .shape()
+            .is_some_and(|s| s.kind == noeta_object::ShapeKind::Class)
+        {
+            return Err("class".to_string());
+        }
         let shape = shape_index(value, shapes).ok_or("unknown object shape")?;
         let fields = value.slots().unwrap_or_default();
         return Ok(Wire::Object {
@@ -523,6 +676,7 @@ mod tests {
             buffer: VecDeque::new(),
             capacity: 1,
             closed: false,
+            producers: 0,
         }];
         let tx = Value::make_sender(ChannelId::from_index(0));
         assert_eq!(marshal(tx, &[], &local).unwrap_err(), "channel");

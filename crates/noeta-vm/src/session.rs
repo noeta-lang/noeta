@@ -243,6 +243,9 @@ impl VmSession {
         state.registry = registry;
         state.sync_to(module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        // Arm the safepoint-GC trigger for this entry (step relative to the session's current
+        // residency, so persistent state is never charged against the watermark).
+        noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
         let mut vm = Vm::load_seeded(module, state);
         vm.run_top();
         let stdout = std::mem::take(&mut vm.out.stdout);
@@ -398,6 +401,9 @@ impl VmSession {
             .expect("session state is present between entries");
         state.sync_to(&module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        // Arm the safepoint-GC trigger for this entry (step relative to the session's current
+        // residency, so persistent state is never charged against the watermark).
+        noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
         let mut vm = Vm::load_seeded(&module, state);
         pre_run(&mut vm);
         vm.run_top();
@@ -502,6 +508,9 @@ impl VmSession {
         let mut state = self.state.take().expect("state present between entries");
         state.sync_to(&module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        // Arm the safepoint-GC trigger for this entry (step relative to the session's current
+        // residency, so persistent state is never charged against the watermark).
+        noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
         let mut vm = Vm::load_seeded(&module, state);
         let callee = vm.persist.globals[slot as usize];
         if callee.is_unbound() {
@@ -585,6 +594,9 @@ impl VmSession {
         let mut state = self.state.take().expect("state present between entries");
         state.sync_to(&module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        // Arm the safepoint-GC trigger for this entry (step relative to the session's current
+        // residency, so persistent state is never charged against the watermark).
+        noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
         let mut vm = Vm::load_seeded(&module, state);
         let found = {
             let v = std::mem::replace(&mut vm.persist.globals[slot as usize], Value::unbound());

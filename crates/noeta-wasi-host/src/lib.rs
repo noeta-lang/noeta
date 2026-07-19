@@ -429,6 +429,16 @@ impl Os for WasiHost {
         ))
     }
 
+    fn os_proc_signal(
+        &mut self,
+        _handle: u64,
+        _signal: noeta_stdlib::os::Signal,
+    ) -> Result<(), StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
+
     fn os_proc_read_line(&mut self, _handle: u64) -> Result<Option<String>, StdError> {
         Err(io_error(
             "no child process exists: the wasm/WASI target has no subprocesses".to_string(),

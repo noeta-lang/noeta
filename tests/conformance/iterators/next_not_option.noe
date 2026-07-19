@@ -1,0 +1,11 @@
+// A `next`-driven user iterator must yield built-in options: a step that returns anything else
+// is E0007 ("iterator `next` must return an option"), identically in both backends.
+// expect: error E0007 at 9:1
+// expect: exit 1
+struct Bad {
+    next: () -> int
+}
+b = Bad { next: fn() => 7 }
+for x in b {
+    echo x
+}

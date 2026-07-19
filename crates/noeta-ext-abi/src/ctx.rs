@@ -236,6 +236,15 @@ pub trait NativeCtx {
     /// is untouched.
     fn option_payload(&mut self, slot: Slot) -> CtxResult<Option<Slot>>;
 
+    /// Whether two slots' values are equal under the **language's `==`** — the exact
+    /// [`BinaryOp::Eq`](noeta_ast) semantics each backend already runs (structural for value types
+    /// and collections, reference identity for a `class` without `impl Equatable`, distinct
+    /// int/float rungs). Both argument slots are untouched. Used by an opt-in reactive `signal`'s
+    /// change-suppression: an equal `set` need not re-fire dependents. Backend-implemented so the
+    /// comparison *is* the language operator (not a re-derived `NativeValue` compare), which keeps it
+    /// differential-identical by construction.
+    fn values_equal(&mut self, a: Slot, b: Slot) -> CtxResult<bool>;
+
     /// Read a slot's **extern value** through a borrow — extern values live inside backend heap
     /// cells, so access is callback-shaped rather than a returned reference. The callback
     /// downcasts via [`crate::ExternValue::as_any`] and copies out what it needs (`http.serve`

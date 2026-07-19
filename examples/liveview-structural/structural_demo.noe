@@ -1,0 +1,125 @@
+// Keyed-list *structural* reconciliation, exercised without a browser — two levels.
+//
+// Part 1 pins the diff **algorithm**: `keyed_op_stream(prev, next)` names the minimal insert /
+// remove / move ops that patch one key order into another. This is the standard keyed-children diff
+// (Vue 3's `patchKeyedChildren` / Solid & Inferno): survivors are anchored on their longest
+// increasing subsequence, so a reorder moves the *fewest* rows.
+//
+// Part 2 pins the **reconciliation** the websocket session runs: it builds a real `view()` over a
+// keyed page, mutates the source signal (append / prepend / remove / reorder), calls
+// `reconcile_region`, and checks the wire frame it pushes plus that a reorder leaves row *content*
+// untouched (the moved row keeps its reactive scope — `view.diff()` finds nothing to re-push).
+//
+//   cd examples/liveview-structural && noeta run structural_demo.noe
+//
+// expect: stdout ""
+// expect: stdout "ins d @end"
+// expect: stdout "ins z a"
+// expect: stdout "rm b"
+// expect: stdout "mv b d"
+// expect: stdout "mv a @end; mv b a"
+// expect: stdout "rm b; ins d @end; mv a d"
+// expect: stdout "--- reconcile ---"
+// expect: stdout "append: true"
+// expect: stdout "prepend: true"
+// expect: stdout "remove: true"
+// expect: stdout "reorder: true"
+// expect: stdout "reorder-content-untouched: true"
+// expect: exit 0
+use para.html.{render, Html, keyed, keyed_op_stream, reconcile_region}
+use std.reactive.{signal, view}
+
+struct Row {
+    id: int
+    label: string
+}
+
+rows = signal([
+    Row { id: 1, label: "a" },
+    Row { id: 2, label: "b" },
+    Row { id: 3, label: "c" },
+])
+
+fn row(r: Row): Html {
+    return @html { <li>${r.label}</li> }
+}
+
+fn page() use (rows): Html {
+    return @html { <ul>${keyed(rows, fn(r) => "${r.id}", row)}</ul> }
+}
+
+fn reordered(xs: List<Row>): List<Row> {
+    moved = xs.filter(fn(x) => x.id == 1)
+    rest = xs.filter(fn(x) => x.id != 1)
+    mut out: List<Row> = []
+    for x in rest {
+        out = out ~ [x]
+        if x.id == 3 {
+            out = out ~ moved
+        }
+    }
+    return out
+}
+
+fn algorithm(): void {
+    echo keyed_op_stream(["a", "b", "c"], ["a", "b", "c"])
+    echo keyed_op_stream(["a", "b", "c"], ["a", "b", "c", "d"])
+    echo keyed_op_stream(["a", "b", "c"], ["z", "a", "b", "c"])
+    echo keyed_op_stream(["a", "b", "c"], ["a", "c"])
+    // The LIS anchor `a,c,d` stays, so swapping `b` past `c` is a single move.
+    echo keyed_op_stream(["a", "b", "c", "d"], ["a", "c", "b", "d"])
+    echo keyed_op_stream(["a", "b", "c"], ["c", "b", "a"])
+    echo keyed_op_stream(["a", "b", "c"], ["c", "a", "d"])
+}
+
+fn reconcile() use (rows): void {
+    p = page()
+    v = view()
+    mut i = 0
+    for c in p.holes {
+        v.expose(p.ids[i], c)
+        i = i + 1
+    }
+    reg = p.regions[0]
+    v.snapshot()
+
+    ins_d = "\"t\":\"ins\",\"id\":\"k0-row-4\",\"before\":\"@end\""
+    ins_z = "\"t\":\"ins\",\"id\":\"k0-row-0\",\"before\":\"k0-row-1\""
+    rm_b = "{\"type\":\"keyed\",\"region\":\"k0\",\"ops\":[{\"t\":\"rm\",\"id\":\"k0-row-2\"}]}"
+    mv_a = "{\"type\":\"keyed\",\"region\":\"k0\",\"ops\":[{\"t\":\"mv\",\"id\":\"k0-row-1\",\"before\":\"k0-row-4\"}]}"
+
+    rows.update(fn(xs) => xs ~ [Row { id: 4, label: "d" }])
+    fa = reconcile_region(reg, v, p.handlers).frame
+    v.diff()
+    ok_a = fa.contains(ins_d)
+    echo "append: ${ok_a}"
+
+    rows.update(fn(xs) => [Row { id: 0, label: "z" }] ~ xs)
+    fp = reconcile_region(reg, v, p.handlers).frame
+    v.diff()
+    ok_p = fp.contains(ins_z)
+    echo "prepend: ${ok_p}"
+
+    rows.update(fn(xs) => xs.filter(fn(x) => x.id != 2))
+    fr = reconcile_region(reg, v, p.handlers).frame
+    v.diff()
+    ok_r = fr == rm_b
+    echo "remove: ${ok_r}"
+
+    rows.update(fn(xs) => reordered(xs))
+    fo = reconcile_region(reg, v, p.handlers).frame
+    // A reorder is a single move — the moved row keeps its element and scope.
+    ok_o = fo == mv_a
+    echo "reorder: ${ok_o}"
+    // …and no row content was re-rendered, so the content diff has nothing to push.
+    untouched = v.diff() == none
+    echo "reorder-content-untouched: ${untouched}"
+}
+
+fn main(): void {
+    algorithm()
+    echo "--- reconcile ---"
+    reconcile()
+}
+
+main()

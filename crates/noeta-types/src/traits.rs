@@ -41,6 +41,33 @@ pub enum BuiltinTrait {
     Equatable,
     Comparable,
     Display,
+    /// **Error** (error-machinery arc) — the failure-value protocol: a type whose values describe
+    /// what went wrong. The required method is `message(): string`; a value of an
+    /// `Error`-implementing type is the idiomatic `Err` payload. Deliberately independent of
+    /// [`BuiltinTrait::Display`]: an error type *may* also implement `Display` (and std's
+    /// `JsonError` does), but `impl Error` alone imposes exactly one method — rendering stays
+    /// whatever the type's display story already is, so adopting `Error` never changes program
+    /// output. Derivable (error-ergonomics): `@derive(Error)` synthesizes
+    /// `fn message(): string { return "${self}" }` — the message IS the type's display story
+    /// (an `impl Display`'s `to_string`, or a derived `Display`'s structural rendering), so the
+    /// derive requires the type to have `Display` at all (E0050 otherwise). `@derive(Error,
+    /// via: field)` instead forwards `message()` into the field's own implementation — the
+    /// wrapper-error shape — requiring the field's type to implement `Error`.
+    Error,
+    /// **From** (error-ergonomics arc) — the declared-conversion protocol: `impl From<Source>` on a
+    /// type `Target` declares that a `Source` value converts into a `Target`, provided by one
+    /// associated function `from(value: Source): Target`. The **only generic built-in trait whose
+    /// argument is a real type** (`Serialize`/`Deserialize` take a format token). Declared on the
+    /// **target** (the orphan rule means the source may be an extern type — `impl From<JsonError>`
+    /// on a user error type). A type carries at most ONE `From` impl — impl-block methods flatten
+    /// into the type's method table by name and there is no overloading, so a second `From` (any
+    /// source) is a coherence conflict (E0027); that also keeps the `?` conversion path unique by
+    /// construction. `from` is an ordinary associated function, explicitly callable as
+    /// `Target.from(x)`; the single *implicit* application in the language is the `?` error
+    /// position: a `?` whose `Err` payload type differs from the enclosing function's declared
+    /// error type converts through the target's `From<Source>` impl (E0057 when none exists). Not
+    /// derivable.
+    From,
     Clone,
     Serialize,
     /// **Deserialize** (L2.2 DI) — the structural JSON *decode* capability, the mirror of
@@ -66,6 +93,11 @@ pub enum BuiltinTrait {
     Mergeable,
 }
 
+/// The required-method cell of [`Info`]: the method's name paired with its user-facing arity,
+/// where an arity of `None` is not pinned by the registry (`Callable`'s `call`). `None` overall =
+/// a marker trait with no hand-written method.
+pub type RequiredMethod = Option<(&'static str, Option<usize>)>;
+
 /// The per-variant metadata of a [`BuiltinTrait`]: the name users write, the single method an `impl`
 /// block must provide (with its user-facing arity, i.e. excluding the receiver), the infix operator
 /// it overloads (if any), and whether it may be derived.
@@ -74,8 +106,10 @@ struct Info {
     name: &'static str,
     /// The required method's name and parameter count *excluding the receiver*, or `None` for a
     /// marker trait whose behavior is fully synthesized (e.g. `Clone`, `Serialize`) and so imposes no
-    /// single hand-written method.
-    required_method: Option<(&'static str, usize)>,
+    /// single hand-written method. The arity is itself an `Option`: `None` means the method's
+    /// parameter count is **not pinned** by the registry — `Callable`'s `call` may take any number
+    /// of parameters, since `obj(args)` forwards whatever the call site supplies.
+    required_method: RequiredMethod,
     /// The infix operator this trait overloads, for the operator traits; `None` otherwise.
     operator: Option<BinaryOp>,
     /// Whether `@derive(Name)` is accepted for this trait.
@@ -90,28 +124,43 @@ impl BuiltinTrait {
         use BuiltinTrait::*;
         let (name, required_method, operator, derivable): (
             &'static str,
-            Option<(&'static str, usize)>,
+            RequiredMethod,
             Option<BinaryOp>,
             bool,
         ) = match self {
-            Add => ("Add", Some(("add", 1)), Some(BinaryOp::Add), false),
-            Sub => ("Sub", Some(("sub", 1)), Some(BinaryOp::Sub), false),
-            Mul => ("Mul", Some(("mul", 1)), Some(BinaryOp::Mul), false),
-            Div => ("Div", Some(("div", 1)), Some(BinaryOp::Div), false),
-            Concat => ("Concat", Some(("concat", 1)), Some(BinaryOp::Concat), false),
-            Equatable => ("Equatable", Some(("eq", 1)), None, true),
-            Comparable => ("Comparable", Some(("compare", 1)), None, true),
-            Display => ("Display", Some(("to_string", 0)), None, true),
+            Add => ("Add", Some(("add", Some(1))), Some(BinaryOp::Add), false),
+            Sub => ("Sub", Some(("sub", Some(1))), Some(BinaryOp::Sub), false),
+            Mul => ("Mul", Some(("mul", Some(1))), Some(BinaryOp::Mul), false),
+            Div => ("Div", Some(("div", Some(1))), Some(BinaryOp::Div), false),
+            Concat => (
+                "Concat",
+                Some(("concat", Some(1))),
+                Some(BinaryOp::Concat),
+                false,
+            ),
+            Equatable => ("Equatable", Some(("eq", Some(1))), None, true),
+            Comparable => ("Comparable", Some(("compare", Some(1))), None, true),
+            Display => ("Display", Some(("to_string", Some(0))), None, true),
+            // The failure-value protocol: one nullary method, `message(): string`. Derivable
+            // (error-ergonomics): the synthesized `message()` returns `"${self}"` — the type's
+            // display story (requires Display, impl'd or derived; E0050 otherwise) — or forwards
+            // into a field's own `message()` via `via:`.
+            Error => ("Error", Some(("message", Some(0))), None, true),
+            // The declared-conversion protocol: one associated function `from(value: Source):
+            // Target`. Not derivable (a conversion body cannot be synthesized from fields).
+            From => ("From", Some(("from", Some(1))), None, false),
             Clone => ("Clone", None, None, true),
             Serialize => ("Serialize", None, None, true),
             Deserialize => ("Deserialize", None, None, true),
-            Index => ("Index", Some(("get", 1)), None, false),
-            Length => ("Length", Some(("len", 0)), None, false),
-            Iterable => ("Iterable", Some(("iter", 0)), None, false),
-            Callable => ("Callable", None, None, false),
-            Members => ("Members", Some(("get", 1)), None, false),
-            DynamicCall => ("DynamicCall", Some(("call", 2)), None, false),
-            TryAdd => ("TryAdd", Some(("try_add", 1)), None, false),
+            Index => ("Index", Some(("get", Some(1))), None, false),
+            Length => ("Length", Some(("len", Some(0))), None, false),
+            Iterable => ("Iterable", Some(("iter", Some(0))), None, false),
+            // `Callable` makes an object invocable as `obj(args)` (dispatched to its `call`
+            // method); the arity is the method's own business, so it is not pinned here.
+            Callable => ("Callable", Some(("call", None)), None, false),
+            Members => ("Members", Some(("get", Some(1))), None, false),
+            DynamicCall => ("DynamicCall", Some(("call", Some(2))), None, false),
+            TryAdd => ("TryAdd", Some(("try_add", Some(1))), None, false),
             // A marker (no user-written method — the CRDT types carry the real merge natively) and
             // not derivable; `intrinsic()` further bars a hand-written `impl`.
             Mergeable => ("Mergeable", None, None, false),
@@ -137,8 +186,9 @@ impl BuiltinTrait {
     }
 
     /// The single method an `impl` block must provide (name + user-facing arity), or `None` for a
-    /// marker trait whose behavior is fully synthesized.
-    pub fn required_method(self) -> Option<(&'static str, usize)> {
+    /// marker trait whose behavior is fully synthesized. An arity of `None` means the parameter
+    /// count is not pinned (`Callable`'s `call` takes whatever the object needs).
+    pub fn required_method(self) -> RequiredMethod {
         self.info().required_method
     }
 
@@ -165,7 +215,7 @@ impl BuiltinTrait {
     /// `Serialize<Format>` is parameterized today (arity 1); every other trait is nullary.
     pub fn generic_arity(self) -> usize {
         match self {
-            BuiltinTrait::Serialize | BuiltinTrait::Deserialize => 1,
+            BuiltinTrait::Serialize | BuiltinTrait::Deserialize | BuiltinTrait::From => 1,
             _ => 0,
         }
     }
@@ -196,6 +246,8 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     BuiltinTrait::Equatable,
     BuiltinTrait::Comparable,
     BuiltinTrait::Display,
+    BuiltinTrait::Error,
+    BuiltinTrait::From,
     BuiltinTrait::Clone,
     BuiltinTrait::Serialize,
     BuiltinTrait::Deserialize,
@@ -228,7 +280,7 @@ mod tests {
                         .unwrap_or_else(|| panic!("no operator trait for {op:?}"));
                     assert_eq!(
                         t.required_method(),
-                        Some((method, 1)),
+                        Some((method, Some(1))),
                         "method mismatch for {op:?}"
                     );
                 }
@@ -245,7 +297,10 @@ mod tests {
     #[test]
     fn equatable_dispatch_matches_registry() {
         use BinaryOp::*;
-        assert_eq!(BuiltinTrait::Equatable.required_method(), Some(("eq", 1)));
+        assert_eq!(
+            BuiltinTrait::Equatable.required_method(),
+            Some(("eq", Some(1)))
+        );
         assert_eq!(Eq.equatable_negation(), Some(false));
         assert_eq!(Ne.equatable_negation(), Some(true));
         for op in [Add, Sub, Mul, Div, Rem, Concat, Lt, Le, Gt, Ge, And, Or] {
@@ -264,7 +319,7 @@ mod tests {
         use BinaryOp::*;
         assert_eq!(
             BuiltinTrait::Comparable.required_method(),
-            Some(("compare", 1))
+            Some(("compare", Some(1)))
         );
         for op in [Lt, Le, Gt, Ge] {
             assert_eq!(op.comparable_method(), Some("compare"));
@@ -320,6 +375,7 @@ mod tests {
             "Equatable",
             "Comparable",
             "Display",
+            "Error",
             "Add",
             "Sub",
             "Mul",

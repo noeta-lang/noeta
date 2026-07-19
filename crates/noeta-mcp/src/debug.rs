@@ -27,8 +27,12 @@ use noeta_ast::Program;
 use noeta_diagnostics::{render, render_mapped};
 use noeta_parser::parse_fragment;
 use noeta_span::{Source, SourceId, SourceMap};
-use noeta_vm::debug::{StepMode, StepState, capture, frame_param_names, resolve_breakpoints};
-use noeta_vm::{DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger, VmBackend};
+use noeta_vm::debug::{
+    StepMode, StepState, capture, frame_param_names, resolve_breakpoints, statement_starts,
+};
+use noeta_vm::{
+    DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger, EvalKind, VmBackend,
+};
 use rmcp::ErrorData;
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
@@ -262,6 +266,9 @@ pub struct BreakpointArg {
 /// The MCP twin of `noeta-dap`'s `DapDebugger`, over the same shared mechanics.
 struct McpDebugger {
     stops: HashSet<(u32, usize)>,
+    /// Every `(proto, pc)` that begins a source statement — where the resume-budget pause lands so
+    /// its captured locals are materialized (see [`statement_starts`]).
+    stmt_starts: HashSet<(u32, usize)>,
     stop_on_entry: bool,
     entered: bool,
     terminate: Arc<AtomicBool>,
@@ -278,6 +285,10 @@ struct McpDebugger {
     /// The per-resume liveness budget (reset on every continue/step).
     steps: u64,
     deadline: Instant,
+    /// Set once the wall-clock budget trips; the `limit` pause is then held until the next
+    /// statement boundary so the captured frame's locals are materialized (never a mid-statement
+    /// transient `unit`). Cleared on every resume.
+    limit_pending: bool,
 }
 
 impl McpDebugger {
@@ -351,7 +362,9 @@ impl McpDebugger {
                         text,
                         frame,
                         scope,
-                        allow_calls: true,
+                        // The agent debug-eval tool is an explicit console entry (it may run code
+                        // and mutate state) — not a memoized watch.
+                        kind: EvalKind::Console,
                         reply,
                     });
                 }
@@ -388,6 +401,7 @@ impl McpDebugger {
     fn finish(&mut self, action: DebugAction) -> DebugAction {
         self.mid_pause = false;
         self.steps = 0;
+        self.limit_pending = false;
         self.deadline = Instant::now() + Duration::from_millis(RESUME_TIMEOUT_MS);
         if matches!(action, DebugAction::Continue) {
             self.shared.set(Phase::Running);
@@ -410,9 +424,24 @@ impl Debugger for McpDebugger {
         // The resume budget: a run that neither pauses nor exits lands in an inspectable `limit`
         // pause rather than running away (decision #5, session form).
         self.steps += 1;
-        if self.steps > RESUME_MAX_STEPS
-            || (self.steps.is_multiple_of(CLOCK_INTERVAL) && Instant::now() >= self.deadline)
+        // The absolute step ceiling always stops here-and-now — a non-terminating run must halt
+        // even if it never reaches another statement boundary.
+        if self.steps > RESUME_MAX_STEPS {
+            return self.pause("limit", view);
+        }
+        // The wall-clock budget only *arms* the limit; the pause is deferred to the next statement
+        // boundary so the captured frame's locals are materialized rather than caught mid-statement
+        // (a pinned register transiently reads `unit` between a local's `Drop` and its restoring
+        // `Move`). This is the same guarantee breakpoints and steps already give — they only ever
+        // stop at `statement_starts`.
+        if !self.limit_pending
+            && self.steps.is_multiple_of(CLOCK_INTERVAL)
+            && Instant::now() >= self.deadline
         {
+            self.limit_pending = true;
+        }
+        if self.limit_pending && self.stmt_starts.contains(&(proto, pc)) {
+            self.limit_pending = false;
             return self.pause("limit", view);
         }
         if self.stop_on_entry && !self.entered {
@@ -586,8 +615,10 @@ pub async fn start(
             }
         };
         let stops = resolve_breakpoints(&compiled.module, &compiled.sources, &requested);
+        let stmt_starts = statement_starts(&compiled.module);
         let debugger = McpDebugger {
             stops,
+            stmt_starts,
             stop_on_entry,
             entered: false,
             terminate: thread_terminate,
@@ -600,6 +631,7 @@ pub async fn start(
             pause_reason: String::new(),
             steps: 0,
             deadline: Instant::now() + Duration::from_millis(RESUME_TIMEOUT_MS),
+            limit_pending: false,
         };
         let (result, trace) = VmBackend::new().run_module_debug_session(
             &compiled.module,

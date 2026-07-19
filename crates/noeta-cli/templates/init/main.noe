@@ -1,0 +1,35 @@
+// The program's entry point. Top-level statements run top to bottom — there is no
+// `main` function. Sibling `.noe` files in this directory are linkable modules.
+
+@doc {
+    Builds the greeting for `name`.
+
+    The `@doc` block above a declaration is its documentation — extracted by
+    `noeta doc`, shown on hover in the editor, and stripped from a normal build.
+}
+fn greet(name: string): string {
+    @debug {
+        echo "greet(${name})"
+    }
+    return "Hello, ${name}!"
+}
+
+echo greet("Noeta")
+
+// Tests live beside the code they test. `noeta test src/main.noe` runs them;
+// a normal `noeta run` strips the block entirely.
+@test {
+    fn greets(): void {
+        assert(greet("world") == "Hello, world!")
+    }
+
+    fn greets_noeta(): void {
+        assert(greet("Noeta") == "Hello, Noeta!")
+    }
+}
+
+// Benchmarks work the same way: `noeta bench src/main.noe`.
+@bench(iterations: 1000)
+fn greet_speed(): void {
+    greet("bench")
+}

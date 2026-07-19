@@ -49,6 +49,8 @@ use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_gc::{collect_trace, release, retain};
 use noeta_object::{Shape, ShapeKind};
 use noeta_span::Span;
+
+use crate::scheduler::SchedState;
 use noeta_value::{
     ChannelId, HeapKind, ScopeId, TaskId, Value, apply_binary, apply_binary_wide, apply_unary,
     compare_primitive, structural_compare,
@@ -76,6 +78,8 @@ pub use backend::*;
 mod calls;
 /// The tier-0 dispatch loop (`Vm::run` / `Vm::dispatch`) and its register helpers.
 mod dispatch;
+/// In-run safepoint cycle collection: trigger polling, root enumeration, mid-run reclaim.
+mod gc;
 pub(crate) use dispatch::*;
 /// The observation hooks: [`Debugger`] / [`ProfileHook`] and the debug request vocabulary.
 mod hooks;
@@ -186,6 +190,21 @@ struct DebugSession<'m> {
     /// fresh values (indices stay valid forever — the module only grows). Only successful compiles
     /// are memoized, and the param names are part of the key, so a hit is exactly a replay.
     memo: HashMap<(String, Vec<String>), u32>,
+    /// Watch-result memo (watch-memoization): `(fragment text, frame index)` → the stop generation
+    /// it was rendered at and its rendered `(value, type)`. The compiled-wrapper memo above still
+    /// re-*runs* the fragment on every render; this one lets an **observational** watch (all
+    /// top-level statements are expressions) skip execution entirely when it is re-rendered at the
+    /// same stop. A hit requires the stored generation to equal [`DebugSession::stop_generation`],
+    /// so any resume/step or console mutation (each of which bumps the generation) forces a fresh
+    /// evaluation; stale entries never match and are overwritten lazily. Frame index is part of the
+    /// key so the same expression watched against different paused frames does not collide.
+    result_memo: HashMap<(String, usize), (u64, String, String)>,
+    /// The **stop generation** — a monotonically-increasing state version for the paused program.
+    /// It bumps whenever the observed state may have changed: the program resumes/steps (the
+    /// dispatch loop bumps it on `DebugAction::Continue`), a console entry runs, a mutating watch
+    /// runs, or a Variables-panel `setVariable` writes a register. A memoized watch result is valid
+    /// only while its stored generation equals this one.
+    stop_generation: u64,
 }
 
 /// The unforgeable global a wrapped console fragment binds its closure to (see
@@ -225,36 +244,6 @@ impl std::fmt::Debug for DebugSession<'_> {
     }
 }
 
-/// The cooperative async-scheduler state (audit-1 finding 3): the structured-concurrency
-/// scope stack, the strand-local telemetry context, and the traced-future hook. One
-/// sub-struct so a scheduler borrow (`&mut self.sched`) is disjoint from the module tables.
-struct SchedState {
-    /// The structured-concurrency scope stack (Track A.3b): one entry per open `concurrent { }` block,
-    /// each a list of the tasks `spawn`ed in it. The scope owns one reference to each task's future (and
-    /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
-    /// `scopes`; both round-robin identically, so the differential holds by construction.
-    scopes: Vec<Vec<Task>>,
-    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
-    /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
-    /// client). This cell always belongs to whichever strand is executing — the main strand (root)
-    /// by default; the scheduler swaps a task's own saved context in around each poll of its step
-    /// (`poll_all_scopes_round`), and a `spawn` snapshots it into the child. Mirrors the
-    /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
-    /// so the differential is indifferent to it by construction.
-    ctx_current: Vec<u64>,
-    /// Whether telemetry is enabled, cached from the host at load (native-otel T5d perf): the
-    /// enabled state is fixed per host (env-derived at construction), and the channel send/recv
-    /// hot paths gate on it — a cached bool is one predictable branch instead of a virtual call.
-    tel_on: bool,
-    /// **Traced futures** (native-otel T5c) — the future-completion hook behind
-    /// `NativeCtx::trace_future`: each entry holds one retained reference to a step future whose
-    /// polls run under its saved context and whose completion (or abort) ends its telemetry span.
-    /// Almost always empty (the hot check in `poll_once` is `is_empty()`); entries leave on
-    /// completion, and teardown feeds strays into the collector roots then releases them, exactly
-    /// like `ext_arena`.
-    traced_futures: Vec<TracedFuture>,
-}
-
 /// The real-OS-thread isolate state (isolates I.4b; audit-1 finding 3): spawn plumbing,
 /// in-flight worker slots, and the borrow-share promotion region. Inert in the sandbox.
 struct IsolateState {
@@ -283,6 +272,13 @@ struct IsolateState {
     shared_region: noeta_value::SharedRegion,
     promote_memo: HashMap<u64, Value>,
     promote_sources: Vec<Value>,
+    /// Worker-side map of globals the parent could **not** ship into this isolate (isolates I.4b):
+    /// global slot → the unshippable value's type name (e.g. a `class`, which has reference identity
+    /// and cannot cross into a fresh heap). The slot is left unbound; if the worker body actually
+    /// *reads* it, `Op::LoadGlobal` raises a precise E0042 naming the global + its type + the fix,
+    /// instead of the confusing "cannot find `x`" an ordinary unbound slot yields. Empty on the
+    /// parent VM and whenever every global shipped.
+    unshippable_globals: HashMap<u32, String>,
 }
 
 /// The run's captured output (audit-1 finding 3): stdout, diagnostics, a deliberate
@@ -531,6 +527,13 @@ struct Vm<'m> {
     /// read-only surface (names / members / indexing / operators / literals); this flag is the
     /// runtime backstop for the receiver-dependent dispatches the gate cannot decide.
     pure_eval: bool,
+    /// Set when this parallel scheduler is **registered in the stall registry** (isolates I.4c
+    /// real-path deadlock detection); `false` for the sandbox and any parallel VM not driven through a
+    /// registering entry point (which keeps the pre-existing keep-waiting behavior — no false deadlock).
+    stall_active: bool,
+    /// Isolate-worker stall slots registered by the parent at spawn but not yet dropped (isolates
+    /// I.4c) — so `active` never lags a starting worker; counted to balance harvest vs teardown drops.
+    registered_workers: usize,
     /// The session-persistent runtime — see [`SessionState`]. Everything else on `Vm` is
     /// per-entry scratch or module-derived tables.
     persist: SessionState,
@@ -589,6 +592,11 @@ struct Vm<'m> {
     /// per-element 64 KB reserve gate).
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     run_depth: usize,
+    /// Extra safepoint-GC roots no register window covers (a depth-0 drive loop's Rust-local
+    /// values — worker isolate, consumed await). Borrowed; see `gc.rs`.
+    transient_roots: Vec<Value>,
+    /// Teardown/reclaim in progress (destructors over a heap mid-surgery): polls must not collect.
+    gc_suspended: bool,
     /// Real-thread isolate state — see [`IsolateState`].
     isolates: IsolateState,
     /// Captured run output — see [`RunOutput`].

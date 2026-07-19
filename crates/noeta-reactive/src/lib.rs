@@ -41,28 +41,32 @@
 //!
 //! # Ownership & disposal (reactivity S4)
 //!
-//! Every node is owned by the program's single implicit reactive scope — its lifetime is the
-//! isolate's. There are no nested reactive scopes yet, so ownership is flat: a node lives until it is
-//! explicitly disposed or the program ends. Two disposal paths:
+//! Disposal severs every graph edge of a node so no dangling subscription can fire, and frees its
+//! slot. There are three disposal paths:
 //!
 //! - **Explicit, effect-only.** `effect(...)` returns a handle with `.dispose()`, which
 //!   [`dispose`](ReactiveGraph::dispose)s its node — severing every subscription so it stops rerunning
 //!   and freeing its slot. This is the surface's only manual disposal: a `signal`/`computed` is *not*
 //!   independently disposable (there is no `.dispose()` on them). A `computed` is a pure derivation
 //!   with no side effects to stop, and exposing per-signal disposal would invite use-after-dispose for
-//!   no gain; both are reclaimed with the scope. (The core's `dispose` accepts any kind — it is what
-//!   `clear` and, later, a scope teardown build on — but the *language surface* only wires it to
-//!   effects.)
+//!   no gain; both are reclaimed by their owner or the scope. (The core's `dispose` accepts any kind.)
+//! - **Owner-tree teardown (S4b, the SolidJS nested owner tree).** A node created *while a
+//!   `computed`/`effect` body is running* is **owned** by that node (its `owner`), recorded in the
+//!   owner's `owned` list. When the owner **reruns** ([`begin_compute`](Inner::begin_compute)) or is
+//!   itself disposed, its owned children — and their children, recursively, in **reverse creation
+//!   order** — are disposed *first*. This is what stops a body that creates reactive nodes on every
+//!   run from accumulating duplicated effects/signals: last run's children are torn down before this
+//!   run rebuilds them. The core is value-generic and cannot release an externally-refcounted cell
+//!   itself, so it collects each disposed child's `content`/`body` into a **reclaimed** buffer the
+//!   client drains ([`drain_reclaimed_into`](ReactiveGraph::drain_reclaimed_into)) and frees after
+//!   every read/flush/dispose — so the backing cells are reclaimed on the spot, not merely at scope
+//!   end. A **foreign source** (a `para.synced`/`para.db` node) is created with
+//!   [`signal_root`](ReactiveGraph::signal_root) and never joins the owner tree: the extension owns
+//!   its lifetime, so a rerun of whatever effect happened to construct it must not tear it down.
 //! - **Scope end.** At program exit the backend calls [`clear`](ReactiveGraph::clear), dropping every
 //!   node and releasing every held value. For a backend whose value type is externally refcounted
 //!   (the VM's `GcVal`) this is what returns residency to zero — the leak oracle's proof obligation,
 //!   which holds across arbitrary create/dispose churn (see the `dispose_churn` conformance case).
-//!
-//! Deferred (not yet built): a **nested owner tree** (SolidJS-style), where an `effect`/`computed`
-//! that creates child nodes during its run owns them and disposes them when it reruns or is itself
-//! disposed. Without it, a node created *inside* a body that runs repeatedly accumulates until scope
-//! end — reachable but advanced, and invisible to the leak oracle (which measures end-of-program
-//! residency, and `clear` reclaims everything). It lands with the transport/UI layers that need it.
 //!
 //! This crate is `unsafe`-free (an arena of indices, no raw pointers) and has no dependencies.
 
@@ -151,6 +155,16 @@ struct Node<V> {
     content: Option<V>,
     /// The closure a `Computed`/`Effect` runs to (re)compute. `None` for a `Signal`.
     body: Option<V>,
+    /// The **owner** (reactivity S4b, the nested owner tree): the `Computed`/`Effect` whose body was
+    /// running when this node was created, or `None` for a root node (created at top level, or by a
+    /// foreign source that manages its own lifetime). An owned node is disposed when its owner reruns
+    /// or is itself disposed.
+    owner: Option<NodeId>,
+    /// Nodes created **inside this node's body**, in creation order — the owner tree's children. On a
+    /// rerun ([`Inner::begin_compute`]) or disposal they are disposed (recursively, reverse creation
+    /// order) before the body runs again, so reactive nodes created inside a repeatedly-running body do
+    /// not accumulate.
+    owned: Vec<NodeId>,
 }
 
 impl<V> Node<V> {
@@ -164,6 +178,8 @@ impl<V> Node<V> {
             subscribers: Vec::new(),
             content: None,
             body: None,
+            owner: None,
+            owned: Vec::new(),
         }
     }
 }
@@ -193,6 +209,14 @@ struct Inner<V> {
     /// Effects dirtied since the last flush, awaiting a run. Drained (and sorted for determinism) per
     /// flush round.
     queue: Vec<NodeId>,
+    /// Cells (`V`s) of owner-tree children disposed during a rerun/disposal (reactivity S4b), awaiting
+    /// release by the client. The core is value-generic and cannot release an externally-refcounted
+    /// value itself, so it collects the `content`/`body` of each auto-disposed descendant here; the
+    /// client drains this after every [`read`](ReactiveGraph::read)/[`flush`](ReactiveGraph::flush)
+    /// (and after a [`dispose`](ReactiveGraph::dispose)) via
+    /// [`drain_reclaimed_into`](ReactiveGraph::drain_reclaimed_into) and frees each — so a body that
+    /// creates-then-drops reactive nodes every run does not accumulate their backing cells.
+    reclaimed: Vec<V>,
     /// True while a [`flush`](ReactiveGraph::flush) loop is running. A `set` performed *inside* a
     /// running effect body must not start a *nested* flush — it enqueues, and the ongoing flush picks
     /// it up next round (the coalescing model). The backends consult [`is_flushing`] to decide whether
@@ -231,12 +255,95 @@ impl<V> Inner<V> {
         self.nodes[source.index()].subscribers.push(subscriber);
     }
 
-    /// Begin recomputing `node`: sever its old dependency edges (so a dependency dropped this run is
-    /// unsubscribed) and push it as the current computing node. Returns its body closure to run.
+    /// Adopt a freshly-created node under the currently-computing node (reactivity S4b). At top level
+    /// (no body running) the node is a root and keeps `owner: None`. Called for `signal`/`computed`/
+    /// `effect` created through the language surface; a foreign source
+    /// ([`ReactiveGraph::signal_root`]) never adopts — it owns its own lifetime.
+    fn adopt(&mut self, node: NodeId) {
+        if let Some(&owner) = self.computing.last() {
+            self.nodes[node.index()].owner = Some(owner);
+            self.nodes[owner.index()].owned.push(node);
+        }
+    }
+
+    /// Detach every graph edge of `node` (as a source and as a subscriber), settle its dirty
+    /// accounting, drop its held cells, and free its slot. The structural half of disposal, shared by
+    /// the public [`ReactiveGraph::dispose`] and the owner-tree teardown. Does **not** reclaim the
+    /// node's cells — the caller decides that (a subtree teardown reclaims; an explicit dispose leaves
+    /// the node's own cells to its client).
+    fn unhook_and_free(&mut self, node: NodeId) {
+        // Detach from sources (stop being their subscriber).
+        let sources = std::mem::take(&mut self.nodes[node.index()].sources);
+        for src in sources {
+            let subs = &mut self.nodes[src.index()].subscribers;
+            if let Some(pos) = subs.iter().position(|&s| s == node) {
+                subs.swap_remove(pos);
+            }
+        }
+        // Detach from subscribers (drop their edge to this now-dead node).
+        let subscribers = std::mem::take(&mut self.nodes[node.index()].subscribers);
+        for sub in subscribers {
+            let srcs = &mut self.nodes[sub.index()].sources;
+            if let Some(pos) = srcs.iter().position(|&s| s == node) {
+                srcs.swap_remove(pos);
+            }
+        }
+        {
+            let n = &self.nodes[node.index()];
+            if n.kind == NodeKind::Computed && n.dirty {
+                self.dirty_computeds -= 1;
+            }
+        }
+        let n = &mut self.nodes[node.index()];
+        n.live = false;
+        n.dirty = false;
+        n.queued = false;
+        n.content = None;
+        n.body = None;
+        n.owner = None;
+        self.free.push(node);
+    }
+
+    /// Dispose the whole owner subtree rooted at `node` **excluding `node` itself** (reactivity S4b):
+    /// every owned descendant, depth-first and in reverse creation order (children created last are
+    /// torn down first — the SolidJS teardown order). Each disposed descendant's `content`/`body`
+    /// cells land in [`Inner::reclaimed`] for the client to release; its graph edges are severed so no
+    /// dangling subscription can fire. `node`'s own `owned` list is emptied.
+    fn dispose_owned(&mut self, node: NodeId) {
+        let owned = std::mem::take(&mut self.nodes[node.index()].owned);
+        for &child in owned.iter().rev() {
+            self.dispose_subtree(child);
+        }
+    }
+
+    /// Dispose `node` **and** its owned subtree — the recursive worker behind [`dispose_owned`].
+    /// Children first (reverse creation order), then `node`: reclaim its cells, then unhook + free.
+    fn dispose_subtree(&mut self, node: NodeId) {
+        if !self.nodes[node.index()].live {
+            return;
+        }
+        let owned = std::mem::take(&mut self.nodes[node.index()].owned);
+        for &child in owned.iter().rev() {
+            self.dispose_subtree(child);
+        }
+        if let Some(content) = self.nodes[node.index()].content.take() {
+            self.reclaimed.push(content);
+        }
+        if let Some(body) = self.nodes[node.index()].body.take() {
+            self.reclaimed.push(body);
+        }
+        self.unhook_and_free(node);
+    }
+
+    /// Begin recomputing `node`: dispose the owner-tree children it created on its previous run (so
+    /// they do not accumulate — reactivity S4b), sever its old dependency edges (so a dependency
+    /// dropped this run is unsubscribed), and push it as the current computing node. Returns its body
+    /// closure to run.
     fn begin_compute(&mut self, node: NodeId) -> V
     where
         V: Clone,
     {
+        self.dispose_owned(node);
         let old_sources = std::mem::take(&mut self.nodes[node.index()].sources);
         for src in old_sources {
             let subs = &mut self.nodes[src.index()].subscribers;
@@ -353,6 +460,7 @@ impl<V: Clone> ReactiveGraph<V> {
                 round_scratch: Vec::new(),
                 dirty_scratch: Vec::new(),
                 queue: Vec::new(),
+                reclaimed: Vec::new(),
                 flushing: false,
                 observed: false,
                 changed: Vec::new(),
@@ -373,9 +481,25 @@ impl<V: Clone> ReactiveGraph<V> {
         }
     }
 
-    /// Create a `signal` holding `initial`. Reading it subscribes the current computing node; setting
-    /// it dirties dependents.
+    /// Create a `signal` holding `initial`, **owned** by the currently-computing node if any
+    /// (reactivity S4b). Reading it subscribes the current computing node; setting it dirties
+    /// dependents.
     pub fn signal(&self, initial: V) -> NodeId {
+        let mut inner = self.inner.borrow_mut();
+        let mut node = Node::placeholder();
+        node.kind = NodeKind::Signal;
+        node.live = true;
+        node.content = Some(initial);
+        let id = Self::alloc(&mut inner, node);
+        inner.adopt(id);
+        id
+    }
+
+    /// Create a **root** signal that never joins the owner tree — for a foreign source
+    /// ([`ReactiveSource`](crate)-style) whose backing value the extension owns and reclaims itself, so
+    /// a rerun of the effect that happened to construct it must not tear it down. Otherwise identical
+    /// to [`signal`](Self::signal).
+    pub fn signal_root(&self, initial: V) -> NodeId {
         let mut inner = self.inner.borrow_mut();
         let mut node = Node::placeholder();
         node.kind = NodeKind::Signal;
@@ -384,21 +508,27 @@ impl<V: Clone> ReactiveGraph<V> {
         Self::alloc(&mut inner, node)
     }
 
-    /// Create a lazy `computed` from `body` (a closure value the backend knows how to run). It is
-    /// created dirty and computes on first [`read`](Self::read).
-    pub fn computed(&self, body: V) -> NodeId {
+    /// Create a lazy `computed` from `body` (a closure value the backend knows how to run), its memo
+    /// cell seeded with `memo` (so an owner-tree teardown can reclaim it even if the computed is never
+    /// read). It is created dirty and computes on first [`read`](Self::read), owned by the
+    /// currently-computing node if any (reactivity S4b).
+    pub fn computed(&self, body: V, memo: V) -> NodeId {
         let mut inner = self.inner.borrow_mut();
         let mut node = Node::placeholder();
         node.kind = NodeKind::Computed;
         node.live = true;
         node.dirty = true;
         node.body = Some(body);
+        node.content = Some(memo);
         inner.dirty_computeds += 1;
-        Self::alloc(&mut inner, node)
+        let id = Self::alloc(&mut inner, node);
+        inner.adopt(id);
+        id
     }
 
-    /// Create an eager `effect` from `body`. It is created dirty and queued; call [`run_pending`] (or
-    /// [`flush`](Self::flush)) to run it the first time — mirroring how a real `set` schedules a rerun.
+    /// Create an eager `effect` from `body`, owned by the currently-computing node if any (reactivity
+    /// S4b). It is created dirty and queued; call [`run_pending`] (or [`flush`](Self::flush)) to run it
+    /// the first time — mirroring how a real `set` schedules a rerun.
     ///
     /// [`run_pending`]: Self::run_pending
     pub fn effect(&self, body: V) -> NodeId {
@@ -410,6 +540,7 @@ impl<V: Clone> ReactiveGraph<V> {
         node.queued = true;
         node.body = Some(body);
         let id = Self::alloc(&mut inner, node);
+        inner.adopt(id);
         inner.queue.push(id);
         id
     }
@@ -602,36 +733,21 @@ impl<V: Clone> ReactiveGraph<V> {
         if !inner.nodes[node.index()].live {
             return;
         }
-        // Detach from sources (stop being their subscriber).
-        let sources = std::mem::take(&mut inner.nodes[node.index()].sources);
-        for src in sources {
-            let subs = &mut inner.nodes[src.index()].subscribers;
-            if let Some(pos) = subs.iter().position(|&s| s == node) {
-                subs.swap_remove(pos);
-            }
-        }
-        // Detach from subscribers (drop their edge to this now-dead node).
-        let subscribers = std::mem::take(&mut inner.nodes[node.index()].subscribers);
-        for sub in subscribers {
-            let srcs = &mut inner.nodes[sub.index()].sources;
-            if let Some(pos) = srcs.iter().position(|&s| s == node) {
-                srcs.swap_remove(pos);
-            }
-        }
-        // Drop values, clear flags, mark the slot free.
+        // Detach from the owner's child list, so a later rerun/disposal of the owner does not try to
+        // dispose this (now dead, possibly reused) slot — the owner-tree S4b invariant.
+        if let Some(owner) = inner.nodes[node.index()].owner
+            && inner.nodes[owner.index()].live
         {
-            let n = &inner.nodes[node.index()];
-            if n.kind == NodeKind::Computed && n.dirty {
-                inner.dirty_computeds -= 1;
+            let owned = &mut inner.nodes[owner.index()].owned;
+            if let Some(pos) = owned.iter().position(|&c| c == node) {
+                owned.swap_remove(pos);
             }
         }
-        let n = &mut inner.nodes[node.index()];
-        n.live = false;
-        n.dirty = false;
-        n.queued = false;
-        n.content = None;
-        n.body = None;
-        inner.free.push(node);
+        // Dispose owned descendants first (reclaiming their cells), then the node itself. The node's
+        // own cells are NOT reclaimed here — the client that called `dispose` releases them (an effect
+        // handle owns its body cell; a hot-swapped signal's cell may still be aliased).
+        inner.dispose_owned(node);
+        inner.unhook_and_free(node);
     }
 
     /// Visit every value the graph currently holds — each live node's `content` (a signal's value or a
@@ -666,10 +782,22 @@ impl<V: Clone> ReactiveGraph<V> {
         inner.free.clear();
         inner.computing.clear();
         inner.queue.clear();
+        inner.reclaimed.clear();
         inner.dirty_computeds = 0;
         inner.round_scratch.clear();
         inner.dirty_scratch.clear();
         inner.changed.clear();
+    }
+
+    /// Drain the cells of owner-tree children disposed since the last drain into `out` (appending —
+    /// the caller owns the buffer so a hot loop reuses its allocation). Each is a `content`/`body`
+    /// `V` of an auto-disposed descendant (reactivity S4b): the client releases every one, so a body
+    /// that creates-then-drops reactive nodes each run reclaims their backing cells rather than
+    /// leaking them until program end. Call after every [`read`](Self::read)/[`flush`](Self::flush)
+    /// and after a [`dispose`](Self::dispose). Order is disposal order (deterministic).
+    pub fn drain_reclaimed_into(&self, out: &mut Vec<V>) {
+        let mut inner = self.inner.borrow_mut();
+        out.append(&mut inner.reclaimed);
     }
 
     /// The number of live nodes — for the leak assertion in tests (create N, dispose N, expect 0).
@@ -893,7 +1021,7 @@ mod tests {
             c2.set(c2.get() + 1);
             TestVal::Data(get(h, s) * 2)
         });
-        let d = b.graph.computed(TestVal::Body("double"));
+        let d = b.graph.computed(TestVal::Body("double"), TestVal::Data(0));
         let h = b.finish();
 
         // Lazy: no compute until the first read.
@@ -942,8 +1070,8 @@ mod tests {
                 cc.set(cc.get() + 1);
                 TestVal::Data(get(h, ac2.get().unwrap()) * 10)
             });
-        let b_id = builder.graph.computed(TestVal::Body("B"));
-        let c_id = builder.graph.computed(TestVal::Body("C"));
+        let b_id = builder.graph.computed(TestVal::Body("B"), TestVal::Data(0));
+        let c_id = builder.graph.computed(TestVal::Body("C"), TestVal::Data(0));
         bnode.set(Some(b_id));
         cnode.set(Some(c_id));
         let builder = builder.body("D", move |h| {
@@ -1229,7 +1357,7 @@ mod tests {
                 let _ = get(h, a2.get().unwrap());
                 TestVal::Data(0)
             });
-        let d = b.graph.computed(TestVal::Body("double"));
+        let d = b.graph.computed(TestVal::Body("double"), TestVal::Data(0));
         let _e = b.graph.effect(TestVal::Body("watch"));
         let h = b.finish();
         h.flush();
@@ -1321,6 +1449,217 @@ mod tests {
         assert!(
             !h.graph.is_flushing(),
             "the flushing flag is cleared after overflow"
+        );
+    }
+
+    #[test]
+    fn owner_tree_disposes_prior_children_on_rerun() {
+        // The S4b owner tree: a parent effect that creates a *child* effect on every run must dispose
+        // last run's child before this run's — so children do not accumulate, and a change the old
+        // child subscribed to reruns only the single live child, not N stale copies.
+        let child_runs = Rc::new(Cell::new(0));
+        let cr = child_runs.clone();
+
+        let trigger_c: Rc<Cell<Option<NodeId>>> = Rc::new(Cell::new(None));
+        let dep_c: Rc<Cell<Option<NodeId>>> = Rc::new(Cell::new(None));
+        let (tc, dc) = (trigger_c.clone(), dep_c.clone());
+
+        let builder = Builder::new();
+        let trigger = builder.graph.signal(TestVal::Data(0));
+        let dep = builder.graph.signal(TestVal::Data(0));
+        trigger_c.set(Some(trigger));
+        dep_c.set(Some(dep));
+        let builder = builder
+            .body("child", move |h| {
+                cr.set(cr.get() + 1);
+                let _ = get(h, dc.get().unwrap()); // the child subscribes to `dep`
+                TestVal::Data(0)
+            })
+            .body("parent", move |h| {
+                let _ = get(h, tc.get().unwrap()); // reruns when `trigger` changes
+                // Create a fresh child effect on every run — the accumulation hazard S4b fixes.
+                let _child = h.graph.effect(TestVal::Body("child"));
+                TestVal::Data(0)
+            });
+        let _parent = builder.graph.effect(TestVal::Body("parent"));
+        let h = builder.finish();
+
+        // First flush: parent runs, creates child #1, child #1 runs once.
+        h.flush();
+        assert_eq!(child_runs.get(), 1);
+        assert_eq!(
+            h.graph.live_count(),
+            4,
+            "trigger + dep + parent + one child"
+        );
+
+        // Rerun the parent three times: each disposes the prior child and makes a new one. Live count
+        // stays flat (never 4+N), and each rerun's child runs exactly once.
+        for i in 2..=4 {
+            h.set(trigger, i);
+            h.flush();
+            assert_eq!(child_runs.get(), i as i32);
+            assert_eq!(h.graph.live_count(), 4, "exactly one child stays live");
+        }
+
+        // A change to `dep` now reruns the ONE live child, not the three disposed ones.
+        let before = child_runs.get();
+        h.set(dep, 99);
+        h.flush();
+        assert_eq!(
+            child_runs.get(),
+            before + 1,
+            "only the single live child is subscribed to dep"
+        );
+    }
+
+    #[test]
+    fn owner_tree_reclaims_disposed_child_cells() {
+        // Each disposed child's content/body cells land in the reclaimed buffer for the client to
+        // free — so a create-then-drop-every-run body reclaims cells on the spot, not at scope end.
+        let sig_c: Rc<Cell<Option<NodeId>>> = Rc::new(Cell::new(None));
+        let sc = sig_c.clone();
+
+        let builder = Builder::new();
+        let s = builder.graph.signal(TestVal::Data(0));
+        sig_c.set(Some(s));
+        let builder = builder.body("parent", move |h| {
+            let _ = get(h, sc.get().unwrap());
+            // A child signal AND a child effect each run — two owned nodes to reclaim on rerun.
+            let _child_sig = h.graph.signal(TestVal::Data(7));
+            let _child_eff = h.graph.effect(TestVal::Body("noop"));
+            TestVal::Data(0)
+        });
+        let builder = builder.body("noop", |_h| TestVal::Data(0));
+        let _parent = builder.graph.effect(TestVal::Body("parent"));
+        let h = builder.finish();
+
+        h.flush();
+        let mut reclaimed = Vec::new();
+        h.graph.drain_reclaimed_into(&mut reclaimed);
+        assert!(reclaimed.is_empty(), "nothing disposed on the first run");
+
+        // Rerun: last run's child signal (content cell) + child effect (body cell) are reclaimed.
+        h.set(s, 1);
+        h.flush();
+        h.graph.drain_reclaimed_into(&mut reclaimed);
+        assert_eq!(
+            reclaimed.len(),
+            2,
+            "the prior child signal's cell and child effect's body"
+        );
+        assert!(
+            reclaimed.contains(&TestVal::Data(7)),
+            "the child signal cell"
+        );
+        assert!(
+            reclaimed.contains(&TestVal::Body("noop")),
+            "the child effect body"
+        );
+    }
+
+    #[test]
+    fn owner_tree_cascades_and_signal_root_survives() {
+        // Deep nesting: parent → child effect → grandchild effect. One parent rerun tears the whole
+        // subtree down before rebuilding it (live count flat). A `signal_root` created inside the body
+        // is NOT adopted — it survives the rerun (a foreign source owns its own lifetime).
+        let grand_runs = Rc::new(Cell::new(0));
+        let gr = grand_runs.clone();
+        let root_ids = Rc::new(RefCell::new(Vec::<NodeId>::new()));
+        let ri = root_ids.clone();
+
+        let trig_c: Rc<Cell<Option<NodeId>>> = Rc::new(Cell::new(None));
+        let tc = trig_c.clone();
+
+        let builder = Builder::new();
+        let trigger = builder.graph.signal(TestVal::Data(0));
+        trig_c.set(Some(trigger));
+        let builder = builder
+            .body("grand", move |_h| {
+                gr.set(gr.get() + 1);
+                TestVal::Data(0)
+            })
+            .body("child", |h| {
+                let _g = h.graph.effect(TestVal::Body("grand"));
+                TestVal::Data(0)
+            })
+            .body("parent", move |h| {
+                let _ = get(h, tc.get().unwrap());
+                let _c = h.graph.effect(TestVal::Body("child"));
+                // A foreign-style root node created mid-body: must NOT be owned/torn down.
+                ri.borrow_mut().push(h.graph.signal_root(TestVal::Data(5)));
+                TestVal::Data(0)
+            });
+        let _parent = builder.graph.effect(TestVal::Body("parent"));
+        let h = builder.finish();
+
+        h.flush();
+        assert_eq!(grand_runs.get(), 1);
+        // trigger + parent + child + grand + 1 root signal.
+        assert_eq!(h.graph.live_count(), 5);
+
+        h.set(trigger, 1);
+        h.flush();
+        assert_eq!(grand_runs.get(), 2, "the rebuilt grandchild runs once more");
+        // The subtree was rebuilt (flat), but a SECOND root signal now also lives (roots are not
+        // torn down): trigger + parent + child + grand + 2 roots = 6.
+        assert_eq!(h.graph.live_count(), 6, "root signals survive the rerun");
+        let roots = root_ids.borrow();
+        assert!(
+            roots.iter().all(|&r| h.graph.is_live(r)),
+            "every signal_root stays live across the owner's rerun"
+        );
+    }
+
+    #[test]
+    fn disposing_owner_cascades_to_children() {
+        // Disposing an effect disposes its owned subtree too (and reclaims their cells).
+        let child_runs = Rc::new(Cell::new(0));
+        let cr = child_runs.clone();
+        let dep_c: Rc<Cell<Option<NodeId>>> = Rc::new(Cell::new(None));
+        let dc = dep_c.clone();
+
+        let builder = Builder::new();
+        let dep = builder.graph.signal(TestVal::Data(0));
+        dep_c.set(Some(dep));
+        let builder = builder.body("parent", move |h| {
+            let cr = cr.clone();
+            let dc = dc.clone();
+            // The child is registered lazily via a distinct body per creation is unnecessary — reuse
+            // one body that reads dep and counts.
+            let _child = h.graph.effect(TestVal::Body("child"));
+            let _ = (cr, dc);
+            TestVal::Data(0)
+        });
+        let cr2 = child_runs.clone();
+        let dc2 = dep_c.clone();
+        let builder = builder.body("child", move |h| {
+            cr2.set(cr2.get() + 1);
+            let _ = get(h, dc2.get().unwrap());
+            TestVal::Data(0)
+        });
+        let parent = builder.graph.effect(TestVal::Body("parent"));
+        let h = builder.finish();
+
+        h.flush();
+        assert_eq!(child_runs.get(), 1);
+        assert_eq!(h.graph.live_count(), 3, "dep + parent + child");
+
+        // Dispose the parent: the child cascades away.
+        h.graph.dispose(parent);
+        let mut reclaimed = Vec::new();
+        h.graph.drain_reclaimed_into(&mut reclaimed);
+        assert_eq!(reclaimed.len(), 1, "the child effect's body is reclaimed");
+        assert_eq!(h.graph.live_count(), 1, "only dep remains");
+
+        // A change to dep reruns nothing — the child is gone.
+        let before = child_runs.get();
+        h.set(dep, 1);
+        h.flush();
+        assert_eq!(
+            child_runs.get(),
+            before,
+            "the cascaded-away child does not rerun"
         );
     }
 }

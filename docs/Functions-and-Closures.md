@@ -42,7 +42,7 @@ of a closure counter. Without the clause, a reference to a top-level binding is 
 fix spelled out (E0005: *add `use (name)` to the signature, or pass it as a parameter*), and a
 bare assignment to an unlisted name simply declares a fresh local.
 
-**No shadowing (E0055).** One name means one thing per scope stack. A binder — a closure
+**No shadowing (E0058).** One name means one thing per scope stack. A binder — a closure
 parameter, `for` variable, match-pattern binding, or fresh local — may not reuse a name already
 bound in a scope it can see, and a binding may not reuse an imported name or module alias
 (E0020). Sealing is what keeps this ergonomic: named-fn params conflict with nothing because the
@@ -102,6 +102,47 @@ echo c()   // 1
 echo c()   // 2
 ```
 
+## Nested functions
+
+A `fn` declared inside another function's body is **nested**: it is a local closure, callable only within the enclosing body, that captures enclosing locals as upvalues. Nested-function *names* are **hoisted** across their block — like top-level functions, siblings see each other regardless of declaration order — so forward references and mutual recursion just work:
+
+```noeta
+fn parity(n: int): bool {
+    fn even(k: int): bool {          // calls `odd`, declared below
+        if k == 0 { return true }
+        return odd(k - 1)
+    }
+    fn odd(k: int): bool {           // calls `even`, declared above
+        if k == 0 { return false }
+        return even(k - 1)
+    }
+    return even(n)                   // mutual recursion, both directions
+}
+echo parity(10)   // true
+```
+
+Two mutually recursive nested functions may also import the *same* enclosing `mut` local with `use (…)` — they share the one live cell, not copies:
+
+```noeta
+fn run(): int {
+    mut hits = 0
+    fn ping(n: int) use (hits): int { hits = hits + 1; if n == 0 { return 0 }; return pong(n - 1) }
+    fn pong(n: int) use (hits): int { hits = hits + 1; if n == 0 { return 0 }; return ping(n - 1) }
+    ping(4)
+    return hits   // 5 — every bounce incremented the shared counter
+}
+```
+
+Only `fn` declarations are hoisted. A plain `let`/value local stays **strictly lexical**: referencing one declared textually later is E0005 (unknown name), not a forward capture.
+
+```noeta error
+fn run(): int {
+    fn peek(): int { return later }   // E0005 — `later` is a value local, not hoisted
+    later = 5
+    return peek()
+}
+```
+
 ## Function types
 
 Function types are first-class surface syntax — write them in annotations and signatures:
@@ -112,6 +153,20 @@ fn run(f: (int) -> int, x: int): int { return f(x) }
 ```
 
 Collection methods are passable as values via **unbound method handles**: `list.len`, `string.upper`, `Stack.size` — each a callable taking the receiver as its first argument (`xss.map(list.len)`).
+
+## Calling a closure-valued field
+
+A function value stored in a **field** is called directly through its receiver — `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (the field-access-then-call desugar). The call is arity/argument-checked against the field's declared type, exactly like a call through a `Fn`-typed local:
+
+```noeta
+struct Counter {
+    step: (int) -> int
+}
+c = Counter { step: fn(x: int) => x + 1 }
+echo c.step(41)      // 42 — load the field, call the value
+```
+
+When a type declares **both** a method and a field of the same name, the method wins in call position (`obj.f(x)` dispatches the method) while the field wins in value position (`obj.f` reads the field) — bind it (`g = obj.f; g(x)`) to call the field. Parentheses are transparent, so `(obj.f)(x)` is the same call as `obj.f(x)`. On a `dyn` receiver the same order applies at runtime: the method table first, then the field. A field whose type is not a function is not callable — E0007, statically when the receiver's type is known.
 
 ## The pipe operator
 

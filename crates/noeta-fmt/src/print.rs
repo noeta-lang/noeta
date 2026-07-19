@@ -23,6 +23,31 @@ use noeta_span::{Source, SourceId, Span};
 use crate::doc::{Doc, render, render_protected};
 use crate::{ArrowStyle, FmtConfig, FmtError, ParenStyle, SemicolonStyle, trivia};
 
+/// A formatter-control marker comment (`// fmt: off` / `// fmt: on`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    Off,
+    On,
+}
+
+/// One postfix operation in a member/method chain — the unit width-driven chain wrapping breaks on
+/// (see [`Printer::chain_ops`]). `Member`/`TupleIndex`/`Await` are dot-links (a break point);
+/// `Call`/`Index`/`Try` attach to the preceding link.
+enum ChainOp<'a> {
+    /// `.name` field or method access.
+    Member(&'a str),
+    /// `.0` tuple index.
+    TupleIndex(u32),
+    /// `.await`.
+    Await,
+    /// `?` try-postfix.
+    Try,
+    /// `(args)` call — the args and the byte just before `(` (for source-directed arg breaking).
+    Call(&'a [Expr], u32),
+    /// `[index]` subscript.
+    Index(&'a Expr),
+}
+
 /// A struct/class body member, unified so comments interleave across them in source order.
 enum Member<'a> {
     Field(&'a FieldDecl),
@@ -241,19 +266,6 @@ impl Printer<'_> {
         }
     }
 
-    /// Take every not-yet-emitted comment whose span starts before `pos` (own-line comments leading
-    /// up to the node at `pos`), advancing the cursor past them.
-    fn take_before(&self, pos: u32) -> Vec<&Comment> {
-        let mut out = Vec::new();
-        let mut i = self.cursor.get();
-        while i < self.comments.len() && self.comments[i].span.start < pos {
-            out.push(&self.comments[i]);
-            i += 1;
-        }
-        self.cursor.set(i);
-        out
-    }
-
     /// If the next comment sits on the same source line as `end` (a trailing `// …` after a
     /// statement), take it; otherwise leave it for the next node's leading set.
     fn take_trailing(&self, end: u32) -> Option<&Comment> {
@@ -272,6 +284,10 @@ impl Printer<'_> {
     /// Every comment positioned within the region is emitted exactly once — leading comments on their
     /// own line above an item, a same-line comment trailing its item, and any remaining ("dangling")
     /// comments before `region_end`.
+    ///
+    /// A `// fmt: off` marker comment opens a **verbatim region**: from the marker to the matching
+    /// `// fmt: on` (inclusive) — or, unmatched, the end of this scope — the source is emitted
+    /// byte-for-byte, un-formatted (the `#[rustfmt::skip]` analogue at statement granularity).
     fn interleave_comments<T>(
         &self,
         items: &[T],
@@ -283,28 +299,61 @@ impl Printer<'_> {
         // (doc, blank_line_before) in output order.
         let mut lines: Vec<(Doc, bool)> = Vec::new();
         let mut last_end = region_start;
+        let mut idx = 0usize;
 
-        for item in items {
-            let span = item_span(item);
-            for c in self.take_before(span.start) {
+        loop {
+            // The next pending comment within the region, and the next un-rendered item.
+            let next_comment = self
+                .comments
+                .get(self.cursor.get())
+                .filter(|c| c.span.start < region_end);
+            let next_item = items.get(idx);
+
+            // Take whichever begins first; a tie (impossible for distinct source tokens) and an item
+            // at an earlier-or-equal start go to the item, so its *inner* comments are consumed by its
+            // own recursion and never surface here.
+            let take_item = match (next_item, next_comment) {
+                (Some(it), Some(c)) => item_span(it).start <= c.span.start,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+
+            if take_item {
+                let it = next_item.expect("take_item implies an item");
+                let span = item_span(it);
+                let blank = !lines.is_empty() && self.blank_between(last_end, span.start);
+                let mut doc = render_item(it)?;
+                last_end = span.end;
+                if let Some(tc) = self.take_trailing(span.end) {
+                    doc = Doc::concat([doc, Doc::text(" "), self.comment_doc(tc)]);
+                    last_end = tc.span.end;
+                }
+                lines.push((doc, blank));
+                idx += 1;
+                continue;
+            }
+
+            let Some(c) = next_comment else {
+                break; // neither an item nor a comment remains — the region is done
+            };
+
+            // `// fmt: off` → emit the whole region verbatim, then resume formatting past it.
+            if self.comment_marker(c) == Some(Marker::Off) {
                 let blank = !lines.is_empty() && self.blank_between(last_end, c.span.start);
-                lines.push((self.comment_doc(c), blank));
-                last_end = c.span.end;
+                let (verbatim, resume_cursor, resume_idx, region_off_end) =
+                    self.collect_fmt_off_region(items, &item_span, idx, region_end);
+                lines.push((Doc::raw_text(verbatim), blank));
+                self.cursor.set(resume_cursor);
+                idx = resume_idx;
+                last_end = region_off_end;
+                continue;
             }
-            let blank = !lines.is_empty() && self.blank_between(last_end, span.start);
-            let mut doc = render_item(item)?;
-            last_end = span.end;
-            if let Some(tc) = self.take_trailing(span.end) {
-                doc = Doc::concat([doc, Doc::text(" "), self.comment_doc(tc)]);
-                last_end = tc.span.end;
-            }
-            lines.push((doc, blank));
-        }
-        // Dangling comments before the region's close (e.g. before a `}` or at end of file).
-        for c in self.take_before(region_end) {
+
+            // An ordinary own-line comment (leading above the next item, or dangling before close).
             let blank = !lines.is_empty() && self.blank_between(last_end, c.span.start);
             lines.push((self.comment_doc(c), blank));
             last_end = c.span.end;
+            self.cursor.set(self.cursor.get() + 1);
         }
 
         let mut parts = Vec::new();
@@ -318,6 +367,85 @@ impl Printer<'_> {
             parts.push(doc);
         }
         Ok(Doc::concat(parts))
+    }
+
+    /// Whether comment `c` is a formatter-control marker (`// fmt: off` / `// fmt: on`, colon-space
+    /// optional; block-comment `/* fmt: off */` accepted too). Anything else is `None`.
+    fn comment_marker(&self, c: &Comment) -> Option<Marker> {
+        let text = &self.source[c.span.start as usize..c.span.end as usize];
+        let inner = if let Some(rest) = text.strip_prefix("//") {
+            rest.trim()
+        } else if let Some(rest) = text.strip_prefix("/*") {
+            rest.strip_suffix("*/").unwrap_or(rest).trim()
+        } else {
+            return None;
+        };
+        match inner {
+            "fmt: off" | "fmt:off" => Some(Marker::Off),
+            "fmt: on" | "fmt:on" => Some(Marker::On),
+            _ => None,
+        }
+    }
+
+    /// Collect a `// fmt: off` verbatim region that begins at the marker currently under the cursor.
+    /// Walks forward over comments and items — consuming each item's inner comments so they are not
+    /// re-emitted — until the matching `// fmt: on` (included) or the scope end. Returns the verbatim
+    /// source slice, the cursor and item index to resume from, and the byte the region ends at.
+    fn collect_fmt_off_region<T>(
+        &self,
+        items: &[T],
+        item_span: &impl Fn(&T) -> Span,
+        start_idx: usize,
+        region_end: u32,
+    ) -> (String, usize, usize, u32) {
+        let marker = &self.comments[self.cursor.get()];
+        let start = marker.span.start;
+        let mut end = marker.span.end;
+        let mut cursor = self.cursor.get() + 1; // consume the `fmt: off` marker itself
+        let mut idx = start_idx;
+
+        loop {
+            let next_comment = self
+                .comments
+                .get(cursor)
+                .filter(|c| c.span.start < region_end);
+            let next_item = items.get(idx);
+            // A comment before the next item (or with no item left) is the next event.
+            let comment_first = match (next_item, next_comment) {
+                (Some(it), Some(c)) => c.span.start < item_span(it).start,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if comment_first {
+                let c = next_comment.expect("comment_first implies a comment");
+                end = end.max(c.span.end);
+                cursor += 1;
+                if self.comment_marker(c) == Some(Marker::On) {
+                    break; // the region closes after its `fmt: on`
+                }
+            } else if let Some(it) = next_item {
+                end = end.max(item_span(it).end);
+                idx += 1;
+                // Skip the item's own inner comments — they are already inside the verbatim slice.
+                while self
+                    .comments
+                    .get(cursor)
+                    .is_some_and(|c| c.span.start < item_span(it).end)
+                {
+                    end = end.max(self.comments[cursor].span.end);
+                    cursor += 1;
+                }
+            } else {
+                break; // nothing left in the scope — the region closes implicitly at its end
+            }
+        }
+
+        let text = self
+            .source
+            .get(start as usize..end as usize)
+            .unwrap_or_default()
+            .to_string();
+        (text, cursor, idx, end)
     }
 
     // ---- source-directed break helpers -------------------------------------------------------
@@ -724,7 +852,7 @@ impl Printer<'_> {
         span: Span,
     ) -> Result<Doc, FmtError> {
         // With an `else`, the then-block must end at the `else` keyword, not at the whole `if`'s
-        // `span.end`: otherwise the then-block's dangling-comment scan (`take_before(region_end)`)
+        // `span.end`: otherwise the then-block's dangling-comment scan (up to `region_end`)
         // greedily swallows the else-branch's *leading* comment. Find the `else` token dividing the
         // two blocks (the first one past the then-body, so a nested `else` inside it is skipped).
         let then_lower = then_body.last().map_or(cond.span().end, |s| s.span().end);
@@ -1473,7 +1601,21 @@ impl Printer<'_> {
             TypeRef::Optional { inner, .. } => Doc::concat([Doc::text("?"), self.type_ref(inner)?]),
             TypeRef::Union { members, .. } => {
                 let ds: Result<Vec<_>, _> = members.iter().map(|m| self.type_ref(m)).collect();
-                Doc::join(ds?, Doc::text(" | "))
+                let ds = ds?;
+                if self.config.wrap && ds.len() > 1 {
+                    // Width-driven: a long union stays on one line if it fits, else one member per
+                    // line with a leading `|` (which continues the previous line, so it re-parses to
+                    // the same type). Flat renders identically to the ` | ` join.
+                    let mut tail = Vec::new();
+                    for m in ds.iter().skip(1) {
+                        tail.push(Doc::line());
+                        tail.push(Doc::text("| "));
+                        tail.push(m.clone());
+                    }
+                    Doc::concat([ds[0].clone(), Doc::concat(tail).nest(self.indent_step())]).group()
+                } else {
+                    Doc::join(ds, Doc::text(" | "))
+                }
             }
             TypeRef::Tuple { elements, .. } => {
                 let ds: Result<Vec<_>, _> = elements.iter().map(|e| self.type_ref(e)).collect();
@@ -1570,8 +1712,165 @@ impl Printer<'_> {
             .then_some(chunks)
     }
 
+    /// Flatten a left-nested chain of **same-precedence** binary operators — `((a + b) - c) + d` →
+    /// `(a, [(+, b), (-, c), (+, d)])` — for width-driven wrapping. Descent stops at a differing
+    /// precedence (that operand is printed as a nested group) and at a spread-list desugar (which
+    /// resugars specially and must not be split across the chain).
+    fn flatten_binary<'e>(
+        &self,
+        op: BinaryOp,
+        lhs: &'e Expr,
+        rhs: &'e Expr,
+    ) -> (&'e Expr, Vec<(BinaryOp, &'e Expr)>) {
+        let target = binop_prec(op);
+        let mut rest = vec![(op, rhs)];
+        let mut head = lhs;
+        while let Expr::Binary {
+            op: op2,
+            lhs: l2,
+            rhs: r2,
+            ..
+        } = head
+        {
+            if binop_prec(*op2) != target || self.spread_list_chunks(head).is_some() {
+                break;
+            }
+            rest.push((*op2, r2));
+            head = l2;
+        }
+        rest.reverse();
+        (head, rest)
+    }
+
+    /// Whether `e` is a postfix/member chain worth width-wrapping — at least two dot-links
+    /// (`.method(…)` / `.field` / `.await`), the point at which breaking one-per-line reads better
+    /// than a long single line. A shorter chain (or a lone postfix) formats inline as before.
+    fn is_wrappable_chain(&self, e: &Expr) -> bool {
+        let (_, ops) = self.chain_ops(e);
+        ops.iter()
+            .filter(|o| {
+                matches!(
+                    o,
+                    ChainOp::Member(_) | ChainOp::TupleIndex(_) | ChainOp::Await
+                )
+            })
+            .count()
+            >= 2
+    }
+
+    /// Flatten a postfix/member chain from `e` inward into its base receiver and the ordered
+    /// operations applied to it (`base.a().b()[0]?` → `base`, `[Member(a), Call, Member(b), Call,
+    /// Index, Try]`). Descent stops at any non-postfix node, and at a set-literal call (`#{…}`,
+    /// which resugars specially), so that node becomes the base and is printed through the normal
+    /// receiver path.
+    fn chain_ops<'e>(&self, e: &'e Expr) -> (&'e Expr, Vec<ChainOp<'e>>) {
+        let mut ops = Vec::new();
+        let mut cur = e;
+        loop {
+            match cur {
+                Expr::Call { callee, args, span }
+                    if !(args.is_empty() && self.set_literal_items(callee, *span).is_some()) =>
+                {
+                    ops.push(ChainOp::Call(args, callee.span().end));
+                    cur = callee;
+                }
+                Expr::Member { receiver, name, .. } => {
+                    ops.push(ChainOp::Member(name));
+                    cur = receiver;
+                }
+                Expr::Index {
+                    receiver, index, ..
+                } => {
+                    ops.push(ChainOp::Index(index));
+                    cur = receiver;
+                }
+                Expr::TupleIndex {
+                    receiver, index, ..
+                } => {
+                    ops.push(ChainOp::TupleIndex(*index));
+                    cur = receiver;
+                }
+                Expr::Try { expr, .. } => {
+                    ops.push(ChainOp::Try);
+                    cur = expr;
+                }
+                Expr::Await { expr, .. } => {
+                    ops.push(ChainOp::Await);
+                    cur = expr;
+                }
+                _ => break,
+            }
+        }
+        ops.reverse();
+        (cur, ops)
+    }
+
+    /// Render a wrappable member chain (see [`Printer::is_wrappable_chain`]) as a single group: flat
+    /// (`a.b().c()`) when it fits [`FmtConfig::line_width`], else the base on the first line and each
+    /// dot-link (`.method(…)`) on its own indented line. The leading `.` continues the previous line,
+    /// so the broken form re-parses to the same chain; being derived purely from the AST, it is
+    /// idempotent.
+    fn member_chain(&self, e: &Expr) -> Result<Doc, FmtError> {
+        let (base, ops) = self.chain_ops(e);
+        let mut head: Vec<Doc> = vec![self.receiver(base)?];
+        // Each dot-link starts a new breakable segment; trailing postfixes (call/index/?) attach to
+        // the segment (or, before the first dot-link, to the base head).
+        let mut links: Vec<Vec<Doc>> = Vec::new();
+        for op in &ops {
+            let is_dot = matches!(
+                op,
+                ChainOp::Member(_) | ChainOp::TupleIndex(_) | ChainOp::Await
+            );
+            let doc = self.chain_op_doc(op)?;
+            if is_dot {
+                links.push(vec![doc]);
+            } else if let Some(last) = links.last_mut() {
+                last.push(doc);
+            } else {
+                head.push(doc);
+            }
+        }
+        let mut tail = Vec::new();
+        for link in links {
+            tail.push(Doc::softline());
+            tail.push(Doc::concat(link));
+        }
+        Ok(Doc::concat([
+            Doc::concat(head),
+            Doc::concat(tail).nest(self.indent_step()),
+        ])
+        .group())
+    }
+
+    /// One postfix operation of a member chain as a `Doc` (see [`Printer::chain_ops`]).
+    fn chain_op_doc(&self, op: &ChainOp) -> Result<Doc, FmtError> {
+        Ok(match op {
+            ChainOp::Member(name) => Doc::text(format!(".{name}")),
+            ChainOp::TupleIndex(index) => Doc::text(format!(".{index}")),
+            ChainOp::Await => Doc::text(".await"),
+            ChainOp::Try => Doc::text("?"),
+            ChainOp::Call(args, open_ref) => self.arg_list(args, *open_ref)?,
+            ChainOp::Index(index) => {
+                Doc::concat([Doc::text("["), self.expr(index)?, Doc::text("]")])
+            }
+        })
+    }
+
     fn expr(&self, expr: &Expr) -> Result<Doc, FmtError> {
         Ok(match expr {
+            // Width-driven member-chain wrapping (`a.b().c()…`): routed here only when `wrap` is on
+            // and the chain is long enough to benefit (>= 2 dot-links); every other postfix form
+            // falls through to its own arm below (including the `#{…}` set-literal resugar).
+            e @ (Expr::Call { .. }
+            | Expr::Member { .. }
+            | Expr::Index { .. }
+            | Expr::TupleIndex { .. }
+            | Expr::Try { .. }
+            | Expr::Await { .. })
+                if self.config.wrap && self.is_wrappable_chain(e) =>
+            {
+                self.member_chain(e)?
+            }
             // An expression-tier block `@sql { … ${hole} … }`. The foreign-language text between holes
             // is emitted **verbatim from source** (escapes intact — the AST's `statics` are unescaped
             // and must never be re-emitted), so the tier value is byte-for-byte preserved. Each `${…}`
@@ -1639,6 +1938,29 @@ impl Printer<'_> {
                     Doc::join(elems, Doc::text(", ")),
                     Doc::text("]"),
                 ])
+            }
+            // Width-driven: flatten a same-precedence binary chain (`a + b + c + …`) into one group
+            // so it lays out flat when it fits and one operand per line — with a leading operator
+            // that continues the previous line — when it does not. Only operators that *continue* a
+            // line when they start one may wrap this way: a leading `~`/`&`/`^`/`<<`/`>>` would
+            // instead terminate the statement (a parse change the safety gate would reject), so those
+            // fall through to the source-directed arm and never break mid-chain.
+            Expr::Binary { op, lhs, rhs, .. }
+                if self.config.wrap && noeta_lexer::token_continues_line(binop_token(*op)) =>
+            {
+                let p = binop_prec(*op);
+                let (head, rest) = self.flatten_binary(*op, lhs, rhs);
+                let mut tail = Vec::new();
+                for (o, operand) in rest {
+                    tail.push(Doc::line());
+                    tail.push(Doc::text(format!("{} ", o.symbol())));
+                    tail.push(self.operand(operand, p, true)?);
+                }
+                Doc::concat([
+                    self.operand(head, p, false)?,
+                    Doc::concat(tail).nest(self.indent_step()),
+                ])
+                .group()
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let p = binop_prec(*op);
@@ -2557,6 +2879,37 @@ fn flatten_pipeline<'e>(left: &'e Expr, right: &'e Expr) -> (&'e Expr, Vec<&'e E
     }
     stages.reverse();
     (head, stages)
+}
+
+/// The lexer token a binary operator is spelled with — used to ask [`noeta_lexer::token_continues_line`]
+/// whether a chain may wrap by breaking *before* the operator (a leading operator that does not
+/// continue the previous line, like `~`/`&`/`^`/`<<`/`>>`, would re-parse as a new statement).
+fn binop_token(op: BinaryOp) -> TokenKind {
+    match op {
+        BinaryOp::Add => TokenKind::Plus,
+        BinaryOp::Sub => TokenKind::Minus,
+        BinaryOp::Mul => TokenKind::Star,
+        BinaryOp::Div => TokenKind::Slash,
+        BinaryOp::Rem => TokenKind::Percent,
+        BinaryOp::Concat => TokenKind::Tilde,
+        BinaryOp::Eq => TokenKind::EqEq,
+        BinaryOp::Ne => TokenKind::NotEq,
+        BinaryOp::Identity => TokenKind::EqEqEq,
+        BinaryOp::NotIdentity => TokenKind::NotEqEq,
+        BinaryOp::Lt => TokenKind::Lt,
+        BinaryOp::Le => TokenKind::LtEq,
+        BinaryOp::Gt => TokenKind::Gt,
+        BinaryOp::Ge => TokenKind::GtEq,
+        BinaryOp::And => TokenKind::AmpAmp,
+        BinaryOp::Or => TokenKind::PipePipe,
+        BinaryOp::BitAnd => TokenKind::Amp,
+        BinaryOp::BitOr => TokenKind::Pipe,
+        BinaryOp::BitXor => TokenKind::Caret,
+        BinaryOp::Shl => TokenKind::Shl,
+        // `>>` is not a single token — it is composed from two adjacent `Gt`, so its leading token
+        // (what a break lands before) is `Gt`.
+        BinaryOp::Shr => TokenKind::Gt,
+    }
 }
 
 fn binop_prec(op: BinaryOp) -> u8 {

@@ -33,6 +33,44 @@ fn run_real_isolate_returns_marshalled_result() {
 }
 
 #[test]
+fn run_real_isolate_collects_cycles_at_its_own_safepoints() {
+    // A worker isolate building reference cycles in a loop, with the safepoint-GC threshold pinned
+    // tiny so the WORKER's own thread-local trigger fires many mid-run collections (memory-
+    // management 6.x: per-isolate heaps collect at per-isolate safepoints). Correct output +
+    // clean exit prove the worker's roots (its depth-0 callee/future transients included) survive
+    // every collection while the stranded cycles are reclaimed.
+    let file = temp_program(
+        "isolate_cycle_gc",
+        "class Node { pub mut next: ?Node\n\
+         fn new(): Node { return Node { next: none } } }\n\
+         async fn spin(count: int): int {\n\
+         mut i = 0\n\
+         while i < count {\n\
+         a = Node.new()\n\
+         b = Node.new()\n\
+         a.next = some(b)\n\
+         b.next = some(a)\n\
+         i = i + 1\n\
+         }\n\
+         return i\n\
+         }\n\
+         async fn run(): int {\n\
+         mut r = 0\n\
+         concurrent { d = isolate spin(20000); r = d.await }\n\
+         return r\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .env("NOETA_GC_THRESHOLD", "128")
+        .assert()
+        .success()
+        .stdout("20000\n");
+}
+
+#[test]
 fn run_real_isolates_fan_out_and_join() {
     // Three isolates run in parallel and their results are summed after the structured join; the
     // isolate body calls a *global* function, exercising the marshalled-globals snapshot.
@@ -223,4 +261,152 @@ fn run_real_isolate_channel_backpressure_capacity_one() {
         .assert()
         .success()
         .stdout("3\n");
+}
+
+// --- worker environment limits: unshippable globals (isolates I.4b) -----------------
+
+#[test]
+fn run_real_isolate_class_global_read_is_a_precise_error() {
+    // A reference `class` global cannot cross into a worker's fresh heap (it has identity —
+    // deep-copying it would silently split "the" instance in two). The worker body *reads* it, so
+    // the parent skips the global at spawn and the read fails AT USE with a precise diagnostic that
+    // names the global, its type, and the fix — not the old confusing "cannot find `counter`" (nor,
+    // worse, a silent stale copy). The checker already rejects a `class` *argument*/*result*
+    // (E0042); this closes the *global* path it does not see.
+    let file = temp_program(
+        "isolate_class_global",
+        "class Counter { pub n: int\n\
+         fn new(): Counter { return Counter { n: 42 } } }\n\
+         counter = Counter.new()\n\
+         async fn work(x: int) use (counter): int { return counter.n + x }\n\
+         async fn run(): int {\n\
+         mut r = 0\n\
+         concurrent { d = isolate work(5); r = d.await }\n\
+         return r\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("counter"))
+        .stderr(predicate::str::contains("Counter"))
+        .stderr(predicate::str::contains("cannot be shared with an isolate"));
+}
+
+#[test]
+fn run_real_isolate_struct_global_ships_by_copy() {
+    // The documented workaround (and the value-type contrast to the class case above): a value
+    // `struct` global HAS no identity, so it marshals by copy and every worker reads its own
+    // snapshot — the isolate body sees the parent's value with no diagnostic. 42 + 5 = 47.
+    let file = temp_program(
+        "isolate_struct_global",
+        "struct Config { n: int }\n\
+         config = Config { n: 42 }\n\
+         async fn work(x: int) use (config): int { return config.n + x }\n\
+         async fn run(): int {\n\
+         mut r = 0\n\
+         concurrent { d = isolate work(5); r = d.await }\n\
+         return r\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("47\n");
+}
+
+#[test]
+fn run_real_isolate_worker_teardown_runs_leaked_cycle_destructors() {
+    // Isolates I.4b worker-teardown gap: a worker that strands reference cycles (`a.peer = b;
+    // b.peer = a` on a `class`) must reap them at its OWN teardown and run their `__destruct` — just
+    // like the main heap's exit reapers. Worker stdout never returns to the parent, so each
+    // destructor appends a marker to a file on real disk (the worker runs on `RealHost`); after the
+    // structured join the parent reads it. Before the fix the cycle leaked untouched and the file
+    // was empty; now 3 iterations × 2 nodes = 6 destructors fire.
+    let dir = std::env::temp_dir().join("noeta_cli_test_isolate_dtor_cycle");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let marker = dir.join("markers.log");
+    let marker_path = marker.to_str().expect("utf-8 path");
+    let src = format!(
+        "use std.fs\n\
+         class Node {{ pub mut peer: ?Node\n\
+         fn new(): Node {{ return Node {{ peer: none }} }}\n\
+         destruct {{ fs.append(\"{marker_path}\", \"x\\n\") }} }}\n\
+         fn spin(count: int): int {{\n\
+         mut i = 0\n\
+         while i < count {{\n\
+         a = Node.new()\n\
+         b = Node.new()\n\
+         a.peer = some(b)\n\
+         b.peer = some(a)\n\
+         i = i + 1\n\
+         }}\n\
+         return i\n\
+         }}\n\
+         async fn work(n: int): int {{ return spin(n) }}\n\
+         async fn run(): int {{\n\
+         mut r = 0\n\
+         concurrent {{ d = isolate work(3); r = d.await }}\n\
+         return r\n\
+         }}\n\
+         echo run().await"
+    );
+    let file = dir.join("main.noe");
+    std::fs::write(&file, &src).expect("write program");
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("3\n");
+    let markers = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        markers.lines().count(),
+        6,
+        "the worker's teardown must run all 6 stranded-cycle destructors; got: {markers:?}"
+    );
+}
+
+// --- real-path cross-isolate deadlock detection (isolates I.4c) ---------------------
+
+#[test]
+fn run_real_isolate_channel_deadlock_errors_not_hangs() {
+    // A genuine cross-thread deadlock: a worker isolate blocks forever on `recv` over a shared
+    // channel that nobody ever sends to or closes, while the parent awaits the worker. The sandbox
+    // oracle catches this cooperative stall as E0010; the real (parallel) scheduler must detect the
+    // all-parties-blocked state — every registered scheduler parked with no timer, no IO, and no live
+    // counterparty — and raise the *same* diagnostic instead of spinning/hanging. The 20s timeout is
+    // the regression guard: before I.4c this hung forever.
+    let file = temp_program(
+        "isolate_deadlock",
+        "async fn stuck(rx: Receiver<int>): int {\n\
+         r = rx.recv().await\n\
+         return match r { some(x) => x, none => 0 }\n\
+         }\n\
+         async fn run(): int {\n\
+         (tx, rx) = channel::<int>(1)\n\
+         mut result = 0\n\
+         concurrent {\n\
+         h = isolate stuck(rx)\n\
+         result = h.await\n\
+         }\n\
+         return result\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(20))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0010"))
+        .stderr(predicate::str::contains("deadlock"));
 }

@@ -1,0 +1,29 @@
+// Reactivity S4b — the owner tree composes with `computed`. A computed creates a child effect during
+// its body, so it OWNS that child; when the computed recomputes it disposes the prior child first. An
+// outer effect reads the computed (forcing it), and changing the computed's dependency `src` reruns the
+// outer effect, which re-reads and recomputes the computed — tearing down the old child effect and
+// making a new one. A change to `dep` then reruns the single live child, not one per stale recompute.
+//
+//   first flush : outer reads c → c computes, creates child#1 → "owned dep=0"
+//   src.set(1)  : outer reruns → c recomputes → dispose child#1, create child#2 → "owned dep=0"
+//   dep.set(3)  : only child#2 is live → "owned dep=3" ONCE
+// expect: stdout "owned dep=0"
+// expect: stdout "owned dep=0"
+// expect: stdout "owned dep=3"
+// expect: stdout "done"
+// expect: exit 0
+use std.reactive.{signal, computed, effect}
+src = signal(0)
+dep = signal(0)
+c = computed(fn() {
+    effect(fn() {
+        echo "owned dep=${dep.get()}"
+    })
+    src.get()
+})
+effect(fn() {
+    c.get()
+})
+src.set(1)
+dep.set(3)
+echo "done"

@@ -168,11 +168,14 @@ impl std::fmt::Debug for CheckOptions {
 /// a tool that has (say) both a per-package [`EditionMap`] and the IDE type index asks for both
 /// without a bespoke entry point.
 pub fn check_all_with(program: &Program, opts: CheckOptions) -> Checked {
+    // The batch/tool entry never cancels: cancellation is a salsa-incremental concern, wired only by
+    // [`check_all_cancellable`] (which the `checked` query calls with salsa's revision poll).
     check_all_impl(
         program,
         opts.record_expr_types,
         opts.registry,
         opts.editions,
+        &|| {},
     )
 }
 
@@ -230,11 +233,29 @@ pub fn check_all_with_registry(
     )
 }
 
+/// [`check_all_with_editions`], but polling `cancel` once per top-level declaration during body
+/// checking (audit F9 residual b). The salsa `checked`/`linked_checked_*` queries pass salsa's own
+/// revision-cancellation poll (`db.unwind_if_revision_cancelled()`) so a pending input write aborts
+/// a long check of a large module promptly — mid-module — rather than only between queries (a
+/// whole-program check is one salsa query). `cancel` signals cancellation by unwinding
+/// (`salsa::Cancelled`), which the checker lets propagate. `record_expr_types` selects the IDE hover
+/// index exactly as [`CheckOptions::record_expr_types`] does, so the ide-flavored linked query wires
+/// the same poll. Every non-salsa caller uses the plain entries and never cancels.
+pub fn check_all_cancellable(
+    program: &Program,
+    editions: EditionMap,
+    record_expr_types: bool,
+    cancel: &dyn Fn(),
+) -> Checked {
+    check_all_impl(program, record_expr_types, None, editions, cancel)
+}
+
 fn check_all_impl(
     program: &Program,
     record_expr_types: bool,
     registry: Option<&'static noeta_ext_abi::registry::Registry>,
     editions: EditionMap,
+    cancel: &dyn Fn(),
 ) -> Checked {
     let mut checker = Checker {
         config: Config {
@@ -253,7 +274,7 @@ fn check_all_impl(
     checker.compute_relevance(program);
     checker.check_semantic_roles(program);
     checker.check_tier_decls(program);
-    checker.check_program(program);
+    checker.check_program(program, cancel);
     checker.into_checked()
 }
 
@@ -771,6 +792,14 @@ struct Symbols {
     /// an instantiated bound `T: Keyed<int>`) and UT4 `dyn Trait` coercion. Populated in pass 1;
     /// coherence (one impl per trait per type) keeps a single entry per pair honest.
     user_trait_impls: HashMap<String, HashMap<String, Vec<Type>>>,
+    /// Declared `From` conversions (error-ergonomics): target type name → the source types its
+    /// in-body `impl From<Source>` blocks declare, resolved at collection so a `?` site can consult
+    /// them regardless of statement order. Coherence allows at most one `From` impl per type (the
+    /// `from` method flattens into the method table by name; no overloading), so a well-formed
+    /// program has at most one source here and a `(source → target)` lookup is unambiguous by
+    /// construction (a duplicate is E0027 and records both — harmlessly, since the program is
+    /// rejected).
+    from_impls: HashMap<String, Vec<Type>>,
     /// The subset of [`Checker::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
@@ -997,7 +1026,7 @@ struct Checker {
 }
 
 /// Which scope frames count as "already bound" for [`Checker::check_shadow`] (the no-shadowing
-/// rule, E0055) — chosen per binder family by where the binder physically lands. See
+/// rule, E0058) — chosen per binder family by where the binder physically lands. See
 /// `check_shadow`'s doc for the mapping.
 #[derive(Clone, Copy)]
 enum ShadowScopes {
@@ -1120,7 +1149,7 @@ impl Checker {
         }
     }
 
-    /// The **no-shadowing** rule (E0055): one name, one meaning, per scope stack. A binder — a
+    /// The **no-shadowing** rule (E0058): one name, one meaning, per scope stack. A binder — a
     /// parameter, `for` variable, match-pattern binding, or fresh local declaration — may not
     /// reuse a name that already means something: another binding in scope, a top-level function
     /// or type, or an imported name. Assignment never re-declares (it reassigns, under
@@ -1239,22 +1268,43 @@ impl Checker {
     }
 
     /// Pass 2: check every top-level statement with a fresh global scope.
-    fn check_program(&mut self, program: &Program) {
+    fn check_program(&mut self, program: &Program, cancel: &dyn Fn()) {
         let mut env: Env = vec![HashMap::new()];
-        self.check_program_in(program, &mut env);
+        self.check_program_in_cancellable(program, &mut env, cancel);
     }
 
     /// [`Checker::check_program`] against a **caller-owned** environment — the seam the
     /// [`SessionChecker`] rides (session-checker C0): a REPL/console session passes its persistent
     /// global scope, so an entry sees the bindings earlier entries committed and the session keeps
     /// whatever this entry binds. The whole-program path passes a fresh one-frame env
-    /// (behavior-identical).
+    /// (behavior-identical). Never cancels — the poll is a no-op (session/REPL entries are already
+    /// prompt-sized; only the whole-file batch path threads a real cancellation poll).
     fn check_program_in(&mut self, program: &Program, env: &mut Env) {
+        self.check_program_in_cancellable(program, env, &|| {});
+    }
+
+    /// [`Checker::check_program_in`], polling `cancel` once per **top-level declaration** before it
+    /// is checked (audit F9 residual b — intra-check cancellation granularity). The whole-file batch
+    /// entry ([`check_all_cancellable`]) threads salsa's revision-cancellation check here, so a
+    /// pending input write aborts a long check of a large module promptly — mid-module — instead of
+    /// only at query boundaries (a whole-program check is a *single* salsa query, so without this
+    /// poll cancellation could not take effect until the entire module was checked). `cancel`
+    /// signals by unwinding (`salsa::Cancelled`), which this loop lets propagate untouched; the
+    /// checker holds no partial state salsa cares about, so the unwind leaves the session consistent.
+    fn check_program_in_cancellable(
+        &mut self,
+        program: &Program,
+        env: &mut Env,
+        cancel: &dyn Fn(),
+    ) {
         // Implicit async top level (Track A): if the module body contains a top-level `.await` (one
         // not inside a nested `fn`/closure), the top level is itself an async context, so its awaits
         // are legal (executable since A.1 — a top-level `.await` runs its future to completion).
         self.coloring.current_async = block_has_await(&program.stmts);
         for stmt in &program.stmts {
+            // Poll for cancellation between declarations: a big module is many top-level items, so
+            // this bounds the work a superseded check does after the write to a single declaration.
+            cancel();
             self.check_stmt(stmt, env);
         }
         self.coloring.current_async = false;
@@ -1441,7 +1491,7 @@ impl Checker {
                             self.relevance.locals.insert(*name_span);
                         }
                         // Annotated = a fresh declaration; carry its `mut`-ness for the field-set rule.
-                        // Fresh means it may not shadow an enclosing binding or a static name (E0055).
+                        // Fresh means it may not shadow an enclosing binding or a static name (E0058).
                         self.check_shadow(name, *name_span, env, ShadowScopes::Enclosing);
                         if *mut_decl {
                             bind_mut(env, name, expected);
@@ -1471,7 +1521,7 @@ impl Checker {
                             );
                         }
                         // `mut x = …` is a fresh declaration in the innermost frame — which may
-                        // not shadow an enclosing binding or a static name (E0055).
+                        // not shadow an enclosing binding or a static name (E0058).
                         if *mut_decl {
                             self.check_shadow(name, *name_span, env, ShadowScopes::Enclosing);
                             bind_mut(env, name, vty);
@@ -1598,7 +1648,20 @@ impl Checker {
                 }
             }
             Stmt::Expr { expr, .. } => {
-                self.check(expr, &Type::Unknown, env);
+                // A `match` that is the whole of an expression statement has its value discarded, so
+                // block-bodied arms (aether F1) are legitimate here (side effects). Route it through
+                // `synth_match` with `value_used` false so it is not flagged E0058; any other
+                // expression is checked normally.
+                if let Expr::Match {
+                    scrutinee,
+                    arms,
+                    span,
+                } = expr
+                {
+                    self.synth_match(scrutinee, arms, *span, env, false);
+                } else {
+                    self.check(expr, &Type::Unknown, env);
+                }
             }
             Stmt::Return { value, span } => {
                 // In a generator, only bare `return;` is allowed (it ends iteration); a value has no
@@ -2043,7 +2106,7 @@ impl Checker {
         for p in &decl.params {
             self.check_reserved_name(&p.name, p.name_span);
             // Params land in the just-pushed frame: any env hit — a capture or a duplicate in
-            // this very list (`fn(x, x)`) — is a shadow (E0055).
+            // this very list (`fn(x, x)`) — is a shadow (E0058).
             self.check_shadow(&p.name, p.name_span, env, ShadowScopes::All);
             bind(env, &p.name, param_type(p, &self.imports.extern_types));
         }

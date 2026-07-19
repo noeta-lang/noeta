@@ -856,14 +856,17 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
             let noeta_pm::manifest::GitRef::Tag(tag) = git_ref else {
                 continue;
             };
+            let version = pkg.version.to_string();
             match index.verify_release_logged(
-                &pkg.identity,
-                &pkg.version.to_string(),
-                url,
-                tag,
-                sha,
-                // Resolved deps don't carry a license claim to cross-check — coordinates only.
-                None,
+                &noeta_pm::registry::ReleaseCoords {
+                    name: &pkg.identity,
+                    version: &version,
+                    url,
+                    tag,
+                    sha,
+                    // Resolved deps don't carry a license claim to cross-check — coordinates only.
+                    license: None,
+                },
                 pinned.as_deref(),
             ) {
                 Ok(v) => {
@@ -894,6 +897,7 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
     // head are pinned trust-on-first-use in the lock, so a later feed whose count shrank is surfaced as
     // a possible rollback (a withheld advisory).
     let mut advisory_hits = 0usize;
+    let mut advisory_fails = 0usize;
     if let Ok(Some(index)) = registry::open_http() {
         println!("\n  Security advisories:");
         let old = lock::Lock::read(&manifest_dir).advisory_trust().cloned();
@@ -911,15 +915,39 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
                 for pkg in &deps {
                     for a in &feed.advisories {
                         if a.is_active() && a.package == pkg.identity && a.affects(&pkg.version) {
+                            // Per-tier policy (advisory-intake arc, tier 5): `off` skips entirely,
+                            // `warn` prints, `fail` prints and fails the audit.
+                            let action = trust.advisories.action_for(a.tier.as_str());
+                            if action == noeta_pm::manifest::AdvisoryAction::Off {
+                                continue;
+                            }
+                            let fails = action == noeta_pm::manifest::AdvisoryAction::Fail;
                             advisory_hits += 1;
+                            if fails {
+                                advisory_fails += 1;
+                            }
                             let url = if a.url.is_empty() {
                                 String::new()
                             } else {
                                 format!("  <{}>", a.url)
                             };
+                            // Publisher-tier advisories carry a keyless bundle attributing them to the
+                            // scope owner's OIDC identity — verify it offline against the scope's pinned
+                            // identity (from resolve-time `scope_trust`) so a compromised registry can't
+                            // fabricate an owner-issued advisory. Operator/imported tiers carry no bundle.
+                            let prov = advisory_provenance_note(a, &graph.scope_trust);
+                            let severity = advisory_severity_display(a);
+                            let marker = if fails { "✗" } else { "⚠" };
                             println!(
-                                "    ⚠ {} {}: [{}] {} ({}){}",
-                                pkg.identity, pkg.version, a.severity, a.summary, a.id, url
+                                "    {marker} {} {}: [{}/{}] {} ({}){}{}",
+                                pkg.identity,
+                                pkg.version,
+                                a.tier,
+                                severity,
+                                a.summary,
+                                a.id,
+                                url,
+                                prov
                             );
                         }
                     }
@@ -927,7 +955,8 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
                 if advisory_hits == 0 {
                     println!(
                         "    no advisories affect the {} resolved dependencies (checked {} signed \
-                         advisor{} against the pinned feed key).",
+                         advisor{} across the operator/publisher/imported tiers against the pinned \
+                         feed key).",
                         deps.len(),
                         feed.count,
                         if feed.count == 1 { "y" } else { "ies" }
@@ -972,15 +1001,495 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
         }
     }
 
-    if advisory_hits > 0 {
+    // A matched advisory fails the audit only when its tier's `[trust.advisories]` policy says `fail`
+    // (default: every tier warns). Warnings are printed above but never break the build.
+    if advisory_fails > 0 {
         eprintln!(
-            "\n{advisory_hits} known-vulnerable or known-malicious dependenc{} in the graph — see the \
-             advisories above.",
-            if advisory_hits == 1 { "y" } else { "ies" }
+            "\n{advisory_fails} known-vulnerable or known-malicious dependenc{} in the graph at a \
+             fail-level advisory tier — see the advisories marked ✗ above.",
+            if advisory_fails == 1 { "y" } else { "ies" }
         );
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
+}
+
+/// The severity cell for a matched advisory in the audit report. When the advisory carries a CVSS
+/// vector (imported tier, residual b), the base score is re-derived from that vector *client-side* and
+/// shown alongside the band — `high (CVSS 7.8)` — so the number behind the band is visible and honestly
+/// recomputed, not taken on the registry's word. A band that disagrees with the vector's own band is
+/// flagged, since the signed band is the trusted decision and a mismatch is worth seeing. No vector →
+/// just the band.
+fn advisory_severity_display(advisory: &noeta_pm::advisory::Advisory) -> String {
+    let Some(vector) = advisory.cvss.as_deref() else {
+        return advisory.severity.clone();
+    };
+    match noeta_pm::cvss::score_vector(vector) {
+        Some((score, band)) => {
+            if band.as_str() == advisory.severity {
+                format!("{} (CVSS {score:.1})", advisory.severity)
+            } else {
+                // The signed band and the vector's computed band differ — show both.
+                format!(
+                    "{} (CVSS {score:.1} → {})",
+                    advisory.severity,
+                    band.as_str()
+                )
+            }
+        }
+        None => advisory.severity.clone(),
+    }
+}
+
+/// The provenance note appended to a matched advisory in the audit report (advisory-intake arc). For a
+/// **publisher**-tier advisory, verify its keyless bundle offline against the scope's pinned identity
+/// (from resolve-time `scope_trust`): a verified owner attestation is the strong signal that the scope
+/// owner really issued it. Operator/imported tiers carry no bundle — an empty note. A verification
+/// failure is surfaced inline (never silently trusted).
+fn advisory_provenance_note(
+    advisory: &noeta_pm::advisory::Advisory,
+    scope_trust: &std::collections::BTreeMap<String, noeta_pm::lock::ScopeTrust>,
+) -> String {
+    use noeta_pm::advisory::AdvisoryTier;
+    match advisory.tier {
+        AdvisoryTier::Imported => {
+            // The upstream link is the provenance for an imported advisory.
+            match &advisory.upstream_id {
+                Some(id) => format!("  [imported from {id}]"),
+                None => String::new(),
+            }
+        }
+        AdvisoryTier::Operator => String::new(),
+        AdvisoryTier::Publisher => {
+            let Some(bundle) = &advisory.bundle else {
+                return "  [publisher advisory carries no bundle — unverifiable]".to_string();
+            };
+            let digest = noeta_pm::keyless::advisory_attested_digest(&advisory.canonical_bytes());
+            // Pin against the scope's keyless identity when we have one; otherwise verify the bundle
+            // stands on its own (identity reported, trust-on-first-use).
+            let scope = advisory
+                .package
+                .split('/')
+                .next()
+                .unwrap_or(&advisory.package);
+            let policy = match scope_trust.get(scope) {
+                Some(noeta_pm::lock::ScopeTrust::Keyless { issuer, identity }) => {
+                    Some(noeta_pm::keyless::IdentityPolicy {
+                        issuer: issuer.clone(),
+                        identity: identity.clone(),
+                    })
+                }
+                _ => None,
+            };
+            match noeta_pm::keyless::verify_bundle(bundle, &digest, policy.as_ref()) {
+                Ok(id) => format!("  [publisher-verified: {}]", id.identity),
+                Err(err) => format!(
+                    "  [publisher bundle FAILED verification: {}]",
+                    err.message()
+                ),
+            }
+        }
+    }
+}
+
+/// `noeta advisory publish <id> <package> <ranges> <severity> <summary>` — issue (or update) a
+/// **publisher**-tier advisory for a package in a scope you own (advisory-intake arc, tier 2). The
+/// advisory is keyless-signed with your OIDC identity (ambient CI, or `--interactive`), so consumers
+/// verify it offline against your scope's pinned identity; it is sent authenticated with the scope's
+/// publish token (`NOETA_REGISTRY_TOKEN`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cmd_advisory_publish(
+    id: &str,
+    package: &str,
+    ranges: &str,
+    severity: &str,
+    summary: &str,
+    details: Option<&str>,
+    url: Option<&str>,
+    patched: Option<&str>,
+    withdraw: bool,
+    interactive: bool,
+    oob: bool,
+) -> ExitCode {
+    if !matches!(severity, "low" | "medium" | "high" | "critical") {
+        eprintln!("noeta: `severity` must be one of low, medium, high, critical");
+        return ExitCode::from(2);
+    }
+    let Some((scope, _)) = package.split_once('/') else {
+        eprintln!("noeta: `package` must be `company/package`");
+        return ExitCode::from(2);
+    };
+    let base = match scope_registry_base(scope) {
+        Ok(Some(base)) => base,
+        Ok(None) => {
+            eprintln!(
+                "noeta: publishing an advisory needs the hosted registry — set `NOETA_REGISTRY_URL` \
+                 or map `{scope}` under `[registries]`"
+            );
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    // The advisory content, tier=publisher. Its canonical bytes are what the keyless bundle attests and
+    // what the registry re-signs and logs.
+    let advisory = noeta_pm::advisory::Advisory {
+        id: id.to_string(),
+        package: package.to_string(),
+        ranges: ranges.to_string(),
+        patched: patched.map(str::to_string),
+        severity: severity.to_string(),
+        summary: summary.to_string(),
+        details: details.unwrap_or("").to_string(),
+        url: url.unwrap_or("").to_string(),
+        withdrawn: withdraw,
+        seq: 0,
+        signature: String::new(),
+        log_index: None,
+        tier: noeta_pm::advisory::AdvisoryTier::Publisher,
+        bundle: None,
+        upstream_id: None,
+        upstream_url: None,
+        cvss: None,
+    };
+    let (bundle, who) = match sign_advisory_keyless(&advisory, interactive, oob) {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
+
+    let index = match registry::HttpIndex::new(base) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match index.publish_scope_advisory(scope, &advisory, &bundle) {
+        Ok(status) => {
+            let verb = if withdraw { "withdrew" } else { "published" };
+            println!("{status}: {verb} publisher advisory `{id}` for `{package}` (keyless: {who})");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `noeta advisory report <package> <summary>` — file a **public report** against a package
+/// (advisory-intake arc, tier 4). Unauthenticated + rate-limited; a report is not an advisory — it is
+/// queued for an operator or the scope owner to triage.
+pub(crate) fn cmd_advisory_report(
+    package: &str,
+    summary: &str,
+    ranges: Option<&str>,
+    details: Option<&str>,
+    url: Option<&str>,
+    reporter: Option<&str>,
+) -> ExitCode {
+    let Some((scope, _)) = package.split_once('/') else {
+        eprintln!("noeta: `package` must be `company/package`");
+        return ExitCode::from(2);
+    };
+    let base = match scope_registry_base(scope) {
+        Ok(Some(base)) => base,
+        Ok(None) => {
+            eprintln!(
+                "noeta: filing a report needs the hosted registry — set `NOETA_REGISTRY_URL` or map \
+                 `{scope}` under `[registries]`"
+            );
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let index = match registry::HttpIndex::new(base) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match index.file_report(package, summary, ranges, details, url, reporter) {
+        Ok(id) => {
+            println!("report filed against `{package}` (id {id})");
+            println!(
+                "  a report is not an advisory — it is queued for triage; an operator or the scope \
+                 owner may promote it."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Keyless-sign an advisory's canonical bytes (the shared publisher-tier flow behind `advisory publish`
+/// and the scope-owner path of `advisory promote`): acquire the OIDC identity (ambient CI, or an
+/// interactive browser login), attest over the advisory's canonical bytes, and verify the bundle locally
+/// before it leaves the machine — never ship an advisory a consumer would reject. Returns `(bundle,
+/// signing-identity)`. `advisory.tier` MUST already be `Publisher` so the attested canonical bytes match
+/// what the registry re-signs.
+fn sign_advisory_keyless(
+    advisory: &noeta_pm::advisory::Advisory,
+    interactive: bool,
+    oob: bool,
+) -> Result<(String, String), ExitCode> {
+    let canonical = advisory.canonical_bytes();
+    let identity = if interactive {
+        noeta_pm::keyless::interactive_identity(oob).map_err(|err| {
+            eprintln!("noeta: {err}");
+            ExitCode::from(1)
+        })?
+    } else {
+        match noeta_pm::keyless::ambient_identity() {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
+                eprintln!(
+                    "noeta: no ambient OIDC identity found — run under CI with `id-token: write`, or \
+                     use `--interactive` to sign in via the browser"
+                );
+                return Err(ExitCode::from(1));
+            }
+            Err(err) => {
+                eprintln!("noeta: {err}");
+                return Err(ExitCode::from(1));
+            }
+        }
+    };
+    let who = identity.identity().to_string();
+    let statement =
+        noeta_pm::keyless::advisory_statement(&advisory.id, &advisory.package, &canonical);
+    let bundle =
+        noeta_pm::keyless::publish_bundle(statement.as_bytes(), identity).map_err(|err| {
+            eprintln!("noeta: {err}");
+            ExitCode::from(1)
+        })?;
+    let digest = noeta_pm::keyless::advisory_attested_digest(&canonical);
+    if let Err(err) = noeta_pm::keyless::verify_bundle(&bundle, &digest, None) {
+        eprintln!(
+            "noeta: the freshly signed advisory bundle does not verify — not publishing: {err}"
+        );
+        return Err(ExitCode::from(1));
+    }
+    Ok((bundle, who))
+}
+
+/// Resolve the registry client for a report triage/promote verb (advisory-intake residual a). The base
+/// URL comes from `--scope`'s `[registries]` routing (scope-owner path) or `NOETA_REGISTRY_URL` (operator
+/// path). The bearer token is the scope publish token (`NOETA_REGISTRY_TOKEN`, the default) unless
+/// `operator` is set, which swaps in the admin token (`NOETA_REGISTRY_ADMIN_TOKEN`).
+fn report_index(scope: Option<&str>, operator: bool) -> Result<registry::HttpIndex, ExitCode> {
+    let base = match scope {
+        Some(s) => match scope_registry_base(s) {
+            Ok(Some(base)) => base,
+            Ok(None) => {
+                eprintln!(
+                    "noeta: this needs the hosted registry — set `NOETA_REGISTRY_URL` or map `{s}` \
+                     under `[registries]`"
+                );
+                return Err(ExitCode::from(2));
+            }
+            Err(code) => return Err(code),
+        },
+        None => match std::env::var("NOETA_REGISTRY_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => {
+                eprintln!("noeta: this needs the hosted registry — set `NOETA_REGISTRY_URL`");
+                return Err(ExitCode::from(2));
+            }
+        },
+    };
+    let index = registry::HttpIndex::new(base).map_err(|err| {
+        eprintln!("noeta: {err}");
+        ExitCode::from(1)
+    })?;
+    if operator {
+        match std::env::var("NOETA_REGISTRY_ADMIN_TOKEN") {
+            Ok(token) if !token.is_empty() => Ok(index.with_token(Some(token))),
+            _ => {
+                eprintln!(
+                    "noeta: an operator action needs the admin token — set `NOETA_REGISTRY_ADMIN_TOKEN`"
+                );
+                Err(ExitCode::from(2))
+            }
+        }
+    } else {
+        Ok(index)
+    }
+}
+
+/// `noeta advisory reports [--scope S]` — list the reports queued for triage (advisory-intake residual
+/// a). Without `--scope`, the operator queue (admin token); with it, the scope owner's own queue. Shows
+/// the promotable (`pending`) reports by default.
+pub(crate) fn cmd_advisory_reports(scope: Option<&str>, status: Option<&str>) -> ExitCode {
+    // A scope owner authenticates with their scope token (the default); the operator queue needs admin.
+    let index = match report_index(scope, scope.is_none()) {
+        Ok(index) => index,
+        Err(code) => return code,
+    };
+    let reports = match index.list_reports(scope, status) {
+        Ok(reports) => reports,
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let scope_note = scope
+        .map(|s| format!(" for scope `{s}`"))
+        .unwrap_or_default();
+    let status_note = status.map(|s| format!(" ({s})")).unwrap_or_default();
+    if reports.is_empty() {
+        println!("no reports{scope_note}{status_note}");
+        return ExitCode::SUCCESS;
+    }
+    println!("reports{scope_note}{status_note}:");
+    for r in &reports {
+        let ranges = r.ranges.as_deref().filter(|s| !s.is_empty());
+        let range_note = ranges.map(|s| format!(" [{s}]")).unwrap_or_default();
+        let advisory_note = r
+            .advisory_id
+            .as_deref()
+            .map(|a| format!(" → advisory `{a}`"))
+            .unwrap_or_default();
+        println!(
+            "  {} {} {}{}: {}{}",
+            r.id, r.status, r.package, range_note, r.summary, advisory_note
+        );
+    }
+    println!(
+        "\npromote one with `noeta advisory promote <report-id> --id <advisory-id> --severity <sev>`."
+    );
+    ExitCode::SUCCESS
+}
+
+/// `noeta advisory promote <report-id>` — promote a queued report into a signed advisory (advisory-intake
+/// residual a). The advisory is prefilled from the report and finalised with the triaged `--id` and
+/// `--severity`. As an operator (`--operator`, admin token) it is an `operator`-tier advisory; otherwise
+/// the report package's scope owner promotes it into a keyless-signed `publisher`-tier advisory — the
+/// exact same keyless flow a fresh `advisory publish` runs, prefilled from the report.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cmd_advisory_promote(
+    report_id: &str,
+    id: &str,
+    severity: &str,
+    ranges: Option<&str>,
+    summary: Option<&str>,
+    details: Option<&str>,
+    url: Option<&str>,
+    patched: Option<&str>,
+    operator: bool,
+    interactive: bool,
+    oob: bool,
+) -> ExitCode {
+    if !matches!(severity, "low" | "medium" | "high" | "critical") {
+        eprintln!("noeta: `severity` must be one of low, medium, high, critical");
+        return ExitCode::from(2);
+    }
+    // The promote base URL comes from `NOETA_REGISTRY_URL` (we don't yet know the report's scope), and
+    // the token is the admin token for `--operator`, else the scope publish token.
+    let index = match report_index(None, operator) {
+        Ok(index) => index,
+        Err(code) => return code,
+    };
+
+    // Fetch the report to prefill the advisory from it.
+    let report = match index.get_report(report_id) {
+        Ok(Some(report)) => report,
+        Ok(None) => {
+            eprintln!("noeta: report `{report_id}` not found (or you can't triage it)");
+            return ExitCode::from(1);
+        }
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let ranges = ranges
+        .map(str::to_string)
+        .or_else(|| report.ranges.clone().filter(|s| !s.is_empty()));
+    let Some(ranges) = ranges.filter(|s| !s.is_empty()) else {
+        eprintln!(
+            "noeta: the report carries no affected range — supply one with `--ranges` (an advisory \
+             needs a non-empty SemVer requirement)"
+        );
+        return ExitCode::from(2);
+    };
+    let summary = summary
+        .map(str::to_string)
+        .or_else(|| Some(report.summary.clone()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| report.package.clone());
+    let details = details
+        .map(str::to_string)
+        .or_else(|| report.details.clone())
+        .unwrap_or_default();
+    let url = url
+        .map(str::to_string)
+        .or_else(|| report.url.clone())
+        .unwrap_or_default();
+
+    // The prepared advisory. The tier decides the canonical bytes the scope-owner bundle attests, so set
+    // it before signing: operator → operator-tier (no bundle); scope owner → publisher-tier (keyless).
+    let advisory = noeta_pm::advisory::Advisory {
+        id: id.to_string(),
+        package: report.package.clone(),
+        ranges,
+        patched: patched.map(str::to_string),
+        severity: severity.to_string(),
+        summary,
+        details,
+        url,
+        withdrawn: false,
+        seq: 0,
+        signature: String::new(),
+        log_index: None,
+        tier: if operator {
+            noeta_pm::advisory::AdvisoryTier::Operator
+        } else {
+            noeta_pm::advisory::AdvisoryTier::Publisher
+        },
+        bundle: None,
+        upstream_id: None,
+        upstream_url: None,
+        cvss: None,
+    };
+
+    // The operator path sends no bundle (an operator advisory); the scope-owner path keyless-signs the
+    // advisory (prefilled from the report) exactly as `advisory publish` would.
+    let (bundle, who) = if operator {
+        (None, None)
+    } else {
+        match sign_advisory_keyless(&advisory, interactive, oob) {
+            Ok((bundle, who)) => (Some(bundle), Some(who)),
+            Err(code) => return code,
+        }
+    };
+
+    match index.promote_report(report_id, &advisory, bundle.as_deref()) {
+        Ok(status) => {
+            let tier = if operator { "operator" } else { "publisher" };
+            match who {
+                Some(who) => println!(
+                    "{status}: promoted report `{report_id}` into {tier} advisory `{id}` for \
+                     `{}` (keyless: {who})",
+                    advisory.package
+                ),
+                None => println!(
+                    "{status}: promoted report `{report_id}` into {tier} advisory `{id}` for `{}`",
+                    advisory.package
+                ),
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// Render a `[trust]` identity set for the audit report (`(none)` when empty).
@@ -1113,4 +1622,297 @@ pub(crate) fn scope_registry_base(scope: &str) -> Result<Option<String>, ExitCod
 /// Quote a string as a TOML basic string for a manifest value we write (`noeta add`).
 pub(crate) fn toml_string(s: &str) -> String {
     noeta_pm::toml_quote(s)
+}
+
+/// The pinned state `noeta watch-scope` carries between runs (advisory-intake arc, tier 6): the keys it
+/// trusts (advisory feed + transparency log), the last checkpoint it saw, and the set of advisory ids
+/// it has ever seen for the scope. Persisted as TOML so a later run can prove the log only grew
+/// (append-only) and no previously-seen advisory silently vanished.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct WatchState {
+    /// The registry base this state is for — a different base resets the watch (a fresh trust anchor).
+    base: String,
+    advisory_key: Option<String>,
+    log_key: Option<String>,
+    log_tree_size: Option<u64>,
+    log_root: Option<String>,
+    feed_count: Option<u64>,
+    /// Advisory ids ever seen for this scope, so a disappearance is a suppression (a withdrawn advisory
+    /// stays in the feed with `withdrawn=true`, so it never counts as disappeared).
+    #[serde(default)]
+    seen: Vec<String>,
+}
+
+/// `noeta watch-scope <scope>` — the transparency-log suppression monitor (advisory-intake arc,
+/// tier 6). Verifies, against the state pinned by the previous run, that the registry's advisory log is
+/// an append-only extension (no history rewrite) and that no advisory previously seen for the scope has
+/// disappeared from the feed (silent suppression). A detected rewrite, key change, feed rollback, or
+/// disappearance exits non-zero; the first run establishes the baseline. Ideal as a CI cron.
+pub(crate) fn cmd_watch_scope(scope: &str, state_path: Option<&std::path::Path>) -> ExitCode {
+    use noeta_pm::transparency;
+
+    let base = match scope_registry_base(scope) {
+        Ok(Some(base)) => base,
+        Ok(None) => {
+            eprintln!(
+                "noeta: watch-scope needs the hosted registry — set `NOETA_REGISTRY_URL` or map \
+                 `{scope}` under `[registries]`"
+            );
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let state_file = match state_path {
+        Some(p) => p.to_path_buf(),
+        None => match noeta_cache::Cache::locate() {
+            Some(dir) => dir.join("watch").join(format!("{scope}.toml")),
+            None => {
+                eprintln!("noeta: cannot locate a state directory — pass `--state <path>`");
+                return ExitCode::from(2);
+            }
+        },
+    };
+    // Load prior state, but only if it is for this same base (a different registry is a fresh anchor).
+    let prior: Option<WatchState> = std::fs::read_to_string(&state_file)
+        .ok()
+        .and_then(|t| toml::from_str::<WatchState>(&t).ok())
+        .filter(|s| s.base == base);
+
+    let index = match registry::HttpIndex::new(base.clone()) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    println!("watch-scope `{scope}` — {base}");
+    let mut drift = 0usize;
+
+    // 1) The advisory feed, verified against the pinned advisory key (TOFU). This checks every
+    //    signature and the signed head against exactly the served advisories.
+    let feed = match index.fetch_advisories(prior.as_ref().and_then(|p| p.advisory_key.as_deref()))
+    {
+        Ok(feed) => feed,
+        Err(err) => {
+            eprintln!("noeta: advisory feed did not verify — {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let scope_prefix = format!("{scope}/");
+    let current_ids: std::collections::BTreeSet<String> = feed
+        .advisories
+        .iter()
+        .filter(|a| a.package.starts_with(&scope_prefix))
+        .map(|a| a.id.clone())
+        .collect();
+
+    // 2) Suppression: an advisory previously seen for the scope that is no longer in the feed.
+    if let Some(prev) = &prior {
+        for id in &prev.seen {
+            if !current_ids.contains(id) {
+                drift += 1;
+                println!(
+                    "    ✗ advisory `{id}` (previously seen for `{scope}`) has DISAPPEARED from the feed"
+                );
+            }
+        }
+        if let Some(prev_count) = prev.feed_count
+            && (feed.count as u64) < prev_count
+        {
+            drift += 1;
+            println!(
+                "    ✗ the advisory feed shrank ({prev_count} → {}) — a possible rollback",
+                feed.count
+            );
+        }
+    }
+
+    // 3) The transparency log: verify the checkpoint signature (against the pinned key, TOFU) and that
+    //    the log is an append-only extension of the previously pinned checkpoint.
+    let mut new_log_key = prior.as_ref().and_then(|p| p.log_key.clone());
+    let mut new_tree_size = prior.as_ref().and_then(|p| p.log_tree_size);
+    let mut new_root = prior.as_ref().and_then(|p| p.log_root.clone());
+    match index.log_public_key() {
+        Ok(Some(served_key)) => {
+            if let Some(pinned) = prior.as_ref().and_then(|p| p.log_key.as_deref())
+                && pinned != served_key
+            {
+                drift += 1;
+                println!(
+                    "    ✗ the transparency-log signing key changed since the last run — possible equivocation"
+                );
+            }
+            let log_key = prior
+                .as_ref()
+                .and_then(|p| p.log_key.clone())
+                .unwrap_or(served_key);
+            match index.log_checkpoint() {
+                Ok(cp) => {
+                    match transparency::verify_checkpoint(
+                        &log_key,
+                        cp.tree_size,
+                        &cp.root_hash,
+                        &cp.signature,
+                    ) {
+                        Ok(true) => {
+                            // Append-only check against the pinned checkpoint.
+                            if let (Some(prev_size), Some(prev_root)) = (
+                                prior.as_ref().and_then(|p| p.log_tree_size),
+                                prior.as_ref().and_then(|p| p.log_root.clone()),
+                            ) {
+                                if cp.tree_size < prev_size {
+                                    drift += 1;
+                                    println!(
+                                        "    ✗ the transparency log SHRANK ({prev_size} → {}) — history was rewritten",
+                                        cp.tree_size
+                                    );
+                                } else if cp.tree_size > prev_size {
+                                    match verify_log_extension(
+                                        &index,
+                                        prev_size,
+                                        cp.tree_size,
+                                        &prev_root,
+                                        &cp.root_hash,
+                                    ) {
+                                        Ok(true) => println!(
+                                            "    ✓ transparency log extended append-only ({prev_size} → {})",
+                                            cp.tree_size
+                                        ),
+                                        Ok(false) => {
+                                            drift += 1;
+                                            println!(
+                                                "    ✗ the transparency log is NOT an append-only extension of the pinned checkpoint — history was rewritten"
+                                            );
+                                        }
+                                        Err(err) => println!(
+                                            "    ⚠ could not verify log consistency — {err}"
+                                        ),
+                                    }
+                                }
+                            } else {
+                                println!(
+                                    "    ✓ transparency-log checkpoint verified (baseline pinned at size {})",
+                                    cp.tree_size
+                                );
+                            }
+                            new_log_key = Some(log_key);
+                            new_tree_size = Some(cp.tree_size);
+                            new_root = Some(cp.root_hash);
+                        }
+                        Ok(false) => {
+                            drift += 1;
+                            println!(
+                                "    ✗ the transparency-log checkpoint signature does not verify against the pinned key"
+                            );
+                        }
+                        Err(err) => println!("    ⚠ checkpoint verification error — {err}"),
+                    }
+                }
+                Err(err) => {
+                    println!("    ⚠ could not fetch the transparency-log checkpoint — {err}")
+                }
+            }
+        }
+        Ok(None) => println!("    (this registry runs no transparency log)"),
+        Err(err) => println!("    ⚠ could not fetch the transparency-log key — {err}"),
+    }
+
+    // 4) Inclusion: every advisory the feed serves for this scope is provably in the log.
+    let scope_advisories: Vec<_> = feed
+        .advisories
+        .iter()
+        .filter(|a| a.package.starts_with(&scope_prefix))
+        .cloned()
+        .collect();
+    match index.verify_advisories_logged(&scope_advisories, new_log_key.as_deref()) {
+        Ok(Some((n, unlogged))) if !unlogged.is_empty() => {
+            drift += 1;
+            println!(
+                "    ✗ {} of `{scope}`'s advisories are NOT in the transparency log: {}",
+                unlogged.len(),
+                unlogged.join(", ")
+            );
+            let _ = n;
+        }
+        Ok(Some((n, _))) if n > 0 => {
+            println!(
+                "    ✓ {n} of `{scope}`'s advisories verified as included in the transparency log"
+            )
+        }
+        _ => {}
+    }
+
+    // Persist the refreshed state.
+    let next = WatchState {
+        base,
+        advisory_key: Some(feed.public_key.clone()),
+        log_key: new_log_key,
+        log_tree_size: new_tree_size,
+        log_root: new_root,
+        feed_count: Some(feed.count as u64),
+        seen: current_ids.into_iter().collect(),
+    };
+    if let Some(parent) = state_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match toml::to_string_pretty(&next) {
+        Ok(text) => {
+            if let Err(err) = std::fs::write(&state_file, text) {
+                eprintln!(
+                    "noeta: could not write watch state `{}`: {err}",
+                    state_file.display()
+                );
+            }
+        }
+        Err(err) => eprintln!("noeta: could not serialize watch state: {err}"),
+    }
+
+    if drift > 0 {
+        eprintln!(
+            "\n{drift} advisory-log integrity problem(s) detected for `{scope}` — see the ✗ lines above."
+        );
+        return ExitCode::from(1);
+    }
+    println!("  no suppression or rewrite detected for `{scope}`.");
+    ExitCode::SUCCESS
+}
+
+/// Verify the transparency log at `to_size`/`to_root` is an append-only extension of the pinned
+/// `from_size`/`from_root` (advisory-intake arc, tier 6). Fetches the registry's consistency proof and
+/// checks it reconstructs both roots.
+fn verify_log_extension(
+    index: &registry::HttpIndex,
+    from_size: u64,
+    to_size: u64,
+    from_root: &str,
+    to_root: &str,
+) -> Result<bool, noeta_pm::PmError> {
+    use noeta_pm::transparency;
+    let cons = index.log_consistency(from_size, to_size)?;
+    let (Some(root_from), Some(root_to)) = (
+        transparency::hex_to_array::<32>(from_root),
+        transparency::hex_to_array::<32>(to_root),
+    ) else {
+        return Err(noeta_pm::PmError::Trust(
+            "malformed pinned/served root hash".to_string(),
+        ));
+    };
+    let proof: Option<Vec<[u8; 32]>> = cons
+        .proof
+        .iter()
+        .map(|h| transparency::hex_to_array::<32>(h))
+        .collect();
+    let Some(proof) = proof else {
+        return Err(noeta_pm::PmError::Trust(
+            "malformed consistency-proof hash".to_string(),
+        ));
+    };
+    Ok(transparency::verify_consistency(
+        from_size as usize,
+        to_size as usize,
+        &proof,
+        &root_from,
+        &root_to,
+    ))
 }

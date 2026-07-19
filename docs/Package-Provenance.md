@@ -135,11 +135,93 @@ consumer decision: reconcile with the maintainer, then `noeta update` re-resolve
 footprint — resolution *enforces* verification, so a passing build already means every signed
 release verified.
 
+## Security advisories and intake tiers
+
+The registry serves a signed, RUSTSEC-style **advisory feed** of known-bad releases. `noeta audit`
+cross-references every resolved dependency against it and reports any that a live advisory affects.
+The feed is signed with its own key (pinned trust-on-first-use in `noeta.lock`), and each advisory is
+bound into the registry's transparency log, so a compromised registry can neither fabricate an
+advisory nor silently drop one.
+
+Every advisory carries an **intake tier** — how it entered the feed. The registry automates
+*provenance*, never *judgment*:
+
+| Tier | Who issues it | Provenance |
+|---|---|---|
+| `operator` | The registry operator (curated) | The feed signature (the anchor of trust) |
+| `publisher` | A scope's own owner, for a package in their scope | A **keyless Sigstore bundle** the consumer verifies offline against the scope's pinned identity |
+| `imported` | Mirrored from OSV / GHSA / RUSTSEC via an operator-curated name map | The upstream advisory id + link |
+
+The tier is bound into the advisory's signed canonical bytes, so a client can trust which tier it was
+served. A **public report** (anyone may file one) is *not* an advisory — it is unauthenticated intake,
+never in the feed, and only becomes an advisory when an operator or the scope owner promotes it.
+
+### Severity — text or CVSS
+
+An advisory's severity is one of `low` / `medium` / `high` / `critical`. When an **imported** upstream
+record carries a **CVSS v3.x vector** (OSV `severity[]` entries of type `CVSS_V3`, or GHSA's
+`cvss.vectorString`), the registry computes the base score from that vector honestly — the published
+CVSS v3.1 base-metric equations — and derives the canonical band from it, keeping the vector on the
+advisory as unsigned, informational metadata. (The band is what's signed and what drives policy; the
+vector is display only.) `noeta audit` re-derives the base score client-side from that vector and shows
+it beside the band — `high (CVSS 7.8)` — so the number behind the band is visible and independently
+recomputed, never taken on the registry's word. A text severity remains the fallback when no vector is
+present.
+
+### Issuing and reporting from the client
+
+- `noeta advisory publish <id> <package> <ranges> <severity> <summary>` — a scope owner issues a
+  **publisher** advisory for their own package. It is keyless-signed with your OIDC identity (ambient
+  CI, or `--interactive` for a laptop browser login) and sent authenticated with the scope's publish
+  token (`NOETA_REGISTRY_TOKEN`). `--withdraw` retracts one (kept in the log, never deleted).
+- `noeta advisory report <package> <summary>` — anyone files a **public report** (rate-limited). It is
+  queued for triage, not published.
+- `noeta advisory reports [--scope <scope>]` — list the reports queued for triage (what's promotable).
+  Without `--scope`, the operator queue (`NOETA_REGISTRY_ADMIN_TOKEN`); with it, the scope owner's own
+  queue (their packages' reports, scope token). Shows `pending` reports by default.
+- `noeta advisory promote <report-id> --id <id> --severity <sev>` — promote a queued report into a
+  signed advisory, **prefilled from the report** (package, ranges, summary, details, url). As an
+  operator (`--operator`, `NOETA_REGISTRY_ADMIN_TOKEN`) it becomes an `operator` advisory; otherwise the
+  report package's scope owner promotes it into a keyless-signed `publisher` advisory — the *same*
+  keyless Sigstore bundle a fresh `advisory publish` produces, so a consumer verifies it identically.
+
+### Per-tier policy — `[trust.advisories]`
+
+By default every tier **warns**: `noeta audit` prints a matched advisory but does not fail. A project
+opts a tier up to `fail` (a CI gate) or down to `off`:
+
+```toml
+[trust.advisories]
+operator  = "fail"     # a curated advisory breaks the build
+publisher = "fail"     # so does an owner-issued one
+imported  = "warn"     # imported feeds are broader — warn, don't fail
+```
+
+A bare `advisories = "fail"` under `[trust]` sets every tier at once. In the audit report a
+`fail`-level hit is marked `✗` (and fails the run); a `warn`-level hit is marked `⚠`. A publisher
+advisory's line also shows the verified signing identity (`[publisher-verified: …]`).
+
+### `noeta watch-scope <scope>` — suppression monitoring
+
+A compromised registry's subtlest attack is to *withhold* an advisory from you specifically. `noeta
+watch-scope` defends against it over time: it pins the advisory feed head, the transparency-log
+checkpoint, and the set of advisory ids ever seen for a scope, then on each run verifies the log is an
+**append-only extension** of the last checkpoint (no history rewrite), that the feed key and log key
+are unchanged, and that **no previously-seen advisory has disappeared**. A rewrite, key change, feed
+rollback, or disappearance exits non-zero. State is kept in a small file (`--state <path>`, else under
+the noeta cache), so it is ideal as a CI cron:
+
+```sh
+noeta watch-scope acme            # first run pins the baseline; later runs detect drift
+```
+
 ## Environment reference
 
 | Variable | Effect |
 |---|---|
 | `NOETA_SIGNING_KEY` | Path to the Ed25519 private key (key path) |
+| `NOETA_REGISTRY_TOKEN` | A scope's publish token — authenticates publishing, scope-owner triage, and scope-owner `advisory promote` |
+| `NOETA_REGISTRY_ADMIN_TOKEN` | The registry admin token — authenticates the operator triage queue and operator `advisory promote` |
 | `NOETA_SIGSTORE_TRUST_ROOT` | Path to a `trusted_root.json` overriding the embedded snapshot |
 | `NOETA_FULCIO_URL` / `NOETA_REKOR_URL` | Override both signing endpoints together (private Sigstore deployment or staging; default: production sigstore.dev) |
 | `NOETA_OIDC_URL` | Override the interactive login's OAuth provider (default: `oauth2.sigstore.dev/auth`) |

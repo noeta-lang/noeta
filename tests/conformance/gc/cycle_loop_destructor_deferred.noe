@@ -1,0 +1,42 @@
+// In-run safepoint cycle collection — destructor timing is UNCHANGED. The loop strands 15k
+// destructor-free cycles (reclaimed mid-run once the default threshold is crossed), while two
+// destructor-bearing cycles — one tied before the loop, one after — must be DEFERRED by every
+// mid-run collection: a safepoint collection never runs a destructor. Both are reclaimed by the
+// exit collection exactly as before this feature, firing `destruct` in reverse-creation order
+// (newest first: 4, 3, 2, 1) after the program's last echo. Both backends agree.
+// expect: stdout "looped 15000"
+// expect: stdout "drop 4"
+// expect: stdout "drop 3"
+// expect: stdout "drop 2"
+// expect: stdout "drop 1"
+// expect: exit 0
+class Res {
+    pub mut next: ?Res
+    id: int
+    fn new(id: int): Res { return Res { next: none, id: id } }
+    destruct { echo "drop ${self.id}" }
+}
+class Node {
+    pub mut next: ?Node
+    fn new(): Node { return Node { next: none } }
+}
+
+r1 = Res.new(1)
+r2 = Res.new(2)
+r1.next = some(r2)
+r2.next = some(r1)
+
+mut i = 0
+while i < 15000 {
+    a = Node.new()
+    b = Node.new()
+    a.next = some(b)
+    b.next = some(a)
+    i = i + 1
+}
+echo "looped ${i}"
+
+r3 = Res.new(3)
+r4 = Res.new(4)
+r3.next = some(r4)
+r4.next = some(r3)

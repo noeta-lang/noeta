@@ -17,6 +17,7 @@
 pub const ABI_VERSION: u32 = 1;
 
 pub mod args;
+pub mod channel;
 pub mod command;
 pub mod ctx;
 pub mod delegate;

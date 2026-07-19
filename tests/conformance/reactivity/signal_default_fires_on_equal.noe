@@ -1,0 +1,15 @@
+// Reactivity S0 — the DEFAULT (no dedupe flag) is unchanged: a `set` to an equal value STILL re-fires
+// dependents. This locks the pre-existing behavior explicitly so the opt-in suppression can never leak
+// into the default. The effect prints on creation (0) and again after each equal `set` (0, 0), because
+// a plain `signal` never compares — every `set` dirties.
+// expect: stdout "count=0"
+// expect: stdout "count=0"
+// expect: stdout "count=0"
+// expect: exit 0
+use std.reactive.{signal, effect}
+count = signal(0)
+effect(fn() {
+    echo "count=${count.get()}"
+})
+count.set(0)   // equal — but the default fires anyway
+count.set(0)   // equal — fires again

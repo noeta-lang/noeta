@@ -189,6 +189,8 @@ impl Interpreter {
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
         deserialize_recipes: DeserializeRecipes,
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
+        // Arm the safepoint-GC trigger for this run (the eval mirror of the VM's arm).
+        crate::leak::safepoint_arm(crate::leak::safepoint_step());
         self.reflection = noeta_ast::reflect::build(ast);
         // Extension attribute shapes ride the artifact (tier-extensions port) — same embed the
         // bytecode path does, so the differential stays green by construction.
@@ -204,6 +206,10 @@ impl Interpreter {
             // A top-level `return`, a `?` short-circuit, or a runtime error stops the program.
             Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => {}
         }
+        // Exit reached: disarm the safepoint trigger — the teardown below runs destructors
+        // against a heap being dismantled, and the exit reapers reclaim everything a pending
+        // safepoint would have.
+        crate::leak::safepoint_disarm();
         // Release every value still in the extensions' retained arena (higher-order-abi H4) —
         // destructor-aware, mirroring the VM's teardown release, so a `destruct`-bearing value
         // left in an extension (an undisposed `Cell`) fires identically on both backends.
@@ -239,6 +245,9 @@ impl Interpreter {
     /// fresh `Frame` each call is correct. Returns the batch's terminating [`Flow`] (a top-level
     /// `return`/error stops it, mirroring the AST-walker session loop).
     pub(crate) fn run_ir_batch(&mut self, ir: &noeta_ir::Program) -> Eval<Flow> {
+        // Arm per batch, relative to the session's current residency (persistent bindings are
+        // never charged against the watermark).
+        crate::leak::safepoint_arm(crate::leak::safepoint_step());
         let mut frame = Frame::new(ir.temp_count);
         self.exec_ir_stmts(&ir.top.stmts, &mut frame)
     }
@@ -311,26 +320,19 @@ impl Interpreter {
             }
             noeta_ir::Stmt::Break { .. } => Ok(Flow::Break),
             noeta_ir::Stmt::Continue { .. } => Ok(Flow::Continue),
-            // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
+            // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list (A.7 tombstone
+            // model — `open_scope` pushes both `scopes` and `scope_closed`).
             noeta_ir::Stmt::ScopeBegin { .. } => {
-                self.scopes.push(Vec::new());
+                self.open_scope();
                 Ok(Flow::Normal)
             }
-            // Close the scope: drive every remaining task to completion (the join), then pop it —
-            // releasing the tasks' futures and results (automatic under `Rc`).
+            // Close the scope: drive every remaining task to completion (the join), then close the
+            // innermost scope — releasing the tasks' futures and results (destructor-aware). The
+            // synchronous (non-flattened) path is strictly LIFO, so the innermost scope is this one.
             noeta_ir::Stmt::ScopeEnd { span } => {
                 self.join_scope(*span)?;
-                if let Some(scope) = self.scopes.pop() {
-                    // Destructor-aware release of each task's future/result (the VM's `ScopeEnd` mirror):
-                    // a **cancelled** task (a `race` loser) abandoned its future mid-body with a live
-                    // captured value, whose destructor must run at its last reference here.
-                    for task in scope {
-                        self.destroy_value(task.future);
-                        if let Some(result) = task.result {
-                            self.destroy_value(result);
-                        }
-                    }
-                }
+                let si = self.innermost_open();
+                self.close_scope(si);
                 Ok(Flow::Normal)
             }
             noeta_ir::Stmt::If {
@@ -727,6 +729,9 @@ impl Interpreter {
         frame: &mut Frame,
     ) -> Eval<Flow> {
         loop {
+            // Safepoint-GC poll at the loop back-edge (memory-management 6.x) — the eval mirror
+            // of the VM dispatch loop's backward-jump poll.
+            crate::cycles::poll_safepoint();
             let taken = match self.eval_ir_block_value(cond, frame, span)? {
                 Value::Bool(b) => b,
                 other => {
@@ -769,6 +774,8 @@ impl Interpreter {
         // closure runs inside the advance. A collection keeps the snapshot fast path.
         if stream {
             loop {
+                // Safepoint-GC poll per iteration — see `exec_ir_while`.
+                crate::cycles::poll_safepoint();
                 let element = match self.iter_value_next(&iterable_value, span)? {
                     Some(e) => e,
                     None => break,
@@ -809,6 +816,8 @@ impl Interpreter {
         }
         let elements = self.iter_elements(iterable_value, span)?;
         for element in elements {
+            // Safepoint-GC poll per iteration — see `exec_ir_while`.
+            crate::cycles::poll_safepoint();
             let child = crate::Scope::child(&self.scope);
             self.bind_for_pattern(&child, pattern, element, span)?;
             let saved = std::mem::replace(&mut self.scope, child);
@@ -1484,6 +1493,18 @@ impl Interpreter {
                 let future = self.eval_ir_atom(future, frame)?;
                 Ok(match self.poll_once(&future, *span)? {
                     Some(value) => crate::builtin_enum("Option", "some", vec![value]),
+                    // A cancelled handle awaited inside an `async fn` body would otherwise suspend
+                    // forever on a `none`; fail loudly (Track A.8, E0056) instead — the same
+                    // contract top-level `.await` enforces. The VM's `Op::PollFuture` mirror.
+                    None if self.handle_cancelled(&future) => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::AwaitCancelled,
+                            *span,
+                            "cannot await a cancelled task; use `.join()` to observe the cancelled \
+                             outcome"
+                                .to_string(),
+                        ));
+                    }
                     None => crate::builtin_enum("Option", "none", vec![]),
                 })
             }
@@ -1499,7 +1520,12 @@ impl Interpreter {
                     // Unreachable for a checked program (E0041); keep evaluation total.
                     return Ok(future);
                 }
-                let scope_idx = self.scopes.len() - 1;
+                // Senders captured in the spawned future are producer holds (isolates I.4c).
+                let holds = crate::collect_producer_channels(&future);
+                for &cid in &holds {
+                    self.add_producer_hold(cid);
+                }
+                let scope_idx = self.innermost_open();
                 let task_idx = self.scopes[scope_idx].len();
                 // The child inherits a snapshot of the spawner's task-local context (T5a).
                 let context = self.ctx_current.clone();
@@ -1509,11 +1535,52 @@ impl Interpreter {
                     cancelled: false,
                     polling: false,
                     context,
+                    holds,
                 });
                 Ok(Value::Handle(
                     ScopeId::from_index(scope_idx),
                     TaskId::from_index(task_idx),
                 ))
+            }
+            // `$scope_begin()` (Track A.7): open a structured-concurrency scope and yield its index, so
+            // the async desugar's split `concurrent { }` can thread that index to its join poll-state.
+            // The value form of `Stmt::ScopeBegin`; mirrors the VM's `Op::ScopeBeginValue`.
+            noeta_ir::Rvalue::ScopeBegin { .. } => Ok(Value::Int(self.open_scope() as i64)),
+            // `$scope_ready(scope)` (Track A.7): whether every task in the scope at index `scope` has
+            // completed or been cancelled — the boolean the split `concurrent { }`'s join poll-state
+            // tests each poll. A stale/out-of-range index reads ready (defensive; unreachable for a
+            // clean program). Mirrors the VM's `Op::ScopeReady`.
+            noeta_ir::Rvalue::ScopeReady { scope, span } => {
+                let scope = self.eval_ir_atom(scope, frame)?;
+                let Value::Int(idx) = scope else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "internal: $scope_ready expects a scope index".to_string(),
+                    ));
+                };
+                let ready = self
+                    .scopes
+                    .get(idx as usize)
+                    .is_none_or(|s| s.iter().all(|t| t.result.is_some() || t.cancelled));
+                Ok(Value::Bool(ready))
+            }
+            // `$scope_end(scope)` (Track A.7): close the drained scope at index `scope` — release its
+            // tasks (destructor-aware) and tombstone the slot. Closes by index, not innermost, so a
+            // sibling's still-open scope above it survives. Mirrors the VM's `Op::ScopeEndAt`.
+            noeta_ir::Rvalue::ScopeEndAt { scope, span } => {
+                let scope = self.eval_ir_atom(scope, frame)?;
+                let Value::Int(idx) = scope else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "internal: $scope_end expects a scope index".to_string(),
+                    ));
+                };
+                if (idx as usize) < self.scopes.len() {
+                    self.close_scope(idx as usize);
+                }
+                Ok(Value::Unit)
             }
             // `isolate f(args)` (isolates I.4b). The tree-walker only ever runs the deterministic
             // sandbox, where an isolate is observationally a cooperative task: build the future by
@@ -1527,7 +1594,13 @@ impl Interpreter {
                 if self.scopes.is_empty() {
                     return Ok(future);
                 }
-                let scope_idx = self.scopes.len() - 1;
+                // Scan the built future for captured senders — the same producer holds the VM's
+                // `isolate`-lowering (`Call`+`Spawn`) counts from the equivalent future (isolates I.4c).
+                let holds = crate::collect_producer_channels(&future);
+                for &cid in &holds {
+                    self.add_producer_hold(cid);
+                }
+                let scope_idx = self.innermost_open();
                 let task_idx = self.scopes[scope_idx].len();
                 // The child inherits a snapshot of the spawner's task-local context (T5a).
                 let context = self.ctx_current.clone();
@@ -1537,6 +1610,7 @@ impl Interpreter {
                     cancelled: false,
                     polling: false,
                     context,
+                    holds,
                 });
                 Ok(Value::Handle(
                     ScopeId::from_index(scope_idx),
@@ -1570,6 +1644,7 @@ impl Interpreter {
                     buffer: std::collections::VecDeque::new(),
                     capacity: cap as usize,
                     closed: false,
+                    producers: 0,
                 });
                 Ok(Value::Tuple(Rc::new(vec![
                     Value::Sender(ChannelId::from_index(id)),
@@ -1621,55 +1696,42 @@ impl Interpreter {
                         format!("`{module}.{func}::<T>(...)` has no resolved result type"),
                     ));
                 };
-                // The call-site-typed native functions: `json.parse::<T>` (aborting) and the
-                // recoverable `json.decode::<T>` → `Result<T, string>` (L2 DI).
-                let recoverable = func == "decode";
-                if module == "json" && (func == "parse" || recoverable) {
-                    let Some(Value::Str(text)) = arg_vals.first() else {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("`json.{func}` expects a `string` argument"),
-                        ));
-                    };
-                    match noeta_stdlib::json::parse_typed(text, recipe) {
-                        Ok(out) => {
-                            let value = self.materialize_recipe(out, *span)?;
-                            if recoverable {
-                                Ok(crate::builtin_enum("Result", "Ok", vec![value]))
-                            } else {
-                                Ok(value)
-                            }
-                        }
-                        Err(error) if recoverable => {
-                            // A decode failure is a recoverable `Result.Err(message)`.
-                            Ok(crate::builtin_enum(
-                                "Result",
-                                "Err",
-                                vec![Value::Str(error.message)],
-                            ))
-                        }
-                        Err(error) => Err(self.runtime_error(
-                            crate::std_error_code(error.kind),
-                            *span,
-                            error.message,
-                        )),
-                    }
-                } else {
-                    Err(self.runtime_error(
+                // Route through the registry's call-site-typed seam: the module's `typed_dispatch`,
+                // threaded the recipe, builds the whole `NativeOut` tree (already carrying its
+                // declared wrapper — `Ok`/`Err` for a `Result` shape, `Some`/`None` for `Option`),
+                // which materializes to a value of `T`. No function name is special-cased —
+                // `json.parse`/`try_parse` are registered like any extension's typed functions.
+                // Mirrors the VM, so the two backends agree by construction.
+                let reg = self.reg();
+                let ext_mod = reg
+                    .find_module(module)
+                    .filter(|_| reg.find_typed_function(module, func).is_some());
+                let Some(typed_dispatch) = ext_mod.and_then(|m| m.typed_dispatch) else {
+                    return Err(self.runtime_error(
                         DiagnosticCode::UnknownName,
                         *span,
                         format!(
                             "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
                         ),
-                    ))
+                    ));
+                };
+                let deep = ext_mod.is_some_and(|m| m.deep_marshal);
+                let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
+                    arg_vals.iter().map(crate::value_to_native_deep).collect()
+                } else {
+                    arg_vals.iter().map(crate::marshal_native_arg).collect()
+                };
+                match typed_dispatch(func, &mut *self.host, &nargs, recipe) {
+                    Ok(out) => self.materialize_recipe(out, *span),
+                    Err(error) => Err(self.std_dispatch_error(error, *span)),
                 }
             }
             noeta_ir::Rvalue::DecodeTyped { name, text, span } => {
-                // The router-facing runtime decode (L2.2 DI). Fully recoverable — an unknown type name,
-                // a non-string operand, or a malformed body all become `Result.Err`; a good decode is
-                // `Result.Ok(value)`. Mirrors the recoverable `json.decode::<T>` branch above, but the
-                // recipe is looked up by runtime type name rather than baked at the call site.
+                // The router-facing runtime decode (L2.2 DI). Fully recoverable — an unknown type
+                // name, a non-string operand, or a malformed body all become `Result.Err` wrapping
+                // a path-carrying `JsonError` (the same error story as `json.try_parse::<T>`).
+                // Mirrors the recoverable `try_parse` branch above, but the recipe is looked up by
+                // runtime type name rather than baked at the call site.
                 let name_val = self.eval_ir_atom(name, frame)?;
                 let text_val = self.eval_ir_atom(text, frame)?;
                 let (Value::Str(type_name), Value::Str(text)) = (&name_val, &text_val) else {
@@ -1679,24 +1741,23 @@ impl Interpreter {
                         "`json.decode_typed` expects two `string` arguments".to_string(),
                     ));
                 };
-                match self.deserialize_recipes.get(type_name).cloned() {
-                    None => Ok(crate::builtin_enum(
+                let err = |error: noeta_stdlib::json::JsonError| {
+                    crate::builtin_enum(
                         "Result",
                         "Err",
-                        vec![Value::Str(format!(
-                            "unknown deserializable type `{type_name}`"
-                        ))],
-                    )),
-                    Some(recipe) => match noeta_stdlib::json::parse_typed(text, &recipe) {
+                        vec![Value::Extern(Rc::new(RefCell::new(
+                            noeta_stdlib::ExternBox::new(error),
+                        )))],
+                    )
+                };
+                match self.deserialize_recipes.get(type_name).cloned() {
+                    None => Ok(err(noeta_stdlib::json::JsonError::unknown_type(type_name))),
+                    Some(recipe) => match noeta_stdlib::json::try_parse_typed(text, &recipe) {
                         Ok(out) => {
                             let value = self.materialize_recipe(out, *span)?;
                             Ok(crate::builtin_enum("Result", "Ok", vec![value]))
                         }
-                        Err(error) => Ok(crate::builtin_enum(
-                            "Result",
-                            "Err",
-                            vec![Value::Str(error.message)],
-                        )),
+                        Err(error) => Ok(err(error)),
                     },
                 }
             }
@@ -1717,15 +1778,29 @@ impl Interpreter {
             NativeOut::Str(s) => Ok(Value::Str(s)),
             NativeOut::Bytes(b) => Ok(Value::Bytes(Rc::new(b))),
             NativeOut::Unit => Ok(Value::Unit),
-            // A `TypeRecipe` names only JSON shapes; extern values, async work, and bulk scalar
-            // vectors (a packed reduction's result, N3.4) can never decode from one.
-            NativeOut::Extern(_) | NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
-                unreachable!("json recipes never produce extern/spawn/bulk-scalar results")
+            // An extern value — the error arm of a `Result`-wrapped door (`json.try_parse::<T>` →
+            // `Result.Err(JsonError)`) carries a path-rich extern; a recipe decode of `T` itself
+            // never yields one, only a wrapper's `Err` does.
+            NativeOut::Extern(e) => Ok(Value::Extern(Rc::new(RefCell::new(e)))),
+            // A `TypeRecipe` names only JSON shapes; async work and bulk scalar vectors (a packed
+            // reduction's result, N3.4) can never decode from one.
+            NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
+                unreachable!("json recipes never produce spawn/bulk-scalar results")
             }
             NativeOut::None => Ok(crate::builtin_enum("Option", "none", vec![])),
             NativeOut::Some(inner) => {
                 let value = self.materialize_recipe(*inner, span)?;
                 Ok(crate::builtin_enum("Option", "some", vec![value]))
+            }
+            // A `Result`-wrapped call-site-typed door (`json.try_parse::<T>`) hands back its whole
+            // `Result` tree — success as `Ok`, a decode failure as `Err` (a path-carrying extern).
+            NativeOut::Ok(inner) => {
+                let value = self.materialize_recipe(*inner, span)?;
+                Ok(crate::builtin_enum("Result", "Ok", vec![value]))
+            }
+            NativeOut::Err(inner) => {
+                let value = self.materialize_recipe(*inner, span)?;
+                Ok(crate::builtin_enum("Result", "Err", vec![value]))
             }
             NativeOut::List(items) => {
                 let mut values = Vec::with_capacity(items.len());

@@ -1,0 +1,29 @@
+// In-run safepoint cycle collection — cycles built inside a SUSPENDED generator's body. The
+// generator's own state (its step closure, cells, and the loop variables they hold) is live across
+// every mid-run collection — rooted through the iterator value driving the `for` — while the
+// cycles each resumption strands are dead and reclaimed. 30k elements cross the default
+// threshold on both backends.
+// expect: stdout "30000"
+// expect: exit 0
+class Node {
+    pub mut next: ?Node
+    fn new(): Node { return Node { next: none } }
+}
+
+fn cycles(n: int): Iterator<int> {
+    mut i = 0
+    while i < n {
+        a = Node.new()
+        b = Node.new()
+        a.next = some(b)
+        b.next = some(a)
+        yield i
+        i = i + 1
+    }
+}
+
+mut total = 0
+for x in cycles(30000) {
+    total = total + 1
+}
+echo total

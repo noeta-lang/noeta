@@ -162,8 +162,10 @@ pub enum DiagnosticCode {
     GeneratorMisuse,
     /// An async construct is misused (Track A): `.await` appears outside an async context (a sync
     /// `fn`, or a closure passed to a builtin — the coloring rule), `.await` is applied to a
-    /// non-`Future` value, an `async fn`'s body is otherwise malformed, or a well-formed async
-    /// program is not yet executable (the A.0 interim gate, lifted in A.1).
+    /// non-`Future` value, `.await` sits in a condition or loop head (an `if`/`while` condition or a
+    /// `for` iterable — the one value position the desugar cannot hoist), an `async fn`'s body is
+    /// otherwise malformed, or a well-formed async program is not yet executable (the A.0 interim gate,
+    /// lifted in A.1).
     AsyncMisuse,
     /// A structured-concurrency construct is misused (Track A.3b): a `spawn` appears outside any
     /// `concurrent { }` scope (an orphan task, forbidden by construction), a `spawn` operand is not a
@@ -229,6 +231,26 @@ pub enum DiagnosticCode {
     /// them — e.g. a top-level-only tier used on a method, or a `@test` method that reads `self`
     /// (a test method must be an associated function so the runner can call it with no receiver).
     InvalidDirectiveSite,
+    /// A block-bodied match arm (`pattern => { stmts }`, aether F1) appears in a `match` whose value
+    /// is used as an expression. Blocks are statement sequences in Noeta — they never produce a
+    /// value (a block-bodied function yields `unit` unless it `return`s) — so such an arm would
+    /// silently contribute `unit` where a value is expected. Either give the arm a value expression
+    /// (`pattern => <expr>`) or use the `match` in statement position, where block arms are for
+    /// side effects.
+    MatchArmNotValue,
+    /// A `.await` (either the top-level driver or the async state machine's poll) reached a task
+    /// that was **cancelled** (`h.cancel()`, or a `race` loser exposed to user code). A cancelled
+    /// task never produces a value — awaiting one would otherwise hang or yield a silent zero — so
+    /// the await fails loudly. Cancel-aware code uses `h.join(): Result<T, Cancelled>` to observe
+    /// the cancelled outcome instead.
+    AwaitCancelled,
+    /// A `?` would propagate an `Err` payload whose type neither matches the enclosing function's
+    /// declared error type nor has a declared conversion into it. `?` auto-converts the error
+    /// **only** through an `impl From<Source>` on the function's error type (the one implicit
+    /// conversion position in the language); with no such conversion the propagation would smuggle
+    /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
+    /// error type, or align the function's declared error type.
+    TryErrorMismatch,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,
     /// or an imported name. **One name, one meaning, per scope stack**: assignment already never
@@ -295,6 +317,9 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidTierDeclaration,
         DiagnosticCode::InvalidTierExpression,
         DiagnosticCode::InvalidDirectiveSite,
+        DiagnosticCode::MatchArmNotValue,
+        DiagnosticCode::AwaitCancelled,
+        DiagnosticCode::TryErrorMismatch,
         DiagnosticCode::ShadowedBinding,
     ];
 
@@ -356,7 +381,10 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidTierExpression => "E0052",
             DiagnosticCode::InvalidTraitDeclaration => "E0053",
             DiagnosticCode::InvalidDirectiveSite => "E0054",
-            DiagnosticCode::ShadowedBinding => "E0055",
+            DiagnosticCode::MatchArmNotValue => "E0055",
+            DiagnosticCode::AwaitCancelled => "E0056",
+            DiagnosticCode::TryErrorMismatch => "E0057",
+            DiagnosticCode::ShadowedBinding => "E0058",
         }
     }
 

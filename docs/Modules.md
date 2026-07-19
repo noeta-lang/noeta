@@ -63,7 +63,7 @@ A whole-module import follows the usual aliasing (`use geometry.vec as gv` → `
 
 (and referencing a non-`pub` declaration by qualified name reports `` `secret` is private to module `geometry.vec` ``).
 
-**One name, one meaning.** A value binding may not reuse the local name a `use` binds — `use geometry.vec` followed by `vec = Holder { … }` is a collision (E0020): rename the binding, or alias the import (`use geometry.vec as gv`). So a dotted chain's root is never ambiguous — it is either the module handle or a local, never both. (The same rule governs binders generally — see [no shadowing, E0055](Functions-and-Closures#sealed-functions--the-use--capture-clause).) Type positions are a separate namespace, so a dotted *type* head like `vec.Vec2` never competes with value bindings at all.
+**One name, one meaning.** A value binding may not reuse the local name a `use` binds — `use geometry.vec` followed by `vec = Holder { … }` is a collision (E0020): rename the binding, or alias the import (`use geometry.vec as gv`). So a dotted chain's root is never ambiguous — it is either the module handle or a local, never both. (The same rule governs binders generally — see [no shadowing, E0058](Functions-and-Closures#sealed-functions--the-use--capture-clause).) Type positions are a separate namespace, so a dotted *type* head like `vec.Vec2` never competes with value bindings at all.
 
 ## Aliasing an import — `as`
 

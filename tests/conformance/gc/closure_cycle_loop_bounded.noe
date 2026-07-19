@@ -1,0 +1,18 @@
+// In-run safepoint cycle collection — a loop stranding one closure↔cell capture cycle per
+// iteration (the self-recursive nested `fn`). 30k iterations cross the default safepoint
+// threshold, so the mid-run collector reclaims the dead capture cycles on both backends while the
+// loop runs; destructor-free, so nothing is observable and exit residency stays 0.
+// expect: stdout "done 30000"
+// expect: exit 0
+fn spin(count: int): int {
+    mut i = 0
+    while i < count {
+        fn rec(n: int): int {
+            if n <= 0 { return 0 }
+            return rec(n - 1)
+        }
+        i = i + 1 + rec(1)
+    }
+    return i
+}
+echo "done ${spin(30000)}"

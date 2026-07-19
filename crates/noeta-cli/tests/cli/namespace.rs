@@ -235,6 +235,11 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
         seq: 0,
         signature: String::new(),
         log_index: Some(0),
+        tier: advisory::AdvisoryTier::Operator,
+        bundle: None,
+        upstream_id: None,
+        upstream_url: None,
+        cvss: None,
     };
     adv.signature = to_hex(&sk.sign(&adv.canonical_bytes()).to_bytes());
     let digest = advisory::feed_digest(std::slice::from_ref(&adv));
@@ -279,6 +284,15 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
 
     let entry = path_dep_project("pm_audit_advisory");
     let app_dir = entry.parent().unwrap();
+    // Opt this project into failing on an operator-tier advisory (advisory-intake arc, tier 5): the
+    // default is warn, so a CI gate declares `[trust].advisories = "fail"` to break the build on a hit.
+    std::fs::write(
+        app_dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nhi = { path = \"../greetlib\" }\n\
+         [trust]\nadvisories = \"fail\"\n",
+    )
+    .unwrap();
     lang()
         .arg("audit")
         .arg(app_dir)
@@ -288,6 +302,8 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
         .stdout(predicate::str::contains("Security advisories:"))
         .stdout(predicate::str::contains("NOETA-2026-0007"))
         .stdout(predicate::str::contains("greeting injection"))
+        // The intake tier is shown per advisory (advisory-intake arc, tier 5).
+        .stdout(predicate::str::contains("[operator/high]"))
         // The advisory is verified as included in the transparency log (log-binding).
         .stdout(predicate::str::contains("included in the transparency log"));
 
@@ -358,6 +374,314 @@ fn noeta_claim_guides_when_not_in_ci_and_device_flow_unconfigured() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("NOETA_GITHUB_CLIENT_ID"));
+}
+
+#[test]
+fn noeta_advisory_report_posts_a_public_report() {
+    // advisory-intake arc, tier 4: `noeta advisory report <package> <summary>` POSTs an unauthenticated
+    // report to the registry. The mock captures the request and confirms its shape.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |method, path, body| {
+        tx.send((method.to_string(), path.to_string(), body.to_string()))
+            .unwrap();
+        (
+            201,
+            r#"{"status":"report filed","id":"rep-abc-123","note":"queued for triage"}"#
+                .to_string(),
+        )
+    });
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .args([
+            "advisory",
+            "report",
+            "acme/imgfx",
+            "looks like it leaks memory",
+            "--details",
+            "repro attached",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("report filed"))
+        .stdout(predicate::str::contains("rep-abc-123"));
+
+    let (method, path, body) = rx.recv().unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(path, "/v1/reports");
+    assert!(body.contains(r#""package":"acme/imgfx""#), "body: {body}");
+    assert!(body.contains("looks like it leaks memory"), "body: {body}");
+    assert!(body.contains("repro attached"), "body: {body}");
+}
+
+#[test]
+fn noeta_watch_scope_pins_a_baseline_and_reports_clean() {
+    // advisory-intake arc, tier 6: `noeta watch-scope <scope>` verifies the advisory feed + transparency
+    // log and pins a baseline on the first run. Here the mock serves a verifiable *empty* feed and log
+    // (an empty tree's root and an empty feed's digest are both sha256 of nothing), so the first run
+    // establishes the baseline and reports clean, writing a state file.
+    use ed25519_dalek::{Signer, SigningKey};
+    use noeta_pm::advisory;
+
+    let to_hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let adv_sk = SigningKey::from_bytes(&[3u8; 32]);
+    let adv_pub = to_hex(adv_sk.verifying_key().as_bytes());
+    let log_sk = SigningKey::from_bytes(&[5u8; 32]);
+    let log_pub = to_hex(log_sk.verifying_key().as_bytes());
+
+    // An empty feed: digest over no advisories == sha256 of the empty string, which is also an empty
+    // Merkle tree's root — so one value serves both the feed digest and the log root.
+    let empty = advisory::feed_digest(&[]);
+    let feed_head = format!("noeta-advisory-feed-v1\n0\n{empty}\n");
+    let feed_sig = to_hex(&adv_sk.sign(feed_head.as_bytes()).to_bytes());
+    let log_cp = format!("noeta-log-checkpoint-v1\n0\n{empty}\n");
+    let log_sig = to_hex(&log_sk.sign(log_cp.as_bytes()).to_bytes());
+
+    let feed = r#"{"advisories":[]}"#.to_string();
+    let adv_key = format!(r#"{{"public_key":"{adv_pub}"}}"#);
+    let checkpoint = format!(r#"{{"count":0,"digest":"{empty}","signature":"{feed_sig}"}}"#);
+    let log_key = format!(r#"{{"public_key":"{log_pub}"}}"#);
+    let log_checkpoint =
+        format!(r#"{{"tree_size":0,"root_hash":"{empty}","signature":"{log_sig}"}}"#);
+
+    let base = mock_http(move |_method, path, _body| match path {
+        "/v1/advisories" => (200, feed.clone()),
+        "/v1/advisories/key" => (200, adv_key.clone()),
+        "/v1/advisories/checkpoint" => (200, checkpoint.clone()),
+        "/v1/log/key" => (200, log_key.clone()),
+        "/v1/log/checkpoint" => (200, log_checkpoint.clone()),
+        _ => (404, r#"{"error":"not found"}"#.to_string()),
+    });
+
+    let state = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("watch_acme.toml");
+    let _ = std::fs::remove_file(&state);
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .args(["watch-scope", "acme", "--state"])
+        .arg(&state)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("baseline pinned"))
+        .stdout(predicate::str::contains(
+            "no suppression or rewrite detected",
+        ));
+    // The baseline is now pinned in the state file for the next run to diff against.
+    let pinned = std::fs::read_to_string(&state).unwrap();
+    assert!(
+        pinned.contains(&adv_pub),
+        "state pins the advisory key:\n{pinned}"
+    );
+    assert!(
+        pinned.contains("log_tree_size"),
+        "state pins the log checkpoint:\n{pinned}"
+    );
+}
+
+#[test]
+fn noeta_advisory_reports_lists_the_operator_and_scope_queues() {
+    // advisory-intake residual a: `noeta advisory reports` lists the promotable queue. Without `--scope`
+    // it hits the operator queue (admin token); with it, the scope owner's own queue (scope token). The
+    // mock captures the request path/auth so we confirm each identity is presented to the right endpoint.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |method, path, _body| {
+        tx.send((method.to_string(), path.to_string())).unwrap();
+        (
+            200,
+            r#"{"reports":[{"id":"rep-1","package":"acme/imgfx","ranges":">=1.0.0","summary":"leaks memory","status":"pending"}]}"#
+                .to_string(),
+        )
+    });
+
+    // Operator queue: admin token, no scope.
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .env("NOETA_REGISTRY_ADMIN_TOKEN", "admin-secret")
+        .args(["advisory", "reports"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rep-1"))
+        .stdout(predicate::str::contains("acme/imgfx"))
+        .stdout(predicate::str::contains("leaks memory"));
+    let (m, p) = rx.recv().unwrap();
+    assert_eq!(m, "GET");
+    assert_eq!(p, "/v1/reports?status=pending");
+
+    // Scope-owner queue: scope token, `--scope acme`.
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .env("NOETA_REGISTRY_TOKEN", "acme-scope-token")
+        .env_remove("NOETA_REGISTRY_ADMIN_TOKEN")
+        .args(["advisory", "reports", "--scope", "acme"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rep-1"));
+    let (m, p) = rx.recv().unwrap();
+    assert_eq!(m, "GET");
+    assert_eq!(p, "/v1/scopes/acme/reports?status=pending");
+}
+
+#[test]
+fn noeta_advisory_promote_operator_prefills_from_the_report_and_posts() {
+    // advisory-intake residual a: `noeta advisory promote --operator` fetches the report, prefills the
+    // advisory from it (package/summary/ranges), and POSTs to /promote with the admin token and NO
+    // bundle (an operator advisory). The mock serves the report then captures the promote body.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |method, path, body| {
+        if method == "GET" {
+            return (
+                200,
+                r#"{"report":{"id":"rep-9","package":"acme/imgfx","ranges":">=1.0.0, <1.3.0","summary":"confirmed leak","details":"repro attached","url":"https://ex.test/r","status":"pending"}}"#
+                    .to_string(),
+            );
+        }
+        tx.send((method.to_string(), path.to_string(), body.to_string()))
+            .unwrap();
+        (
+            201,
+            r#"{"status":"report promoted","advisory":"NOETA-2026-0100","tier":"operator"}"#
+                .to_string(),
+        )
+    });
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .env("NOETA_REGISTRY_ADMIN_TOKEN", "admin-secret")
+        .args([
+            "advisory",
+            "promote",
+            "rep-9",
+            "--operator",
+            "--id",
+            "NOETA-2026-0100",
+            "--severity",
+            "medium",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "operator advisory `NOETA-2026-0100`",
+        ));
+
+    let (method, path, body) = rx.recv().unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(path, "/v1/reports/rep-9/promote");
+    assert!(body.contains(r#""id":"NOETA-2026-0100""#), "body: {body}");
+    assert!(
+        body.contains(r#""package":"acme/imgfx""#),
+        "prefilled package: {body}"
+    );
+    assert!(body.contains(r#""severity":"medium""#), "body: {body}");
+    // Prefilled from the report (not passed on the command line).
+    assert!(body.contains("confirmed leak"), "prefilled summary: {body}");
+    assert!(
+        body.contains(r#""ranges":">=1.0.0, <1.3.0""#),
+        "prefilled ranges: {body}"
+    );
+    // An operator advisory carries no keyless bundle.
+    assert!(
+        !body.contains("\"bundle\""),
+        "operator promote has no bundle: {body}"
+    );
+}
+
+#[test]
+fn noeta_advisory_promote_scope_owner_signs_the_same_keyless_bundle() {
+    // advisory-intake residual a: the scope-owner promote path produces the SAME keyless Sigstore bundle
+    // a fresh `advisory publish` does — prefilled from the report. Hermetic: an ambient CI identity mints
+    // the bundle via an in-process Fulcio + Rekor, and the mock registry serves the report then captures
+    // the promote body, confirming it carries a bundle and the report's package.
+    if !git_available() {
+        return;
+    }
+    use noeta_pm::keyless_fixtures::{TestSigstore, spawn_mock};
+    use std::sync::Arc;
+
+    const IDENTITY: &str =
+        "https://github.com/acme/tools/.github/workflows/advise.yaml@refs/heads/main";
+    const ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+    let base_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("advisory_promote_keyless");
+    let _ = std::fs::remove_dir_all(&base_dir);
+    std::fs::create_dir_all(&base_dir).unwrap();
+
+    let sigstore = Arc::new(TestSigstore::new(ISSUER, IDENTITY));
+    let fulcio = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_fulcio(m, p, b))
+    };
+    let rekor = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_rekor(m, p, b))
+    };
+    let token_endpoint = {
+        let s = sigstore.clone();
+        spawn_mock(move |_m, _p, _b| (200, s.github_token_response()))
+    };
+    let trust_root = base_dir.join("trusted_root.json");
+    std::fs::write(&trust_root, sigstore.trusted_root_json()).unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let registry = mock_http(move |method, path, body| {
+        if method == "GET" {
+            return (
+                200,
+                r#"{"report":{"id":"rep-k","package":"acme/imgfx","ranges":">=1.0.0","summary":"owner-confirmed leak","status":"pending"}}"#
+                    .to_string(),
+            );
+        }
+        tx.send((path.to_string(), body.to_string())).unwrap();
+        (
+            201,
+            r#"{"status":"report promoted","advisory":"ACME-2026-0009","tier":"publisher"}"#
+                .to_string(),
+        )
+    });
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &registry)
+        .env("NOETA_REGISTRY_TOKEN", "acme-scope-token")
+        .env_remove("NOETA_REGISTRY_ADMIN_TOKEN")
+        .env_remove("NOETA_SIGNING_KEY")
+        .env("GITHUB_ACTIONS", "true")
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            format!("{token_endpoint}/token"),
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "mock-runner-token")
+        .env("NOETA_FULCIO_URL", &fulcio)
+        .env("NOETA_REKOR_URL", &rekor)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .args([
+            "advisory",
+            "promote",
+            "rep-k",
+            "--id",
+            "ACME-2026-0009",
+            "--severity",
+            "high",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "publisher advisory `ACME-2026-0009`",
+        ))
+        .stdout(predicate::str::contains(format!("keyless: {IDENTITY}")));
+
+    let (path, body) = rx.recv().unwrap();
+    assert_eq!(path, "/v1/reports/rep-k/promote");
+    assert!(
+        body.contains(r#""package":"acme/imgfx""#),
+        "prefilled package: {body}"
+    );
+    // The scope-owner promotion carries a keyless bundle (the same attestation `advisory publish` makes).
+    assert!(
+        body.contains("\"bundle\""),
+        "publisher promote carries a bundle: {body}"
+    );
+    assert!(
+        body.contains("dsseEnvelope") || body.contains("mediaType"),
+        "bundle is a Sigstore bundle: {body}"
+    );
 }
 
 #[test]

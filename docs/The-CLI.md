@@ -4,6 +4,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 
 | Command | Purpose |
 |---|---|
+| [`noeta init`](#noeta-init) | Scaffold a new project — manifest, entry file, editor profiles, agent docs. |
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
 | [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
@@ -19,7 +20,9 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
 | [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
 | [`noeta publish`](#noeta-publish) | Publish a tagged release of your package to the registry, signed ([provenance](Package-Provenance)). |
-| [`noeta audit`](#noeta-audit) | Report the dependency tree's trust footprint — native/command grants and pinned provenance. |
+| [`noeta audit`](#noeta-audit) | Report the dependency tree's trust footprint — native/command grants, pinned provenance, and advisory hits by tier. |
+| [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, or list/promote the report queue. |
+| [`noeta watch-scope`](#noeta-watch-scope) | Monitor a scope's advisory transparency log for silent suppression or rewrite. |
 | [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
@@ -32,6 +35,46 @@ Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 > [!NOTE]
 > The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
 
+## `noeta init`
+
+Scaffolds a new project, ready to run before you edit a line:
+
+```text
+noeta init [PATH]            # default: the current directory (created if missing)
+      --name company/package # default: local/<directory-name>
+      --no-git               # skip `git init`
+```
+
+What it writes — never overwriting a file that already exists, so it is safe in a non-empty directory:
+
+- **`noeta.toml`** — package identity plus two build targets: `development` wires the four std dev tiers (`@test`, `@bench`, `@doc`, `@debug`) live, and `production` is an explicit name for the tier-free baseline (see [build targets](Documentation-and-Tiers#build-targets--noetatoml)).
+- **`src/main.noe`** — a fmt-canonical entry file exercising every tier: a documented function with a `@debug` trace, a two-case `@test` block, and a `@bench`.
+- **`.vscode/`** — the run/debug profiles the [Noeta extension](Editor-and-AI-Tooling) picks up (F5 debugging over `noeta dap`), plus the extension recommendation.
+- **`.gitignore`** — build/profiler artifacts ignored; `noeta.lock` deliberately not (commit it).
+- **`AGENTS.md`** — how an AI agent should drive this project: the CLI feedback loop and the [`noeta mcp`](Editor-and-AI-Tooling) tool surface.
+- **`SYNTAX.md`** — the full language reference, assembled from the same embedded guide `noeta mcp`'s `docs_search` serves, so it always matches the installed compiler. Delete and re-run `noeta init` after upgrading to refresh it.
+
+A fresh directory also gets `git init` (skipped inside an existing repository, or with `--no-git`). A directory that already holds a `noeta.toml` is refused.
+
+```console
+$ noeta init webapp
+  created noeta.toml
+  created src/main.noe
+  created .gitignore
+  created .vscode/launch.json
+  created .vscode/extensions.json
+  created AGENTS.md
+  created SYNTAX.md
+  created git repository
+initialized Noeta package `local/webapp` in webapp
+$ noeta test webapp/src/main.noe
+running 2 tests on 2 threads
+  ok    greets
+  ok    greets_noeta
+
+2 passed, 0 failed, 2 total
+```
+
 ## `noeta fmt`
 
 Formats `.noe` source into the canonical style — the same layout no matter how the code was written (like `gofmt`/`rustfmt`). It is a **canonical reformatter** guarded by a safety check: the formatted output is re-parsed and compared to the original, so formatting can never change what a program means; if anything looks off, the file is left untouched.
@@ -39,6 +82,7 @@ Formats `.noe` source into the canonical style — the same layout no matter how
 ```text
 noeta fmt [PATHS...]   # format files, or every .noe under a directory, in place (atomic)
 noeta fmt --check ...  # write nothing; list any file that is not already formatted, exit 1 (CI)
+noeta fmt --diff  ...  # write nothing; print a unified diff of the pending reformat, exit 1 if any (CI)
 noeta fmt --stdin      # read source on stdin, write the formatted result to stdout (format-on-save)
 noeta fmt --parens <remove|add> ...      # override the [fmt] parens policy for redundant header parens
 noeta fmt --semicolons <remove|add|preserve> ...   # override the [fmt] semicolons policy
@@ -56,7 +100,17 @@ parens           = "remove"   # "remove" (default) strips redundant parens aroun
 semicolons       = "remove"   # "remove" (default) strips redundant statement terminators; "add" or "preserve"
 ```
 
-With `wrap = false` (the default) the formatter preserves the line breaks you wrote and only normalizes indentation, spacing, and blank lines — so a tidy file is left essentially as-is. Trailing `;` and comments are always preserved; when `wrap = true`, wrapped lists get a trailing comma. Editors format with the same engine: the VS Code extension turns on **format-on-save** and **format-on-type** (reformatting a block when you type its closing `}`) for `.noe` files by default.
+With `wrap = false` (the default) the formatter preserves the line breaks you wrote and only normalizes indentation, spacing, and blank lines — so a tidy file is left essentially as-is. Trailing `;` and comments are always preserved. With `wrap = true` the layout is re-derived from `line_width`: over-width **collections**, **argument/parameter lists**, **pipelines** (`|>`), **binary chains** (`a + b + c …`), **method chains** (`a.b().c() …`), and **union types** (`A | B | C`) each break one element per line (wrapped lists get a trailing comma), while anything that fits stays on one line. Editors format with the same engine: the VS Code extension turns on **format-on-save** and **format-on-type** (reformatting a block when you type its closing `}`) for `.noe` files by default.
+
+To keep a region exactly as written — a hand-aligned table, a generated block — wrap it in `// fmt: off` / `// fmt: on` markers (on their own lines); everything between them passes through byte-for-byte, and formatting resumes after `// fmt: on` (an unmatched `// fmt: off` disables formatting to the end of its scope).
+
+```noeta
+// fmt: off
+matrix = [1, 0, 0,
+          0, 1, 0,
+          0, 0, 1]
+// fmt: on
+```
 
 ---
 
@@ -141,6 +195,46 @@ noeta check [PATH]
 ```
 
 Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
+
+## `noeta migrate`
+
+```text
+noeta migrate [--db <dsn>] [--dir <path>] [--status] [--dry-run] [--reset [--yes]]
+noeta migrate new <name> [--dir <path>]
+```
+
+Applies a project's **plain-SQL migrations** (the para/db layer). Migrations are `.sql` files in a
+`migrations/` directory, applied in filename-sort order; each runs inside its own transaction, so a
+failure rolls that migration back and stops, naming the file. An applied migration is tracked in a
+`_noeta_migrations` table by a sha256 checksum of its contents — editing an already-applied file, or
+deleting one, is a hard error (history is immutable). Migrations are **forward-only** (no down files):
+`--reset` covers the development loop.
+
+| invocation | effect |
+| --- | --- |
+| `noeta migrate` | apply every pending migration, printing each applied file |
+| `noeta migrate --status` | list which migrations are applied and which are pending |
+| `noeta migrate --dry-run` | list what would be applied, without touching the database |
+| `noeta migrate new <name>` | scaffold `migrations/<UTC-timestamp>_<name>.sql` |
+| `noeta migrate --reset --yes` | DESTRUCTIVE: drop the schema and re-apply from zero |
+
+The **connection string** is resolved, highest priority first: the `--db <dsn>` flag, the
+`DATABASE_URL` environment variable, then a `[db]` table in `noeta.toml`:
+
+```toml
+[db]
+url = "sqlite:app.db"        # any dsn scheme db.connect accepts (sqlite:… / postgres://…)
+migrations = "migrations"    # optional; the migrations directory (default "migrations")
+```
+
+`--dir` overrides the directory per-invocation. `--reset` drops and recreates the schema — on SQLite
+it drops every user table/view/trigger; on PostgreSQL it runs `DROP SCHEMA public CASCADE; CREATE
+SCHEMA public` — and refuses to run without `--yes` or an interactive `yes` typed at the prompt.
+
+Exit codes: `0` success; `2` for a usage/config problem (no dsn configured, a missing migrations
+directory, an unconfirmed `--reset`); `1` for a run that failed (connect failure, a SQL error,
+checksum drift, a deleted migration). An app can migrate itself at boot off the same engine with
+`conn.migrate("migrations")` (see [para/db](https://github.com/…/packages/para-db)).
 
 ## `noeta serve` and `--watch`
 
@@ -432,6 +526,31 @@ noeta audit [PATH]
 ```
 
 Answers *"what am I actually running?"* for the resolved dependency tree: every package and its source, which ones run **native code** or add **CLI commands** (the `[trust]` grants that make that authority active), and each scope's **pinned provenance trust root** — a signing key or a keyless identity. Resolution *enforces* verification, so a build that succeeds already means every signed release verified; the audit is the human-readable report of what that trust rests on.
+
+It also cross-references every dependency against the registry's **security advisory feed**, showing each hit's **intake tier** (`operator` / `publisher` / `imported`) and, for a publisher advisory, its verified signing identity. An imported advisory that carried a **CVSS v3.x vector** upstream shows its severity band with the base score re-derived client-side from that vector — `high (CVSS 7.8)`. Whether a tier fails or merely warns is set per-project by `[trust.advisories]` (default: all warn) — see [Package Provenance](Package-Provenance#security-advisories-and-intake-tiers).
+
+### `noeta advisory`
+
+```text
+noeta advisory publish <ID> <PACKAGE> <RANGES> <SEVERITY> <SUMMARY> [--details …] [--url …] [--patched …] [--withdraw] [--interactive [--oob]]
+noeta advisory report  <PACKAGE> <SUMMARY> [--ranges …] [--details …] [--url …] [--reporter …]
+noeta advisory reports [--scope <SCOPE>] [--status <pending|promoted|dismissed>] [--all]
+noeta advisory promote <REPORT-ID> --id <ID> --severity <SEVERITY> [--ranges …] [--summary …] [--details …] [--url …] [--patched …] [--operator] [--interactive [--oob]]
+```
+
+`advisory publish` issues (or updates) a **publisher**-tier advisory for a package in a scope you own — keyless-signed with your OIDC identity, sent with the scope's publish token (`NOETA_REGISTRY_TOKEN`), so consumers verify it offline. `advisory report` files a **public report** against any package (unauthenticated, rate-limited): not an advisory, but queued for an operator or the scope owner to triage.
+
+`advisory reports` lists the reports queued for triage — what's **promotable**. Without `--scope` it shows the operator triage queue (needs `NOETA_REGISTRY_ADMIN_TOKEN`); with `--scope`, the scope owner's own queue (their packages' reports; needs the scope's `NOETA_REGISTRY_TOKEN`). It shows the `pending` reports by default (`--all` for every status).
+
+`advisory promote` turns a queued report into a signed advisory. The advisory is **prefilled from the report** (package, ranges, summary, details, url) and finalised with the triaged `--id` and `--severity`. As an **operator** (`--operator`, `NOETA_REGISTRY_ADMIN_TOKEN`) it becomes an `operator`-tier advisory; otherwise the report package's **scope owner** promotes it into a keyless-signed `publisher`-tier advisory — the same keyless Sigstore bundle a fresh `advisory publish` produces, prefilled from the report. See [Package Provenance](Package-Provenance#issuing-and-reporting-from-the-client).
+
+### `noeta watch-scope`
+
+```text
+noeta watch-scope <SCOPE> [--state <PATH>]
+```
+
+Monitors a scope's advisory **transparency log** over time for silent suppression or history rewrite: it pins the feed head, the log checkpoint, and the advisory ids seen for the scope, then on each run verifies the log only grew (append-only) and that no previously-seen advisory disappeared. A rewrite, key change, feed rollback, or disappearance exits non-zero — ideal as a CI cron. See [Package Provenance](Package-Provenance#noeta-watch-scope-scope--suppression-monitoring).
 
 ### `noeta key`
 

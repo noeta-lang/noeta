@@ -25,6 +25,33 @@ const PREC = {
   call: 15,       // f() x.m() x[i] x.f
 };
 
+// Verbatim text-tier names. `@<name> { … }` for a name in this set has its body captured as raw
+// `text_body` prose (never lexed as code). The std default is `doc`; a per-project generated
+// `project-tiers.json` (emitted by `noeta grammar tree-sitter`) widens it with the project's
+// `@tier(<name>, text: "…")` declarations, so third-party text tiers parse verbatim too. Absent
+// that file — a project with no declared tiers — the static `doc`-only set is the fallback. The
+// file is validated here so a malformed overlay can never inject an unexpected token.
+const TEXT_TIER_NAMES = (() => {
+  const isIdent = (s) => typeof s === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(s);
+  try {
+    const declared = require('./project-tiers.json').textTiers;
+    if (Array.isArray(declared)) {
+      const names = [...new Set(declared.filter(isIdent))];
+      if (names.length > 0) return names;
+    }
+  } catch (_) {
+    // No per-project overlay — fall through to the static default.
+  }
+  return ['doc'];
+})();
+
+// The tier-name rule for `text_tier_block`: an `alias(<literal>, identifier)` per verbatim tier, so
+// each name is a keyword that selects the text-tier form. A single name needs no `choice` wrapper.
+function textTierName($) {
+  const alts = TEXT_TIER_NAMES.map((n) => alias(n, $.identifier));
+  return alts.length === 1 ? alts[0] : choice(...alts);
+}
+
 module.exports = grammar({
   name: 'noeta',
 
@@ -122,11 +149,13 @@ module.exports = grammar({
     // scanner with the same balanced-brace + `\{`/`\}`/`\\` escape count as the compiler's lexer,
     // so editor and compiler always agree on where the body ends. The `queries/injections.scm`
     // rule overlays markdown on the body. Third-party declared text tiers (`@tier(x, text: "…")`)
-    // are not modeled statically — a static grammar cannot read the declaration set; their bodies
-    // parse as code (or error-recover) until a per-project generated grammar exists.
+    // are not modeled by the *static* grammar — a static grammar cannot read the declaration set, so
+    // their bodies parse as code (or error-recover). A per-project overlay (`project-tiers.json`,
+    // emitted by `noeta grammar tree-sitter`) widens `TEXT_TIER_NAMES` above so those names parse
+    // verbatim too; `queries/injections.scm` then maps each to its language.
     text_tier_block: $ => seq(
       '@',
-      field('name', alias('doc', $.identifier)),
+      field('name', textTierName($)),
       field('body', $.text_block),
     ),
     text_block: $ => seq('{', optional($.text_body), '}'),
