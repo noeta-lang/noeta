@@ -2303,6 +2303,12 @@ impl<'m> Vm<'m> {
                             future
                         } else {
                             retain(future);
+                            // Senders captured in the spawned future are producer holds (isolates
+                            // I.4c auto-close); count them onto their channels for the task's life.
+                            let holds = Self::collect_producer_channels(future);
+                            for &cid in &holds {
+                                self.add_producer_hold(cid);
+                            }
                             let scope_idx = self.sched.scopes.len() - 1;
                             let task_idx = self.sched.scopes[scope_idx].len();
                             // The child inherits a snapshot of the spawner's task-local context
@@ -2314,6 +2320,7 @@ impl<'m> Vm<'m> {
                                 cancelled: false,
                                 polling: false,
                                 context,
+                                holds,
                             });
                             Value::make_handle(
                                 ScopeId::from_index(scope_idx),
@@ -2345,7 +2352,12 @@ impl<'m> Vm<'m> {
                         // tasks' owned futures and results.
                         self.join_scope(*span)?;
                         if let Some(scope) = self.sched.scopes.pop() {
-                            for task in scope {
+                            for mut task in scope {
+                                // End any producer holds this task still carries (isolates I.4c): a
+                                // completed task already released them at completion (list emptied),
+                                // so this only fires for a task the scope reclaims before it finished
+                                // (e.g. a cancelled `race` loser) — its captured sender is now gone.
+                                self.release_task_holds(&mut task.holds);
                                 // Destructor-aware: a task's future holds the async body's captured
                                 // locals in its state-machine cells. A completed task's cells are spent,
                                 // but a **cancelled** task (a `race` loser) abandoned its future mid-body
@@ -2394,6 +2406,7 @@ impl<'m> Vm<'m> {
                                 buffer: std::collections::VecDeque::new(),
                                 capacity: cap as usize,
                                 closed: false,
+                                producers: 0,
                             }
                         };
                         self.persist.channels.push(channel);

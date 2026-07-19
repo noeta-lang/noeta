@@ -12,7 +12,7 @@
 //! last-use destruction); only the crate's *name history* survives in old comments.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 use noeta_ast::reflect::TypeRepr;
@@ -1049,6 +1049,11 @@ struct Task {
     /// `ctx_current` at `spawn`, swapped in around each poll of this task's step — the tree-walker
     /// mirror of the VM's field.
     context: Vec<u64>,
+    /// The channels this task holds a **producer hold** on (isolates I.4c auto-close): the indices of
+    /// every `Sender<T>` it captured. Decremented when the task's future is reclaimed (on completion
+    /// or at scope end), auto-closing a channel when its last producer is gone. The VM's `Task.holds`
+    /// mirror. Emptied once decremented so completion and scope-end never double-count.
+    holds: Vec<usize>,
 }
 
 /// One traced future (native-otel T5c) — the tree-walker mirror of the VM's entry. `future` is a
@@ -1081,6 +1086,48 @@ struct Channel {
     buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
     capacity: usize,
     closed: bool,
+    /// Live **producer holds** (isolates I.4c auto-close): spawned tasks/isolates that captured a
+    /// `Sender` for this channel. Born at 0 (the `channel()` split does not count); when it returns
+    /// to 0 after being positive the channel auto-closes. The tree-walker mirror of the VM
+    /// `Channel::Local::producers`.
+    producers: u32,
+}
+
+/// The channel indices of every `Sender<T>` reachable from a spawned future's captures (isolates
+/// I.4c auto-close): a cycle-safe walk of the tree-walker value graph. It follows a closure's
+/// **immediate captured-scope bindings** (never its parent-scope chain up to the globals), so it
+/// collects the same producer holds the VM's `gc_children`-based walk does (whose closures likewise
+/// carry only explicit captures) and both backends agree.
+pub(crate) fn collect_producer_channels(root: &Value) -> Vec<usize> {
+    fn walk(v: &Value, out: &mut Vec<usize>, seen: &mut HashSet<*const Scope>) {
+        match v {
+            Value::Sender(id) => out.push(id.index()),
+            Value::Future(inner) => walk(inner, out, seen),
+            Value::BoundMethod(recv, _) => walk(recv, out, seen),
+            Value::Function(closure) => {
+                let scope: &Rc<Scope> = &closure.captured;
+                if seen.insert(Rc::as_ptr(scope)) {
+                    for binding in scope.vars.borrow().values() {
+                        walk(&binding.value, out, seen);
+                    }
+                }
+            }
+            Value::Tuple(items) | Value::Set(items, _) => {
+                items.iter().for_each(|it| walk(it, out, seen));
+            }
+            Value::List(ListRepr::Boxed { items, .. }) => {
+                items.iter().for_each(|it| walk(it, out, seen));
+            }
+            Value::Map(entries, _) => entries.values().for_each(|it| walk(it, out, seen)),
+            Value::Enum(e) => e.data.iter().for_each(|it| walk(it, out, seen)),
+            Value::Object(o) => o.slots.borrow().iter().for_each(|it| walk(it, out, seen)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    walk(root, &mut out, &mut seen);
+    out
 }
 
 /// One program's worth of evaluation state.
@@ -1371,6 +1418,31 @@ impl Interpreter {
     /// `destruct` at *its* last reference. A non-aggregate, or an aliased aggregate (refcount > 1),
     /// simply lets its `Rc` drop here — memory is reclaimed, no destructor fires (deferred to the
     /// final reference, §2). Closure-captured values are out of §4 scope (Phase 6 owns capture).
+    /// Register one producer hold on channel `cid` (isolates I.4c): a spawned task/isolate captured a
+    /// `Sender` for it. The tree-walker mirror of the VM's `add_producer_hold`.
+    pub(crate) fn add_producer_hold(&mut self, cid: usize) {
+        self.channels[cid].producers += 1;
+    }
+
+    /// End one producer hold on channel `cid` (isolates I.4c): its task completed or was reclaimed.
+    /// Auto-closes the channel when its last producer is gone, marking channel progress so a parked
+    /// receiver re-polls and observes the close. The VM's `end_producer_hold` mirror.
+    pub(crate) fn end_producer_hold(&mut self, cid: usize) {
+        if noeta_stdlib::channel::producer_left(&mut self.channels[cid].producers) {
+            self.channels[cid].closed = true;
+            self.channel_progress += 1;
+        }
+    }
+
+    /// Release the producer holds a task recorded, if not already released (isolates I.4c) — on the
+    /// task's completion, or at scope end for a task that never completed. Empties the list so the two
+    /// paths never double-count. The VM's `release_task_holds` mirror.
+    pub(crate) fn release_task_holds(&mut self, holds: &mut Vec<usize>) {
+        for cid in std::mem::take(holds) {
+            self.end_producer_hold(cid);
+        }
+    }
+
     fn destroy_value(&mut self, value: Value) {
         match value {
             Value::Object(obj) => self.destroy_object(obj),
@@ -2316,7 +2388,13 @@ impl Interpreter {
                 "send" => {
                     self.expect_std_arity(name, &args, 1, span)?;
                     let value = args.into_iter().next().unwrap();
-                    return Ok(Value::ChannelSend(id, Rc::new(value)));
+                    return Ok(Value::ChannelSend(
+                        id,
+                        Rc::new(value),
+                        Rc::new(std::cell::Cell::new(
+                            noeta_stdlib::channel::SendPhase::Fresh,
+                        )),
+                    ));
                 }
                 "close" => {
                     self.expect_std_arity(name, &args, 0, span)?;
@@ -3713,44 +3791,73 @@ impl Interpreter {
                     None => Ok(None),
                 }
             }
-            // `tx.send(v)` (isolates I.1): enqueue when the buffer has room (ready → unit), else
-            // suspend (pending) until a `recv` frees a slot. Sending on a closed channel is a bug
-            // (E0010) — the receiver would never see it.
-            Value::ChannelSend(id, value) => {
+            // `tx.send(v)` (isolates I.1 + I.4c rendezvous): the shared `channel` policy decides the
+            // action from the channel's scalar state and this send's rendezvous phase (carried on the
+            // future's `Rc<Cell>`, so it persists across the same awaited future's re-polls).
+            Value::ChannelSend(id, value, phase_cell) => {
+                use noeta_stdlib::channel::{SendAction, SendPhase};
                 let id = *id;
+                let phase = phase_cell.get();
                 let chan = &self.channels[id.index()];
-                if chan.closed {
-                    return Err(self.runtime_error(
+                let action = noeta_stdlib::channel::poll_send(
+                    chan.capacity,
+                    chan.buffer.len(),
+                    chan.closed,
+                    phase,
+                );
+                match action {
+                    // Sending on a closed channel is a bug (E0010) — the receiver would never see it.
+                    SendAction::Closed => Err(self.runtime_error(
                         DiagnosticCode::Panic,
                         span,
                         "cannot send on a closed channel".to_string(),
-                    ));
-                }
-                if chan.buffer.len() < chan.capacity {
-                    let value = (**value).clone();
-                    // The sender's trace context rides the message (T5d) — the VM's envelope,
-                    // mirrored.
-                    let context = self.outbound_trace_context();
-                    self.channels[id.index()].buffer.push_back((value, context));
-                    self.channel_progress += 1;
-                    Ok(Some(Value::Unit))
-                } else {
-                    Ok(None)
+                    )),
+                    // Buffered deliver (complete now) or rendezvous deposit (park until taken): the
+                    // message enters the one queue either way.
+                    SendAction::DeliverBuffered | SendAction::Deposit => {
+                        let value = (**value).clone();
+                        // The sender's trace context rides the message (T5d) — the VM's envelope,
+                        // mirrored.
+                        let context = self.outbound_trace_context();
+                        self.channels[id.index()].buffer.push_back((value, context));
+                        self.channel_progress += 1;
+                        if action == SendAction::Deposit {
+                            // A rendezvous send parks, recording that its message is now in the
+                            // handoff, and completes only once a receiver takes it.
+                            phase_cell.set(SendPhase::Deposited);
+                            Ok(None)
+                        } else {
+                            Ok(Some(Value::Unit))
+                        }
+                    }
+                    // Rendezvous: the deposited message has been taken — complete.
+                    SendAction::Complete => {
+                        self.channel_progress += 1;
+                        Ok(Some(Value::Unit))
+                    }
+                    SendAction::Park => Ok(None),
                 }
             }
             // `rx.recv()` (isolates I.1): dequeue the next message (ready → `some(v)`), yield `none`
             // once the channel is closed and drained, else suspend (pending) on an empty open buffer.
             Value::ChannelRecv(id) => {
                 let id = *id;
-                if let Some((value, context)) = self.channels[id.index()].buffer.pop_front() {
-                    // Seed the receiving strand from the message's context (T5d).
-                    self.seed_context_from_message(context);
-                    self.channel_progress += 1;
-                    Ok(Some(builtin_enum("Option", "some", vec![value])))
-                } else if self.channels[id.index()].closed {
-                    Ok(Some(builtin_enum("Option", "none", vec![])))
-                } else {
-                    Ok(None)
+                let chan = &self.channels[id.index()];
+                match noeta_stdlib::channel::poll_recv(chan.buffer.len(), chan.closed) {
+                    noeta_stdlib::channel::RecvAction::Deliver => {
+                        let (value, context) = self.channels[id.index()]
+                            .buffer
+                            .pop_front()
+                            .expect("non-empty");
+                        // Seed the receiving strand from the message's context (T5d).
+                        self.seed_context_from_message(context);
+                        self.channel_progress += 1;
+                        Ok(Some(builtin_enum("Option", "some", vec![value])))
+                    }
+                    noeta_stdlib::channel::RecvAction::ClosedEmpty => {
+                        Ok(Some(builtin_enum("Option", "none", vec![])))
+                    }
+                    noeta_stdlib::channel::RecvAction::Park => Ok(None),
                 }
             }
             other => Ok(Some(other.clone())),
@@ -3788,6 +3895,14 @@ impl Interpreter {
                     if let Some(value) = polled? {
                         self.scopes[si][ti].result = Some(value);
                         completed = true;
+                        // The task is done, so its **producer holds** end now — auto-closing any
+                        // channel whose last producer just completed, while the scope is still open,
+                        // so a sibling receiver drains then observes `none` (isolates I.4c). The
+                        // future is left for `ScopeEnd` to reclaim, so captured-local destructors
+                        // still fire at the join (unchanged, both backends agree); only the producer
+                        // accounting resolves eagerly here. The VM's mirror.
+                        let mut holds = std::mem::take(&mut self.scopes[si][ti].holds);
+                        self.release_task_holds(&mut holds);
                     }
                 }
                 ti += 1;

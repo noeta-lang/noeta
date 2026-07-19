@@ -18,6 +18,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use noeta_ast::reflect::TypeRepr;
+use noeta_stdlib::channel::SendPhase;
 
 use crate::{Builtin, Closure, EnumDef, EnumValue, ObjectValue, TypeDef};
 
@@ -127,7 +128,10 @@ pub enum Value {
     Receiver(crate::ChannelId),
     /// A **leaf channel-send future** (isolates I.1): the twin of the VM's `Payload::ChannelSend`.
     /// `tx.send(v)` produces one, carrying the channel index and the message `v` (held until enqueued).
-    ChannelSend(crate::ChannelId, Rc<Value>),
+    /// The third field is its capacity-0 **rendezvous phase** (isolates I.4c), shared by `Rc<Cell>` so
+    /// the transition to `Deposited` persists across the re-polls of the same awaited future; ignored
+    /// for a buffered channel.
+    ChannelSend(crate::ChannelId, Rc<Value>, Rc<std::cell::Cell<SendPhase>>),
     /// A **leaf channel-recv future** (isolates I.1): the twin of the VM's `Payload::ChannelRecv`.
     /// `rx.recv()` produces one, carrying the channel index.
     ChannelRecv(crate::ChannelId),
@@ -817,7 +821,7 @@ impl fmt::Debug for Value {
             Value::AsyncIo(id) => write!(f, "AsyncIo({id})"),
             Value::Sender(id) => write!(f, "Sender({})", id.index()),
             Value::Receiver(id) => write!(f, "Receiver({})", id.index()),
-            Value::ChannelSend(id, value) => write!(f, "ChannelSend({}, {value:?})", id.index()),
+            Value::ChannelSend(id, value, _) => write!(f, "ChannelSend({}, {value:?})", id.index()),
             Value::ChannelRecv(id) => write!(f, "ChannelRecv({})", id.index()),
         }
     }
