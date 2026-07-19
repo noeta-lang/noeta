@@ -1013,6 +1013,16 @@ impl<'m> Vm<'m> {
                             )?;
                             continue 'reload;
                         }
+                        // The member-handle iterator (coroutines Track-I trigger): a user object
+                        // with no `iter` but a callable `next` member — a method, or a
+                        // closure-valued field — drains into a materialized snapshot list,
+                        // exactly like the tree-walker.
+                        if v.is_object() && self.has_user_next(v) {
+                            let list = self.drain_next_object(v, *span)?;
+                            set_reg(regs, fbase, *dst, list);
+                            pc += 1;
+                            continue;
+                        }
                         // Snapshot the elements to iterate: a packed list materializes into an owned
                         // boxed snapshot (so `ListLen`/`ListGet` never see the flat form); a list's
                         // elements, a set's canonical elements, or a map's values in sorted-key order
@@ -1034,6 +1044,17 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *src as usize];
                         match v.list_len() {
                             Some(n) => {
+                                set_reg(regs, fbase, *dst, Value::int(n as i64));
+                                pc += 1;
+                            }
+                            // `iter()` returned a `next`-driven user iterator object (the
+                            // Iterable → member-handle composition): drain it into the snapshot
+                            // register, exactly as the tree-walker's `iter_elements` does, so the
+                            // loop's `ListGet` reads the materialized elements.
+                            None if self.has_user_next(v) => {
+                                let list = self.drain_next_object(v, *span)?;
+                                let n = list.list_len().expect("the drain returns a list");
+                                set_reg(regs, fbase, *src, list);
                                 set_reg(regs, fbase, *dst, Value::int(n as i64));
                                 pc += 1;
                             }

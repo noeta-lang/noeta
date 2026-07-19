@@ -1523,6 +1523,17 @@ impl Interpreter {
     /// Materialize the elements a `for` loop iterates over: a list/set in canonical order, a
     /// map's values in key order, or a user object's `Iterable` (`iter`) list. Shared by the
     /// AST walker's `exec_for` and the Core-IR interpreter so both agree by construction.
+    /// Whether a value is a user object exposing a `next` member — a declared method, or a field
+    /// (whose value the drain calls through the ordinary member-call path; a non-callable one
+    /// raises the indirect-call error there). The gate for `next`-driven user iteration,
+    /// mirrored by the VM's shape-based gate.
+    fn has_user_next(v: &Value) -> bool {
+        matches!(
+            v,
+            Value::Object(o) if o.def.methods.contains_key("next") || o.field("next").is_some()
+        )
+    }
+
     fn iter_elements(&mut self, iterable: Value, span: Span) -> Eval<Vec<Value>> {
         match &iterable {
             Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
@@ -1531,10 +1542,12 @@ impl Interpreter {
             // Iterating a map yields its values, in deterministic key order.
             Value::Map(entries, _) => Ok(entries.values().cloned().collect()),
             // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
-            // `iter` method returns.
+            // `iter` method returns — or, composing with the member-handle iterator below, the
+            // `next`-driven user iterator object it returns.
             Value::Object(object) if object.def.methods.contains_key("iter") => {
                 match self.call_method(iterable.clone(), "iter", Vec::new(), span)? {
                     Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
+                    other if Self::has_user_next(&other) => self.drain_next_object(other, span),
                     other => Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
                         span,
@@ -1542,11 +1555,49 @@ impl Interpreter {
                     )),
                 }
             }
+            // The **member-handle iterator** (coroutines Track-I trigger): a user object with no
+            // `iter` but a callable `next` member — a method, or (through the member-call
+            // fallback) a closure-valued field — drives iteration directly: `next()` until
+            // `none`, each `some(x)` contributing an element. Eager like the `Iterable` list
+            // path (user iteration snapshots; lazy streaming remains built-in `Iterator<T>`'s).
+            Value::Object(_) if Self::has_user_next(&iterable) => {
+                self.drain_next_object(iterable.clone(), span)
+            }
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!("cannot iterate over {}", other.type_name()),
             )),
+        }
+    }
+
+    /// Drain a `next`-driven user iterator object into its element list: call the object's `next`
+    /// member — dispatched through the ordinary member-call path, so a method or a closure-valued
+    /// field both work — until it returns `none`; each `some(x)` contributes `x`. A step that is
+    /// not a built-in option is E0007, identically in both backends.
+    fn drain_next_object(&mut self, obj: Value, span: Span) -> Eval<Vec<Value>> {
+        let mut elements = Vec::new();
+        loop {
+            let step = self.call_method(obj.clone(), "next", Vec::new(), span)?;
+            let payload = match &step {
+                Value::Enum(e) if e.enum_name == "Option" && e.variant == "some" => {
+                    e.data.first().cloned().unwrap_or(Value::Unit)
+                }
+                Value::Enum(e) if e.enum_name == "Option" && e.variant == "none" => {
+                    return Ok(elements);
+                }
+                other => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "iterator `next` must return an option, found {}",
+                            other.type_name()
+                        ),
+                    ));
+                }
+            };
+            elements.push(payload);
         }
     }
 
