@@ -66,7 +66,7 @@ serde_json = { workspace = true }
 # `bench` drive the tier-1 JIT under hot-counter promotion. `--no-default-features` builds a
 # Cranelift-free interpreter-only binary (identical behaviour, smaller build).
 default = ["jit"]
-jit = ["noeta-vm/jit", "noeta-runner/jit"]
+jit = ["noeta-vm/jit", "noeta-runner/jit", "noeta-prof/jit"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

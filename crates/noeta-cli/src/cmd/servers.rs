@@ -99,15 +99,19 @@ pub(crate) fn cmd_profile(
     format: Option<&str>,
     out: Option<PathBuf>,
     lines: bool,
+    jit: bool,
 ) -> ExitCode {
     let mode = if instrument {
         noeta_prof::Mode::Instrument
     } else if alloc {
         noeta_prof::Mode::Alloc
     } else if let Some(every) = every {
+        // The op-clock cannot see native code (native ops don't advance the counter), so tier-1
+        // sampling is a wall-clock concern; `--jit` with `--every` stays tier-0.
         noeta_prof::Mode::Sample {
             clock: noeta_prof::SampleClock::Ops { every },
             lines,
+            jit: false,
         }
     } else {
         noeta_prof::Mode::Sample {
@@ -115,6 +119,7 @@ pub(crate) fn cmd_profile(
                 hz: hz.unwrap_or(1000),
             },
             lines,
+            jit,
         }
     };
     let format = match format {

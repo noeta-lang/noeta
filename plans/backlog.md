@@ -70,7 +70,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| Profiler: tier-1 (JIT-on) sampling — poll at JIT trampoline points. (Allocation and per-isolate profiles have since shipped: `--alloc`, per-worker flamegraphs) | profiler arc |
 | Profiler: continuous / attach-to-running-`serve` profiling; differential A/B flamegraph compare; column-precise attribution | profiler deferred tail |
 | tree-sitter: per-project generated grammar for third-party text tiers (a static grammar can't know which `@name` opens a verbatim body; the TextMate side ships a generator) | text-tiers / Documentation-and-Tiers |
 | Debug console: persistent `mut` bindings across entries; watch-memoization | tooling-unification deferred |

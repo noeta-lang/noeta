@@ -44,6 +44,19 @@ pub trait ProfileHook: Send {
     /// Called before each interpreted instruction with a read-only view of the live call stack. The
     /// hook does its own timing/counting and must not block.
     fn before_op(&mut self, view: &DebugView);
+    /// Called at the tier-1 **trampoline**, just before a compiled prototype's native code runs
+    /// (`Vm::jit_enter`), with the live call stack and the prototype `proto` about to execute
+    /// natively. This is the profiler's shadow-state seam for tier-1 sampling: native code hits no
+    /// interpreter op boundary, so [`ProfileHook::before_op`] cannot fire while it runs — the sampler
+    /// records here which JIT frame it will attribute the native segment's wall time to. The default
+    /// is a no-op (the instrumenting/allocation collectors only run tier-0, so they never see this).
+    /// Only reached on a profiled run whose JIT is armed (`noeta profile --jit`).
+    fn on_jit_enter(&mut self, _view: &DebugView, _proto: u32) {}
+    /// Called at the tier-1 trampoline, just after the compiled prototype's native code returns to
+    /// the interpreter (bail / return / a pushed callee). The sampler banks the wall time that
+    /// accrued during the native segment onto the frame recorded by the matching
+    /// [`on_jit_enter`](ProfileHook::on_jit_enter). Default no-op.
+    fn on_jit_exit(&mut self, _view: &DebugView) {}
     /// Downcast hatch: reclaim the concrete collector (and its accumulated results) after the run.
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
 }

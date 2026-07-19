@@ -2,8 +2,10 @@
 
 `noeta profile app.noe` runs a program and reports **where it spends its time** — a hot-function
 table or a flamegraph. Like the debugger, it is a dev-time tool over the **production VM**: the same
-`load → check → compile → run` pipeline `noeta run` uses, with the JIT unarmed so every frame is
-observable. What you profile is what ships (see [*Tier-0, and what it means*](#tier-0-and-what-it-means)).
+`load → check → compile → run` pipeline `noeta run` uses. By default the JIT is unarmed so every
+frame is observable (**tier-0**); `--jit` arms the tier-1 JIT and samples native code at the
+trampoline, so the profile reflects what actually ships (see
+[*Tiers, and what they mean*](#tiers-and-what-they-mean)).
 
 ## Three profilers
 
@@ -58,6 +60,7 @@ $ noeta profile app.noe --format folded -o - | inferno-flamegraph > app.svg
 | `--hz <N>` | Wall-clock sampling rate (default **1000** Hz). |
 | `--every <N>` | **Deterministic** sampling: one sample every `N` executed ops instead of on a wall clock. Reproducible run to run — an op-weighted (not time-weighted) flamegraph. Use it for stable diffs or scripted checks. |
 | `--lines` | Attribute each flamegraph leaf to its **source line** (`fn:line`), not just the function — so the hot *line* within a function is visible. |
+| `--jit` | Arm the **tier-1 JIT** while sampling (default: tier-0). Hot prototypes run native and their wall time is sampled at the JIT trampoline, so the profile is the *shipped* time distribution, not the interpreter's. Tier-1 frames are labeled ` [jit]` (e.g. `hot [jit]`), so a function's native and interpreter samples read apart. Wall-clock sampling only (the op-clock can't see native code); function-level, not line-level, inside JIT frames. The summary reports how many prototypes were promoted. |
 | `--format <fmt>` | `folded` (Brendan-Gregg collapsed stacks), `svg` (self-contained flamegraph), `speedscope` (JSON for [speedscope.app](https://www.speedscope.app); each frame carries structured `file`/`line`/`col`, so tools can jump to source). |
 | `-o <file>` | Write the artifact to a file instead of stderr (recommended for `svg`/`speedscope`). `-o -` writes it to **stdout** for piping — it follows the program's own forwarded output, so it suits programs that print little or nothing. |
 
@@ -129,15 +132,29 @@ speedscope JSON (whose frames carry structured `file`/`line`/`col`) or the instr
 a profile taken on the CLI drops into the editor view, and the same file still loads at
 [speedscope.app](https://www.speedscope.app).
 
-## Tier-0, and what it means
+## Tiers, and what they mean
 
-A profile session runs **tier-0** (the interpreter, JIT unarmed) — the same decision the
+By default a profile session runs **tier-0** (the interpreter, JIT unarmed) — the same decision the
 [debugger](Debugging) makes — because the sampler needs an observable instruction boundary and the
-instrumenting counter needs to see every call. That has one honest consequence: a profile reflects
+instrumenting counter needs to see every call. That has one honest consequence: the profile reflects
 the **interpreter's** time distribution. This is faithful for the questions a language-level profiler
 answers — *which function / line is hot, and how many times is it called* — because tier-0 preserves
 the exact call structure and relative work. It is **not** the absolute wall-time of the JIT-compiled
 build (the JIT changes constants, not shape). Call counts are tier-independent and exact.
+
+**`--jit` (tier-1 sampling)** arms the production hot-counter JIT so hot prototypes run native, and
+the sampler attributes their wall time — the profile then *is* the shipped time distribution. Native
+code hits no interpreter instruction boundary, so the sampler cannot poll inside it; instead it polls
+at the **JIT trampoline** — the seam the VM crosses to enter and leave a compiled frame — and banks
+the wall time a native segment took onto the function that ran, labeled ` [jit]`. That makes tier-1
+attribution **function-level**: a `[jit]` frame names the hot function, but there is no per-line
+breakdown inside native code (several source lines fuse into one native segment, so a single leaf
+line would be dishonest — `--lines` has no effect on `[jit]` frames). A function typically appears
+twice — `hot` (its tier-0 warm-up and any deopt bail-outs) and `hot [jit]` (its native samples) —
+which is the honest picture of a tiered runtime. The summary reports the promotion count (how many
+prototypes went native); [`--jit-stats`](The-CLI) on `noeta run` gives the full compile/bail report.
+Tier-1 sampling is wall-clock only — the deterministic op-clock (`--every`) can't observe native code
+(native ops don't advance the op counter), so it stays tier-0 even with `--jit`.
 
 ## Under the hood (short version)
 
@@ -148,14 +165,20 @@ per-op delta onto the executing stack — the allocator is the single choke poin
 builtins' allocations are counted too. The instrumenting collector diffs
 the live frame stack to detect call enter/exit and times each; the sampler snapshots the live stack
 at a safe point when a tick is pending — **cooperative sampling**, so the timer thread never races
-the interpreter's stack. Function names and source lines come from the **always-emitted line tables**
-on every compiled chunk, so no special debug build is needed. The profiler is a dev tool, outside the
+the interpreter's stack. Under `--jit` the sampler adds one more safe point: the **JIT trampoline**
+(`jit_enter`/`jit_exit`), where it records which compiled frame is about to run and, on the way out,
+banks the wall time that accrued while native code ran onto that frame — so native time lands on the
+function that spent it instead of being misattributed to whatever interpreter frame resumed after a
+bail. The hooks are default no-ops, so an off-JIT (or unprofiled) run pays nothing. Function names and
+source lines come from the **always-emitted line tables** on every compiled chunk, so no special debug
+build is needed. The profiler is a dev tool, outside the
 [differential oracle](Architecture-and-Pipeline) (its signal is time, not program output).
 
 ## Current limitations
 
-- **Tier-0 only** — the JIT-compiled tier is not sampled (its absolute wall-time isn't reflected);
-  see above. Sampling the JIT tier is a future add.
+- **Tier-1 attribution is function-level** — `--jit` samples native code at the trampoline and names
+  the hot function (` [jit]`), but there is no per-line breakdown inside a JIT frame (`--lines` is
+  tier-0 only); native segments fuse several source lines, so a leaf line would be dishonest.
 - **Isolate profiles are separate, not merged** — each worker isolate gets its own named profile
   (see [Threads](#threads)); there is no combined cross-thread view or merged function table yet.
 - **Per-line self-time** in the instrumenting table is function-granular today (line attribution is

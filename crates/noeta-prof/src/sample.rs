@@ -33,24 +33,40 @@ pub enum Trigger {
     Ops { every: u64, counter: u64 },
 }
 
-/// Accumulates `stack → sample count`, keyed by the chain of prototype indices (root → leaf) plus
-/// the leaf's pc (0 unless line-attribution is on, so the default output is unchanged).
+/// Accumulates `stack → sample count`, keyed by the chain of prototype indices (root → leaf), the
+/// leaf's pc (0 unless line-attribution is on, so the default output is unchanged), and whether the
+/// sample landed inside **tier-1 native code** (the leaf frame is JIT-executed — `noeta profile
+/// --jit`). The tier-1 flag splits a function's tier-0 and tier-1 samples into distinct folded
+/// stacks so the flamegraph can label them apart.
 pub struct SampleCollector {
     trigger: Trigger,
     /// When on, the leaf frame's pc is folded into the key so distinct source lines within one
     /// function become distinct stacks (resolved to `fn:line` labels after the run).
     lines: bool,
-    stacks: HashMap<(Vec<u32>, u32), u64>,
+    stacks: HashMap<SampleKey, u64>,
     total: u64,
     /// Reused snapshot buffer, to avoid allocating on the ops that don't sample.
     scratch: Vec<u32>,
+    /// The frame proto-chain (root → leaf) captured at the current tier-1 trampoline entry, so the
+    /// wall time that accrues during the native segment is banked onto the JIT frame that ran — not
+    /// onto whatever interpreter frame happens to execute right after native code bails back.
+    /// `Some` only between an `on_jit_enter`/`on_jit_exit` pair (which never nest — each `jit_enter`
+    /// runs to a bail/return before the interpreter re-enters the trampoline).
+    jit_chain: Option<Vec<u32>>,
 }
 
+/// The key one sample aggregates under: the frame proto-chain (root → leaf), the leaf's pc (0 = no
+/// line attribution), and whether the leaf ran as tier-1 native code.
+type SampleKey = (Vec<u32>, u32, bool);
+
 /// One resolved folded stack: the chain of frame indices (root → leaf), the leaf's pc (0 = no line
-/// attribution), and the sample count.
+/// attribution), whether the leaf ran tier-1 native (native, JIT-executed), and the sample count.
 pub struct RawFolded {
     pub chain: Vec<u32>,
     pub leaf_pc: u32,
+    /// The leaf frame executed as tier-1 native code when this sample was taken — the resolver
+    /// appends the tier-1 marker to its label.
+    pub tier1: bool,
     pub count: u64,
 }
 
@@ -63,6 +79,7 @@ impl SampleCollector {
             stacks: HashMap::new(),
             total: 0,
             scratch: Vec::new(),
+            jit_chain: None,
         }
     }
 
@@ -77,17 +94,20 @@ impl SampleCollector {
             stacks: HashMap::new(),
             total: 0,
             scratch: Vec::new(),
+            jit_chain: None,
         }
     }
 
-    /// Total samples taken and the aggregated stacks (each a root→leaf proto chain, leaf pc, count).
+    /// Total samples taken and the aggregated stacks (each a root→leaf proto chain, leaf pc, tier-1
+    /// flag, count).
     pub fn finish(self) -> (u64, Vec<RawFolded>) {
         let folded = self
             .stacks
             .into_iter()
-            .map(|((chain, leaf_pc), count)| RawFolded {
+            .map(|((chain, leaf_pc, tier1), count)| RawFolded {
                 chain,
                 leaf_pc,
+                tier1,
                 count,
             })
             .collect();
@@ -126,10 +146,44 @@ impl ProfileHook for SampleCollector {
         } else {
             0
         };
+        // An op-boundary sample is always tier-0: native code has no op boundary, so `before_op`
+        // never fires inside a JIT frame (those samples arrive via `on_jit_exit`).
         *self
             .stacks
-            .entry((self.scratch.clone(), leaf_pc))
+            .entry((self.scratch.clone(), leaf_pc, false))
             .or_insert(0) += n;
+        self.total += n;
+    }
+
+    fn on_jit_enter(&mut self, view: &DebugView, _proto: u32) {
+        // Snapshot the live proto-chain (root → leaf); the leaf is the prototype about to run
+        // natively. Banked at `on_jit_exit` against the wall time the native segment accrues. The
+        // op-clock takes no wall ticks during native code (native ops don't advance the counter), so
+        // it simply records nothing for the segment — tier-1 attribution is a wall-time concern.
+        self.scratch.clear();
+        let depth = view.depth();
+        for i in 0..depth {
+            self.scratch.push(view.proto_at(i));
+        }
+        self.jit_chain = Some(self.scratch.clone());
+    }
+
+    fn on_jit_exit(&mut self, _view: &DebugView) {
+        let Some(chain) = self.jit_chain.take() else {
+            return;
+        };
+        // Wall ticks that accrued while native code ran (op-clock: always 0 — no ticks). Bank them
+        // onto the entered JIT frame, flagged tier-1 so the resolver labels it apart from the same
+        // function's tier-0 samples. No line pc: native code merges several source lines per segment,
+        // so a single leaf line would be dishonest (function-level attribution, as documented).
+        let n = match &self.trigger {
+            Trigger::Wall { pending } => u64::from(pending.swap(0, Ordering::Relaxed)),
+            Trigger::Ops { .. } => 0,
+        };
+        if n == 0 {
+            return;
+        }
+        *self.stacks.entry((chain, 0, true)).or_insert(0) += n;
         self.total += n;
     }
 

@@ -378,6 +378,13 @@ enum Command {
         /// so the hot *line* within a function is visible. Sampling only.
         #[arg(long)]
         lines: bool,
+        /// Arm the **tier-1 JIT** while sampling (default: tier-0 pinned). Hot prototypes run native
+        /// and their wall time is sampled at the JIT trampoline, so the profile reflects what
+        /// actually ships; tier-1 frames are labeled ` [jit]` in the flamegraph. Wall-clock sampling
+        /// only (the op-clock cannot see native code) and ignored with `--instrument`/`--alloc`.
+        /// Function-level attribution inside JIT frames — not line-level.
+        #[arg(long)]
+        jit: bool,
     },
     // (`Serve` was a variant here until higher-order-abi H6 — `noeta serve` is now an
     // extension-contributed command, `noeta-stdlib/src/serve.rs::SERVE_COMMAND`, wired
@@ -760,6 +767,7 @@ pub fn run_cli(
             format,
             out,
             lines,
+            jit,
         } => cmd_profile(
             &file,
             instrument,
@@ -769,6 +777,7 @@ pub fn run_cli(
             format.as_deref(),
             out,
             lines,
+            jit,
         ),
         Command::Cache { action } => cmd_cache(&action),
         Command::Fmt {

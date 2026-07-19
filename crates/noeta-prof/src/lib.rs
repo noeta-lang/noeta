@@ -26,6 +26,11 @@ mod session;
 
 pub use render::{Format, render};
 
+/// The label suffix a **tier-1** (JIT-executed) frame carries in a flamegraph, so a function's
+/// native samples read apart from its interpreter samples (`hot` vs `hot [jit]`). Frame identity is
+/// the label, so the two become distinct frames in the folded/speedscope artifacts.
+pub const TIER1_MARKER: &str = " [jit]";
+
 /// Which profiler to run. `Summary` just times the run; `Instrument` attaches the exact per-function
 /// collector; `Sample` builds a wall-time (or, deterministically, op-weighted) flamegraph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +45,17 @@ pub enum Mode {
     /// retains".
     Alloc,
     /// Periodic stack sampling → a folded-stack flamegraph. `lines` attributes the leaf frame to its
-    /// current source line (`fn:line` in the folded labels) rather than just the function.
-    Sample { clock: SampleClock, lines: bool },
+    /// current source line (`fn:line` in the folded labels) rather than just the function. `jit` arms
+    /// the **tier-1 JIT** (the production hot-counter tier) so hot prototypes run native and their
+    /// wall time is sampled at the JIT trampoline — the profile then reflects what actually ships
+    /// (tier-1 frames carry the [`TIER1_MARKER`]). Off, the run stays pinned tier-0 (every frame
+    /// interpreter-executed) as it always has. `jit` needs the `jit` cargo feature to have any effect;
+    /// without it the flag is honored but no prototype ever goes native (the run stays tier-0).
+    Sample {
+        clock: SampleClock,
+        lines: bool,
+        jit: bool,
+    },
 }
 
 /// What clock drives the sampling profiler.
@@ -93,6 +107,10 @@ pub struct Report {
     /// spawn-finish order, each named `isolate <fn> #<n>`. Same unit as the main flamegraph.
     /// Empty for isolate-free programs and for [`Mode::Summary`].
     pub isolates: Vec<(String, Flamegraph)>,
+    /// On a tier-1 (`jit`-armed) sampling run, how many prototypes the JIT promoted to native — the
+    /// `--jit-stats`-style promotion signal. `None` on every tier-0 run (and when the build lacks the
+    /// `jit` feature, so nothing is ever compiled).
+    pub jit_compiled: Option<usize>,
 }
 
 /// What one unit of a flamegraph's stack weight means — sample counts (the sampling profiler) or
@@ -192,7 +210,7 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
 
     match mode {
         Mode::Summary => {
-            let (out, _) = session::run(&compiled, None, None);
+            let (out, _) = session::run(&compiled, None, None, false);
             report_from(out, None, None, Vec::new())
         }
         Mode::Instrument => {
@@ -202,7 +220,8 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
             let protos = compiled.module.protos.len();
             let (factory, sink) =
                 isolate_seam(move |_| Box::new(instrument::InstrumentCollector::new(protos)));
-            let (out, hook) = session::run(&compiled, Some(hook), Some((factory, sink.clone())));
+            let (out, hook) =
+                session::run(&compiled, Some(hook), Some((factory, sink.clone())), false);
             let (functions, flamegraph) = match hook {
                 Some(hook) => {
                     let collector = *hook
@@ -234,7 +253,8 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
         Mode::Alloc => {
             let hook = Box::new(alloc::AllocCollector::new());
             let (factory, sink) = isolate_seam(|_| Box::new(alloc::AllocCollector::new()));
-            let (out, hook) = session::run(&compiled, Some(hook), Some((factory, sink.clone())));
+            let (out, hook) =
+                session::run(&compiled, Some(hook), Some((factory, sink.clone())), false);
             let flamegraph = hook.map(|hook| {
                 let collector = *hook
                     .into_any()
@@ -251,7 +271,7 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
             });
             report_from(out, None, flamegraph, isolates)
         }
-        Mode::Sample { clock, lines } => {
+        Mode::Sample { clock, lines, jit } => {
             // Wall-clock sampling needs a timer thread bumping per-collector atomics (a fanout, so
             // every isolate's collector ticks too); op-clock is self-contained. Either way the
             // collectors ride the per-op seam and come back with their aggregated stacks.
@@ -291,6 +311,7 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
                 &compiled,
                 Some(Box::new(collector)),
                 Some((factory, sink.clone())),
+                jit,
             );
             // Stop the timer *before* resolving, so no further ticks accrue.
             if let Some(timer) = timer {
@@ -480,6 +501,16 @@ fn resolve_flamegraph(
             last.line = Some(line);
             last.col = None;
         }
+        // A tier-1 (native, JIT-executed) leaf carries the marker suffix, so its samples aggregate
+        // under a label distinct from the same function's tier-0 samples. It keeps the function's
+        // definition site (`file`/`line`/`col`) — only a *leaf* line is withheld (native code merges
+        // several source lines per segment, so a `:N` suffix would be dishonest); tier-1 samples
+        // always have `leaf_pc == 0`, so the leaf-line block above never fires for them.
+        if folded.tier1
+            && let Some(last) = chain.last_mut()
+        {
+            last.label.push_str(TIER1_MARKER);
+        }
         let indices: Vec<u32> = chain.into_iter().map(&mut intern).collect();
         *merged.entry(indices).or_insert(0) += folded.count;
     }
@@ -599,6 +630,7 @@ fn report_from(
     flamegraph: Option<Flamegraph>,
     isolates: Vec<(String, Flamegraph)>,
 ) -> Report {
+    let jit_compiled = out.jit_compiled;
     let mut stdout = String::new();
     let mut stderr = String::new();
     for chunk in out.chunks {
@@ -615,6 +647,7 @@ fn report_from(
         functions,
         flamegraph,
         isolates,
+        jit_compiled,
     }
 }
 
@@ -799,16 +832,24 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
                 );
             }
         }
-        Mode::Sample { clock, .. } => {
+        Mode::Sample { clock, jit, .. } => {
             let flame = report.flamegraph.as_ref();
             let clock_desc = match clock {
                 SampleClock::Wall { hz } => format!("wall-clock {hz} Hz"),
                 SampleClock::Ops { every } => format!("op-clock 1/{every}"),
             };
+            // A tier-1 (`--jit`) run reports the tier and the `--jit-stats`-style promotion count;
+            // the classic run stays "tier-0". `jit_compiled` is `None` on a build without the `jit`
+            // feature, so the flag is honored but nothing was promoted (still observably tier-0).
+            let tier_desc = match (jit, report.jit_compiled) {
+                (true, Some(n)) => format!("tier-1, {n} proto(s) native, sampling"),
+                (true, None) => "tier-1 requested (no JIT in this build), sampling".to_string(),
+                (false, _) => "tier-0, sampling".to_string(),
+            };
             let _ = writeln!(
                 err,
                 "noeta profile: {} samples over {} stacks{}, program ran in {:.3?} \
-                 (tier-0, sampling, {clock_desc})",
+                 ({tier_desc}, {clock_desc})",
                 flame.map_or(0, |f| f.total),
                 flame.map_or(0, |f| f.stacks.len()),
                 isolates_suffix(&report),
