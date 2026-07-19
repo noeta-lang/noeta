@@ -5279,7 +5279,9 @@ fn value_to_json(value: &Value) -> String {
 /// JSON serializer consumes. Numbers become scalars; strings, enum variants, and the opaque
 /// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
 /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`] (objects in declared field order).
-/// Mirrors the VM's [`noeta_value::Value::to_native_deep`] so both backends agree.
+/// Mirrors the VM's [`noeta_value::Value::to_native_deep`] so both backends agree — per-
+/// representation glue, mirrored by design (see `plans/backend-mirror.md`); divergence is caught
+/// by `std/json_encoder_one_engine.noe` and the differential.
 fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
     use noeta_stdlib::{NativeValue, Scalar};
     match value {

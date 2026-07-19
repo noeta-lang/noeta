@@ -1,9 +1,20 @@
-//! JSON parsing for the Ring 2 `json` module, shared by both backends.
+//! JSON decoding for the Ring 2 `json` module, shared by both backends — and the module's one
+//! error story, [`JsonError`].
 //!
-//! Parsing is the only half that lives here: it produces a backend-agnostic [`Json`] tree that
-//! each backend converts into its own value representation, so both build identical values from
-//! identical input (the differential holds by construction). Serialization is the inverse and
-//! already exists in each backend as `to_json`, so `json.stringify` reuses that.
+//! **Decoding** lives here: parsing produces a backend-agnostic [`Json`] tree, and the typed walk
+//! ([`decode`]) checks it against a call-site [`TypeRecipe`], so both backends build identical
+//! values from identical input (the differential holds by construction). The walk threads the
+//! **path** from the document root, so every failure is a [`JsonError`] naming its exact location.
+//! One walk serves both doors: [`try_parse_typed`] (`json.try_parse::<T>` / `json.decode_typed`,
+//! recoverable) and [`parse_typed`] (`json.parse::<T>`, the aborting convenience form).
+//!
+//! **Encoding** is likewise single-engined: [`stringify`] (re-exported below) is the one shared
+//! text serializer in `noeta_ext_abi::json_text`, serving both `json.stringify` and the
+//! `@derive(Serialize<Json>)` method `to_json()` — each backend only deep-marshals its own value
+//! representation into the neutral `NativeValue` tree (the VM's `Value::to_native_deep`, the
+//! reference interpreter's `value_to_native_deep` — representation glue, mirrored by design; see
+//! `plans/backend-mirror.md`). Key order is per aggregate kind, identical in both doors: maps
+//! sorted (their canonical order), objects in declared field order.
 //!
 //! The parse goes through `serde_json` (robust over escapes, Unicode, and number edge cases).
 //! With `serde_json`'s default features its object map is a `BTreeMap`, so keys arrive sorted —
