@@ -622,7 +622,13 @@ impl Resolver {
             Stmt::Fn(decl) => {
                 // The fn name is visible to siblings and to itself (recursion).
                 self.bind(&decl.name, decl.name_span);
-                self.walk_callable(decl.span, &decl.params, &decl.body, None, Some(&decl.captures));
+                self.walk_callable(
+                    decl.span,
+                    &decl.params,
+                    &decl.body,
+                    None,
+                    Some(&decl.captures),
+                );
             }
             Stmt::Return { value, .. } => {
                 if let Some(value) = value {

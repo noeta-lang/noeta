@@ -202,6 +202,9 @@ fn decorator_detail(name: &str) -> &'static str {
         "role" => "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles",
         "semantic" => "@semantic — mark an enum's variants as role names",
         "packed" => "@packed(Layout.Row|Layout.Column) — flat value-struct layout",
+        "validated" => {
+            "@validated — literal construction only through the type's own constructor functions"
+        }
         "tier" => "@tier(name, …) — declare a dev-tier and its runner",
         _ => "decorator directive",
     }
@@ -1087,7 +1090,15 @@ mod tests {
         let cands = directives(&program_of(""));
         let labels: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
         // The parser's closed decorator set…
-        for name in ["derive", "attribute", "role", "semantic", "packed", "tier"] {
+        for name in [
+            "derive",
+            "attribute",
+            "role",
+            "semantic",
+            "packed",
+            "validated",
+            "tier",
+        ] {
             assert!(
                 labels.contains(&name),
                 "missing decorator {name}: {labels:?}"
