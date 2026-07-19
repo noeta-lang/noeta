@@ -1,0 +1,12 @@
+// The same fix generalizes to a plain value global: an `async fn` reassigning a top-level `mut`
+// scalar (`counter = counter + x`) stores through the global across successive awaits rather than
+// hoisting `counter` into a per-future `none` cell (which would compute `none + x` → runtime error).
+// expect: stdout "7"
+// expect: exit 0
+mut counter = 0
+async fn bump(x: int): void {
+    counter = counter + x
+}
+bump(3).await
+bump(4).await
+echo counter

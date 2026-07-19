@@ -1,0 +1,14 @@
+// The mutation is observed across a real suspend point: mutate the global, `await`, then mutate again.
+// Because the global is stored (not held in a state-machine cell), the value written before the await
+// is visible to the read after it — the future re-loads the live global on resume. 0 + 5 + 5 = 10.
+// expect: stdout "10"
+// expect: exit 0
+use std.task.{sleep}
+mut log = 0
+async fn work(x: int): void {
+    log = log + x
+    sleep(1).await
+    log = log + x
+}
+work(5).await
+echo log

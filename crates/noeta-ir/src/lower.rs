@@ -445,6 +445,7 @@ pub fn lower_with_sites_opts(
             .into_iter()
             .collect(),
         registry,
+        module_globals: module_global_names(program),
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -493,6 +494,29 @@ struct Lowerer<'a> {
     /// (instance-registry IR5): an `@json` block's `ExtTier::handler` is looked up here, so an
     /// embed session's own extension-declared expression tier lowers against *its* registry.
     registry: &'static noeta_ext_abi::registry::Registry,
+    /// Every top-level binding/`fn` name — the module globals. Threaded into the async/generator
+    /// state-machine desugar so a **bare reassignment of a global** (`g.n = …`, `counter = …`) is
+    /// kept as a global store rather than mis-hoisted into a state-machine cell (which would
+    /// initialize a fresh `none` upvalue and shadow the real global — the reference reads a stale
+    /// value). A global is never a capturable local, mirroring the compiler's free-variable
+    /// analysis (which already filters globals out of captures).
+    module_globals: HashSet<String>,
+}
+
+/// The top-level binding and `fn` names of a program — the module globals a nested function
+/// resolves by name (never captures). These are the only names that can appear as a bare
+/// reassignment target inside an async/generator body while denoting a global, so they are the
+/// set the state-machine desugar excludes from cell-hoisting.
+fn module_global_names(program: &AstProgram) -> HashSet<String> {
+    program
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            AstStmt::Binding { name, .. } => Some(name.clone()),
+            AstStmt::Fn(decl) => Some(decl.name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build the narrowing-identity map (see [`Lowerer::type_aliases`]) from a program's `use`
@@ -942,7 +966,7 @@ impl Lowerer<'_> {
     ) -> Result<Func, Unsupported> {
         let outer = self.temps;
         self.temps = 0;
-        let param_names = params.iter().map(|p| p.name.clone()).collect();
+        let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
         // Defaults are evaluated in the captured scope at call time, each in its own frame, so
         // lower each as a self-contained thunk (this also restores `self.temps` to 0 between
         // thunks, keeping the body's numbering independent).
@@ -963,7 +987,7 @@ impl Lowerer<'_> {
                 // The desugar's synthesized step closure executes this function's body, so it
                 // traces under this function's name (see `synth_step_name`).
                 self.synth_step_name = name.clone();
-                self.lower_generator(stmts, span)?
+                self.lower_generator(stmts, span, &param_names)?
             }
             // An `async fn` (Track A) lowers to a lazy `Future` over its body — `make_future(thunk)` —
             // not the body's statements directly (like a generator, but a single deferred computation
@@ -972,7 +996,7 @@ impl Lowerer<'_> {
             BodyKind::Block(stmts) if is_async => {
                 // As for a generator: the future's step closure is this function's body.
                 self.synth_step_name = name.clone();
-                self.lower_async(stmts, span)?
+                self.lower_async(stmts, span, &param_names)?
             }
             BodyKind::Block(stmts) => self.lower_body(stmts)?,
         };
@@ -1009,9 +1033,20 @@ impl Lowerer<'_> {
     /// rejected by the checker (E0039, "not yet supported — Track G.2") and never reaches a *run*; if
     /// one survives in a check-failed program it stays a `Stmt::Yield` inside a segment and lowers
     /// through the interim discard arm, keeping lowering total.
-    fn lower_generator(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let desugar =
-            desugar_state_machine(stmts, span, self.sites.for_stream_sites, SuspendMode::Gen);
+    fn lower_generator(
+        &mut self,
+        stmts: &[AstStmt],
+        span: Span,
+        params: &[String],
+    ) -> Result<Block, Unsupported> {
+        let desugar = desugar_state_machine(
+            stmts,
+            span,
+            self.sites.for_stream_sites,
+            SuspendMode::Gen,
+            &self.module_globals,
+            params,
+        );
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -1042,9 +1077,20 @@ impl Lowerer<'_> {
     /// `return e` completes the future with the raw `e` (so `?`'s injected error-return propagates
     /// unchanged); the driver/`.await` wraps completion vs pending. Unlike A.1's thunk, this can suspend
     /// mid-body and resume — the mechanism A.3b's concurrency needs to run a sibling while one task waits.
-    fn lower_async(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let desugar =
-            desugar_state_machine(stmts, span, self.sites.for_stream_sites, SuspendMode::Async);
+    fn lower_async(
+        &mut self,
+        stmts: &[AstStmt],
+        span: Span,
+        params: &[String],
+    ) -> Result<Block, Unsupported> {
+        let desugar = desugar_state_machine(
+            stmts,
+            span,
+            self.sites.for_stream_sites,
+            SuspendMode::Async,
+            &self.module_globals,
+            params,
+        );
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
