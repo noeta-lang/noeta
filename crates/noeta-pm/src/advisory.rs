@@ -107,6 +107,12 @@ pub struct Advisory {
     /// A link to the upstream advisory (imported tier). `None` for other tiers.
     #[serde(default)]
     pub upstream_url: Option<String>,
+    /// The CVSS v3.x vector an imported advisory's severity band was derived from, when the upstream
+    /// carried one. Unsigned/informational (NOT in [`Self::canonical_bytes`]) — the trusted decision is
+    /// the `severity` band; `noeta audit` re-derives the base score from this for display. `None`
+    /// otherwise.
+    #[serde(default)]
+    pub cvss: Option<String>,
 }
 
 impl Advisory {
@@ -234,6 +240,7 @@ mod tests {
             bundle: None,
             upstream_id: None,
             upstream_url: None,
+            cvss: None,
         };
         a.signature = hex_encode(&sk.sign(&a.canonical_bytes()).to_bytes());
         a

@@ -156,6 +156,18 @@ The tier is bound into the advisory's signed canonical bytes, so a client can tr
 served. A **public report** (anyone may file one) is *not* an advisory — it is unauthenticated intake,
 never in the feed, and only becomes an advisory when an operator or the scope owner promotes it.
 
+### Severity — text or CVSS
+
+An advisory's severity is one of `low` / `medium` / `high` / `critical`. When an **imported** upstream
+record carries a **CVSS v3.x vector** (OSV `severity[]` entries of type `CVSS_V3`, or GHSA's
+`cvss.vectorString`), the registry computes the base score from that vector honestly — the published
+CVSS v3.1 base-metric equations — and derives the canonical band from it, keeping the vector on the
+advisory as unsigned, informational metadata. (The band is what's signed and what drives policy; the
+vector is display only.) `noeta audit` re-derives the base score client-side from that vector and shows
+it beside the band — `high (CVSS 7.8)` — so the number behind the band is visible and independently
+recomputed, never taken on the registry's word. A text severity remains the fallback when no vector is
+present.
+
 ### Issuing and reporting from the client
 
 - `noeta advisory publish <id> <package> <ranges> <severity> <summary>` — a scope owner issues a
@@ -164,6 +176,14 @@ never in the feed, and only becomes an advisory when an operator or the scope ow
   token (`NOETA_REGISTRY_TOKEN`). `--withdraw` retracts one (kept in the log, never deleted).
 - `noeta advisory report <package> <summary>` — anyone files a **public report** (rate-limited). It is
   queued for triage, not published.
+- `noeta advisory reports [--scope <scope>]` — list the reports queued for triage (what's promotable).
+  Without `--scope`, the operator queue (`NOETA_REGISTRY_ADMIN_TOKEN`); with it, the scope owner's own
+  queue (their packages' reports, scope token). Shows `pending` reports by default.
+- `noeta advisory promote <report-id> --id <id> --severity <sev>` — promote a queued report into a
+  signed advisory, **prefilled from the report** (package, ranges, summary, details, url). As an
+  operator (`--operator`, `NOETA_REGISTRY_ADMIN_TOKEN`) it becomes an `operator` advisory; otherwise the
+  report package's scope owner promotes it into a keyless-signed `publisher` advisory — the *same*
+  keyless Sigstore bundle a fresh `advisory publish` produces, so a consumer verifies it identically.
 
 ### Per-tier policy — `[trust.advisories]`
 
@@ -200,6 +220,8 @@ noeta watch-scope acme            # first run pins the baseline; later runs dete
 | Variable | Effect |
 |---|---|
 | `NOETA_SIGNING_KEY` | Path to the Ed25519 private key (key path) |
+| `NOETA_REGISTRY_TOKEN` | A scope's publish token — authenticates publishing, scope-owner triage, and scope-owner `advisory promote` |
+| `NOETA_REGISTRY_ADMIN_TOKEN` | The registry admin token — authenticates the operator triage queue and operator `advisory promote` |
 | `NOETA_SIGSTORE_TRUST_ROOT` | Path to a `trusted_root.json` overriding the embedded snapshot |
 | `NOETA_FULCIO_URL` / `NOETA_REKOR_URL` | Override both signing endpoints together (private Sigstore deployment or staging; default: production sigstore.dev) |
 | `NOETA_OIDC_URL` | Override the interactive login's OAuth provider (default: `oauth2.sigstore.dev/auth`) |
