@@ -30,6 +30,18 @@ pub trait Debugger: Send {
     /// trampoline would otherwise only refresh on its next `before_op`, after the reply). The default
     /// is a no-op — a debugger that reads the live view directly on its own thread needs nothing.
     fn after_side_effect(&mut self, _view: &DebugView) {}
+
+    /// A new worker-isolate **strand** began (DAP worker debugging): `id` is its stable strand id
+    /// (the DAP `threadId` the adapter reports; the main program is always strand `1`) and `name`
+    /// the spawned function's debug name. Called by the scheduler at the `isolate f(args)` spawn,
+    /// while the debugger is installed (not during a pause), so a DAP adapter can emit a `thread`
+    /// *started* event and register the strand as a debuggable thread. Default no-op — a debugger
+    /// that does not model threads needs nothing.
+    fn on_strand_started(&mut self, _id: u32, _name: &str) {}
+
+    /// A worker-isolate strand finished (its root task completed): the DAP adapter emits a
+    /// `thread` *exited* event and drops the strand from its live-thread set. Default no-op.
+    fn on_strand_exited(&mut self, _id: u32) {}
 }
 
 /// A profiler observing tier-0 execution (the `noeta profile` engine implements it). Like the
@@ -252,12 +264,23 @@ pub struct DebugView<'a> {
     pub(crate) module: &'a Module,
     pub(crate) frames: &'a [Frame],
     pub(crate) regs: &'a [Value],
+    /// The **strand** currently executing (DAP worker debugging): the main program is strand `1`,
+    /// each `isolate f(args)` a fresh id. The debugger reports this as the stopped `threadId`, so a
+    /// breakpoint inside a worker isolate surfaces against that worker's thread. `1` on every
+    /// non-isolate run (and for the profiler's views, which do not model threads).
+    pub(crate) strand: u32,
 }
 
 impl<'a> DebugView<'a> {
     /// Number of live frames on the call stack.
     pub fn depth(&self) -> usize {
         self.frames.len()
+    }
+
+    /// The strand id currently executing — the DAP `threadId` a pause reports (see the `strand`
+    /// field). `1` is the main program; each live worker isolate has its own id.
+    pub fn strand_id(&self) -> u32 {
+        self.strand
     }
 
     /// The prototype index of the frame at call-stack index `i` — a stable per-function key (into

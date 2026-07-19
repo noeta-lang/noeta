@@ -257,12 +257,14 @@ impl<'m> Vm<'m> {
                 // frame's `pc` is synced first so the view resolves the right current line. It never
                 // pauses, so unlike the debugger it needs no take/restore: it borrows only the frame
                 // stack + registers (dispatch params, not `self`) and `module` (a local reference).
+                let strand = self.sched.current_strand;
                 if let Some(prof) = self.profiler.as_mut() {
                     frames[top].pc = pc;
                     let view = DebugView {
                         module,
                         frames: &frames[..],
                         regs: &regs[..],
+                        strand,
                     };
                     prof.before_op(&view);
                 }
@@ -285,6 +287,7 @@ impl<'m> Vm<'m> {
                                 module,
                                 frames: &frames[..],
                                 regs: &regs[..],
+                                strand,
                             };
                             dbg.before_op(proto as u32, pc, &view)
                         };
@@ -370,6 +373,7 @@ impl<'m> Vm<'m> {
                                         module,
                                         frames: &frames[..],
                                         regs: &regs[..],
+                                        strand,
                                     };
                                     dbg.after_side_effect(&view);
                                 }
@@ -2308,12 +2312,15 @@ impl<'m> Vm<'m> {
                             // The child inherits a snapshot of the spawner's task-local context
                             // (T5a): a task spawned inside `with_span` parents its spans there.
                             let context = self.sched.ctx_current.clone();
+                            let strand = self.sched.current_strand;
                             self.sched.scopes[scope_idx].push(Task {
                                 future,
                                 result: None,
                                 cancelled: false,
                                 polling: false,
                                 context,
+                                strand,
+                                isolate_strand: None,
                             });
                             Value::make_handle(
                                 ScopeId::from_index(scope_idx),

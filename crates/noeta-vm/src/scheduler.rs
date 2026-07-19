@@ -418,11 +418,25 @@ impl<'m> Vm<'m> {
                     // `polling` guard above keeps each task's pair balanced.
                     let ctx = std::mem::take(&mut self.sched.scopes[si][ti].context);
                     let saved = std::mem::replace(&mut self.sched.ctx_current, ctx);
+                    // Swap this task's strand in for the duration of its poll (DAP worker
+                    // debugging), mirroring the context swap: a breakpoint tripped inside the poll
+                    // reports the task's strand as the stopped DAP thread. Restored after, paired
+                    // like the context swap (the `polling` guard keeps the pairs balanced).
+                    let saved_strand = self.sched.current_strand;
+                    self.sched.current_strand = self.sched.scopes[si][ti].strand;
                     let polled = self.poll_once(future, span);
+                    self.sched.current_strand = saved_strand;
                     self.sched.scopes[si][ti].context =
                         std::mem::replace(&mut self.sched.ctx_current, saved);
                     self.sched.scopes[si][ti].polling = false;
                     if let Poll::Ready(value) = polled? {
+                        // A worker-isolate root task finishing ends its strand (DAP worker
+                        // debugging): tell the debugger so it emits the `thread` exited event.
+                        if let Some(id) = self.sched.scopes[si][ti].isolate_strand
+                            && let Some(dbg) = self.debugger.as_mut()
+                        {
+                            dbg.on_strand_exited(id);
+                        }
                         self.sched.scopes[si][ti].result = Some(value);
                         completed = true;
                     }
@@ -483,12 +497,18 @@ impl<'m> Vm<'m> {
         let task_idx = self.sched.scopes[scope_idx].len();
         // The child inherits a snapshot of the spawner's task-local context (T5a).
         let context = self.sched.ctx_current.clone();
+        // ...and the spawner's strand (DAP worker debugging): a plain task is cooperative
+        // concurrency *within* the current thread, not a new one. An isolate root overrides this
+        // (see `spawn_isolate_coop`).
+        let strand = self.sched.current_strand;
         self.sched.scopes[scope_idx].push(Task {
             future,
             result: None,
             cancelled: false,
             polling: false,
             context,
+            strand,
+            isolate_strand: None,
         });
         Value::make_handle(ScopeId::from_index(scope_idx), TaskId::from_index(task_idx))
     }
@@ -496,6 +516,12 @@ impl<'m> Vm<'m> {
     /// The cooperative isolate path: build the future by calling `callee(args)` (a lazy `async fn`
     /// call constructs the state machine without running the body), then register it as a task —
     /// observationally identical to `spawn callee(args)`.
+    ///
+    /// The debugger's single-thread run always takes this path (real isolates are never armed under
+    /// the debugger), so it is where a worker isolate becomes a debuggable DAP **thread**: the task
+    /// gets a fresh strand id and the debugger is told the strand started (a `thread` event). The
+    /// strand travels with the task through every poll (`poll_all_scopes_round`), so a breakpoint
+    /// inside the isolate body reports this worker's thread; its completion fires `on_strand_exited`.
     fn spawn_isolate_coop(
         &mut self,
         callee: Value,
@@ -511,8 +537,34 @@ impl<'m> Vm<'m> {
                 v
             })
             .collect();
+        // Mint this worker's strand id and announce it (DAP worker debugging) *before* the body can
+        // run, so the `thread` started event precedes any `stopped` from inside it. Only meaningful
+        // when a debugger is attached; on an ordinary run the name lookup and counter bump are the
+        // whole cost, and the id is simply never observed.
+        let strand = self.sched.next_strand;
+        self.sched.next_strand += 1;
+        let name = callee
+            .as_closure()
+            .and_then(|proto| self.module.protos[proto as usize].name.clone())
+            .unwrap_or_else(|| "<isolate>".to_string());
+        if let Some(dbg) = self.debugger.as_mut() {
+            dbg.on_strand_started(strand, &name);
+        }
         let future = self.call_value(callee, owned, span)?;
-        Ok(self.register_task(future))
+        let handle = self.register_task(future);
+        // Promote the just-registered task to a worker-isolate root on its own strand (register_task
+        // defaulted it to the spawner's strand / no isolate marker).
+        if let Some((si, ti)) = handle.handle_parts()
+            && let Some(task) = self
+                .sched
+                .scopes
+                .get_mut(si.index())
+                .and_then(|s| s.get_mut(ti.index()))
+        {
+            task.strand = strand;
+            task.isolate_strand = Some(strand);
+        }
+        Ok(handle)
     }
 
     /// The real-thread isolate path: marshal the arguments (and the current globals) into `Send` wire

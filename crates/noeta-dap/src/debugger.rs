@@ -8,24 +8,113 @@
 //! or a landed step) it emits a `stopped` event and blocks the run thread on a resume channel until
 //! the adapter says continue/step/terminate.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use noeta_ast::Program;
 use noeta_parser::parse_fragment;
 use noeta_span::{SourceId, SourceMap};
-use noeta_vm::debug::{StepState, capture, frame_param_names};
+use noeta_vm::debug::{ResolvedBreakpoint, StepState, capture, frame_param_names};
 use noeta_vm::{
     DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugSetRequest, DebugView, Debugger, EvalKind,
 };
 use serde_json::{Value, json};
 
-use crate::MAIN_THREAD_ID;
 use crate::protocol::event;
 
-pub use noeta_vm::debug::{FrameInfo, PausedState, StepMode, resolve_breakpoints};
+pub use noeta_vm::debug::{
+    FrameInfo, PausedState, RequestedBreakpoint, StepMode, resolve_conditional_breakpoints,
+};
+
+/// The live-thread registry (DAP worker debugging): the main program (thread `1`) plus one entry
+/// per live worker isolate, shared between the run worker's [`DapDebugger`] (which adds/removes
+/// worker strands as isolates spawn and finish) and the adapter reader loop (which reads it to
+/// answer `threads`). A `Mutex` because the two threads touch it at disjoint times (the debugger
+/// mutates it during execution; the reader reads it between requests).
+pub type ThreadRegistry = Arc<Mutex<Vec<ThreadEntry>>>;
+
+/// One live worker-isolate thread: its stable DAP `threadId` (the VM strand id) and display name
+/// (the spawned function). The main program is never in this list — the reader loop always reports
+/// it (thread `1`).
+#[derive(Debug, Clone)]
+pub struct ThreadEntry {
+    pub id: i64,
+    pub name: String,
+}
+
+/// A parsed DAP `hitCondition` (hit-count breakpoints): the breakpoint stops only on the hits this
+/// admits, counting a hit each time the location is reached with its `condition` (if any) true. The
+/// supported forms cover VS Code's grammar; an unparseable expression is reported and the breakpoint
+/// falls back to every-hit (see [`crate::parse_hit_condition`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitCondition {
+    /// A bare `N` or `>=N`: stop from the Nth hit onward (ignore the first `N-1`).
+    Ge(u64),
+    /// `>N`: stop after more than N hits (from the `N+1`th).
+    Gt(u64),
+    /// `=N` / `==N`: stop on exactly the Nth hit.
+    Eq(u64),
+    /// `<N`: stop only on the first `N-1` hits.
+    Lt(u64),
+    /// `<=N`: stop only on the first N hits.
+    Le(u64),
+    /// `%N`: stop on every Nth hit (`hits % N == 0`).
+    Mod(u64),
+}
+
+impl HitCondition {
+    /// Whether a breakpoint with this hit-count expression stops on its `hits`-th qualifying hit
+    /// (1-based). A `%0` matcher (rejected at parse time) never reaches here.
+    pub fn matches(self, hits: u64) -> bool {
+        match self {
+            HitCondition::Ge(n) => hits >= n,
+            HitCondition::Gt(n) => hits > n,
+            HitCondition::Eq(n) => hits == n,
+            HitCondition::Lt(n) => hits < n,
+            HitCondition::Le(n) => hits <= n,
+            HitCondition::Mod(n) => n != 0 && hits.is_multiple_of(n),
+        }
+    }
+}
+
+/// A breakpoint compiled for the run (conditional / hit-count breakpoints): its optional `condition`
+/// fragment (parsed once, evaluated in the paused frame on each arrival), the raw condition text
+/// (the VM's compiled-wrapper memo key), its optional hit-count matcher, and the running hit count.
+/// Opaque outside this module — built by [`compile_resolved_breakpoints`], consumed by
+/// [`DapDebugger::new`].
+pub struct BreakpointState {
+    /// The parsed condition expression, evaluated in the frame on each arrival; the breakpoint
+    /// stops only when it is true. `None` for an unconditional breakpoint.
+    condition: Option<Program>,
+    /// The raw condition source (the memo key for the VM's compiled fragment wrapper).
+    condition_text: String,
+    /// The hit-count matcher; `None` = stop on every qualifying hit.
+    hit: Option<HitCondition>,
+    /// How many times this breakpoint's location was reached **with its condition true** — the
+    /// count the [`HitCondition`] tests.
+    hits: u64,
+}
+
+/// The state carried between the two `before_op` consults that evaluate a conditional breakpoint:
+/// the VM cannot run the condition inside `before_op` (a call needs `&mut Vm`), so the first consult
+/// returns [`DebugAction::Evaluate`] and parks the reply channel here; the VM services it and
+/// re-consults `before_op`, which reads the outcome and decides whether to stop.
+struct PendingCondition {
+    proto: u32,
+    pc: usize,
+    reply: Receiver<DebugEvalOutcome>,
+}
+
+/// The resolved truth of a breakpoint condition at an arrival: `True` (stop, subject to the hit
+/// count), `False` (skip), or an evaluation `Error` — DAP convention is to **stop** on a condition
+/// error, surfacing the message.
+enum ConditionOutcome {
+    True,
+    False,
+    Error(String),
+}
 
 /// A resume command sent from the adapter to a paused run.
 pub enum Resume {
@@ -73,8 +162,16 @@ pub type Paused = Arc<Mutex<Option<PausedState>>>;
 /// The [`Debugger`] the VM calls before every instruction on the debug run thread. It pauses at a
 /// resolved breakpoint (or once at entry), reports the stop, and blocks until the adapter resumes it.
 pub struct DapDebugger {
-    /// `(proto, pc)` positions a breakpoint resolves to.
-    stops: HashSet<(u32, usize)>,
+    /// `(proto, pc)` positions a breakpoint resolves to, each with its compiled condition and
+    /// hit-count matcher (conditional / hit-count breakpoints).
+    stops: HashMap<(u32, usize), BreakpointState>,
+    /// The live-thread registry (DAP worker debugging): worker isolate strands are added on spawn
+    /// (`on_strand_started`) and dropped on finish (`on_strand_exited`); the reader loop reads it
+    /// to answer `threads`.
+    threads: ThreadRegistry,
+    /// The conditional breakpoint awaiting its condition's evaluation across a `before_op`
+    /// round-trip (see [`PendingCondition`]); `None` when no condition is mid-flight.
+    pending_condition: Option<PendingCondition>,
     /// Pause once before the first instruction runs.
     stop_on_entry: bool,
     /// Whether the entry pause has already happened.
@@ -110,7 +207,8 @@ pub struct DapDebugger {
 impl DapDebugger {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        stops: HashSet<(u32, usize)>,
+        stops: HashMap<(u32, usize), BreakpointState>,
+        threads: ThreadRegistry,
         stop_on_entry: bool,
         terminate: Arc<AtomicBool>,
         sources: SourceMap,
@@ -121,6 +219,8 @@ impl DapDebugger {
     ) -> DapDebugger {
         DapDebugger {
             stops,
+            threads,
+            pending_condition: None,
             stop_on_entry,
             entered: false,
             terminate,
@@ -141,17 +241,28 @@ impl DapDebugger {
     ///
     /// Any pause consumes the in-flight step (arriving here means it landed, or a breakpoint pre-empted
     /// it); a fresh [`Resume::Step`] then arms a new one, relative to *this* location.
-    fn pause(&mut self, reason: &str, view: &DebugView) -> DebugAction {
+    fn pause(
+        &mut self,
+        reason: &str,
+        description: Option<String>,
+        view: &DebugView,
+    ) -> DebugAction {
         self.step = None;
         *self.paused.lock().unwrap() = Some(capture(view, &self.sources));
-        let _ = self.events.send(event(
-            "stopped",
-            json!({
-                "reason": reason,
-                "threadId": MAIN_THREAD_ID,
-                "allThreadsStopped": true,
-            }),
-        ));
+        // The stop reports the **current strand** as its thread (DAP worker debugging): a breakpoint
+        // inside a worker isolate surfaces against that worker's `threadId`, the main program against
+        // thread `1`. `allThreadsStopped` because the debugger runs the whole program on one thread
+        // (worker isolates are cooperative here) — an all-stop model, so a stop stops every strand.
+        let mut body = json!({
+            "reason": reason,
+            "threadId": view.strand_id() as i64,
+            "allThreadsStopped": true,
+        });
+        if let Some(desc) = description {
+            body["description"] = json!(desc);
+            body["text"] = json!(desc);
+        }
+        let _ = self.events.send(event("stopped", body));
         self.mid_pause = true;
         self.wait(view)
     }
@@ -273,6 +384,80 @@ impl DapDebugger {
             .as_ref()
             .is_some_and(|step| step.landed(view, &self.sources))
     }
+
+    /// Launch a conditional breakpoint's condition evaluation (conditional breakpoints): the VM
+    /// cannot run code inside `before_op`, so hand the condition fragment to the dispatch loop as a
+    /// [`DebugEvalRequest`] and park the reply channel in `pending_condition`. The VM evaluates it in
+    /// the innermost frame (frame 0), sends the outcome back, and re-consults `before_op`, which
+    /// reads it and decides. Evaluated as [`EvalKind::Console`] so it always runs fresh — a `Watch`
+    /// would memoize the first result across a loop and never see the condition change.
+    fn launch_condition(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction {
+        let bp = &self.stops[&(proto, pc)];
+        let program = bp
+            .condition
+            .clone()
+            .expect("launch_condition only called for a conditional breakpoint");
+        let text = bp.condition_text.clone();
+        let scope = frame_param_names(view, 0, &self.sources).unwrap_or_default();
+        let (reply, rx) = mpsc::channel();
+        self.pending_condition = Some(PendingCondition {
+            proto,
+            pc,
+            reply: rx,
+        });
+        DebugAction::Evaluate(DebugEvalRequest {
+            program,
+            text,
+            frame: 0,
+            scope,
+            kind: EvalKind::Console,
+            reply,
+        })
+    }
+
+    /// Decide whether a breakpoint at `(proto, pc)` stops, given its condition's truth
+    /// (conditional / hit-count breakpoints). On `True` the hit count advances and the hit-count
+    /// matcher (if any) gates the stop; on `False` the breakpoint is skipped but an in-flight step
+    /// still lands; on `Error` we stop and surface the message (DAP convention). A skipped
+    /// breakpoint falls through to the step check so `next`/`stepIn`/`stepOut` are never swallowed.
+    fn resolve_breakpoint(
+        &mut self,
+        proto: u32,
+        pc: usize,
+        outcome: ConditionOutcome,
+        view: &DebugView,
+    ) -> DebugAction {
+        match outcome {
+            ConditionOutcome::Error(message) => self.pause(
+                "breakpoint",
+                Some(format!("breakpoint condition error: {message}")),
+                view,
+            ),
+            ConditionOutcome::False => self.land_step_or_continue(view),
+            ConditionOutcome::True => {
+                let bp = self.stops.get_mut(&(proto, pc)).expect("breakpoint exists");
+                bp.hits += 1;
+                let stops = match &bp.hit {
+                    None => true,
+                    Some(hit) => hit.matches(bp.hits),
+                };
+                if stops {
+                    self.pause("breakpoint", None, view)
+                } else {
+                    self.land_step_or_continue(view)
+                }
+            }
+        }
+    }
+
+    /// A breakpoint that did not stop still lets an in-flight step land here (its line was reached).
+    fn land_step_or_continue(&mut self, view: &DebugView) -> DebugAction {
+        if self.step_landed(view) {
+            self.pause("step", None, view)
+        } else {
+            DebugAction::Continue
+        }
+    }
 }
 
 impl Debugger for DapDebugger {
@@ -285,21 +470,66 @@ impl Debugger for DapDebugger {
             *self.paused.lock().unwrap() = Some(capture(view, &self.sources));
             return self.wait(view);
         }
+        // The VM just evaluated a conditional breakpoint's condition and re-consulted us at the same
+        // instruction (conditional breakpoints): read the outcome and decide whether to stop.
+        if let Some(pending) = self.pending_condition.take()
+            && (pending.proto, pending.pc) == (proto, pc)
+        {
+            let outcome = match pending.reply.try_recv() {
+                Ok(DebugEvalOutcome::Value { text, .. }) => {
+                    if text == "true" {
+                        ConditionOutcome::True
+                    } else {
+                        ConditionOutcome::False
+                    }
+                }
+                Ok(DebugEvalOutcome::Error(message)) => ConditionOutcome::Error(message),
+                Err(_) => ConditionOutcome::Error("the condition did not evaluate".to_string()),
+            };
+            return self.resolve_breakpoint(proto, pc, outcome, view);
+        }
         if self.terminate.load(Ordering::Relaxed) {
             return DebugAction::Terminate;
         }
         if self.stop_on_entry && !self.entered {
             self.entered = true;
-            return self.pause("entry", view);
+            return self.pause("entry", None, view);
         }
-        // A breakpoint pre-empts an in-flight step (standard behaviour: land on the breakpoint).
-        if self.stops.contains(&(proto, pc)) {
-            return self.pause("breakpoint", view);
+        // A breakpoint pre-empts an in-flight step (standard behaviour: land on the breakpoint). A
+        // conditional one first evaluates its condition (a `before_op` round-trip through the VM);
+        // an unconditional one resolves straight away.
+        if let Some(bp) = self.stops.get(&(proto, pc)) {
+            if bp.condition.is_some() {
+                return self.launch_condition(proto, pc, view);
+            }
+            return self.resolve_breakpoint(proto, pc, ConditionOutcome::True, view);
         }
         if self.step_landed(view) {
-            return self.pause("step", view);
+            return self.pause("step", None, view);
         }
         DebugAction::Continue
+    }
+
+    /// A worker isolate spawned (DAP worker debugging): register the strand as a live thread and
+    /// announce it, so `threads` lists it and the editor shows a new thread.
+    fn on_strand_started(&mut self, id: u32, name: &str) {
+        self.threads.lock().unwrap().push(ThreadEntry {
+            id: id as i64,
+            name: name.to_string(),
+        });
+        let _ = self.events.send(event(
+            "thread",
+            json!({ "reason": "started", "threadId": id as i64 }),
+        ));
+    }
+
+    /// A worker isolate finished: drop the strand and announce its exit.
+    fn on_strand_exited(&mut self, id: u32) {
+        self.threads.lock().unwrap().retain(|t| t.id != id as i64);
+        let _ = self.events.send(event(
+            "thread",
+            json!({ "reason": "exited", "threadId": id as i64 }),
+        ));
     }
 
     /// After the VM writes a paused frame's register (`setVariable`), re-publish the captured stack
@@ -326,4 +556,74 @@ pub fn parse_console_fragment(text: &str) -> Option<Program> {
         return None;
     }
     Some(fragment.program)
+}
+
+/// Parse a DAP `hitCondition` (hit-count breakpoints) into a [`HitCondition`], strictly. The forms:
+/// `N` / `>=N` (from the Nth hit), `>N` (after N), `=N` / `==N` (the Nth exactly), `<N`, `<=N`, and
+/// `%N` (every Nth). An unrecognized form, a non-numeric operand, or `%0` is an `Err` with a
+/// message; the adapter reports it and the breakpoint falls back to every-hit.
+pub fn parse_hit_condition(raw: &str) -> Result<HitCondition, String> {
+    let s = raw.trim();
+    let num = |rest: &str| -> Result<u64, String> {
+        rest.trim()
+            .parse::<u64>()
+            .map_err(|_| format!("invalid hit count `{raw}` (expected a number)"))
+    };
+    // Two-character operators first, so `>=` is not read as `>`.
+    if let Some(rest) = s.strip_prefix(">=") {
+        Ok(HitCondition::Ge(num(rest)?))
+    } else if let Some(rest) = s.strip_prefix("<=") {
+        Ok(HitCondition::Le(num(rest)?))
+    } else if let Some(rest) = s.strip_prefix("==") {
+        Ok(HitCondition::Eq(num(rest)?))
+    } else if let Some(rest) = s.strip_prefix('>') {
+        Ok(HitCondition::Gt(num(rest)?))
+    } else if let Some(rest) = s.strip_prefix('<') {
+        Ok(HitCondition::Lt(num(rest)?))
+    } else if let Some(rest) = s.strip_prefix('=') {
+        Ok(HitCondition::Eq(num(rest)?))
+    } else if let Some(rest) = s.strip_prefix('%') {
+        let n = num(rest)?;
+        if n == 0 {
+            Err(format!(
+                "invalid hit count `{raw}` (`%` needs a nonzero number)"
+            ))
+        } else {
+            Ok(HitCondition::Mod(n))
+        }
+    } else {
+        Ok(HitCondition::Ge(num(s)?))
+    }
+}
+
+/// Compile the resolved breakpoints (conditional / hit-count breakpoints) into the per-instruction
+/// [`BreakpointState`] the [`DapDebugger`] runs: parse each `condition` into a console fragment and
+/// each `hitCondition` into a [`HitCondition`]. Both were already validated when `setBreakpoints`
+/// stored them, so an unparseable one here degrades safely (a bad condition ⇒ unconditional, a bad
+/// hit count ⇒ every-hit) rather than dropping the breakpoint.
+pub fn compile_resolved_breakpoints(
+    resolved: HashMap<(u32, usize), ResolvedBreakpoint>,
+) -> HashMap<(u32, usize), BreakpointState> {
+    resolved
+        .into_iter()
+        .map(|(key, r)| {
+            let (condition, condition_text) = match r.condition {
+                Some(text) => (parse_console_fragment(&text), text),
+                None => (None, String::new()),
+            };
+            let hit = r
+                .hit_condition
+                .as_deref()
+                .and_then(|s| parse_hit_condition(s).ok());
+            (
+                key,
+                BreakpointState {
+                    condition,
+                    condition_text,
+                    hit,
+                    hits: 0,
+                },
+            )
+        })
+        .collect()
 }

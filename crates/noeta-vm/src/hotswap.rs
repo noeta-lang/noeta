@@ -503,6 +503,7 @@ impl<'m> Vm<'m> {
                 module: self.module,
                 frames,
                 regs,
+                strand: self.sched.current_strand,
             };
             let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
                 return Err(format!("no frame {frame} in the paused stack"));

@@ -91,6 +91,17 @@ pub(crate) struct Task {
     /// instead of leaking between interleaved tasks. Plain `u64`s (span ids), not values — no
     /// refcount traffic, invisible to the GC and the leak oracle.
     pub(crate) context: Vec<u64>,
+    /// The **strand** this task belongs to (DAP worker debugging): a plain `spawn`/`concurrent`
+    /// task inherits its spawner's strand (they are cooperative concurrency *within* one logical
+    /// thread); a worker-isolate root task gets a fresh id. The scheduler swaps this into
+    /// `SchedState::current_strand` around each poll, so a breakpoint inside the task reports the
+    /// right DAP thread. `1` (the main strand) on ordinary runs.
+    pub(crate) strand: u32,
+    /// `Some(id)` iff this is a worker-isolate **root** task (the cooperative `isolate f(args)`
+    /// spawn, DAP worker debugging): its `id` equals `strand`, and its completion fires the
+    /// debugger's `on_strand_exited` (a `thread` exited event). `None` for every other task —
+    /// including sub-tasks a worker spawns, which merely inherit the strand.
+    pub(crate) isolate_strand: Option<u32>,
 }
 
 /// One traced future (native-otel T5c): the future-completion hook's entry. `future` is a
@@ -328,6 +339,8 @@ impl<'m> Vm<'m> {
             sched: SchedState {
                 scopes: Vec::new(),
                 ctx_current: Vec::new(),
+                current_strand: 1,
+                next_strand: 2,
                 tel_on,
                 traced_futures: Vec::new(),
             },
