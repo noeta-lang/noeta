@@ -26,19 +26,22 @@ telemetry, CRDTs + p2p, and the `para` namespace with the aether web framework.
 
 ## The frontier — good next picks
 
-The backlog rows marked *(active)* are worth picking up on their own; the rest of the backlog is
-trigger-gated. The standouts, roughly by leverage:
+The 2026-07-19 backlog burndown closed every implementable *(active)* row and the deferred-item
+long tail (small language follow-ups, `.await` positions, channels I.4c, isolate env limits I.4b,
+nested `concurrent` A.7, safepoint cycle GC, keyed-list LiveView, field-calls + `Callable`,
+DAP workers + conditional breakpoints, profiler tier-1, per-project tree-sitter grammar, fmt
+follow-ons, salsa residuals, plus three latent compiler/VM bugs found en route). What remains in
+`backlog.md` is exclusively **decision-gated or trigger-gated**:
 
-1. **Publish the toolchain + registry repos** — the keystone: unblocks true out-of-tree packages,
-   makes every "path deps until published" caveat disappear. A user decision (naming, visibility,
+1. **`@derive(FromJson)`** — buildable now; blocked only on the Ring 2 vs Ring 3 and
+   validating-hook decisions.
+2. **Publish the toolchain + registry repos** — the keystone; a user decision (naming, visibility,
    push policy), then mechanical follow-through.
-2. **`@derive(FromJson)`** — now unblocked by the type-system track; the acceptance test for
-   "the type is the schema".
-3. **The small-language-follow-ups cluster** — `Map.get`, match-arm block *values* in expression
-   position: small, user-visible. (Match-arm blocks, closure-in-method VM capture, generic-enum
-   match-payload, and generic-trait defaults have since shipped.)
-4. **In-run safepoint cycle collection** — the one GC story gap (peak residency of cycle-building
-   loops).
+3. **Decision items**: advisory-intake trust model, `h.cancel()` scope, editions S3/S4 (awaits a
+   deliberate breaking change), Tauri packaging, edge-platform proof, capability-enforcement
+   research, synced store R&D, TaskScope patterns.
+4. **Trigger-gated tails**: the perf cluster, stdlib follow-ons, OTEL residuals, and the remaining
+   tooling rows — each fires on its stated trigger, none on its own.
 
 ## Working discipline (unchanged)
 
