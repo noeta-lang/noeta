@@ -1100,6 +1100,8 @@ impl Lowerer<'_> {
         args.splice(0..0, hidden);
     }
 
+    // The lowering inputs for one function/closure body — a bundle, not a signature worth a struct.
+    #[allow(clippy::too_many_arguments)]
     fn lower_func(
         &mut self,
         params: &[Param],
