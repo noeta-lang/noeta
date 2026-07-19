@@ -492,6 +492,45 @@ pub(crate) fn make_some(value: Value) -> Value {
     Value::enum_value(shape, vec![value])
 }
 
+/// Build the built-in `Result::Ok(value)` (Track A.8) — the success arm of `h.join()`'s
+/// `Result<T, Cancelled>`. The enum owns one reference to `value`, so the caller must have retained
+/// it first. `Ok < Err` (variant index 0), matching the compiler's `builtin_enum_shape`.
+pub(crate) fn make_ok(value: Value) -> Value {
+    static OK: OnceLock<&'static Shape> = OnceLock::new();
+    let shape = OK.get_or_init(|| {
+        noeta_object::intern_shape(
+            Shape::enum_variant("Result", "Ok", Vec::new(), true).with_variant_index(0),
+        )
+    });
+    Value::enum_value(shape, vec![value])
+}
+
+/// Build the built-in `Result::Err(value)` (Track A.8) — the failure arm of `h.join()`. `Err` is
+/// variant index 1 (`Ok < Err`). The enum owns one reference to `value`.
+pub(crate) fn make_err(value: Value) -> Value {
+    static ERR: OnceLock<&'static Shape> = OnceLock::new();
+    let shape = ERR.get_or_init(|| {
+        noeta_object::intern_shape(
+            Shape::enum_variant("Result", "Err", Vec::new(), true).with_variant_index(1),
+        )
+    });
+    Value::enum_value(shape, vec![value])
+}
+
+/// Build the built-in `Cancelled` marker enum value (`Cancelled.Cancelled`, Track A.8) — the typed
+/// `Err` payload `h.join()` returns for a cancelled task. A single payload-free variant, modeled on
+/// [`make_ordering`]; shapes match by name + variant, so it is differential-identical to the
+/// tree-walker's `builtin_enum("Cancelled", "Cancelled", ..)`.
+pub(crate) fn make_cancelled() -> Value {
+    static CANCELLED: OnceLock<&'static Shape> = OnceLock::new();
+    let shape = CANCELLED.get_or_init(|| {
+        noeta_object::intern_shape(
+            Shape::enum_variant("Cancelled", "Cancelled", Vec::new(), false).with_variant_index(0),
+        )
+    });
+    Value::enum_value(shape, Vec::new())
+}
+
 /// Build the built-in `Option::none` (no payload), matching the tree-walker / compiler `none`.
 pub(crate) fn make_none() -> Value {
     static NONE: OnceLock<&'static Shape> = OnceLock::new();

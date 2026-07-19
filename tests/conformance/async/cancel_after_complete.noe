@@ -1,0 +1,26 @@
+// Track A.8 — cancelling a task that has already completed is a **no-op**: its result is preserved.
+// `work` completes on the first join (`Ok(5)`); the subsequent `h.cancel()` finds a task with a
+// stored result and does nothing, so a second `join` still reports `Ok(5)`. Cancellation only ever
+// stops a task that has not yet finished. Both backends agree.
+// expect: stdout "first=5"
+// expect: stdout "second=5"
+// expect: exit 0
+use std.task.{sleep}
+async fn work(): int {
+    sleep(1).await
+    return 5
+}
+concurrent {
+    h = spawn work()
+    r1 = h.join()
+    echo match r1 {
+        Ok(v)  => "first=" ~ v,
+        Err(_) => "first=cancelled",
+    }
+    h.cancel()
+    r2 = h.join()
+    echo match r2 {
+        Ok(v)  => "second=" ~ v,
+        Err(_) => "second=cancelled",
+    }
+}

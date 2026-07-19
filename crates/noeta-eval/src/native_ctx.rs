@@ -187,6 +187,18 @@ impl NativeCtx for EvalCtx<'_> {
 
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>> {
         let value = self.get(future)?.clone();
+        // A combinator (`all`/`race`/`map_bounded`) polling a task handle the user already
+        // cancelled fails loudly (Track A.8, E0056) rather than spinning to a deadlock — the same
+        // contract `.await` enforces. The VM's mirror.
+        if self.interp.handle_cancelled(&value) {
+            let _ = self.interp.runtime_error(
+                noeta_diagnostics::DiagnosticCode::AwaitCancelled,
+                self.span,
+                "cannot await a cancelled task; use `.join()` to observe the cancelled outcome"
+                    .to_string(),
+            );
+            return Err(CtxError::Abort);
+        }
         match self.interp.poll_once(&value, self.span) {
             Ok(Some(result)) => {
                 // A borrowed seed cannot be spent in place — fresh slot, like the VM.

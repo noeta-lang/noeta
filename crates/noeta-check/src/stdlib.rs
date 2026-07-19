@@ -259,6 +259,9 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
         Type::Named(n, args) if n == ITERATOR => {
             iterator_method(name, args.first().unwrap_or(&Type::Dyn))
         }
+        Type::Named(n, args) if n == FUTURE => {
+            future_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
         Type::Named(n, args) if n == SENDER => {
             sender_method(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -280,6 +283,23 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
         }
         _ => None,
     }
+}
+
+/// A task handle `Future<T>` (Track A.8) — the cancellation surface a `spawn`/`isolate` handle
+/// exposes. `cancel()` marks the task cancelled (idempotent, `void`); `join()` drives it and reports
+/// its outcome as a typed `Result<T, Cancelled>` (`Ok(v)` on completion, `Err(Cancelled)` if
+/// cancelled) — the explicit, cancel-aware counterpart to plain `.await: T` (which errors E0056 on a
+/// cancelled task). Every `Future<T>` advertises them, since a spawn handle is itself a `Future<T>`;
+/// on a bare (never-spawned) future `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
+fn future_method(name: &str, elem: &Type) -> Option<Type> {
+    Some(match name {
+        "cancel" => Type::Unit,
+        "join" => Type::Result(
+            Box::new(elem.clone()),
+            Box::new(Type::Named("Cancelled".to_string(), Vec::new())),
+        ),
+        _ => return None,
+    })
 }
 
 /// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
@@ -492,6 +512,11 @@ pub(super) fn method_params(
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
+        // `Future<T>` cancellation methods (Track A.8): both nullary.
+        Type::Named(n, _) if n == FUTURE => Some(match name {
+            "cancel" | "join" => vec![],
+            _ => return None,
+        }),
         Type::Named(n, args) if n == SENDER => {
             let elem = args.first().cloned().unwrap_or(Type::Dyn);
             Some(match name {

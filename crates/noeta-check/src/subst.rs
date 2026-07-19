@@ -31,6 +31,8 @@ pub(crate) fn attr_field_type(ty: noeta_ext_abi::registry::AttrFieldType) -> Typ
 
 pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "Ordering",
+    // The typed cancelled marker (Track A.8): the `Err` payload of `h.join(): Result<T, Cancelled>`.
+    "Cancelled",
     "Type",
     "Semantic",
     "RoleBinding",

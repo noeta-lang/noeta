@@ -267,6 +267,18 @@ impl NativeCtx for VmCtx<'_, '_> {
 
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>> {
         let value = self.get(future)?;
+        // A combinator (`all`/`race`/`map_bounded`) polling a task handle the user already
+        // cancelled fails loudly (Track A.8, E0056) — the same contract `.await` enforces — rather
+        // than spinning to a deadlock.
+        if self.vm.handle_cancelled(value) {
+            self.vm.error(
+                DiagnosticCode::AwaitCancelled,
+                self.span,
+                "cannot await a cancelled task; use `.join()` to observe the cancelled outcome"
+                    .to_string(),
+            );
+            return Err(CtxError::Abort);
+        }
         match self.vm.poll_once(value, self.span) {
             Ok(Poll::Ready(result)) => {
                 // A borrowed seed cannot be spent in place (the entry is the caller's) — the

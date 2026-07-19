@@ -66,7 +66,7 @@ What stays E0040: `.await` inside a **closure** (function coloring — a closure
 
 A `concurrent { … }` scope runs tasks concurrently and joins them at the closing brace. Inside it:
 
-- **`spawn expr()`** schedules a future as a task, yielding a handle you can `.await`.
+- **`spawn expr()`** schedules a future as a task, yielding a handle you can `.await` (or `.cancel()` / `.join()` — see [Cancellation](#cancellation)).
 - **`isolate f(args)`** runs in a fresh isolate (own heap, true parallelism); its arguments and result must be `Send` (see below).
 
 ```noeta
@@ -94,6 +94,40 @@ concurrent {
 ### Nested `concurrent` interleaves
 
 A `concurrent { … }` block opened **inside a spawned task's own body** is a genuine suspension point, not an atomic step: its join yields out of the task's poll while the inner scope's tasks are still pending, so those inner tasks interleave with the outer scope's siblings across scheduler rounds (rather than the inner scope being driven to completion inside one poll of the outer task). Two sibling tasks that each open their own `concurrent` therefore run interleaved, not one-after-the-other. Scopes close by identity, so a nested block can finish while a sibling's block is still open — structured guarantees (a block joins all its tasks before it returns) hold regardless of interleaving. Under the sandbox clock the interleaving is deterministic and both backends agree.
+
+### Cancellation
+
+A task handle (what `spawn`/`isolate` return — itself a `Future<T>`) can be cancelled. Cancellation is exactly what a `race` loser gets: a **cooperative** stop at the task's next suspension point. The task is never polled again, its captured locals' destructors run when its future is reclaimed at the scope's close, and it counts as done for the join — so cancelling frees no differently than a normal join (residency stays 0).
+
+| Operation | Behavior |
+|---|---|
+| `h.cancel(): void` | Marks the task cancelled — idempotent, and a **no-op on an already-completed task** (its result is preserved). The task stops at its last suspension; the code past that point never runs. |
+| `h.join(): Result<T, Cancelled>` | Drives the task and reports its outcome: `Ok(v)` if it completed, `Err(Cancelled)` if it was cancelled. The explicit, cancel-aware way to await. |
+| `h.await: T` | Unchanged for the common case. On a **cancelled** task it fails loudly (`E0056`) — a cancelled task never produces a value, so awaiting one is a bug. Cancel-aware code uses `h.join()` instead. |
+
+```noeta
+use std.task.{sleep}
+async fn work(): int {
+    sleep(10).await
+    return 5                            // never reached once cancelled
+}
+
+concurrent {
+    h = spawn work()
+    sleep(1).await                      // let `work` reach its suspension
+    h.cancel()                          // cooperative stop
+    echo match h.join() {
+        Ok(v)  => "done=" ~ v,
+        Err(_) => "cancelled",          // ← taken
+    }
+}
+```
+
+**The "stops at next suspension" contract.** Cancellation is cooperative and deterministic: it takes effect where the task is already parked (its last `.await`), never by interrupting running code. A task with no further suspension points that is already executing runs to its natural end.
+
+**`join` vs `await`.** `join` is the pairing for cancellable work — it keeps the typed cancelled outcome in the language's ordinary `Result`/`match` vocabulary, while plain `await` stays `T` for the overwhelmingly-common uncancelled path and fails loudly (`E0056`) rather than silently if it ever meets a cancelled task (Noeta has no exceptions to catch, so a silent zero would be unsound). `cancel`/`join` are offered on every `Future<T>` because a handle *is* a `Future<T>`; on a bare (never-spawned) future `cancel` is a harmless no-op and `join` equals `Ok(future.await)`.
+
+The `Cancelled` marker is a payload-free prelude enum — matchable (`Err(Cancelled.Cancelled)`, or just `Err(_)`), and `Send`. Cancelling a producer task composes with channels: its `Sender` **producer hold** releases when its future is reclaimed at the scope's close, auto-closing the channel exactly as a completed producer's would.
 
 ## Isolates and `Send`
 

@@ -1,0 +1,32 @@
+// Track A.8 — a cancelled task's captured-local destructors still run. `work` creates a `Res`, is
+// polled to its `sleep` suspension (capturing `Res` in its future's state), and is then cancelled.
+// Its future is reclaimed at the scope's close exactly like a completed task's, so the captured
+// `Res`'s `destruct` fires there — cancellation frees no differently than a normal join (the leak
+// oracle confirms residency 0). "work end" never prints (cooperative stop); "drop work" does. Both
+// backends agree, and the order is deterministic under the sandbox clock.
+// expect: stdout "use work"
+// expect: stdout "cancelled"
+// expect: stdout "drop work"
+// expect: exit 0
+use std.task.{sleep}
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${self.tag}" }
+}
+async fn work(): int {
+    r = Res.new("work")
+    echo "use ${r.tag}"
+    sleep(10).await
+    echo "work end"
+    return 5
+}
+concurrent {
+    h = spawn work()
+    sleep(1).await
+    h.cancel()
+    echo match h.join() {
+        Ok(v)  => "ok=" ~ v,
+        Err(_) => "cancelled",
+    }
+}

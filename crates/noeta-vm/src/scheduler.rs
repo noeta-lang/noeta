@@ -1043,6 +1043,34 @@ impl<'m> Vm<'m> {
         span: Span,
         safepoint: Option<(&[Frame], &[Value])>,
     ) -> Result<Value, Abort> {
+        // `.await` on a cancelled task is a **loud error** (Track A.8, E0056): a cancelled task never
+        // produces a value, so awaiting one would otherwise hang until the deadlock guard fires or
+        // silently yield a zero. Cancel-aware code uses `h.join()` (which reads the same drive but
+        // reports the cancelled outcome) instead.
+        match self.drive_future_outcome(future, span, safepoint)? {
+            Some(value) => Ok(value),
+            None => Err(self.error(
+                DiagnosticCode::AwaitCancelled,
+                span,
+                "cannot await a cancelled task; use `.join()` to observe the cancelled outcome"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// The shared drive loop behind `.await` ([`Self::drive_future`]) and `h.join()`
+    /// ([`Self::join_task`]) (Track A.8): poll the target to completion via the executor, interleaving
+    /// every open `concurrent` scope's tasks each round. Returns `Some(value)` when the future
+    /// completes, or `None` when the target is a task **handle whose task was cancelled** — the
+    /// terminal state a cancelled task stays in (never polled again, never gets a result). The two
+    /// callers differ only in how they render that `None`: `.await` raises E0056, `join` wraps it as
+    /// `Err(Cancelled)`.
+    fn drive_future_outcome(
+        &mut self,
+        future: Value,
+        span: Span,
+        safepoint: Option<(&[Frame], &[Value])>,
+    ) -> Result<Option<Value>, Abort> {
         loop {
             // Safepoint-GC poll between rounds — see `join_scope`.
             if let Some((frames, regs)) = safepoint
@@ -1053,7 +1081,13 @@ impl<'m> Vm<'m> {
             let wake_gen = isolate::WAKE.generation();
             let before = self.persist.channel_progress;
             if let Poll::Ready(value) = self.poll_once(future, span)? {
-                return Ok(value);
+                return Ok(Some(value));
+            }
+            // A cancelled handle never becomes ready — report the cancelled outcome now rather than
+            // spinning to a deadlock. Checked after the poll so a task cancelled by a sibling this
+            // round is observed at once.
+            if self.handle_cancelled(future) {
+                return Ok(None);
             }
             let progressed = if self.sched.scopes.is_empty() {
                 false
@@ -1073,5 +1107,35 @@ impl<'m> Vm<'m> {
                 ));
             }
         }
+    }
+
+    /// Drive a task handle for `h.join()` (Track A.8) and report its outcome as a typed
+    /// `Result<T, Cancelled>`: `Ok(value)` once the task completes, `Err(Cancelled)` if it was
+    /// cancelled. The explicit, cancel-aware counterpart to plain `.await` (which raises E0056 on a
+    /// cancelled task). Reuses the same interleaving drive, so joining composes with sibling tasks and
+    /// nested scopes exactly as awaiting does. A bare (non-handle) future never appears cancelled, so
+    /// `join` on one equals `Ok(future.await)`.
+    pub(crate) fn join_task(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
+        // No safepoint frames here (a method-dispatch drive, like the `NativeCtx` combinators): the
+        // handle is rooted through `sched.scopes`, and the caller's Rust frame holds the receiver.
+        match self.drive_future_outcome(future, span, None)? {
+            Some(value) => Ok(crate::values::make_ok(value)),
+            None => Ok(crate::values::make_err(crate::values::make_cancelled())),
+        }
+    }
+
+    /// Whether `future` is a task **handle** whose task has been cancelled (Track A.8) — the terminal
+    /// state after `h.cancel()` (or a `race` loser): the task is never polled again and never gets a
+    /// result. A non-handle future, or a handle whose task completed or is still pending, is `false`.
+    pub(crate) fn handle_cancelled(&self, future: Value) -> bool {
+        future
+            .handle_parts()
+            .and_then(|(si, ti)| {
+                self.sched
+                    .scopes
+                    .get(si.index())
+                    .and_then(|s| s.get(ti.index()))
+            })
+            .is_some_and(|task| task.result.is_none() && task.cancelled)
     }
 }

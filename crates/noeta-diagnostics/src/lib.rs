@@ -238,6 +238,12 @@ pub enum DiagnosticCode {
     /// (`pattern => <expr>`) or use the `match` in statement position, where block arms are for
     /// side effects.
     MatchArmNotValue,
+    /// A `.await` (either the top-level driver or the async state machine's poll) reached a task
+    /// that was **cancelled** (`h.cancel()`, or a `race` loser exposed to user code). A cancelled
+    /// task never produces a value — awaiting one would otherwise hang or yield a silent zero — so
+    /// the await fails loudly. Cancel-aware code uses `h.join(): Result<T, Cancelled>` to observe
+    /// the cancelled outcome instead.
+    AwaitCancelled,
 }
 
 impl DiagnosticCode {
@@ -299,6 +305,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidTierExpression,
         DiagnosticCode::InvalidDirectiveSite,
         DiagnosticCode::MatchArmNotValue,
+        DiagnosticCode::AwaitCancelled,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -360,6 +367,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidTraitDeclaration => "E0053",
             DiagnosticCode::InvalidDirectiveSite => "E0054",
             DiagnosticCode::MatchArmNotValue => "E0055",
+            DiagnosticCode::AwaitCancelled => "E0056",
         }
     }
 

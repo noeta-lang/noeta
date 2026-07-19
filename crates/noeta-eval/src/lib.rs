@@ -2517,6 +2517,24 @@ impl Interpreter {
             self.expect_std_arity(name, &args, 0, span)?;
             return Ok(Value::ChannelRecv(*id));
         }
+        // Task-handle cancellation methods (Track A.8): `h.cancel()` marks the task cancelled
+        // exactly as a `race` loser (idempotent; a no-op on a completed task or a bare future),
+        // `h.join()` drives it and reports the typed `Result<T, Cancelled>` outcome. Offered on any
+        // `Future<T>`, since a spawn/isolate handle is itself a `Future<T>`. The VM's mirror.
+        if matches!(receiver, Value::Handle(..) | Value::Future(_)) {
+            match name {
+                "cancel" => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    self.cancel_task(&receiver);
+                    return Ok(Value::Unit);
+                }
+                "join" => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    return self.join_task(receiver, span);
+                }
+                _ => {}
+            }
+        }
         // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
         // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
         // seam like any other. Mirrors the VM.)
@@ -4132,10 +4150,35 @@ impl Interpreter {
     /// they interleave; advances the logical clock when nothing progresses; deadlocks if nothing can
     /// advance.
     fn drive_future(&mut self, future: Value, span: Span) -> Eval<Value> {
+        // `.await` on a cancelled task is a **loud error** (Track A.8, E0056) — a cancelled task
+        // never produces a value. Cancel-aware code uses `h.join()` (the same drive, cancelled
+        // outcome reported) instead. The VM's `drive_future` mirror.
+        match self.drive_future_outcome(future, span)? {
+            Some(value) => Ok(value),
+            None => Err(self.runtime_error(
+                DiagnosticCode::AwaitCancelled,
+                span,
+                "cannot await a cancelled task; use `.join()` to observe the cancelled outcome"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// The shared drive loop behind `.await` ([`Self::drive_future`]) and `h.join()`
+    /// ([`Self::join_task`]) (Track A.8): drive the target to completion, interleaving open scopes
+    /// each round. `Some(value)` on completion, `None` when the target is a task **handle whose task
+    /// was cancelled** (never polled again, never gets a result). The tree-walker mirror of the VM's
+    /// `drive_future_outcome`.
+    fn drive_future_outcome(&mut self, future: Value, span: Span) -> Eval<Option<Value>> {
         loop {
             let before = self.channel_progress;
             if let Some(value) = self.poll_once(&future, span)? {
-                return Ok(value);
+                return Ok(Some(value));
+            }
+            // A cancelled handle never becomes ready — report the cancelled outcome rather than
+            // spinning to a deadlock. Checked after the poll so a sibling's cancel this round shows.
+            if self.handle_cancelled(&future) {
+                return Ok(None);
             }
             // Interleave: run every open scope's tasks one round (so awaiting a handle — or a `sleep` —
             // inside a `concurrent` block lets siblings at all levels make progress).
@@ -4154,6 +4197,35 @@ impl Interpreter {
                 ));
             }
         }
+    }
+
+    /// Drive a task handle for `h.join()` (Track A.8) and report its outcome as a typed
+    /// `Result<T, Cancelled>`: `Ok(value)` once the task completes, `Err(Cancelled)` if it was
+    /// cancelled. The cancel-aware counterpart to `.await` (which raises E0056 on a cancelled task).
+    /// The tree-walker mirror of the VM's `join_task`.
+    fn join_task(&mut self, future: Value, span: Span) -> Eval<Value> {
+        match self.drive_future_outcome(future, span)? {
+            Some(value) => Ok(builtin_enum("Result", "Ok", vec![value])),
+            None => Ok(builtin_enum(
+                "Result",
+                "Err",
+                vec![builtin_enum("Cancelled", "Cancelled", Vec::new())],
+            )),
+        }
+    }
+
+    /// Whether `future` is a task **handle** whose task has been cancelled (Track A.8) — the terminal
+    /// state after `h.cancel()` (or a `race` loser). The tree-walker mirror of the VM's
+    /// `handle_cancelled`.
+    fn handle_cancelled(&self, future: &Value) -> bool {
+        if let Value::Handle(si, ti) = future {
+            return self
+                .scopes
+                .get(si.index())
+                .and_then(|s| s.get(ti.index()))
+                .is_some_and(|task| task.result.is_none() && task.cancelled);
+        }
+        false
     }
 
     fn expect_arity(

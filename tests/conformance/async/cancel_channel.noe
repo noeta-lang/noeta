@@ -1,0 +1,45 @@
+// Track A.8 — cancellation composes with nested `concurrent` and channels. `produce` sends two
+// buffered values then suspends at a long `sleep`; `consume` reads exactly those two. The producer
+// is cancelled while suspended — a cooperative stop past its last suspension, so its remaining
+// `send`s never run. At the scope's close the cancelled producer's future is reclaimed and its
+// `Sender` **producer hold** releases (auto-closing the channel), exactly as a completed producer's
+// would — so cancel-then-join leaks nothing (the leak oracle confirms residency 0). Both backends
+// agree under the sandbox clock.
+// expect: stdout "sum=3"
+// expect: stdout "producer cancelled"
+// expect: exit 0
+use std.task.{sleep}
+async fn produce(tx: Sender<int>): void {
+    tx.send(1).await
+    tx.send(2).await
+    sleep(100).await
+    tx.send(3).await
+}
+async fn consume(rx: Receiver<int>): int {
+    mut total = 0
+    mut n = 0
+    while n < 2 {
+        (delta, got) = match rx.recv().await {
+            some(v) => (v, 1),
+            none    => (0, 2),
+        }
+        total = total + delta
+        n = n + got
+    }
+    return total
+}
+(tx, rx) = channel::<int>(2)
+concurrent {
+    p = spawn produce(tx)
+    c = spawn consume(rx)
+    x = c.join()
+    p.cancel()
+    echo match x {
+        Ok(v)  => "sum=" ~ v,
+        Err(_) => "sum=cancelled",
+    }
+    echo match p.join() {
+        Ok(_)  => "producer done",
+        Err(_) => "producer cancelled",
+    }
+}

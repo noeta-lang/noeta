@@ -1,0 +1,24 @@
+// Track A.8 — `h.cancel()` is idempotent: cancelling twice is the same as cancelling once. The task
+// is marked cancelled on the first call and never polled again; the second call is a no-op. A
+// subsequent `join` still reports `Err(Cancelled)`, and the task's "end" line never prints. Both
+// backends agree.
+// expect: stdout "work start"
+// expect: stdout "cancelled"
+// expect: exit 0
+use std.task.{sleep}
+async fn work(): int {
+    echo "work start"
+    sleep(10).await
+    echo "work end"
+    return 7
+}
+concurrent {
+    h = spawn work()
+    sleep(1).await
+    h.cancel()
+    h.cancel()
+    echo match h.join() {
+        Ok(v)  => "ok=" ~ v,
+        Err(_) => "cancelled",
+    }
+}
