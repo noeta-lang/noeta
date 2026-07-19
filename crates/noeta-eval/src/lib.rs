@@ -5208,6 +5208,8 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         // `timestamp_ms` — extern-types X2).
         NativeOut::None => builtin_enum("Option", "none", Vec::new()),
         NativeOut::Some(inner) => builtin_enum("Option", "some", vec![materialize_native(*inner)]),
+        NativeOut::Ok(inner) => builtin_enum("Result", "Ok", vec![materialize_native(*inner)]),
+        NativeOut::Err(inner) => builtin_enum("Result", "Err", vec![materialize_native(*inner)]),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
         // work is ticketed at the dispatch return (extern-types X5), never materialized.

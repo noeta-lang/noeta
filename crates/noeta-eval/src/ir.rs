@@ -1696,51 +1696,34 @@ impl Interpreter {
                         format!("`{module}.{func}::<T>(...)` has no resolved result type"),
                     ));
                 };
-                // The call-site-typed native functions: `json.parse::<T>` (aborting) and the
-                // recoverable `json.try_parse::<T>` → `Result<T, JsonError>` (one error story
-                // with `json.decode_typed`).
-                let recoverable = func == "try_parse";
-                if module == "json" && (func == "parse" || recoverable) {
-                    let Some(Value::Str(text)) = arg_vals.first() else {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("`json.{func}` expects a `string` argument"),
-                        ));
-                    };
-                    if recoverable {
-                        // A decode failure is a recoverable `Result.Err(JsonError)` — the
-                        // path-carrying extern error value, wrapped exactly as the VM wraps it.
-                        return match noeta_stdlib::json::try_parse_typed(text, recipe) {
-                            Ok(out) => {
-                                let value = self.materialize_recipe(out, *span)?;
-                                Ok(crate::builtin_enum("Result", "Ok", vec![value]))
-                            }
-                            Err(error) => Ok(crate::builtin_enum(
-                                "Result",
-                                "Err",
-                                vec![Value::Extern(Rc::new(RefCell::new(
-                                    noeta_stdlib::ExternBox::new(error),
-                                )))],
-                            )),
-                        };
-                    }
-                    match noeta_stdlib::json::parse_typed(text, recipe) {
-                        Ok(out) => self.materialize_recipe(out, *span),
-                        Err(error) => Err(self.runtime_error(
-                            crate::std_error_code(error.kind),
-                            *span,
-                            error.message,
-                        )),
-                    }
-                } else {
-                    Err(self.runtime_error(
+                // Route through the registry's call-site-typed seam: the module's `typed_dispatch`,
+                // threaded the recipe, builds the whole `NativeOut` tree (already carrying its
+                // declared wrapper — `Ok`/`Err` for a `Result` shape, `Some`/`None` for `Option`),
+                // which materializes to a value of `T`. No function name is special-cased —
+                // `json.parse`/`try_parse` are registered like any extension's typed functions.
+                // Mirrors the VM, so the two backends agree by construction.
+                let reg = self.reg();
+                let ext_mod = reg
+                    .find_module(module)
+                    .filter(|_| reg.find_typed_function(module, func).is_some());
+                let Some(typed_dispatch) = ext_mod.and_then(|m| m.typed_dispatch) else {
+                    return Err(self.runtime_error(
                         DiagnosticCode::UnknownName,
                         *span,
                         format!(
                             "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
                         ),
-                    ))
+                    ));
+                };
+                let deep = ext_mod.is_some_and(|m| m.deep_marshal);
+                let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
+                    arg_vals.iter().map(crate::value_to_native_deep).collect()
+                } else {
+                    arg_vals.iter().map(crate::marshal_native_arg).collect()
+                };
+                match typed_dispatch(func, &mut *self.host, &nargs, recipe) {
+                    Ok(out) => self.materialize_recipe(out, *span),
+                    Err(error) => Err(self.std_dispatch_error(error, *span)),
                 }
             }
             noeta_ir::Rvalue::DecodeTyped { name, text, span } => {
@@ -1795,15 +1778,29 @@ impl Interpreter {
             NativeOut::Str(s) => Ok(Value::Str(s)),
             NativeOut::Bytes(b) => Ok(Value::Bytes(Rc::new(b))),
             NativeOut::Unit => Ok(Value::Unit),
-            // A `TypeRecipe` names only JSON shapes; extern values, async work, and bulk scalar
-            // vectors (a packed reduction's result, N3.4) can never decode from one.
-            NativeOut::Extern(_) | NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
-                unreachable!("json recipes never produce extern/spawn/bulk-scalar results")
+            // An extern value — the error arm of a `Result`-wrapped door (`json.try_parse::<T>` →
+            // `Result.Err(JsonError)`) carries a path-rich extern; a recipe decode of `T` itself
+            // never yields one, only a wrapper's `Err` does.
+            NativeOut::Extern(e) => Ok(Value::Extern(Rc::new(RefCell::new(e)))),
+            // A `TypeRecipe` names only JSON shapes; async work and bulk scalar vectors (a packed
+            // reduction's result, N3.4) can never decode from one.
+            NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
+                unreachable!("json recipes never produce spawn/bulk-scalar results")
             }
             NativeOut::None => Ok(crate::builtin_enum("Option", "none", vec![])),
             NativeOut::Some(inner) => {
                 let value = self.materialize_recipe(*inner, span)?;
                 Ok(crate::builtin_enum("Option", "some", vec![value]))
+            }
+            // A `Result`-wrapped call-site-typed door (`json.try_parse::<T>`) hands back its whole
+            // `Result` tree — success as `Ok`, a decode failure as `Err` (a path-carrying extern).
+            NativeOut::Ok(inner) => {
+                let value = self.materialize_recipe(*inner, span)?;
+                Ok(crate::builtin_enum("Result", "Ok", vec![value]))
+            }
+            NativeOut::Err(inner) => {
+                let value = self.materialize_recipe(*inner, span)?;
+                Ok(crate::builtin_enum("Result", "Err", vec![value]))
             }
             NativeOut::List(items) => {
                 let mut values = Vec::with_capacity(items.len());

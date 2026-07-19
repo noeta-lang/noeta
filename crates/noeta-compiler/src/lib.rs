@@ -3533,16 +3533,12 @@ impl<'m> FnCompiler<'m> {
                 let args = self.atom_regs(args)?;
                 let module_id = self.module.intern_name(module);
                 let func_id = self.module.intern_name(func);
-                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
-                let err_shape = self.module.builtin_enum_shape("Result", "Err");
                 self.code.push(Op::TypedModuleCall {
                     dst,
                     module: module_id,
                     func: func_id,
                     args,
                     recipe: recipe.clone().map(Box::new),
-                    ok_shape,
-                    err_shape,
                     span: *span,
                 });
                 Ok(())

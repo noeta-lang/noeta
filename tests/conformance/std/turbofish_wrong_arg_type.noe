@@ -1,0 +1,6 @@
+// `json.parse::<T>` expects a `string`; an `int` argument is a static E0007 through the declared
+// signature (the normal native-argument check applies to the turbofish door too).
+// expect: error E0007 at 5:5
+use std.json
+x = json.parse::<int>(5);
+echo x;

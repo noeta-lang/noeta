@@ -151,6 +151,8 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         // `timestamp_ms` — extern-types X2).
         NativeOut::None => make_none(),
         NativeOut::Some(inner) => make_some(materialize_native(*inner)),
+        NativeOut::Ok(inner) => make_ok(materialize_native(*inner)),
+        NativeOut::Err(inner) => make_err(materialize_native(*inner)),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the VM's shape table), not here; async work is
         // ticketed at the dispatch return (extern-types X5), never materialized.
@@ -560,6 +562,10 @@ pub(crate) fn materialize_recipe(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Unit => Value::unit(),
         NativeOut::None => make_none(),
         NativeOut::Some(inner) => make_some(materialize_recipe(*inner)),
+        // A `Result`-wrapped call-site-typed door (`json.try_parse::<T>`) hands back its whole
+        // `Result` tree; the error arm is typically a path-carrying extern value.
+        NativeOut::Ok(inner) => make_ok(materialize_recipe(*inner)),
+        NativeOut::Err(inner) => make_err(materialize_recipe(*inner)),
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_recipe).collect()),
         NativeOut::Map(entries) => {
             let mut map = BTreeMap::new();
@@ -577,14 +583,14 @@ pub(crate) fn materialize_recipe(out: noeta_stdlib::NativeOut) -> Value {
                 .collect();
             Value::object(shape, values)
         }
-        // `Object` (shape-from-argument), extern values, and bulk scalar vectors (a packed
-        // reduction's result, N3.4) are never produced by a recipe decode (a `TypeRecipe` names
-        // only JSON shapes).
-        NativeOut::Object(_)
-        | NativeOut::Extern(_)
-        | NativeOut::Spawn(_)
-        | NativeOut::Scalars(_) => {
-            unreachable!("json.parse recipe decode never yields an Object/Extern/Spawn result")
+        // An extern value — the error arm of a `Result`-wrapped door (`json.try_parse::<T>` →
+        // `Result.Err(JsonError)`) carries a path-rich extern. A recipe decode of `T` itself never
+        // yields one; it reaches here only inside a wrapper's `Err`.
+        NativeOut::Extern(e) => Value::extern_value(e),
+        // `Object` (shape-from-argument) and bulk scalar vectors (a packed reduction's result,
+        // N3.4) are never produced by a recipe decode (a `TypeRecipe` names only JSON shapes).
+        NativeOut::Object(_) | NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
+            unreachable!("json.parse recipe decode never yields an Object/Spawn/bulk-scalar result")
         }
     }
 }

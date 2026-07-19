@@ -714,8 +714,6 @@ impl<'m> Vm<'m> {
                         func: func_id,
                         args,
                         recipe,
-                        ok_shape,
-                        err_shape,
                         span,
                     } => {
                         // Resolve the interned module/func names (`module` is the outer loop-local
@@ -732,62 +730,51 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        // The call-site-typed native functions: `json.parse::<T>` (aborting) and
-                        // the recoverable `json.try_parse::<T>` → `Result<T, JsonError>` (one
-                        // error story with `json.decode_typed`).
-                        let recoverable = func == "try_parse";
-                        if mod_name == "json" && (func == "parse" || recoverable) {
-                            let text = args
-                                .first()
-                                .map(|r| regs[fbase + *r as usize])
-                                .and_then(|v| v.as_string());
-                            let Some(text) = text else {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!("`json.{func}` expects a `string` argument"),
-                                ));
-                            };
-                            if recoverable {
-                                // A decode failure is a recoverable `Result.Err(JsonError)` — the
-                                // path-carrying extern error value, exactly as the eval reference
-                                // wraps it.
-                                let value = match noeta_stdlib::json::try_parse_typed(&text, recipe)
-                                {
-                                    Ok(out) => Value::enum_value(
-                                        self.persist.shapes[*ok_shape as usize],
-                                        vec![materialize_recipe(out)],
-                                    ),
-                                    Err(error) => Value::enum_value(
-                                        self.persist.shapes[*err_shape as usize],
-                                        vec![Value::extern_value(noeta_stdlib::ExternBox::new(
-                                            error,
-                                        ))],
-                                    ),
-                                };
-                                set_reg(regs, fbase, *dst, value);
-                            } else {
-                                match noeta_stdlib::json::parse_typed(&text, recipe) {
-                                    Ok(out) => {
-                                        set_reg(regs, fbase, *dst, materialize_recipe(out));
-                                    }
-                                    Err(error) => {
-                                        return Err(self.error(
-                                            stdlib_error_code(error.kind),
-                                            *span,
-                                            error.message,
-                                        ));
-                                    }
-                                }
-                            }
-                        } else {
+                        // Route through the registry's call-site-typed seam: the module's
+                        // `typed_dispatch`, threaded the recipe, builds the whole `NativeOut` tree
+                        // (already carrying its declared wrapper — `Ok`/`Err` for a `Result` shape,
+                        // `Some`/`None` for `Option`), which materializes to a value of `T`. No
+                        // function name is special-cased — `json.parse`/`try_parse` are registered
+                        // like any extension's call-site-typed functions.
+                        let reg = self.reg();
+                        let Some(ext_mod) = reg
+                            .find_module(mod_name)
+                            .filter(|_| reg.find_typed_function(mod_name, func).is_some())
+                        else {
                             return Err(self.error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            format!(
-                                "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
-                            ),
-                        ));
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!(
+                                    "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
+                                ),
+                            ));
+                        };
+                        let Some(typed_dispatch) = ext_mod.typed_dispatch else {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!(
+                                    "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
+                                ),
+                            ));
+                        };
+                        // A reflective module (`json`) marshals its arguments deeply; every other
+                        // uses the cheap shallow projection — the same decision the plain module
+                        // dispatch makes.
+                        let nargs: Vec<noeta_stdlib::NativeValue> = args
+                            .iter()
+                            .map(|r| {
+                                let v = regs[fbase + *r as usize];
+                                if ext_mod.deep_marshal {
+                                    v.to_native_deep()
+                                } else {
+                                    marshal_native_arg(v)
+                                }
+                            })
+                            .collect();
+                        match typed_dispatch(func, &mut *self.persist.host, &nargs, recipe) {
+                            Ok(out) => set_reg(regs, fbase, *dst, materialize_recipe(out)),
+                            Err(error) => return Err(self.std_dispatch_error(error, *span)),
                         }
                         pc += 1;
                     }
