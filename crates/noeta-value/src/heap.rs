@@ -387,8 +387,10 @@ pub(crate) enum Payload {
     Receiver(crate::ChannelId),
     /// A **leaf channel-send future** (isolates I.1): `tx.send(v)` produces one, carrying the channel
     /// id and **owning one reference** to the message `v` (a GC node like [`Self::Cell`]). Polling it
-    /// enqueues `v` when the buffer has room (ready → unit) or reports pending on a full buffer.
-    ChannelSend(crate::ChannelId, Value),
+    /// enqueues `v` when the buffer has room (ready → unit) or reports pending on a full buffer. The
+    /// third word is its capacity-0 **rendezvous phase** (isolates I.4c) — whether it has yet
+    /// deposited into the one-slot handoff; ignored for a buffered channel.
+    ChannelSend(crate::ChannelId, Value, noeta_ext_abi::channel::SendPhase),
     /// A **leaf channel-recv future** (isolates I.1): `rx.recv()` produces one, carrying the channel
     /// id. Polling it dequeues the next message (ready → `some(v)`), reports `none` once closed and
     /// drained, or pending on an empty open buffer. A GC leaf — the queued messages live in the backend.
@@ -700,7 +702,7 @@ pub(crate) fn free(value: Value) {
         // A future owns one reference to its thunk/step closure (a node like `Cell`).
         Payload::Future(step) => release_child(*step),
         // A channel-send future owns the message it is queuing until it is enqueued or dropped.
-        Payload::ChannelSend(_, value) => release_child(*value),
+        Payload::ChannelSend(_, value, _) => release_child(*value),
         // A bound method handle owns its captured receiver.
         Payload::BoundMethod { recv, .. } => release_child(*recv),
         // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
@@ -902,7 +904,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         // A future owns one reference to its thunk/step closure.
         Payload::Future(step) => push(*step),
         // A channel-send future owns one reference to the message it is queuing.
-        Payload::ChannelSend(_, value) => push(*value),
+        Payload::ChannelSend(_, value, _) => push(*value),
         // A bound method handle owns one reference to its captured receiver.
         Payload::BoundMethod { recv, .. } => push(*recv),
         // A packed list holds only primitive words (no child references) — a GC leaf; a timer holds

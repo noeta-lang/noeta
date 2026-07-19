@@ -224,3 +224,40 @@ fn run_real_isolate_channel_backpressure_capacity_one() {
         .success()
         .stdout("3\n");
 }
+
+// --- real-path cross-isolate deadlock detection (isolates I.4c) ---------------------
+
+#[test]
+fn run_real_isolate_channel_deadlock_errors_not_hangs() {
+    // A genuine cross-thread deadlock: a worker isolate blocks forever on `recv` over a shared
+    // channel that nobody ever sends to or closes, while the parent awaits the worker. The sandbox
+    // oracle catches this cooperative stall as E0010; the real (parallel) scheduler must detect the
+    // all-parties-blocked state — every registered scheduler parked with no timer, no IO, and no live
+    // counterparty — and raise the *same* diagnostic instead of spinning/hanging. The 20s timeout is
+    // the regression guard: before I.4c this hung forever.
+    let file = temp_program(
+        "isolate_deadlock",
+        "async fn stuck(rx: Receiver<int>): int {\n\
+         r = rx.recv().await\n\
+         return match r { some(x) => x, none => 0 }\n\
+         }\n\
+         async fn run(): int {\n\
+         (tx, rx) = channel::<int>(1)\n\
+         mut result = 0\n\
+         concurrent {\n\
+         h = isolate stuck(rx)\n\
+         result = h.await\n\
+         }\n\
+         return result\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .timeout(std::time::Duration::from_secs(20))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0010"))
+        .stderr(predicate::str::contains("deadlock"));
+}

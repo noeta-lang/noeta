@@ -129,7 +129,37 @@ impl Value {
     /// reference to `value` is released by its normal end-of-life.
     pub fn make_channel_send(id: ChannelId, value: Value) -> Value {
         value.inc_ref();
-        heap::alloc(Payload::ChannelSend(id, value))
+        heap::alloc(Payload::ChannelSend(
+            id,
+            value,
+            noeta_ext_abi::channel::SendPhase::Fresh,
+        ))
+    }
+
+    /// The rendezvous handoff phase of a channel-send future (isolates I.4c), or `None` if this is
+    /// not one. Carried on the future so a capacity-0 send remembers, across re-polls, whether it has
+    /// already deposited its message into the one-slot handoff.
+    pub fn channel_send_phase(self) -> Option<noeta_ext_abi::channel::SendPhase> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::ChannelSend(_, _, phase) => Some(*phase),
+            _ => None,
+        })
+    }
+
+    /// Record the rendezvous handoff phase of a channel-send future (isolates I.4c). The future is a
+    /// stable heap object across re-polls, so the transition to `Deposited` persists.
+    pub fn set_channel_send_phase(self, phase: noeta_ext_abi::channel::SendPhase) {
+        if !self.is_pointer() {
+            return;
+        }
+        heap::with_payload_mut(self, |p| {
+            if let Payload::ChannelSend(_, _, slot) = p {
+                *slot = phase;
+            }
+        });
     }
 
     /// A **leaf channel-recv future** (isolates I.1): `rx.recv()` produces one, carrying the channel id.
@@ -144,7 +174,7 @@ impl Value {
             return None;
         }
         heap::with_payload(self, |p| match p {
-            Payload::ChannelSend(id, value) => {
+            Payload::ChannelSend(id, value, _) => {
                 value.inc_ref();
                 Some((*id, *value))
             }

@@ -62,6 +62,16 @@ pub(crate) enum Channel {
         buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
         capacity: usize,
         closed: bool,
+        /// Live **producer holds** of this channel (isolates I.4c auto-close): the count of spawned
+        /// tasks/isolates that captured a `Sender<T>` for it. Incremented when such a producer is
+        /// spawned, decremented when it completes; when the count returns to 0 (having been positive)
+        /// the channel **auto-closes**, so a blocked receiver drains then observes `none` instead of
+        /// deadlocking. Keyed on producer-task lifecycle rather than raw sender-value RC because the
+        /// enclosing async/top-level scope retains a structural sender (a cell or global) until it
+        /// ends — which is too late to signal "no more sends". A channel whose sender is only ever
+        /// used structurally (never handed to a producer task) has 0 holds and relies on explicit
+        /// `close()`, exactly as before.
+        producers: u32,
     },
     Shared(Arc<isolate::ChannelCore>),
 }
@@ -91,6 +101,12 @@ pub(crate) struct Task {
     /// instead of leaking between interleaved tasks. Plain `u64`s (span ids), not values — no
     /// refcount traffic, invisible to the GC and the leak oracle.
     pub(crate) context: Vec<u64>,
+    /// The channels this task holds a **producer hold** on (isolates I.4c auto-close): the channel
+    /// indices of every `Sender<T>` it captured at spawn. Each is decremented when the task's future
+    /// is released (on completion or at `ScopeEnd`), auto-closing the channel when its last producer
+    /// is gone. Emptied once decremented, so a completed task's early release and the scope's
+    /// end-of-life sweep never double-count.
+    pub(crate) holds: Vec<usize>,
 }
 
 /// One traced future (native-otel T5c): the future-completion hook's entry. `future` is a
@@ -316,6 +332,7 @@ impl<'m> Vm<'m> {
             hot_mailbox: None,
             applied_swaps: 0,
             pure_eval: false,
+            stall_active: false,
             persist,
             map_packed,
             methods,
@@ -657,6 +674,11 @@ pub(crate) fn run_isolate_worker(
         })
         .collect();
     let callee = Value::closure(proto, Vec::new());
+    // Register this worker in the stall registry for its driving lifetime (isolates I.4c): it
+    // participates in the global all-parties-blocked deadlock check, so a cross-isolate deadlock
+    // among workers resolves to E0010 rather than spinning.
+    wvm.stall_active = true;
+    let stall = isolate::STALL.scheduler();
     let outcome = match wvm.call_value(callee, arg_vals, span) {
         Ok(future) => {
             let result = wvm.drive_future(future, span);
@@ -665,6 +687,7 @@ pub(crate) fn run_isolate_worker(
         }
         Err(abort) => Err(abort),
     };
+    drop(stall);
     release(callee);
     // Hand the worker's finished collector to the sink (before teardown — destructor ops after the
     // program's own work are not the profile's subject). The `#n` is the sink's running count,

@@ -324,7 +324,11 @@ impl Interpreter {
                     // Destructor-aware release of each task's future/result (the VM's `ScopeEnd` mirror):
                     // a **cancelled** task (a `race` loser) abandoned its future mid-body with a live
                     // captured value, whose destructor must run at its last reference here.
-                    for task in scope {
+                    for mut task in scope {
+                        // End any producer holds still carried (isolates I.4c): a completed task
+                        // already released them (list emptied); this only fires for one reclaimed
+                        // before it finished (e.g. a cancelled `race` loser). The VM's mirror.
+                        self.release_task_holds(&mut task.holds);
                         self.destroy_value(task.future);
                         if let Some(result) = task.result {
                             self.destroy_value(result);
@@ -1499,6 +1503,11 @@ impl Interpreter {
                     // Unreachable for a checked program (E0041); keep evaluation total.
                     return Ok(future);
                 }
+                // Senders captured in the spawned future are producer holds (isolates I.4c).
+                let holds = crate::collect_producer_channels(&future);
+                for &cid in &holds {
+                    self.add_producer_hold(cid);
+                }
                 let scope_idx = self.scopes.len() - 1;
                 let task_idx = self.scopes[scope_idx].len();
                 // The child inherits a snapshot of the spawner's task-local context (T5a).
@@ -1509,6 +1518,7 @@ impl Interpreter {
                     cancelled: false,
                     polling: false,
                     context,
+                    holds,
                 });
                 Ok(Value::Handle(
                     ScopeId::from_index(scope_idx),
@@ -1527,6 +1537,12 @@ impl Interpreter {
                 if self.scopes.is_empty() {
                     return Ok(future);
                 }
+                // Scan the built future for captured senders — the same producer holds the VM's
+                // `isolate`-lowering (`Call`+`Spawn`) counts from the equivalent future (isolates I.4c).
+                let holds = crate::collect_producer_channels(&future);
+                for &cid in &holds {
+                    self.add_producer_hold(cid);
+                }
                 let scope_idx = self.scopes.len() - 1;
                 let task_idx = self.scopes[scope_idx].len();
                 // The child inherits a snapshot of the spawner's task-local context (T5a).
@@ -1537,6 +1553,7 @@ impl Interpreter {
                     cancelled: false,
                     polling: false,
                     context,
+                    holds,
                 });
                 Ok(Value::Handle(
                     ScopeId::from_index(scope_idx),
@@ -1570,6 +1587,7 @@ impl Interpreter {
                     buffer: std::collections::VecDeque::new(),
                     capacity: cap as usize,
                     closed: false,
+                    producers: 0,
                 });
                 Ok(Value::Tuple(Rc::new(vec![
                     Value::Sender(ChannelId::from_index(id)),

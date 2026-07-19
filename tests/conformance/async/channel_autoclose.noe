@@ -1,0 +1,37 @@
+// Isolates I.4c — **auto-close on last producer**: with no explicit `close()`, once every spawned
+// producer that holds a `Sender` has completed, the channel closes on its own, so the consumer drains
+// the buffered messages then observes `none` instead of blocking forever. Two producers fill a
+// capacity-4 channel and return; the consumer sums 0+1+2 (base 0) + 10+11+12 (base 10) = 36 and then
+// terminates on the auto-close. Keyed on producer-task lifecycle, so both backends agree.
+// expect: stdout "36"
+// expect: exit 0
+async fn producer(tx: Sender<int>, base: int): void {
+    for i in 0..3 {
+        tx.send(base + i).await
+    }
+}
+async fn consumer(rx: Receiver<int>): int {
+    mut total = 0
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        total = total + v
+        running = keep
+    }
+    return total
+}
+async fn run(): int {
+    (tx, rx) = channel::<int>(4)
+    mut result = 0
+    concurrent {
+        h = spawn consumer(rx)
+        concurrent {
+            spawn producer(tx, 0)
+            spawn producer(tx, 10)
+        }
+        result = h.await
+    }
+    return result
+}
+echo run().await

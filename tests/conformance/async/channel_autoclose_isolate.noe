@@ -1,0 +1,35 @@
+// Isolates I.4c — auto-close with **isolate** producers. Three worker isolates each send one square
+// over a shared channel and complete; with no explicit `close()`, the channel auto-closes once the
+// last isolate (the last producer) is done, so the collector drains 2²+3²+4² = 29 then observes
+// `none`. In the deterministic sandbox an isolate is a cooperative task; both backends agree.
+// expect: stdout "29"
+// expect: exit 0
+async fn worker(tx: Sender<int>, n: int): void {
+    tx.send(n * n).await
+}
+async fn collector(rx: Receiver<int>): int {
+    mut total = 0
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        total = total + v
+        running = keep
+    }
+    return total
+}
+async fn run(): int {
+    (tx, rx) = channel::<int>(4)
+    mut result = 0
+    concurrent {
+        h = spawn collector(rx)
+        concurrent {
+            isolate worker(tx, 2)
+            isolate worker(tx, 3)
+            isolate worker(tx, 4)
+        }
+        result = h.await
+    }
+    return result
+}
+echo run().await

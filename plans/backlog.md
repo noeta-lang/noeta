@@ -30,7 +30,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| **Channel v1 limits:** capacity-0 rendezvous deadlocks; no auto-close when all senders drop (`close()` is explicit); a genuine cross-isolate deadlock on the *real* path hangs (spin-yield) rather than erroring — the sandbox is the oracle that catches it as E0010 | isolates I.4c |
 | **Real-isolate worker environment limits:** workers snapshot only marshallable globals (a `class`-instance global is skipped → fails at use); worker teardown skips cycle collection | isolates I.4b |
 | User-facing `h.cancel()` + a typed cancelled outcome (today cancellation is race/scope-internal) | A.8 scope decision |
 | App-lifetime `TaskScope` patterns: DI-managed workers, durable queues, schedulers; overlaps the "background-work extensions" proposal below | §7.2 design. Framework/extension patterns, not language constructs |

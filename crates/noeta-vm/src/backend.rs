@@ -756,6 +756,15 @@ impl Backend for VmBackend {
 /// session (REPL-on-VM) can run one entry's `main` against the shared globals *without* the teardown a
 /// later entry's bindings still depend on; the single-shot path just runs them back to back.
 pub(crate) fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult {
+    // Register the root parent in the stall registry for its driving lifetime, so a genuine
+    // real-path cross-isolate deadlock resolves to E0010 instead of spinning (isolates I.4c). Inert
+    // in the deterministic sandbox (non-parallel).
+    let _stall = if vm.isolates.parallel_isolates {
+        vm.stall_active = true;
+        Some(crate::isolate::STALL.scheduler())
+    } else {
+        None
+    };
     vm.run_top();
     vm.teardown(mode)
 }

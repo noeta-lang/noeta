@@ -136,8 +136,18 @@ concurrent {
 
 - `channel::<T>(cap)` returns `(Sender<T>, Receiver<T>)`; both ends are `Send`.
 - `tx.send(v).await` — async; applies backpressure when the buffer is full.
-- `tx.close()` — marks the channel closed.
+- `tx.close()` — marks the channel closed (idempotent — closing twice is harmless).
 - `rx.recv().await` — `some(v)` while values remain, `none` once closed and drained.
+
+### Channel semantics
+
+| Behavior | Rule |
+|---|---|
+| **Buffered** (`cap >= 1`) | `send` completes as soon as the message is enqueued into an open buffer with room; a full buffer applies backpressure (the `send` parks until a `recv` frees a slot). |
+| **Rendezvous** (`cap == 0`) | A direct hand-off: `send` parks until a receiver *takes* the message, and `recv` parks until a sender offers one — the send completes **after** the receive (observable ordering; the sender never runs ahead). |
+| **Auto-close** | When every spawned task/isolate that holds a `Sender` for a channel has completed, the channel **closes on its own** — receivers drain the buffer, then observe `none` instead of blocking forever. A `Sender` kept only by a long-lived enclosing scope (never handed to a producer) does not trigger this; use `tx.close()` for that. |
+| **Explicit close** | `tx.close()` still works and is idempotent; it composes with auto-close (whichever happens first closes the channel). |
+| **Deadlock** | A channel that can make no progress — every party blocked on channel ops with no live counterparty, no timer, and no pending IO — is a deterministic deadlock: the sandbox catches it as `E0010`, and the real (parallel) scheduler raises the same `E0010` rather than spinning. |
 
 ## Determinism
 
