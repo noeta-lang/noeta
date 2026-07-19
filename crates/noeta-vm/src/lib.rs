@@ -78,6 +78,8 @@ pub use backend::*;
 mod calls;
 /// The tier-0 dispatch loop (`Vm::run` / `Vm::dispatch`) and its register helpers.
 mod dispatch;
+/// In-run safepoint cycle collection: trigger polling, root enumeration, mid-run reclaim.
+mod gc;
 pub(crate) use dispatch::*;
 /// The observation hooks: [`Debugger`] / [`ProfileHook`] and the debug request vocabulary.
 mod hooks;
@@ -583,6 +585,11 @@ struct Vm<'m> {
     /// per-element 64 KB reserve gate).
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     run_depth: usize,
+    /// Extra safepoint-GC roots no register window covers (a depth-0 drive loop's Rust-local
+    /// values — worker isolate, consumed await). Borrowed; see `gc.rs`.
+    transient_roots: Vec<Value>,
+    /// Teardown/reclaim in progress (destructors over a heap mid-surgery): polls must not collect.
+    gc_suspended: bool,
     /// Real-thread isolate state — see [`IsolateState`].
     isolates: IsolateState,
     /// Captured run output — see [`RunOutput`].

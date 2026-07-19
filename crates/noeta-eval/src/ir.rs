@@ -189,6 +189,8 @@ impl Interpreter {
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
         deserialize_recipes: DeserializeRecipes,
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
+        // Arm the safepoint-GC trigger for this run (the eval mirror of the VM's arm).
+        crate::leak::safepoint_arm(crate::leak::safepoint_step());
         self.reflection = noeta_ast::reflect::build(ast);
         // Extension attribute shapes ride the artifact (tier-extensions port) — same embed the
         // bytecode path does, so the differential stays green by construction.
@@ -204,6 +206,10 @@ impl Interpreter {
             // A top-level `return`, a `?` short-circuit, or a runtime error stops the program.
             Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => {}
         }
+        // Exit reached: disarm the safepoint trigger — the teardown below runs destructors
+        // against a heap being dismantled, and the exit reapers reclaim everything a pending
+        // safepoint would have.
+        crate::leak::safepoint_disarm();
         // Release every value still in the extensions' retained arena (higher-order-abi H4) —
         // destructor-aware, mirroring the VM's teardown release, so a `destruct`-bearing value
         // left in an extension (an undisposed `Cell`) fires identically on both backends.
@@ -239,6 +245,9 @@ impl Interpreter {
     /// fresh `Frame` each call is correct. Returns the batch's terminating [`Flow`] (a top-level
     /// `return`/error stops it, mirroring the AST-walker session loop).
     pub(crate) fn run_ir_batch(&mut self, ir: &noeta_ir::Program) -> Eval<Flow> {
+        // Arm per batch, relative to the session's current residency (persistent bindings are
+        // never charged against the watermark).
+        crate::leak::safepoint_arm(crate::leak::safepoint_step());
         let mut frame = Frame::new(ir.temp_count);
         self.exec_ir_stmts(&ir.top.stmts, &mut frame)
     }
@@ -731,6 +740,9 @@ impl Interpreter {
         frame: &mut Frame,
     ) -> Eval<Flow> {
         loop {
+            // Safepoint-GC poll at the loop back-edge (memory-management 6.x) — the eval mirror
+            // of the VM dispatch loop's backward-jump poll.
+            crate::cycles::poll_safepoint();
             let taken = match self.eval_ir_block_value(cond, frame, span)? {
                 Value::Bool(b) => b,
                 other => {
@@ -773,6 +785,8 @@ impl Interpreter {
         // closure runs inside the advance. A collection keeps the snapshot fast path.
         if stream {
             loop {
+                // Safepoint-GC poll per iteration — see `exec_ir_while`.
+                crate::cycles::poll_safepoint();
                 let element = match self.iter_value_next(&iterable_value, span)? {
                     Some(e) => e,
                     None => break,
@@ -813,6 +827,8 @@ impl Interpreter {
         }
         let elements = self.iter_elements(iterable_value, span)?;
         for element in elements {
+            // Safepoint-GC poll per iteration — see `exec_ir_while`.
+            crate::cycles::poll_safepoint();
             let child = crate::Scope::child(&self.scope);
             self.bind_for_pattern(&child, pattern, element, span)?;
             let saved = std::mem::replace(&mut self.scope, child);

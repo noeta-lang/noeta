@@ -913,9 +913,24 @@ impl<'m> Vm<'m> {
     /// with the inner join; the loop exits on the *innermost* scope alone (outer scopes are joined by
     /// their own `ScopeEnd`). On a round where nothing completed, advance the logical clock; a pending
     /// scope with no timer to advance is a deterministic deadlock.
-    pub(crate) fn join_scope(&mut self, span: Span) -> Result<(), Abort> {
+    /// `safepoint` carries the calling dispatch loop's live frame stack + register windows so each
+    /// round can poll the safepoint-GC trigger (the tasks themselves are rooted through
+    /// `sched.scopes`); `None` = never collect here (a caller whose Rust frame holds
+    /// non-enumerable values).
+    pub(crate) fn join_scope(
+        &mut self,
+        span: Span,
+        safepoint: Option<(&[Frame], &[Value])>,
+    ) -> Result<(), Abort> {
         let si = self.sched.scopes.len() - 1;
         loop {
+            // Safepoint-GC poll between rounds (memory-management 6.x): every task is parked (its
+            // step returned), so the scheduler state is fully enumerable.
+            if let Some((frames, regs)) = safepoint
+                && noeta_value::safepoint_gc_pending()
+            {
+                self.maybe_safepoint_gc(frames, regs);
+            }
             // Snapshot the wake generation before polling (P-PAR S3): progress a worker makes
             // *during* this round then returns the stall wait immediately instead of parking.
             let wake_gen = isolate::WAKE.generation();
@@ -949,8 +964,24 @@ impl<'m> Vm<'m> {
     /// drives every open `concurrent` scope's sibling tasks a round (A.7 — across all scope levels) so
     /// they interleave; advances the logical clock when nothing progresses; deadlocks if nothing can
     /// advance. Returns the completion value (owned). The caller's register keeps owning the future.
-    pub(crate) fn drive_future(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
+    /// `safepoint` carries the calling dispatch loop's live frame stack + register windows so each
+    /// round can poll the safepoint-GC trigger — the awaited `future` itself stays rooted by the
+    /// caller's register (dispatch) or by [`Vm::transient_roots`] (a depth-0 worker drive).
+    /// `None` = never collect here (a `NativeCtx` drive: extension Rust frames can hold values
+    /// the VM cannot enumerate).
+    pub(crate) fn drive_future(
+        &mut self,
+        future: Value,
+        span: Span,
+        safepoint: Option<(&[Frame], &[Value])>,
+    ) -> Result<Value, Abort> {
         loop {
+            // Safepoint-GC poll between rounds — see `join_scope`.
+            if let Some((frames, regs)) = safepoint
+                && noeta_value::safepoint_gc_pending()
+            {
+                self.maybe_safepoint_gc(frames, regs);
+            }
             let wake_gen = isolate::WAKE.generation();
             let before = self.persist.channel_progress;
             if let Poll::Ready(value) = self.poll_once(future, span)? {

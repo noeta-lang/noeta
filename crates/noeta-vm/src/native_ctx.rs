@@ -288,7 +288,10 @@ impl NativeCtx for VmCtx<'_, '_> {
 
     fn drive(&mut self, future: Slot) -> CtxResult<Slot> {
         let value = self.get(future)?;
-        match self.vm.drive_future(value, self.span) {
+        // No safepoint view: a `NativeCtx` drive runs beneath an extension's Rust frame, whose
+        // locals (and this ctx's own slot table) can hold values the VM cannot enumerate — so the
+        // drive loop never collects here (the enclosing dispatch loop's polls still do).
+        match self.vm.drive_future(value, self.span, None) {
             Ok(result) => {
                 // A borrowed seed cannot be spent in place — fresh owned slot (see `poll`).
                 if future < self.seeded {

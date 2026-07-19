@@ -29,8 +29,10 @@ mod ops;
 mod packed;
 
 pub use heap::{
-    CollectorMode, Color, SharedRegion, SharedRoot, collector_mode, live_count, live_objects,
-    live_peak, note_refcount_anomalies, refcount_anomalies, reset_peak, reset_refcount_anomalies,
+    CollectorMode, Color, SAFEPOINT_GC_DEFAULT_THRESHOLD, SharedRegion, SharedRoot, collector_mode,
+    live_count, live_objects, live_peak, note_refcount_anomalies, rebuffer_candidate,
+    refcount_anomalies, reset_peak, reset_refcount_anomalies, safepoint_gc_arm,
+    safepoint_gc_default_threshold, safepoint_gc_disarm, safepoint_gc_pending, safepoint_gc_rearm,
     set_collector_mode, take_candidates,
 };
 pub use ids::{ChannelId, ScopeId, TaskId};

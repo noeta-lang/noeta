@@ -156,6 +156,13 @@ impl<'m> Vm<'m> {
         // with ops that carry their own `base` field). `chunk` borrows `*module` (an `&'m Module`
         // copied out of `self`), so it is independent of the `&mut self` the arms use.
         'reload: loop {
+            // Safepoint-GC poll at the frame transfer (memory-management 6.x): one predicted
+            // thread-local-bool read when idle. A frame transfer is a safe point by construction —
+            // every active register window holds exactly its owned references (the same invariant
+            // the abort teardown releases by), so the full root set is enumerable.
+            if noeta_value::safepoint_gc_pending() {
+                self.maybe_safepoint_gc(frames, regs);
+            }
             // Re-read the module each frame transfer, NOT once per dispatch: a debug-console
             // fragment install ([`Vm::install_fragment`], tooling-unification T4) swaps
             // `self.module` to an extended snapshot mid-run, and the next frame must resolve
@@ -237,6 +244,13 @@ impl<'m> Vm<'m> {
             // (the branch's own location) *before* `pc` is reassigned to it.
             macro_rules! osr_backedge {
                 ($target:expr) => {
+                    // Safepoint-GC poll at the taken loop back-edge (memory-management 6.x): the
+                    // other half of the poll placement (see the `'reload` poll above), so a loop
+                    // that never calls still reaches a safepoint each iteration. One predicted
+                    // thread-local-bool read when idle.
+                    if ($target as usize) <= pc && noeta_value::safepoint_gc_pending() {
+                        self.maybe_safepoint_gc(&*frames, &*regs);
+                    }
                     #[cfg(feature = "jit")]
                     {
                         let _osr_t = $target as usize;
@@ -2270,7 +2284,12 @@ impl<'m> Vm<'m> {
                         // the frame teardown can no longer see the future — skipping this on the
                         // error path (e.g. a detected async deadlock) orphans it (the refcount
                         // anomaly the strengthened leak oracle catches). `drive_future` borrows.
-                        let value = self.drive_future(future, *span);
+                        // The consumed future rides `transient_roots` across the drive: with its
+                        // register emptied, only this Rust local owns it, and a mid-drive safepoint
+                        // collection must still see it as a root.
+                        self.transient_roots.push(future);
+                        let value = self.drive_future(future, *span, Some((frames, regs)));
+                        self.transient_roots.pop();
                         self.release_value(future);
                         let value = value?;
                         set_reg(regs, fbase, *dst, value);
@@ -2357,7 +2376,7 @@ impl<'m> Vm<'m> {
                     Op::ScopeEnd { span } => {
                         // Join the scope (drive every task to completion), then pop it and release the
                         // tasks' owned futures and results.
-                        self.join_scope(*span)?;
+                        self.join_scope(*span, Some((frames, regs)))?;
                         if let Some(scope) = self.sched.scopes.pop() {
                             for mut task in scope {
                                 // End any producer holds this task still carries (isolates I.4c): a

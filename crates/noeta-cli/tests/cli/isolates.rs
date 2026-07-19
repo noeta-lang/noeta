@@ -33,6 +33,44 @@ fn run_real_isolate_returns_marshalled_result() {
 }
 
 #[test]
+fn run_real_isolate_collects_cycles_at_its_own_safepoints() {
+    // A worker isolate building reference cycles in a loop, with the safepoint-GC threshold pinned
+    // tiny so the WORKER's own thread-local trigger fires many mid-run collections (memory-
+    // management 6.x: per-isolate heaps collect at per-isolate safepoints). Correct output +
+    // clean exit prove the worker's roots (its depth-0 callee/future transients included) survive
+    // every collection while the stranded cycles are reclaimed.
+    let file = temp_program(
+        "isolate_cycle_gc",
+        "class Node { pub mut next: ?Node\n\
+         fn new(): Node { return Node { next: none } } }\n\
+         async fn spin(count: int): int {\n\
+         mut i = 0\n\
+         while i < count {\n\
+         a = Node.new()\n\
+         b = Node.new()\n\
+         a.next = some(b)\n\
+         b.next = some(a)\n\
+         i = i + 1\n\
+         }\n\
+         return i\n\
+         }\n\
+         async fn run(): int {\n\
+         mut r = 0\n\
+         concurrent { d = isolate spin(20000); r = d.await }\n\
+         return r\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .env("NOETA_GC_THRESHOLD", "128")
+        .assert()
+        .success()
+        .stdout("20000\n");
+}
+
+#[test]
 fn run_real_isolates_fan_out_and_join() {
     // Three isolates run in parallel and their results are summed after the structured join; the
     // isolate body calls a *global* function, exercising the marshalled-globals snapshot.

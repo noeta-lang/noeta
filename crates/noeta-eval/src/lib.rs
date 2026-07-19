@@ -24,6 +24,7 @@ use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, TypeRef, UnaryOp};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
+mod cycles;
 pub mod drop_audit;
 mod ids;
 mod ir;
@@ -33,7 +34,7 @@ mod ops;
 mod value;
 
 pub(crate) use ids::{ChannelId, ScopeId, TaskId};
-pub use leak::live_count;
+pub use leak::{live_count, live_peak, reset_peak, set_safepoint_threshold};
 pub use value::{IterState, ListRepr, Value};
 use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
 
@@ -381,7 +382,7 @@ pub struct EnumDef {
     /// closures capturing the definition (global) scope — exactly like a struct/class's `methods`.
     /// An instance call `value.m(...)` and an associated call `Enum.f(...)` both resolve here; the
     /// distinction (a value receiver vs. a bare type-name receiver) is made at the call site.
-    methods: HashMap<String, Rc<Closure>>,
+    pub(crate) methods: HashMap<String, Rc<Closure>>,
 }
 
 impl EnumDef {
@@ -417,7 +418,7 @@ struct VariantInfo {
 pub struct EnumValue {
     enum_name: String,
     variant: String,
-    data: Vec<Value>,
+    pub(crate) data: Vec<Value>,
     /// The variant's declaration index — derived `Comparable`'s primary key (variant order, then
     /// payload). Type metadata like the VM `Shape::variant_index`: **excluded from `PartialEq`**
     /// (equality compares name/variant/data).
@@ -478,12 +479,12 @@ impl EnumValue {
 pub struct TypeDef {
     name: String,
     fields: Vec<FieldSpec>,
-    methods: HashMap<String, Rc<Closure>>,
+    pub(crate) methods: HashMap<String, Rc<Closure>>,
     /// The class's `destruct` block lowered to a parameterless Core-IR [`noeta_ir::Func`], if any —
     /// run by the runtime when the last reference to an instance drops (not directly callable),
     /// with the instance's fields and `self` bound into its scope. Shared so an `ObjectValue` can
     /// reach it.
-    destructor: Option<Rc<noeta_ir::Func>>,
+    pub(crate) destructor: Option<Rc<noeta_ir::Func>>,
     /// Whether this came from a `struct X {...}` struct (vs. a `class`). Cosmetic in M0.
     is_struct: bool,
     /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**
@@ -553,7 +554,7 @@ struct FieldSpec {
 /// `Rc<BTreeMap>` cannot. Borrows are always released promptly (snapshot-then-release) so a method
 /// or destructor that re-enters and mutates the same instance never hits a borrow conflict.
 pub struct ObjectValue {
-    def: Rc<TypeDef>,
+    pub(crate) def: Rc<TypeDef>,
     /// The field values in **slot order**, parallel to `def.fields` (`slots[i]` is the value of
     /// `def.fields[i]`). This mirrors the VM's `Payload::Object { shape, slots }` — the layout
     /// groundwork P-PACK Phase 1 needs — replacing the former name-keyed `BTreeMap`: a `Vec` index
@@ -561,7 +562,7 @@ pub struct ObjectValue {
     /// shared `def`, not per instance. An opaque `use`-import is constructed with a per-literal `def`
     /// whose fields are the literal's keys in sorted order (matching the VM's opaque shape), so even
     /// dynamic-field imports fit the uniform slot model.
-    slots: RefCell<Vec<Value>>,
+    pub(crate) slots: RefCell<Vec<Value>>,
     /// A monotonic per-run **creation sequence** (object-model slice 2c): the instance's allocation
     /// age. The cycle reaper finalizes reclaimed members in reverse-creation order (newest-first) by
     /// this key, matching the VM's `ObjHeader::seq` so cyclic `destruct` order agrees across backends.
@@ -709,7 +710,7 @@ pub struct Closure {
     /// matching the VM's globals-only default thunks.
     defaults: Vec<Option<noeta_ir::Thunk>>,
     body: Rc<noeta_ir::Func>,
-    captured: Rc<Scope>,
+    pub(crate) captured: Rc<Scope>,
     /// The declared name (`"f"`, `"Type.method"`) for the abort traceback — the eval twin of the
     /// VM's `Chunk::name`. `None` for an anonymous closure value.
     name: Option<String>,
@@ -791,6 +792,40 @@ fn register_mutated_object(obj: &Rc<ObjectValue>) {
     });
 }
 
+/// The still-live captured-scope candidates (upgraded, deduplicated by pointer) — the safepoint
+/// collector's seed set. **Peeked, not drained**: live and deferred entries must stay registered
+/// for the exit reapers; entries whose target the collection frees fail their next upgrade and are
+/// pruned by [`prune_cycle_registries`].
+pub(crate) fn captured_scope_candidates() -> Vec<Rc<Scope>> {
+    CAPTURED_SCOPES.with(|r| {
+        let mut seen = std::collections::HashSet::new();
+        r.borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|s| seen.insert(Rc::as_ptr(s) as usize))
+            .collect()
+    })
+}
+
+/// The still-live mutated-object candidates — see [`captured_scope_candidates`].
+pub(crate) fn mutated_object_candidates() -> Vec<Rc<ObjectValue>> {
+    MUTATED_OBJECTS.with(|r| {
+        let mut seen = std::collections::HashSet::new();
+        r.borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|o| seen.insert(Rc::as_ptr(o) as usize))
+            .collect()
+    })
+}
+
+/// Drop dead weak entries from both candidate registries (after a safepoint collection freed
+/// their targets), bounding the registries to the live candidate set.
+pub(crate) fn prune_cycle_registries() {
+    CAPTURED_SCOPES.with(|r| r.borrow_mut().retain(|w| w.strong_count() > 0));
+    MUTATED_OBJECTS.with(|r| r.borrow_mut().retain(|w| w.strong_count() > 0));
+}
+
 impl Drop for Closure {
     fn drop(&mut self) {
         leak::dec();
@@ -809,7 +844,7 @@ impl std::fmt::Debug for Closure {
 
 /// A name binding and whether it may be reassigned.
 struct Binding {
-    value: Value,
+    pub(crate) value: Value,
     mutable: bool,
 }
 
@@ -820,11 +855,11 @@ struct Binding {
 /// them by clearing the bindings of any captured scope still live after global teardown,
 /// so heap residency reaches 0 on this backend (the leak oracle's gate).
 struct Scope {
-    vars: RefCell<HashMap<String, Binding>>,
+    pub(crate) vars: RefCell<HashMap<String, Binding>>,
     /// Binding names in declaration order, so the runtime can destroy them in reverse
     /// declaration order at scope exit — the deterministic destruction order the spec wants.
-    order: RefCell<Vec<String>>,
-    parent: Option<Rc<Scope>>,
+    pub(crate) order: RefCell<Vec<String>>,
+    pub(crate) parent: Option<Rc<Scope>>,
 }
 
 /// The outcome of trying to reassign an existing binding through the scope chain. `Assigned`
@@ -3402,6 +3437,9 @@ impl Interpreter {
                 arity_message("function", required, closure.params.len(), args.len()),
             ));
         }
+        // Safepoint-GC poll at the call boundary (memory-management 6.x) — with the loop
+        // polls, this bounds a recursion-driven cycle builder too.
+        cycles::poll_safepoint();
         let supplied = args.len();
         let call_scope = Scope::child(&closure.captured);
         for (param, arg) in closure.params.iter().zip(args) {
@@ -3440,6 +3478,8 @@ impl Interpreter {
                 arity_message("method", required, method.params.len(), args.len()),
             ));
         }
+        // Safepoint-GC poll at the call boundary — see `call_closure`.
+        cycles::poll_safepoint();
         let supplied = args.len();
         let call_scope = Scope::child(&method.captured);
         // Bind only `self` — fields are **not** snapshotted into the scope. A bare field read
