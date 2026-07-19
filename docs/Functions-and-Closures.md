@@ -122,6 +122,20 @@ fn run(f: (int) -> int, x: int): int { return f(x) }
 
 Collection methods are passable as values via **unbound method handles**: `list.len`, `string.upper`, `Stack.size` — each a callable taking the receiver as its first argument (`xss.map(list.len)`).
 
+## Calling a closure-valued field
+
+A function value stored in a **field** is called directly through its receiver — `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (the field-access-then-call desugar). The call is arity/argument-checked against the field's declared type, exactly like a call through a `Fn`-typed local:
+
+```noeta
+struct Counter {
+    step: (int) -> int
+}
+c = Counter { step: fn(x: int) => x + 1 }
+echo c.step(41)      // 42 — load the field, call the value
+```
+
+When a type declares **both** a method and a field of the same name, the method wins in call position (`obj.f(x)` dispatches the method) while the field wins in value position (`obj.f` reads the field) — bind it (`g = obj.f; g(x)`) to call the field. Parentheses are transparent, so `(obj.f)(x)` is the same call as `obj.f(x)`. On a `dyn` receiver the same order applies at runtime: the method table first, then the field. A field whose type is not a function is not callable — E0007, statically when the receiver's type is known.
+
 ## The pipe operator
 
 `|>` threads the left value as the **first argument** of the right call. It turns nested calls into a left-to-right pipeline:

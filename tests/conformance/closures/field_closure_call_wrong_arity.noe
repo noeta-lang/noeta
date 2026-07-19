@@ -1,0 +1,11 @@
+// A call through a `Fn`-typed field is arity-checked against the field's declared parameter
+// types, exactly like a call through a `Fn`-typed local (the same `check_args` path): too many
+// arguments is a static E0007. (The lower bound stays unenforced — a function value does not
+// record which parameters carry defaults.)
+// expect: error E0007 at 11:6
+// expect: exit 1
+struct Counter {
+    step: (int) -> int
+}
+c = Counter { step: fn(x: int) => x + 1 }
+echo c.step(1, 2)

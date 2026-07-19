@@ -67,6 +67,23 @@ for (i, x) in ["a", "b"].enumerate() {   // enumerate yields (index, value) tupl
 
 Iterating a map yields its values; iterating a set yields elements in sorted order.
 
+A user type iterates through the `Iterable` protocol — `iter()` returning a list — or as a **`next`-driven iterator**: an object exposing a callable `next` member (a method, or a closure-valued field) is driven `next()` → `some(x)`/`none` until exhausted. `iter()` may itself return such a handle. User iteration materializes its elements eagerly; lazy streaming is the built-in `Iterator<T>`'s (`xs.iter()`).
+
+```noeta
+struct Gen {
+    next: () -> ?int
+}
+fn counter(hi: int): Gen {
+    mut n = 0
+    return Gen { next: fn(): ?int {
+        if n >= hi { return none }
+        n = n + 1
+        return some(n - 1)
+    } }
+}
+for x in counter(3) { echo x }   // 0 1 2
+```
+
 ## `break` and `continue`
 
 Both work in `while` and `for`, including inside a nested `if`. `break` outside any loop is E0024.

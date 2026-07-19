@@ -17,7 +17,7 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| **`obj.f(args)` on a closure-valued field** — parsed unconditionally as method dispatch (E0005); needs the field-access-then-call desugar. With it: the `Callable`/`Members` protocols | M1.8 tail + coroutines Track-I. Trigger: member-handles / user iterators holding a `next` closure |
+| **`Members`/`DynamicCall` protocol dispatch** — registered in the trait table (`get(name)` / `call(name, args)`) but with no behavior: no language construct consumes dynamic member access today (`obj.f(args)` field-calls, `Callable`, and `next`-driven iterators all shipped without it). Deliberately deferred rather than shipping speculative machinery | M1.8b tail (the last unwired protocol names). Trigger: a concrete consumer — a dynamic-proxy/ORM-style use case, or reflection-driven member access |
 | Nested `concurrent` inside a *spawned task's own body* runs atomically within that task's poll | A.7 residual |
 | Prelude constructors (`Ok`/`Err`/`some`) and `panic` as first-class *values* | slice F2 residue. Exotic; needs hand-matched runtime arity/error text |
 | **Editions S3/S4** — the first real edition-gated behavior (S3, pending a deliberate language divergence) and edition-aware diagnostics + a `noeta fix` migrator (S4, depends on S3) | editions arc. Trigger: a breaking language change we want to ship |

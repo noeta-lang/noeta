@@ -1,0 +1,14 @@
+// A call through the `Callable` protocol is arity-checked against the `call` method's own
+// signature: `add10` takes one argument, so two is a static E0007 — exactly as the explicit
+// `add10.call(1, 2)` would be checked.
+// expect: error E0007 at 14:6
+// expect: exit 1
+class Adder {
+    pub base: int
+
+    impl Callable {
+        fn call(x: int): int { return self.base + x }
+    }
+}
+add10 = Adder { base: 10 }
+echo add10(1, 2)

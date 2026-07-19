@@ -109,12 +109,15 @@ impl Checker {
                     "the `{trait_name}` trait requires the `{req_name}` method"
                 ));
             }
-            Some(m) if m.params.len() != req_arity => {
+            // An arity of `None` is not pinned by the registry (`Callable`'s `call` takes whatever
+            // the object needs — `obj(args)` forwards the call site's arguments).
+            Some(m) if req_arity.is_some_and(|arity| m.params.len() != arity) => {
+                let arity = req_arity.expect("guarded by is_some_and");
                 self.error(
                     DiagnosticCode::InvalidImpl,
                     m.name_span,
                     format!(
-                        "`{req_name}` must take {req_arity} parameter(s), found {}",
+                        "`{req_name}` must take {arity} parameter(s), found {}",
                         m.params.len()
                     ),
                 );

@@ -84,6 +84,7 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Index` | `get(i): T` | `a[i]` |
 | `Length` | `len(): int` | `x.len()` on a `<T: Length>` parameter |
 | `Iterable` | `iter(): Iterator<T>` | `for x in o` |
+| `Callable` | `call(...)` — any arity | `obj(args)` |
 | `Clone` | — | structural clone |
 
 `Ordering` is a namable built-in enum (`Ordering.Less` / `Equal` / `Greater`); calling `.compare()` on a primitive returns it.
@@ -104,6 +105,19 @@ class Money {
     }
 }
 echo (Money.new(3) < Money.new(5))   // true
+```
+
+**`Callable` makes an object invocable.** A type implementing `Callable` with a `call` method can be applied like a function — `obj(args)` dispatches to `obj.call(args)`, with the receiver's state in scope. The arity is the method's own (the protocol does not pin it), and the call is arity/argument-checked against the method's signature like any method call. A user type without a `call` method is statically not callable (E0007).
+
+```noeta
+class Adder {
+    pub base: int
+    impl Callable {
+        fn call(x: int): int { return self.base + x }
+    }
+}
+add10 = Adder { base: 10 }
+echo add10(5)     // 15
 ```
 
 There is also a **standalone** `impl Trait for T { ... }`, which must target a type declared in the same module — an orphan target is E0013, a wrong or missing required method is E0015. A standalone impl of a **user** trait may carry method bodies (hoisted onto the target type); an impl of a **built-in** trait must stay an empty-body marker (a body is E0015 — those methods live in the type's own body).

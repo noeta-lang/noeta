@@ -1,0 +1,12 @@
+// The field-call desugar respects field privacy: calling a private `class` field's closure from
+// outside the declaring type is E0035, exactly like reading it — while the type's own methods
+// call it freely.
+// expect: error E0035 at 12:6
+// expect: exit 1
+class Machine {
+    op: (int) -> int
+    fn new(): Machine { return Machine { op: fn(x: int) => x * 2 } }
+    fn run(x: int): int { return self.op(x) }
+}
+m = Machine.new()
+echo m.op(5)

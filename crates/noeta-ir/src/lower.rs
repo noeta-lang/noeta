@@ -102,6 +102,10 @@ pub struct LoweringSites<'a> {
     /// **Bound**-handle sites (`value.method` in value position, EX.2b) → emitted as an
     /// [`Rvalue::BoundHandle`] (the receiver captured) instead of a field load.
     pub bound_handle_sites: &'a HashSet<Span>,
+    /// Field-call sites: `obj.f(args)` call spans the checker resolved to a **field** of the
+    /// receiver's type → lowered as [`Rvalue::Field`] then [`Rvalue::Call`] (the field-access-
+    /// then-call desugar) instead of [`Rvalue::Method`], so `obj.f(args)` means `(obj.f)(args)`.
+    pub field_call_sites: &'a HashSet<Span>,
     /// Bare float-literal spans the checker adapted into an `f32` context (`mut x: f32 = 1.5`,
     /// P-NUM-SYM). Unlike `f64` (bit-identical to `float`), `f32` is a *distinct 32-bit*
     /// representation, so an adapted literal must lower to a narrow [`Const::F32`] rather than the
@@ -138,6 +142,7 @@ impl LoweringSites<'static> {
             construction_sites: REPRS.get_or_init(HashMap::new),
             handle_sites: HANDLES.get_or_init(HashMap::new),
             bound_handle_sites: SPANS.get_or_init(HashSet::new),
+            field_call_sites: SPANS.get_or_init(HashSet::new),
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
             bundle_call_sites: PAIRS.get_or_init(HashMap::new),
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
@@ -166,6 +171,7 @@ macro_rules! lowering_sites {
             construction_sites: &$s.construction_sites,
             handle_sites: &$s.handle_sites,
             bound_handle_sites: &$s.bound_handle_sites,
+            field_call_sites: &$s.field_call_sites,
             f32_literal_sites: &$s.f32_literal_sites,
             bundle_call_sites: &$s.bundle_call_sites,
             namespace_module_sites: &$s.namespace_module_sites,
@@ -1401,6 +1407,33 @@ impl Lowerer<'_> {
                         ));
                     }
                     let receiver = self.lower_expr(receiver, out)?;
+                    // A field-call site (`obj.f(args)` where the checker resolved `f` to a FIELD of
+                    // the receiver's type): the field-access-then-call desugar — load the field,
+                    // then call the loaded value, exactly the `Field` + `Call` sequence the
+                    // spelled-out `g = obj.f; g(args)` lowers to. The field is loaded **before**
+                    // the arguments, matching the `(obj.f)(args)` callee-first evaluation order.
+                    if self.sites.field_call_sites.contains(span) {
+                        let callee = self.emit(
+                            out,
+                            Rvalue::Field {
+                                receiver,
+                                name: name.clone(),
+                                name_span: *name_span,
+                                span: *span,
+                            },
+                            *span,
+                        );
+                        let arg_atoms = self.lower_args(args, out)?;
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::Call {
+                                callee,
+                                args: arg_atoms,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
                     let arg_atoms = self.lower_args(args, out)?;
                     // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
                     // this call span in `width_sites`. Emit the width-carrying `WidthIntMethod` so both

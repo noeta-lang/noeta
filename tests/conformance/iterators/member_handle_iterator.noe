@@ -1,0 +1,50 @@
+// The **member-handle iterator** (coroutines Track-I trigger, closing the M1.8 tail): a user
+// type holding a `next` CLOSURE FIELD satisfies iteration — `for x in gen` drives `gen.next()`
+// until `none`, and the member-call machinery (method first, then the closure-valued field)
+// resolves each step. The closure captures its state through a shared cell, so the handle is a
+// self-contained iterator value. Elements materialize eagerly, like the `Iterable` list path.
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "0"
+// expect: stdout "0"
+// expect: stdout "10"
+// expect: stdout "20"
+// expect: exit 0
+struct Gen {
+    next: () -> ?int
+}
+
+fn counter(hi: int): Gen {
+    mut n = 0
+    return Gen {
+        next: fn(): ?int {
+            if n >= hi { return none }
+            n = n + 1
+            return some(n - 1)
+        }
+    }
+}
+
+for x in counter(3) {
+    echo x
+}
+
+// The handle's `next` is also directly callable through the field-call desugar — the same
+// member-call seam the loop uses.
+g = counter(1)
+echo g.next() ?? -1
+
+// A `next` METHOD works identically (the method wins the member lookup; same drive protocol).
+class Tens {
+    pub mut n: int
+    fn next(): ?int {
+        if self.n >= 3 { return none }
+        self.n = self.n + 1
+        return some((self.n - 1) * 10)
+    }
+}
+t = Tens { n: 0 }
+for x in t {
+    echo x
+}

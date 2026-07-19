@@ -1630,6 +1630,17 @@ impl Interpreter {
     /// Materialize the elements a `for` loop iterates over: a list/set in canonical order, a
     /// map's values in key order, or a user object's `Iterable` (`iter`) list. Shared by the
     /// AST walker's `exec_for` and the Core-IR interpreter so both agree by construction.
+    /// Whether a value is a user object exposing a `next` member — a declared method, or a field
+    /// (whose value the drain calls through the ordinary member-call path; a non-callable one
+    /// raises the indirect-call error there). The gate for `next`-driven user iteration,
+    /// mirrored by the VM's shape-based gate.
+    fn has_user_next(v: &Value) -> bool {
+        matches!(
+            v,
+            Value::Object(o) if o.def.methods.contains_key("next") || o.field("next").is_some()
+        )
+    }
+
     fn iter_elements(&mut self, iterable: Value, span: Span) -> Eval<Vec<Value>> {
         match &iterable {
             Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
@@ -1638,10 +1649,12 @@ impl Interpreter {
             // Iterating a map yields its values, in deterministic key order.
             Value::Map(entries, _) => Ok(entries.values().cloned().collect()),
             // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
-            // `iter` method returns.
+            // `iter` method returns — or, composing with the member-handle iterator below, the
+            // `next`-driven user iterator object it returns.
             Value::Object(object) if object.def.methods.contains_key("iter") => {
                 match self.call_method(iterable.clone(), "iter", Vec::new(), span)? {
                     Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
+                    other if Self::has_user_next(&other) => self.drain_next_object(other, span),
                     other => Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
                         span,
@@ -1649,11 +1662,49 @@ impl Interpreter {
                     )),
                 }
             }
+            // The **member-handle iterator** (coroutines Track-I trigger): a user object with no
+            // `iter` but a callable `next` member — a method, or (through the member-call
+            // fallback) a closure-valued field — drives iteration directly: `next()` until
+            // `none`, each `some(x)` contributing an element. Eager like the `Iterable` list
+            // path (user iteration snapshots; lazy streaming remains built-in `Iterator<T>`'s).
+            Value::Object(_) if Self::has_user_next(&iterable) => {
+                self.drain_next_object(iterable.clone(), span)
+            }
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!("cannot iterate over {}", other.type_name()),
             )),
+        }
+    }
+
+    /// Drain a `next`-driven user iterator object into its element list: call the object's `next`
+    /// member — dispatched through the ordinary member-call path, so a method or a closure-valued
+    /// field both work — until it returns `none`; each `some(x)` contributes `x`. A step that is
+    /// not a built-in option is E0007, identically in both backends.
+    fn drain_next_object(&mut self, obj: Value, span: Span) -> Eval<Vec<Value>> {
+        let mut elements = Vec::new();
+        loop {
+            let step = self.call_method(obj.clone(), "next", Vec::new(), span)?;
+            let payload = match &step {
+                Value::Enum(e) if e.enum_name == "Option" && e.variant == "some" => {
+                    e.data.first().cloned().unwrap_or(Value::Unit)
+                }
+                Value::Enum(e) if e.enum_name == "Option" && e.variant == "none" => {
+                    return Ok(elements);
+                }
+                other => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "iterator `next` must return an option, found {}",
+                            other.type_name()
+                        ),
+                    ));
+                }
+            };
+            elements.push(payload);
         }
     }
 
@@ -2275,11 +2326,21 @@ impl Interpreter {
                 Some(method) => {
                     self.call_method_on(&Rc::clone(object), &Rc::clone(method), args, span)
                 }
-                None => Err(self.runtime_error(
-                    DiagnosticCode::UnknownName,
-                    span,
-                    format!("type `{}` has no method `{name}`", object.def.name()),
-                )),
+                // The runtime member-call fallback (the field-access-then-call desugar's `dyn`
+                // path): no method `name`, but the object HAS a field `name` — `obj.f(args)`
+                // means `(obj.f)(args)`, so call the field's value. The same order the checker
+                // pins statically (a method wins, the field is consulted only on a miss), and the
+                // same route the lowered `Field` + `Call` takes — a non-callable field value
+                // raises the indirect-call E0007 ("`X` is not callable"), identically in both
+                // backends. A type with neither stays the runtime E0005.
+                None => match object.field(name) {
+                    Some(value) => self.call(value, args, span),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        span,
+                        format!("type `{}` has no method `{name}`", object.def.name()),
+                    )),
+                },
             };
         }
         // `status.label()` — an enum instance method (the unified body, object-model slice 3). The
@@ -3420,11 +3481,29 @@ impl Interpreter {
             // A bound handle (`f = x.method`, EX.2b): dispatch the method on the captured receiver.
             Value::BoundMethod(recv, method) => self.call_method(*recv, &method, args, span),
             Value::Function(closure) => self.call_closure(&closure, args, span),
-            other => Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!("{} is not callable", other.type_name()),
-            )),
+            other => {
+                // The **`Callable` protocol**: an object (or enum value) invoked as a value —
+                // `obj(args)` dispatches to its `call` METHOD, the protocol's required method.
+                // Structural at runtime like the other protocol dispatches (`iter`, `to_string`):
+                // the method table is what is consulted, and `impl Callable { fn call(...) }` is
+                // the validated way to populate it. Deliberately method-only — a closure-valued
+                // FIELD named `call` does not make the object invocable (that is member-call
+                // territory: `obj.call(args)` reaches it) — so both backends gate identically.
+                if matches!(&other, Value::Object(o) if o.def.methods.contains_key("call")) {
+                    return self.call_method(other, "call", args, span);
+                }
+                if let Value::Enum(e) = &other
+                    && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
+                    && def.method("call").is_some()
+                {
+                    return self.call_method(other, "call", args, span);
+                }
+                Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("{} is not callable", other.type_name()),
+                ))
+            }
         }
     }
 

@@ -1031,6 +1031,16 @@ impl<'m> Vm<'m> {
                             )?;
                             continue 'reload;
                         }
+                        // The member-handle iterator (coroutines Track-I trigger): a user object
+                        // with no `iter` but a callable `next` member — a method, or a
+                        // closure-valued field — drains into a materialized snapshot list,
+                        // exactly like the tree-walker.
+                        if v.is_object() && self.has_user_next(v) {
+                            let list = self.drain_next_object(v, *span)?;
+                            set_reg(regs, fbase, *dst, list);
+                            pc += 1;
+                            continue;
+                        }
                         // Snapshot the elements to iterate: a packed list materializes into an owned
                         // boxed snapshot (so `ListLen`/`ListGet` never see the flat form); a list's
                         // elements, a set's canonical elements, or a map's values in sorted-key order
@@ -1052,6 +1062,17 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *src as usize];
                         match v.list_len() {
                             Some(n) => {
+                                set_reg(regs, fbase, *dst, Value::int(n as i64));
+                                pc += 1;
+                            }
+                            // `iter()` returned a `next`-driven user iterator object (the
+                            // Iterable → member-handle composition): drain it into the snapshot
+                            // register, exactly as the tree-walker's `iter_elements` does, so the
+                            // loop's `ListGet` reads the materialized elements.
+                            None if self.has_user_next(v) => {
+                                let list = self.drain_next_object(v, *span)?;
+                                let n = list.list_len().expect("the drain returns a list");
+                                set_reg(regs, fbase, *src, list);
                                 set_reg(regs, fbase, *dst, Value::int(n as i64));
                                 pc += 1;
                             }
@@ -1338,6 +1359,37 @@ impl<'m> Vm<'m> {
                                 None => {
                                     let shape = v.shape().unwrap();
                                     let Some(proto) = self.method_proto(&shape.name, method) else {
+                                        // The runtime member-call fallback (the field-access-then-
+                                        // call desugar's `dyn` path): no method `method`, but the
+                                        // shape HAS a field of that name — `obj.f(args)` means
+                                        // `(obj.f)(args)`, so call the field's value through the
+                                        // shared closure-call setup (the `Op::Call` machinery).
+                                        // The same order the checker pins statically (a method
+                                        // wins, the field is consulted only on a miss) and the
+                                        // same route the lowered `Field` + `Call` takes — a
+                                        // non-callable field value raises the indirect-call E0007
+                                        // ("... is not callable"), identically in both backends.
+                                        // Left uncached: the method cache memoizes prototypes,
+                                        // and this dyn-only path re-probes per call.
+                                        if let Some(callee_val) =
+                                            shape.slot_of(method).and_then(|s| v.slot_at(s))
+                                        {
+                                            if self.setup_closure_call(
+                                                frames,
+                                                regs,
+                                                top,
+                                                fbase,
+                                                *dst,
+                                                callee_val,
+                                                args,
+                                                *span,
+                                                pc + 1,
+                                            )? {
+                                                continue 'reload;
+                                            }
+                                            pc += 1;
+                                            continue;
+                                        }
                                         return Err(self.error(
                                             DiagnosticCode::UnknownName,
                                             *span,

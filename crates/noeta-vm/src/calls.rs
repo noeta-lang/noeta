@@ -36,6 +36,90 @@ impl<'m> Vm<'m> {
             .copied()
     }
 
+    /// Whether a value is a user object exposing a `next` member — a declared method, or a field
+    /// slot (whose value the drain calls through the ordinary indirect-call path; a non-callable
+    /// one raises its error there). The gate for `next`-driven user iteration, mirroring the
+    /// tree-walker's.
+    pub(crate) fn has_user_next(&self, v: Value) -> bool {
+        v.is_object()
+            && v.shape().is_some_and(|s| {
+                self.method_proto(&s.name, "next").is_some() || s.slot_of("next").is_some()
+            })
+    }
+
+    /// Drain a `next`-driven user iterator object into a materialized element list — the
+    /// member-handle iterator (coroutines Track-I trigger): call the object's `next` member — a
+    /// method (the same synchronous re-entry a bound handle uses), or a closure-valued field
+    /// (called like any function value) — until it returns `none`; each `some(x)` contributes
+    /// `x`. Eager like the `Iterable` list path (user iteration snapshots; lazy streaming remains
+    /// built-in `Iterator<T>`'s). A step that is not a built-in option is E0007, identically in
+    /// both backends. `obj` is borrowed (the caller's register keeps it alive); the returned list
+    /// owns one reference per element.
+    pub(crate) fn drain_next_object(&mut self, obj: Value, span: Span) -> Result<Value, Abort> {
+        let mut elements: Vec<Value> = Vec::new();
+        loop {
+            let stepped = {
+                let shape = obj.shape().expect("a user iterator object has a shape");
+                if self.method_proto(&shape.name, "next").is_some() {
+                    retain(obj);
+                    self.run_method_handle("", "next", false, vec![obj], span)
+                } else {
+                    let f = shape
+                        .slot_of("next")
+                        .and_then(|s| obj.slot_at(s))
+                        .expect("gated on a `next` member");
+                    // Retained across the call: the closure body may reassign the very field
+                    // it was read from (a `class` field-set mutates in place), so the slot's
+                    // reference alone cannot be relied on for the call's duration.
+                    retain(f);
+                    let result = self.call_value(f, Vec::new(), span);
+                    release(f);
+                    result
+                }
+            };
+            let step = match stepped {
+                Ok(v) => v,
+                Err(abort) => {
+                    for e in elements {
+                        release(e);
+                    }
+                    return Err(abort);
+                }
+            };
+            let variant = step
+                .shape()
+                .filter(|s| s.name == "Option")
+                .and_then(|s| s.variant.clone());
+            match variant.as_deref() {
+                Some("some") => {
+                    let payload = step
+                        .enum_data()
+                        .and_then(|d| d.into_iter().next())
+                        .unwrap_or_else(Value::unit);
+                    retain(payload);
+                    release(step);
+                    elements.push(payload);
+                }
+                Some("none") => {
+                    release(step);
+                    return Ok(Value::list(elements));
+                }
+                _ => {
+                    let found = step.type_name();
+                    release(step);
+                    for e in elements {
+                        release(e);
+                    }
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("iterator `next` must return an option, found {found}"),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Call a value with already-owned arguments (each carrying one reference transferred to
     /// the callee), re-entering the VM on a fresh frame stack. Only closures are callable in
     /// this slice — builtins are never first-class values. Used by `map`/`filter`.
@@ -768,11 +852,38 @@ impl<'m> Vm<'m> {
                                 set_reg(regs, caller_base, dst, result);
                                 Ok(false)
                             }
-                            None => Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                span,
-                                format!("{} is not callable", callee_val.type_name()),
-                            )),
+                            None => {
+                                // The **`Callable` protocol**: an object (or enum value) invoked
+                                // as a value — `obj(args)` dispatches to its `call` METHOD
+                                // (receiver first, then the call's arguments) through the same
+                                // synchronous re-entry a bound handle uses. Structural at runtime
+                                // like the other protocol dispatches (`iter`, `to_string`): the
+                                // method table is consulted, `impl Callable { fn call(...) }` the
+                                // validated way to populate it. Method-only, matching the
+                                // tree-walker's gate — a closure-valued FIELD named `call` is
+                                // member-call territory (`obj.call(args)`), not invocability.
+                                if let Some(shape) = callee_val.shape()
+                                    && self.method_proto(&shape.name, "call").is_some()
+                                {
+                                    retain(callee_val);
+                                    let mut owned = Vec::with_capacity(arg_regs.len() + 1);
+                                    owned.push(callee_val);
+                                    for &r in arg_regs {
+                                        let v = regs[caller_base + r as usize];
+                                        retain(v);
+                                        owned.push(v);
+                                    }
+                                    let result =
+                                        self.run_method_handle("", "call", false, owned, span)?;
+                                    set_reg(regs, caller_base, dst, result);
+                                    return Ok(false);
+                                }
+                                Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    span,
+                                    format!("{} is not callable", callee_val.type_name()),
+                                ))
+                            }
                         },
                     },
                 },

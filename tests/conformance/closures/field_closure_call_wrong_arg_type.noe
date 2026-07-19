@@ -1,0 +1,10 @@
+// A call through a `Fn`-typed field type-checks each argument against the field's declared
+// parameter types (riding the fn-value call checking): a `string` where the `(int) -> int` field
+// expects an `int` is a static E0007.
+// expect: error E0007 at 10:6
+// expect: exit 1
+struct Counter {
+    step: (int) -> int
+}
+c = Counter { step: fn(x: int) => x + 1 }
+echo c.step("nope")
