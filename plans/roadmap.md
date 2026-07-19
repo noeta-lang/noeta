@@ -26,22 +26,30 @@ telemetry, CRDTs + p2p, and the `para` namespace with the aether web framework.
 
 ## The frontier — good next picks
 
-The 2026-07-19 backlog burndown closed every implementable *(active)* row and the deferred-item
-long tail (small language follow-ups, `.await` positions, channels I.4c, isolate env limits I.4b,
-nested `concurrent` A.7, safepoint cycle GC, keyed-list LiveView, field-calls + `Callable`,
-DAP workers + conditional breakpoints, profiler tier-1, per-project tree-sitter grammar, fmt
-follow-ons, salsa residuals, plus three latent compiler/VM bugs found en route). What remains in
-`backlog.md` is exclusively **decision-gated or trigger-gated**:
+The 2026-07-19/20 burndown + the owner-commissioned arcs that followed closed every implementable
+row: the deferred-item long tail (small language follow-ups, `.await` positions, channels I.4c,
+isolate env limits I.4b, nested `concurrent` A.7, safepoint cycle GC, keyed-list LiveView,
+field-calls + `Callable`, DAP workers + conditional breakpoints, profiler tier-1, per-project
+tree-sitter grammar, fmt follow-ons, salsa residuals), then a JSON/error/type-system sweep —
+`Error` trait + `From`/`?` conversions + `@derive(Error)`, `json.try_parse::<T>`/`JsonError`,
+registry-driven call-site-typed native functions, **polymorphic function values** (expected-type
+instantiation, user turbofish + `T`-forwarding, generic methods, prelude constructors as values),
+and **`Validate`** (recipe-boundary invariant enforcement + `@validated`) — plus advisory-intake
+residuals (CVSS, feed adapters, promote) and the **para/db migration system** (`noeta migrate` +
+seeds). Several latent compiler/VM/parser bugs were found and fixed en route. CUTS (owner):
+reverse debugging, down migrations. What remains in `backlog.md` is exclusively **decision-gated
+or trigger-gated**:
 
-1. **`@derive(FromJson)`** — buildable now; blocked only on the Ring 2 vs Ring 3 and
-   validating-hook decisions.
-2. **Publish the toolchain + registry repos** — the keystone; a user decision (naming, visibility,
-   push policy), then mechanical follow-through.
-3. **Decision items**: advisory-intake trust model, `h.cancel()` scope, editions S3/S4 (awaits a
-   deliberate breaking change), Tauri packaging, edge-platform proof, capability-enforcement
-   research, synced store R&D, TaskScope patterns.
-4. **Trigger-gated tails**: the perf cluster, stdlib follow-ons, OTEL residuals, and the remaining
-   tooling rows — each fires on its stated trigger, none on its own.
+1. **Publish the toolchain + registry repos** — the keystone; a user decision (naming, visibility,
+   push policy), then mechanical follow-through. Local `main` (both repos) carries everything,
+   unpushed.
+2. **User-action items**: the Spin/Fastly edge deploy (account + one deploy; the guide + verified
+   local proof are done), and editions S3/S4 (awaits a deliberate post-1.0 breaking change).
+3. **Design-gated**: Tauri packaging, capability-enforcement (static effect analysis — deferred by
+   the owner), synced store R&D, TaskScope patterns.
+4. **Trigger-gated tails**: the perf cluster, stdlib follow-ons, OTEL residuals, the attested watch
+   ledger (design note filed), the wasm-serve component packaging, and the small remaining tooling
+   rows — each fires on its stated trigger, none on its own.
 
 ## Working discipline (unchanged)
 
