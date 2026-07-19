@@ -74,8 +74,10 @@ struct Info {
     name: &'static str,
     /// The required method's name and parameter count *excluding the receiver*, or `None` for a
     /// marker trait whose behavior is fully synthesized (e.g. `Clone`, `Serialize`) and so imposes no
-    /// single hand-written method.
-    required_method: Option<(&'static str, usize)>,
+    /// single hand-written method. The arity is itself an `Option`: `None` means the method's
+    /// parameter count is **not pinned** by the registry — `Callable`'s `call` may take any number
+    /// of parameters, since `obj(args)` forwards whatever the call site supplies.
+    required_method: Option<(&'static str, Option<usize>)>,
     /// The infix operator this trait overloads, for the operator traits; `None` otherwise.
     operator: Option<BinaryOp>,
     /// Whether `@derive(Name)` is accepted for this trait.
@@ -90,28 +92,35 @@ impl BuiltinTrait {
         use BuiltinTrait::*;
         let (name, required_method, operator, derivable): (
             &'static str,
-            Option<(&'static str, usize)>,
+            Option<(&'static str, Option<usize>)>,
             Option<BinaryOp>,
             bool,
         ) = match self {
-            Add => ("Add", Some(("add", 1)), Some(BinaryOp::Add), false),
-            Sub => ("Sub", Some(("sub", 1)), Some(BinaryOp::Sub), false),
-            Mul => ("Mul", Some(("mul", 1)), Some(BinaryOp::Mul), false),
-            Div => ("Div", Some(("div", 1)), Some(BinaryOp::Div), false),
-            Concat => ("Concat", Some(("concat", 1)), Some(BinaryOp::Concat), false),
-            Equatable => ("Equatable", Some(("eq", 1)), None, true),
-            Comparable => ("Comparable", Some(("compare", 1)), None, true),
-            Display => ("Display", Some(("to_string", 0)), None, true),
+            Add => ("Add", Some(("add", Some(1))), Some(BinaryOp::Add), false),
+            Sub => ("Sub", Some(("sub", Some(1))), Some(BinaryOp::Sub), false),
+            Mul => ("Mul", Some(("mul", Some(1))), Some(BinaryOp::Mul), false),
+            Div => ("Div", Some(("div", Some(1))), Some(BinaryOp::Div), false),
+            Concat => (
+                "Concat",
+                Some(("concat", Some(1))),
+                Some(BinaryOp::Concat),
+                false,
+            ),
+            Equatable => ("Equatable", Some(("eq", Some(1))), None, true),
+            Comparable => ("Comparable", Some(("compare", Some(1))), None, true),
+            Display => ("Display", Some(("to_string", Some(0))), None, true),
             Clone => ("Clone", None, None, true),
             Serialize => ("Serialize", None, None, true),
             Deserialize => ("Deserialize", None, None, true),
-            Index => ("Index", Some(("get", 1)), None, false),
-            Length => ("Length", Some(("len", 0)), None, false),
-            Iterable => ("Iterable", Some(("iter", 0)), None, false),
-            Callable => ("Callable", None, None, false),
-            Members => ("Members", Some(("get", 1)), None, false),
-            DynamicCall => ("DynamicCall", Some(("call", 2)), None, false),
-            TryAdd => ("TryAdd", Some(("try_add", 1)), None, false),
+            Index => ("Index", Some(("get", Some(1))), None, false),
+            Length => ("Length", Some(("len", Some(0))), None, false),
+            Iterable => ("Iterable", Some(("iter", Some(0))), None, false),
+            // `Callable` makes an object invocable as `obj(args)` (dispatched to its `call`
+            // method); the arity is the method's own business, so it is not pinned here.
+            Callable => ("Callable", Some(("call", None)), None, false),
+            Members => ("Members", Some(("get", Some(1))), None, false),
+            DynamicCall => ("DynamicCall", Some(("call", Some(2))), None, false),
+            TryAdd => ("TryAdd", Some(("try_add", Some(1))), None, false),
             // A marker (no user-written method — the CRDT types carry the real merge natively) and
             // not derivable; `intrinsic()` further bars a hand-written `impl`.
             Mergeable => ("Mergeable", None, None, false),
@@ -137,8 +146,9 @@ impl BuiltinTrait {
     }
 
     /// The single method an `impl` block must provide (name + user-facing arity), or `None` for a
-    /// marker trait whose behavior is fully synthesized.
-    pub fn required_method(self) -> Option<(&'static str, usize)> {
+    /// marker trait whose behavior is fully synthesized. An arity of `None` means the parameter
+    /// count is not pinned (`Callable`'s `call` takes whatever the object needs).
+    pub fn required_method(self) -> Option<(&'static str, Option<usize>)> {
         self.info().required_method
     }
 
@@ -228,7 +238,7 @@ mod tests {
                         .unwrap_or_else(|| panic!("no operator trait for {op:?}"));
                     assert_eq!(
                         t.required_method(),
-                        Some((method, 1)),
+                        Some((method, Some(1))),
                         "method mismatch for {op:?}"
                     );
                 }
@@ -245,7 +255,10 @@ mod tests {
     #[test]
     fn equatable_dispatch_matches_registry() {
         use BinaryOp::*;
-        assert_eq!(BuiltinTrait::Equatable.required_method(), Some(("eq", 1)));
+        assert_eq!(
+            BuiltinTrait::Equatable.required_method(),
+            Some(("eq", Some(1)))
+        );
         assert_eq!(Eq.equatable_negation(), Some(false));
         assert_eq!(Ne.equatable_negation(), Some(true));
         for op in [Add, Sub, Mul, Div, Rem, Concat, Lt, Le, Gt, Ge, And, Or] {
@@ -264,7 +277,7 @@ mod tests {
         use BinaryOp::*;
         assert_eq!(
             BuiltinTrait::Comparable.required_method(),
-            Some(("compare", 1))
+            Some(("compare", Some(1)))
         );
         for op in [Lt, Le, Gt, Ge] {
             assert_eq!(op.comparable_method(), Some("compare"));

@@ -1,0 +1,10 @@
+// Invoking an object whose type provides no `call` method is statically rejected: a user type's
+// method set is closed, so nothing can make `p(3)` succeed at runtime — E0007 with the protocol
+// as the help, instead of the former runtime "object is not callable".
+// expect: error E0007 at 10:6
+// expect: exit 1
+struct Point {
+    x: int
+}
+p = Point { x: 1 }
+echo p(3)

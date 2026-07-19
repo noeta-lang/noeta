@@ -139,6 +139,16 @@ impl Checker {
                     }
                     return ret;
                 }
+                // A local binding of a user OBJECT type invoked as a value (`obj(args)`) — the
+                // `Callable` protocol: typed as `obj.call(args)` when the type provides a `call`
+                // method; a known user type without one is statically not callable (E0007).
+                if let Some(recv @ Type::Named(..)) = lookup(env, name) {
+                    let recv = recv.clone();
+                    if let Some(ret) = self.synth_callable_object(&recv, args, arg_exprs, span, env)
+                    {
+                        return ret;
+                    }
+                }
                 if let Some(sig) = self.symbols.functions.get(name) {
                     let required = sig.required;
                     // A generic function is instantiated per call: bind its type parameters from the
@@ -513,10 +523,56 @@ impl Checker {
                 ret
             }
             _ => {
-                self.synth(callee, env);
+                let ty = self.synth(callee, env);
+                // Any other callee expression whose static type is a user OBJECT type — the
+                // `Callable` protocol for computed callees (`make()(args)`, `pipeline[0](x)`).
+                if let Some(ret) = self.synth_callable_object(&ty, args, arg_exprs, span, env) {
+                    return ret;
+                }
                 Type::Unknown
             }
         }
+    }
+
+    /// Type an OBJECT invoked as a value — the **`Callable` protocol** (`obj(args)` means
+    /// `obj.call(args)`): when `recv` names a user type providing a `call` method, the call types
+    /// against that method's signature (generics instantiate from the receiver's type arguments,
+    /// exactly like an explicit method call). A known user type *without* a `call` method is
+    /// statically not callable — E0007 with the protocol as the help — since the method set of a
+    /// user type is closed. `None` when `recv` is not a resolvable user type (an extern type, a
+    /// type parameter, `dyn`): those stay lenient/deferred exactly as before.
+    pub(crate) fn synth_callable_object(
+        &mut self,
+        recv: &Type,
+        args: &mut [Type],
+        arg_exprs: &[Expr],
+        span: Span,
+        env: &mut Env,
+    ) -> Option<Type> {
+        let Type::Named(n, recv_args) = recv else {
+            return None;
+        };
+        if let Some(sig) = self
+            .symbols
+            .methods
+            .get(&(n.clone(), "call".to_string()))
+            .cloned()
+        {
+            return Some(self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, env));
+        }
+        if self.symbols.types.contains(n) || self.symbols.enums.contains_key(n) {
+            self.finalize_closure_args(&[], args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("type `{n}` is not callable"),
+            )
+            .help(format!(
+                "implement `Callable` with a `call` method to make a `{n}` invocable as `value(...)`"
+            ));
+            return Some(Type::Unknown);
+        }
+        None
     }
 
     /// Check a call to a resolved user method or associated function (`Box.new(...)`, `obj.m(...)`).

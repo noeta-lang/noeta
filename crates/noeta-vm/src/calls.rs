@@ -768,11 +768,38 @@ impl<'m> Vm<'m> {
                                 set_reg(regs, caller_base, dst, result);
                                 Ok(false)
                             }
-                            None => Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                span,
-                                format!("{} is not callable", callee_val.type_name()),
-                            )),
+                            None => {
+                                // The **`Callable` protocol**: an object (or enum value) invoked
+                                // as a value — `obj(args)` dispatches to its `call` METHOD
+                                // (receiver first, then the call's arguments) through the same
+                                // synchronous re-entry a bound handle uses. Structural at runtime
+                                // like the other protocol dispatches (`iter`, `to_string`): the
+                                // method table is consulted, `impl Callable { fn call(...) }` the
+                                // validated way to populate it. Method-only, matching the
+                                // tree-walker's gate — a closure-valued FIELD named `call` is
+                                // member-call territory (`obj.call(args)`), not invocability.
+                                if let Some(shape) = callee_val.shape()
+                                    && self.method_proto(&shape.name, "call").is_some()
+                                {
+                                    retain(callee_val);
+                                    let mut owned = Vec::with_capacity(arg_regs.len() + 1);
+                                    owned.push(callee_val);
+                                    for &r in arg_regs {
+                                        let v = regs[caller_base + r as usize];
+                                        retain(v);
+                                        owned.push(v);
+                                    }
+                                    let result =
+                                        self.run_method_handle("", "call", false, owned, span)?;
+                                    set_reg(regs, caller_base, dst, result);
+                                    return Ok(false);
+                                }
+                                Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    span,
+                                    format!("{} is not callable", callee_val.type_name()),
+                                ))
+                            }
                         },
                     },
                 },

@@ -3317,11 +3317,29 @@ impl Interpreter {
             // A bound handle (`f = x.method`, EX.2b): dispatch the method on the captured receiver.
             Value::BoundMethod(recv, method) => self.call_method(*recv, &method, args, span),
             Value::Function(closure) => self.call_closure(&closure, args, span),
-            other => Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!("{} is not callable", other.type_name()),
-            )),
+            other => {
+                // The **`Callable` protocol**: an object (or enum value) invoked as a value —
+                // `obj(args)` dispatches to its `call` METHOD, the protocol's required method.
+                // Structural at runtime like the other protocol dispatches (`iter`, `to_string`):
+                // the method table is what is consulted, and `impl Callable { fn call(...) }` is
+                // the validated way to populate it. Deliberately method-only — a closure-valued
+                // FIELD named `call` does not make the object invocable (that is member-call
+                // territory: `obj.call(args)` reaches it) — so both backends gate identically.
+                if matches!(&other, Value::Object(o) if o.def.methods.contains_key("call")) {
+                    return self.call_method(other, "call", args, span);
+                }
+                if let Value::Enum(e) = &other
+                    && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
+                    && def.method("call").is_some()
+                {
+                    return self.call_method(other, "call", args, span);
+                }
+                Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("{} is not callable", other.type_name()),
+                ))
+            }
         }
     }
 
