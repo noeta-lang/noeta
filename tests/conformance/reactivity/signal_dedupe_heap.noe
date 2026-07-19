@@ -1,0 +1,15 @@
+// Reactivity S0 — dedupe uses the language's `==`, which is STRUCTURAL for heap values (lists, maps).
+// A dedupe signal holding a list suppresses a `set` to a structurally-equal list ([1, 2, 3] again) and
+// fires only when the contents actually differ. So the effect prints the length on creation (3) and
+// once more when the list changes (4) — never for the equal re-set.
+// expect: stdout "len=3"
+// expect: stdout "len=4"
+// expect: exit 0
+use std.reactive.{signal, effect}
+items = signal([1, 2, 3], true)
+effect(fn() {
+    echo "len=${items.get().len()}"
+})
+items.set([1, 2, 3])      // structurally equal → suppressed
+items.set([1, 2, 3, 4])   // different contents → rerun
+items.set([1, 2, 3, 4])   // equal again → suppressed

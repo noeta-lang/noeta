@@ -435,6 +435,14 @@ fn compare(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError> {
     Ok(Value::bool(result))
 }
 
+/// The language's `==` as a direct predicate (the [`BinaryOp::Eq`] rung, without boxing a
+/// `Value::bool` result) — for callers that only need the boolean, e.g. a reactive `signal`'s opt-in
+/// equal-`set` suppression consulted through the extension ABI. Structurally identical to the
+/// operator, so it stays differential-identical with the tree-walker's [`crate::ops`] twin.
+pub fn value_eq(left: Value, right: Value) -> bool {
+    values_equal(left, right)
+}
+
 fn values_equal(left: Value, right: Value) -> bool {
     // Both integers: exact i64 equality.
     if let (Some(a), Some(b)) = (int_operand(left), int_operand(right)) {

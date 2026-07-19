@@ -263,6 +263,13 @@ impl NativeCtx for EvalCtx<'_> {
         Ok(Some(self.insert(payload)))
     }
 
+    fn values_equal(&mut self, a: Slot, b: Slot) -> CtxResult<bool> {
+        // The language's `==` verbatim (the tree-walker's own Eq rung over borrowed values).
+        let av = self.get(a)?.clone();
+        let bv = self.get(b)?.clone();
+        Ok(crate::ops::value_eq(&av, &bv))
+    }
+
     fn with_extern(
         &mut self,
         slot: Slot,

@@ -36,7 +36,7 @@ pub use heap::{
 pub use ids::{ChannelId, ScopeId, TaskId};
 pub use ops::{
     OpError, apply_binary, apply_binary_wide, apply_unary, compare_primitive, compare_values,
-    set_order, structural_compare,
+    set_order, structural_compare, value_eq,
 };
 
 use std::collections::BTreeMap;

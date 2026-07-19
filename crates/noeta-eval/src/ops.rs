@@ -237,6 +237,14 @@ fn compare(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpError> 
     Ok(Value::Bool(result))
 }
 
+/// The language's `==` as a direct predicate (the [`BinaryOp::Eq`] rung, without boxing a
+/// `Value::Bool` result) — for callers that only need the boolean, e.g. a reactive `signal`'s opt-in
+/// equal-`set` suppression consulted through the extension ABI. Structurally identical to the
+/// operator, so it stays differential-identical with the VM's [`noeta_value::ops`] twin.
+pub fn value_eq(left: &Value, right: &Value) -> bool {
+    values_equal(left, right)
+}
+
 fn values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => a == b,

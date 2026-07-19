@@ -29,7 +29,25 @@ n.update(fn(x) => x + 5)
 echo n.get()                    // 15
 ```
 
-Setting to a value equal to the current one still fires dependents — a change is a `set`, not a value difference (there is no equality suppression; it would not always be cheap, and this keeps the contract simple).
+By default, setting a signal to a value equal to the current one **still fires** dependents — a change is a `set`, not a value difference, which keeps the default contract simple (and equality is not always cheap to compute).
+
+### Opt-in equality suppression
+
+Pass `signal(initial, dedupe: true)` — a trailing `bool` flag — to make a signal skip re-firing when a `set`/`update` lands a value **equal to the current one under the language's `==`**. The comparison is exactly the `==` operator: structural for value types and collections (two lists with equal elements are equal), reference identity for a `class` without `impl Equatable`. It applies **only** to signals created with the flag; a plain `signal(initial)` is unchanged.
+
+```noeta
+use std.reactive.{signal, effect}
+count = signal(0, true)                 // dedupe on
+effect(fn() { echo "count is ${count.get()}" })   // prints once: "count is 0"
+count.set(0)                            // equal → suppressed, no rerun
+count.set(1)                            // changed → reruns: "count is 1"
+
+items = signal([1, 2, 3], true)
+items.set([1, 2, 3])                    // structurally equal → suppressed
+items.set([1, 2, 3, 4])                 // different → reruns
+```
+
+Use it for signals fed by a source that re-emits the same value (a poll, a recompute, an incoming message), so downstream effects only run on genuine change. Leave it off — the default — when every `set` should be observed, or when `==` would be expensive relative to the work a rerun does.
 
 ## Computeds — lazy, memoized derivations
 
@@ -115,7 +133,23 @@ effect(fn() { n.set(n.get() + 1) })   // reads n and writes n — never settles
 
 ## Disposal and ownership
 
-Every reactive node belongs to the program's implicit scope; all of them are reclaimed when the program ends. For finer control, an `effect` is **disposable** via `.dispose()`, which severs its subscriptions so it stops rerunning. Signals and computeds are not independently disposable — a computed has no side effect to stop, and both are freed with the scope. (Nested reactive scopes, where an effect owns and disposes child effects it creates, are a later addition.)
+An `effect` is **disposable** via `.dispose()`, which severs its subscriptions so it stops rerunning. Signals and computeds are not independently disposable — a computed has no side effect to stop, and both are freed by their owner or the scope.
+
+Ownership is a **tree** (the SolidJS model): a reactive node created *while a `computed`/`effect` body is running* is **owned** by that body. When the owner reruns — or is itself disposed — it disposes the children it created on its previous run (and their children, recursively) **before** running again. So a body that creates reactive nodes on every run does not accumulate duplicated effects:
+
+```noeta
+use std.reactive.{signal, effect}
+outer = signal(0)
+dep   = signal(0)
+effect(fn() {
+    outer.get()
+    effect(fn() { echo "dep is ${dep.get()}" })   // a child effect, owned by the outer one
+})
+outer.set(1)          // reruns outer: last run's child is disposed, a fresh one created
+dep.set(5)            // exactly ONE live child reacts — not one per outer run
+```
+
+Without this, each `outer` run would leave a live child subscribed to `dep`, and `dep.set` would fire an ever-growing pile of stale copies. A child's backing cells are reclaimed the moment its owner tears it down, not merely at program end. Nodes created at the top level (outside any body) are roots, reclaimed when the program ends; a foreign reactive source (a CRDT-synced signal, a reactive DB query) is always a root — it owns its own lifetime and is never torn down by a rerun of whatever body happened to construct it.
 
 ## Views — pushing state to a client
 
