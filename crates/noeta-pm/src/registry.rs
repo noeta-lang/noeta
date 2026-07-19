@@ -596,6 +596,53 @@ struct ScopeResponse {
     public_key: Option<String>,
 }
 
+/// One public report as served by the registry's triage endpoints (advisory-intake arc, tier 4). A
+/// report is raw intake — it becomes an advisory only when an operator or the scope owner promotes it
+/// (`noeta advisory promote`), prefilling the advisory from these fields.
+#[cfg(feature = "registry-http")]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Report {
+    /// The opaque report id.
+    pub id: String,
+    /// The package the report is against, `company/package`.
+    pub package: String,
+    /// The affected version range the reporter believes, if any.
+    #[serde(default)]
+    pub ranges: Option<String>,
+    /// The one-line summary.
+    pub summary: String,
+    /// The reporter's longer description, if any.
+    #[serde(default)]
+    pub details: Option<String>,
+    /// A link the reporter provided, if any.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The reporter's self-identification, if any.
+    #[serde(default)]
+    pub reporter: Option<String>,
+    /// `pending` | `promoted` | `dismissed`.
+    pub status: String,
+    /// The advisory id this report was promoted into, once promoted.
+    #[serde(default)]
+    pub advisory_id: Option<String>,
+    /// When the report was filed (ISO-8601).
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+#[cfg(feature = "registry-http")]
+#[derive(serde::Deserialize)]
+struct ReportsResponse {
+    #[serde(default)]
+    reports: Vec<Report>,
+}
+
+#[cfg(feature = "registry-http")]
+#[derive(serde::Deserialize)]
+struct ReportResponse {
+    report: Report,
+}
+
 #[cfg(feature = "registry-http")]
 impl HttpIndex {
     /// A client for the registry at `base` (e.g. `https://registry.noeta.dev`). The publish token,
@@ -614,6 +661,14 @@ impl HttpIndex {
             token: std::env::var("NOETA_REGISTRY_TOKEN").ok(),
             client,
         })
+    }
+
+    /// Override the bearer token this client presents (advisory-intake residual a). The default token is
+    /// the scope publish token (`NOETA_REGISTRY_TOKEN`); the operator promote/list path presents an
+    /// admin token instead. `None` clears it (an unauthenticated client).
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
     }
 
     fn url_for(&self, name: &str) -> String {
@@ -1392,6 +1447,149 @@ impl HttpIndex {
             "registry rejected the advisory for `{scope}`: {detail}"
         )))
     }
+
+    /// List reports in the triage queue (advisory-intake residual a). With `scope`, the scope owner's own
+    /// queue (`GET /v1/scopes/{scope}/reports`, scope-token authenticated); without, the operator queue
+    /// (`GET /v1/reports`, admin-token authenticated). `status` filters (`pending` for what's promotable).
+    /// The bearer token this client carries decides which identity is presented.
+    pub fn list_reports(
+        &self,
+        scope: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<Vec<Report>, PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "listing reports needs a token — set NOETA_REGISTRY_TOKEN (scope owner) or \
+                 NOETA_REGISTRY_ADMIN_TOKEN (operator)"
+                    .to_string(),
+            )
+        })?;
+        let mut url = match scope {
+            Some(s) => format!("{}/v1/scopes/{s}/reports", self.base),
+            None => format!("{}/v1/reports", self.base),
+        };
+        if let Some(s) = status {
+            url.push_str(&format!("?status={s}"));
+        }
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|err| PmError::Network(format!("listing reports failed: {err}")))?;
+        let status_code = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status_code.is_success() {
+            let parsed: ReportsResponse = serde_json::from_str(&text)
+                .map_err(|err| PmError::Network(format!("malformed reports response: {err}")))?;
+            return Ok(parsed.reports);
+        }
+        Err(PmError::Auth(format!(
+            "registry rejected the report listing: {}",
+            error_detail(&text, status_code)
+        )))
+    }
+
+    /// Fetch one report by id (advisory-intake residual a): `GET /v1/reports/{id}`, authorized as the
+    /// operator or the report package's scope owner (whichever token this client carries). Used by
+    /// `noeta advisory promote` to prefill the advisory from the report. `Ok(None)` on 404.
+    pub fn get_report(&self, id: &str) -> Result<Option<Report>, PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "fetching a report needs a token — set NOETA_REGISTRY_TOKEN (scope owner) or \
+                 NOETA_REGISTRY_ADMIN_TOKEN (operator)"
+                    .to_string(),
+            )
+        })?;
+        let resp = self
+            .client
+            .get(format!("{}/v1/reports/{id}", self.base))
+            .bearer_auth(token)
+            .send()
+            .map_err(|err| PmError::Network(format!("fetching report `{id}` failed: {err}")))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status_code = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status_code.is_success() {
+            let parsed: ReportResponse = serde_json::from_str(&text)
+                .map_err(|err| PmError::Network(format!("malformed report response: {err}")))?;
+            return Ok(Some(parsed.report));
+        }
+        Err(PmError::Auth(format!(
+            "registry rejected fetching report `{id}`: {}",
+            error_detail(&text, status_code)
+        )))
+    }
+
+    /// Promote a report into an advisory (advisory-intake residual a): `POST /v1/reports/{id}/promote`.
+    /// The bearer token this client carries decides the tier server-side — the admin token yields an
+    /// `operator` advisory (`bundle` is `None`); a scope publish token yields a `publisher` advisory and
+    /// MUST carry a keyless `bundle` over the advisory's canonical bytes. Returns the registry's status
+    /// message. `advisory` supplies the triaged fields (id, ranges, severity, summary, …).
+    pub fn promote_report(
+        &self,
+        report_id: &str,
+        advisory: &crate::advisory::Advisory,
+        bundle: Option<&str>,
+    ) -> Result<String, PmError> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            PmError::Auth(
+                "promoting a report needs a token — set NOETA_REGISTRY_TOKEN (scope owner) or \
+                 NOETA_REGISTRY_ADMIN_TOKEN (operator)"
+                    .to_string(),
+            )
+        })?;
+        let mut body = serde_json::json!({
+            "id": advisory.id,
+            "package": advisory.package,
+            "ranges": advisory.ranges,
+            "severity": advisory.severity,
+            "summary": advisory.summary,
+            "details": advisory.details,
+            "url": advisory.url,
+            "withdrawn": advisory.withdrawn,
+        });
+        if let Some(patched) = &advisory.patched {
+            body["patched"] = serde_json::json!(patched);
+        }
+        if let Some(bundle) = bundle {
+            body["bundle"] = serde_json::json!(bundle);
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/reports/{report_id}/promote", self.base))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .map_err(|err| {
+                PmError::Network(format!("promoting report `{report_id}` failed: {err}"))
+            })?;
+        let status_code = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status_code.is_success() {
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("report `{report_id}` promoted"));
+            return Ok(msg);
+        }
+        Err(PmError::Auth(format!(
+            "registry rejected promoting report `{report_id}`: {}",
+            error_detail(&text, status_code)
+        )))
+    }
+}
+
+/// Pull the `error` string out of a registry JSON error body, falling back to the HTTP status.
+#[cfg(feature = "registry-http")]
+fn error_detail(text: &str, status: reqwest::StatusCode) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| status.to_string())
 }
 
 /// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub

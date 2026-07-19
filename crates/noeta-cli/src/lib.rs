@@ -56,8 +56,8 @@ use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
 use cmd::init::cmd_init;
 use cmd::pm::{
-    cmd_add, cmd_advisory_publish, cmd_advisory_report, cmd_audit, cmd_claim, cmd_key, cmd_publish,
-    cmd_scope, cmd_update, cmd_watch_scope,
+    cmd_add, cmd_advisory_promote, cmd_advisory_publish, cmd_advisory_report, cmd_advisory_reports,
+    cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update, cmd_watch_scope,
 };
 use cmd::repl::cmd_repl;
 use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
@@ -625,6 +625,64 @@ enum AdvisoryCommand {
         #[arg(long)]
         reporter: Option<String>,
     },
+    /// List the public reports queued for triage — what's **promotable** (advisory-intake residual a).
+    /// Without `--scope`, the operator triage queue (needs `NOETA_REGISTRY_ADMIN_TOKEN`); with it, the
+    /// scope owner's own queue (only their packages' reports; needs the scope's `NOETA_REGISTRY_TOKEN`).
+    /// Defaults to the `pending` (promotable) reports.
+    Reports {
+        /// Show a scope owner's own queue (their packages' reports), authenticated with the scope token.
+        /// Without it, the operator queue (admin token).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Filter by status (`pending` | `promoted` | `dismissed`). Defaults to `pending`; pass `--all`
+        /// to list every status.
+        #[arg(long)]
+        status: Option<String>,
+        /// List reports of every status (overrides the default `pending` filter).
+        #[arg(long)]
+        all: bool,
+    },
+    /// **Promote** a queued report into a signed advisory (advisory-intake residual a). The advisory is
+    /// prefilled from the report (package, ranges, summary, details, url) — you supply the triaged `--id`
+    /// and `--severity`. As an **operator** (`--operator`, admin token) it becomes an `operator`-tier
+    /// advisory; otherwise the report package's **scope owner** promotes it into a keyless-signed
+    /// `publisher`-tier advisory (exactly like `advisory publish`), authenticated with the scope token.
+    Promote {
+        /// The report id to promote (from `noeta advisory reports`).
+        report: String,
+        /// The advisory id to issue (e.g. `NOETA-2026-0001` or `ACME-2026-0001`).
+        #[arg(long)]
+        id: String,
+        /// Severity: `low`, `medium`, `high`, or `critical`.
+        #[arg(long)]
+        severity: String,
+        /// Override the affected range (default: the report's `ranges`, if any).
+        #[arg(long)]
+        ranges: Option<String>,
+        /// Override the summary (default: the report's summary).
+        #[arg(long)]
+        summary: Option<String>,
+        /// Override the details (default: the report's details).
+        #[arg(long)]
+        details: Option<String>,
+        /// Override the link (default: the report's url).
+        #[arg(long)]
+        url: Option<String>,
+        /// The first fixed version (informational).
+        #[arg(long)]
+        patched: Option<String>,
+        /// Promote as the **operator** (admin token → an `operator`-tier advisory, no keyless bundle).
+        /// Without it, the report package's scope owner promotes into a `publisher`-tier advisory.
+        #[arg(long)]
+        operator: bool,
+        /// (Scope-owner path) Sign keyless via an **interactive browser login** instead of the ambient
+        /// CI identity.
+        #[arg(long)]
+        interactive: bool,
+        /// With `--interactive`: print the sign-in URL and prompt for the code (SSH sessions, containers).
+        #[arg(long, requires = "interactive")]
+        oob: bool,
+    },
 }
 
 /// Which editor grammar `noeta grammar` targets. Only tree-sitter needs a *generated* per-project
@@ -1006,6 +1064,39 @@ pub fn run_cli(
                 details.as_deref(),
                 url.as_deref(),
                 reporter.as_deref(),
+            ),
+            AdvisoryCommand::Reports { scope, status, all } => {
+                let status = if all {
+                    None
+                } else {
+                    Some(status.as_deref().unwrap_or("pending").to_string())
+                };
+                cmd_advisory_reports(scope.as_deref(), status.as_deref())
+            }
+            AdvisoryCommand::Promote {
+                report,
+                id,
+                severity,
+                ranges,
+                summary,
+                details,
+                url,
+                patched,
+                operator,
+                interactive,
+                oob,
+            } => cmd_advisory_promote(
+                &report,
+                &id,
+                &severity,
+                ranges.as_deref(),
+                summary.as_deref(),
+                details.as_deref(),
+                url.as_deref(),
+                patched.as_deref(),
+                operator,
+                interactive,
+                oob,
             ),
         },
         Command::WatchScope { scope, state } => cmd_watch_scope(&scope, state.as_deref()),

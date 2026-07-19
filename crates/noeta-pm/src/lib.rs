@@ -53,6 +53,12 @@ pub mod transparency;
 #[cfg(all(feature = "registry-http", feature = "provenance"))]
 pub mod advisory;
 
+/// CVSS v3.x base-score computation (advisory-intake residual b) — re-derives an imported advisory's
+/// base score from the CVSS vector the feed echoes, so `noeta audit` shows the band *and* the score.
+/// Pure math; gated with `advisory` since only the audit display consumes it.
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+pub mod cvss;
+
 /// Keyless provenance — Sigstore bundles verified offline against the public sigstore.dev trust
 /// root (Phase 5). Behind the `keyless` feature (CLI-only), for the same reason as `provenance`.
 #[cfg(feature = "keyless")]

@@ -21,7 +21,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
 | [`noeta publish`](#noeta-publish) | Publish a tagged release of your package to the registry, signed ([provenance](Package-Provenance)). |
 | [`noeta audit`](#noeta-audit) | Report the dependency tree's trust footprint — native/command grants, pinned provenance, and advisory hits by tier. |
-| [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, or file a public report against any package. |
+| [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, or list/promote the report queue. |
 | [`noeta watch-scope`](#noeta-watch-scope) | Monitor a scope's advisory transparency log for silent suppression or rewrite. |
 | [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
 
@@ -487,16 +487,22 @@ noeta audit [PATH]
 
 Answers *"what am I actually running?"* for the resolved dependency tree: every package and its source, which ones run **native code** or add **CLI commands** (the `[trust]` grants that make that authority active), and each scope's **pinned provenance trust root** — a signing key or a keyless identity. Resolution *enforces* verification, so a build that succeeds already means every signed release verified; the audit is the human-readable report of what that trust rests on.
 
-It also cross-references every dependency against the registry's **security advisory feed**, showing each hit's **intake tier** (`operator` / `publisher` / `imported`) and, for a publisher advisory, its verified signing identity. Whether a tier fails or merely warns is set per-project by `[trust.advisories]` (default: all warn) — see [Package Provenance](Package-Provenance#security-advisories-and-intake-tiers).
+It also cross-references every dependency against the registry's **security advisory feed**, showing each hit's **intake tier** (`operator` / `publisher` / `imported`) and, for a publisher advisory, its verified signing identity. An imported advisory that carried a **CVSS v3.x vector** upstream shows its severity band with the base score re-derived client-side from that vector — `high (CVSS 7.8)`. Whether a tier fails or merely warns is set per-project by `[trust.advisories]` (default: all warn) — see [Package Provenance](Package-Provenance#security-advisories-and-intake-tiers).
 
 ### `noeta advisory`
 
 ```text
 noeta advisory publish <ID> <PACKAGE> <RANGES> <SEVERITY> <SUMMARY> [--details …] [--url …] [--patched …] [--withdraw] [--interactive [--oob]]
 noeta advisory report  <PACKAGE> <SUMMARY> [--ranges …] [--details …] [--url …] [--reporter …]
+noeta advisory reports [--scope <SCOPE>] [--status <pending|promoted|dismissed>] [--all]
+noeta advisory promote <REPORT-ID> --id <ID> --severity <SEVERITY> [--ranges …] [--summary …] [--details …] [--url …] [--patched …] [--operator] [--interactive [--oob]]
 ```
 
-`advisory publish` issues (or updates) a **publisher**-tier advisory for a package in a scope you own — keyless-signed with your OIDC identity, sent with the scope's publish token (`NOETA_REGISTRY_TOKEN`), so consumers verify it offline. `advisory report` files a **public report** against any package (unauthenticated, rate-limited): not an advisory, but queued for an operator or the scope owner to triage. See [Package Provenance](Package-Provenance#issuing-and-reporting-from-the-client).
+`advisory publish` issues (or updates) a **publisher**-tier advisory for a package in a scope you own — keyless-signed with your OIDC identity, sent with the scope's publish token (`NOETA_REGISTRY_TOKEN`), so consumers verify it offline. `advisory report` files a **public report** against any package (unauthenticated, rate-limited): not an advisory, but queued for an operator or the scope owner to triage.
+
+`advisory reports` lists the reports queued for triage — what's **promotable**. Without `--scope` it shows the operator triage queue (needs `NOETA_REGISTRY_ADMIN_TOKEN`); with `--scope`, the scope owner's own queue (their packages' reports; needs the scope's `NOETA_REGISTRY_TOKEN`). It shows the `pending` reports by default (`--all` for every status).
+
+`advisory promote` turns a queued report into a signed advisory. The advisory is **prefilled from the report** (package, ranges, summary, details, url) and finalised with the triaged `--id` and `--severity`. As an **operator** (`--operator`, `NOETA_REGISTRY_ADMIN_TOKEN`) it becomes an `operator`-tier advisory; otherwise the report package's **scope owner** promotes it into a keyless-signed `publisher`-tier advisory — the same keyless Sigstore bundle a fresh `advisory publish` produces, prefilled from the report. See [Package Provenance](Package-Provenance#issuing-and-reporting-from-the-client).
 
 ### `noeta watch-scope`
 
