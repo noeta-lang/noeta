@@ -1,0 +1,9 @@
+// F3: a wrong-arity call THROUGH a first-class constructor value raises the same runtime error a
+// direct call does (hand-matched across backends, differential-pinned). `f = Err` stays a deferred
+// binding statically (the F1 fallback), so the misuse surfaces at runtime.
+// expect: stdout "bound"
+// expect: error E0007 at 9:6
+// expect: exit 1
+f = Err;
+echo "bound";
+echo f();

@@ -150,7 +150,8 @@ impl Checker {
                     (generic.params, raw_params, generic.raw_ret)
                 }
             };
-        let tps: HashSet<String> = if params.is_empty() {
+        let is_prelude_ctor = params.is_empty();
+        let tps: HashSet<String> = if is_prelude_ctor {
             ["$T".to_string(), "$E".to_string()].into_iter().collect()
         } else {
             params.iter().map(|(n, _)| n.clone()).collect()
@@ -163,6 +164,15 @@ impl Checker {
         }
         bind_type_params(&raw_ret, exp_ret, &tps, &mut subst);
         self.enforce_type_param_bounds(name, &params, &subst, &tps, span);
+        // A constructor slot the expectation left open stays an **inference hole** — matching the
+        // call form (`Err(e)` synthesizes `Result<?, E>`), so `xs.map(Err)` flows into a declared
+        // `List<Result<int, Low>>` boundary exactly as the per-element calls would. A user generic
+        // fn's residue erases to `dyn` (below), matching its call sites.
+        if is_prelude_ctor {
+            for p in ["$T", "$E"] {
+                subst.entry(p.to_string()).or_insert(Type::Unknown);
+            }
+        }
         Some(Type::Fn {
             params: raw_params
                 .iter()

@@ -1291,6 +1291,41 @@ impl<'m> Vm<'m> {
                     };
                     Err(self.error(DiagnosticCode::Panic, span, message))
                 }
+            }
+            // The prelude constructors as callables (poly-values F3): the value path
+            // (`results.map(Ok)`) and a wrong-arity direct call both land here, so their behavior
+            // and error text are identical to the tree-walker's `call_builtin` by hand-matching.
+            // The enum owns one reference to its payload, so the borrowed argument is retained.
+            Builtin::MakeOk => match args {
+                [] => Ok(make_ok_void()),
+                [payload] => {
+                    retain(*payload);
+                    Ok(make_ok(*payload))
+                }
+                _ => Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "`Ok` takes 0 or 1 argument(s) but {} were supplied",
+                        args.len()
+                    ),
+                )),
+            },
+            Builtin::MakeErr => {
+                self.check_arity(builtin, args, 1, span)?;
+                retain(args[0]);
+                Ok(make_err(args[0]))
+            }
+            Builtin::MakeSome => {
+                self.check_arity(builtin, args, 1, span)?;
+                retain(args[0]);
+                Ok(make_some(args[0]))
+            }
+            // `panic(msg)` through the value path — byte-identical to `Op::Panic`'s abort.
+            Builtin::Panic => {
+                self.check_arity(builtin, args, 1, span)?;
+                let message = args[0].display();
+                Err(self.error(DiagnosticCode::Panic, span, format!("panic: {message}")))
             } // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
               // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
               // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`,

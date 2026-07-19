@@ -1,0 +1,16 @@
+// F3 (poly-values): the prelude constructors are first-class VALUES riding F1's expected-type
+// instantiation — `xs.map(Ok)` / `xs.map(some)` pass a genuine callable, and both backends
+// construct identical `Result`/`Option` values through it. The precise static types flow on:
+// unwrapping an element with `?`-free matching type-checks against the instantiated payload.
+// expect: stdout "[Ok(1), Ok(2)]"
+// expect: stdout "[some(a), some(b)]"
+// expect: stdout "3"
+// expect: exit 0
+oks = [1, 2].map(Ok);
+echo oks;
+
+somes = ["a", "b"].map(some);
+echo somes;
+
+n: int = oks[1] ?? 0;
+echo n + 1;

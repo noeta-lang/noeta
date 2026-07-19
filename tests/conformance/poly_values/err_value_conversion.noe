@@ -1,0 +1,33 @@
+// F3: `Err` as a value composes with the error-ergonomics machinery — failures built through
+// `map(Err)` propagate through `?` in a function whose declared error type converts the payload
+// via its `impl From<Source>` (the `?`-boundary conversion from the ergonomics arc).
+// expect: stdout "wrapped: low 7"
+// expect: exit 0
+struct Low {
+    code: int
+}
+
+struct High {
+    msg: string
+
+    impl From<Low> {
+        fn from(e: Low): High {
+            return High { msg: "low ${e.code}" }
+        }
+    }
+}
+
+fn failures(): List<Result<int, Low>> {
+    return [Low { code: 7 }].map(Err);
+}
+
+fn run(): Result<int, High> {
+    v = failures()[0]?;
+    return Ok(v);
+}
+
+out = match run() {
+    Ok(v) => "ok ${v}",
+    Err(e) => "wrapped: ${e.msg}",
+};
+echo out;

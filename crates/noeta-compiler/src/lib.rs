@@ -2861,9 +2861,11 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(dst)
             }
-            // A bare reference to a collection builtin becomes a first-class native-function value (a
-            // direct call still uses `CallBuiltin`). Other prelude names used as values (the
-            // `Ok`/`Err`/`some` constructors, `panic`, `next_id`) are not yet first-class — skip.
+            // A bare reference to a prelude builtin becomes a first-class native-function value (a
+            // direct call still uses its fast op / `CallBuiltin`). This covers the collection
+            // builtins AND (poly-values F3) the constructors `Ok`/`Err`/`some` and `panic`, so
+            // `results.map(Ok)` passes a genuine callable — both backends construct the same value
+            // family, and a call through it shares `call_builtin`'s exact arity/error text.
             Resolved::Prelude => match Builtin::from_name(name) {
                 Some(func) => {
                     let dst = self.alloc_reg();
@@ -3662,8 +3664,27 @@ impl<'m> FnCompiler<'m> {
         if let Atom::Var { name, .. } = callee
             && matches!(self.resolve(name), Resolved::Prelude)
         {
+            // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)`, `panic(msg)` — an arity-correct direct call
+            // keeps its dedicated fast op (`MakeEnum` / `Op::Panic`, which tier-1 also compiles).
+            // A wrong-arity call falls through to the generic `CallBuiltin` below, whose RUNTIME
+            // arity error is byte-identical to a call through the first-class value (poly-values
+            // F3) — so the direct and indirect paths cannot diverge, and neither aborts compile.
+            match name.as_str() {
+                "Ok" if args.len() <= 1 => {
+                    return self.make_result_option("Result", "Ok", args, dst);
+                }
+                "Err" if args.len() == 1 => {
+                    return self.make_result_option("Result", "Err", args, dst);
+                }
+                "some" if args.len() == 1 => {
+                    return self.make_result_option("Option", "some", args, dst);
+                }
+                "panic" if args.len() == 1 => return self.make_panic(args, span),
+                _ => {}
+            }
             if let Some(builtin) = Builtin::from_name(name) {
-                // `len`/`map`/`filter`/`sum` — the collection builtins.
+                // `len`/`map`/`filter`/`sum`/`assert` — the collection/assertion builtins — plus
+                // the wrong-arity constructor calls from above.
                 let args = self.atom_regs(args)?;
                 self.code.push(Op::CallBuiltin {
                     dst,
@@ -3673,14 +3694,7 @@ impl<'m> FnCompiler<'m> {
                 });
                 return Ok(());
             }
-            return match name.as_str() {
-                // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)` — the Result/Option constructors.
-                "Ok" => self.make_result_option("Result", "Ok", args, dst),
-                "Err" => self.make_result_option("Result", "Err", args, dst),
-                "some" => self.make_result_option("Option", "some", args, dst),
-                "panic" => self.make_panic(args, span),
-                _ => unsupported("prelude function not in the VM subset"),
-            };
+            return unsupported("prelude function not in the VM subset");
         }
         // A statically-known top-level `fn` (immutable, zero-upvalue global) — call it directly
         // through its slot, skipping the `LoadGlobal` + per-call retain/release of the callee

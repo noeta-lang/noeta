@@ -1,0 +1,9 @@
+// F3 twin of constructor_value_wrong_arity: a wrong-arity DIRECT call of a prelude constructor is
+// the same runtime error the value path raises — the VM no longer rejects it at compile time
+// (which would have diverged from the tree-walker's runtime error), it routes through the shared
+// builtin dispatch.
+// expect: stdout "start"
+// expect: error E0007 at 9:6
+// expect: exit 1
+echo "start";
+echo Err();

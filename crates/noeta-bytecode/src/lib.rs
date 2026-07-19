@@ -56,10 +56,10 @@ pub enum CaptureFrom {
     Upvalue(u16),
 }
 
-/// A prelude collection builtin, called directly by name (`len(x)`, `map(xs, f)`). These
-/// are never first-class values in the M1.3 subset — a program that passes one around
-/// (rather than calling it) is left unsupported — so they ride in a dedicated `CallBuiltin`
-/// op rather than being materialized into a register.
+/// A prelude builtin, called directly by name (`len(x)`, `map(xs, f)`, `Ok(v)`). A bare
+/// reference to one is a **first-class value** (`Op::LoadNativeFn` materializes it into a
+/// register; indirect calls through it reuse the same dispatch, so arity/error text matches the
+/// direct `CallBuiltin` path exactly).
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     Len,
@@ -69,10 +69,21 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
     Assert,
+    /// `Ok(x)` / `Ok()` — construct a `Result.Ok` (poly-values F3: also a first-class value).
+    /// A direct, arity-correct call still compiles to the dedicated `MakeEnum` fast path; this
+    /// variant carries the value form and the wrong-arity runtime error.
+    MakeOk,
+    /// `Err(e)` — construct a `Result.Err`.
+    MakeErr,
+    /// `some(x)` — construct an `Option.some`.
+    MakeSome,
+    /// `panic(msg)` — abort with an unrecoverable `Panic` diagnostic. As a value, calling it
+    /// reproduces `Op::Panic`'s exact behavior and message.
+    Panic,
     // (The whole orchestration family — `task` at higher-order-abi H0/H2, `http.serve` at H3,
     // `signal`/`computed`/`effect` at H5 — migrated onto the registry's `NativeCtx` dispatch,
-    // `noeta-stdlib/src/{task,serve,reactive}.rs`. Only the language-level collection builtins
-    // and `assert` remain.)
+    // `noeta-stdlib/src/{task,serve,reactive}.rs`. Only the language-level collection builtins,
+    // `assert`, and the prelude constructors remain.)
 }
 
 impl Builtin {
@@ -84,6 +95,10 @@ impl Builtin {
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
             Builtin::Assert => "assert",
+            Builtin::MakeOk => "Ok",
+            Builtin::MakeErr => "Err",
+            Builtin::MakeSome => "some",
+            Builtin::Panic => "panic",
         }
     }
 
@@ -95,6 +110,10 @@ impl Builtin {
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
             "assert" => Some(Builtin::Assert),
+            "Ok" => Some(Builtin::MakeOk),
+            "Err" => Some(Builtin::MakeErr),
+            "some" => Some(Builtin::MakeSome),
+            "panic" => Some(Builtin::Panic),
             _ => None,
         }
     }
