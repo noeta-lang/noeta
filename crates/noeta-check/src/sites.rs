@@ -28,6 +28,11 @@ pub struct Sites {
     pub construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
+    /// `from_bytes::<T>` spans whose packed element type `T` implements `Validate` (validation arc):
+    /// lowering sets `Rvalue::FromBytes.validate`, so both backends run `validate()` on each decoded
+    /// element (aborting at `[i]` on the first rejection — the abort door, consistent with a shape
+    /// error). A pure function of the program.
+    pub from_bytes_validated: HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`): the turbofish `T` resolved into a
     /// [`noeta_ext_abi::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
     /// program, like the other site maps.
@@ -164,6 +169,9 @@ pub(crate) struct SiteMaps {
     /// two backends pick the same representation by construction (the flat layout stays invisible to
     /// `RunResult`).
     pub(crate) packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
+    /// `from_bytes::<T>` spans whose packed element type implements `Validate` — see
+    /// [`Sites::from_bytes_validated`].
+    pub(crate) from_bytes_validated: HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), keyed by the `Expr::TypedModuleCall`
     /// span → the turbofish `T` resolved into a [`noeta_ext_abi::TypeRecipe`]. Both backends harvest
     /// this on the same program, so the lowering bakes identical recipes into `Rvalue::TypedModuleCall`.
@@ -238,6 +246,7 @@ impl SiteMaps {
             type_of_sites: self.type_of_sites,
             construction_sites: self.construction_sites,
             packed_list_sites: self.packed_list_sites,
+            from_bytes_validated: self.from_bytes_validated,
             typed_module_call_sites: self.typed_module_call_sites,
             deserialize_recipes: self.deserialize_recipes,
             decode_typed_sites: self.decode_typed_sites,

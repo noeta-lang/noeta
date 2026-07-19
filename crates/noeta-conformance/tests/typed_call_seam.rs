@@ -42,12 +42,17 @@ fn default_out(recipe: &TypeRecipe) -> NativeOut {
         TypeRecipe::Option(_) => NativeOut::None,
         TypeRecipe::List(_) => NativeOut::List(Vec::new()),
         TypeRecipe::Map(_) => NativeOut::Map(Vec::new()),
-        TypeRecipe::Struct { name, fields } => NativeOut::Struct {
+        TypeRecipe::Struct {
+            name,
+            fields,
+            has_validator,
+        } => NativeOut::Struct {
             name: name.clone(),
             fields: fields
                 .iter()
                 .map(|(f, r)| (f.clone(), default_out(r)))
                 .collect(),
+            has_validator: *has_validator,
         },
     }
 }

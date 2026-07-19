@@ -1280,6 +1280,13 @@ impl Checker {
                 match self.packed_layout(&elem) {
                     Some(layout) => {
                         self.sites.packed_list_sites.insert(*span, layout);
+                        // Validation arc: if the packed element type implements `Validate`, mark the
+                        // site so both backends run `validate()` on each decoded element (the abort
+                        // door — consistent with `from_bytes`'s shape-error behavior, and closing the
+                        // hole a `@validated` packed type would otherwise have here).
+                        if self.satisfies(&elem, noeta_types::BuiltinTrait::Validate) {
+                            self.sites.from_bytes_validated.insert(*span);
+                        }
                     }
                     None => {
                         self.error(

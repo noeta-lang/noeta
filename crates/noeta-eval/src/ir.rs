@@ -38,6 +38,15 @@ use crate::{
     compare_primitive,
 };
 
+/// The outcome of materializing one recipe node (validation arc): a built value, or a validation
+/// rejection carrying the path-rich [`noeta_stdlib::json::JsonError`] the failing `Validate::validate`
+/// produced. A rejection propagates up through containers until a `Result`-wrapped door recovers it
+/// into a `Result.Err` or the aborting door raises it — so `validate` fires bottom-up.
+enum MatOut {
+    Value(Value),
+    Rejected(noeta_stdlib::json::JsonError),
+}
+
 /// The `@derive(Deserialize<Json>)` decode registry (L2.2 DI) an [`Interpreter`] runs
 /// `json.decode_typed` against — a runtime type-name → recipe map lifted from
 /// `noeta_check::Sites::deserialize_recipes`. Threaded through the `run_ir` entry points beside
@@ -1368,7 +1377,12 @@ impl Interpreter {
                 let v = self.eval_ir_atom(operand, frame)?;
                 Ok(self.materialize_fields(&v))
             }
-            noeta_ir::Rvalue::FromBytes { blob, layout, span } => {
+            noeta_ir::Rvalue::FromBytes {
+                blob,
+                layout,
+                validate,
+                span,
+            } => {
                 // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): resolve T's schema,
                 // then wrap the raw bytes as a packed list — the inverse of `to_bytes`, an O(n) copy.
                 let blob_val = self.eval_ir_atom(blob, frame)?;
@@ -1405,7 +1419,23 @@ impl Interpreter {
                         ),
                     ));
                 }
-                Ok(Value::packed_list_from(schema, (*bytes).clone()))
+                let list = Value::packed_list_from(schema, (*bytes).clone());
+                // Validation arc: `from_bytes` is an abort door — run each decoded element's
+                // `validate()` (materialized boxed for the re-entry) and abort at `[i]` on the first
+                // rejection, consistent with a length/shape mismatch. Closes the hole a `@validated`
+                // packed type would otherwise have here.
+                if *validate && let Value::List(repr) = &list {
+                    for (i, elem) in repr.to_rc_vec().iter().enumerate() {
+                        if let Some(message) = self.validate_message(elem.clone(), *span)? {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("from_bytes: [{i}]: {message}"),
+                            ));
+                        }
+                    }
+                }
+                Ok(list)
             }
             noeta_ir::Rvalue::AttributesOf { ty, dynamic, span } => {
                 // A forwarded type parameter (F2b) resolves the concrete NAME through the hidden
@@ -1766,7 +1796,18 @@ impl Interpreter {
                     arg_vals.iter().map(crate::marshal_native_arg).collect()
                 };
                 match typed_dispatch(func, &mut *self.host, &nargs, &recipe) {
-                    Ok(out) => self.materialize_recipe(out, *span),
+                    Ok(out) => {
+                        // The aborting door (`json.parse::<T>`): a validation rejection that reaches
+                        // the top (not recovered by a `Result` wrapper) aborts with the same
+                        // path-precise message the abort door already uses for shape failures.
+                        let mut path = String::new();
+                        match self.materialize_recipe(out, &mut path, *span)? {
+                            MatOut::Value(v) => Ok(v),
+                            MatOut::Rejected(e) => {
+                                Err(self.std_dispatch_error(e.into_std_error(), *span))
+                            }
+                        }
+                    }
                     Err(error) => Err(self.std_dispatch_error(error, *span)),
                 }
             }
@@ -1798,8 +1839,15 @@ impl Interpreter {
                     None => Ok(err(noeta_stdlib::json::JsonError::unknown_type(type_name))),
                     Some(recipe) => match noeta_stdlib::json::try_parse_typed(text, &recipe) {
                         Ok(out) => {
-                            let value = self.materialize_recipe(out, *span)?;
-                            Ok(crate::builtin_enum("Result", "Ok", vec![value]))
+                            // The recoverable router door: a validation rejection is threaded into
+                            // the `Result.Err(JsonError)`, exactly like a shape failure.
+                            let mut path = String::new();
+                            match self.materialize_recipe(out, &mut path, *span)? {
+                                MatOut::Value(value) => {
+                                    Ok(crate::builtin_enum("Result", "Ok", vec![value]))
+                                }
+                                MatOut::Rejected(e) => Ok(err(e)),
+                            }
                         }
                         Err(error) => Ok(err(error)),
                     },
@@ -1808,74 +1856,164 @@ impl Interpreter {
         }
     }
 
-    /// Materialize a `json.parse::<T>` result tree ([`noeta_stdlib::NativeOut`]) into a value of `T`.
-    /// A struct is built through [`Self::construct_object`] — its real registered definition, so the
-    /// instance has its methods/defaults exactly like a literal; the VM builds a matching same-name
-    /// shape, so both backends agree.
-    fn materialize_recipe(&mut self, out: noeta_stdlib::NativeOut, span: Span) -> Eval<Value> {
+    /// Materialize a `json.parse::<T>` result tree ([`noeta_stdlib::NativeOut`]) into a value of `T`,
+    /// running any `Validate::validate` **bottom-up** (validation arc). A struct is built through
+    /// [`Self::construct_object`] — its real registered definition, so the instance has its
+    /// methods/defaults exactly like a literal; the VM builds a matching same-name shape, so both
+    /// backends agree.
+    ///
+    /// `path` mirrors the decode walk's path stack (`items[2].price`) so a validation rejection
+    /// names its exact location. A rejection is returned as [`MatOut::Rejected`] — it propagates up
+    /// through containers (short-circuiting a container *before* its own `validate` runs, so a
+    /// container only ever validates already-valid fields) until a `Result`-wrapped door recovers
+    /// it into a `Result.Err` or the aborting door raises it.
+    fn materialize_recipe(
+        &mut self,
+        out: noeta_stdlib::NativeOut,
+        path: &mut String,
+        span: Span,
+    ) -> Eval<MatOut> {
+        use noeta_stdlib::json::{push_index, push_member};
         use noeta_stdlib::{NativeOut, Scalar};
-        match out {
-            NativeOut::Scalar(Scalar::Int(n)) => Ok(Value::Int(n)),
-            NativeOut::Scalar(Scalar::Float(f)) => Ok(Value::Float(f)),
-            NativeOut::Scalar(Scalar::F32(f)) => Ok(Value::F32(f)),
-            NativeOut::Scalar(Scalar::Bool(b)) => Ok(Value::Bool(b)),
-            NativeOut::Str(s) => Ok(Value::Str(s)),
-            NativeOut::Bytes(b) => Ok(Value::Bytes(Rc::new(b))),
-            NativeOut::Unit => Ok(Value::Unit),
+        Ok(match out {
+            NativeOut::Scalar(Scalar::Int(n)) => MatOut::Value(Value::Int(n)),
+            NativeOut::Scalar(Scalar::Float(f)) => MatOut::Value(Value::Float(f)),
+            NativeOut::Scalar(Scalar::F32(f)) => MatOut::Value(Value::F32(f)),
+            NativeOut::Scalar(Scalar::Bool(b)) => MatOut::Value(Value::Bool(b)),
+            NativeOut::Str(s) => MatOut::Value(Value::Str(s)),
+            NativeOut::Bytes(b) => MatOut::Value(Value::Bytes(Rc::new(b))),
+            NativeOut::Unit => MatOut::Value(Value::Unit),
             // An extern value — the error arm of a `Result`-wrapped door (`json.try_parse::<T>` →
             // `Result.Err(JsonError)`) carries a path-rich extern; a recipe decode of `T` itself
             // never yields one, only a wrapper's `Err` does.
-            NativeOut::Extern(e) => Ok(Value::Extern(Rc::new(RefCell::new(e)))),
+            NativeOut::Extern(e) => MatOut::Value(Value::Extern(Rc::new(RefCell::new(e)))),
             // A `TypeRecipe` names only JSON shapes; async work and bulk scalar vectors (a packed
             // reduction's result, N3.4) can never decode from one.
             NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
                 unreachable!("json recipes never produce spawn/bulk-scalar results")
             }
-            NativeOut::None => Ok(crate::builtin_enum("Option", "none", vec![])),
-            NativeOut::Some(inner) => {
-                let value = self.materialize_recipe(*inner, span)?;
-                Ok(crate::builtin_enum("Option", "some", vec![value]))
-            }
+            NativeOut::None => MatOut::Value(crate::builtin_enum("Option", "none", vec![])),
+            NativeOut::Some(inner) => match self.materialize_recipe(*inner, path, span)? {
+                MatOut::Rejected(e) => MatOut::Rejected(e),
+                MatOut::Value(v) => MatOut::Value(crate::builtin_enum("Option", "some", vec![v])),
+            },
             // A `Result`-wrapped call-site-typed door (`json.try_parse::<T>`) hands back its whole
             // `Result` tree — success as `Ok`, a decode failure as `Err` (a path-carrying extern).
-            NativeOut::Ok(inner) => {
-                let value = self.materialize_recipe(*inner, span)?;
-                Ok(crate::builtin_enum("Result", "Ok", vec![value]))
-            }
-            NativeOut::Err(inner) => {
-                let value = self.materialize_recipe(*inner, span)?;
-                Ok(crate::builtin_enum("Result", "Err", vec![value]))
-            }
+            // This is the **recovery point**: a validation rejection under this wrapper becomes the
+            // door's `Result.Err(JsonError)` rather than an abort.
+            NativeOut::Ok(inner) => match self.materialize_recipe(*inner, path, span)? {
+                MatOut::Rejected(e) => MatOut::Value(crate::builtin_enum(
+                    "Result",
+                    "Err",
+                    vec![crate::json_error_value(e)],
+                )),
+                MatOut::Value(v) => MatOut::Value(crate::builtin_enum("Result", "Ok", vec![v])),
+            },
+            NativeOut::Err(inner) => match self.materialize_recipe(*inner, path, span)? {
+                MatOut::Rejected(e) => MatOut::Rejected(e),
+                MatOut::Value(v) => MatOut::Value(crate::builtin_enum("Result", "Err", vec![v])),
+            },
             NativeOut::List(items) => {
                 let mut values = Vec::with_capacity(items.len());
-                for item in items {
-                    values.push(self.materialize_recipe(item, span)?);
+                for (i, item) in items.into_iter().enumerate() {
+                    let mark = push_index(path, i);
+                    let outcome = self.materialize_recipe(item, path, span)?;
+                    path.truncate(mark);
+                    match outcome {
+                        MatOut::Rejected(e) => return Ok(MatOut::Rejected(e)),
+                        MatOut::Value(v) => values.push(v),
+                    }
                 }
-                Ok(Value::list(values))
+                MatOut::Value(Value::list(values))
             }
             NativeOut::Map(entries) => {
                 let mut map = std::collections::BTreeMap::new();
                 for (key, value) in entries {
-                    let value = self.materialize_recipe(value, span)?;
-                    map.insert(noeta_stdlib::MapKey::from(key), value);
+                    let mark = push_member(path, &key);
+                    let outcome = self.materialize_recipe(value, path, span)?;
+                    path.truncate(mark);
+                    match outcome {
+                        MatOut::Rejected(e) => return Ok(MatOut::Rejected(e)),
+                        MatOut::Value(v) => {
+                            map.insert(noeta_stdlib::MapKey::from(key), v);
+                        }
+                    }
                 }
-                Ok(Value::map_value(Rc::new(map)))
+                MatOut::Value(Value::map_value(Rc::new(map)))
             }
-            NativeOut::Struct { name, fields } => {
+            NativeOut::Struct {
+                name,
+                fields,
+                has_validator,
+            } => {
                 let mut field_values = Vec::with_capacity(fields.len());
                 for (fname, fout) in fields {
-                    let value = self.materialize_recipe(fout, span)?;
-                    field_values.push((fname, span, value));
+                    let mark = push_member(path, &fname);
+                    let outcome = self.materialize_recipe(fout, path, span)?;
+                    path.truncate(mark);
+                    match outcome {
+                        MatOut::Rejected(e) => return Ok(MatOut::Rejected(e)),
+                        MatOut::Value(v) => field_values.push((fname, span, v)),
+                    }
                 }
                 // A `json.parse::<T>` result carries no reflected tag (R2) — its concrete type is
                 // recovered head-only from the shape; untagged.
-                self.construct_object(&name, span, field_values, None, None, span)
+                let value = self.construct_object(&name, span, field_values, None, None, span)?;
+                // Bottom-up: every field is materialized and validated above, so the type's own
+                // `validate` sees an already-valid value. A rejection short-circuits before this
+                // node becomes a `Value`.
+                if has_validator
+                    && let Some(rejection) = self.run_validator(value.clone(), path, span)?
+                {
+                    return Ok(MatOut::Rejected(rejection));
+                }
+                MatOut::Value(value)
             }
             // `Object` (shape-from-argument) is never produced by a recipe decode.
             NativeOut::Object(_) => {
                 unreachable!("json.parse recipe decode never yields an Object result")
             }
+        })
+    }
+
+    /// Run `value`'s `Validate::validate` (validation arc) — ordinary Noeta code re-entered
+    /// mid-materialize. Returns `Some(message)` (the validator's own error message) when the
+    /// validator's `Result` is an `Err`, `None` when it is `Ok`. The message is a `string`-typed
+    /// error's bare string, or an `Error`-typed error's `message()`. Shared by the JSON recipe doors
+    /// (which wrap it in a path-carrying `JsonError`) and `from_bytes` (its own error channel).
+    fn validate_message(&mut self, value: Value, span: Span) -> Eval<Option<String>> {
+        let result = self.call_method(value, "validate", vec![], span)?;
+        match crate::result_err_payload(&result) {
+            Some(payload) => Ok(Some(self.validation_message(payload, span)?)),
+            None => Ok(None),
         }
+    }
+
+    /// The JSON-recipe wrapper over [`Self::validate_message`]: a rejection becomes a path-carrying
+    /// [`noeta_stdlib::json::JsonError`] naming `path`.
+    fn run_validator(
+        &mut self,
+        value: Value,
+        path: &str,
+        span: Span,
+    ) -> Eval<Option<noeta_stdlib::json::JsonError>> {
+        Ok(self
+            .validate_message(value, span)?
+            .map(|message| noeta_stdlib::json::JsonError::validation(path, message)))
+    }
+
+    /// The message string of a validator's `Err` payload: a `string` payload directly, or an
+    /// `Error`-implementing payload's `message()` (both guaranteed by the checker's `Validate`
+    /// return-shape rule).
+    fn validation_message(&mut self, payload: Value, span: Span) -> Eval<String> {
+        if let Value::Str(s) = &payload {
+            return Ok(s.clone());
+        }
+        let rendered = self.call_method(payload, "message", vec![], span)?;
+        Ok(match rendered {
+            Value::Str(s) => s,
+            other => other.display(),
+        })
     }
 
     /// In-place list `set` for a marked self-update `xs = xs.set(i, v)` (the `xs[i] = v` desugaring).

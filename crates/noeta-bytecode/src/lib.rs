@@ -798,6 +798,9 @@ pub enum Op {
         dst: Reg,
         src: Reg,
         schema: u32,
+        /// Whether element `T` implements `Validate` (validation arc): when set, the VM runs
+        /// `validate()` on each decoded element and aborts at `[i]` on the first rejection.
+        validate: bool,
         span: Span,
     },
     /// `type_of(value)` where the checker resolved the operand's **concrete** static type: `dst` is

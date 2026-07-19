@@ -88,6 +88,10 @@ pub enum NativeOut {
     Struct {
         name: String,
         fields: Vec<(String, NativeOut)>,
+        /// Propagated from [`TypeRecipe::Struct::has_validator`] (validation arc): when set, the
+        /// backend re-enters the VM to run this type's `Validate::validate` on the built value,
+        /// bottom-up. `false` short-circuits any re-entry (zero cost for a non-validated type).
+        has_validator: bool,
     },
     /// A string-keyed map (a JSON object decoded under a `Map` recipe), entries in key order.
     Map(Vec<(String, NativeOut)>),
@@ -376,6 +380,12 @@ pub enum TypeRecipe {
     Struct {
         name: String,
         fields: Vec<(String, TypeRecipe)>,
+        /// Whether this type implements the `Validate` built-in trait (validation arc). When set,
+        /// a recipe door re-enters the backend to run `validate()` on the freshly-built value
+        /// (bottom-up: after all fields are materialized and validated). Resolved by the checker's
+        /// `type_to_recipe`; `false` means the materialize walk never re-enters for this node
+        /// (zero cost for a non-validated type).
+        has_validator: bool,
     },
 }
 

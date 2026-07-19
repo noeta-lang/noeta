@@ -586,7 +586,7 @@ impl<'m> Vm<'m> {
     /// parameters — identical to a closure call whose prototype is resolved from the method table
     /// rather than a first-class closure. Associated handles are not yet produced (MH.1 is
     /// instance-only); they return a clean error rather than mis-dispatching.
-    fn run_method_handle(
+    pub(crate) fn run_method_handle(
         &mut self,
         ty: &str,
         method: &str,

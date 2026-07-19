@@ -1,0 +1,25 @@
+// The packed `from_bytes::<T>` recipe door auto-validates (validation arc slice 2). A `@packed`
+// struct may implement `Validate`; when `from_bytes` reinterprets a byte buffer into a `List<T>`,
+// each decoded element's `validate()` runs. `from_bytes` is an ABORT door, so a violating element
+// aborts at `[i]` (runtime E0007) — this closes the hole a `@validated` packed type would otherwise
+// have here. A buffer whose every element is well-formed passes untouched. Runs on both backends.
+// expect: stdout "valid: 2 packets"
+// expect: exit 0
+@packed struct Packet {
+    kind: int
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.kind < 0 || self.kind > 9 {
+                return Err("bad kind ${self.kind}")
+            }
+            return Ok()
+        }
+    }
+}
+
+// Round-trip a valid buffer: two in-range packets survive `to_bytes` → `from_bytes` and validate.
+good = [Packet { kind: 1 }, Packet { kind: 7 }]
+blob = good.to_bytes()
+back = from_bytes::<Packet>(blob)
+echo "valid: ${back.len()} packets"
