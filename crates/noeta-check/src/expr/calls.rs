@@ -176,10 +176,112 @@ impl Checker {
         Some(Type::Fn {
             params: raw_params
                 .iter()
-                .map(|p| erase_type_params(apply_subst(p, &subst), &tps))
+                .map(|p| subst_or_dyn(p, &subst, &tps))
                 .collect(),
-            ret: Box::new(erase_type_params(apply_subst(&raw_ret, &subst), &tps)),
+            ret: Box::new(subst_or_dyn(&raw_ret, &subst, &tps)),
         })
+    }
+
+    /// Type an **explicitly instantiated user-generic call** `f::<T, ...>(args)` (poly-values F2).
+    /// The named type arguments bind to the function's declared type parameters IN ORDER and are
+    /// seeded as winning bindings into the shared generic-call machinery
+    /// ([`Self::check_generic_call_seeded`]): argument inference can only fill parameters the
+    /// turbofish left implicit (there are none today — arity is exact), and an argument that
+    /// disagrees with an explicit binding fails the ordinary assignability check against the
+    /// substituted parameter (E0007). Misapplied turbofish — an unknown callee, a non-generic
+    /// function, a local binding, or a type-argument arity mismatch — is E0058.
+    ///
+    /// A type argument may itself be an in-scope type parameter (`load::<T>(p)` inside another
+    /// generic fn): it binds as the opaque `Named` parameter, checks structurally, and erases at
+    /// runtime like every generic call.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn synth_typed_call(
+        &mut self,
+        name: &str,
+        name_span: Span,
+        type_args: &[TypeRef],
+        args: &mut [Type],
+        arg_exprs: &[Expr],
+        span: Span,
+        env: &mut Env,
+    ) -> Type {
+        for t in type_args {
+            self.check_type_ref(t);
+        }
+        let resolved: Vec<Type> = type_args
+            .iter()
+            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .collect();
+        // A local binding cannot be instantiated, and shadows the free function in call position —
+        // reject rather than silently routing past the shadow.
+        if lookup(env, name).is_some() {
+            self.finalize_closure_args(&[], args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                name_span,
+                format!("`{name}` is a local binding, not a generic function"),
+            )
+            .help("explicit type arguments apply only to a declared generic `fn`");
+            return Type::Unknown;
+        }
+        let Some(sig) = self.symbols.functions.get(name).cloned() else {
+            self.finalize_closure_args(&[], args, arg_exprs, env);
+            if !self.config.session_mode && !self.is_known_name(name, env) {
+                self.error(
+                    DiagnosticCode::UnknownName,
+                    name_span,
+                    format!("cannot find `{name}` in this scope"),
+                );
+            } else {
+                self.error(
+                    DiagnosticCode::InvalidTypeArguments,
+                    name_span,
+                    format!("`{name}` is not a generic function"),
+                )
+                .help("explicit type arguments apply only to a declared generic `fn`");
+            }
+            return Type::Unknown;
+        };
+        let Some(generic) = sig.generic.clone() else {
+            self.finalize_closure_args(&sig.params, args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                name_span,
+                format!("`{name}` takes no type parameters"),
+            )
+            .help("drop the `::<...>` — only a generic `fn` is instantiated explicitly");
+            return sig.ret.clone();
+        };
+        if resolved.len() != generic.params.len() {
+            self.finalize_closure_args(&[], args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                span,
+                format!(
+                    "`{name}` expects {} type argument(s), found {}",
+                    generic.params.len(),
+                    resolved.len()
+                ),
+            );
+            let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+            return erase_type_params(generic.raw_ret.clone(), &tps);
+        }
+        let seed: HashMap<String, Type> = generic
+            .params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .zip(resolved)
+            .collect();
+        self.check_generic_call_seeded(
+            name,
+            &generic,
+            sig.required,
+            args,
+            arg_exprs,
+            span,
+            seed,
+            env,
+        )
     }
 
     /// Whether `name` resolves to **something the checker knows** — a local binding, a top-level

@@ -1203,6 +1203,46 @@ impl Checker {
                     }
                 }
             }
+            // `f::<T, ...>(args)` — an explicitly instantiated user-generic call (poly-values F2).
+            // Arguments defer exactly as a plain call's do (a closure/polymorphic-fn argument
+            // finalizes against the SUBSTITUTED parameter type inside the seeded generic check).
+            Expr::TypedCall {
+                name,
+                name_span,
+                type_args,
+                args,
+                span,
+            } => {
+                let mut arg_types: Vec<Type> = args
+                    .iter()
+                    .map(|a| {
+                        if self.is_deferred_arg(a, env) {
+                            Type::Unknown
+                        } else {
+                            self.synth(a, env)
+                        }
+                    })
+                    .collect();
+                let ret = self.synth_typed_call(
+                    name,
+                    *name_span,
+                    type_args,
+                    &mut arg_types,
+                    args,
+                    *span,
+                    env,
+                );
+                // The deferred-argument safety net, mirroring `synth_call`: any deferred argument
+                // no branch finalized is synthesized standalone so its body is always checked.
+                for (i, expr) in args.iter().enumerate() {
+                    if self.is_deferred_arg(expr, env)
+                        && matches!(arg_types.get(i), Some(Type::Unknown))
+                    {
+                        self.synth(expr, env);
+                    }
+                }
+                ret
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {

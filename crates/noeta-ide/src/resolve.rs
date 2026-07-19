@@ -784,6 +784,7 @@ impl Resolver {
                 self.walk_expr(recv);
                 self.walk_exprs(args);
             }
+            Expr::TypedCall { args, .. } => self.walk_exprs(args),
             Expr::Invoke {
                 recv, name, args, ..
             } => {

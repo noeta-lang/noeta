@@ -2160,6 +2160,24 @@ impl Printer<'_> {
                 Doc::text(">"),
                 self.arg_list(args, ty.span().end)?,
             ]),
+            Expr::TypedCall {
+                name,
+                type_args,
+                args,
+                ..
+            } => {
+                let mut parts = vec![Doc::text(format!("{name}::<"))];
+                for (i, t) in type_args.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(Doc::text(", "));
+                    }
+                    parts.push(self.type_ref(t)?);
+                }
+                parts.push(Doc::text(">"));
+                let anchor = type_args.last().map(|t| t.span().end).unwrap_or(0);
+                parts.push(self.arg_list(args, anchor)?);
+                Doc::concat(parts)
+            }
             Expr::RolesOf { ty: Some(ty), .. } => Doc::concat([
                 Doc::text("roles_of::<"),
                 self.type_ref(ty)?,

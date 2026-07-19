@@ -1,0 +1,8 @@
+// F2 negative: a turbofish on a non-generic function is rejected (E0058) — there are no type
+// parameters to bind.
+// expect: error E0058 at 8:6
+// expect: exit 1
+fn double(a: int): int {
+    return a * 2;
+}
+echo double::<int>(3);

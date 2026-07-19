@@ -725,7 +725,16 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             visit_expr_types(name, f);
             visit_expr_types(args, f);
         }
-        Expr::TypedModuleCall { args, .. } => args.iter_mut().for_each(|a| visit_expr_types(a, f)),
+        Expr::TypedModuleCall { ty, args, .. } => {
+            f(ty);
+            args.iter_mut().for_each(|a| visit_expr_types(a, f));
+        }
+        Expr::TypedCall {
+            type_args, args, ..
+        } => {
+            type_args.iter_mut().for_each(&mut *f);
+            args.iter_mut().for_each(|a| visit_expr_types(a, f));
+        }
         Expr::Member { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
             visit_expr_types(receiver, f)
         }

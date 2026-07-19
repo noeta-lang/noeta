@@ -1643,6 +1643,32 @@ impl Lowerer<'_> {
                     ))
                 }
             }
+            // `f::<T, ...>(args)` (poly-values F2): the explicit instantiation is a checker-only
+            // fact — generics are erased — so this lowers exactly as the plain `f(args)` does: an
+            // ordinary call of the named function. The compiler's direct-global fast path applies
+            // unchanged (the callee is the same `Var` atom).
+            Expr::TypedCall {
+                name,
+                name_span,
+                args,
+                span,
+                ..
+            } => {
+                let callee = Atom::Var {
+                    name: name.clone(),
+                    span: *name_span,
+                };
+                let arg_atoms = self.lower_args(args, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Call {
+                        callee,
+                        args: arg_atoms,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::Member {
                 receiver,
                 name,

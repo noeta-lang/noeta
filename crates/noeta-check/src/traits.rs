@@ -1169,6 +1169,36 @@ impl Checker {
         recv_args: &[Type],
         env: &mut Env,
     ) -> Type {
+        // Seed with the receiver's type arguments (instance call); the call's own arguments then
+        // refine any still-unbound parameters without overwriting the receiver's binding.
+        let seed: HashMap<String, Type> = generic
+            .params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .zip(recv_args.iter().cloned())
+            .filter(|(_, t)| !t.defers_to_runtime())
+            .collect();
+        self.check_generic_call_seeded(name, generic, required, args, arg_exprs, span, seed, env)
+    }
+
+    /// The seeded core of [`Self::check_generic_call`]: `seed` holds type-parameter bindings that
+    /// **win** over anything the arguments would derive — the receiver's type arguments for an
+    /// instance method call, or (poly-values F2) the EXPLICIT turbofish instantiations of
+    /// `f::<T, ...>(args)`, which is what makes "explicit args win; a conflicting argument is the
+    /// ordinary assignability error against the substituted parameter" true by construction
+    /// (binding uses first-wins `or_insert`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn check_generic_call_seeded(
+        &mut self,
+        name: &str,
+        generic: &GenericInfo,
+        required: usize,
+        args: &mut [Type],
+        arg_exprs: &[Expr],
+        span: Span,
+        seed: HashMap<String, Type>,
+        env: &mut Env,
+    ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
         if args.len() < required || args.len() > generic.raw_params.len() {
             let expected = if required == generic.raw_params.len() {
@@ -1186,15 +1216,7 @@ impl Checker {
             );
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
-        // Seed with the receiver's type arguments (instance call); the call's own arguments then
-        // refine any still-unbound parameters without overwriting the receiver's binding.
-        let mut subst: HashMap<String, Type> = generic
-            .params
-            .iter()
-            .map(|(n, _)| n.clone())
-            .zip(recv_args.iter().cloned())
-            .filter(|(_, t)| !t.defers_to_runtime())
-            .collect();
+        let mut subst: HashMap<String, Type> = seed;
         for (i, raw) in generic.raw_params.iter().enumerate() {
             if i >= args.len() {
                 // Omitted trailing defaults — already checked at the declaration.
@@ -1209,7 +1231,7 @@ impl Checker {
                 && self.is_deferred_arg(expr, env)
                 && matches!(args[i], Type::Unknown)
             {
-                let expected = erase_type_params(apply_subst(raw, &subst), &tps);
+                let expected = subst_or_dyn(raw, &subst, &tps);
                 // Absorb the (substituted) parameter type into the deferred literal — a `Fn` into a
                 // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` into a
                 // container literal — so its resolved type then binds any still-unbound type
@@ -1247,7 +1269,7 @@ impl Checker {
             }
         }
         self.enforce_type_param_bounds(name, &generic.params, &subst, &tps, span);
-        erase_type_params(apply_subst(&generic.raw_ret, &subst), &tps)
+        subst_or_dyn(&generic.raw_ret, &subst, &tps)
     }
 
     /// Enforce a polymorphic callable's declared **trait bounds** against a resolved substitution:
@@ -1277,7 +1299,7 @@ impl Checker {
                     let want: Vec<Type> = bound
                         .args
                         .iter()
-                        .map(|a| erase_type_params(apply_subst(a, subst), tps))
+                        .map(|a| subst_or_dyn(a, subst, tps))
                         .collect();
                     if !self.satisfies_user_trait(concrete, &bound.name, &want) {
                         let shown = bound_display(&bound.name, &want);

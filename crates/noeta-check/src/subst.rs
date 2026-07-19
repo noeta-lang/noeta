@@ -208,6 +208,24 @@ pub(crate) fn mentions_param(ty: &Type, params: &[String]) -> bool {
     }
 }
 
+/// Apply a call's substitution with every still-unbound parameter of `tps` mapped to `dyn` — the
+/// **capture-safe** form of substitute-then-erase: a type the substitution itself inserted is
+/// never re-erased, even when the caller's in-scope type parameter shares a NAME with the
+/// callee's (`fn relabel<T>` forwarding `T` into `fn id<T>` must yield `T`, not `dyn`).
+/// [`apply_subst`] replaces each occurrence without recursing into the replacement, so the
+/// inserted type survives verbatim.
+pub(crate) fn subst_or_dyn(
+    ty: &Type,
+    subst: &HashMap<String, Type>,
+    tps: &HashSet<String>,
+) -> Type {
+    let mut full = subst.clone();
+    for n in tps {
+        full.entry(n.clone()).or_insert(Type::Dyn);
+    }
+    apply_subst(ty, &full)
+}
+
 /// Substitute resolved type parameters into a type, deeply. An unresolved parameter is left as its
 /// `Named` form (the caller erases any residue to `dyn`).
 pub(crate) fn apply_subst(ty: &Type, subst: &HashMap<String, Type>) -> Type {
