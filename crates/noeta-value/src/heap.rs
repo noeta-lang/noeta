@@ -104,6 +104,14 @@ fn live_inc() {
                 p.set(n);
             }
         });
+        // Safepoint-GC trigger (memory-management 6.x): residency growth is allocation-driven, so
+        // the allocation path is where the watermark is checked — the dispatch loop's poll then
+        // reads one thread-local bool. Disarmed (`usize::MAX`) unless a run armed it.
+        GC_WATERMARK.with(|w| {
+            if n >= w.get() {
+                GC_PENDING.with(|g| g.set(true));
+            }
+        });
     });
 }
 
@@ -192,6 +200,113 @@ thread_local! {
 /// its configured mode); switching mid-run is not supported (the two keep different invariants).
 pub fn set_collector_mode(mode: CollectorMode) {
     MODE.with(|m| m.set(mode));
+}
+
+// --- In-run safepoint-GC trigger (memory-management 6.x) ---
+//
+// Both cycle reapers historically ran only at clean exit, so a program building cycles in a loop
+// had unbounded peak residency. The trigger below lets the VM run a collection DURING execution at
+// a safepoint: the allocation path sets a `GC_PENDING` flag when the live count crosses a
+// watermark (`Trace` mode) or when the candidate buffer crosses a floor (`TrialDeletion` mode),
+// and the dispatch loop polls that one bool at loop back-edges and frame transfers. Thread-local,
+// so every isolate carries its own trigger state — a worker collects at its own safepoints.
+
+thread_local! {
+    /// Set when a trigger condition crossed; cleared by [`safepoint_gc_rearm`] after a collection.
+    static GC_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// The live-object count at which the next safepoint collection is requested (`Trace` mode).
+    /// `usize::MAX` = disarmed (the default — plain `noeta-value` users never trigger).
+    static GC_WATERMARK: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// The configured growth step: after a collection the watermark re-arms to
+    /// `live + max(live, step)`, so collections amortize geometrically over residency growth.
+    static GC_STEP: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// The candidate-buffer length at which the next collection is requested (`TrialDeletion`
+    /// mode). `usize::MAX` = disarmed.
+    static GC_CANDIDATE_FLOOR: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+/// The default safepoint-GC threshold: how many live heap objects (over the arm point) accumulate
+/// before a mid-run collection is requested. Overridable per-process via `NOETA_GC_THRESHOLD`.
+pub const SAFEPOINT_GC_DEFAULT_THRESHOLD: usize = 10_000;
+
+/// The candidate-buffer growth (`TrialDeletion` mode) between safepoint collections.
+const SAFEPOINT_GC_CANDIDATE_STEP: usize = 4_096;
+
+/// The process-wide safepoint-GC threshold: `NOETA_GC_THRESHOLD` if set and parseable, else
+/// [`SAFEPOINT_GC_DEFAULT_THRESHOLD`]. Read once.
+pub fn safepoint_gc_default_threshold() -> usize {
+    static FROM_ENV: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *FROM_ENV.get_or_init(|| {
+        std::env::var("NOETA_GC_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(SAFEPOINT_GC_DEFAULT_THRESHOLD)
+    })
+}
+
+/// Whether a safepoint collection has been requested on this thread (one thread-local bool read —
+/// the dispatch loop's whole poll cost).
+#[inline]
+pub fn safepoint_gc_pending() -> bool {
+    GC_PENDING.with(|g| g.get())
+}
+
+/// Arm the safepoint-GC trigger for a run: request a collection once `step` further objects are
+/// live (relative to now, so a session/embed host's pre-existing residency is not charged), or —
+/// in `TrialDeletion` mode — once the candidate buffer grows by its step. Called by a run entry;
+/// thread-local, so each isolate arms its own.
+pub fn safepoint_gc_arm(step: usize) {
+    GC_STEP.with(|s| s.set(step));
+    GC_PENDING.with(|g| g.set(false));
+    GC_WATERMARK.with(|w| w.set(live_count().saturating_add(step)));
+    GC_CANDIDATE_FLOOR.with(|f| {
+        f.set(
+            CANDIDATES
+                .with(|c| c.borrow().len())
+                .saturating_add(SAFEPOINT_GC_CANDIDATE_STEP),
+        )
+    });
+}
+
+/// Disarm the safepoint-GC trigger (tests / teardown hygiene): no further collections are
+/// requested until the next [`safepoint_gc_arm`].
+pub fn safepoint_gc_disarm() {
+    GC_STEP.with(|s| s.set(usize::MAX));
+    GC_PENDING.with(|g| g.set(false));
+    GC_WATERMARK.with(|w| w.set(usize::MAX));
+    GC_CANDIDATE_FLOOR.with(|f| f.set(usize::MAX));
+}
+
+/// Re-arm the trigger after a safepoint collection: clear the pending flag and move the watermark
+/// to `live + max(live, step)` — geometric growth, so a program whose residency is genuinely live
+/// pays a vanishing collection frequency, while a cycle-churning loop is collected every `step`
+/// objects. The candidate floor re-arms relative to what stayed buffered (deferred components are
+/// re-buffered, and must not immediately re-trigger).
+pub fn safepoint_gc_rearm() {
+    let step = GC_STEP.with(|s| s.get());
+    if step == usize::MAX {
+        safepoint_gc_disarm();
+        return;
+    }
+    let live = live_count();
+    GC_WATERMARK.with(|w| w.set(live.saturating_add(live.max(step))));
+    GC_CANDIDATE_FLOOR.with(|f| {
+        f.set(
+            CANDIDATES
+                .with(|c| c.borrow().len())
+                .saturating_add(SAFEPOINT_GC_CANDIDATE_STEP),
+        )
+    });
+    GC_PENDING.with(|g| g.set(false));
+}
+
+/// Re-buffer a value as a candidate cycle root (the safepoint trial-deletion collector's deferral
+/// path: a destructor-bearing dead component is left allocated for the exit collection, which
+/// finds it again through the buffer).
+pub fn rebuffer_candidate(value: Value) {
+    if value.is_pointer() {
+        possible_root(value);
+    }
 }
 
 /// The active collector mode.
@@ -799,7 +914,17 @@ fn possible_root(value: Value) {
         set_color(value, Color::Purple);
         if !buffered(value) {
             set_buffered(value, true);
-            CANDIDATES.with(|c| c.borrow_mut().push(value));
+            let len = CANDIDATES.with(|c| {
+                let mut c = c.borrow_mut();
+                c.push(value);
+                c.len()
+            });
+            // Safepoint-GC trigger, `TrialDeletion` mode: the buffer crossing its floor requests a
+            // mid-run collection (the buffer IS the collector's whole input, so its growth — not
+            // raw allocation — is the right pressure signal here). Disarmed floor = `usize::MAX`.
+            if len >= GC_CANDIDATE_FLOOR.with(|f| f.get()) {
+                GC_PENDING.with(|g| g.set(true));
+            }
         }
     }
 }

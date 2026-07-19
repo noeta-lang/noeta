@@ -193,10 +193,199 @@ pub fn collect_trial_deletion() -> Garbage {
     }
 }
 
+// --- In-run safepoint collection (memory-management 6.x) -----------------------------------------
+//
+// The two collectors above run at clean exit, where the root set is trivially small and every
+// destructor may fire. The safepoint variants below run DURING execution, bounding the peak
+// residency of cycle-building loops, under one semantic rule: **a safepoint collection never runs
+// a destructor**. The destructor spec (destructor-order-spec §1/§2/§7, in git history) makes a
+// `destruct` block the only observable memory-management effect and ties its firing to the last
+// owning release — an event cyclic garbage never produces, so cycle-destructor timing is
+// collector-defined and today realized at exit on both backends. Reclaiming *destructor-free*
+// garbage mid-run is therefore invisible; a dead component containing any destructor-bearing
+// member is **deferred** intact to the exit collection, which reclaims it exactly as before
+// (same members, same reverse-`seq` order, same output). This also frees the two backends from
+// having to synchronize their collection points — unobservable work needs no differential.
+
+/// **Safepoint trace collection** (`Trace` mode): mark from the interpreter-enumerated `roots`
+/// (every live register window, frame upvalues, globals, channel buffers, extension arena, embed
+/// handles, scheduler-held tasks, traced futures, promoted-argument pins), then reclaim the
+/// unreachable registry members — except:
+///
+/// - **Anomaly abort.** If the garbage set's refcounts do not exactly balance its internal
+///   in-edges, the whole collection is abandoned (empty [`Garbage`], colors restored, counts
+///   untouched — the trace never mutates refcounts). An imbalance means either a refcount bug or
+///   a **missed root**: a live object referenced only from state the safepoint could not
+///   enumerate would show `refcount > in-edges`, so this check makes a missed root cost liveness
+///   until exit — never a use-after-free. (Unlike the exit trace, nothing is added to the
+///   anomaly oracle here: the exit collection still sees and reports a genuine refcount bug.)
+/// - **Destructor deferral.** Weakly-connected components of the garbage containing any member
+///   for which `defer` answers true (the VM asks "does this shape have an own `destruct`?") are
+///   left allocated for the exit collection, preserving today's observable destructor timing and
+///   ordering. Destructor-bearing values *captured* by a dead cycle are themselves members of the
+///   dead set, so the per-member predicate covers them.
+///
+/// The returned garbage is destructor-free by construction; the VM reclaims it through the same
+/// `reclaim_cycle_garbage` path (whose destructor phase is then vacuous), with
+/// `release_external: true` exactly like the exit trace.
+pub fn collect_trace_safepoint(roots: &[Value], defer: &dyn Fn(Value) -> bool) -> Garbage {
+    for &root in roots {
+        mark(root);
+    }
+    let live = noeta_value::live_objects();
+    let garbage: Vec<Value> = live
+        .iter()
+        .copied()
+        .filter(|v| v.gc_color() != Color::Gray)
+        .collect();
+    for &v in &live {
+        if v.gc_color() == Color::Gray {
+            v.gc_set_color(Color::Black);
+        }
+    }
+    if garbage.is_empty() || count_refcount_anomalies(&garbage) != 0 {
+        return Garbage::default();
+    }
+    let mut fresh = Vec::new();
+    for component in weakly_connected_components(&garbage) {
+        if component.iter().any(|&v| defer(v)) {
+            continue;
+        }
+        fresh.extend(component);
+    }
+    // Deterministic free order (reverse creation), matching the exit reclaim's tie-break. Not
+    // observable — the set is destructor-free — but it keeps the reclaim path's behavior uniform.
+    fresh.sort_by_key(|g| std::cmp::Reverse(g.gc_seq()));
+    Garbage {
+        fresh,
+        already_destructed: Vec::new(),
+        release_external: true,
+    }
+}
+
+/// **Safepoint trial-deletion collection** (`TrialDeletion` mode): the Bacon–Rajan collection
+/// over the buffered candidate roots, with the safepoint destructor rule applied. Unlike the
+/// trace it needs no root enumeration at all — deadness is proven by the trial decrement (every
+/// external owner, including a VM register, holds a counted reference), so there is no
+/// missed-root failure mode and no abort path. Dead components containing a destructor-bearing
+/// member are **restored** (their trial decrements undone edge-for-edge) and re-buffered as
+/// candidates, so the exit collection reclaims them exactly as it would have.
+pub fn collect_trial_deletion_safepoint(defer: &dyn Fn(Value) -> bool) -> Garbage {
+    let roots = noeta_value::take_candidates();
+    let mut gray_roots = Vec::new();
+    let mut deferred_dealloc = Vec::new();
+    for &s in &roots {
+        s.gc_set_buffered(false);
+        match s.gc_color() {
+            Color::Purple => {
+                mark_gray(s);
+                gray_roots.push(s);
+            }
+            // A deferred-dealloc object (refcount 0, children already released, `__destruct`
+            // already run on the release path): free-only, exactly as the exit collection.
+            _ => deferred_dealloc.push(s),
+        }
+    }
+    for &s in &gray_roots {
+        scan(s);
+    }
+    let mut white = Vec::new();
+    for &s in &gray_roots {
+        gather_white(s, &mut white);
+    }
+    let mut seen: HashSet<u64> = HashSet::with_capacity(white.len() + deferred_dealloc.len());
+    let white: Vec<Value> = white
+        .into_iter()
+        .filter(|v| seen.insert(v.bits()))
+        .collect();
+    let already_destructed: Vec<Value> = deferred_dealloc
+        .into_iter()
+        .filter(|v| seen.insert(v.bits()))
+        .collect();
+    let mut fresh = Vec::new();
+    for component in weakly_connected_components(&white) {
+        if component.iter().any(|&v| defer(v)) {
+            // Defer the destructor-bearing component to the exit collection: undo the trial
+            // decrements edge-for-edge (each member's out-edges were decremented exactly once by
+            // `mark_gray`; edges into the component all come from within it, since it is white =
+            // externally unreferenced and weak connectivity keeps sibling components edge-free),
+            // then re-buffer every member so the exit trial deletion finds the cycle again.
+            for &m in &component {
+                for child in m.gc_children() {
+                    if !child.is_shared() {
+                        child.gc_rc_inc();
+                    }
+                }
+            }
+            for &m in &component {
+                noeta_value::rebuffer_candidate(m);
+            }
+            continue;
+        }
+        fresh.extend(component);
+    }
+    fresh.sort_by_key(|g| std::cmp::Reverse(g.gc_seq()));
+    Garbage {
+        fresh,
+        already_destructed,
+        release_external: false,
+    }
+}
+
+/// Partition `garbage` into its weakly-connected components under the heap reference graph
+/// restricted to the set — the granularity at which the safepoint collectors decide "reclaim now"
+/// vs "defer to exit". Weak (undirected) connectivity is what makes deferral sound: no reclaimed
+/// member can hold an edge to a deferred one (or vice versa), so freeing one component never
+/// releases or dangles into another.
+fn weakly_connected_components(garbage: &[Value]) -> Vec<Vec<Value>> {
+    let index: std::collections::HashMap<u64, usize> = garbage
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.bits(), i))
+        .collect();
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); garbage.len()];
+    for (i, &v) in garbage.iter().enumerate() {
+        for child in v.gc_children() {
+            if let Some(&j) = index.get(&child.bits())
+                && j != i
+            {
+                adjacency[i].push(j);
+                adjacency[j].push(i);
+            }
+        }
+    }
+    let mut component_of = vec![usize::MAX; garbage.len()];
+    let mut components = Vec::new();
+    for start in 0..garbage.len() {
+        if component_of[start] != usize::MAX {
+            continue;
+        }
+        let id = components.len();
+        let mut members = Vec::new();
+        let mut queue = vec![start];
+        component_of[start] = id;
+        while let Some(i) = queue.pop() {
+            members.push(garbage[i]);
+            for &j in &adjacency[i] {
+                if component_of[j] == usize::MAX {
+                    component_of[j] = id;
+                    queue.push(j);
+                }
+            }
+        }
+        components.push(members);
+    }
+    components
+}
+
 /// Paint `s` and everything reachable from it `Gray` (reachable/live). Idempotent via the color
-/// check, so shared substructure and cycles terminate.
+/// check, so shared substructure and cycles terminate. A **borrow-shared** object (isolates I.3)
+/// is skipped outright: it is owned by its region — never registered, never swept — and writing
+/// its color from a safepoint collection while worker isolates hold the graph would be a data
+/// race; its children are all shared too (promotion deep-copies whole graphs), so the skip loses
+/// no reachability.
 fn mark(s: Value) {
-    if !s.is_pointer() || s.gc_color() == Color::Gray {
+    if !s.is_pointer() || s.is_shared() || s.gc_color() == Color::Gray {
         return;
     }
     s.gc_set_color(Color::Gray);
@@ -268,13 +457,17 @@ impl CycleCollector {
 }
 
 /// Paint `s` gray and trial-decrement each child's count, recursing — so edges *internal* to
-/// the candidate subgraph no longer count toward keeping a node alive.
+/// the candidate subgraph no longer count toward keeping a node alive. Borrow-shared children
+/// are skipped (never refcounted, never collected — see [`mark`]).
 fn mark_gray(s: Value) {
     if s.gc_color() == Color::Gray {
         return;
     }
     s.gc_set_color(Color::Gray);
     for child in s.gc_children() {
+        if child.is_shared() {
+            continue;
+        }
         child.gc_rc_dec();
         mark_gray(child);
     }
@@ -296,10 +489,14 @@ fn scan(s: Value) {
     }
 }
 
-/// Restore `s` (and its still-gray subgraph) to black, undoing the trial decrements.
+/// Restore `s` (and its still-gray subgraph) to black, undoing the trial decrements. Shared
+/// children are skipped, mirroring [`mark_gray`]'s skip (their counts were never decremented).
 fn scan_black(s: Value) {
     s.gc_set_color(Color::Black);
     for child in s.gc_children() {
+        if child.is_shared() {
+            continue;
+        }
         child.gc_rc_inc();
         if child.gc_color() != Color::Black {
             scan_black(child);
@@ -390,6 +587,145 @@ mod tests {
         gc.add_candidate(cell);
         gc.add_candidate(closure);
         gc.collect(); // frees both members of the cycle; miri verifies no leak
+    }
+
+    /// Reclaim a [`Garbage`] set the way the VM's `reclaim_cycle_garbage` does, minus destructors
+    /// (safepoint garbage is destructor-free by construction): release each fresh member's edges
+    /// to surviving values, then free every member shallowly.
+    fn reclaim(garbage: Garbage) {
+        let dead: HashSet<u64> = garbage
+            .fresh
+            .iter()
+            .chain(&garbage.already_destructed)
+            .map(|v| v.bits())
+            .collect();
+        if garbage.release_external {
+            for &g in &garbage.fresh {
+                for child in g.gc_children() {
+                    if !dead.contains(&child.bits()) {
+                        release(child);
+                    }
+                }
+            }
+        }
+        for g in garbage.fresh.into_iter().chain(garbage.already_destructed) {
+            g.gc_free_shallow();
+        }
+    }
+
+    #[test]
+    fn safepoint_trace_reclaims_an_unreachable_cycle_and_spares_the_rooted() {
+        // Two A<->B cycles; one stays rooted, one is released. The safepoint trace must reclaim
+        // exactly the unrooted one.
+        let (a, b) = (cell(), cell());
+        a.set_slot(0, b);
+        b.set_slot(0, a);
+        let (c, d) = (cell(), cell());
+        c.set_slot(0, d);
+        d.set_slot(0, c);
+        release(a);
+        release(b); // a<->b now unreachable garbage
+        let before = noeta_value::live_count();
+        let garbage = collect_trace_safepoint(&[c], &|_| false);
+        assert_eq!(
+            garbage.fresh.len(),
+            2,
+            "exactly the dead cycle is reclaimed"
+        );
+        reclaim(garbage);
+        assert_eq!(noeta_value::live_count(), before - 2);
+        // c<->d survived intact and rooted; tear it down through the safepoint path too.
+        release(c);
+        release(d);
+        let garbage = collect_trace_safepoint(&[], &|_| false);
+        assert_eq!(garbage.fresh.len(), 2);
+        reclaim(garbage);
+    }
+
+    #[test]
+    fn safepoint_trace_defers_a_destructor_bearing_component() {
+        // Cycle 1 (a<->b) is "destructor-bearing" (the predicate defers `a`); cycle 2 (c<->d) is
+        // destructor-free. Only cycle 2 may be reclaimed mid-run; cycle 1 stays allocated for the
+        // exit collection, its refcounts untouched.
+        let (a, b) = (cell(), cell());
+        a.set_slot(0, b);
+        b.set_slot(0, a);
+        let (c, d) = (cell(), cell());
+        c.set_slot(0, d);
+        d.set_slot(0, c);
+        release(a);
+        release(b);
+        release(c);
+        release(d);
+        let deferred = a;
+        let garbage = collect_trace_safepoint(&[], &|v| v.bits() == deferred.bits());
+        assert_eq!(garbage.fresh.len(), 2, "only the destructor-free cycle");
+        assert!(
+            garbage
+                .fresh
+                .iter()
+                .all(|v| v.bits() != a.bits() && v.bits() != b.bits())
+        );
+        reclaim(garbage);
+        // The deferred cycle survived with exact counts; the exit-style trace reclaims it.
+        assert_eq!(a.refcount(), 1);
+        assert_eq!(b.refcount(), 1);
+        let garbage = collect_trace(&[]);
+        assert_eq!(garbage.fresh.len(), 2);
+        reclaim(garbage);
+    }
+
+    #[test]
+    fn safepoint_trace_aborts_on_a_missed_root() {
+        // `x` is live, held ONLY by a root the enumeration "missed" (we simply do not pass it).
+        // Its refcount then exceeds its in-edges from the garbage set, so the whole collection
+        // must abort — reclaiming nothing — rather than free a live object.
+        let x = cell();
+        let garbage = collect_trace_safepoint(&[], &|_| false);
+        assert!(
+            garbage.fresh.is_empty(),
+            "imbalance must abort the collection"
+        );
+        assert_eq!(x.refcount(), 1, "the live object is untouched");
+        release(x); // frees promptly (Trace mode)
+    }
+
+    #[test]
+    fn safepoint_trial_deletion_reclaims_free_cycles_and_defers_destructor_bearing() {
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::TrialDeletion);
+        // Destructor-free cycle a<->b and "destructor-bearing" cycle c<->d, both released so the
+        // release path buffers candidates.
+        let (a, b) = (cell(), cell());
+        a.set_slot(0, b);
+        b.set_slot(0, a);
+        let (c, d) = (cell(), cell());
+        c.set_slot(0, d);
+        d.set_slot(0, c);
+        release(a);
+        release(b);
+        release(c);
+        release(d);
+        let deferred = c;
+        let before = noeta_value::live_count();
+        let garbage = collect_trial_deletion_safepoint(&|v| v.bits() == deferred.bits());
+        assert_eq!(garbage.fresh.len(), 2, "only the destructor-free cycle");
+        assert!(
+            garbage
+                .fresh
+                .iter()
+                .all(|v| v.bits() != c.bits() && v.bits() != d.bits())
+        );
+        assert!(!garbage.release_external);
+        reclaim(garbage);
+        assert_eq!(noeta_value::live_count(), before - 2);
+        // The deferred cycle's trial decrements were restored and it was re-buffered: the exit
+        // collection reclaims it exactly as it would have without the safepoint.
+        assert_eq!(c.refcount(), 1);
+        assert_eq!(d.refcount(), 1);
+        let garbage = collect_trial_deletion();
+        assert_eq!(garbage.fresh.len(), 2);
+        reclaim(garbage);
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     }
 
     #[test]
