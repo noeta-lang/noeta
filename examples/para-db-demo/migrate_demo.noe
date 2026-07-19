@@ -1,0 +1,28 @@
+// Self-migrating at boot (aether DB6): `conn.migrate(dir)` applies every pending SQL migration under
+// `dir` in one transaction each, tracked in `_noeta_migrations`, and returns how many it applied.
+// This is the same engine `noeta migrate` drives from the CLI. Run from the repo root so the relative
+// migrations path resolves:
+//
+//   noeta run examples/para-db-demo/migrate_demo.noe
+use para.db
+
+conn = db.connect("sqlite::memory:")
+
+// Apply the two migrations under migrations/ — returns the count applied (0 when already up to date).
+applied = conn.migrate("examples/para-db-demo/migrations")
+echo "applied ${applied} migration(s)"
+
+// Re-running is a no-op: the tracking table records what already ran.
+again = conn.migrate("examples/para-db-demo/migrations")
+echo "re-run applied ${again} migration(s)"
+
+// The schema and seed data from the migrations are now live.
+rows = conn.query("SELECT id, name FROM users ORDER BY id", [])
+echo "users -> ${rows.len()}"
+for row in rows {
+    id = row["id"]
+    name = row["name"]
+    echo "  #${id} ${name}"
+}
+
+conn.close()

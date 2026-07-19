@@ -45,6 +45,14 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | OTEL: **stdout/structured-logging bridge** — `std.log` records go to the OTLP sink only; mirroring them to stdout (a `print`-bridge) is a separate decision, deferred | native-otel metrics-logs, §decision 3 |
 | Synced **store** (a whole reactive dataset, the §9.12 merge point) and `.history()`/time-travel over the p2p append log | p2p "later/open" R&D |
 
+## Database (para/db)
+
+| Item | Source / trigger |
+| --- | --- |
+| **Down / rollback migrations** — v1 is deliberately forward-only (down migrations are routinely wrong against real production data; `--reset` covers development). Optional paired `*.down.sql` files + a `noeta migrate down [--to <file>]` verb, applied newest-first in their own transactions | migration engine (aether DB6, 2026-07-19). Trigger: a concrete need for a scripted rollback beyond `--reset` |
+| **Per-dialect migration overrides** — v1 runs each migration body verbatim in the target dialect's native SQL (write portable SQL). A `migrations/postgres/` (or `sqlite/`) sub-directory shadowing a base file for a divergent backend (e.g. `SERIAL` vs `AUTOINCREMENT`), selected by the connected driver's dialect. `load_dir` already ignores sub-directories, leaving room for this | migration engine (aether DB6, 2026-07-19). Trigger: a project genuinely needing to target both SQLite and Postgres from one migration set |
+| **Out-of-order migration detection** — the runner applies pending files in filename-sort order and gates history integrity via checksum + deleted-file checks; it does not warn when a *newly added* migration sorts before an already-applied one (a rebase inserting an earlier prefix). Timestamps make this rare; a warning (not a hard error, to keep legitimate merges unblocked) could flag it | migration engine (aether DB6, 2026-07-19). Trigger: an out-of-order incident in practice |
+
 ## Packages, registry & distribution
 
 | Item | Source / trigger |

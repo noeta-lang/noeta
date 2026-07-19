@@ -79,6 +79,10 @@ noeta-playground = { path = "crates/noeta-playground" }
 noeta-wasm-serve = { path = "crates/noeta-wasm-serve" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
+# The `para.db` native driver + migration engine. Depended on directly by the CLI so `noeta migrate`
+# can open a driver and run the migration engine without the composed toolchain; the package's native
+# entry crate re-exports its `NOETA_EXTENSIONS` for the runtime registry.
+noeta-para-db = { path = "crates/noeta-para-db" }
 # The reactive extension **contract** (capability-broker seam): the trait an out-of-tree reactive-node
 # extension (`para.synced`) programs against and the in-tree engine (`noeta-stdlib::reactive`)
 # implements — reached per-run via `noeta_ext_abi::capability::<dyn ReactiveSource>`. Tiny: deps only

@@ -51,6 +51,7 @@ pub struct Manifest {
     targets: BTreeMap<String, Target>,
     trust: Trust,
     registries: Registries,
+    db: DbConfig,
 }
 
 /// The `[registries]` table (private-registries arc) — a map from a **scope** (`company`) to the
@@ -210,6 +211,20 @@ pub struct Trust {
     /// tier (`operator`/`publisher`/`imported`) makes `noeta audit` **fail** the build, merely **warn**,
     /// or is ignored (`off`). Default: every tier warns; a project opts a tier up to `fail` for CI.
     pub advisories: AdvisoryPolicy,
+}
+
+/// The `[db]` table — a project's default database wiring for `noeta migrate` (and any tooling that
+/// wants a declared DSN). Both keys are optional: `url` is the connection string (the same dsn schemes
+/// `db.connect` accepts) and `migrations` is the directory holding the `.sql` migration files
+/// (default `migrations/`). The CLI layers a `--db`/`--dir` flag and the `DATABASE_URL` env var over
+/// these, so a project can declare a default here and still override per-invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DbConfig {
+    /// The database connection string, if declared. `None` = not configured here (resolve from a flag
+    /// or `DATABASE_URL`).
+    pub url: Option<String>,
+    /// The migrations directory, if declared. `None` = the default (`migrations/`).
+    pub migrations: Option<String>,
 }
 
 /// What a matched advisory of a given intake tier does to an `noeta audit` run (advisory-intake arc,
@@ -791,6 +806,7 @@ impl Manifest {
         let dependencies = parse_dependencies(&table)?;
         let trust = parse_trust(&table)?;
         let registries = parse_registries(&table)?;
+        let db = parse_db(&table)?;
         let mut targets = BTreeMap::new();
 
         let Some(targets_value) = table.get("targets") else {
@@ -800,6 +816,7 @@ impl Manifest {
                 targets,
                 trust,
                 registries,
+                db,
             });
         };
         let targets_table = targets_value
@@ -882,6 +899,7 @@ impl Manifest {
             targets,
             trust,
             registries,
+            db,
         })
     }
 
@@ -898,6 +916,11 @@ impl Manifest {
     /// The `[trust]` grants — the authority this manifest extends to its dependencies (Phase 4).
     pub fn trust(&self) -> &Trust {
         &self.trust
+    }
+
+    /// The `[db]` table — the project's default database wiring (`noeta migrate`).
+    pub fn db(&self) -> &DbConfig {
+        &self.db
     }
 
     /// The declared dependencies, keyed by local **import root** (the dependency-table key).
@@ -1229,6 +1252,29 @@ fn parse_dependency_map(deps: &toml::Table) -> Result<BTreeMap<String, Dependenc
 /// entry is validated as an identity (so a typo'd grant is a hard error, not a silently ineffective
 /// one). An absent `[trust]` table yields empty grants — the safe default (no dependency may run
 /// native code or add a command).
+/// Parse the optional `[db]` table into a [`DbConfig`]. Both keys (`url`, `migrations`) are optional
+/// strings; a present-but-wrong-typed value fails loudly rather than being silently ignored.
+fn parse_db(table: &toml::Table) -> Result<DbConfig, String> {
+    let Some(value) = table.get("db") else {
+        return Ok(DbConfig::default());
+    };
+    let db_table = value.as_table().ok_or("`db` must be a table")?;
+    let string_key = |key: &str| -> Result<Option<String>, String> {
+        match db_table.get(key) {
+            None => Ok(None),
+            Some(v) => Ok(Some(
+                v.as_str()
+                    .ok_or_else(|| format!("`db.{key}` must be a string"))?
+                    .to_string(),
+            )),
+        }
+    };
+    Ok(DbConfig {
+        url: string_key("url")?,
+        migrations: string_key("migrations")?,
+    })
+}
+
 fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
     let Some(value) = table.get("trust") else {
         return Ok(Trust::default());
@@ -1564,6 +1610,36 @@ fn provider_of(target: &str, tier: &str, value: &toml::Value) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- `[db]` (migration wiring) -------------------------------------------------------------
+
+    #[test]
+    fn parses_a_db_table() {
+        let m = Manifest::parse(
+            "[db]\n\
+             url = \"postgres://u:p@h/db\"\n\
+             migrations = \"db/migrations\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.db().url.as_deref(), Some("postgres://u:p@h/db"));
+        assert_eq!(m.db().migrations.as_deref(), Some("db/migrations"));
+    }
+
+    #[test]
+    fn a_missing_db_table_is_the_default() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"0.1.0\"\n").expect("valid");
+        assert_eq!(m.db(), &DbConfig::default());
+        assert!(m.db().url.is_none());
+    }
+
+    #[test]
+    fn a_wrongly_typed_db_url_is_an_error() {
+        let err = Manifest::parse("[db]\nurl = 5\n").unwrap_err();
+        assert!(
+            err.to_string().contains("`db.url` must be a string"),
+            "{err}"
+        );
+    }
 
     // --- `[registries]` (private-registries arc) -----------------------------------------------
 

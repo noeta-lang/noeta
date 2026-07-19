@@ -52,7 +52,12 @@ noeta-prof = { workspace = true }
 noeta-fmt = { workspace = true }
 noeta-pm = { workspace = true, features = ["fmt-config", "registry-http", "provenance", "keyless"] }
 noeta-mcp = { workspace = true }
+# The `noeta migrate` verb opens a driver and drives the migration engine directly (both drivers so
+# SQLite and Postgres migrate from the stock binary).
+noeta-para-db = { workspace = true, features = ["ring-sqlite", "ring-postgres"] }
 sha2 = { workspace = true }
+# `migrate new` stamps a UTC-timestamp filename prefix.
+time = { version = "0.3", default-features = false, features = ["std"] }
 clap = { workspace = true }
 # `--watch` restart-on-change dev loop (server-hmr W0).
 notify = { workspace = true }

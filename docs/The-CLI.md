@@ -196,6 +196,46 @@ noeta check [PATH]
 
 Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
 
+## `noeta migrate`
+
+```text
+noeta migrate [--db <dsn>] [--dir <path>] [--status] [--dry-run] [--reset [--yes]]
+noeta migrate new <name> [--dir <path>]
+```
+
+Applies a project's **plain-SQL migrations** (the para/db layer). Migrations are `.sql` files in a
+`migrations/` directory, applied in filename-sort order; each runs inside its own transaction, so a
+failure rolls that migration back and stops, naming the file. An applied migration is tracked in a
+`_noeta_migrations` table by a sha256 checksum of its contents — editing an already-applied file, or
+deleting one, is a hard error (history is immutable). Migrations are **forward-only** (no down files):
+`--reset` covers the development loop.
+
+| invocation | effect |
+| --- | --- |
+| `noeta migrate` | apply every pending migration, printing each applied file |
+| `noeta migrate --status` | list which migrations are applied and which are pending |
+| `noeta migrate --dry-run` | list what would be applied, without touching the database |
+| `noeta migrate new <name>` | scaffold `migrations/<UTC-timestamp>_<name>.sql` |
+| `noeta migrate --reset --yes` | DESTRUCTIVE: drop the schema and re-apply from zero |
+
+The **connection string** is resolved, highest priority first: the `--db <dsn>` flag, the
+`DATABASE_URL` environment variable, then a `[db]` table in `noeta.toml`:
+
+```toml
+[db]
+url = "sqlite:app.db"        # any dsn scheme db.connect accepts (sqlite:… / postgres://…)
+migrations = "migrations"    # optional; the migrations directory (default "migrations")
+```
+
+`--dir` overrides the directory per-invocation. `--reset` drops and recreates the schema — on SQLite
+it drops every user table/view/trigger; on PostgreSQL it runs `DROP SCHEMA public CASCADE; CREATE
+SCHEMA public` — and refuses to run without `--yes` or an interactive `yes` typed at the prompt.
+
+Exit codes: `0` success; `2` for a usage/config problem (no dsn configured, a missing migrations
+directory, an unconfirmed `--reset`); `1` for a run that failed (connect failure, a SQL error,
+checksum drift, a deleted migration). An app can migrate itself at boot off the same engine with
+`conn.migrate("migrations")` (see [para/db](https://github.com/…/packages/para-db)).
+
 ## `noeta serve` and `--watch`
 
 `noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response`
