@@ -418,6 +418,25 @@ impl<'m> Vm<'m> {
                         // `Value::unbound` sentinel (P-JIT globals); every other value is a real binding.
                         let v = self.persist.globals[global.0 as usize];
                         if v.is_unbound() {
+                            // In a worker isolate, an unbound slot may be a global the parent could
+                            // not ship (isolates I.4b) — a `class` (reference identity), a captured
+                            // closure, a `Local` channel. Name it + its type + the fix, instead of
+                            // the misleading "cannot find `x`" (the global clearly exists in source).
+                            if let Some(ty) = self.isolates.unshippable_globals.get(&global.0) {
+                                return Err(self.error(
+                                    DiagnosticCode::NotSend,
+                                    *span,
+                                    format!(
+                                        "the global `{}` of type `{ty}` cannot be shared with an \
+                                         isolate — only value types cross an isolate boundary (a \
+                                         reference `class` has identity, a captured closure and a \
+                                         cooperative channel hold heap state). Make it a value \
+                                         type, or pass the value-type data it holds to the isolate \
+                                         as arguments.",
+                                        module.global_name(*global)
+                                    ),
+                                ));
+                            }
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
                                 *span,
