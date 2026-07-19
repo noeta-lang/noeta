@@ -136,7 +136,7 @@ xs: List<int> = [1, 2, 3]
 count: int = 3
 ```
 
-**Shadowing** is lexical and limited to name-introducing constructs — a function parameter or loop variable whose name matches an outer binding shadows it for that scope, leaving the outer binding untouched. A plain `name = expr` never shadows: the first use in a scope declares the binding, and a later one (in the same or an inner scope) reassigns it — which is E0006 if it is immutable.
+**There is no shadowing** — one name means one thing per scope stack (E0055). A binder — a closure parameter, `for` variable, or match-pattern binding — may not reuse a name already bound in a scope it can see, and a binding may not reuse an imported name (E0020); rename one side. A plain `name = expr` never introduces a second binding either: the first use in a scope declares it, and a later one (in the same or an inner scope) reassigns it — E0006 if it is immutable, E0007 if the type would change. Named functions make this ergonomic by being **sealed** — their bodies don't see surrounding value bindings at all (import one explicitly with `use (…)`), so their parameters conflict with nothing. See [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).
 
 **Compound assignment** `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`:
 

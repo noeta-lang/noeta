@@ -2,8 +2,10 @@
 //! binding, attached right after the binding's name — `mut xs⟨: List<int>⟩ = …`.
 //!
 //! Three sources of truth, all already computed for other features: the checker's `expr_types`
-//! index (the hover index — the SAME spelling hover and the debugger show, so the inline text can
-//! never disagree with them), the parsed AST (binding shapes and un-annotatedness), and the
+//! index (the hover index — the same `TypeRepr`s hover and the debugger read; hints render them
+//! via [`TypeRepr::display_short`], shortening each nominal to its in-scope name, where hover
+//! keeps the fully-qualified spelling for disambiguation), the parsed AST (binding shapes and
+//! un-annotatedness), and the
 //! [`DefUse`] binding index as a **declaration filter** — `x = 5` reassigning an earlier binding
 //! parses as the same `Stmt::Binding` shape but is a *use*: hinting it would be noise, and its
 //! type is pinned by its declaration anyway (mut-typing stability is what makes these hints
