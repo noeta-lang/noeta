@@ -837,11 +837,12 @@ pub enum Op {
         span: Span,
     },
     /// The **router-facing** runtime JSON decode (`json.decode_typed(name, text)` → `Result<dyn,
-    /// string>`, L2.2 DI): decode the JSON in register `text` into the type named by the runtime
+    /// JsonError>`, L2.2 DI): decode the JSON in register `text` into the type named by the runtime
     /// string in register `name`, using the recipe registered for a `@derive(Deserialize<Json>)`
     /// type (baked into [`Module::deserialize_recipes`]). Fully recoverable — a malformed body **or**
-    /// an unknown/unregistered type name lands as `Result.Err` (`err_shape`); a successful decode as
-    /// `Result.Ok` (`ok_shape`) wrapping the materialized value.
+    /// an unknown/unregistered type name lands as `Result.Err` (`err_shape`) wrapping a
+    /// path-carrying `JsonError` extern value; a successful decode as `Result.Ok` (`ok_shape`)
+    /// wrapping the materialized value.
     DecodeTyped {
         dst: Reg,
         name: Reg,

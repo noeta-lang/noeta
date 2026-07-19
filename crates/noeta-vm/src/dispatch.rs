@@ -799,15 +799,16 @@ impl<'m> Vm<'m> {
                         err_shape,
                         span,
                     } => {
-                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown type
-                        // name, a non-string operand, or a malformed body all land as `Result.Err`; a
-                        // good decode is `Result.Ok(value)` wrapping the materialized struct. Mirrors
-                        // the recoverable `json.decode::<T>` branch above, but the recipe is looked up by
-                        // runtime type name rather than baked at the call site.
-                        let err = |vm: &Self, msg: String| {
+                        // The router-facing runtime decode (L2.2 DI). Fully recoverable: an unknown
+                        // type name, a non-string operand, or a malformed body all land as
+                        // `Result.Err` wrapping a path-carrying `JsonError` (the same error story
+                        // as `json.try_parse::<T>`). Mirrors the recoverable `try_parse` branch
+                        // above, but the recipe is looked up by runtime type name rather than
+                        // baked at the call site.
+                        let err = |vm: &Self, error: noeta_stdlib::json::JsonError| {
                             Value::enum_value(
                                 vm.persist.shapes[*err_shape as usize],
-                                vec![Value::string(&msg)],
+                                vec![Value::extern_value(noeta_stdlib::ExternBox::new(error))],
                             )
                         };
                         let name_val = regs[fbase + *name as usize].as_string();
@@ -820,14 +821,19 @@ impl<'m> Vm<'m> {
                             ));
                         };
                         let value = match self.deserialize_recipes.get(&type_name) {
-                            None => err(self, format!("unknown deserializable type `{type_name}`")),
-                            Some(recipe) => match noeta_stdlib::json::parse_typed(&text, recipe) {
-                                Ok(out) => Value::enum_value(
-                                    self.persist.shapes[*ok_shape as usize],
-                                    vec![materialize_recipe(out)],
-                                ),
-                                Err(error) => err(self, error.message),
-                            },
+                            None => err(
+                                self,
+                                noeta_stdlib::json::JsonError::unknown_type(&type_name),
+                            ),
+                            Some(recipe) => {
+                                match noeta_stdlib::json::try_parse_typed(&text, recipe) {
+                                    Ok(out) => Value::enum_value(
+                                        self.persist.shapes[*ok_shape as usize],
+                                        vec![materialize_recipe(out)],
+                                    ),
+                                    Err(error) => err(self, error),
+                                }
+                            }
                         };
                         set_reg(regs, fbase, *dst, value);
                         pc += 1;

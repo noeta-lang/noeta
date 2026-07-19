@@ -1732,10 +1732,11 @@ impl Interpreter {
                 }
             }
             noeta_ir::Rvalue::DecodeTyped { name, text, span } => {
-                // The router-facing runtime decode (L2.2 DI). Fully recoverable — an unknown type name,
-                // a non-string operand, or a malformed body all become `Result.Err`; a good decode is
-                // `Result.Ok(value)`. Mirrors the recoverable `json.decode::<T>` branch above, but the
-                // recipe is looked up by runtime type name rather than baked at the call site.
+                // The router-facing runtime decode (L2.2 DI). Fully recoverable — an unknown type
+                // name, a non-string operand, or a malformed body all become `Result.Err` wrapping
+                // a path-carrying `JsonError` (the same error story as `json.try_parse::<T>`).
+                // Mirrors the recoverable `try_parse` branch above, but the recipe is looked up by
+                // runtime type name rather than baked at the call site.
                 let name_val = self.eval_ir_atom(name, frame)?;
                 let text_val = self.eval_ir_atom(text, frame)?;
                 let (Value::Str(type_name), Value::Str(text)) = (&name_val, &text_val) else {
@@ -1745,24 +1746,23 @@ impl Interpreter {
                         "`json.decode_typed` expects two `string` arguments".to_string(),
                     ));
                 };
-                match self.deserialize_recipes.get(type_name).cloned() {
-                    None => Ok(crate::builtin_enum(
+                let err = |error: noeta_stdlib::json::JsonError| {
+                    crate::builtin_enum(
                         "Result",
                         "Err",
-                        vec![Value::Str(format!(
-                            "unknown deserializable type `{type_name}`"
-                        ))],
-                    )),
-                    Some(recipe) => match noeta_stdlib::json::parse_typed(text, &recipe) {
+                        vec![Value::Extern(Rc::new(RefCell::new(
+                            noeta_stdlib::ExternBox::new(error),
+                        )))],
+                    )
+                };
+                match self.deserialize_recipes.get(type_name).cloned() {
+                    None => Ok(err(noeta_stdlib::json::JsonError::unknown_type(type_name))),
+                    Some(recipe) => match noeta_stdlib::json::try_parse_typed(text, &recipe) {
                         Ok(out) => {
                             let value = self.materialize_recipe(out, *span)?;
                             Ok(crate::builtin_enum("Result", "Ok", vec![value]))
                         }
-                        Err(error) => Ok(crate::builtin_enum(
-                            "Result",
-                            "Err",
-                            vec![Value::Str(error.message)],
-                        )),
+                        Err(error) => Ok(err(error)),
                     },
                 }
             }
