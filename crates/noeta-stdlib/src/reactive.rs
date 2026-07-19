@@ -130,6 +130,15 @@ pub const VIEW_CTX_METHODS: &[ExtFn] = &[
         params: &[SigType::String, SigType::Dyn],
         ret: RetTy::Concrete(SigType::Unit),
     },
+    // `unexpose(name)` — drop the binding `name` and **dispose its handle**, so a diff never pushes
+    // it again and its backing cells reclaim (the keyed-list structural-change path: a row that
+    // leaves the key set is unexposed, tearing down its per-row reactive scope). A no-op for an
+    // unknown name.
+    ExtFn {
+        name: "unexpose",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
     // `snapshot() -> string` — the full-state frame; also the baseline diffs are minimal against.
     ExtFn {
         name: "snapshot",
@@ -658,6 +667,39 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             } else {
                 view.bindings.push(binding);
             }
+            Ok(CtxOut::Out(NativeOut::Unit))
+        }
+        "unexpose" => {
+            ctx_arity(method, args, 1)?;
+            let noeta_ext_abi::registry::NativeValue::Str(name) = ctx.view(args[0])? else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: "view.unexpose: the binding name must be a string".to_string(),
+                }
+                .into());
+            };
+            // Drop the binding and dispose its graph node, then remap the dirty set to the shifted
+            // indices (removing the binding shifts every later index down by one). Disposing the
+            // node reclaims its owner-tree scope; `release_reclaimed` returns the cells on the spot,
+            // so a churning keyed list (rows in and out) leaves residency flat.
+            let node = {
+                let mut views = ext.views.borrow_mut();
+                let view = &mut views[id];
+                let Some(idx) = view.bindings.iter().position(|b| b.name == name) else {
+                    return Ok(CtxOut::Out(NativeOut::Unit));
+                };
+                let node = view.bindings[idx].node;
+                view.bindings.remove(idx);
+                let old = std::mem::take(&mut view.dirty);
+                view.dirty = old
+                    .into_iter()
+                    .filter(|&d| d != idx)
+                    .map(|d| if d > idx { d - 1 } else { d })
+                    .collect();
+                node
+            };
+            ext.graph.dispose(node);
+            release_reclaimed(ctx, ext);
             Ok(CtxOut::Out(NativeOut::Unit))
         }
         "snapshot" => {

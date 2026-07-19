@@ -1,0 +1,35 @@
+// `view.unexpose(name)` (LiveView keyed-list arc): drop a binding and dispose its handle, so a later
+// `diff()` never pushes it again and the handle's reactive scope reclaims — the transport primitive
+// the keyed list uses to tear down a row that leaves the key set. `b` is a computed over `a`; after
+// unexposing it, changing `a` still diffs `a` but no longer pushes `b` (its node was disposed and
+// unsubscribed), and unexposing an unknown name is a harmless no-op. Runs on both backends (the view
+// transport is shared) and leaves zero residency under `--check-leaks` — the disposed node is
+// reclaimed on the spot.
+// expect: stdout "snapshot {"type":"snapshot","values":{"a":1,"b":10}}"
+// expect: stdout "both {"type":"patch","changes":{"a":2,"b":20}}"
+// expect: stdout "after {"type":"patch","changes":{"a":3}}"
+// expect: stdout "unknown-noop"
+// expect: exit 0
+use std.reactive.{signal, computed, view}
+
+a = signal(1)
+b = computed(fn() => a.get() * 10)
+v = view()
+v.expose("a", a)
+v.expose("b", b)
+snap = v.snapshot()
+echo "snapshot ${snap}"
+
+a.set(2)
+d1 = v.diff() ?? "none"
+echo "both ${d1}"
+
+// Drop `b`: its node is disposed and unsubscribed, so the next change to `a` diffs only `a`.
+v.unexpose("b")
+a.set(3)
+d2 = v.diff() ?? "none"
+echo "after ${d2}"
+
+// Unexposing a name that was never (or is no longer) bound is a no-op, not an error.
+v.unexpose("nope")
+echo "unknown-noop"

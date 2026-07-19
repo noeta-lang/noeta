@@ -42,7 +42,6 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| **Keyed-list structural changes** — `keyed()` captures the key set at first render; add/remove/reorder still re-renders the parent region (per-row incrementality covers in-place mutation only) | LiveView. Trigger: large mutable lists with churn *(active — the known LiveView gap)* |
 | OTEL: **observable/async instruments** (`ObservableCounter`/`ObservableGauge` with pull callbacks) — sync `counter`/`up_down_counter`/`histogram`/`gauge` shipped; callback-driven instruments deferred | native-otel metrics-logs, §deferred |
 | OTEL: **histogram views / custom buckets / delta temporality** — every histogram uses the OTel default explicit bounds and only cumulative is emitted (the `Temporality::Delta` variant exists but is unused); custom bucket config, per-instrument views, and delta export deferred | native-otel metrics-logs, §deferred |
 | OTEL: **metrics cardinality limits** — no per-metric attribute-set cap today (unbounded `BTreeMap` per instrument); a hard cardinality-limit policy slice deferred | native-otel metrics-logs, §deferred |
