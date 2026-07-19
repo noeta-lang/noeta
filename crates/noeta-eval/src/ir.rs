@@ -199,6 +199,9 @@ impl Interpreter {
         // The `@derive(Deserialize<Json>)` decode registry (L2.2 DI) `json.decode_typed` resolves
         // against — lifted from the checker's sites, identical to the VM's map by construction.
         self.deserialize_recipes = deserialize_recipes;
+        // The forwarding type-argument table (poly-values F2b) rides the IR itself, so both
+        // backends read the same entries by construction.
+        self.type_args = ir.type_args.clone();
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
@@ -1404,7 +1407,27 @@ impl Interpreter {
                 }
                 Ok(Value::packed_list_from(schema, (*bytes).clone()))
             }
-            noeta_ir::Rvalue::AttributesOf { ty, .. } => {
+            noeta_ir::Rvalue::AttributesOf { ty, dynamic, span } => {
+                // A forwarded type parameter (F2b) resolves the concrete NAME through the hidden
+                // slot's table entry; a static turbofish keeps the compile-time name.
+                if let Some(slot) = dynamic {
+                    let idx = self.eval_ir_atom(slot, frame)?;
+                    let name = match idx {
+                        Value::Int(i) => self
+                            .type_args
+                            .get(i as usize)
+                            .map(|e| e.name.clone())
+                            .unwrap_or_default(),
+                        _ => {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "corrupt hidden type-argument slot".to_string(),
+                            ));
+                        }
+                    };
+                    return Ok(self.materialize_attributes(&name));
+                }
                 let type_name = match ty {
                     noeta_ir::TypeRef::Named { name, .. } => name.as_str(),
                     _ => "",
@@ -1682,12 +1705,33 @@ impl Interpreter {
                 func,
                 args,
                 recipe,
+                dynamic,
                 span,
             } => {
                 let arg_vals: Vec<Value> = args
                     .iter()
                     .map(|a| self.eval_ir_atom(a, frame))
                     .collect::<Result<_, _>>()?;
+                // The recipe: baked at the call site, or (F2b) resolved per-instantiation
+                // through the enclosing forwarding fn's hidden slot — an index into the
+                // program's type-argument table. A table entry without a recipe is statically
+                // rejected at the instantiating call; the runtime check is the safety net.
+                let recipe = match dynamic {
+                    Some(slot) => {
+                        let idx = self.eval_ir_atom(slot, frame)?;
+                        let Value::Int(i) = idx else {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "corrupt hidden type-argument slot".to_string(),
+                            ));
+                        };
+                        self.type_args
+                            .get(i as usize)
+                            .and_then(|e| e.recipe.clone())
+                    }
+                    None => recipe.clone(),
+                };
                 // The recipe is required; its absence was already reported by the checker.
                 let Some(recipe) = recipe else {
                     return Err(self.runtime_error(
@@ -1721,7 +1765,7 @@ impl Interpreter {
                 } else {
                     arg_vals.iter().map(crate::marshal_native_arg).collect()
                 };
-                match typed_dispatch(func, &mut *self.host, &nargs, recipe) {
+                match typed_dispatch(func, &mut *self.host, &nargs, &recipe) {
                     Ok(out) => self.materialize_recipe(out, *span),
                     Err(error) => Err(self.std_dispatch_error(error, *span)),
                 }

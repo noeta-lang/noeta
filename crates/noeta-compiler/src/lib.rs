@@ -237,6 +237,7 @@ fn compile_inner(
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
         deserialize_recipes: module.deserialize_recipes,
+        type_args: module.type_args,
         destruct_reachable,
         cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
@@ -390,6 +391,7 @@ fn compile_to_mc(
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
         deserialize_recipes: sites.deserialize_recipes,
+        type_args: ir.type_args.clone(),
         structural_eq_types: HashSet::new(),
         packed_fields: HashMap::new(),
         key_capable_types: HashSet::new(),
@@ -495,6 +497,7 @@ impl SessionCompiler {
             comparable_derives: Vec::new(),
             tojson_derives: Vec::new(),
             deserialize_recipes: Vec::new(),
+            type_args: Vec::new(),
             structural_eq_types: HashSet::new(),
             packed_fields: HashMap::new(),
             key_capable_types: HashSet::new(),
@@ -597,6 +600,10 @@ impl SessionCompiler {
             // derive a recipe (and does not recognize `decode_typed` at all), so this is a checked-session
             // capability by construction.
             self.mc.deserialize_recipes = sites.deserialize_recipes.clone();
+            // The forwarding type-argument table (F2b): the session checker accumulates it across
+            // entries (indexes are append-only), so the lowered snapshot is cumulative and a
+            // wholesale replace stays index-stable.
+            self.mc.type_args = ir.type_args.clone();
         }
 
         // Register this entry's globals/types/methods into the persistent tables (all additive:
@@ -685,6 +692,7 @@ impl SessionCompiler {
             comparable_derives: self.mc.comparable_derives.clone(),
             tojson_derives: self.mc.tojson_derives.clone(),
             deserialize_recipes: self.mc.deserialize_recipes.clone(),
+            type_args: self.mc.type_args.clone(),
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
             reflection: self.reflection.clone(),
@@ -776,6 +784,9 @@ struct ModuleCompiler {
     /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI), taken verbatim from the checker's
     /// [`noeta_check::Sites::deserialize_recipes`] and copied onto [`Module::deserialize_recipes`].
     deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
+    /// The program-wide type-argument table (poly-values F2b), taken from the lowered IR
+    /// `Program::type_args` and copied onto [`Module::type_args`].
+    type_args: Vec<noeta_ext_abi::TypeArgInfo>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
     /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
@@ -2861,9 +2872,11 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(dst)
             }
-            // A bare reference to a collection builtin becomes a first-class native-function value (a
-            // direct call still uses `CallBuiltin`). Other prelude names used as values (the
-            // `Ok`/`Err`/`some` constructors, `panic`, `next_id`) are not yet first-class — skip.
+            // A bare reference to a prelude builtin becomes a first-class native-function value (a
+            // direct call still uses its fast op / `CallBuiltin`). This covers the collection
+            // builtins AND (poly-values F3) the constructors `Ok`/`Err`/`some` and `panic`, so
+            // `results.map(Ok)` passes a genuine callable — both backends construct the same value
+            // family, and a call through it shares `call_builtin`'s exact arity/error text.
             Resolved::Prelude => match Builtin::from_name(name) {
                 Some(func) => {
                     let dst = self.alloc_reg();
@@ -3489,15 +3502,25 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::FieldsOf { dst, src });
                 Ok(())
             }
-            Rvalue::AttributesOf { ty, .. } => {
+            Rvalue::AttributesOf { ty, dynamic, .. } => {
                 // The attribute type is resolved at compile time (closed-world); the VM reads the
-                // matching manifest entries from `Module::reflection` and materializes them.
+                // matching manifest entries from `Module::reflection` and materializes them. A
+                // FORWARDED type parameter (F2b) instead resolves its name at runtime through the
+                // hidden slot register and the module's type-argument table.
+                let dynamic = match dynamic {
+                    Some(slot) => Some(self.atom_reg(slot)?),
+                    None => None,
+                };
                 let type_name = match ty {
                     TypeRef::Named { name, .. } => name.as_str(),
                     _ => "",
                 };
                 let type_name = self.module.intern_name(type_name);
-                self.code.push(Op::AttributesOf { dst, type_name });
+                self.code.push(Op::AttributesOf {
+                    dst,
+                    type_name,
+                    dynamic,
+                });
                 Ok(())
             }
             Rvalue::RolesOf { ty, .. } => {
@@ -3528,9 +3551,14 @@ impl<'m> FnCompiler<'m> {
                 func,
                 args,
                 recipe,
+                dynamic,
                 span,
             } => {
                 let args = self.atom_regs(args)?;
+                let dynamic = match dynamic {
+                    Some(slot) => Some(self.atom_reg(slot)?),
+                    None => None,
+                };
                 let module_id = self.module.intern_name(module);
                 let func_id = self.module.intern_name(func);
                 self.code.push(Op::TypedModuleCall {
@@ -3539,6 +3567,7 @@ impl<'m> FnCompiler<'m> {
                     func: func_id,
                     args,
                     recipe: recipe.clone().map(Box::new),
+                    dynamic,
                     span: *span,
                 });
                 Ok(())
@@ -3662,8 +3691,27 @@ impl<'m> FnCompiler<'m> {
         if let Atom::Var { name, .. } = callee
             && matches!(self.resolve(name), Resolved::Prelude)
         {
+            // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)`, `panic(msg)` — an arity-correct direct call
+            // keeps its dedicated fast op (`MakeEnum` / `Op::Panic`, which tier-1 also compiles).
+            // A wrong-arity call falls through to the generic `CallBuiltin` below, whose RUNTIME
+            // arity error is byte-identical to a call through the first-class value (poly-values
+            // F3) — so the direct and indirect paths cannot diverge, and neither aborts compile.
+            match name.as_str() {
+                "Ok" if args.len() <= 1 => {
+                    return self.make_result_option("Result", "Ok", args, dst);
+                }
+                "Err" if args.len() == 1 => {
+                    return self.make_result_option("Result", "Err", args, dst);
+                }
+                "some" if args.len() == 1 => {
+                    return self.make_result_option("Option", "some", args, dst);
+                }
+                "panic" if args.len() == 1 => return self.make_panic(args, span),
+                _ => {}
+            }
             if let Some(builtin) = Builtin::from_name(name) {
-                // `len`/`map`/`filter`/`sum` — the collection builtins.
+                // `len`/`map`/`filter`/`sum`/`assert` — the collection/assertion builtins — plus
+                // the wrong-arity constructor calls from above.
                 let args = self.atom_regs(args)?;
                 self.code.push(Op::CallBuiltin {
                     dst,
@@ -3673,14 +3721,7 @@ impl<'m> FnCompiler<'m> {
                 });
                 return Ok(());
             }
-            return match name.as_str() {
-                // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)` — the Result/Option constructors.
-                "Ok" => self.make_result_option("Result", "Ok", args, dst),
-                "Err" => self.make_result_option("Result", "Err", args, dst),
-                "some" => self.make_result_option("Option", "some", args, dst),
-                "panic" => self.make_panic(args, span),
-                _ => unsupported("prelude function not in the VM subset"),
-            };
+            return unsupported("prelude function not in the VM subset");
         }
         // A statically-known top-level `fn` (immutable, zero-upvalue global) — call it directly
         // through its slot, skipping the `LoadGlobal` + per-call retain/release of the callee

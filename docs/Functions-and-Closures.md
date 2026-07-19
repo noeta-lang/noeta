@@ -122,6 +122,18 @@ fn run(f: (int) -> int, x: int): int { return f(x) }
 
 Collection methods are passable as values via **unbound method handles**: `list.len`, `string.upper`, `Stack.size` — each a callable taking the receiver as its first argument (`xss.map(list.len)`).
 
+**Generic functions are values too.** With an expected function type in play — a `map` argument, an annotated binding, a declared `Fn`-typed field or parameter — a generic function instantiates against the expectation and checks precisely; without one it stays the erased, `dyn`-parameter value (calls defer per position):
+
+```noeta
+fn wrap<T>(x: T): List<T> { return [x] }
+
+echo [1, 2].map(wrap)                 // [[1], [2]] — precise: (int) -> List<int>
+g: (string) -> List<string> = wrap    // instantiates from the annotation
+h = wrap                              // bare: the erased value, still callable at any type
+```
+
+The prelude constructors `Ok`/`Err`/`some` — and `panic` — are first-class the same way: `results.map(Ok)` passes the genuine constructor, with a direct call's exact arity behavior and error text. (`assert` stays a special form, and a generic function that forwards `T` into a call-site-typed position — see [Generics & Traits](Generics-and-Traits) — must be called rather than passed.)
+
 ## Calling a closure-valued field
 
 A function value stored in a **field** is called directly through its receiver — `obj.f(args)` means `(obj.f)(args)` when `f` is a field of function type (the field-access-then-call desugar). The call is arity/argument-checked against the field's declared type, exactly like a call through a `Fn`-typed local:

@@ -1903,6 +1903,43 @@ where
                 }
             });
 
+        // `f::<T, ...>(args)` — an explicitly instantiated call of a user generic function
+        // (poly-values F2), generalizing the turbofish beyond the blessed forms. An atom like
+        // `typed_module_call` — `ident ::< T,+ > ( args )` — tried after the contextual `channel`
+        // and the module form (which requires a `.`), so those win; a bare identifier with no `::`
+        // fails here and falls through to `obj_or_ident`. Multiple type arguments are allowed —
+        // the checker binds them to the function's declared type parameters in order (E0058 on an
+        // arity mismatch).
+        let typed_fn_call = ident_parser(ctx)
+            .then_ignore(just(T::ColonColon))
+            .then(
+                type_parser(ctx)
+                    .separated_by(just(T::Comma))
+                    .at_least(1)
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::Lt), just(T::Gt)),
+            )
+            .then(
+                ident_parser(ctx)
+                    .then_ignore(just(T::Colon))
+                    .or_not()
+                    .ignore_then(sub.clone())
+                    .separated_by(just(T::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LParen), just(T::RParen)),
+            )
+            .map_with(
+                move |(((name, name_span), type_args), args), e| Expr::TypedCall {
+                    name,
+                    name_span,
+                    type_args,
+                    args,
+                    span: ctx.to_span(e.span()),
+                },
+            );
+
         // `roles_of()` / `roles_of::<RoleEnum>()` — the semantic-role index query (P2.7). A keyword,
         // an *optional* `::<E>` turbofish scoping the query to one role enum (mirroring
         // `attributes_of`), and a trailing `()`. Bare `roles_of()` spans all role-tagged attributes;
@@ -1972,7 +2009,10 @@ where
             roles_of,
             params_of,
             invoke,
-            typed_module_call,
+            // One choice-tuple slot for the two user turbofish forms (the tuple is at its arity
+            // cap): the module form (`json.parse::<T>(s)`, needs a `.`) wins over the free-function
+            // form (`f::<T>(args)`).
+            typed_module_call.or(typed_fn_call),
             list,
             map,
             set,

@@ -1,0 +1,42 @@
+// F2b (poly-values), the motivating case end-to-end: inside a generic fn body, `T` is legal as a
+// call-site-typed turbofish argument — `json.try_parse::<T>` — and the TypeRecipe is computed
+// PER-INSTANTIATION: generics are erased, so the instantiating call passes a hidden index into
+// the program's type-argument table, and the one compiled body decodes each `T` with its own
+// recipe. Two different instantiations of the same wrapper in one program, both backends.
+// expect: stdout "order 7 costs 9.5"
+// expect: stdout "user Ada"
+// expect: stdout "bad-shape"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+    total: float
+}
+
+struct User {
+    name: string
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+o = load::<Order>("{\"id\": 7, \"total\": 9.5}")
+echo match o {
+    Ok(v) => "order ${v.id} costs ${v.total}",
+    Err(e) => "unreached",
+}
+
+u = load::<User>("{\"name\": \"Ada\"}")
+echo match u {
+    Ok(v) => "user ${v.name}",
+    Err(e) => "unreached",
+}
+
+bad = load::<User>("{\"id\": 1}")
+echo match bad {
+    Ok(v) => "unreached",
+    Err(e) => "bad-shape",
+}

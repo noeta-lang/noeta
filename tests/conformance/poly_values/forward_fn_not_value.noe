@@ -1,0 +1,17 @@
+// F2b negative: a FORWARDING generic fn is not a first-class value — its hidden type-argument
+// slot is supplied per call, and an erased value would silently miss it. E0058 with a clear help
+// beats a runtime arity surprise.
+// expect: error E0058 at 17:5
+// expect: exit 1
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+f = load

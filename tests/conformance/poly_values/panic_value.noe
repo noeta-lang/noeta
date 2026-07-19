@@ -1,0 +1,8 @@
+// F3: `panic` as a first-class value — calling it through the value preserves the direct call's
+// exact abort behavior and message (`panic: <msg>`, E0010, nonzero exit) on both backends.
+// expect: stdout "before"
+// expect: error E0010 at 8:1
+// expect: exit 1
+p = panic;
+echo "before";
+p("boom");

@@ -1,0 +1,40 @@
+// F2b nested forwarding: a generic wrapper forwards its `T` through ANOTHER forwarding generic —
+// the hidden type-argument slot passes through the intermediate call untouched, so the innermost
+// call-site-typed decode still sees the outermost instantiation's recipe.
+// expect: stdout "7"
+// expect: stdout "Ada"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+struct User {
+    name: string
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+fn load_twice<T>(text: string): Result<T, JsonError> {
+    first = load::<T>(text)
+    return match first {
+        Ok(v) => load::<T>(text),
+        Err(e) => first,
+    }
+}
+
+o = load_twice::<Order>("{\"id\": 7}")
+echo match o {
+    Ok(v) => "${v.id}",
+    Err(e) => "unreached",
+}
+
+u = load_twice::<User>("{\"name\": \"Ada\"}")
+echo match u {
+    Ok(v) => v.name,
+    Err(e) => "unreached",
+}

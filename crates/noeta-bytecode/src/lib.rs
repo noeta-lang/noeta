@@ -56,10 +56,10 @@ pub enum CaptureFrom {
     Upvalue(u16),
 }
 
-/// A prelude collection builtin, called directly by name (`len(x)`, `map(xs, f)`). These
-/// are never first-class values in the M1.3 subset — a program that passes one around
-/// (rather than calling it) is left unsupported — so they ride in a dedicated `CallBuiltin`
-/// op rather than being materialized into a register.
+/// A prelude builtin, called directly by name (`len(x)`, `map(xs, f)`, `Ok(v)`). A bare
+/// reference to one is a **first-class value** (`Op::LoadNativeFn` materializes it into a
+/// register; indirect calls through it reuse the same dispatch, so arity/error text matches the
+/// direct `CallBuiltin` path exactly).
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     Len,
@@ -69,10 +69,21 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
     Assert,
+    /// `Ok(x)` / `Ok()` — construct a `Result.Ok` (poly-values F3: also a first-class value).
+    /// A direct, arity-correct call still compiles to the dedicated `MakeEnum` fast path; this
+    /// variant carries the value form and the wrong-arity runtime error.
+    MakeOk,
+    /// `Err(e)` — construct a `Result.Err`.
+    MakeErr,
+    /// `some(x)` — construct an `Option.some`.
+    MakeSome,
+    /// `panic(msg)` — abort with an unrecoverable `Panic` diagnostic. As a value, calling it
+    /// reproduces `Op::Panic`'s exact behavior and message.
+    Panic,
     // (The whole orchestration family — `task` at higher-order-abi H0/H2, `http.serve` at H3,
     // `signal`/`computed`/`effect` at H5 — migrated onto the registry's `NativeCtx` dispatch,
-    // `noeta-stdlib/src/{task,serve,reactive}.rs`. Only the language-level collection builtins
-    // and `assert` remain.)
+    // `noeta-stdlib/src/{task,serve,reactive}.rs`. Only the language-level collection builtins,
+    // `assert`, and the prelude constructors remain.)
 }
 
 impl Builtin {
@@ -84,6 +95,10 @@ impl Builtin {
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
             Builtin::Assert => "assert",
+            Builtin::MakeOk => "Ok",
+            Builtin::MakeErr => "Err",
+            Builtin::MakeSome => "some",
+            Builtin::Panic => "panic",
         }
     }
 
@@ -95,6 +110,10 @@ impl Builtin {
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
             "assert" => Some(Builtin::Assert),
+            "Ok" => Some(Builtin::MakeOk),
+            "Err" => Some(Builtin::MakeErr),
+            "some" => Some(Builtin::MakeSome),
+            "panic" => Some(Builtin::Panic),
             _ => None,
         }
     }
@@ -736,6 +755,10 @@ pub enum Op {
     AttributesOf {
         dst: Reg,
         type_name: NameId,
+        /// A forwarded type parameter (poly-values F2b): the register holding the hidden slot's
+        /// index into [`Module::type_args`]; the concrete type NAME is resolved through the table
+        /// at runtime instead of `type_name` (which is unused then).
+        dynamic: Option<Reg>,
     },
     /// `roles_of()` / `roles_of::<RoleEnum>()`: `dst = List<RoleBinding>` — the `(declaration, Role)`
     /// semantic-role index from the module's reflection info, each entry materialized into a
@@ -828,6 +851,10 @@ pub enum Op {
         /// Boxed (P-VMT-OPSZ): a `TypeRecipe` is 48 bytes and only a call-site-typed native call
         /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
         recipe: Option<Box<noeta_ext_abi::TypeRecipe>>,
+        /// A forwarded type parameter (poly-values F2b): the register holding the hidden slot's
+        /// index into [`Module::type_args`], whose entry supplies the per-instantiation recipe
+        /// (`recipe` is `None` then).
+        dynamic: Option<Reg>,
         span: Span,
     },
     /// The **router-facing** runtime JSON decode (`json.decode_typed(name, text)` → `Result<dyn,
@@ -1300,6 +1327,11 @@ pub struct Module {
     /// inline on the op) so the op stays `Copy`-cheap and the `TypeRepr` — which is `Send` — keeps the
     /// module shareable across isolate threads. Empty for a program with no tagged list literal.
     pub type_reprs: Vec<noeta_ast::reflect::TypeRepr>,
+    /// The program-wide **type-argument table** (poly-values F2b): the concrete instantiations of
+    /// forwarding generics, indexed by the hidden call arguments (see
+    /// [`Op::TypedModuleCall::dynamic`] / [`Op::AttributesOf::dynamic`]). Copied from the IR
+    /// `Program`, so both backends resolve identical entries. Empty without forwarding.
+    pub type_args: Vec<noeta_ext_abi::TypeArgInfo>,
     /// The interned instruction name table (P-VMT-OPSZ): every [`NameId`] in an op indexes here.
     /// Deduped module-wide by the compiler, so a name used at N sites is stored once. Holds field /
     /// method / global / type names, ext-call module+func, and `match`-literal strings; the VM
@@ -1704,9 +1736,14 @@ fn op_repr(
         Op::Narrow {
             dst, src, target, ..
         } => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
-        Op::AttributesOf { dst, type_name } => {
-            format!("AttributesOf r{dst} <- attributes_of::<{}>()", n(type_name))
-        }
+        Op::AttributesOf {
+            dst,
+            type_name,
+            dynamic,
+        } => match dynamic {
+            Some(slot) => format!("AttributesOf r{dst} <- attributes_of::<$ty r{slot}>()"),
+            None => format!("AttributesOf r{dst} <- attributes_of::<{}>()", n(type_name)),
+        },
         Op::RolesOf { dst, role_enum } => match role_enum {
             Some(e) => format!("RolesOf     r{dst} <- roles_of::<{}>()", n(e)),
             None => format!("RolesOf     r{dst} <- roles_of()"),

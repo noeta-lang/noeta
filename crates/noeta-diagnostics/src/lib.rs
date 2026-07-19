@@ -251,6 +251,12 @@ pub enum DiagnosticCode {
     /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
     /// error type, or align the function's declared error type.
     TryErrorMismatch,
+    /// An explicit turbofish instantiation (`f::<T, ...>(args)`) that cannot apply: the callee is
+    /// not a generic function (or not a function at all), or the number of type arguments does not
+    /// match the function's declared type parameters. Type arguments bind to the declaration's
+    /// parameters in order; supply exactly one per parameter, or drop the turbofish and let the
+    /// arguments infer them.
+    InvalidTypeArguments,
 }
 
 impl DiagnosticCode {
@@ -314,6 +320,7 @@ impl DiagnosticCode {
         DiagnosticCode::MatchArmNotValue,
         DiagnosticCode::AwaitCancelled,
         DiagnosticCode::TryErrorMismatch,
+        DiagnosticCode::InvalidTypeArguments,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -377,6 +384,7 @@ impl DiagnosticCode {
             DiagnosticCode::MatchArmNotValue => "E0055",
             DiagnosticCode::AwaitCancelled => "E0056",
             DiagnosticCode::TryErrorMismatch => "E0057",
+            DiagnosticCode::InvalidTypeArguments => "E0058",
         }
     }
 

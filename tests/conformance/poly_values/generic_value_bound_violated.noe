@@ -1,0 +1,15 @@
+// F1: the declared trait bounds ride value-position instantiation — the same E0025 a call site
+// enforces. `biggest` instantiates with `T = Box` from the annotated binding's parameter types,
+// and `Box` satisfies no `Comparable`, so the VALUE is rejected statically.
+// expect: error E0025 at 15:24
+// expect: exit 1
+class Box {
+    value: int
+}
+
+fn biggest<T: Comparable>(a: T, b: T): T {
+    if a > b { return a; }
+    return b;
+}
+
+g: (Box, Box) -> Box = biggest;

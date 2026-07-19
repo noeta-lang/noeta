@@ -1,0 +1,31 @@
+// F2c (poly-values): a generic call in a CHECKED position infers its instantiation from the
+// expected RETURN type — the bidirectional machinery seeds `T` from the annotation, so even a
+// forwarding generic (whose `T` determines a call-site-typed recipe) needs no turbofish here.
+// Inference does NOT flow through `?` (`o: Order = load(text)?` still spells `load::<Order>`).
+// expect: stdout "7"
+// expect: stdout "[10]"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+struct Order {
+    id: int
+}
+
+fn load<T>(text: string): Result<T, JsonError> {
+    return json.try_parse::<T>(text)
+}
+
+r: Result<Order, JsonError> = load("{\"id\": 7}")
+echo match r {
+    Ok(v) => "${v.id}",
+    Err(e) => "unreached",
+}
+
+// The plain (non-forwarding) case: `T` pinned by the expected return alone.
+fn singleton<T>(v: T): List<T> {
+    return [v]
+}
+
+xs: List<int> = singleton(10)
+echo xs

@@ -1,0 +1,18 @@
+// F2 forwarding, generic-to-generic: inside a generic fn body, `T` is legal as a turbofish
+// argument to another user generic — the call binds the callee's parameter to the opaque `T` and
+// the instantiation resolves at the OUTER call site. Erased at runtime, so no machinery beyond
+// the static substitution is needed.
+// expect: stdout "5"
+// expect: stdout "ok"
+// expect: exit 0
+fn id<T>(x: T): T {
+    return x;
+}
+
+fn relabel<T>(x: T): T {
+    return id::<T>(x);
+}
+
+n: int = relabel::<int>(5);
+echo n;
+echo relabel::<string>("ok");

@@ -19,7 +19,7 @@ impl Checker {
         env: &mut Env,
     ) {
         for (i, expr) in arg_exprs.iter().enumerate() {
-            if !is_deferred_literal_arg(expr) {
+            if !self.is_deferred_arg(expr, env) {
                 continue;
             }
             let Some(slot) = args.get_mut(i) else {
@@ -29,11 +29,12 @@ impl Checker {
                 continue;
             }
             // Absorb the expected parameter type where it can guide the literal — a `Fn` for a
-            // closure, a `List`/`Map` for a container literal; anything else (a mismatched param, or
-            // an unknown one) synthesizes standalone, preserving the pre-deferral behavior (the
-            // mismatch is then caught by `check_args`' assignability check).
+            // closure (or a deferred polymorphic-function reference, F1), a `List`/`Map` for a
+            // container literal; anything else (a mismatched param, or an unknown one) synthesizes
+            // standalone, preserving the pre-deferral behavior (the mismatch is then caught by
+            // `check_args`' assignability check).
             *slot = match (expr, params.get(i)) {
-                (Expr::Closure { .. }, Some(expected @ Type::Fn { .. })) => {
+                (Expr::Closure { .. } | Expr::Ident { .. }, Some(expected @ Type::Fn { .. })) => {
                     self.check(expr, expected, env)
                 }
                 (
@@ -43,6 +44,252 @@ impl Checker {
                 _ => self.synth(expr, env),
             };
         }
+    }
+
+    /// Whether a call argument should be **deferred** until the callee's parameter types are
+    /// known: the literal forms ([`is_deferred_literal_arg`] — closures and container literals),
+    /// plus (F1, poly-values) a bare identifier naming an unshadowed **polymorphic named function**
+    /// — a generic user fn, or a prelude constructor (`Ok`/`Err`/`some`) — whose precise type only
+    /// an expected `Fn` type can instantiate. Everything else synthesizes eagerly as before.
+    pub(crate) fn is_deferred_arg(&self, expr: &Expr, env: &Env) -> bool {
+        if is_deferred_literal_arg(expr) {
+            return true;
+        }
+        matches!(expr, Expr::Ident { name, .. }
+            if lookup(env, name).is_none()
+                && (matches!(name.as_str(), "Ok" | "Err" | "some")
+                    || self
+                        .symbols
+                        .functions
+                        .get(name)
+                        .is_some_and(|sig| sig.generic.is_some())))
+    }
+
+    /// The precise monomorphic [`Type::Fn`] of a **polymorphic named function used in value
+    /// position** against an expected function type (F1, poly-values): a generic user fn — or a
+    /// prelude constructor (`Ok`/`Err`/`some`, and `panic`) — instantiates its type parameters
+    /// from the expectation via the same structural binding a call site uses
+    /// ([`bind_type_params`]), enforces its declared bounds, and yields the substituted signature
+    /// (`xs.map(double_generic)` sees `fn(int) -> int`, `results.map(Ok)` sees
+    /// `fn(int) -> Result<int, E>`). Instantiation happens **at the use site from the expected
+    /// type only** — no type scheme is stored in the lattice, and a bare (expectation-free)
+    /// reference keeps today's erased value (a generic fn's `dyn`-erased signature; a constructor
+    /// stays a deferred hole), the honest gradual fallback the `dyn` top exists for.
+    ///
+    /// `None` when `name` is not such a function, or a local shadows it: the caller falls back to
+    /// ordinary synthesis. The caller subsumes the result against `expected`, so a genuinely
+    /// incompatible instantiation (`ints.map(first_elem_generic)` where the parameter shapes
+    /// cannot line up) still reports.
+    pub(crate) fn instantiate_fn_value(
+        &mut self,
+        name: &str,
+        expected: &Type,
+        span: Span,
+        env: &Env,
+    ) -> Option<Type> {
+        let Type::Fn {
+            params: exp_params,
+            ret: exp_ret,
+        } = expected
+        else {
+            return None;
+        };
+        if lookup(env, name).is_some() {
+            return None;
+        }
+        // A FORWARDING generic fn is not a first-class value (F2b) — fall through to synthesis,
+        // whose `Ident` arm reports the boundary once.
+        if self.symbols.forwarding.contains_key(name) {
+            return None;
+        }
+        // The prelude constructors, typed as the generic constructors they are:
+        // `Ok<T, E>(v: T): Result<T, E>` (also the nullary `Ok(): Result<void, E>`),
+        // `Err<T, E>(e: E): Result<T, E>`, `some<T>(v: T): Option<T>`. The synthetic `$T`/`$E`
+        // parameter names cannot collide with a user type (no source name contains `$`), and any
+        // residue erases to `dyn` below. `panic` has no parameters to instantiate: its value type
+        // is `fn(dyn) -> ?` — the language has no bottom/`never` type, so the return stays an
+        // inference hole (divergent in practice, compatible with any expected return).
+        let t = || Type::Named("$T".to_string(), Vec::new());
+        let e = || Type::Named("$E".to_string(), Vec::new());
+        /// The instantiable shape of a polymorphic value: its (bounded) type parameters and
+        /// un-erased params/return — the same trio [`GenericInfo`] carries.
+        type CtorShape = (Vec<(String, Vec<BoundReq>)>, Vec<Type>, Type);
+        let (params, raw_params, raw_ret): CtorShape = match name {
+            "panic" => {
+                return Some(Type::Fn {
+                    params: vec![Type::Dyn],
+                    ret: Box::new(Type::Unknown),
+                });
+            }
+            "some" => (Vec::new(), vec![t()], Type::Option(Box::new(t()))),
+            "Ok" if exp_params.is_empty() => (
+                Vec::new(),
+                Vec::new(),
+                Type::Result(Box::new(Type::Unit), Box::new(e())),
+            ),
+            "Ok" => (
+                Vec::new(),
+                vec![t()],
+                Type::Result(Box::new(t()), Box::new(e())),
+            ),
+            "Err" => (
+                Vec::new(),
+                vec![e()],
+                Type::Result(Box::new(t()), Box::new(e())),
+            ),
+            _ => {
+                // A generic user function: its un-erased `GenericInfo` drives the instantiation
+                // exactly as a call site's does, bounds included.
+                let sig = self.symbols.functions.get(name)?;
+                let generic = sig.generic.clone()?;
+                let required = sig.required;
+                // The value adopts the expectation's arity when the declaration's defaults
+                // allow it (a trailing-defaulted parameter may be dropped from the value's
+                // face); otherwise keep the full parameter list and let subsumption report
+                // the arity mismatch.
+                let n = if (required..=generic.raw_params.len()).contains(&exp_params.len()) {
+                    exp_params.len()
+                } else {
+                    generic.raw_params.len()
+                };
+                let mut raw_params = generic.raw_params;
+                raw_params.truncate(n);
+                (generic.params, raw_params, generic.raw_ret)
+            }
+        };
+        let is_prelude_ctor = params.is_empty();
+        let tps: HashSet<String> = if is_prelude_ctor {
+            ["$T".to_string(), "$E".to_string()].into_iter().collect()
+        } else {
+            params.iter().map(|(n, _)| n.clone()).collect()
+        };
+        // Bind parameters first (positionally, contravariance is irrelevant for binding), then let
+        // the expected return pin anything the parameters left open (`f: () -> Order = make`).
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        for (raw, exp) in raw_params.iter().zip(exp_params) {
+            bind_type_params(raw, exp, &tps, &mut subst);
+        }
+        bind_type_params(&raw_ret, exp_ret, &tps, &mut subst);
+        self.enforce_type_param_bounds(name, &params, &subst, &tps, span);
+        // A constructor slot the expectation left open stays an **inference hole** — matching the
+        // call form (`Err(e)` synthesizes `Result<?, E>`), so `xs.map(Err)` flows into a declared
+        // `List<Result<int, Low>>` boundary exactly as the per-element calls would. A user generic
+        // fn's residue erases to `dyn` (below), matching its call sites.
+        if is_prelude_ctor {
+            for p in ["$T", "$E"] {
+                subst.entry(p.to_string()).or_insert(Type::Unknown);
+            }
+        }
+        Some(Type::Fn {
+            params: raw_params
+                .iter()
+                .map(|p| subst_or_dyn(p, &subst, &tps))
+                .collect(),
+            ret: Box::new(subst_or_dyn(&raw_ret, &subst, &tps)),
+        })
+    }
+
+    /// Type an **explicitly instantiated user-generic call** `f::<T, ...>(args)` (poly-values F2).
+    /// The named type arguments bind to the function's declared type parameters IN ORDER and are
+    /// seeded as winning bindings into the shared generic-call machinery
+    /// ([`Self::check_generic_call_seeded`]): argument inference can only fill parameters the
+    /// turbofish left implicit (there are none today — arity is exact), and an argument that
+    /// disagrees with an explicit binding fails the ordinary assignability check against the
+    /// substituted parameter (E0007). Misapplied turbofish — an unknown callee, a non-generic
+    /// function, a local binding, or a type-argument arity mismatch — is E0058.
+    ///
+    /// A type argument may itself be an in-scope type parameter (`load::<T>(p)` inside another
+    /// generic fn): it binds as the opaque `Named` parameter, checks structurally, and erases at
+    /// runtime like every generic call.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn synth_typed_call(
+        &mut self,
+        name: &str,
+        name_span: Span,
+        type_args: &[TypeRef],
+        args: &mut [Type],
+        arg_exprs: &[Expr],
+        span: Span,
+        env: &mut Env,
+    ) -> Type {
+        for t in type_args {
+            self.check_type_ref(t);
+        }
+        let resolved: Vec<Type> = type_args
+            .iter()
+            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .collect();
+        // A local binding cannot be instantiated, and shadows the free function in call position —
+        // reject rather than silently routing past the shadow.
+        if lookup(env, name).is_some() {
+            self.finalize_closure_args(&[], args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                name_span,
+                format!("`{name}` is a local binding, not a generic function"),
+            )
+            .help("explicit type arguments apply only to a declared generic `fn`");
+            return Type::Unknown;
+        }
+        let Some(sig) = self.symbols.functions.get(name).cloned() else {
+            self.finalize_closure_args(&[], args, arg_exprs, env);
+            if !self.config.session_mode && !self.is_known_name(name, env) {
+                self.error(
+                    DiagnosticCode::UnknownName,
+                    name_span,
+                    format!("cannot find `{name}` in this scope"),
+                );
+            } else {
+                self.error(
+                    DiagnosticCode::InvalidTypeArguments,
+                    name_span,
+                    format!("`{name}` is not a generic function"),
+                )
+                .help("explicit type arguments apply only to a declared generic `fn`");
+            }
+            return Type::Unknown;
+        };
+        let Some(generic) = sig.generic.clone() else {
+            self.finalize_closure_args(&sig.params, args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                name_span,
+                format!("`{name}` takes no type parameters"),
+            )
+            .help("drop the `::<...>` — only a generic `fn` is instantiated explicitly");
+            return sig.ret.clone();
+        };
+        if resolved.len() != generic.params.len() {
+            self.finalize_closure_args(&[], args, arg_exprs, env);
+            self.error(
+                DiagnosticCode::InvalidTypeArguments,
+                span,
+                format!(
+                    "`{name}` expects {} type argument(s), found {}",
+                    generic.params.len(),
+                    resolved.len()
+                ),
+            );
+            let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+            return erase_type_params(generic.raw_ret.clone(), &tps);
+        }
+        let seed: HashMap<String, Type> = generic
+            .params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .zip(resolved)
+            .collect();
+        self.check_generic_call_seeded(
+            name,
+            &generic,
+            sig.required,
+            args,
+            arg_exprs,
+            span,
+            seed,
+            Some(span),
+            env,
+        )
     }
 
     /// Whether `name` resolves to **something the checker knows** — a local binding, a top-level
@@ -80,7 +327,7 @@ impl Checker {
         // exactly as before the deferral existed. A closure's type is never `Unknown` once typed,
         // so the placeholder is an unambiguous marker.
         for (i, expr) in arg_exprs.iter().enumerate() {
-            if is_deferred_literal_arg(expr) && matches!(args.get(i), Some(Type::Unknown)) {
+            if self.is_deferred_arg(expr, env) && matches!(args.get(i), Some(Type::Unknown)) {
                 self.synth(expr, env);
             }
         }
@@ -163,6 +410,7 @@ impl Checker {
                             arg_exprs,
                             span,
                             &[],
+                            Some(call_span),
                             env,
                         );
                     }
@@ -651,6 +899,8 @@ impl Checker {
                 arg_exprs,
                 span,
                 recv_args,
+                // Methods never forward (forwarding is top-level-fn only), so no hidden site.
+                None,
                 env,
             );
         }

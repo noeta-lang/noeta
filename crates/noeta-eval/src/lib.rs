@@ -1253,6 +1253,11 @@ struct Interpreter {
     /// `run_ir` start; `Rvalue::DecodeTyped` (`json.decode_typed(name, text)`) looks a runtime type
     /// name up here to decode a JSON body into that type. Empty on every run with no such derive.
     deserialize_recipes: std::collections::HashMap<String, noeta_stdlib::TypeRecipe>,
+    /// The program-wide **type-argument table** (poly-values F2b) — the concrete instantiations of
+    /// forwarding generics, lifted from the IR `Program` at `run_ir` start. A dynamic
+    /// call-site-typed site resolves its per-instantiation recipe/name through the hidden slot's
+    /// index into this table; identical to the VM's copy by construction.
+    type_args: Vec<noeta_stdlib::TypeArgInfo>,
     /// The live **call-site shadow stack**: one `(callee name, call-site span)` per function/method
     /// activation currently on the Rust call stack, pushed at each call boundary and popped on the
     /// way out (abort included). Only read when an abort snapshots [`Self::abort_trace`], so it
@@ -1351,6 +1356,7 @@ impl Interpreter {
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
             deserialize_recipes: std::collections::HashMap::new(),
+            type_args: Vec::new(),
             call_sites: Vec::new(),
             abort_trace: Vec::new(),
             registry: None,

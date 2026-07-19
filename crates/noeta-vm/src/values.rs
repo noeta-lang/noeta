@@ -507,6 +507,20 @@ pub(crate) fn make_ok(value: Value) -> Value {
     Value::enum_value(shape, vec![value])
 }
 
+/// Build the built-in **void success** `Result::Ok()` (no payload) — the `Ok()` form through the
+/// first-class-constructor value path (poly-values F3). Same interned shape as [`make_ok`] (the
+/// interner dedups), just an empty payload, so it is display- and match-identical to the
+/// compiler-lowered `Ok()`.
+pub(crate) fn make_ok_void() -> Value {
+    static OK: OnceLock<&'static Shape> = OnceLock::new();
+    let shape = OK.get_or_init(|| {
+        noeta_object::intern_shape(
+            Shape::enum_variant("Result", "Ok", Vec::new(), true).with_variant_index(0),
+        )
+    });
+    Value::enum_value(shape, Vec::new())
+}
+
 /// Build the built-in `Result::Err(value)` (Track A.8) — the failure arm of `h.join()`. `Err` is
 /// variant index 1 (`Ok < Err`). The enum owns one reference to `value`.
 pub(crate) fn make_err(value: Value) -> Value {
