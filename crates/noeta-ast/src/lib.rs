@@ -243,6 +243,85 @@ pub struct StructDecl {
     pub span: Span,
 }
 
+/// The closed set of **built-in decorator directives** — the `@`-directives the language itself
+/// defines to prefix a *type* declaration (or, for [`Tier`](Self::Tier), a runner `fn`). This is the
+/// one source of truth for that set: the parser's statement grammar dispatches on it, the checker and
+/// IDE consult it, and every per-directive behavior site matches this enum exhaustively, so adding a
+/// variant is a compile error at every site that must consider it (no silent `_ =>` fallthrough). It
+/// is distinct from the open-ended **tier** name-space (`@test`/`@bench`/… and user `@tier`
+/// declarations), which is data, not a fixed enum.
+///
+/// Each variant's [`as_str`](Self::as_str) is its exact wire name; [`from_name`](Self::from_name)
+/// round-trips it. `@packed` and `@tier` also correspond to the [`PackedDirective`] / tier machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinDirective {
+    /// `@derive(Trait, …)` — code generation: synthesize built-in/user trait implementations.
+    Derive,
+    /// `@attribute(Kind, …)` — declare a struct usable as a `#[Name(…)]` data attribute.
+    Attribute,
+    /// `@role(Enum.Variant, …)` — tag an attribute/trait with architectural roles.
+    Role,
+    /// `@semantic` — mark an enum's variants as role names. Takes no arguments.
+    Semantic,
+    /// `@packed(Layout.Row|Layout.Column)` — flat value-struct layout. See [`PackedDirective`].
+    Packed,
+    /// `@validated` — bar outside-the-`impl` literal construction. Takes no arguments.
+    Validated,
+    /// `@tier(name, …)` — bring a dev-tier into existence (its decorated `fn` is the runner).
+    Tier,
+}
+
+impl BuiltinDirective {
+    /// Every built-in directive, in declaration order — the one enumerated set that replaces the old
+    /// `&[&str]` name list. Iterate this to offer/validate the full closed set (completion, tests).
+    pub const ALL: [BuiltinDirective; 7] = [
+        BuiltinDirective::Derive,
+        BuiltinDirective::Attribute,
+        BuiltinDirective::Role,
+        BuiltinDirective::Semantic,
+        BuiltinDirective::Packed,
+        BuiltinDirective::Validated,
+        BuiltinDirective::Tier,
+    ];
+
+    /// The directive's exact wire name (the identifier after `@`), e.g. [`Derive`](Self::Derive) ⇒
+    /// `"derive"`. The exhaustive match here is itself a compiler-forced site: a new variant must be
+    /// named its wire spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            BuiltinDirective::Derive => "derive",
+            BuiltinDirective::Attribute => "attribute",
+            BuiltinDirective::Role => "role",
+            BuiltinDirective::Semantic => "semantic",
+            BuiltinDirective::Packed => "packed",
+            BuiltinDirective::Validated => "validated",
+            BuiltinDirective::Tier => "tier",
+        }
+    }
+
+    /// The directive named `name`, or `None` if `name` is not a built-in directive (e.g. a tier name
+    /// or unknown `@foo`). The inverse of [`as_str`](Self::as_str); round-trips every variant.
+    pub fn from_name(name: &str) -> Option<BuiltinDirective> {
+        BuiltinDirective::ALL
+            .into_iter()
+            .find(|d| d.as_str() == name)
+    }
+}
+
+impl core::fmt::Display for BuiltinDirective {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl core::str::FromStr for BuiltinDirective {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        BuiltinDirective::from_name(s).ok_or(())
+    }
+}
+
 /// The storage layout a `@packed` struct's lists use (P-SIMD `plans/perf/p-simd-column-layout.md`).
 /// A per-type performance attribute — **invisible to behaviour**; it only changes which kernel/offset
 /// math the runtime uses. Set by `@packed(Layout.Row|Layout.Column)`; bare `@packed` is [`Row`](Self::Row).
@@ -1869,5 +1948,30 @@ mod key_capable_tests {
         assert!(key_capable_packed(&HashMap::new()).is_empty());
         let capable = key_capable_packed(&map(&[("Unit", &[])]));
         assert!(capable.contains("Unit"));
+    }
+}
+
+#[cfg(test)]
+mod builtin_directive_tests {
+    use super::BuiltinDirective;
+    use std::str::FromStr;
+
+    /// The name set stays honest: every variant round-trips through its wire name, and `ALL` names
+    /// are distinct. A new directive that forgot its `as_str`/`from_name` wiring fails this.
+    #[test]
+    fn every_directive_round_trips_its_wire_name() {
+        for d in BuiltinDirective::ALL {
+            assert_eq!(BuiltinDirective::from_name(d.as_str()), Some(d));
+            assert_eq!(d.to_string(), d.as_str());
+            assert_eq!(BuiltinDirective::from_str(d.as_str()), Ok(d));
+        }
+        // Distinct wire names.
+        let mut names: Vec<&str> = BuiltinDirective::ALL.iter().map(|d| d.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), BuiltinDirective::ALL.len());
+        // A non-directive name is not misread as one.
+        assert_eq!(BuiltinDirective::from_name("bench"), None);
+        assert!(BuiltinDirective::from_str("nope").is_err());
     }
 }
