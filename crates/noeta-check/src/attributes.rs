@@ -17,7 +17,7 @@ impl Checker {
     /// spelling is still rejected up front (E0017).
     pub(crate) fn check_attrs(&mut self, attrs: &[Attribute], target: TargetKind) {
         for attr in attrs {
-            if attr.name == "derive" {
+            if attr.name == noeta_ast::BuiltinDirective::Derive.as_str() {
                 self.error(
                     DiagnosticCode::InvalidAttribute,
                     attr.span,

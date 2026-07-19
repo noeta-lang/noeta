@@ -1095,33 +1095,39 @@ impl DocumentStore {
             }
             _ => return None,
         };
-        let descriptor = match &text[name_tok.span.range()] {
-            "derive" => {
+        let descriptor = match noeta_ast::BuiltinDirective::from_name(&text[name_tok.span.range()])
+        {
+            Some(noeta_ast::BuiltinDirective::Derive) => {
                 "codegen directive `@derive(Trait, …)` — generates built-in trait \
                  implementations (`Equatable`, `Comparable`, `Printable`, `Serialize<…>`, …) for \
                  this type"
             }
-            "attribute" => {
+            Some(noeta_ast::BuiltinDirective::Attribute) => {
                 "declares this struct as a **metadata attribute**: instances attach to \
                  declarations as `#[Name(args)]` and are read back with `attributes_of::<Name>()`. \
                  An optional site argument (`@attribute(Function)`) restricts what it may annotate"
             }
-            "role" => {
+            Some(noeta_ast::BuiltinDirective::Role) => {
                 "architectural-role directive: every declaration this attribute annotates is \
                  bound to the named role (`@role(Enum.Variant)` — a variant of a `@semantic` \
                  enum). The compile-time role index powers `roles_of()`, the Architecture view, \
                  and `noeta trace`"
             }
-            "semantic" => {
+            Some(noeta_ast::BuiltinDirective::Semantic) => {
                 "marks this enum as **role-eligible**: its variants can be conferred on \
                  declarations as architectural roles, via `@role(ThisEnum.Variant)` on an \
                  attribute"
             }
-            "packed" => {
+            Some(noeta_ast::BuiltinDirective::Packed) => {
                 "storage directive: a **packed value struct** — fields lay out flat (no boxing), \
                  and a `List` of a packed struct is one contiguous buffer"
             }
-            _ => return None,
+            // `@validated` has no dedicated decorator hover here, and `@tier` hovers instead through
+            // `hover_tier` (its dev-tier arm); both stay silent from this token-level hover. A
+            // non-directive token (a tier name, arbitrary `@foo`) is likewise `None`. Enumerated
+            // rather than `_` so a new `BuiltinDirective` variant forces a decision here.
+            Some(noeta_ast::BuiltinDirective::Validated | noeta_ast::BuiltinDirective::Tier)
+            | None => return None,
         };
         let span = Span {
             start: at.span.start,

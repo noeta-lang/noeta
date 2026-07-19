@@ -31,10 +31,11 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use noeta_ast::{
-    AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
-    FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, MethodDirective, ObjectLit,
-    PackedDirective, PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl,
-    TraitBound, TraitDecl, TraitMethod, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl, ClosureBody, DeriveSpec,
+    EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, MethodDirective,
+    ObjectLit, PackedDirective, PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl,
+    TierDecl, TraitBound, TraitDecl, TraitMethod, TypeParam, TypeRef, UnaryOp, UseName,
+    VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -67,26 +68,19 @@ enum PrefixOp {
     Isolate,
 }
 
-/// The built-in **decorator** directives — the closed set of `@`-directives that prefix a *type*
-/// declaration (`@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`). Everything else after
-/// `@` is a **tier** directive (`@test`/`@bench`/…, an open set). The statement parser dispatches on
-/// this set by name: a tier parser rejects these names up front, so a decorator directive is never
-/// speculatively parsed as a tier (no wasted backtracking, and no need to restrict tier arguments —
-/// the side-effecting literal parser is only ever reached for a genuine tier).
-/// Public so IDE completion offers exactly the set this grammar accepts (never a drifted copy).
-pub const DECORATOR_DIRECTIVES: &[&str] = &[
-    "derive",
-    "attribute",
-    "role",
-    "semantic",
-    "packed",
-    "validated",
-    "tier",
-];
-
-/// Whether `name` is a built-in decorator directive (vs. a tier directive).
+/// Whether `name` is a built-in decorator directive (vs. a tier directive). The one source of truth
+/// for the closed set is [`noeta_ast::BuiltinDirective`]; this is a thin membership test over it.
+///
+/// The built-in decorator directives are the closed set of `@`-directives that prefix a *type*
+/// declaration (`@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`, …). Everything else
+/// after `@` is a **tier** directive (`@test`/`@bench`/…, an open set). The statement parser
+/// dispatches on this set by name: a tier parser rejects these names up front, so a decorator
+/// directive is never speculatively parsed as a tier (no wasted backtracking, and no need to
+/// restrict tier arguments — the side-effecting literal parser is only ever reached for a genuine
+/// tier). IDE completion iterates [`noeta_ast::BuiltinDirective::ALL`] so it offers exactly the set
+/// this grammar accepts (never a drifted copy).
 fn is_decorator_directive(name: &str) -> bool {
-    DECORATOR_DIRECTIVES.contains(&name)
+    BuiltinDirective::from_name(name).is_some()
 }
 
 /// The chumsky "extra" type used throughout: rich errors over [`TokenKind`](T) tokens
@@ -3718,18 +3712,22 @@ where
                             name,
                             name_span,
                             args,
-                        } => match name.as_str() {
+                        } => match BuiltinDirective::from_name(&name) {
                             // `@derive(Trait, …)` — codegen. `@attribute` / `@attribute(Kind, …)` —
                             // the attribute opt-in; its args are the placement kinds (empty ⇒
                             // anywhere). `@role(Enum.Variant, …)` — semantic-role tags (accumulated
                             // across directives). `@semantic` — marks an enum role-eligible. The
                             // checker validates each one's arguments and the records-only rule.
-                            "derive" => derives.extend(directive_derive_specs(args, &ctx)),
-                            "attribute" => attribute = Some(directive_heads(args)),
-                            "role" => role
+                            Some(BuiltinDirective::Derive) => {
+                                derives.extend(directive_derive_specs(args, &ctx))
+                            }
+                            Some(BuiltinDirective::Attribute) => {
+                                attribute = Some(directive_heads(args))
+                            }
+                            Some(BuiltinDirective::Role) => role
                                 .get_or_insert_with(Vec::new)
                                 .extend(args.into_iter().map(directive_role_tag)),
-                            "semantic" => {
+                            Some(BuiltinDirective::Semantic) => {
                                 // `@semantic` takes no arguments — reject them rather than dropping
                                 // them silently (uniform directive-argument validation, E0037).
                                 if let Some(arg) = args.first() {
@@ -3746,7 +3744,7 @@ where
                                 }
                                 semantic = Some(name_span);
                             }
-                            "packed" => {
+                            Some(BuiltinDirective::Packed) => {
                                 // `@packed` (P-PACK) — the struct-only flat-layout marker. Its one
                                 // optional argument is `Layout.Row|Layout.Column` (P-SIMD): the
                                 // storage layout its lists use. Anything else is E0037. The checker
@@ -3758,7 +3756,7 @@ where
                                     layout,
                                 });
                             }
-                            "validated" => {
+                            Some(BuiltinDirective::Validated) => {
                                 // `@validated` (validation arc) — the construction-channeling marker
                                 // for a struct/class. Takes no arguments; reject them rather than
                                 // dropping them silently (uniform directive-argument validation).
@@ -3776,13 +3774,21 @@ where
                                 }
                                 validated = Some(name_span);
                             }
-                            _ => ctx.diags.borrow_mut().push(Diagnostic::error(
-                                DiagnosticCode::UnexpectedToken,
-                                name_span,
-                                format!(
-                                    "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`, `@packed`, and `@validated`"
-                                ),
-                            )),
+                            // `@tier` is a built-in directive, but its only valid form is the tier
+                            // *declaration* `@tier(...) fn runner` (parsed by `tier_decl_fn`); as a
+                            // leading decorator on a *type* it is not accepted, so it falls through to
+                            // the same unknown-directive error as any non-directive `@foo`. Grouped
+                            // with `None` (a genuinely unknown name) rather than a `_` wildcard so a
+                            // newly added `BuiltinDirective` variant forces a decision here.
+                            Some(BuiltinDirective::Tier) | None => {
+                                ctx.diags.borrow_mut().push(Diagnostic::error(
+                                    DiagnosticCode::UnexpectedToken,
+                                    name_span,
+                                    format!(
+                                        "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`, `@packed`, and `@validated`"
+                                    ),
+                                ))
+                            }
                         },
                         Decorator::Attr(attr) => attrs.push(attr),
                     }
@@ -3925,13 +3931,12 @@ where
         // tier's runner; `name` (a bare identifier — parsed as the attr grammar's `TypeRef`) is
         // what consumers write as `@<name> { … }`; the optional `config:` names the `@attribute`
         // struct carrying the tier's knobs (the `Bench { iterations }` model). Argument-shape
-        // errors surface here (E0037); the checker validates the semantics (E0051). `tier` is in
-        // `DECORATOR_DIRECTIVES`, so the tier-block/annotation forms never claim it.
+        // errors surface here (E0037); the checker validates the semantics (E0051). `tier` is a
+        // `BuiltinDirective`, so the tier-block/annotation forms never claim it.
         let tier_decl_fn = just(T::At)
-            .ignore_then(
-                id.clone()
-                    .filter(|(name, _): &(String, Span)| name == "tier"),
-            )
+            .ignore_then(id.clone().filter(|(name, _): &(String, Span)| {
+                BuiltinDirective::from_name(name) == Some(BuiltinDirective::Tier)
+            }))
             .then(tier_args.clone())
             // Absorb the woven `;` when the directive sits on its own line above the `fn`
             // (slice 7), exactly as `derive_directive` does.
