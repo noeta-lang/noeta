@@ -910,6 +910,34 @@ impl Checker {
                 // false instead).
             } => self.synth_match(scrutinee, arms, *span, env, true),
             Expr::Object(lit) => {
+                // `@validated` (validation arc): a `@validated` type may only be built from OUTSIDE
+                // its own `impl`/methods through a validating constructor. A bare literal or a
+                // record-update spread outside the type would bypass the invariant, so it is E0060.
+                // Construction inside the type's own methods (`current_type`) stays legal; the recipe
+                // doors never reach here (they materialize directly), so they remain exempt and
+                // auto-validate — that is the whole point.
+                if self.symbols.validated_types.contains(&lit.type_name)
+                    && self.coloring.current_type.as_deref() != Some(lit.type_name.as_str())
+                {
+                    let kind = if lit.spread.is_some() {
+                        "a record-update"
+                    } else {
+                        "literal construction"
+                    };
+                    self.error(
+                        DiagnosticCode::ValidatedConstruction,
+                        lit.type_name_span,
+                        format!(
+                            "`{}` is `@validated`: {kind} outside its own `impl` is not allowed",
+                            lit.type_name
+                        ),
+                    )
+                    .help(format!(
+                        "build `{0}` through one of its constructor functions (which runs \
+                         `validate()` and returns `Result<{0}, E>`)",
+                        lit.type_name
+                    ));
+                }
                 if let Some(spread) = &lit.spread {
                     self.synth(spread, env);
                 }
@@ -1280,6 +1308,13 @@ impl Checker {
                 match self.packed_layout(&elem) {
                     Some(layout) => {
                         self.sites.packed_list_sites.insert(*span, layout);
+                        // Validation arc: if the packed element type implements `Validate`, mark the
+                        // site so both backends run `validate()` on each decoded element (the abort
+                        // door — consistent with `from_bytes`'s shape-error behavior, and closing the
+                        // hole a `@validated` packed type would otherwise have here).
+                        if self.satisfies(&elem, noeta_types::BuiltinTrait::Validate) {
+                            self.sites.from_bytes_validated.insert(*span);
+                        }
                     }
                     None => {
                         self.error(

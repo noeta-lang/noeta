@@ -1270,9 +1270,16 @@ impl Checker {
                     .iter()
                     .map(|(fname, fty)| Some((fname.clone(), self.type_to_recipe(fty)?)))
                     .collect::<Option<Vec<_>>>()?;
+                // Validation arc: a struct implementing `Validate` carries the flag so the recipe
+                // door re-enters to run `validate()` on the freshly-built value (bottom-up).
+                let has_validator = self.satisfies(
+                    &Type::Named(name.clone(), Vec::new()),
+                    noeta_types::BuiltinTrait::Validate,
+                );
                 TypeRecipe::Struct {
                     name: name.clone(),
                     fields,
+                    has_validator,
                 }
             }
             _ => return None,

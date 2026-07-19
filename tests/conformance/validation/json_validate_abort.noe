@@ -1,0 +1,28 @@
+// The aborting door `json.parse::<T>` (validation arc slice 2): consistent with its shape-mismatch
+// behavior, a validation failure ABORTS at the call site (runtime E0007) rather than returning a
+// Result — the message carries the same path precision as the recoverable door. Here the nested
+// port `ports[0]` is out of range, so the abort names it. Runs identically on both backends.
+// expect: error E0007 at 27:5
+use std.json
+
+struct Port {
+    n: int
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.n < 1 || self.n > 65535 {
+                return Err("port ${self.n} out of range")
+            }
+            return Ok()
+        }
+    }
+}
+
+struct Cluster {
+    ports: List<Port>
+}
+
+// `json.parse::<Cluster>` aborts on the inner port's invariant — the same abort door a shape
+// mismatch takes, now carrying the validator's message at `ports[0]`.
+c = json.parse::<Cluster>("{\"ports\": [{\"n\": 70000}]}");
+echo c.ports.len();

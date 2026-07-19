@@ -504,6 +504,10 @@ pub enum Rvalue {
     FromBytes {
         blob: Atom,
         layout: Option<noeta_ast::reflect::PackedLayout>,
+        /// Whether element type `T` implements `Validate` (validation arc): when set, the backend
+        /// runs `validate()` on each decoded element and aborts at `[i]` on the first rejection —
+        /// the abort door, consistent with a shape mismatch.
+        validate: bool,
         span: Span,
     },
     /// `channel::<T>(capacity)` — construct a bounded channel (isolates I.1), yielding a

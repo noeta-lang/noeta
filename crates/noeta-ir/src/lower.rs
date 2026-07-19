@@ -82,6 +82,9 @@ pub struct LoweringSites<'a> {
     /// [`Rvalue::List`] — its element is a `@packed` struct with this flat
     /// [`noeta_ast::reflect::PackedLayout`].
     pub packed_list_sites: &'a HashMap<Span, noeta_ast::reflect::PackedLayout>,
+    /// A `from_bytes::<T>` whose span is here has a `Validate`-implementing packed element type
+    /// (validation arc): the emitted [`Rvalue::FromBytes`] carries `validate: true`.
+    pub from_bytes_validated: &'a HashSet<Span>,
     /// A `list[i].field` member read whose span is here (the index receiver is a built-in `List`) fuses
     /// to a single [`Rvalue::IndexField`], reading a packed element's field without materializing it.
     pub index_field_sites: &'a HashSet<Span>,
@@ -169,6 +172,7 @@ impl LoweringSites<'static> {
         static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
         LoweringSites {
             packed_list_sites: PACKED.get_or_init(HashMap::new),
+            from_bytes_validated: SPANS.get_or_init(HashSet::new),
             index_field_sites: SPANS.get_or_init(HashSet::new),
             typed_module_call_sites: RECIPES.get_or_init(HashMap::new),
             decode_typed_sites: SPANS.get_or_init(HashSet::new),
@@ -206,6 +210,7 @@ macro_rules! lowering_sites {
     ($s:expr) => {
         $crate::LoweringSites {
             packed_list_sites: &$s.packed_list_sites,
+            from_bytes_validated: &$s.from_bytes_validated,
             index_field_sites: &$s.index_field_sites,
             typed_module_call_sites: &$s.typed_module_call_sites,
             decode_typed_sites: &$s.decode_typed_sites,
@@ -1095,6 +1100,8 @@ impl Lowerer<'_> {
         args.splice(0..0, hidden);
     }
 
+    // The lowering inputs for one function/closure body — a bundle, not a signature worth a struct.
+    #[allow(clippy::too_many_arguments)]
     fn lower_func(
         &mut self,
         params: &[Param],
@@ -2236,11 +2243,14 @@ impl Lowerer<'_> {
                 // list literals use (`packed_list_sites`); `None` means T was not packable (already
                 // a checker error), and the backend then fails cleanly rather than mis-decoding.
                 let layout = self.sites.packed_list_sites.get(span).cloned();
+                // Validation arc: the checker marked this site if `T` implements `Validate`.
+                let validate = self.sites.from_bytes_validated.contains(span);
                 Ok(self.emit(
                     out,
                     Rvalue::FromBytes {
                         blob,
                         layout,
+                        validate,
                         span: *span,
                     },
                     *span,

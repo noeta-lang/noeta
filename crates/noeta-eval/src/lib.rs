@@ -4610,6 +4610,25 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
     }))
 }
 
+/// The `Err` payload of a `Result::Err` value (validation arc): `Some(payload)` when `value` is
+/// `Result::Err(e)`, else `None` (an `Ok`, or any non-`Result`). Used by `materialize_recipe` to
+/// read a `Validate::validate` result.
+pub(crate) fn result_err_payload(value: &Value) -> Option<Value> {
+    let Value::Enum(e) = value else {
+        return None;
+    };
+    match (e.enum_name.as_str(), e.variant.as_str()) {
+        ("Result", "Err") => Some(e.data.first().cloned().unwrap_or(Value::Unit)),
+        _ => None,
+    }
+}
+
+/// Wrap a path-carrying [`noeta_stdlib::json::JsonError`] as an extern `Value` — the `Err` payload
+/// of a validation-rejecting recipe door (validation arc).
+pub(crate) fn json_error_value(error: noeta_stdlib::json::JsonError) -> Value {
+    Value::Extern(Rc::new(RefCell::new(noeta_stdlib::ExternBox::new(error))))
+}
+
 /// One snapshot of an [`IterState`]'s shape (its child values cloned, its counters copied). Read
 /// under a *short* `RefCell` borrow so the driver can recurse into a source — or run a `map`/`filter`
 /// closure — with **no** borrow held, mirroring the VM's [`noeta_value::Value::iter_next_apply`]: a

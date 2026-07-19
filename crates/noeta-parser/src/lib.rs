@@ -74,8 +74,15 @@ enum PrefixOp {
 /// speculatively parsed as a tier (no wasted backtracking, and no need to restrict tier arguments —
 /// the side-effecting literal parser is only ever reached for a genuine tier).
 /// Public so IDE completion offers exactly the set this grammar accepts (never a drifted copy).
-pub const DECORATOR_DIRECTIVES: &[&str] =
-    &["derive", "attribute", "role", "semantic", "packed", "tier"];
+pub const DECORATOR_DIRECTIVES: &[&str] = &[
+    "derive",
+    "attribute",
+    "role",
+    "semantic",
+    "packed",
+    "validated",
+    "tier",
+];
 
 /// Whether `name` is a built-in decorator directive (vs. a tier directive).
 fn is_decorator_directive(name: &str) -> bool {
@@ -571,6 +578,9 @@ fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
 /// Attach leading `@derive(...)` directives and `#[...]` data attributes to the type declaration
 /// they precede. Both are only valid on class/struct/enum declarations; the grammar only ever
 /// pairs them with one of those.
+// One parameter per decorator channel — a bundling helper (mirrors the formatter's
+// `decl_directives`); a struct would only relocate the same fields.
+#[allow(clippy::too_many_arguments)]
 fn attach_decorators(
     stmt: Stmt,
     derives: Vec<DeriveSpec>,
@@ -579,6 +589,7 @@ fn attach_decorators(
     role: Option<Vec<RoleTag>>,
     semantic: Option<Span>,
     packed: Option<PackedDirective>,
+    validated: Option<Span>,
 ) -> Stmt {
     if derives.is_empty()
         && attrs.is_empty()
@@ -586,6 +597,7 @@ fn attach_decorators(
         && role.is_none()
         && semantic.is_none()
         && packed.is_none()
+        && validated.is_none()
     {
         return stmt;
     }
@@ -599,6 +611,8 @@ fn attach_decorators(
             c.role = role;
             c.semantic = semantic;
             c.packed = packed;
+            // `@validated` (validation arc) applies to a class — construction channeling.
+            c.validated = validated;
             Stmt::Class(c)
         }
         Stmt::Struct(mut r) => {
@@ -610,6 +624,8 @@ fn attach_decorators(
             r.semantic = semantic;
             // `@packed` is the struct-only layout marker; the checker validates its fields.
             r.packed = packed;
+            // `@validated` (validation arc) applies to a struct — construction channeling.
+            r.validated = validated;
             Stmt::Struct(r)
         }
         Stmt::Enum(mut e) => {
@@ -2767,7 +2783,13 @@ where
             .then(block.clone())
             .map_with(
                 move |(
-                    (((((((attrs, pub_kw), async_kw), name_pair), type_params), params), captures), ret),
+                    (
+                        (
+                            (((((attrs, pub_kw), async_kw), name_pair), type_params), params),
+                            captures,
+                        ),
+                        ret,
+                    ),
                     body,
                 ),
                       e| {
@@ -2910,8 +2932,10 @@ where
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
-                move |(((((((decos, async_kw), name_pair), type_params), params), captures), ret),
-                       body),
+                move |(
+                    ((((((decos, async_kw), name_pair), type_params), params), captures), ret),
+                    body,
+                ),
                       e| {
                     let mut directives = Vec::new();
                     let mut attrs = Vec::new();
@@ -3220,6 +3244,7 @@ where
                     role: None,
                     semantic: None,
                     packed: None,
+                    validated: None,
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -3270,6 +3295,7 @@ where
                     role: None,
                     semantic: None,
                     packed: None,
+                    validated: None,
                     destructor,
                     span: ctx.to_span(e.span()),
                 })
@@ -3685,6 +3711,7 @@ where
                 let mut role: Option<Vec<RoleTag>> = None;
                 let mut semantic: Option<Span> = None;
                 let mut packed: Option<PackedDirective> = None;
+                let mut validated: Option<Span> = None;
                 for decorator in decorators {
                     match decorator {
                         Decorator::Derive {
@@ -3731,11 +3758,29 @@ where
                                     layout,
                                 });
                             }
+                            "validated" => {
+                                // `@validated` (validation arc) — the construction-channeling marker
+                                // for a struct/class. Takes no arguments; reject them rather than
+                                // dropping them silently (uniform directive-argument validation).
+                                if let Some(arg) = args.first() {
+                                    ctx.diags.borrow_mut().push(
+                                        Diagnostic::error(
+                                            DiagnosticCode::InvalidDirectiveArgument,
+                                            arg.0.1,
+                                            "`@validated` takes no arguments".to_string(),
+                                        )
+                                        .with_help(
+                                            "`@validated` bars outside-the-impl literal construction; build the type through a validating constructor",
+                                        ),
+                                    );
+                                }
+                                validated = Some(name_span);
+                            }
                             _ => ctx.diags.borrow_mut().push(Diagnostic::error(
                                 DiagnosticCode::UnexpectedToken,
                                 name_span,
                                 format!(
-                                    "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`, and `@packed`"
+                                    "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`, `@packed`, and `@validated`"
                                 ),
                             )),
                         },
@@ -3743,7 +3788,9 @@ where
                     }
                 }
                 set_public(
-                    attach_decorators(stmt, derives, attrs, attribute, role, semantic, packed),
+                    attach_decorators(
+                        stmt, derives, attrs, attribute, role, semantic, packed, validated,
+                    ),
                     pub_kw.is_some(),
                 )
             });

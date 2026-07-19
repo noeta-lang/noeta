@@ -677,6 +677,7 @@ impl<'m> Vm<'m> {
                         dst,
                         src,
                         schema,
+                        validate,
                         span,
                     } => {
                         // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): wrap the raw
@@ -705,6 +706,23 @@ impl<'m> Vm<'m> {
                         ));
                         }
                         let list = Value::packed_list(schema, bytes);
+                        // Validation arc: `from_bytes` is an abort door — run each decoded element's
+                        // `validate()` (materialized boxed for the re-entry, then consumed) and abort
+                        // at `[i]` on the first rejection, consistent with a length/shape mismatch.
+                        if *validate {
+                            let n = list.list_len().unwrap_or(0);
+                            for i in 0..n {
+                                let element = list.packed_get(i); // owned (rc 1), consumed below
+                                if let Some(message) = self.validate_message(element, *span)? {
+                                    release(list);
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        format!("from_bytes: [{i}]: {message}"),
+                                    ));
+                                }
+                            }
+                        }
                         set_reg(regs, fbase, *dst, list);
                         pc += 1;
                     }
@@ -788,7 +806,23 @@ impl<'m> Vm<'m> {
                             })
                             .collect();
                         match typed_dispatch(func, &mut *self.persist.host, &nargs, recipe) {
-                            Ok(out) => set_reg(regs, fbase, *dst, materialize_recipe(out)),
+                            Ok(out) => {
+                                // The aborting door (`json.parse::<T>`): a validation rejection that
+                                // reaches the top (not recovered by a `Result` wrapper) aborts with
+                                // the same path-precise message the abort door uses for shape
+                                // failures. `json.try_parse::<T>` wraps its result in `Ok`/`Err`, so
+                                // its rejections are recovered inside `materialize_recipe` and never
+                                // reach here.
+                                let mut path = String::new();
+                                match self.materialize_recipe(out, &mut path, *span)? {
+                                    MatOut::Value(v) => set_reg(regs, fbase, *dst, v),
+                                    MatOut::Rejected(e) => {
+                                        return Err(
+                                            self.std_dispatch_error(e.into_std_error(), *span)
+                                        );
+                                    }
+                                }
+                            }
                             Err(error) => return Err(self.std_dispatch_error(error, *span)),
                         }
                         pc += 1;
@@ -822,17 +856,30 @@ impl<'m> Vm<'m> {
                                 "`json.decode_typed` expects two `string` arguments".to_string(),
                             ));
                         };
-                        let value = match self.deserialize_recipes.get(&type_name) {
+                        // Clone the recipe out of `self` first: materializing it re-enters the VM
+                        // (`&mut self`) to run any `Validate::validate`, which cannot coexist with a
+                        // borrow of `self.deserialize_recipes`.
+                        let recipe = self.deserialize_recipes.get(&type_name).cloned();
+                        let value = match recipe {
                             None => err(
                                 self,
                                 noeta_stdlib::json::JsonError::unknown_type(&type_name),
                             ),
                             Some(recipe) => {
-                                match noeta_stdlib::json::try_parse_typed(&text, recipe) {
-                                    Ok(out) => Value::enum_value(
-                                        self.persist.shapes[*ok_shape as usize],
-                                        vec![materialize_recipe(out)],
-                                    ),
+                                match noeta_stdlib::json::try_parse_typed(&text, &recipe) {
+                                    // The recoverable router door: a validation rejection is
+                                    // threaded into the `Result.Err(JsonError)`, exactly like a
+                                    // shape failure.
+                                    Ok(out) => {
+                                        let mut path = String::new();
+                                        match self.materialize_recipe(out, &mut path, *span)? {
+                                            MatOut::Value(v) => Value::enum_value(
+                                                self.persist.shapes[*ok_shape as usize],
+                                                vec![v],
+                                            ),
+                                            MatOut::Rejected(e) => err(self, e),
+                                        }
+                                    }
                                     Err(error) => err(self, error),
                                 }
                             }

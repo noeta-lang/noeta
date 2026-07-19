@@ -1,0 +1,14 @@
+// `impl Validate`'s `validate` must return `Result<void, E>` with `E` a `string` or an
+// `Error`-implementing type. A plain `bool` return is E0015 (invalid impl), pointed at the method.
+// expect: error E0015 at 9:12
+// expect: exit 1
+struct Gate {
+    open: bool
+
+    impl Validate {
+        fn validate(): bool {
+            return self.open
+        }
+    }
+}
+echo "unreached"

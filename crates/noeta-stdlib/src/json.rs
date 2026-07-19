@@ -63,6 +63,10 @@ pub enum JsonErrorKind {
     MissingField,
     /// `json.decode_typed(name, …)` was handed a type name with no registered decode recipe.
     UnknownType,
+    /// A well-formed, shape-correct value whose type rejected it in its `Validate::validate`
+    /// (validation arc): the invariant, not the JSON shape, failed. Carries the validator's own
+    /// message as the detail and the path to the failing value.
+    Validation,
 }
 
 impl JsonErrorKind {
@@ -73,6 +77,7 @@ impl JsonErrorKind {
             JsonErrorKind::Mismatch => "mismatch",
             JsonErrorKind::MissingField => "missing_field",
             JsonErrorKind::UnknownType => "unknown_type",
+            JsonErrorKind::Validation => "validation",
         }
     }
 }
@@ -139,6 +144,20 @@ impl JsonError {
             kind: JsonErrorKind::MissingField,
             path: path.to_string(),
             detail: format!("missing field `{field}` for `{type_name}`"),
+            line: None,
+            column: None,
+        }
+    }
+
+    /// A validation failure at `path` (validation arc): a shape-correct value whose type's
+    /// `Validate::validate` rejected it. `message` is the validator's own error message (a
+    /// `string`-typed validator's bare string, or an `Error`-typed validator's `message()`), which
+    /// becomes the detail so the composed message reads `items[2]: <validator message>`.
+    pub fn validation(path: &str, message: String) -> JsonError {
+        JsonError {
+            kind: JsonErrorKind::Validation,
+            path: path.to_string(),
+            detail: message,
             line: None,
             column: None,
         }
@@ -260,8 +279,10 @@ fn to_native(json: &Json) -> NativeOut {
 }
 
 /// Append one member segment (`.field`, or the bare name at the root) to a path, returning the
-/// length to truncate back to after the child walk — the pop of the push.
-fn push_member(path: &mut String, name: &str) -> usize {
+/// length to truncate back to after the child walk — the pop of the push. Public so a backend's
+/// `materialize_recipe` reconstructs the **same** path while re-walking a decoded tree to run
+/// `Validate::validate` (validation arc), keeping the two path stories byte-identical.
+pub fn push_member(path: &mut String, name: &str) -> usize {
     let mark = path.len();
     if !path.is_empty() {
         path.push('.');
@@ -270,8 +291,9 @@ fn push_member(path: &mut String, name: &str) -> usize {
     mark
 }
 
-/// Append one list-index segment (`[2]`) to a path, returning the truncation mark.
-fn push_index(path: &mut String, index: usize) -> usize {
+/// Append one list-index segment (`[2]`) to a path, returning the truncation mark. Public for the
+/// backends' `Validate` re-walk (see [`push_member`]).
+pub fn push_index(path: &mut String, index: usize) -> usize {
     use std::fmt::Write;
     let mark = path.len();
     let _ = write!(path, "[{index}]");
@@ -342,7 +364,11 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
             }
             _ => Err(JsonError::mismatch(path, "map", json)),
         },
-        TypeRecipe::Struct { name, fields } => match json {
+        TypeRecipe::Struct {
+            name,
+            fields,
+            has_validator,
+        } => match json {
             Json::Object(entries) => {
                 let mut slots = Vec::with_capacity(fields.len());
                 for (field, field_recipe) in fields {
@@ -364,6 +390,7 @@ fn decode(json: &Json, recipe: &TypeRecipe, path: &mut String) -> Result<NativeO
                 Ok(NativeOut::Struct {
                     name: name.clone(),
                     fields: slots,
+                    has_validator: *has_validator,
                 })
             }
             _ => Err(JsonError::mismatch(path, name, json)),
@@ -475,6 +502,7 @@ mod tests {
         let recipe = TypeRecipe::Struct {
             name: "Point".into(),
             fields: vec![("x".into(), TypeRecipe::Int), ("y".into(), TypeRecipe::Int)],
+            has_validator: false,
         };
         assert_eq!(
             parse_typed("{\"y\": 2, \"x\": 1}", &recipe).unwrap(),
@@ -484,6 +512,7 @@ mod tests {
                     ("x".into(), NativeOut::Scalar(Scalar::Int(1))),
                     ("y".into(), NativeOut::Scalar(Scalar::Int(2))),
                 ],
+                has_validator: false,
             }
         );
     }
@@ -496,6 +525,7 @@ mod tests {
                 ("a".into(), TypeRecipe::Int),
                 ("b".into(), TypeRecipe::Option(boxed(TypeRecipe::Int))),
             ],
+            has_validator: false,
         };
         // `b` absent → `None`.
         assert_eq!(
@@ -506,12 +536,14 @@ mod tests {
                     ("a".into(), NativeOut::Scalar(Scalar::Int(1))),
                     ("b".into(), NativeOut::None),
                 ],
+                has_validator: false,
             }
         );
         // `a` absent → error.
         let recipe_missing_required = TypeRecipe::Struct {
             name: "Pair".into(),
             fields: vec![("a".into(), TypeRecipe::Int)],
+            has_validator: false,
         };
         assert!(parse_typed("{}", &recipe_missing_required).is_err());
     }
@@ -522,6 +554,7 @@ mod tests {
         let point = TypeRecipe::Struct {
             name: "Point".into(),
             fields: vec![("x".into(), TypeRecipe::Int), ("y".into(), TypeRecipe::Int)],
+            has_validator: false,
         };
         let recipe = TypeRecipe::List(boxed(point));
         let out = parse_typed("[{\"x\": 1, \"y\": 2}, {\"x\": 3, \"y\": 4}]", &recipe).unwrap();
@@ -547,6 +580,7 @@ mod tests {
         let recipe = TypeRecipe::Struct {
             name: "Point".into(),
             fields: vec![("x".into(), TypeRecipe::Int)],
+            has_validator: false,
         };
         assert!(parse_typed("[1, 2, 3]", &recipe).is_err());
     }
@@ -558,10 +592,12 @@ mod tests {
         let item = TypeRecipe::Struct {
             name: "Item".into(),
             fields: vec![("price".into(), TypeRecipe::Float)],
+            has_validator: false,
         };
         TypeRecipe::Struct {
             name: "Order".into(),
             fields: vec![("items".into(), TypeRecipe::List(boxed(item)))],
+            has_validator: false,
         }
     }
 
@@ -622,6 +658,7 @@ mod tests {
             &TypeRecipe::Struct {
                 name: "Pair".into(),
                 fields: vec![("a".into(), TypeRecipe::Int)],
+                has_validator: false,
             },
         )
         .unwrap_err();

@@ -1243,8 +1243,14 @@ impl ModuleCompiler {
         let is_method = method.is_some();
         let debug = self.debug;
         let globals = self.global_names();
-        let analysis =
-            freevars::analyze(params, defaults, body, &enclosing_locals, &globals, captures);
+        let analysis = freevars::analyze(
+            params,
+            defaults,
+            body,
+            &enclosing_locals,
+            &globals,
+            captures,
+        );
 
         // The capturable layer this function exposes to its own nested closures. A method also
         // exposes `self` (captured by boxing the receiver — aether F3); its FIELDS are deliberately
@@ -3483,7 +3489,12 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::FromBytes { blob, layout, span } => {
+            Rvalue::FromBytes {
+                blob,
+                layout,
+                validate,
+                span,
+            } => {
                 // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4). Intern element T's
                 // schema from the layout the checker recorded (the same channel list literals use). A
                 // `None` layout means T was not packable — the checker already emitted E0038, so this
@@ -3496,6 +3507,7 @@ impl<'m> FnCompiler<'m> {
                             dst,
                             src,
                             schema,
+                            validate: *validate,
                             span: *span,
                         });
                     }

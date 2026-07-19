@@ -1059,6 +1059,7 @@ impl Printer<'_> {
             d.role.as_deref(),
             d.semantic.is_some(),
             d.packed,
+            d.validated.is_some(),
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1079,6 +1080,7 @@ impl Printer<'_> {
             d.role.as_deref(),
             d.semantic.is_some(),
             d.packed,
+            d.validated.is_some(),
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1252,6 +1254,7 @@ impl Printer<'_> {
             d.role.as_deref(),
             d.semantic.is_some(),
             d.packed,
+            false,
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1312,6 +1315,7 @@ impl Printer<'_> {
             None,
             d.semantic.is_some(),
             d.packed,
+            false,
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1400,6 +1404,7 @@ impl Printer<'_> {
         role: Option<&[RoleTag]>,
         semantic: bool,
         packed: Option<noeta_ast::PackedDirective>,
+        validated: bool,
     ) -> Result<Vec<Doc>, FmtError> {
         let mut lines: Vec<Doc> = Vec::new();
         if !derives.is_empty() {
@@ -1443,6 +1448,11 @@ impl Printer<'_> {
                 noeta_ast::PackedLayout::Row => "@packed".to_string(),
                 noeta_ast::PackedLayout::Column => "@packed(Layout.Column)".to_string(),
             }));
+        }
+        // `@validated` (validation arc) — emit so a `@validated` type round-trips (else fmt would
+        // silently strip the construction-channeling marker).
+        if validated {
+            lines.push(Doc::text("@validated"));
         }
         for a in attrs {
             lines.push(self.attribute(a)?);

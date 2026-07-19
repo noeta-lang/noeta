@@ -263,6 +263,13 @@ pub enum DiagnosticCode {
     /// re-declares (it reassigns, E0006/E0007 governing), and `is`-narrowing refines the *same*
     /// binding, so silent shadowing is never needed and only obscures which meaning a name has.
     ShadowedBinding,
+    /// A `@validated` struct/class is literally constructed (`T { ... }`, or a record-update
+    /// `T { ...base, f: v }`) from OUTSIDE its own `impl`/methods (validation arc). A `@validated`
+    /// type may only be built through its own constructor functions — which run `validate()` and
+    /// return `Result<T, E>` — so an outside literal (which would bypass the invariant) is rejected.
+    /// Construction inside the type's own methods stays legal, and the recipe doors (`json.parse`,
+    /// `from_bytes`, …) are exempt because they auto-validate.
+    ValidatedConstruction,
 }
 
 impl DiagnosticCode {
@@ -328,6 +335,7 @@ impl DiagnosticCode {
         DiagnosticCode::TryErrorMismatch,
         DiagnosticCode::InvalidTypeArguments,
         DiagnosticCode::ShadowedBinding,
+        DiagnosticCode::ValidatedConstruction,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -393,6 +401,7 @@ impl DiagnosticCode {
             DiagnosticCode::TryErrorMismatch => "E0057",
             DiagnosticCode::InvalidTypeArguments => "E0058",
             DiagnosticCode::ShadowedBinding => "E0059",
+            DiagnosticCode::ValidatedConstruction => "E0060",
         }
     }
 

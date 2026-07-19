@@ -376,6 +376,7 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         | Bt::Members
         | Bt::DynamicCall
         | Bt::TryAdd
+        | Bt::Validate
         | Bt::Mergeable => false,
     }
 }

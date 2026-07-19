@@ -1,0 +1,90 @@
+// Automatic bottom-up `Validate` enforcement at recipe materialization (validation arc slice 2).
+// When a recipe door (`json.try_parse::<T>` / `json.decode_typed`) materializes a value whose type
+// implements `Validate`, its `validate()` runs automatically on the freshly-built value. A
+// rejection is threaded into the door's `Result.Err` as a path-carrying `JsonError` (so a nested
+// failure reads `ports[1]: ...`). BOTTOM-UP: inner values validate before their container, so a
+// container's `validate` only ever sees already-valid fields and the error points at the innermost
+// failure. A valid document passes untouched. Runs identically on both backends.
+// expect: stdout "ok: port 8080"
+// expect: stdout "port 70000 out of range"
+// expect: stdout "ports[1]: port 70000 out of range"
+// expect: stdout "too many ports"
+// expect: stdout "ok: 1 ports"
+// expect: stdout "decode: port 70000 out of range"
+// expect: stdout "decode-ok: port 443"
+// expect: exit 0
+use std.json
+use std.json.JsonError
+
+// A validator that calls another method of its own type (composition — a validator is ordinary
+// Noeta code, re-entered mid-decode).
+@derive(Deserialize<Json>)
+struct Port {
+    n: int
+
+    fn label(): string { return "port ${self.n}" }
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.n < 1 || self.n > 65535 {
+                return Err("${self.label()} out of range")
+            }
+            return Ok()
+        }
+    }
+}
+
+// A container whose OWN validator (reject two-or-more) runs only AFTER every port is materialized
+// and validated — the bottom-up proof: a document that would trip BOTH an inner port and this
+// container reports the inner `ports[1]` failure, never "too many ports".
+struct Cluster {
+    ports: List<Port>
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.ports.len() >= 2 {
+                return Err("too many ports")
+            }
+            return Ok()
+        }
+    }
+}
+
+fn port_msg(r: Result<Port, JsonError>): string {
+    return match r {
+        Ok(p) => "ok: ${p.label()}",
+        Err(e) => e.message(),
+    }
+}
+
+fn cluster_msg(r: Result<Cluster, JsonError>): string {
+    return match r {
+        Ok(c) => "ok: ${c.ports.len()} ports",
+        Err(e) => e.message(),
+    }
+}
+
+// A well-formed value validates and passes untouched; a violating one is a recoverable `Err`
+// carrying the validator's own message (root path → no prefix).
+echo port_msg(json.try_parse::<Port>("{\"n\": 8080}"))
+echo port_msg(json.try_parse::<Port>("{\"n\": 70000}"))
+
+// Nested: the second port is out of range — the path names it exactly, and the container's own
+// validator never runs (bottom-up short-circuit) even though it would also reject len >= 2.
+echo cluster_msg(json.try_parse::<Cluster>("{\"ports\": [{\"n\": 80}, {\"n\": 70000}]}"))
+
+// All ports valid but len >= 2 → the container's validator fires (after every port passed).
+echo cluster_msg(json.try_parse::<Cluster>("{\"ports\": [{\"n\": 80}, {\"n\": 443}]}"))
+
+// A single valid port passes both levels untouched.
+echo cluster_msg(json.try_parse::<Cluster>("{\"ports\": [{\"n\": 443}]}"))
+
+// The router door `decode_typed` auto-validates too (recipe from `@derive(Deserialize<Json>)`).
+fn decode_msg(r: Result<dyn, JsonError>): string {
+    return match r {
+        Ok(p) => "decode-ok: ${p.label()}",
+        Err(e) => "decode: ${e.message()}",
+    }
+}
+echo decode_msg(json.decode_typed("Port", "{\"n\": 70000}"))
+echo decode_msg(json.decode_typed("Port", "{\"n\": 443}"))

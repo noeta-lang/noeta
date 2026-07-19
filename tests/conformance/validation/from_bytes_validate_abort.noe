@@ -1,0 +1,22 @@
+// `from_bytes::<T>` is an abort door (validation arc slice 2): a decoded packed element that fails
+// its `Validate` invariant aborts at `[i]` with runtime E0007, carrying the validator's own
+// message — consistent with a length/shape mismatch. The second packet is out of range. Runs
+// identically on both backends.
+// expect: error E0007 at 21:8
+@packed struct Packet {
+    kind: int
+
+    impl Validate {
+        fn validate(): Result<void, string> {
+            if self.kind < 0 || self.kind > 9 {
+                return Err("bad kind ${self.kind}")
+            }
+            return Ok()
+        }
+    }
+}
+
+// `kind: 99` violates the invariant; the flat buffer round-trips but `from_bytes` rejects element 1.
+blob = [Packet { kind: 1 }, Packet { kind: 99 }].to_bytes()
+back = from_bytes::<Packet>(blob)
+echo back.len()

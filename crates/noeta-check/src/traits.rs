@@ -168,6 +168,36 @@ impl Checker {
                 }
             }
         }
+        // `Validate`'s `validate` must return `Result<void, E>` where `E` is a plain `string` or any
+        // `Error`-implementing type — the shape both the `?`-conversion path and the recipe-seam
+        // auto-enforcement (validation arc slice 2) rely on. (Presence + arity 0 were checked
+        // above; here we pin the return.)
+        if t == BuiltinTrait::Validate
+            && let Some(m) = methods.iter().find(|m| m.name == "validate")
+        {
+            let ret = field_type(&m.ret, &self.imports.extern_types);
+            let ok_shape = match &ret {
+                Type::Result(ok, err) if matches!(**ok, Type::Unit) => Some((**err).clone()),
+                _ => None,
+            };
+            let err_ok = ok_shape.as_ref().is_some_and(|err| {
+                matches!(err, Type::String) || self.satisfies(err, BuiltinTrait::Error)
+            });
+            if !err_ok {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`validate` must return `Result<void, E>` where `E` is `string` or a type \
+                         implementing `Error`, found `{ret}`"
+                    ),
+                )
+                .help(
+                    "return `Ok()` when the value is well-formed and `Err(e)` with a `string` or \
+                     `Error` payload when an invariant is violated",
+                );
+            }
+        }
     }
 
     /// Validate a standalone `impl Trait for T {}` declaration. Two checks beyond the shared
