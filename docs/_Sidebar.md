@@ -17,6 +17,7 @@
 - [Profiling](Profiling)
 - [Observability](Observability)
 - [WebAssembly & the Edge](WebAssembly-and-the-Edge)
+- [Edge Deployment](Edge-Deployment)
 
 **Language reference**
 - [Syntax Basics](Syntax-Basics)
