@@ -13,6 +13,42 @@ use noeta_value::{ScopeId, TaskId, Value};
 
 use crate::*;
 
+/// The cooperative async-scheduler state (audit-1 finding 3): the structured-concurrency
+/// scope stack, the strand-local telemetry context, and the traced-future hook. One
+/// sub-struct so a scheduler borrow (`&mut self.sched`) is disjoint from the module tables.
+pub(crate) struct SchedState {
+    /// The structured-concurrency scope stack (Track A.3b): one entry per open `concurrent { }` block,
+    /// each a list of the tasks `spawn`ed in it. The scope owns one reference to each task's future (and
+    /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
+    /// `scopes`; both round-robin identically, so the differential holds by construction.
+    pub(crate) scopes: Vec<Vec<Task>>,
+    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
+    /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
+    /// client). This cell always belongs to whichever strand is executing — the main strand (root)
+    /// by default; the scheduler swaps a task's own saved context in around each poll of its step
+    /// (`poll_all_scopes_round`), and a `spawn` snapshots it into the child. Mirrors the
+    /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
+    /// so the differential is indifferent to it by construction.
+    pub(crate) ctx_current: Vec<u64>,
+    /// The **strand** currently executing (DAP worker debugging): main is `1`; the scheduler swaps
+    /// a worker-isolate task's strand in around each poll (mirroring `ctx_current`) so the debugger
+    /// reports a breakpoint inside a worker against that worker's DAP thread. `1` outside a polled
+    /// isolate, and `next_strand` (from `2`) hands out ids at each cooperative `isolate` spawn.
+    pub(crate) current_strand: u32,
+    pub(crate) next_strand: u32,
+    /// Whether telemetry is enabled, cached from the host at load (native-otel T5d perf): the
+    /// enabled state is fixed per host (env-derived at construction), and the channel send/recv
+    /// hot paths gate on it — a cached bool is one predictable branch instead of a virtual call.
+    pub(crate) tel_on: bool,
+    /// **Traced futures** (native-otel T5c) — the future-completion hook behind
+    /// `NativeCtx::trace_future`: each entry holds one retained reference to a step future whose
+    /// polls run under its saved context and whose completion (or abort) ends its telemetry span.
+    /// Almost always empty (the hot check in `poll_once` is `is_empty()`); entries leave on
+    /// completion, and teardown feeds strays into the collector roots then releases them, exactly
+    /// like `ext_arena`.
+    pub(crate) traced_futures: Vec<TracedFuture>,
+}
+
 impl<'m> Vm<'m> {
     /// Poll a future once (Track A.3 — the VM twin of the tree-walker's `Interpreter::poll_once`).
     /// A leaf timer is ready once the executor clock reaches its deadline, else it registers the
