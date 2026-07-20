@@ -697,8 +697,13 @@ fn q_attr_value(av: &mut AttrValue, visit: &mut NameVisitor) {
                 .iter_mut()
                 .for_each(|(_, val)| q_attr_value(val, visit));
         }
-        AttrValue::TypeRef(name) => {
+        AttrValue::TypeRef { name, args } => {
             visit(name, NameKind::Type, None);
+            // A generic argument is itself a type reference and must be qualified too, or
+            // `@derive(Serialize<Json>)` would resolve `Serialize` but leave `Json` bare.
+            for arg in args {
+                q_typeref(arg, visit);
+            }
         }
         AttrValue::Str(_) | AttrValue::Int(_) | AttrValue::Float(_) | AttrValue::Bool(_) => {}
     }

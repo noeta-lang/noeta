@@ -457,9 +457,17 @@ pub enum AttrValue {
         type_name: String,
         fields: Vec<(String, AttrValue)>,
     },
-    /// A bare type name used as a value (`JsonConverter`) — a type reference, materialized as the
+    /// A type name used as a value (`JsonConverter`) — a type reference, materialized as the
     /// reflection `Type` ADT (`Type.Named("JsonConverter", [])`). C# `typeof(Foo)` / Java `Class<?>`.
-    TypeRef(String),
+    ///
+    /// `args` carries a generic application's arguments (`Json` in `@derive(Serialize<Json>)`) and
+    /// is empty for a plain name. It exists so this one value type can represent every directive
+    /// argument form: the `@`-directives previously had a separate identifiers-only grammar whose
+    /// sole capability beyond `#[...]`'s was generic type arguments.
+    TypeRef {
+        name: String,
+        args: Vec<TypeRef>,
+    },
 }
 
 /// One `@derive(...)` entry: the trait name plus any **generic type arguments** it carries
@@ -884,7 +892,12 @@ pub struct Param {
 
 /// A type reference in source (e.g. `int`, `List<Item>`, `Result<Order, OrderError>`,
 /// `?User`). Parsed and retained for M1's type checker; M0 does not interpret it.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializable because [`AttrValue::TypeRef`] embeds one: a directive argument may be a generic
+/// type application (`@derive(Serialize<Json>)`), and attribute values travel into the serialized
+/// reflection manifest. Every field is a `String`, a nested `TypeRef`, or a `Span` (itself serde),
+/// so this costs nothing beyond the derive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeRef {
     /// A named type with optional generic arguments.
     Named {

@@ -562,7 +562,13 @@ fn attr_value_str(value: &AttrValue) -> String {
             enum_name, variant, ..
         } => format!("{enum_name}.{variant}"),
         AttrValue::Struct { type_name, .. } => format!("{type_name} {{…}}"),
-        AttrValue::TypeRef(name) => name.clone(),
+        // Rendered WITH its generic arguments: the fmt safety gate compares this output, so a
+        // formatter dropping the `<Json>` from `@derive(Serialize<Json>)` must be detectable.
+        AttrValue::TypeRef { name, args } if args.is_empty() => name.clone(),
+        AttrValue::TypeRef { name, args } => format!(
+            "{name}<{}>",
+            args.iter().map(type_ref_str).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 

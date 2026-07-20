@@ -358,7 +358,10 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
                     args: Vec::new(),
                 })
             } else {
-                Ok(AttrValue::TypeRef(name.clone()))
+                Ok(AttrValue::TypeRef {
+                    name: name.clone(),
+                    args: Vec::new(),
+                })
             }
         }
         _ => Err(not_literal()),
@@ -469,16 +472,16 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
     let mut bad = false;
     for arg in args {
         match (&arg.name, &arg.value) {
-            (None, AttrValue::TypeRef(n)) if name.is_none() => {
+            (None, AttrValue::TypeRef { name: n, .. }) if name.is_none() => {
                 name = Some((n.clone(), arg.span));
             }
-            (Some(k), AttrValue::TypeRef(ty)) if k == "config" && config.is_none() => {
+            (Some(k), AttrValue::TypeRef { name: ty, .. }) if k == "config" && config.is_none() => {
                 config = Some((ty.clone(), arg.span));
             }
             (Some(k), AttrValue::Str(lang)) if k == "text" && text.is_none() => {
                 text = Some((lang.clone(), arg.span));
             }
-            (Some(k), AttrValue::TypeRef(ty)) if k == "expr" && expr.is_none() => {
+            (Some(k), AttrValue::TypeRef { name: ty, .. }) if k == "expr" && expr.is_none() => {
                 expr = Some((ty.clone(), arg.span));
             }
             _ => {

@@ -1527,7 +1527,19 @@ impl Printer<'_> {
             AttrValue::Int(i) => Doc::text(i.to_string()),
             AttrValue::Float(f) => Doc::text(format_float(*f)),
             AttrValue::Bool(b) => Doc::text(b.to_string()),
-            AttrValue::TypeRef(name) => Doc::text(name.clone()),
+            // Generic arguments must survive formatting — dropping them changes which trait
+            // instantiation a `@derive(Serialize<Json>)` synthesizes. Rendered through the same
+            // `type_ref` printer a type annotation uses, so a nested `Serialize<List<Json>>` and a
+            // plain `List<Json>` format identically rather than through a second, drifting path.
+            AttrValue::TypeRef { name, args } if args.is_empty() => Doc::text(name.clone()),
+            AttrValue::TypeRef { name, args } => {
+                let ds: Result<Vec<_>, _> = args.iter().map(|a| self.type_ref(a)).collect();
+                Doc::concat([
+                    Doc::text(format!("{name}<")),
+                    Doc::join(ds?, Doc::text(", ")),
+                    Doc::text(">"),
+                ])
+            }
             AttrValue::List(items) => {
                 let ds: Result<Vec<_>, _> = items.iter().map(|i| self.attr_value(i)).collect();
                 Doc::concat([
