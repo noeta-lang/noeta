@@ -397,6 +397,8 @@ resolved against the base. An absolute target (one with a scheme) is used as-is,
 | `timeout(ms)` | `Client` | Per-request deadline; exceeding it is an `HttpError` with `kind() == "timeout"`. |
 | `retry(max, base_ms?, on?)` | `Client` | Retry transient failures — see below. |
 | `retry_non_idempotent()` | `Client` | Extend retries to POST. |
+| `prepare(method, path, body?, headers?)` | `Request` | Build a request **without** performing it. |
+| `send(req)` | `Result<Response, HttpError>` | Perform an already-built request. |
 | `base_url()` | `string` | The configured base, or empty. |
 | `get` / `head` / `delete` / `post` / `put` / `query` / `request` | `Result<Response, HttpError>` | As the free verbs, but path-relative. |
 

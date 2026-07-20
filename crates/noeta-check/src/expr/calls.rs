@@ -1063,6 +1063,20 @@ impl Checker {
                 self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, None, env),
             );
         }
+        // An **extern** type participates in the protocol exactly as a user type does (http arc
+        // H10): a registered `call` method makes its values invocable. Extern types already join
+        // every other protocol (`Display`, `Error`, `Equatable`); being uncallable was an
+        // inconsistency, not a decision. This is what lets a native extension hand user code a
+        // callable value — a middleware's `next` — without a parallel callback mechanism.
+        if self.reg().find_type_method_sig(n, "call").is_some() {
+            let params = stdlib::method_params(self.reg(), recv, "call").unwrap_or_default();
+            let required =
+                stdlib::method_required(self.reg(), recv, "call").unwrap_or(params.len());
+            let result = stdlib::method_return(self.reg(), recv, "call").unwrap_or(Type::Dyn);
+            self.finalize_closure_args(&params, args, arg_exprs, env);
+            self.check_args(&params, required, args, arg_exprs, span, "call");
+            return Some(result);
+        }
         if self.symbols.types.contains(n) || self.symbols.enums.contains_key(n) {
             self.finalize_closure_args(&[], args, arg_exprs, env);
             self.error(

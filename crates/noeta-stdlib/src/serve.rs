@@ -40,7 +40,7 @@ fn shutdown_requested() -> bool {
     SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
+pub(crate) const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 
 /// The websocket session handle's type name (server-hmr L0).
 pub const SOCKET_TYPE_NAME: &str = "Socket";

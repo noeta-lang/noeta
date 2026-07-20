@@ -1295,6 +1295,8 @@ fn crypto_dispatch(
 // --- `http`: an HTTP client over the Network capability (http arc H2) ----------------------------
 
 /// The `Response` signature type, named once.
+use crate::serve::REQUEST_SIG;
+
 const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
 const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME);
 
@@ -1586,6 +1588,24 @@ const CLIENT_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(Str),
     },
+    // Build a request WITHOUT performing it: the value a middleware chain above std starts from.
+    // Resolves the path against the base URL and applies the client's headers, so what the outermost
+    // middleware sees is the request as configured, not a half-formed one.
+    ExtFn {
+        name: "prepare",
+        params: &[Str, Str, SigType::Optional(&STR_OR_BYTES), OPT_HEADERS],
+        ret: Concrete(REQUEST_SIG),
+    },
+    // The **terminal**: perform an already-built `Request` through this client's configuration —
+    // base URL resolution, client headers, deadline, retry. This is the seam a middleware layer
+    // above std bottoms out in: compose the onion in Noeta, and `send` is the innermost call. std
+    // deliberately does not compose chains itself, because doing so would mean holding user
+    // closures inside a native value.
+    ExtFn {
+        name: "send",
+        params: &[REQUEST_SIG],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
     ExtFn {
         name: "get",
         params: &[Str, OPT_HEADERS],
@@ -1660,6 +1680,17 @@ const CLIENT_DOCS: &[(&str, &str)] = &[
     (
         "base_url",
         "The client's base URL, or empty if it has none.",
+    ),
+    (
+        "prepare",
+        "Build a `Request` without performing it — path resolved against the base URL, client \
+         headers applied. The value a middleware chain starts from; pair it with `send`.",
+    ),
+    (
+        "send",
+        "Perform an already-built `Request` through this client's configuration (base URL, \
+         headers, deadline, retry). The terminal a composed middleware chain bottoms out in — \
+         see the `para/api` package, which owns middleware, mocking, and pagination.",
     ),
     (
         "get",
@@ -1763,6 +1794,41 @@ fn client_method_dispatch(
         "base_url" => {
             want_arity(method, args, 0)?;
             return Ok(NativeOut::Str(client.base_url.clone()));
+        }
+        "prepare" => {
+            want_arity_range(method, args, 2, 4)?;
+            let verb = want_str(method, args, 0)?.to_string();
+            let target = want_str(method, args, 1)?.to_string();
+            let body = match args.get(2) {
+                None => Vec::new(),
+                Some(_) => want_data(method, args, 2)?.to_vec(),
+            };
+            let inner = client.build(&verb, &target, body, want_headers(method, args, 3)?);
+            return Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::net::Request {
+                    conn: 0, // outbound: there is no connection to reply on
+                    inner,
+                },
+            )));
+        }
+        "send" => {
+            want_arity(method, args, 1)?;
+            let Some(NativeValue::Extern(value)) = args.first() else {
+                return Err(type_error(method, crate::net::REQUEST_TYPE_NAME));
+            };
+            let Some(request) = value.as_any().downcast_ref::<crate::net::Request>() else {
+                return Err(type_error(method, crate::net::REQUEST_TYPE_NAME));
+            };
+            // The request arrives fully formed, so only the client's own configuration is layered
+            // on: its headers (the request's own win), its base URL for a relative target, its
+            // deadline, its retry policy.
+            let outgoing = client.build(
+                &request.inner.method,
+                &request.inner.url,
+                request.inner.body.clone(),
+                request.inner.headers.clone(),
+            );
+            return Ok(crate::net::fetch_outcome(client.perform(outgoing, host)));
         }
         _ => {}
     }
@@ -2096,6 +2162,23 @@ const REQUEST_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Bytes),
     },
+    ExtFn {
+        name: "url",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    // Copy-modify (the `Response.with_header` shape). A middleware layer above std — para/api —
+    // rewrites a request before passing it on, so `Request` needs builders, not just accessors.
+    ExtFn {
+        name: "with_header",
+        params: &[Str, Str],
+        ret: Concrete(REQUEST_SIG),
+    },
+    ExtFn {
+        name: "with_url",
+        params: &[Str],
+        ret: Concrete(REQUEST_SIG),
+    },
 ];
 
 fn request_method_dispatch(
@@ -2144,6 +2227,27 @@ fn request_method_dispatch(
         "body_bytes" => {
             want_arity(method, args, 0)?;
             Ok(NativeOut::Bytes(req.body.clone()))
+        }
+        "url" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(req.url.clone()))
+        }
+        "with_header" => {
+            want_arity(method, args, 2)?;
+            let name = want_str(method, args, 0)?.to_string();
+            let value = want_str(method, args, 1)?.to_string();
+            let mut next = request.clone();
+            next.inner
+                .headers
+                .retain(|(k, _)| !k.eq_ignore_ascii_case(&name));
+            next.inner.headers.push((name, value));
+            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
+        }
+        "with_url" => {
+            want_arity(method, args, 1)?;
+            let mut next = request.clone();
+            next.inner.url = want_str(method, args, 0)?.to_string();
+            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
         }
         _ => Err(crate::no_method_error(
             crate::net::REQUEST_TYPE_NAME,

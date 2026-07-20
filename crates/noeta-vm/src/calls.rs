@@ -879,6 +879,31 @@ impl<'m> Vm<'m> {
                                 // validated way to populate it. Method-only, matching the
                                 // tree-walker's gate — a closure-valued FIELD named `call` is
                                 // member-call territory (`obj.call(args)`), not invocability.
+                                // An **extern** value participates in the protocol too (http arc
+                                // H10): a registered `call` method makes it invocable, routed
+                                // through ordinary extern method dispatch. This is what lets a
+                                // native extension hand user code a callable value (a middleware's
+                                // `next`) without a parallel callback mechanism.
+                                if callee_val.heap_kind() == Some(HeapKind::Extern)
+                                    && callee_val.with_extern(|e| {
+                                        self.reg()
+                                            .find_type_method_sig(e.type_identity(), "call")
+                                            .is_some()
+                                    })
+                                {
+                                    // BORROWED, not moved: `call_extern_method` takes a slice and
+                                    // does not consume its arguments (unlike `run_method_handle`
+                                    // below, which owns its vector). Retaining here would leak one
+                                    // reference per argument plus the receiver.
+                                    let borrowed: Vec<_> = arg_regs
+                                        .iter()
+                                        .map(|&r| regs[caller_base + r as usize])
+                                        .collect();
+                                    let result = self
+                                        .call_extern_method(callee_val, "call", &borrowed, span)?;
+                                    set_reg(regs, caller_base, dst, result);
+                                    return Ok(false);
+                                }
                                 if let Some(shape) = callee_val.shape()
                                     && self.method_proto(&shape.name, "call").is_some()
                                 {
