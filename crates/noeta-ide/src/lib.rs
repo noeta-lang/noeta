@@ -42,6 +42,7 @@ pub mod impact;
 pub mod inlay;
 pub mod offsets;
 pub mod resolve;
+pub mod sample;
 pub mod semtokens;
 pub mod signature;
 pub mod symbols;

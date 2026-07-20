@@ -222,7 +222,9 @@ fn examples_with_expected_stdout_produce_it() {
 /// obvious home but does not work: a package has no manifest key to exclude a subdirectory from its
 /// own sources, so an example that depends on its parent package drags in every *sibling* example
 /// as package source. Grouping under `examples/<pkg>/` gives the same ownership story with no
-/// absorption. Putting them inside the package needs a manifest `exclude` first.
+/// absorption — and it is the right shape for where the para packages are heading anyway, since
+/// each is moving to its own repository, taking its examples with it. No manifest `exclude` key is
+/// needed for that; the split repo makes the question moot.
 #[test]
 #[ignore = "composes a toolchain per package (a real cargo build); run explicitly or via CI's own step"]
 fn every_package_example_still_compiles() {
