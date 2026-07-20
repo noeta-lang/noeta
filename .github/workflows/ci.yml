@@ -138,6 +138,15 @@ jobs:
       # exercise the production hot-counter JIT end-to-end (real-host `noeta run`/`test`). Gate that path.
       - name: JIT-enabled CLI (integration + doc samples)
         run: cargo test -p noeta-cli --locked
+      # The shipped examples are code users copy and the docs link to by path, so a language change
+      # must not be able to invalidate them unnoticed — it twice did (the sealed-fn and no-shadowing
+      # rules each broke a LiveView example, and both sat broken because the only tests referencing
+      # an example were `#[ignore]`d socket tests). The core sweep runs with the suite above; the
+      # PACKAGE examples are their own step because each composes a toolchain (a real cargo build)
+      # and must run serially — `--ignored` selects exactly that test, not the non-hermetic
+      # real-socket/real-network ones.
+      - name: Shipped package examples still compile
+        run: cargo test -p noeta-cli --locked --test examples -- --ignored
 
   clippy:
     name: Clippy (deny warnings)

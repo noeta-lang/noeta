@@ -37,8 +37,10 @@ pub struct LeakReport {
     pub eval_measured: usize,
     /// Programs measured on the VM (compiled to bytecode).
     pub vm_measured: usize,
-    /// Programs whose result was a parse/load failure, so no backend ran.
-    pub parse_failed: usize,
+    /// Every program no backend measured, by reason. Checker-rejected cases used to return here
+    /// counted as NOTHING at all — invisible in the summary, so a fixture that stopped compiling
+    /// silently shrank the measured set with no number moving.
+    pub not_run: crate::NotRun,
     /// Every backend×program pair that ended with live residency.
     pub leaks: Vec<Leak>,
 }
@@ -60,8 +62,11 @@ impl LeakReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "leak oracle: {} programs on the tree-walker, {} on the VM ({} parse/load-failed, not run)",
-            self.eval_measured, self.vm_measured, self.parse_failed,
+            "leak oracle: {} programs on the tree-walker, {} on the VM ({} not run: {})",
+            self.eval_measured,
+            self.vm_measured,
+            self.not_run.total(),
+            self.not_run.to_human(),
         );
         if self.leaks.is_empty() {
             out.push_str("residency 0 at clean exit on every program, both backends ✓\n");
@@ -107,12 +112,12 @@ pub fn run_leak_check(root: &Path, only: Option<&Path>) -> LeakReport {
         if case.multi {
             match noeta_loader::read_workspace(&case.entry) {
                 Ok(raw) => measure_workspace(&name, &raw, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         } else {
             match std::fs::read_to_string(&case.entry) {
                 Ok(text) => measure_single(&name, &text, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         }
     }
@@ -129,11 +134,13 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
     if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
-        report.parse_failed += 1;
+        report.not_run.parse_failed += 1;
         return;
     }
     // A program the checker rejects never runs a backend — its diagnostics are its whole result.
+    // Counted, not dropped: an uncounted exclusion is one the summary cannot report.
     if !noeta_db::checked(&db, src).diagnostics.is_empty() {
+        report.not_run.checker_rejected += 1;
         return;
     }
     let checked = noeta_db::checked(&db, src);
@@ -175,11 +182,12 @@ fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut 
     let program = match &noeta_db::linked(&db, ws).0 {
         Ok(program) => program,
         Err(_) => {
-            report.parse_failed += 1;
+            report.not_run.link_failed += 1;
             return;
         }
     };
     if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
+        report.not_run.checker_rejected += 1;
         return;
     }
     let checked = noeta_db::linked_checked(&db, ws);

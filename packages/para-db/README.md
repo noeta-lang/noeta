@@ -195,7 +195,7 @@ CREATE FUNCTION users_notify() RETURNS trigger AS $$ BEGIN PERFORM pg_notify('us
 CREATE TRIGGER users_changed AFTER INSERT OR UPDATE OR DELETE ON users FOR EACH STATEMENT EXECUTE FUNCTION users_notify();
 ```
 
-See `examples/para-db-demo/` — `reactive_demo.noe` (the manual-signal pattern, any driver),
+See `examples/para-db/para-db-demo/` — `reactive_demo.noe` (the manual-signal pattern, any driver),
 `live_repo_sqlite_demo.noe`, `live_repo_demo.noe` + `watch_demo.noe` (PostgreSQL, external writes).
 
 ## Editor highlighting for `@sql`

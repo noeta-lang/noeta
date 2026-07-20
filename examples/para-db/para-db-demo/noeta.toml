@@ -1,0 +1,22 @@
+[package]
+name = "noeta/para_db_demo"
+version = "0.1.0"
+
+[dependencies]
+# The first-party non-default database package, keyed `para` so its native module addresses as
+# `para.db` and its type as `para.db.Connection`.
+para = { path = "../../../packages/para-db" }
+
+# Default database wiring for `noeta migrate`: the migrations and (re-runnable) seeds directories.
+[db]
+migrations = "migrations"
+seeds = "seeds"
+
+# Running a package's native Rust code requires the root app to authorize it (Phase 4 trust gate).
+[trust]
+native = ["para/db"]
+
+[native]
+# A `--native` binary picks its driver at runtime; request the Postgres driver ring so the AOT build
+# includes it (the SQLite default already rides the entry crate).
+rings = ["ring-postgres"]

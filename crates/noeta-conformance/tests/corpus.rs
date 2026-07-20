@@ -13,22 +13,6 @@ fn corpus_root() -> PathBuf {
 }
 
 #[test]
-fn demo_example_and_corpus_case_stay_in_sync() {
-    // The §14 acceptance program lives in two places: `examples/orders.noe` (what
-    // `lang run` executes) and `tests/conformance/demo/orders.noe` (the corpus case with
-    // its `// expect:` assertions). They are byte-identical mirrors; this guards the drift.
-    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let example = std::fs::read_to_string(workspace.join("examples/orders.noe"))
-        .expect("examples/orders.noe exists");
-    let corpus = std::fs::read_to_string(workspace.join("tests/conformance/demo/orders.noe"))
-        .expect("tests/conformance/demo/orders.noe exists");
-    assert_eq!(
-        example, corpus,
-        "examples/orders.noe and tests/conformance/demo/orders.noe have diverged"
-    );
-}
-
-#[test]
 fn conformance_corpus_passes() {
     // Run on a large-stack worker: a realistic case (async server + reactive diff) can out-recurse
     // libtest's ~2 MiB test thread in debug. See `noeta_conformance::on_deep_stack`.
@@ -121,7 +105,7 @@ fn ir_lowering_is_total_over_the_corpus() {
             report.to_human()
         );
         assert_eq!(
-            report.skipped,
+            report.not_run.unsupported,
             0,
             "the Core-IR lowering must cover 100% of the comparable corpus; got:\n{}",
             report.to_human()
@@ -176,7 +160,7 @@ fn differential_backends_agree() {
         // (every parse-clean case) — match/`?`/`??`/constructors completing the feature surface.
         // The tree-walker is now frozen as the pure oracle; this floor must never regress.
         assert_eq!(
-            report.skipped,
+            report.not_run.unsupported,
             0,
             "the VM must compile 100% of the comparable corpus (Thrust-A gate); got:\n{}",
             report.to_human()
@@ -225,7 +209,7 @@ fn jit_differential_tiers_agree() {
         // Every parse-clean program the VM supports must run through the JIT (J0 forces this); the
         // interpreter's own gate already fixes `skipped == 0`, so tier 1 covers the same 100%.
         assert_eq!(
-            report.skipped,
+            report.not_run.unsupported,
             0,
             "the JIT oracle must cover 100% of the comparable corpus; got:\n{}",
             report.to_human()
@@ -236,4 +220,61 @@ fn jit_differential_tiers_agree() {
             report.to_human()
         );
     });
+}
+
+/// A **single-file** corpus case may not import a user module.
+///
+/// Single-file cases are checked from their raw text, with no linker: an unresolved `use App.X`
+/// silently becomes an opaque stub instead of the `E0019` the real `noeta` binary reports. That is
+/// a fidelity gap between this harness and the shipped pipeline, and it hid two obsolete M0
+/// fixtures (`demo/orders.noe`, `modules/namespace_and_use.noe`) for months: both asserted stdout
+/// they could no longer produce, passed here, and failed through the CLI. Both are now directory
+/// cases carrying the modules they import.
+///
+/// So the rule this pins: a case that imports a user module is a **multi-file** case. Put it in its
+/// own directory with `main.noe` plus the modules it needs, and the loader/linker path — the same
+/// one the CLI uses — runs it. `use std.…` is unaffected; those resolve through the extension
+/// registry with no linking involved.
+#[test]
+fn a_single_file_case_never_imports_a_user_module() {
+    let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/conformance");
+    let mut offenders = Vec::new();
+    collect_single_file_cases(&corpus, &mut offenders);
+    assert!(
+        offenders.is_empty(),
+        "these single-file cases import a user module, which the single-file harness path cannot \
+         resolve (it never links) — make each one a directory case with `main.noe` and the \
+         modules it imports:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Walk the corpus the way `collect_cases` does — a directory holding `main.noe` is one multi-file
+/// case and is not descended into — collecting single-file cases that carry a user import.
+fn collect_single_file_cases(dir: &std::path::Path, out: &mut Vec<String>) {
+    if dir.join("main.noe").is_file() {
+        return; // a multi-file case: the linker resolves its imports, which is the point
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_single_file_cases(&path, out);
+        } else if path.extension().is_some_and(|e| e == "noe") {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // A user import is `use <Capitalised>…`; `use std.…` needs no linking.
+            if text.lines().any(|line| {
+                line.trim_start()
+                    .strip_prefix("use ")
+                    .and_then(|rest| rest.chars().next())
+                    .is_some_and(char::is_uppercase)
+            }) {
+                out.push(format!("  {}", path.display()));
+            }
+        }
+    }
 }

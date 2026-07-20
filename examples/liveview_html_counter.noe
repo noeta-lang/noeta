@@ -56,18 +56,18 @@ fn render(statics: List<string>, holes: List<() -> dyn>): Html {
     return Html { skeleton: skeleton, holes: computeds }
 }
 
-fn document(title: string, page: Html): string {
+fn document(title: string, body: Html): string {
     head = "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>${title}</title></head><body>\n"
-    return "${head}${page.skeleton}\n<script src=\"/live.js\"></script></body></html>\n"
+    return "${head}${body.skeleton}\n<script src=\"/live.js\"></script></body></html>\n"
 }
 
 // One websocket session: a `view()` over the page's hole computeds, the full snapshot, then a loop
 // — each client event runs the app's handler and pushes the minimal diff of the holes that changed.
-async fn session(sock: Socket, render_page: () -> Html, on_event: (string) -> void): bool {
-    page = render_page()
+async fn session(sock: Socket, render_page: () -> Html, handle_event: (string) -> void): bool {
+    rendered = render_page()
     v = view()
     mut i = 0
-    for c in page.holes {
+    for c in rendered.holes {
         v.expose("h${i}", c)
         i = i + 1
     }
@@ -82,7 +82,7 @@ async fn session(sock: Socket, render_page: () -> Html, on_event: (string) -> vo
             kind = evt["type"]
             if kind == "event" {
                 name = evt["name"]
-                on_event("${name}")
+                handle_event("${name}")
             }
             patch = v.diff() ?? ""
             if patch != "" {
@@ -94,9 +94,9 @@ async fn session(sock: Socket, render_page: () -> Html, on_event: (string) -> vo
 }
 
 // Route one request: the websocket upgrade, the bundled client shim, or the server-rendered page.
-fn serve_liveview(req: Request, title: string, render_page: () -> Html, on_event: (string) -> void): Response {
+fn serve_liveview(req: Request, title: string, render_page: () -> Html, handle_event: (string) -> void): Response {
     if req.path() == "/ws" {
-        return server.websocket(fn(sock) => session(sock, render_page, on_event))
+        return server.websocket(fn(sock) => session(sock, render_page, handle_event))
     }
     if req.path() == "/live.js" {
         return server.response(200, server.liveview_js(), {"content-type": "application/javascript"})
@@ -108,7 +108,9 @@ fn serve_liveview(req: Request, title: string, render_page: () -> Html, on_event
 
 count = signal(0)
 
-fn page(): Html {
+// `use (count)`: a named `fn` is sealed against the file's top-level bindings, so the signal this
+// page reads is declared in the signature.
+fn page() use (count): Html {
     return @html {
         <h1>Noeta LiveView counter</h1>
         <p>count: <b>${count.get()}</b> &nbsp; doubled: <b>${count.get() * 2}</b></p>
@@ -117,7 +119,7 @@ fn page(): Html {
     }
 }
 
-fn on_event(name: string): void {
+fn on_event(name: string) use (count): void {
     if name == "inc" {
         count.update(fn(n) => n + 1)
     }
