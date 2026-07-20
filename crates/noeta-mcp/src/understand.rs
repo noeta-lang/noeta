@@ -235,8 +235,7 @@ fn basename(name: &str) -> String {
 /// (a sibling the entry never imports included), each module from its own parse. Bare parses,
 /// so the docs browser works on work-in-progress code, exactly as [`project_docs`] does.
 fn member_programs(p: &Prepared) -> Vec<(noeta_span::SourceId, Program)> {
-    p.ws
-        .members(&p.db)
+    p.ws.members(&p.db)
         .iter()
         .map(|&sp| {
             (

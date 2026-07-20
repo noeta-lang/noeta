@@ -2205,7 +2205,9 @@ impl Checker {
                 self.error(
                     DiagnosticCode::UnknownName,
                     *span,
-                    format!("cannot capture `{name}`: no binding of that name at the declaration site"),
+                    format!(
+                        "cannot capture `{name}`: no binding of that name at the declaration site"
+                    ),
                 )
                 .help("`use (…)` names a value binding visible where the function is declared");
             }

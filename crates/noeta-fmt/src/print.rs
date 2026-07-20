@@ -375,10 +375,10 @@ impl Printer<'_> {
         let text = &self.source[c.span.start as usize..c.span.end as usize];
         let inner = if let Some(rest) = text.strip_prefix("//") {
             rest.trim()
-        } else if let Some(rest) = text.strip_prefix("/*") {
-            rest.strip_suffix("*/").unwrap_or(rest).trim()
         } else {
-            return None;
+            // Not a line comment, so it must be a block comment — anything else is not a marker.
+            let rest = text.strip_prefix("/*")?;
+            rest.strip_suffix("*/").unwrap_or(rest).trim()
         };
         match inner {
             "fmt: off" | "fmt:off" => Some(Marker::Off),

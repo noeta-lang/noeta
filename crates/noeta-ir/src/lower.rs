@@ -2404,7 +2404,8 @@ impl Lowerer<'_> {
                 // A synthesized step closure inherits its fn's seal; a user closure is `None`
                 // (auto-capturing).
                 let captures = self.synth_step_captures.take();
-                let func = self.lower_func(params, body_kind, *span, false, false, name, captures)?;
+                let func =
+                    self.lower_func(params, body_kind, *span, false, false, name, captures)?;
                 Ok(self.emit(
                     out,
                     Rvalue::Closure {
