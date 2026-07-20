@@ -65,8 +65,11 @@ use std.http.client
 use std.http.{Request, Response}
 
 fn handle(req: Request): Response {
-    upstream = client.get("https://api.example.com/data")
-    return server.response(200, "upstream said: ${upstream.body()}")
+    // A transport failure is the `Err` arm; degrade rather than take down the handler.
+    return match client.get("https://api.example.com/data") {
+        Ok(upstream) => server.response(200, "upstream said: ${upstream.body()}"),
+        Err(e) => server.response(502, "upstream unreachable: ${e.kind()}"),
+    }
 }
 
 server.serve(8080, handle)

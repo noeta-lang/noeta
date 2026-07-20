@@ -1,7 +1,9 @@
-// std.http sync surface (http arc H2): get/post/head/delete/request return a first-class
-// `Response` (an extern type — narrows, compares, exposes accessors). Under the sandbox every
-// request is answered by the deterministic httpbin-style responder, so the differential pins exact
-// bytes; under `noeta run` these hit the real network.
+// std.http sync surface (http arc H2/H6): get/post/head/delete/request return
+// `Result<Response, HttpError>` — a *transport* failure is the `Err`, so `?` on a request means
+// exactly "the network broke". An HTTP error **status** is an ordinary `Ok(Response)` (see the 404
+// below, which is `ok() == false`, not an `Err`). Under the sandbox every request is answered by
+// the deterministic httpbin-style responder, so the differential pins exact bytes; under
+// `noeta run` these hit the real network.
 // expect: stdout "200"
 // expect: stdout "true"
 // expect: stdout "{"body":"","method":"GET","path":"/echo"}"
@@ -17,21 +19,22 @@
 use std.http.client
 use std.http.Response
 
-r = client.get("https://svc.test/echo")
+r = client.get("https://svc.test/echo")?
 echo r.status()
 echo r.ok()
 echo r.body()
 echo r.header("content-type")
 echo r is Response
 
-p = client.post("https://svc.test/echo", "hi")
+p = client.post("https://svc.test/echo", "hi")?
 echo p.body()
 
-nf = client.get("https://svc.test/status/404")
+// A 404 is an answer, not a broken network: it arrives as `Ok`, and `ok()` reports the status.
+nf = client.get("https://svc.test/status/404")?
 echo nf.status()
 echo nf.ok()
 
-echo client.get("https://api.example.com/v1/data").body()
+echo client.get("https://api.example.com/v1/data")?.body()
 
-echo client.request("delete", "https://svc.test/status/204").status()
-echo client.head("https://svc.test/echo").header("x-missing")
+echo client.request("delete", "https://svc.test/status/204")?.status()
+echo client.head("https://svc.test/echo")?.header("x-missing")

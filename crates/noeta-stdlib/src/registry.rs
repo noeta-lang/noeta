@@ -187,6 +187,19 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: REQUEST_DOCS,
         ..ExtType::DEFAULTS
     },
+    // `HttpError` (http arc H6) — the transport failure the client's `Result` door carries. Pure,
+    // content-equal data like `Response`; declares `Error` + `Display` (the `JsonError` model) so
+    // `<E: Error>` bounds accept it and `?` converts through `From`.
+    ExtType {
+        name: crate::net::HTTP_ERROR_TYPE_NAME,
+        namespace: "std.http",
+        methods: HTTP_ERROR_METHODS,
+        dispatch: http_error_method_dispatch,
+        key_capable: false, // a transport failure is not a map key
+        traits: &["Error", "Display"],
+        docs: HTTP_ERROR_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // The websocket session handle (server-hmr L0) — its methods reach the `Network` hijack seam
     // (send/recv/close ride the executor), so they live in the ctx table.
     ExtType {
@@ -1267,6 +1280,16 @@ fn crypto_dispatch(
 
 /// The `Response` signature type, named once.
 const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
+const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME);
+
+/// What every client verb returns (http arc H6): `Result<Response, HttpError>`.
+///
+/// The split is deliberate and load-bearing. A **transport** failure — the request never produced
+/// a response — is the `Err`, so `?` on a request means exactly "the network broke". An HTTP error
+/// **status** is an ordinary `Ok(Response)`: a 404 is an answer, and folding it into `Err` is the
+/// `http_errors` flag that confuses everyone in Guzzle. Callers opt into status-as-error with
+/// `resp.error_for_status()?`.
+const RESPONSE_RESULT_SIG: SigType = SigType::Result(&RESPONSE_SIG, &HTTP_ERROR_SIG);
 
 /// A request-headers argument type — `Map<string, string>`, named once.
 const HEADERS: SigType = SigType::Map(&SigType::String, &SigType::String);
@@ -1289,72 +1312,72 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
     ExtFn {
         name: "get",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "head",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "delete",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "post",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "put",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "query",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "request",
         params: &[Str, Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "get_async",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "head_async",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "delete_async",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "post_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "put_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "query_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "request_async",
         params: &[Str, Str, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
 ];
 
@@ -1425,6 +1448,7 @@ fn http_dispatch(
                 status: status as u16,
                 headers,
                 body,
+                url: String::new(), // a server-built reply has no originating URL
             },
         )));
     }
@@ -1466,8 +1490,87 @@ fn http_dispatch(
     if func.ends_with("_async") {
         Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
     } else {
-        let response = host.net_fetch(request)?;
-        Ok(NativeOut::Extern(crate::ExternBox::new(response)))
+        // A transport failure is `Err(HttpError)`, never a `StdError` abort (http arc H6) — the
+        // caller decides whether to `?` it, retry it, or inspect its `kind()`.
+        Ok(crate::net::fetch_outcome(host.net_fetch(request)))
+    }
+}
+
+/// The `HttpError` instance methods (http arc H6): pure reads over the transport failure. Mirrors
+/// `JsonError` — `message`/`to_string` satisfy the `Error` + `Display` declarations on its
+/// registration, so `?` converts it through `From` and `${e}` interpolates the sentence.
+const HTTP_ERROR_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "message",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "kind",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "url",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "retryable",
+        params: &[],
+        ret: Concrete(SigType::Bool),
+    },
+];
+
+const HTTP_ERROR_DOCS: &[(&str, &str)] = &[
+    (
+        "message",
+        "The composed human message (`timeout request to `https://api.example.com`: …`). The \
+         `Error` trait's required method.",
+    ),
+    (
+        "to_string",
+        "Same as `message()` — the `Display` rendering, so `${e}` interpolates the message.",
+    ),
+    (
+        "kind",
+        "What class of transport failure this is: `\"timeout\"`, `\"dns\"`, `\"connect\"`, \
+         `\"tls\"`, `\"protocol\"`, `\"invalid_url\"`, or `\"other\"`. An HTTP error *status* is \
+         never one of these — a 404 is an ordinary `Response`, checked with `ok()`.",
+    ),
+    ("url", "The request URL that failed."),
+    (
+        "retryable",
+        "Whether retrying the identical request could plausibly succeed. True for `timeout`, \
+         `dns`, and `connect` (transient); false for `tls` and `invalid_url` (deterministic) and \
+         for `protocol`/`other`, where the request may already have been applied server-side.",
+    ),
+];
+
+fn http_error_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(error) = recv.as_any().downcast_ref::<crate::NetError>() else {
+        return Err(type_error(method, "HttpError"));
+    };
+    want_arity(method, args, 0)?;
+    match method {
+        "message" | "to_string" => Ok(NativeOut::Str(error.message())),
+        "kind" => Ok(NativeOut::Str(error.kind.label().to_string())),
+        "url" => Ok(NativeOut::Str(error.url.clone())),
+        "retryable" => Ok(NativeOut::Scalar(Scalar::Bool(error.kind.retryable()))),
+        _ => Err(crate::no_method_error(
+            crate::net::HTTP_ERROR_TYPE_NAME,
+            method,
+        )),
     }
 }
 
@@ -1502,6 +1605,19 @@ const RESPONSE_METHODS: &[ExtFn] = &[
         name: "with_header",
         params: &[Str, Str],
         ret: Concrete(RESPONSE_SIG),
+    },
+    // The opt-in status-as-error door (http arc H6): `resp.error_for_status()?` turns a non-2xx
+    // into the `Err` arm, for callers who want a 404 to short-circuit like a transport failure.
+    // Kept explicit rather than folded into the verbs, so `?` on a request keeps one meaning.
+    ExtFn {
+        name: "error_for_status",
+        params: &[],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "url",
+        params: &[],
+        ret: Concrete(Str),
     },
 ];
 
@@ -1554,6 +1670,29 @@ fn response_method_dispatch(
             next.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(&name));
             next.headers.push((name, value));
             Ok(NativeOut::Extern(crate::ExternBox::new(next)))
+        }
+        "url" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(resp.url.clone()))
+        }
+        "error_for_status" => {
+            want_arity(method, args, 0)?;
+            // The status class is not a transport failure, so the synthesized error is `Protocol`
+            // with the status in the detail — `kind()` stays honest about what actually happened,
+            // and `retryable()` is false (a 404 will not become a 200 on its own).
+            Ok(if (200..=299).contains(&resp.status) {
+                NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
+                    resp.clone(),
+                ))))
+            } else {
+                NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(
+                    crate::NetError::new(
+                        crate::net::NetErrorKind::Protocol,
+                        resp.url.clone(),
+                        format!("the server answered with status {}", resp.status),
+                    ),
+                ))))
+            })
         }
         _ => Err(crate::no_method_error(
             crate::net::RESPONSE_TYPE_NAME,
@@ -3189,6 +3328,18 @@ const RESPONSE_DOCS: &[(&str, &str)] = &[
     (
         "with_header",
         "A copy of the response with header `name: value` set.",
+    ),
+    (
+        "url",
+        "The final URL this response came from, after redirects — the correct base for resolving \
+         a relative `Location` or `Link` target. Empty for a response the program built with \
+         `http.server.response(…)`.",
+    ),
+    (
+        "error_for_status",
+        "`Ok(self)` for a 2xx status, `Err(HttpError)` otherwise — the opt-in door for callers \
+         who want a non-2xx to short-circuit through `?` like a transport failure. Requests \
+         themselves never do this: a 404 is an answer, not a broken network.",
     ),
 ];
 const SOCKET_DOCS: &[(&str, &str)] = &[

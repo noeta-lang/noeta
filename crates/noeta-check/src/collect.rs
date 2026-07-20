@@ -934,7 +934,9 @@ fn collect_nested_fn_names(stmt: &Stmt, top_level: bool, out: &mut HashSet<Strin
                 body(b, out);
             }
         }
-        Stmt::For { iterable, body: b, .. } => {
+        Stmt::For {
+            iterable, body: b, ..
+        } => {
             collect_nested_fns_in_expr(iterable, out);
             body(b, out);
         }
@@ -993,8 +995,12 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
             }
         }
         Expr::Unary { operand: inner, .. }
-        | Expr::Member { receiver: inner, .. }
-        | Expr::TupleIndex { receiver: inner, .. }
+        | Expr::Member {
+            receiver: inner, ..
+        }
+        | Expr::TupleIndex {
+            receiver: inner, ..
+        }
         | Expr::Try { expr: inner, .. }
         | Expr::Await { expr: inner, .. }
         | Expr::Spawn { future: inner, .. }
@@ -1011,7 +1017,9 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::Pipeline {
             left: a, right: b, ..
         }
-        | Expr::Range { start: a, end: b, .. }
+        | Expr::Range {
+            start: a, end: b, ..
+        }
         | Expr::Index {
             receiver: a,
             index: b,
@@ -1049,9 +1057,9 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
             collect_nested_fns_in_expr(name, out);
             collect_nested_fns_in_expr(args, out);
         }
-        Expr::List { items, .. } | Expr::Tuple { items, .. } => {
-            items.iter().for_each(|i| collect_nested_fns_in_expr(i, out))
-        }
+        Expr::List { items, .. } | Expr::Tuple { items, .. } => items
+            .iter()
+            .for_each(|i| collect_nested_fns_in_expr(i, out)),
         Expr::Map { entries, .. } => {
             for (k, v) in entries {
                 collect_nested_fns_in_expr(k, out);
@@ -1065,9 +1073,9 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
                 }
             }
         }
-        Expr::TierExpr { holes, .. } => {
-            holes.iter().for_each(|h| collect_nested_fns_in_expr(h, out))
-        }
+        Expr::TierExpr { holes, .. } => holes
+            .iter()
+            .for_each(|h| collect_nested_fns_in_expr(h, out)),
         Expr::Ident { .. }
         | Expr::NativeFnRef { .. }
         | Expr::AttributesOf { .. }

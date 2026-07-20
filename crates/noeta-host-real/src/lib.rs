@@ -53,8 +53,9 @@ use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
     AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, ExternBox, ExternIo, FileReader,
     FileSystem, Ids, InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore,
-    MetricValue, Metrics, NativeOut, NetRequest, NetResponse, Network, Os, ReadSource, RealBody,
-    Rng, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, StdError, TraceContext, Tracing,
+    MetricValue, Metrics, NativeOut, NetError, NetErrorKind, NetRequest, NetResponse, Network, Os,
+    ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, StdError,
+    TraceContext, Tracing,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -419,9 +420,15 @@ impl FileSystem for RealHost {
 async fn reqwest_fetch(
     client: &reqwest::Client,
     request: NetRequest,
-) -> Result<NetResponse, StdError> {
-    let method = reqwest::Method::from_bytes(request.method.as_bytes())
-        .map_err(|_| io_error(format!("invalid HTTP method `{}`", request.method)))?;
+) -> Result<NetResponse, NetError> {
+    let url = request.url.clone();
+    let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|_| {
+        NetError::new(
+            NetErrorKind::InvalidUrl,
+            &url,
+            format!("invalid HTTP method `{}`", request.method),
+        )
+    })?;
     let mut builder = client.request(method, &request.url);
     for (name, value) in &request.headers {
         builder = builder.header(name, value);
@@ -429,31 +436,74 @@ async fn reqwest_fetch(
     if !request.body.is_empty() {
         builder = builder.body(request.body);
     }
-    let url = request.url;
-    let response = builder
-        .send()
-        .await
-        .map_err(|e| io_error(format!("request to `{url}` failed: {e}")))?;
+    let response = builder.send().await.map_err(|e| net_error(&url, &e))?;
     let status = response.status().as_u16();
+    // reqwest tracks the redirect chain, so this is the URL the body actually came from — the
+    // correct base for resolving a relative `Link`/`Location`, which the request URL would not be.
+    let final_url = response.url().to_string();
     let headers = response
         .headers()
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
+    // A failure *reading the body* is a truncated/mangled response, not a failure to connect —
+    // classify through the same reqwest predicates, which report it as a decode/body error.
     let body = response
         .bytes()
         .await
-        .map_err(|e| {
-            io_error(format!(
-                "reading the response body from `{url}` failed: {e}"
-            ))
-        })?
+        .map_err(|e| net_error(&url, &e))?
         .to_vec();
     Ok(NetResponse {
         status,
         headers,
         body,
+        url: final_url,
     })
+}
+
+/// Classify a reqwest failure into the seam's [`NetErrorKind`] (http arc H6).
+///
+/// reqwest exposes the class as a set of predicates rather than an enum, and it does not surface
+/// DNS or TLS distinctly — both arrive as `is_connect`, with the distinguishing detail only in the
+/// source chain. We walk that chain for the two markers worth separating: a resolver failure is
+/// transient and worth retrying, a certificate failure never is. Anything unrecognised stays
+/// `Connect`, which is the conservative (retryable) reading of a connect-class failure.
+#[cfg(feature = "ring-http-client")]
+fn net_error(url: &str, error: &reqwest::Error) -> NetError {
+    let kind = if error.is_timeout() {
+        NetErrorKind::Timeout
+    } else if error.is_connect() {
+        match connect_cause(error) {
+            Some(cause) => cause,
+            None => NetErrorKind::Connect,
+        }
+    } else if error.is_body() || error.is_decode() {
+        NetErrorKind::Protocol
+    } else if error.is_builder() || error.is_request() {
+        NetErrorKind::InvalidUrl
+    } else {
+        NetErrorKind::Other
+    };
+    NetError::new(kind, url, error.to_string())
+}
+
+/// Distinguish DNS and TLS inside a connect-class reqwest failure by inspecting the source chain's
+/// rendered text — the only signal reqwest exposes without depending on hyper/rustls error types
+/// directly, which would couple this crate to their versions.
+#[cfg(feature = "ring-http-client")]
+fn connect_cause(error: &reqwest::Error) -> Option<NetErrorKind> {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = cause.to_string().to_ascii_lowercase();
+        if text.contains("dns") || text.contains("name or service not known") {
+            return Some(NetErrorKind::Dns);
+        }
+        if text.contains("certificate") || text.contains("tls") || text.contains("handshake") {
+            return Some(NetErrorKind::Tls);
+        }
+        source = std::error::Error::source(cause);
+    }
+    None
 }
 
 /// The real host's async network descriptor (http arc H3): its real body is a genuine reqwest
@@ -477,25 +527,27 @@ impl ExternIo for HttpIo {
             .enable_all()
             .build()
             .map_err(|e| io_error(format!("cannot start a runtime for the request: {e}")))?;
-        let response = rt.block_on(reqwest_fetch(&self.client, self.request.clone()))?;
-        Ok(NativeOut::Extern(ExternBox::new(response)))
+        Ok(noeta_stdlib::net::fetch_outcome(rt.block_on(
+            reqwest_fetch(&self.client, self.request.clone()),
+        )))
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
         let client = self.client.clone();
         let request = self.request.clone();
         Some(RealBody::Async(Box::pin(async move {
-            let response = reqwest_fetch(&client, request).await?;
-            Ok(NativeOut::Extern(ExternBox::new(response)))
+            Ok(noeta_stdlib::net::fetch_outcome(
+                reqwest_fetch(&client, request).await,
+            ))
         })))
     }
 }
 
 impl Network for RealHost {
     /// Perform the request over the real network, blocking on the host's runtime (the sync
-    /// `http.*` surface). A transport failure is an `ErrorKind::Io` error; an HTTP error *status*
+    /// `http.*` surface). A transport failure is a classified [`NetError`]; an HTTP error *status*
     /// comes back as an ordinary [`NetResponse`].
-    fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, StdError> {
+    fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, NetError> {
         #[cfg(feature = "ring-http-client")]
         {
             self.runtime.block_on(reqwest_fetch(&self.http, request))
@@ -505,9 +557,10 @@ impl Network for RealHost {
         // would be a footprint-selection bug, so this is a hard error rather than a silent no-op.
         #[cfg(not(feature = "ring-http-client"))]
         {
-            let _ = request;
-            Err(io_error(
-                "the HTTP client (std.http) is not built into this binary".to_string(),
+            Err(NetError::new(
+                NetErrorKind::Other,
+                request.url,
+                "the HTTP client (std.http) is not built into this binary",
             ))
         }
     }
@@ -2322,6 +2375,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: b"pong".to_vec(),
+                url: String::new(),
             },
         );
         match reply.run_real() {

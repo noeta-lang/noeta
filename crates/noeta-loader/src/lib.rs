@@ -943,8 +943,10 @@ fn link_core(
                     let full_path = module.namespace.clone();
                     match origins.get(name.local()) {
                         None => {
-                            origins
-                                .insert(name.local().to_string(), Origin::Import(full_path.clone()));
+                            origins.insert(
+                                name.local().to_string(),
+                                Origin::Import(full_path.clone()),
+                            );
                             for decl in module.stmts.iter().filter(|s| decl_is_public(s)) {
                                 let Some(dname) = qualifiable_decl_name(decl) else {
                                     continue;
@@ -1056,7 +1058,12 @@ fn link_core(
                 // The entry's own declarations and statements qualify against the entry's map (its
                 // own namespace + its resolved imports), with the whole tail's bindings in scope.
                 let mut stmt = other.clone();
-                qualify::qualify_stmt_scoped(&mut stmt, &entry_map, &entry_bound, &mut dotted_misses);
+                qualify::qualify_stmt_scoped(
+                    &mut stmt,
+                    &entry_map,
+                    &entry_bound,
+                    &mut dotted_misses,
+                );
                 entry_stmts.push(stmt);
             }
         }
@@ -1099,9 +1106,9 @@ fn link_core(
         };
         let namespace = mpath.join(".");
         let message = match resolve(&module_views, &mpath, dname) {
-            Resolution::Resolved(_) => format!(
-                "qualified reference `{name}` requires an import — add `use {namespace}`"
-            ),
+            Resolution::Resolved(_) => {
+                format!("qualified reference `{name}` requires an import — add `use {namespace}`")
+            }
             Resolution::Private => format!("`{dname}` is private to module `{namespace}`"),
             Resolution::Missing | Resolution::NoModule => continue,
         };

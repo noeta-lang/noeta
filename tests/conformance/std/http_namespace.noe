@@ -18,21 +18,21 @@
 // expect: exit 0
 use std.http
 
-r = http.client.get("https://svc.test/echo")
+r = http.client.get("https://svc.test/echo")?
 echo r.status()
 echo r.ok()
 echo r.body()
 echo r.header("content-type")
 echo r is http.Response
 
-p = http.client.post("https://svc.test/echo", "hi")
+p = http.client.post("https://svc.test/echo", "hi")?
 echo p.body()
 
-nf = http.client.get("https://svc.test/status/404")
+nf = http.client.get("https://svc.test/status/404")?
 echo nf.status()
 echo nf.ok()
 
-echo http.client.get("https://api.example.com/v1/data").body()
+echo http.client.get("https://api.example.com/v1/data")?.body()
 
-echo http.client.request("delete", "https://svc.test/status/204").status()
-echo http.client.head("https://svc.test/echo").header("x-missing")
+echo http.client.request("delete", "https://svc.test/status/204")?.status()
+echo http.client.head("https://svc.test/echo")?.header("x-missing")

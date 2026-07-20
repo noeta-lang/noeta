@@ -170,6 +170,14 @@ pub enum SigType {
     List(&'static SigType),
     Option(&'static SigType),
     Map(&'static SigType, &'static SigType),
+    /// A fallible result (http arc H6) — `http.client.get(url): Result<Response, HttpError>`. The
+    /// checker maps it onto the language's first-class `Type::Result`, so `?` propagation and
+    /// `From`-based error conversion work on it exactly as they do for a user-declared `Result`.
+    ///
+    /// This is the **non-turbofish** door. A call-site-typed one (`json.try_parse::<T>`) names its
+    /// error through [`TypeArgWrap::Result`] instead, because its ok-type is only known at the call.
+    /// The dispatch returns [`NativeOut::Ok`] / [`NativeOut::Err`] — never a `StdError` abort.
+    Result(&'static SigType, &'static SigType),
     /// An async future (Track A.4c) — `fs.read_async(path): Future<string>`. The checker maps it onto
     /// `Type::Named("Future", [inner])` and `.await` unwraps it.
     Future(&'static SigType),
@@ -247,6 +255,7 @@ impl SigType {
             SigType::List(t) => format!("List<{}>", t.render()),
             SigType::Option(t) => format!("Option<{}>", t.render()),
             SigType::Map(k, v) => format!("Map<{}, {}>", k.render(), v.render()),
+            SigType::Result(ok, err) => format!("Result<{}, {}>", ok.render(), err.render()),
             SigType::Future(t) => format!("Future<{}>", t.render()),
             SigType::Named(n) => (*n).to_string(),
             SigType::Union(ts) => ts

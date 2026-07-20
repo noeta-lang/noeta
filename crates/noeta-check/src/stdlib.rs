@@ -68,6 +68,12 @@ fn sig_to_type_bound(
             Box::new(sig_to_type_bound(reg, k, bindings)),
             Box::new(sig_to_type_bound(reg, v, bindings)),
         ),
+        // `Result<T, E>` is a first-class `Type`, not a `Named` — mapping straight onto it is what
+        // makes `?` propagation and `From`-based error conversion work on a registry signature.
+        SigType::Result(ok, err) => Type::Result(
+            Box::new(sig_to_type_bound(reg, ok, bindings)),
+            Box::new(sig_to_type_bound(reg, err, bindings)),
+        ),
         SigType::Future(t) => Type::Named(
             FUTURE.to_string(),
             vec![sig_to_type_bound(reg, t, bindings)],
@@ -140,6 +146,10 @@ fn bind_sig(sig: &registry::SigType, arg: &Type, bindings: &mut Vec<Option<Type>
             bind_sig(k, ak, bindings);
             bind_sig(v, av, bindings);
         }
+        (SigType::Result(s_ok, s_err), Type::Result(a_ok, a_err)) => {
+            bind_sig(s_ok, a_ok, bindings);
+            bind_sig(s_err, a_err, bindings);
+        }
         (SigType::Future(s), Type::Named(n, targs)) if n == FUTURE => {
             if let Some(t) = targs.first() {
                 bind_sig(s, t, bindings);
@@ -210,7 +220,7 @@ fn collect_bounded_vars(sig: &registry::SigType, out: &mut Vec<(u8, &'static str
         SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
             collect_bounded_vars(t, out)
         }
-        SigType::Map(k, v) => {
+        SigType::Map(k, v) | SigType::Result(k, v) => {
             collect_bounded_vars(k, out);
             collect_bounded_vars(v, out);
         }

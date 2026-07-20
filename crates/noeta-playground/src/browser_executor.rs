@@ -52,8 +52,7 @@ impl BrowserFetchIo {
 impl ExternIo for BrowserFetchIo {
     fn run_sync(&mut self, host: &mut dyn Host) -> Result<NativeOut, StdError> {
         let request = self.request.take().expect("one-shot descriptor");
-        host.net_fetch(request)
-            .map(|response| NativeOut::Extern(noeta_stdlib::ExternBox::new(response)))
+        Ok(noeta_stdlib::net::fetch_outcome(host.net_fetch(request)))
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
@@ -90,10 +89,9 @@ impl Future for FetchFuture {
         }
         match imports::fetch_take(self.ticket) {
             None => Poll::Pending,
-            Some(reply) => Poll::Ready(
-                parse_reply(&reply, &self.url)
-                    .map(|response| NativeOut::Extern(noeta_stdlib::ExternBox::new(response))),
-            ),
+            Some(reply) => Poll::Ready(Ok(noeta_stdlib::net::fetch_outcome(parse_reply(
+                &reply, &self.url,
+            )))),
         }
     }
 }

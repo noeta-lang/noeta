@@ -45,7 +45,9 @@ pub use host::{
     ReadSource, RealP2pConfig, Rng, SyncStatus,
 };
 pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
-pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
+pub use net::{
+    AcceptIo, NetError, NetErrorKind, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request,
+};
 pub use os::{ExecIo, ExecResult, Process};
 pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
 pub use registry::{

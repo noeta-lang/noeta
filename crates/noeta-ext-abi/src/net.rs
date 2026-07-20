@@ -32,6 +32,143 @@ pub struct NetRequest {
     pub body: Vec<u8>,
 }
 
+/// The registered extern-type name of a transport failure (http arc H6).
+pub const HTTP_ERROR_TYPE_NAME: &str = "HttpError";
+
+/// `HttpError`'s qualified runtime identity — the [`RESPONSE_TYPE_IDENTITY`] twin.
+pub const HTTP_ERROR_TYPE_IDENTITY: &str = "std.http.HttpError";
+
+/// Why a request never produced a response (http arc H6). A *transport* failure only — an HTTP
+/// error **status** is not one of these, it is an ordinary [`NetResponse`] the caller inspects with
+/// `ok()`/`status()`. That split is what lets `?` mean "the network broke" and nothing else.
+///
+/// The classification exists so a retry policy can be written structurally rather than by matching
+/// on message text: [`NetErrorKind::retryable`] is the predicate a backoff loop consults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetErrorKind {
+    /// The request exceeded its deadline.
+    Timeout,
+    /// The host name did not resolve.
+    Dns,
+    /// The connection could not be established, or was reset mid-flight.
+    Connect,
+    /// The TLS handshake or certificate validation failed.
+    Tls,
+    /// The response could not be read as HTTP (a malformed frame, a truncated body).
+    Protocol,
+    /// The URL itself is not a valid request target.
+    InvalidUrl,
+    /// A transport failure that does not fit the classes above.
+    Other,
+}
+
+impl NetErrorKind {
+    /// The surface label `HttpError.kind()` returns.
+    pub fn label(self) -> &'static str {
+        match self {
+            NetErrorKind::Timeout => "timeout",
+            NetErrorKind::Dns => "dns",
+            NetErrorKind::Connect => "connect",
+            NetErrorKind::Tls => "tls",
+            NetErrorKind::Protocol => "protocol",
+            NetErrorKind::InvalidUrl => "invalid_url",
+            NetErrorKind::Other => "other",
+        }
+    }
+
+    /// Whether retrying the identical request could plausibly succeed.
+    ///
+    /// Timeouts, connect failures, and DNS misses are transient — a resolver blip, a full backlog,
+    /// a rolling restart. TLS and URL failures are deterministic: the certificate will not become
+    /// valid, the URL will not become parseable, so retrying only burns the budget. `Protocol` and
+    /// `Other` are conservatively **not** retried, because a request that reached the server and
+    /// came back mangled may well have been applied — retrying it risks a duplicate write.
+    pub fn retryable(self) -> bool {
+        matches!(
+            self,
+            NetErrorKind::Timeout | NetErrorKind::Dns | NetErrorKind::Connect
+        )
+    }
+}
+
+/// A transport failure crossing the [`crate::host::Network`] seam (http arc H6): the classified
+/// twin of the [`NetResponse`] success. Carries the URL so a diagnostic names the request that
+/// failed without the caller having to thread it back through.
+///
+/// This IS the user-facing `HttpError` extern type, exactly as [`NetResponse`] is `Response`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetError {
+    /// What class of transport failure this is.
+    pub kind: NetErrorKind,
+    /// The request URL that failed.
+    pub url: String,
+    /// The host's rendering of the underlying failure.
+    pub detail: String,
+}
+
+impl NetError {
+    /// A failure of `kind` against `url`, detailed by `detail`.
+    pub fn new(kind: NetErrorKind, url: impl Into<String>, detail: impl Into<String>) -> NetError {
+        NetError {
+            kind,
+            url: url.into(),
+            detail: detail.into(),
+        }
+    }
+
+    /// The composed sentence the value displays as, and what `message()` returns:
+    /// `timeout request to `https://api.example.com`: …` reads as one line in a log.
+    pub fn message(&self) -> String {
+        format!(
+            "{} request to `{}`: {}",
+            self.kind.label(),
+            self.url,
+            self.detail
+        )
+    }
+}
+
+/// A transport failure degrades to the pre-H6 aborting form for any path that has not yet been
+/// converted to the `Result` door (and for hosts that only speak [`crate::StdError`]).
+impl From<NetError> for crate::StdError {
+    fn from(error: NetError) -> crate::StdError {
+        crate::StdError {
+            kind: crate::ErrorKind::Io,
+            message: error.message(),
+        }
+    }
+}
+
+/// `NetError` IS the user-facing `HttpError` extern type — pure, host-free, content-equal data,
+/// the [`NetResponse`] model. Declares `Error` + `Display` at its registration so `<E: Error>`
+/// bounds accept it and `?` converts through `From`.
+impl ExternValue for NetError {
+    fn type_identity(&self) -> &'static str {
+        HTTP_ERROR_TYPE_IDENTITY
+    }
+    fn eq_value(&self, other: &dyn ExternValue) -> bool {
+        other.as_any().downcast_ref::<NetError>() == Some(self)
+    }
+    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0 // not key-capable
+    }
+    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        write!(out, "{}", self.message())
+    }
+    fn clone_box(&self) -> Box<dyn ExternValue> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 /// An HTTP response crossing the [`crate::host::Network`] seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetResponse {
@@ -41,6 +178,10 @@ pub struct NetResponse {
     pub headers: Vec<(String, String)>,
     /// The response body bytes.
     pub body: Vec<u8>,
+    /// The **final** URL this response came from — after redirects, so it is the correct base for
+    /// resolving a relative `Location` or RFC 8288 `Link` target. Empty for a response the program
+    /// *built* rather than received (`http.server.response(…)`), which has no originating URL.
+    pub url: String,
 }
 
 impl NetResponse {
@@ -83,6 +224,20 @@ impl ExternValue for NetResponse {
     }
 }
 
+/// Marshal a fetch outcome as the client's `Result<Response, HttpError>` (http arc H6). Shared by
+/// the sync dispatch and every async descriptor (default, real, browser), so both doors return the
+/// identical shape and `await`ing an async verb yields the same `Result` the sync verb does.
+pub fn fetch_outcome(result: Result<NetResponse, NetError>) -> crate::NativeOut {
+    match result {
+        Ok(response) => crate::NativeOut::Ok(Box::new(crate::NativeOut::Extern(
+            crate::ExternBox::new(response),
+        ))),
+        Err(error) => crate::NativeOut::Err(Box::new(crate::NativeOut::Extern(
+            crate::ExternBox::new(error),
+        ))),
+    }
+}
+
 /// The default async network descriptor (http arc H3): it performs the request synchronously
 /// through the Host **at spawn** and has no real body. The sandbox uses this (deterministic,
 /// resolved at spawn — the differential never observes a real body); the real host overrides
@@ -99,8 +254,7 @@ impl crate::ExternIo for NetFetchIo {
         &mut self,
         host: &mut dyn crate::Host,
     ) -> Result<crate::NativeOut, crate::StdError> {
-        let response = host.net_fetch(self.request.clone())?;
-        Ok(crate::NativeOut::Extern(crate::ExternBox::new(response)))
+        Ok(fetch_outcome(host.net_fetch(self.request.clone())))
     }
 }
 

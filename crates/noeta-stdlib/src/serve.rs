@@ -328,6 +328,7 @@ fn server_error() -> NetResponse {
         status: 500,
         headers: Vec::new(),
         body: b"Internal Server Error".to_vec(),
+        url: String::new(), // built, not received
     }
 }
 
@@ -598,6 +599,7 @@ pub fn http_ctx_dispatch(
                                                 status: 400,
                                                 headers: Vec::new(),
                                                 body: b"not a websocket request".to_vec(),
+                                                url: String::new(), // built, not received
                                             },
                                         )?;
                                         true

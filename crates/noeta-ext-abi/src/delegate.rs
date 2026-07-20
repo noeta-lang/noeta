@@ -254,7 +254,7 @@ macro_rules! __delegate_host_capability {
             fn net_fetch(
                 &mut self,
                 request: $crate::NetRequest,
-            ) -> Result<$crate::NetResponse, $crate::StdError> {
+            ) -> Result<$crate::NetResponse, $crate::NetError> {
                 self.$field.net_fetch(request)
             }
             fn net_spawn(&self, request: $crate::NetRequest) -> Box<dyn $crate::ExternIo> {

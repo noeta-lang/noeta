@@ -177,6 +177,7 @@ fn failure(message: &str) -> NetResponse {
         status: 500,
         headers: vec![("content-type".to_string(), "text/plain".to_string())],
         body: message.as_bytes().to_vec(),
+        url: String::new(), // built, not received
     }
 }
 
@@ -224,7 +225,7 @@ mod tests {
         let module = compile(
             "use std.http.server\nuse std.http.client\nuse std.http.{Request, Response}\n\n\
              fn handle(req: Request): Response {\n\
-                 upstream = client.get(\"http://api.internal/data\")\n\
+                 upstream = client.get(\"http://api.internal/data\")?\n\
                  return server.response(200, \"upstream said: ${upstream.body()}\")\n\
              }\n\n\
              server.serve(8080, handle)",
@@ -237,6 +238,7 @@ mod tests {
                 status: 200,
                 headers: Vec::new(),
                 body: b"42".to_vec(),
+                url: request.url.clone(),
             })
         });
         let response =

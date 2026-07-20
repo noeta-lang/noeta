@@ -353,20 +353,44 @@ and a program that only *calls out* never links the server — each `use` pulls 
 
 ### Client: `http.client`
 
-`use std.http.client` binds `client`. Each verb performs a request and returns a `Response`; the
-`*_async` twins return a `Future<Response>` for concurrent work.
+`use std.http.client` binds `client`. Each verb performs a request and returns a
+`Result<Response, HttpError>`; the `*_async` twins return a `Future<Result<Response, HttpError>>`
+for concurrent work.
 
 | Function | Signature | Notes |
 |---|---|---|
-| `get` / `head` / `delete` | `get(url: string, headers?: Map<string, string>) -> Response` | Bodyless verbs. |
-| `post` / `put` | `post(url: string, body: string\|bytes, headers?: Map<string, string>) -> Response` | Body-carrying. |
-| `query` | `query(url: string, body: string\|bytes, headers?: Map<string, string>) -> Response` | The HTTP QUERY method — a safe, idempotent request that carries a body (for complex reads a URL can't express). |
-| `request` | `request(method: string, url: string, headers?: Map<string, string>) -> Response` | Any other (bodyless) verb. |
-| `*_async` | `get_async(url, headers?) -> Future<Response>`, … | Async twin of every verb above; `.await` yields the `Response`. |
+| `get` / `head` / `delete` | `get(url: string, headers?: Map<string, string>) -> Result<Response, HttpError>` | Bodyless verbs. |
+| `post` / `put` | `post(url: string, body: string\|bytes, headers?: Map<string, string>) -> Result<Response, HttpError>` | Body-carrying. |
+| `query` | `query(url: string, body: string\|bytes, headers?: Map<string, string>) -> Result<Response, HttpError>` | The HTTP QUERY method — a safe, idempotent request that carries a body (for complex reads a URL can't express). |
+| `request` | `request(method: string, url: string, headers?: Map<string, string>) -> Result<Response, HttpError>` | Any other (bodyless) verb. |
+| `*_async` | `get_async(url, headers?) -> Future<Result<Response, HttpError>>`, … | Async twin of every verb above; `.await?` yields the `Response`. |
 
-Every verb takes an **optional** trailing `headers: Map<string, string>`. `Response` methods:
-`status() -> int`, `ok() -> bool` (2xx), `body() -> string`, `body_bytes() -> bytes`, and
-`header(name) -> string?` (case-insensitive).
+Every verb takes an **optional** trailing `headers: Map<string, string>`.
+
+#### What is an error, and what isn't
+
+The `Err` arm is a **transport** failure only — the request never produced a response. So `?` on a
+request means exactly one thing: *the network broke*.
+
+An HTTP error **status is not an error**. A `404` is an answer: it arrives as `Ok(Response)`, and
+you check it with `ok()` or `status()`. This is deliberate — folding status into `Err` is the
+mistake that makes `http_errors`-style flags necessary elsewhere. When you *do* want a non-2xx to
+short-circuit, opt in per call with `error_for_status()`:
+
+```noeta ignore
+resp = client.get("https://api.example.com/users/1")?   // Err only if the network broke
+strict = client.get("https://api.example.com/users/1")?.error_for_status()?   // Err on 4xx/5xx too
+```
+
+`Response` methods: `status() -> int`, `ok() -> bool` (2xx), `body() -> string`,
+`body_bytes() -> bytes`, `header(name) -> string?` (case-insensitive), `url() -> string` (the final
+URL after redirects), and `error_for_status() -> Result<Response, HttpError>`.
+
+`HttpError` implements `Error` and `Display`, so it converts through `?` like any other error type.
+Its methods: `message()`, `kind()`, `url()`, and `retryable()`. `kind()` is one of `"timeout"`,
+`"dns"`, `"connect"`, `"tls"`, `"protocol"`, `"invalid_url"`, or `"other"`; `retryable()` is true
+for the transient three (`timeout`/`dns`/`connect`) and false for the rest — a TLS failure will not
+fix itself, and a `protocol` failure may already have been applied server-side.
 
 ```noeta check
 use std.http.client
@@ -377,7 +401,7 @@ token = "s3cret"
 payload = {"name": "Niro"}
 filter = {"q": "cats"}
 
-resp = client.get("https://api.example.com/users/1", {"authorization": "Bearer " ~ token})
+resp = client.get("https://api.example.com/users/1", {"authorization": "Bearer " ~ token})?
 if resp.ok() {
     user = json.parse::<User>(resp.body())
     echo user.name
@@ -386,8 +410,8 @@ if resp.ok() {
 }
 
 // POST a JSON body; QUERY for a body-carrying read.
-client.post("https://api.example.com/users", json.stringify(payload), {"content-type": "application/json"})
-found = client.query("https://api.example.com/search", json.stringify(filter))
+client.post("https://api.example.com/users", json.stringify(payload), {"content-type": "application/json"})?
+found = client.query("https://api.example.com/search", json.stringify(filter))?
 ```
 
 Concurrent fan-out: `all` (from `std.task`) awaits a batch of futures together, returning their
@@ -400,7 +424,7 @@ codes = all([
     client.get_async("https://a.example"),
     client.get_async("https://b.example"),
 ])
-echo [codes[0].status(), codes[1].status()].join(",")
+echo [codes[0]?.status(), codes[1]?.status()].join(",")
 ```
 
 **Sandbox vs. real.** Under `noeta run` (and the REPL) requests hit the real network. Under the

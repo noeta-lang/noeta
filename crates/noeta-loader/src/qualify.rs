@@ -314,9 +314,7 @@ fn bound_in_pattern(p: &Pattern, names: &mut HashSet<String>) {
         Pattern::Variant { bindings, .. } => {
             bindings.iter().for_each(|b| bound_in_pattern(b, names))
         }
-        Pattern::Tuple { elements, .. } => {
-            elements.iter().for_each(|e| bound_in_pattern(e, names))
-        }
+        Pattern::Tuple { elements, .. } => elements.iter().for_each(|e| bound_in_pattern(e, names)),
         Pattern::Wildcard { .. }
         | Pattern::Int { .. }
         | Pattern::Str { .. }
@@ -330,7 +328,10 @@ fn bound_in_pattern(p: &Pattern, names: &mut HashSet<String>) {
 fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
     match e {
         Expr::Closure {
-            params, ret: _, body, ..
+            params,
+            ret: _,
+            body,
+            ..
         } => {
             names.extend(params.iter().map(|p| p.name.clone()));
             match body {
@@ -367,8 +368,12 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
             }
         }
         Expr::Unary { operand: inner, .. }
-        | Expr::Member { receiver: inner, .. }
-        | Expr::TupleIndex { receiver: inner, .. }
+        | Expr::Member {
+            receiver: inner, ..
+        }
+        | Expr::TupleIndex {
+            receiver: inner, ..
+        }
         | Expr::Try { expr: inner, .. }
         | Expr::Await { expr: inner, .. }
         | Expr::Spawn { future: inner, .. }
@@ -385,7 +390,9 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         | Expr::Pipeline {
             left: a, right: b, ..
         }
-        | Expr::Range { start: a, end: b, .. }
+        | Expr::Range {
+            start: a, end: b, ..
+        }
         | Expr::Index {
             receiver: a,
             index: b,

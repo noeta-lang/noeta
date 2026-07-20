@@ -28,8 +28,8 @@ use noeta_stdlib::fs::Vfs;
 use noeta_stdlib::{
     AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
     InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue,
-    Metrics, NetRequest, NetResponse, Network, Os, ReadSource, Rng, SpanId, SpanKind, SpanStatus,
-    SpanTracker, StdError, TraceContext, Tracing,
+    Metrics, NetError, NetErrorKind, NetRequest, NetResponse, Network, Os, ReadSource, Rng, SpanId,
+    SpanKind, SpanStatus, SpanTracker, StdError, TraceContext, Tracing,
 };
 use serde_json::json;
 
@@ -412,11 +412,18 @@ pub(crate) fn request_json(request: &NetRequest) -> String {
 
 /// Raise the embedder's reply JSON (`{status, headers, body}` or `{error}`) back into a
 /// [`NetResponse`]. Shared by the synchronous leaf and the JSPI future (W3.1).
-pub(crate) fn parse_reply(reply: &str, url: &str) -> Result<NetResponse, StdError> {
-    let parsed: serde_json::Value = serde_json::from_str(reply)
-        .map_err(|e| io_error(format!("malformed embedder fetch reply: {e}")))?;
+pub(crate) fn parse_reply(reply: &str, url: &str) -> Result<NetResponse, NetError> {
+    let parsed: serde_json::Value = serde_json::from_str(reply).map_err(|e| {
+        NetError::new(
+            NetErrorKind::Protocol,
+            url,
+            format!("malformed embedder fetch reply: {e}"),
+        )
+    })?;
+    // A browser `fetch` rejection collapses every transport class into one opaque string (the
+    // Fetch spec deliberately withholds the distinction from script), so it can only be `Other`.
     if let Some(error) = parsed.get("error").and_then(|e| e.as_str()) {
-        return Err(io_error(format!("cannot fetch `{url}`: {error}")));
+        return Err(NetError::new(NetErrorKind::Other, url, error));
     }
     let headers = parsed
         .get("headers")
@@ -434,6 +441,7 @@ pub(crate) fn parse_reply(reply: &str, url: &str) -> Result<NetResponse, StdErro
         })
         .unwrap_or_default();
     Ok(NetResponse {
+        url: url.to_string(),
         status: parsed.get("status").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
         headers,
         body: parsed
@@ -446,7 +454,7 @@ pub(crate) fn parse_reply(reply: &str, url: &str) -> Result<NetResponse, StdErro
 }
 
 impl Network for BrowserHost {
-    fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, StdError> {
+    fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, NetError> {
         let reply = imports::net_fetch(&request_json(&request));
         parse_reply(&reply, &request.url)
     }
@@ -623,6 +631,6 @@ mod tests {
                 body: Vec::new(),
             })
             .expect_err("no network natively");
-        assert!(err.message.contains("JS embedding"), "{}", err.message);
+        assert!(err.message().contains("JS embedding"), "{}", err.message());
     }
 }

@@ -128,5 +128,8 @@ pub fn fetch(request: NetRequest) -> Result<NetResponse, StdError> {
         status,
         headers,
         body: bytes,
+        // `wasi:http` does not report a redirect chain, so the request URL is the best available
+        // answer for "where did this come from".
+        url,
     })
 }

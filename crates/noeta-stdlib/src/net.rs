@@ -10,9 +10,10 @@
 //! answered here; a program that wants real data runs under `noeta run` (the real host).
 
 pub use noeta_ext_abi::net::{
-    NetFetchIo, NetRequest, NetResponse, REQUEST_TYPE_IDENTITY, REQUEST_TYPE_NAME,
-    RESPONSE_TYPE_IDENTITY, RESPONSE_TYPE_NAME, Request, WS_ACCEPT_GUID, accept_outcome,
-    query_value, request_header, request_path, ws_recv_outcome,
+    HTTP_ERROR_TYPE_IDENTITY, HTTP_ERROR_TYPE_NAME, NetError, NetErrorKind, NetFetchIo, NetRequest,
+    NetResponse, REQUEST_TYPE_IDENTITY, REQUEST_TYPE_NAME, RESPONSE_TYPE_IDENTITY,
+    RESPONSE_TYPE_NAME, Request, WS_ACCEPT_GUID, accept_outcome, fetch_outcome, query_value,
+    request_header, request_path, ws_recv_outcome,
 };
 
 use serde_json::json;
@@ -83,6 +84,9 @@ fn typed(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> NetRespon
         status,
         headers: vec![("content-type".to_string(), content_type.to_string())],
         body: body.into(),
+        // Stamped by `sandbox_respond`, which is the only caller and the only place that knows the
+        // request — keeping it off this shorthand avoids threading the URL through every arm.
+        url: String::new(),
     }
 }
 
@@ -112,6 +116,14 @@ fn path_of(url: &str) -> &str {
 /// - `/headers` → `200`, JSON body of the request headers (sorted by name).
 /// - anything else → `200`, the plain-text line `noeta sandbox: {method} {path}`.
 pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
+    // Every arm builds its response through `typed`, which cannot know the request; stamp the
+    // originating URL once here so a sandbox response carries it exactly as a real one does.
+    let mut response = sandbox_body(request);
+    response.url = request.url.clone();
+    response
+}
+
+fn sandbox_body(request: &NetRequest) -> NetResponse {
     let path = path_of(&request.url);
     if let Some(rest) = path.strip_prefix("/status/") {
         return match rest.parse::<u16>() {
