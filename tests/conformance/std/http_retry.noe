@@ -1,0 +1,41 @@
+// Retry with exponential backoff (http arc H9). The sandbox's `/status/{n}` route answers `n`
+// deterministically forever, so a retryable status exhausts the budget — which is exactly what
+// makes the loop observable: sleeping goes through the **Clock** capability, so the logical clock
+// advances by the backoff curve and a retrying program stays in-oracle. That is the whole reason
+// retries sleep on the clock seam rather than the thread.
+// expect: stdout "503"
+// expect: stdout "750"
+// expect: stdout "200"
+// expect: stdout "0"
+// expect: stdout "404"
+// expect: stdout "0"
+// expect: stdout "0"
+// expect: exit 0
+use std.http.client
+use std.time
+
+// Three retries over a permanent 503: attempts at 0, then sleeps of 250 + 500 = 750ms before the
+// budget runs out. The LAST outcome is what the caller sees — a 503 response, not a synthesized
+// summary error.
+before = time.monotonic()
+r = client.new("https://svc.test").retry(2, 250).get("/status/503")?
+echo r.status()
+echo time.monotonic() - before - 1
+
+// A success never sleeps.
+before2 = time.monotonic()
+ok = client.new("https://svc.test").retry(3).get("/status/200")?
+echo ok.status()
+echo time.monotonic() - before2 - 1
+
+// A status OUTSIDE the retry set is returned immediately — 404 is an answer, not a hiccup.
+before3 = time.monotonic()
+nf = client.new("https://svc.test").retry(3).get("/status/404")?
+echo nf.status()
+echo time.monotonic() - before3 - 1
+
+// POST is NOT retried by default: a request that may already have been applied must not be
+// repeated silently. No sleeps, even against a retryable status.
+before4 = time.monotonic()
+p = client.new("https://svc.test").retry(3).post("/status/503", "body")?
+echo time.monotonic() - before4 - 1

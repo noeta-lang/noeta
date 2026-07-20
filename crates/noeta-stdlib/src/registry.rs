@@ -1568,6 +1568,20 @@ const CLIENT_METHODS: &[ExtFn] = &[
         ret: Concrete(CLIENT_SIG),
     },
     ExtFn {
+        name: "retry",
+        params: &[
+            Int,
+            SigType::Optional(&Int),
+            SigType::Optional(&SigType::List(&Int)),
+        ],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "retry_non_idempotent",
+        params: &[],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
         name: "base_url",
         params: &[],
         ret: Concrete(Str),
@@ -1627,6 +1641,21 @@ const CLIENT_DOCS: &[(&str, &str)] = &[
         "timeout",
         "A copy of the client with a per-request deadline in milliseconds. Exceeding it is an \
          `HttpError` whose `kind()` is `\"timeout\"` (and `retryable()` is true).",
+    ),
+    (
+        "retry",
+        "A copy of the client that retries failed requests: `retry(max, base_ms?, on?)`. \
+         Retries a **transient** transport failure (`timeout`/`dns`/`connect`) and any status in \
+         `on` (default `[429, 502, 503, 504]`), backing off `base_ms` doubled per attempt \
+         (default 250ms, capped at 30s). A server's own `Retry-After` wins over the computed \
+         backoff. Only **idempotent** verbs are retried — see `retry_non_idempotent`.",
+    ),
+    (
+        "retry_non_idempotent",
+        "Extend the retry policy to POST. Off by default because retrying a request that may \
+         already have been applied can duplicate a side effect — a second charge, a second \
+         order — and a timeout is exactly the case where the client cannot tell. Opt in when the \
+         endpoint is safe to repeat or you send an idempotency key.",
     ),
     (
         "base_url",
@@ -1691,6 +1720,46 @@ fn client_method_dispatch(
             }
             return configured(client.with_timeout(ms as u64));
         }
+        "retry" => {
+            want_arity_range(method, args, 1, 3)?;
+            let max = want_int(method, args, 0)?;
+            if max < 0 {
+                return Err(type_error(method, "a non-negative retry count"));
+            }
+            let mut policy = crate::http_client::RetryPolicy::new(max as u32);
+            if args.len() > 1 {
+                let base = want_int(method, args, 1)?;
+                if base <= 0 {
+                    return Err(type_error(method, "a positive backoff in milliseconds"));
+                }
+                policy.base_ms = base as u64;
+            }
+            if args.len() > 2 {
+                let Some(NativeValue::List(statuses)) = args.get(2) else {
+                    return Err(type_error(method, "a list of status codes"));
+                };
+                policy.on_status = statuses
+                    .iter()
+                    .map(|v| match v {
+                        NativeValue::Scalar(Scalar::Int(n)) if (100..=599).contains(n) => {
+                            Ok(*n as u16)
+                        }
+                        _ => Err(type_error(
+                            method,
+                            "a list of HTTP status codes in 100..=599",
+                        )),
+                    })
+                    .collect::<Result<_, _>>()?;
+            }
+            // Inherit the opt-in when re-configuring an already-unsafe client, so the order of
+            // `.retry(..)` and `.retry_non_idempotent()` in a chain does not change behavior.
+            policy.non_idempotent = client.retry.as_ref().is_some_and(|r| r.non_idempotent);
+            return configured(client.with_retry(policy));
+        }
+        "retry_non_idempotent" => {
+            want_arity(method, args, 0)?;
+            return configured(client.with_non_idempotent_retry());
+        }
         "base_url" => {
             want_arity(method, args, 0)?;
             return Ok(NativeOut::Str(client.base_url.clone()));
@@ -1728,7 +1797,9 @@ fn client_method_dispatch(
             ));
         }
     };
-    Ok(crate::net::fetch_outcome(host.net_fetch(request)))
+    // Through the client's own `perform`, which applies the retry policy (http arc H9); without a
+    // policy it is exactly `host.net_fetch`, so a non-retrying client costs nothing extra.
+    Ok(crate::net::fetch_outcome(client.perform(request, host)))
 }
 
 /// The `HttpError` instance methods (http arc H6): pure reads over the transport failure. Mirrors

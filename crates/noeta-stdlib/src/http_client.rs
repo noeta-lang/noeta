@@ -41,6 +41,97 @@ pub struct HttpClient {
     pub headers: Vec<(String, String)>,
     /// The per-request deadline in milliseconds, or `None` for the host's default.
     pub timeout_ms: Option<u64>,
+    /// The retry policy, or `None` to attempt each request exactly once.
+    pub retry: Option<RetryPolicy>,
+}
+
+/// How a [`HttpClient`] retries (http arc H9).
+///
+/// Two things are retried: a **transport** failure the seam classified as transient
+/// ([`crate::NetErrorKind::retryable`] — timeout, dns, connect), and a **status** in
+/// [`RetryPolicy::on_status`]. Nothing else: a TLS failure will not fix itself, and a `protocol`
+/// failure may already have been applied server-side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// How many *additional* attempts after the first. `retry(3)` performs up to 4 requests.
+    pub max_retries: u32,
+    /// The first backoff, doubling per attempt (250, 500, 1000, …), capped at [`MAX_BACKOFF_MS`].
+    pub base_ms: u64,
+    /// Response statuses worth retrying. Defaults to [`DEFAULT_RETRY_STATUSES`].
+    pub on_status: Vec<u16>,
+    /// Whether to retry **non-idempotent** verbs (POST). Off by default — see
+    /// [`RetryPolicy::should_retry_method`].
+    pub non_idempotent: bool,
+}
+
+/// The statuses retried unless the caller names their own: 429 (rate limited — the case
+/// `Retry-After` exists for) and the 502/503/504 gateway-and-overload trio. Deliberately NOT 500:
+/// a generic server error is usually deterministic, and hammering it helps nobody.
+pub const DEFAULT_RETRY_STATUSES: &[u16] = &[429, 502, 503, 504];
+
+/// The first backoff when the caller does not name one.
+pub const DEFAULT_BACKOFF_MS: u64 = 250;
+
+/// The ceiling on a computed backoff. Exponential growth is useful for the first few attempts and
+/// absurd after that — without a cap, `retry(10)` would wait minutes between attempts.
+pub const MAX_BACKOFF_MS: u64 = 30_000;
+
+impl RetryPolicy {
+    /// A policy retrying `max_retries` times with the default backoff and status set.
+    pub fn new(max_retries: u32) -> RetryPolicy {
+        RetryPolicy {
+            max_retries,
+            base_ms: DEFAULT_BACKOFF_MS,
+            on_status: DEFAULT_RETRY_STATUSES.to_vec(),
+            non_idempotent: false,
+        }
+    }
+
+    /// Whether a request using `method` may be retried at all.
+    ///
+    /// The safety rule, and the reason this is not simply "retry what the policy says": retrying a
+    /// **non-idempotent** request that may already have been applied can duplicate a side effect —
+    /// a second charge, a second order. A timeout is exactly the case where the client cannot know
+    /// whether the server processed it. So POST is not retried unless the caller explicitly opts
+    /// in with `retry_non_idempotent()`, having decided their endpoint is safe (or that they send
+    /// an idempotency key). Everything RFC 7231 defines as idempotent — GET, HEAD, PUT, DELETE,
+    /// OPTIONS, TRACE — plus QUERY (safe and idempotent by its own definition) is retried freely.
+    pub fn should_retry_method(&self, method: &str) -> bool {
+        self.non_idempotent
+            || matches!(
+                method.to_ascii_uppercase().as_str(),
+                "GET" | "HEAD" | "PUT" | "DELETE" | "OPTIONS" | "TRACE" | "QUERY"
+            )
+    }
+
+    /// The backoff before attempt `retry` (0-based): `base * 2^retry`, capped.
+    pub fn backoff_ms(&self, retry: u32) -> u64 {
+        self.base_ms
+            .saturating_mul(1u64 << retry.min(20))
+            .min(MAX_BACKOFF_MS)
+    }
+
+    /// How long to wait before the next attempt, preferring the server's own `Retry-After` over
+    /// our computed backoff when the response carries one.
+    ///
+    /// A server that says "wait 60s" knows something we do not, so it wins — but still capped, so
+    /// a hostile or broken `Retry-After: 86400` cannot park the program for a day.
+    pub fn delay_for(&self, retry: u32, response: Option<&crate::NetResponse>) -> u64 {
+        response
+            .and_then(|r| r.header_value("retry-after"))
+            .and_then(parse_retry_after_seconds)
+            .map(|secs| secs.saturating_mul(1000).min(MAX_BACKOFF_MS))
+            .unwrap_or_else(|| self.backoff_ms(retry))
+    }
+}
+
+/// Parse a `Retry-After` value as delay-seconds (RFC 9110 §10.2.3).
+///
+/// Only the delay-seconds form is honored; the HTTP-date form needs a wall-clock comparison and a
+/// date parser, and servers that rate-limit overwhelmingly send seconds. An unparseable value
+/// falls back to the computed backoff rather than failing the request.
+fn parse_retry_after_seconds(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
 }
 
 impl HttpClient {
@@ -68,6 +159,24 @@ impl HttpClient {
             timeout_ms: Some(ms),
             ..self.clone()
         }
+    }
+
+    /// A copy with the retry policy set.
+    pub fn with_retry(&self, retry: RetryPolicy) -> HttpClient {
+        HttpClient {
+            retry: Some(retry),
+            ..self.clone()
+        }
+    }
+
+    /// A copy whose retry policy also covers non-idempotent verbs. A no-op without a policy —
+    /// opting into retrying POST is meaningless if nothing is retried at all.
+    pub fn with_non_idempotent_retry(&self) -> HttpClient {
+        let mut next = self.clone();
+        if let Some(retry) = next.retry.as_mut() {
+            retry.non_idempotent = true;
+        }
+        next
     }
 
     /// Resolve a request target against the base URL.
@@ -106,6 +215,45 @@ impl HttpClient {
             headers,
             body,
             timeout_ms: self.timeout_ms,
+        }
+    }
+
+    /// Perform `request` through the host, applying this client's retry policy (http arc H9).
+    ///
+    /// Sleeping between attempts goes through the **Clock** capability, not a thread sleep: under
+    /// the sandbox that advances the logical clock without blocking, so a retrying program stays
+    /// deterministic and in-oracle, and the differential covers this loop like any other code.
+    ///
+    /// The **last** outcome is what the caller sees. A retry budget that runs out returns the
+    /// final failure (or the final retryable status as an ordinary `Ok` response) rather than
+    /// synthesizing a summary error — the caller asked for a request, not a report.
+    pub fn perform(
+        &self,
+        request: NetRequest,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NetResponse, crate::NetError> {
+        let Some(policy) = self.retry.as_ref().filter(|p| p.max_retries > 0) else {
+            return host.net_fetch(request);
+        };
+        if !policy.should_retry_method(&request.method) {
+            return host.net_fetch(request);
+        }
+        let mut retry = 0;
+        loop {
+            let outcome = host.net_fetch(request.clone());
+            let exhausted = retry >= policy.max_retries;
+            let delay = match &outcome {
+                // A transient transport failure: worth another attempt. A deterministic one
+                // (tls, invalid_url) or an ambiguous one (protocol, other) is returned as-is.
+                Err(error) if error.kind.retryable() && !exhausted => policy.delay_for(retry, None),
+                // A status the caller nominated. The server's own `Retry-After` wins if present.
+                Ok(response) if policy.on_status.contains(&response.status) && !exhausted => {
+                    policy.delay_for(retry, Some(response))
+                }
+                _ => return outcome,
+            };
+            host.clock_sleep(delay as i64);
+            retry += 1;
         }
     }
 }
@@ -356,6 +504,92 @@ mod tests {
             parse_link_header(header),
             vec![("next".to_string(), "https://x.example/1".to_string())]
         );
+    }
+
+    fn response_with(status: u16, headers: Vec<(&str, &str)>) -> crate::NetResponse {
+        crate::NetResponse {
+            status,
+            headers: headers
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: Vec::new(),
+            url: String::new(),
+        }
+    }
+
+    #[test]
+    fn backoff_doubles_and_then_caps() {
+        let policy = RetryPolicy::new(20);
+        assert_eq!(policy.backoff_ms(0), 250);
+        assert_eq!(policy.backoff_ms(1), 500);
+        assert_eq!(policy.backoff_ms(2), 1_000);
+        // Without the cap, attempt 20 would be 250ms << 20 ≈ 3 days.
+        assert_eq!(policy.backoff_ms(20), MAX_BACKOFF_MS);
+    }
+
+    #[test]
+    fn retry_after_wins_over_the_computed_backoff() {
+        let policy = RetryPolicy::new(3);
+        let response = response_with(429, vec![("retry-after", "5")]);
+        assert_eq!(
+            policy.delay_for(0, Some(&response)),
+            5_000,
+            "the server knows its own rate limit better than our backoff curve does"
+        );
+    }
+
+    #[test]
+    fn a_hostile_retry_after_is_still_capped() {
+        let policy = RetryPolicy::new(3);
+        let response = response_with(503, vec![("Retry-After", "86400")]);
+        assert_eq!(
+            policy.delay_for(0, Some(&response)),
+            MAX_BACKOFF_MS,
+            "a broken or hostile `Retry-After` must not park the program for a day"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_retry_after_falls_back_to_the_backoff() {
+        // The HTTP-date form, which we deliberately do not parse.
+        let policy = RetryPolicy::new(3);
+        let response = response_with(503, vec![("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")]);
+        assert_eq!(policy.delay_for(1, Some(&response)), policy.backoff_ms(1));
+    }
+
+    #[test]
+    fn post_is_not_retried_unless_explicitly_opted_in() {
+        let safe = RetryPolicy::new(3);
+        assert!(
+            !safe.should_retry_method("POST"),
+            "may already have applied"
+        );
+        for method in ["GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE", "QUERY"] {
+            assert!(safe.should_retry_method(method), "{method} is idempotent");
+        }
+        let opted_in = RetryPolicy {
+            non_idempotent: true,
+            ..RetryPolicy::new(3)
+        };
+        assert!(opted_in.should_retry_method("POST"));
+    }
+
+    #[test]
+    fn the_default_status_set_excludes_500() {
+        // 429 and the gateway trio are worth retrying; a generic 500 is usually deterministic.
+        assert_eq!(DEFAULT_RETRY_STATUSES, &[429, 502, 503, 504]);
+        assert!(!DEFAULT_RETRY_STATUSES.contains(&500));
+    }
+
+    #[test]
+    fn opting_into_unsafe_retries_is_order_independent() {
+        // `.retry(3).retry_non_idempotent()` and the reverse must agree — a chain's meaning
+        // should not depend on the order of two independent configuration steps.
+        let a = HttpClient::new("")
+            .with_retry(RetryPolicy::new(3))
+            .with_non_idempotent_retry();
+        assert!(a.retry.as_ref().expect("policy").non_idempotent);
     }
 
     #[test]

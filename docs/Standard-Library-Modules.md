@@ -395,6 +395,8 @@ resolved against the base. An absolute target (one with a scheme) is used as-is,
 | `bearer(token)` | `Client` | `Authorization: Bearer <token>`. |
 | `basic(user, password)` | `Client` | HTTP Basic (RFC 7617). |
 | `timeout(ms)` | `Client` | Per-request deadline; exceeding it is an `HttpError` with `kind() == "timeout"`. |
+| `retry(max, base_ms?, on?)` | `Client` | Retry transient failures — see below. |
+| `retry_non_idempotent()` | `Client` | Extend retries to POST. |
 | `base_url()` | `string` | The configured base, or empty. |
 | `get` / `head` / `delete` / `post` / `put` / `query` / `request` | `Result<Response, HttpError>` | As the free verbs, but path-relative. |
 
@@ -410,6 +412,36 @@ tracing = api.header("x-trace", request_id)   // `api` is unchanged
 Header precedence is **call over client** — a per-request header replaces the client's same-named
 one (matched case-insensitively) rather than duplicating it, so a client-wide `accept` can be
 overridden for exactly one call.
+
+#### Retries
+
+```noeta ignore
+api = client.new("https://api.example.com").retry(3)              // defaults
+api = client.new("https://api.example.com").retry(3, 500)          // 500ms first backoff
+api = client.new("https://api.example.com").retry(3, 500, [429])   // only rate limits
+```
+
+`retry(max, base_ms?, on?)` retries two things: a **transient transport failure** (an `HttpError`
+whose `retryable()` is true — `timeout`, `dns`, `connect`) and any **status** in `on`, which
+defaults to `[429, 502, 503, 504]`. Backoff starts at `base_ms` (default 250) and doubles per
+attempt, capped at 30s. A server's own `Retry-After` header wins over the computed backoff — it
+knows its rate limit better than a curve does — but is capped too, so a broken `Retry-After:
+86400` cannot park your program for a day.
+
+Note what is *not* in the default status set: **500**. A generic server error is usually
+deterministic, and hammering it helps nobody. Name it explicitly if your API means something
+transient by it.
+
+**POST is not retried by default.** Retrying a request that may already have been applied can
+duplicate a side effect — a second charge, a second order — and a timeout is exactly the case where
+the client cannot tell whether the server processed it. Everything RFC 7231 defines as idempotent
+(GET, HEAD, PUT, DELETE, OPTIONS, TRACE) plus QUERY is retried freely; POST needs
+`retry_non_idempotent()`, which you should reach for only when the endpoint is safe to repeat or
+you send an idempotency key.
+
+Retries sleep on the **Clock** capability, not the thread — so under the deterministic sandbox a
+retrying program advances logical time instead of blocking, stays reproducible, and is covered by
+the conformance differential like any other code.
 
 #### What is an error, and what isn't
 
