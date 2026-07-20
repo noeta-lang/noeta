@@ -333,6 +333,195 @@ impl BuiltinDirective {
     }
 }
 
+/// The declaration kinds a directive may sit on, as a set.
+///
+/// A set rather than the tier ABI's `TierSite` (`Function | Method | Type`), because the checker
+/// already draws distinctions `TierSite` cannot express: `@packed` is struct-only, `@validated` is
+/// struct-or-class, `@semantic` is enum-only, and all five type directives are rejected on a trait.
+/// Collapsing those into one `Type` variant loses exactly the information the diagnostics need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sites(u16);
+
+impl Sites {
+    pub const NONE: Sites = Sites(0);
+    pub const STRUCT: Sites = Sites(1 << 0);
+    pub const CLASS: Sites = Sites(1 << 1);
+    pub const ENUM: Sites = Sites(1 << 2);
+    pub const TRAIT: Sites = Sites(1 << 3);
+    pub const FN: Sites = Sites(1 << 4);
+    pub const METHOD: Sites = Sites(1 << 5);
+    /// Every type declaration — struct, class, enum. (Deliberately excludes `trait`: a trait is a
+    /// contract, not a data type, and every type directive on one is `E0053`.)
+    pub const TYPE: Sites = Sites(Self::STRUCT.0 | Self::CLASS.0 | Self::ENUM.0);
+
+    pub const fn union(self, other: Sites) -> Sites {
+        Sites(self.0 | other.0)
+    }
+
+    /// Whether every site in `other` is permitted here. `Sites::NONE` is contained in everything,
+    /// so a directive with no legal site rejects every placement.
+    pub const fn contains(self, other: Sites) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// A human phrase for a diagnostic — "a struct", "a struct or a class".
+    pub fn label(self) -> String {
+        let mut parts = Vec::new();
+        for (bit, name) in [
+            (Sites::STRUCT, "a struct"),
+            (Sites::CLASS, "a class"),
+            (Sites::ENUM, "an enum"),
+            (Sites::TRAIT, "a trait"),
+            (Sites::FN, "a function"),
+            (Sites::METHOD, "a method"),
+        ] {
+            if self.contains(bit) {
+                parts.push(name);
+            }
+        }
+        match parts.len() {
+            0 => "nothing".to_string(),
+            1 => parts[0].to_string(),
+            _ => {
+                let last = parts.pop().expect("non-empty");
+                format!("{} or {last}", parts.join(", "))
+            }
+        }
+    }
+}
+
+/// Everything about a built-in directive that was previously decided by matching on its name.
+///
+/// One table, indexed by the directive, replacing per-directive knowledge that had drifted apart
+/// across the parser, checker, formatter and IDE — legal sites lived in four checker files, the
+/// completion detail in `noeta-ide`, the hover prose somewhere else again, and two directives had
+/// simply been forgotten in the hover match.
+///
+/// Only *static* facts live here. A vocabulary that depends on the program or on another crate —
+/// the set of derivable traits, the `Layout` variants — stays with its owner; this table says a
+/// directive takes one argument named `Trait`, not which traits exist.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectiveInfo {
+    /// Where the directive may legally appear. The checker reports anything else.
+    pub sites: Sites,
+    /// Maximum positional arguments; `None` is variadic, `Some(0)` takes none.
+    pub max_args: Option<usize>,
+    /// Named-argument keys the directive understands (`via:` on `@derive`, `config:`/`text:`/
+    /// `expr:` on `@tier`). Empty means named arguments are not accepted at all.
+    pub named_keys: &'static [&'static str],
+    /// Whether repeating the directive accumulates (`@derive`, `@role`) or the last wins.
+    pub accumulates: bool,
+    /// The one-line usage shown beside the name in completion.
+    pub detail: &'static str,
+    /// Prose shown on hover.
+    pub doc: &'static str,
+    /// Signature-help parameter names, in order.
+    pub params: &'static [&'static str],
+}
+
+impl BuiltinDirective {
+    /// This directive's metadata. The exhaustive match is the compile-time lock: a new variant must
+    /// state its sites, arity and prose here before it can be added.
+    ///
+    /// Returned by value rather than as a `&'static` into a table: an array indexed by the
+    /// directive would need an enum→index mapping that could silently disagree with the array's
+    /// order, which is the class of drift this table exists to end.
+    pub const fn info(self) -> DirectiveInfo {
+        match self {
+            BuiltinDirective::Derive => DirectiveInfo {
+                sites: Sites::TYPE,
+                max_args: None,
+                named_keys: &["via"],
+                accumulates: true,
+                detail: "@derive(Trait, …) — derive implementations for a type",
+                doc: "codegen directive `@derive(Trait, …)` — generates built-in trait \
+                      implementations (`Equatable`, `Comparable`, `Printable`, `Serialize<…>`, …) \
+                      for this type",
+                params: &["Trait"],
+            },
+            BuiltinDirective::Attribute => DirectiveInfo {
+                sites: Sites::STRUCT,
+                max_args: None,
+                named_keys: &[],
+                accumulates: false,
+                detail: "@attribute(…) — declare this struct as a data attribute",
+                doc: "declares this struct as a **metadata attribute**: instances attach to \
+                      declarations as `#[Name(args)]` and are read back with \
+                      `attributes_of::<Name>()`. An optional site argument (`@attribute(Function)`) \
+                      restricts what it may annotate",
+                params: &["Kind"],
+            },
+            BuiltinDirective::Role => DirectiveInfo {
+                sites: Sites::STRUCT,
+                max_args: None,
+                named_keys: &[],
+                accumulates: true,
+                detail: "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles",
+                doc: "architectural-role directive: every declaration this attribute annotates is \
+                      bound to the named role (`@role(Enum.Variant)` — a variant of a `@semantic` \
+                      enum). The compile-time role index powers `roles_of()`, the Architecture \
+                      view, and `noeta trace`",
+                params: &["Enum.Variant"],
+            },
+            BuiltinDirective::Semantic => DirectiveInfo {
+                sites: Sites::ENUM,
+                max_args: Some(0),
+                named_keys: &[],
+                accumulates: false,
+                detail: "@semantic — mark an enum's variants as role names",
+                doc: "marks this enum as **role-eligible**: its variants can be conferred on \
+                      declarations as architectural roles, via `@role(ThisEnum.Variant)` on an \
+                      attribute",
+                params: &[],
+            },
+            BuiltinDirective::Packed => DirectiveInfo {
+                sites: Sites::STRUCT,
+                max_args: Some(1),
+                named_keys: &[],
+                accumulates: false,
+                detail: "@packed(Layout.Row|Layout.Column) — flat value-struct layout",
+                doc: "storage directive: a **packed value struct** — fields lay out flat (no \
+                      boxing), and a `List` of a packed struct is one contiguous buffer",
+                params: &["Layout.Row|Layout.Column"],
+            },
+            BuiltinDirective::Validated => DirectiveInfo {
+                sites: Sites::STRUCT.union(Sites::CLASS),
+                max_args: Some(0),
+                named_keys: &[],
+                accumulates: false,
+                detail: "@validated — literal construction only through the type's own constructor \
+                         functions",
+                // This directive had no hover at all before the table existed — it was one of the
+                // two the hover match had simply forgotten.
+                doc: "construction directive: bars literal construction (`T { … }`, including a \
+                      record-update spread) from **outside** the type's own `impl`, so every value \
+                      is built through a constructor that can validate it. Construction inside the \
+                      type's own methods stays legal, and the `from_bytes` recipe door auto-validates",
+                params: &[],
+            },
+            BuiltinDirective::Tier => DirectiveInfo {
+                sites: Sites::FN,
+                max_args: Some(1),
+                named_keys: &["config", "text", "expr"],
+                accumulates: false,
+                detail: "@tier(name, …) — declare a dev-tier and its runner",
+                // Also previously absent from hover: the match returned `None` on the claim that
+                // `@tier` "hovers instead through `hover_tier`", but that path only walks tier
+                // *blocks* and method directives, never a `@tier` declaration.
+                doc: "declares a **dev-tier** and marks the decorated `fn` as its runner. \
+                      `config:` names the tier's knob attribute, `text: \"<lang>\"` makes its \
+                      blocks capture a verbatim body in that language, and `expr: Type` makes it \
+                      usable as an expression tier producing that type",
+                params: &["name", "config: Type | text: \"<lang>\" | expr: Type"],
+            },
+        }
+    }
+}
+
 impl core::fmt::Display for BuiltinDirective {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())

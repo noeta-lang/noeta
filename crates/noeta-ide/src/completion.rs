@@ -193,23 +193,13 @@ pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// The short usage detail shown beside a built-in decorator directive — the closed set the
-/// statement grammar dispatches on ([`noeta_ast::BuiltinDirective`]). Exhaustive on the enum so a new
-/// directive can't be offered without a detail string.
+/// The short usage detail shown beside a built-in decorator directive.
+///
+/// Reads the one metadata table rather than carrying its own copy: the detail string used to live
+/// here, the hover prose in `noeta-ide/src/lib.rs`, and the legal sites across four checker files,
+/// each free to drift from the others.
 fn decorator_detail(directive: BuiltinDirective) -> &'static str {
-    match directive {
-        BuiltinDirective::Derive => "@derive(Trait, …) — derive implementations for a type",
-        BuiltinDirective::Attribute => "@attribute(…) — declare this struct as a data attribute",
-        BuiltinDirective::Role => {
-            "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles"
-        }
-        BuiltinDirective::Semantic => "@semantic — mark an enum's variants as role names",
-        BuiltinDirective::Packed => "@packed(Layout.Row|Layout.Column) — flat value-struct layout",
-        BuiltinDirective::Validated => {
-            "@validated — literal construction only through the type's own constructor functions"
-        }
-        BuiltinDirective::Tier => "@tier(name, …) — declare a dev-tier and its runner",
-    }
+    directive.info().detail
 }
 
 /// The directive candidates offered right after an `@` (**directive completion**, C4): the built-in

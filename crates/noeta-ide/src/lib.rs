@@ -1096,40 +1096,18 @@ impl DocumentStore {
             }
             _ => return None,
         };
-        let descriptor = match noeta_ast::BuiltinDirective::from_name(&text[name_tok.span.range()])
-        {
-            Some(noeta_ast::BuiltinDirective::Derive) => {
-                "codegen directive `@derive(Trait, …)` — generates built-in trait \
-                 implementations (`Equatable`, `Comparable`, `Printable`, `Serialize<…>`, …) for \
-                 this type"
-            }
-            Some(noeta_ast::BuiltinDirective::Attribute) => {
-                "declares this struct as a **metadata attribute**: instances attach to \
-                 declarations as `#[Name(args)]` and are read back with `attributes_of::<Name>()`. \
-                 An optional site argument (`@attribute(Function)`) restricts what it may annotate"
-            }
-            Some(noeta_ast::BuiltinDirective::Role) => {
-                "architectural-role directive: every declaration this attribute annotates is \
-                 bound to the named role (`@role(Enum.Variant)` — a variant of a `@semantic` \
-                 enum). The compile-time role index powers `roles_of()`, the Architecture view, \
-                 and `noeta trace`"
-            }
-            Some(noeta_ast::BuiltinDirective::Semantic) => {
-                "marks this enum as **role-eligible**: its variants can be conferred on \
-                 declarations as architectural roles, via `@role(ThisEnum.Variant)` on an \
-                 attribute"
-            }
-            Some(noeta_ast::BuiltinDirective::Packed) => {
-                "storage directive: a **packed value struct** — fields lay out flat (no boxing), \
-                 and a `List` of a packed struct is one contiguous buffer"
-            }
-            // `@validated` has no dedicated decorator hover here, and `@tier` hovers instead through
-            // `hover_tier` (its dev-tier arm); both stay silent from this token-level hover. A
-            // non-directive token (a tier name, arbitrary `@foo`) is likewise `None`. Enumerated
-            // rather than `_` so a new `BuiltinDirective` variant forces a decision here.
-            Some(noeta_ast::BuiltinDirective::Validated | noeta_ast::BuiltinDirective::Tier)
-            | None => return None,
-        };
+        // Every built-in directive hovers, from the one metadata table.
+        //
+        // This match used to carry its own prose per directive and returned `None` for two of them:
+        // `@validated` simply had none, and `@tier` was excused on the grounds that it "hovers
+        // instead through `hover_tier`" — but that path only walks tier *blocks* and method
+        // directives, never a `@tier` declaration, so it hovered nowhere. Sourcing the prose from
+        // the table makes the omission impossible: a directive without a `doc` does not compile.
+        // `None` here is not a built-in directive (a tier name, an arbitrary `@foo`) — `hover_tier`
+        // handles the tier name-space.
+        let descriptor = noeta_ast::BuiltinDirective::from_name(&text[name_tok.span.range()])?
+            .info()
+            .doc;
         let span = Span {
             start: at.span.start,
             end: name_tok.span.end,
@@ -3196,6 +3174,47 @@ mod tests {
                 .hover_use("file:///a.noe", Position::new(1, 6), enc)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn every_builtin_directive_hovers() {
+        // Two directives used to hover nowhere. `@validated` had no prose in the match at all, and
+        // `@tier` was excused with a comment claiming it "hovers instead through `hover_tier`" —
+        // but that path only walks tier *blocks* and method directives, never a `@tier`
+        // declaration. Both were silent.
+        //
+        // Sourcing the prose from `BuiltinDirective::info()` makes that class of omission
+        // impossible, and this test is the check that it stays impossible: it iterates the closed
+        // set rather than a hand-written list, so a new directive is covered the day it is added.
+        for directive in noeta_ast::BuiltinDirective::ALL {
+            let mut store = test_store();
+            // Every directive is placed on a declaration it is legal on, so nothing but the hover
+            // itself is under test.
+            let src = match directive {
+                noeta_ast::BuiltinDirective::Semantic => {
+                    "@semantic\nenum Color { Red; Green }\n".to_string()
+                }
+                noeta_ast::BuiltinDirective::Tier => {
+                    "@tier(mytier)\nfn run_mytier() {\n  return\n}\n".to_string()
+                }
+                noeta_ast::BuiltinDirective::Packed => "@packed\nstruct V { x: f32 }\n".to_string(),
+                noeta_ast::BuiltinDirective::Derive => {
+                    "@derive(Clone)\nstruct P { x: int }\n".to_string()
+                }
+                noeta_ast::BuiltinDirective::Role => {
+                    "@role(Kind.Service)\nstruct P { x: int }\n".to_string()
+                }
+                other => format!("@{other}\nstruct P {{ x: int }}\n"),
+            };
+            store.open("file:///d.noe", src);
+            // Column 1 — inside the directive's name, just past the `@`.
+            let hover =
+                store.hover_directive("file:///d.noe", Position::new(0, 1), Encoding::Utf16);
+            assert!(
+                hover.is_some(),
+                "`@{directive}` produced no hover; every built-in directive must describe itself"
+            );
+        }
     }
 
     #[test]

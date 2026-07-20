@@ -96,17 +96,22 @@ pub fn directive_signature(
                 .join(" | ");
             Some(one(&format!("@packed({variants})"), &variants))
         }
-        Some(BuiltinDirective::Semantic) => None, // takes no arguments
-        // `@validated` takes no arguments; it previously reached the tier-annotation fallthrough,
-        // which returns `None` for a name that is not a registered tier — identical, now explicit.
-        Some(BuiltinDirective::Validated) => None,
-        Some(BuiltinDirective::Tier) => {
-            let parameters = vec![
-                "name".to_string(),
-                "config: Type | text: \"<lang>\" | expr: Type".to_string(),
-            ];
+        // Directives whose signature is fully described by the metadata table: the parameter names
+        // are static, so there is nothing to compute. A directive that takes no arguments has an
+        // empty `params` and correctly yields no signature.
+        //
+        // The arms above stay hand-written because their labels interpolate a *vocabulary* that
+        // this table deliberately does not own — the derivable traits come from `noeta-types`, the
+        // `Layout` variants and semantic-enum variants from `reflect`. The table says `@packed`
+        // takes one argument; it does not say which layouts exist.
+        Some(directive) => {
+            let info = directive.info();
+            if info.params.is_empty() {
+                return None;
+            }
+            let parameters: Vec<String> = info.params.iter().map(|p| p.to_string()).collect();
             Some(SignatureData {
-                label: format!("@tier({})", parameters.join(", ")),
+                label: format!("@{directive}({})", parameters.join(", ")),
                 active_param: ctxt.active.min(parameters.len() - 1),
                 parameters,
             })
