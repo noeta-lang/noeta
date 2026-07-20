@@ -191,6 +191,7 @@ mod tests {
             url: path.to_string(),
             headers: Vec::new(),
             body: Vec::new(),
+            timeout_ms: None,
         }
     }
 

@@ -629,6 +629,7 @@ mod tests {
                 url: "https://example.com".into(),
                 headers: Vec::new(),
                 body: Vec::new(),
+                timeout_ms: None,
             })
             .expect_err("no network natively");
         assert!(err.message().contains("JS embedding"), "{}", err.message());

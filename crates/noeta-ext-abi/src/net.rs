@@ -30,6 +30,10 @@ pub struct NetRequest {
     pub headers: Vec<(String, String)>,
     /// The request body bytes — empty for a bodyless request.
     pub body: Vec<u8>,
+    /// The per-request deadline in milliseconds (http arc H7), or `None` for the host's default.
+    /// Set by a configured `Client`; the free verbs never carry one. Meaningless on an *inbound*
+    /// request (the server side reuses this struct), where it stays `None`.
+    pub timeout_ms: Option<u64>,
 }
 
 /// The registered extern-type name of a transport failure (http arc H6).

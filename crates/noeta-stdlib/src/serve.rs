@@ -918,6 +918,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             body: Vec::new(),
+            timeout_ms: None,
         }
     }
 

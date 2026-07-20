@@ -4657,6 +4657,7 @@ dependencies = [
 name = "noeta-stdlib"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bcrypt",
  "bytemuck",
  "compact_str",

@@ -42,6 +42,7 @@ pub fn sandbox_request_script() -> Vec<NetRequest> {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         body: body.as_bytes().to_vec(),
+        timeout_ms: None,
     };
     vec![
         req("GET", "/", "", vec![]),
@@ -168,6 +169,7 @@ mod tests {
             url: url.to_string(),
             headers: vec![],
             body: vec![],
+            timeout_ms: None,
         }
     }
 

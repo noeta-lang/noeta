@@ -210,6 +210,7 @@ mod tests {
             url: url.to_string(),
             headers: Vec::new(),
             body: Vec::new(),
+            timeout_ms: None,
         }
     }
 

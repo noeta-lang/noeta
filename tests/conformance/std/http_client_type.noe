@@ -1,0 +1,53 @@
+// The configured `Client` (http arc H7): base URL + shared headers + auth + deadline, bound once
+// and spent many times — the "driver" shape, under the name every other ecosystem uses. It is
+// **immutable**: every configuration method returns a new `Client`, so a derived client can never
+// disturb the one it came from, and the verbs mirror the free functions exactly (same names, same
+// optional trailing headers, same `Result<Response, HttpError>`) differing only in that their
+// first argument is a path resolved against the base.
+// expect: stdout "true"
+// expect: stdout "https://svc.test"
+// expect: stdout "{"accept":"application/vnd.github+json","authorization":"Bearer t0ken"}"
+// expect: stdout "{"Accept":"text/plain","authorization":"Bearer t0ken"}"
+// expect: stdout "{"accept":"application/vnd.github+json","authorization":"Bearer t0ken"}"
+// expect: stdout "https://other.test/echo"
+// expect: stdout "{"body":"hi","method":"POST","path":"/echo"}"
+// expect: stdout "204"
+// expect: stdout "200"
+// expect: stdout "{"authorization":"Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="}"
+// expect: exit 0
+use std.http.client
+use std.http.Client
+
+gh = client.new("https://svc.test")
+    .header("accept", "application/vnd.github+json")
+    .bearer("t0ken")
+    .timeout(30_000)
+
+echo gh is Client
+echo gh.base_url()
+
+// The base URL is joined and the client's headers ride every request.
+echo gh.get("/headers")?.body()
+
+// A per-call header REPLACES the client's same-named one (case-insensitively) rather than
+// duplicating it — so a client-wide `accept` can be overridden for exactly one call. The caller's
+// own spelling is what goes on the wire (`Accept`, not the client's `accept`).
+echo gh.get("/headers", {"Accept": "text/plain"})?.body()
+
+// Immutability: deriving a new client leaves the original's headers untouched.
+derived = gh.header("x-extra", "1")
+echo gh.get("/headers")?.body()
+
+// An absolute target ignores the base — what lets a paginator follow an absolute `next` link
+// back through a based client (S6 depends on this).
+echo gh.get("https://other.test/echo")?.url()
+
+// The verbs mirror the free functions.
+echo gh.post("/echo", "hi")?.body()
+echo gh.request("delete", "/status/204")?.status()
+
+// A client with no base behaves exactly like the free verbs.
+echo client.new().get("https://svc.test/echo")?.status()
+
+// Basic auth is RFC 7617 (the RFC's own `Aladdin:open sesame` example).
+echo client.new("https://svc.test").basic("Aladdin", "open sesame").get("/headers")?.body()

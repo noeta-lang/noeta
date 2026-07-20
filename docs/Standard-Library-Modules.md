@@ -367,6 +367,50 @@ for concurrent work.
 
 Every verb takes an **optional** trailing `headers: Map<string, string>`.
 
+#### Configured clients
+
+The verbs above are the **one-shot** door. When you talk to the same API repeatedly, bind the
+configuration once with `client.new(base_url?)` and spend it many times:
+
+```noeta ignore
+use std.http.client
+
+gh = client.new("https://api.github.com")
+    .header("accept", "application/vnd.github+json")
+    .bearer(env.get("GITHUB_TOKEN"))
+    .timeout(30_000)
+
+repo = gh.get("/repos/nsrosenqvist/noeta")?
+```
+
+A `Client` carries a base URL, headers applied to every request, an auth scheme, and a per-request
+deadline. Its verbs mirror the free functions exactly — same names, same optional trailing headers,
+same `Result<Response, HttpError>` — differing only in that the first argument is a **path**
+resolved against the base. An absolute target (one with a scheme) is used as-is, so following a
+`next` link back through a based client works.
+
+| Method | Returns | Notes |
+|---|---|---|
+| `header(name, value)` | `Client` | Applied to every request. |
+| `bearer(token)` | `Client` | `Authorization: Bearer <token>`. |
+| `basic(user, password)` | `Client` | HTTP Basic (RFC 7617). |
+| `timeout(ms)` | `Client` | Per-request deadline; exceeding it is an `HttpError` with `kind() == "timeout"`. |
+| `base_url()` | `string` | The configured base, or empty. |
+| `get` / `head` / `delete` / `post` / `put` / `query` / `request` | `Result<Response, HttpError>` | As the free verbs, but path-relative. |
+
+A `Client` is **immutable**: every configuration method returns a *new* client. So a derived client
+can never disturb the one it came from, and sharing a configured client across a program is safe by
+construction:
+
+```noeta ignore
+api = client.new("https://api.example.com").header("accept", "application/json")
+tracing = api.header("x-trace", request_id)   // `api` is unchanged
+```
+
+Header precedence is **call over client** — a per-request header replaces the client's same-named
+one (matched case-insensitively) rather than duplicating it, so a client-wide `accept` can be
+overridden for exactly one call.
+
 #### What is an error, and what isn't
 
 The `Err` arm is a **transport** failure only — the request never produced a response. So `?` on a

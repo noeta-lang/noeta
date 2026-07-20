@@ -712,6 +712,7 @@ mod tests {
             url: "/ping".into(),
             headers: vec![("x-a".into(), "1".into())],
             body: Vec::new(),
+            timeout_ms: None,
         });
         let listener = host.net_listen("ignored:0").expect("armed listener");
         let (conn, request) = host
@@ -752,6 +753,7 @@ mod tests {
                 url: "http://example.com".into(),
                 headers: Vec::new(),
                 body: Vec::new(),
+                timeout_ms: None,
             })
             .expect_err("no client");
         assert!(err.message().contains("wasi:http"), "{}", err.message());

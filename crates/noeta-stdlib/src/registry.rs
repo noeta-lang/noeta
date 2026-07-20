@@ -187,6 +187,20 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: REQUEST_DOCS,
         ..ExtType::DEFAULTS
     },
+    // `Client` (http arc H7) — the configured client: base URL, headers, auth, deadline. Pure,
+    // content-equal config; immutable, so every builder method returns a new one.
+    ExtType {
+        name: crate::http_client::CLIENT_TYPE_NAME,
+        namespace: "std.http",
+        methods: CLIENT_METHODS,
+        dispatch: client_method_dispatch,
+        key_capable: false, // a client is not a map key
+        // The verbs take the same optional `headers: Map<string, string>` the free functions do,
+        // so the map must arrive marshalled rather than as an opaque handle.
+        deep_marshal: true,
+        docs: CLIENT_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // `HttpError` (http arc H6) — the transport failure the client's `Result` door carries. Pure,
     // content-equal data like `Response`; declares `Error` + `Display` (the `JsonError` model) so
     // `<E: Error>` bounds accept it and `?` converts through `From`.
@@ -1309,6 +1323,13 @@ const OPT_BODY: SigType = SigType::Optional(&STR_OR_BYTES);
 /// of the former single `http` module (package-manager P0.3b) so a whole-module `use std.http.client`
 /// is precisely the client-ring signal, and `use std.http.server` sheds reqwest entirely.
 const HTTP_CLIENT_FNS: &[ExtFn] = &[
+    // The configured door (http arc H7): `client.new(base?)` mints a `Client` carrying base URL,
+    // headers, auth, and a deadline. The free verbs below stay the one-shot door.
+    ExtFn {
+        name: "new",
+        params: &[SigType::Optional(&Str)],
+        ret: Concrete(CLIENT_SIG),
+    },
     ExtFn {
         name: "get",
         params: &[Str, OPT_HEADERS],
@@ -1423,6 +1444,9 @@ fn http_request(
         url: url.to_string(),
         headers,
         body,
+        // The free verbs carry no deadline — a timeout is configuration, and configuration lives
+        // on a `Client` (`client.new(base).timeout(ms)`).
+        timeout_ms: None,
     }
 }
 
@@ -1450,6 +1474,17 @@ fn http_dispatch(
                 body,
                 url: String::new(), // a server-built reply has no originating URL
             },
+        )));
+    }
+    // The configured-client constructor (http arc H7) — pure, no request performed.
+    if func == "new" {
+        want_arity_range(func, args, 0, 1)?;
+        let base = match args.first() {
+            None => "",
+            Some(_) => want_str(func, args, 0)?,
+        };
+        return Ok(NativeOut::Extern(crate::ExternBox::new(
+            crate::http_client::HttpClient::new(base),
         )));
     }
     // Build the request from the call, per verb shape. Bodyless verbs put headers at index 1;
@@ -1494,6 +1529,204 @@ fn http_dispatch(
         // caller decides whether to `?` it, retry it, or inspect its `kind()`.
         Ok(crate::net::fetch_outcome(host.net_fetch(request)))
     }
+}
+
+const CLIENT_SIG: SigType = SigType::Named(crate::http_client::CLIENT_TYPE_NAME);
+
+/// The `Client` instance methods (http arc H7): the immutable configuration chain, then the verbs
+/// that spend it.
+///
+/// Every configuration method returns a **new** `Client` (`-> Client`), the copy-modify shape
+/// `Response.with_header` already uses — so a derived client can never mutate the one it came
+/// from, and sharing a configured client across a program is safe by construction.
+///
+/// The verbs mirror the free functions exactly (same names, same optional trailing headers, same
+/// `Result<Response, HttpError>`), differing only in that their first argument is a *path*
+/// resolved against the base URL rather than a whole URL. An absolute target still wins, so a
+/// paginator can hand back an absolute `next` link through a based client.
+const CLIENT_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "header",
+        params: &[Str, Str],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "bearer",
+        params: &[Str],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "basic",
+        params: &[Str, Str],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "timeout",
+        params: &[Int],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "base_url",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "get",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "head",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "delete",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "post",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "put",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "query",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "request",
+        params: &[Str, Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+];
+
+const CLIENT_DOCS: &[(&str, &str)] = &[
+    (
+        "header",
+        "A copy of the client with header `name: value` applied to every request. A per-request \
+         header of the same name replaces it for that call.",
+    ),
+    (
+        "bearer",
+        "A copy of the client sending `Authorization: Bearer <token>`.",
+    ),
+    (
+        "basic",
+        "A copy of the client sending HTTP Basic credentials (RFC 7617).",
+    ),
+    (
+        "timeout",
+        "A copy of the client with a per-request deadline in milliseconds. Exceeding it is an \
+         `HttpError` whose `kind()` is `\"timeout\"` (and `retryable()` is true).",
+    ),
+    (
+        "base_url",
+        "The client's base URL, or empty if it has none.",
+    ),
+    (
+        "get",
+        "GET the path, resolved against the base URL. An absolute target (one with a scheme) is \
+         used as-is. Returns `Result<Response, HttpError>` exactly like the free verb.",
+    ),
+    ("head", "HEAD the path — see `get`."),
+    ("delete", "DELETE the path — see `get`."),
+    ("post", "POST a body to the path — see `get`."),
+    ("put", "PUT a body to the path — see `get`."),
+    (
+        "query",
+        "QUERY the path (a safe, idempotent, body-carrying read) — see `get`.",
+    ),
+    (
+        "request",
+        "Any other bodyless verb against the path — see `get`.",
+    ),
+];
+
+fn client_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    use crate::http_client::{HttpClient, basic_auth_value};
+    let Some(client) = recv.as_any().downcast_ref::<HttpClient>() else {
+        return Err(type_error(method, crate::http_client::CLIENT_TYPE_NAME));
+    };
+    // The configuration half: each returns a NEW client, never mutating the receiver.
+    let configured = |next: HttpClient| Ok(NativeOut::Extern(crate::ExternBox::new(next)));
+    match method {
+        "header" => {
+            want_arity(method, args, 2)?;
+            let name = want_str(method, args, 0)?.to_string();
+            let value = want_str(method, args, 1)?;
+            return configured(client.with_header(&name, value));
+        }
+        "bearer" => {
+            want_arity(method, args, 1)?;
+            let token = want_str(method, args, 0)?;
+            return configured(client.with_header("authorization", &format!("Bearer {token}")));
+        }
+        "basic" => {
+            want_arity(method, args, 2)?;
+            let user = want_str(method, args, 0)?.to_string();
+            let password = want_str(method, args, 1)?;
+            return configured(
+                client.with_header("authorization", &basic_auth_value(&user, password)),
+            );
+        }
+        "timeout" => {
+            want_arity(method, args, 1)?;
+            let ms = want_int(method, args, 0)?;
+            if ms <= 0 {
+                return Err(type_error(method, "a positive timeout in milliseconds"));
+            }
+            return configured(client.with_timeout(ms as u64));
+        }
+        "base_url" => {
+            want_arity(method, args, 0)?;
+            return Ok(NativeOut::Str(client.base_url.clone()));
+        }
+        _ => {}
+    }
+    // The verb half: expand the client into a plain request, then take the shared fetch door, so a
+    // configured call and a free call are indistinguishable from the Host's side.
+    let request = match method {
+        "get" | "head" | "delete" => {
+            want_arity_range(method, args, 1, 2)?;
+            client.build(
+                method,
+                want_str(method, args, 0)?,
+                Vec::new(),
+                want_headers(method, args, 1)?,
+            )
+        }
+        "post" | "put" | "query" => {
+            want_arity_range(method, args, 2, 3)?;
+            let target = want_str(method, args, 0)?.to_string();
+            let body = want_data(method, args, 1)?.to_vec();
+            client.build(method, &target, body, want_headers(method, args, 2)?)
+        }
+        "request" => {
+            want_arity_range(method, args, 2, 3)?;
+            let verb = want_str(method, args, 0)?.to_string();
+            let target = want_str(method, args, 1)?.to_string();
+            client.build(&verb, &target, Vec::new(), want_headers(method, args, 2)?)
+        }
+        _ => {
+            return Err(crate::no_method_error(
+                crate::http_client::CLIENT_TYPE_NAME,
+                method,
+            ));
+        }
+    };
+    Ok(crate::net::fetch_outcome(host.net_fetch(request)))
 }
 
 /// The `HttpError` instance methods (http arc H6): pure reads over the transport failure. Mirrors
@@ -4487,6 +4720,7 @@ mod tests {
                 url: "/users/42?active=true".to_string(),
                 headers: vec![("Content-Type".to_string(), "application/json".to_string())],
                 body: b"{}".to_vec(),
+                timeout_ms: None,
             },
         };
         let call = |req: &mut crate::net::Request, method: &str, args: &[NativeValue]| {

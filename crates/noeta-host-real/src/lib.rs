@@ -436,6 +436,11 @@ async fn reqwest_fetch(
     if !request.body.is_empty() {
         builder = builder.body(request.body);
     }
+    // A configured `Client`'s deadline (http arc H7). reqwest applies it to the whole request
+    // including the body read, which is the semantics a caller expects from "timeout".
+    if let Some(ms) = request.timeout_ms {
+        builder = builder.timeout(std::time::Duration::from_millis(ms));
+    }
     let response = builder.send().await.map_err(|e| net_error(&url, &e))?;
     let status = response.status().as_u16();
     // reqwest tracks the redirect chain, so this is the URL the body actually came from — the
@@ -853,6 +858,7 @@ async fn read_request(stream: &mut TcpStream) -> Result<NetRequest, StdError> {
         url: target,
         headers,
         body,
+        timeout_ms: None, // inbound: a deadline is the outbound client's concern
     })
 }
 
@@ -2214,6 +2220,7 @@ mod tests {
                 url: "https://example.com/".to_string(),
                 headers: vec![],
                 body: vec![],
+                timeout_ms: None,
             })
             .expect("real fetch should succeed when online");
         assert_eq!(resp.status, 200);
