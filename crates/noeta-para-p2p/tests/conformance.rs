@@ -55,7 +55,7 @@ fn para_conformance_passes_and_backends_agree() {
             diff.to_human()
         );
         assert_eq!(
-            diff.skipped,
+            diff.not_run.unsupported,
             0,
             "the VM must compile 100% of the comparable para corpus; got:\n{}",
             diff.to_human()

@@ -25,12 +25,14 @@ use crate::leaks::Leak;
 /// The outcome of a JIT differential run over a corpus.
 #[derive(Debug, Default)]
 pub struct JitDiffReport {
-    /// Programs the VM compiled and on which tier 0 and tier 1 agreed.
+    /// Programs both tiers actually RAN, and on which they agreed. Strictly execution coverage:
+    /// a program the checker rejected never ran and is counted in [`not_run`], not here.
     pub matched: usize,
-    /// Programs outside the VM's current subset (skipped — neither tier runs them).
-    pub skipped: usize,
-    /// Programs that did not parse cleanly, so there is no result to compare.
-    pub parse_failed: usize,
+    /// Every case excluded before the comparison, by reason (see [`NotRun`]).
+    pub not_run: crate::NotRun,
+    /// Checker-rejected cases declaring no `// expect: error` — see the eval differential's field
+    /// of the same name. A fixture that stops compiling leaves tier coverage silently otherwise.
+    pub unexpected_rejections: Vec<String>,
     /// Total prototypes compiled to *real native code* across the corpus — the JIT-coverage number.
     pub native_protos: usize,
     /// Total prototypes compiled at all (native + bail stubs).
@@ -49,7 +51,7 @@ impl JitDiffReport {
 
     /// Whether tier 1 agreed with tier 0 and leaked nothing on every compiled program.
     pub fn ok(&self) -> bool {
-        self.mismatches.is_empty() && self.leaks.is_empty()
+        self.mismatches.is_empty() && self.leaks.is_empty() && self.unexpected_rejections.is_empty()
     }
 
     /// A human-readable summary.
@@ -58,10 +60,26 @@ impl JitDiffReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "jit-differential: {} matched, {} skipped (unsupported), {} parse-failed; {}/{} prototypes native (rest bail stubs)",
-            self.matched, self.skipped, self.parse_failed, self.native_protos, self.compiled_protos,
+            "jit-differential: {} ran and agreed, {} not run ({}); {}/{} prototypes native (rest bail stubs)",
+            self.matched,
+            self.not_run.total(),
+            self.not_run.to_human(),
+            self.native_protos,
+            self.compiled_protos,
         );
-        if self.mismatches.is_empty() && self.leaks.is_empty() {
+        if !self.unexpected_rejections.is_empty() {
+            let _ = writeln!(
+                out,
+                "{} case(s) REJECTED BY THE CHECKER WITHOUT DECLARING AN ERROR — they no longer \
+                 run, so they cover neither tier. Either fix the fixture or declare the diagnostic \
+                 with `// expect: error <CODE> at <line>:<col>`:",
+                self.unexpected_rejections.len()
+            );
+            for name in &self.unexpected_rejections {
+                let _ = writeln!(out, "  {name}");
+            }
+        }
+        if self.ok() {
             out.push_str(
                 "tier 1 agrees with tier 0 and leaks nothing on every compiled program ✓\n",
             );
@@ -108,12 +126,12 @@ pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
         if case.multi {
             match noeta_loader::read_workspace(&case.entry) {
                 Ok(raw) => compare_tiers_workspace(&name, &raw, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         } else {
             match std::fs::read_to_string(&case.entry) {
                 Ok(text) => compare_tiers(&name, &text, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         }
     }
@@ -123,6 +141,17 @@ pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
 /// Compare tier 0 vs tier 1 on one single-file program. Gates identically to the eval differential
 /// (parse-clean, checker-accepted, VM-compilable), then runs the interpreter and the forced JIT and
 /// compares — measuring the forced-JIT run's heap residency in the same pass.
+/// Record a checker rejection the case's own header does not account for — see the eval
+/// differential's `note_rejection`.
+fn note_rejection(name: &str, text: &str, report: &mut JitDiffReport) {
+    let declares_error = crate::Expectations::parse(text)
+        .map(|e| !e.errors.is_empty())
+        .unwrap_or(false);
+    if !declares_error {
+        report.unexpected_rejections.push(name.to_string());
+    }
+}
+
 fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, name, text);
@@ -131,17 +160,21 @@ fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
     if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
-        report.parse_failed += 1;
+        report.not_run.parse_failed += 1;
         return;
     }
     // A checker-rejected program never runs a backend — its diagnostics are its whole result, the
-    // same on either tier. Count it matched (like the eval differential does).
+    // same on either tier, so it cannot disagree. That makes it a trivial agreement, NOT tier
+    // coverage: counting it as matched (as this and the eval differential both used to) inflated
+    // the headline and let a fixture that stopped compiling slip from one side of it to the other
+    // without moving the number.
     if !noeta_db::checked(&db, src).diagnostics.is_empty() {
-        report.matched += 1;
+        report.not_run.checker_rejected += 1;
+        note_rejection(name, text, report);
         return;
     }
     match &noeta_db::bytecode(&db, src).0 {
-        Err(_) => report.skipped += 1,
+        Err(_) => report.not_run.unsupported += 1,
         Ok(module) => run_and_compare(name, module, report),
     }
 }
@@ -156,15 +189,16 @@ fn compare_tiers_workspace(
     let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
     if noeta_db::linked(&db, ws).0.is_err() {
-        report.parse_failed += 1;
+        report.not_run.link_failed += 1;
         return;
     }
     if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
-        report.matched += 1;
+        report.not_run.checker_rejected += 1;
+        note_rejection(name, raw.entry.text(), report);
         return;
     }
     match &noeta_db::linked_bytecode(&db, ws).0 {
-        Err(_) => report.skipped += 1,
+        Err(_) => report.not_run.unsupported += 1,
         Ok(module) => run_and_compare(name, module, report),
     }
 }

@@ -29,7 +29,9 @@ fn page(): string {
     `
 }
 
-async fn session(sock: Socket): bool {
+// `use (count, double)`: a named `fn` is sealed — it sees its parameters and statics, not the
+// file's top-level bindings — so the signals this session pushes are declared in the signature.
+async fn session(sock: Socket) use (count, double): bool {
     v = view()
     v.expose("count", count)
     v.expose("double", double)

@@ -668,10 +668,10 @@ fn api_page(id: &DocId) -> Option<DocPage> {
 fn api_overview_page(qualified: &str) -> Option<DocPage> {
     let (kind, members): (DocKind, Vec<api::ApiFn>) = if let Some(m) = api::module(qualified) {
         (DocKind::Module, m.functions)
-    } else if let Some(t) = api::type_(qualified) {
-        (DocKind::Struct, t.methods)
     } else {
-        return None;
+        // Not a module, so the only other thing this page can be about is an extern type.
+        let t = api::type_(qualified)?;
+        (DocKind::Struct, t.methods)
     };
     let noun = if kind == DocKind::Module {
         "Functions"

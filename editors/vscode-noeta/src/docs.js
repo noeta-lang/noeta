@@ -343,10 +343,21 @@ async function fetchHighlights(client, page) {
     if (!snippets.length) return null;
     const reply = await client.sendRequest("noeta/docsHighlight", { snippets });
     const all = (reply && reply.spans) || [];
+    // The server also returns each snippet's `// sample:start`/`// sample:end` split. It is computed
+    // there, not here, because `spans` are offsets into the text they describe — folding lines in
+    // the viewer would paint the unfolded code's spans onto the folded code.
+    const samples = (reply && reply.samples) || [];
     let k = 0;
-    const out = { signature: null, blocks: {} };
-    if (page.signature) out.signature = all[k++] || null;
-    for (const f of fences) out.blocks[f.index] = all[k++] || null;
+    const out = { signature: null, blocks: {}, samples: {} };
+    if (page.signature) {
+      out.signature = all[k] || null;
+      k++;
+    }
+    for (const f of fences) {
+      out.blocks[f.index] = all[k] || null;
+      out.samples[f.index] = samples[k] || null;
+      k++;
+    }
     return out;
   } catch {
     return null;

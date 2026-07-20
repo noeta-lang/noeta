@@ -128,14 +128,29 @@ fn bench_baseline_saves_and_compares() {
          }\n\
          @bench(iterations: 2000) fn b(): void { work(500) }\n",
     );
-    lang()
+    // Persisting a baseline *is* exercising the cache, so this test owns its cache dir rather than
+    // sharing the per-target one (`support::lang`'s convention). Isolation hardening: this test was
+    // seen once to report no baseline comparison at all under a fully parallel suite, and did not
+    // reproduce — removing the shared-directory variable rules that class out rather than leaving a
+    // rare CI red no one can reproduce.
+    let cache_dir = PathBuf::from(concat!(
+        env!("CARGO_TARGET_TMPDIR"),
+        "/bench-baseline-cache"
+    ));
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    let bench = || {
+        let mut cmd = lang();
+        cmd.env("NOETA_CACHE_DIR", &cache_dir);
+        cmd
+    };
+    bench()
         .arg("bench")
         .arg(&file)
         .arg("--save-baseline")
         .arg("cli-test")
         .assert()
         .success();
-    lang()
+    bench()
         .arg("bench")
         .arg(&file)
         .arg("--baseline")
@@ -143,7 +158,7 @@ fn bench_baseline_saves_and_compares() {
         .assert()
         .success()
         .stdout(predicate::str::contains("% vs cli-test"));
-    let out = lang()
+    let out = bench()
         .arg("bench")
         .arg(&file)
         .arg("--baseline")
@@ -155,7 +170,7 @@ fn bench_baseline_saves_and_compares() {
         serde_json::from_slice(&out.get_output().stdout).expect("valid JSON");
     assert!(json["benches"][0]["baselineDeltaPct"].is_f64());
     // An unknown baseline is a clear error.
-    lang()
+    bench()
         .arg("bench")
         .arg(&file)
         .arg("--baseline")
@@ -179,14 +194,22 @@ fn bench_max_regress_gates_ci() {
          }\n\
          @bench(iterations: 2000) fn b(): void { work(500) }\n",
     );
-    lang()
+    // Owns its cache dir for the same reason as `bench_baseline_saves_and_compares` above.
+    let cache_dir = PathBuf::from(concat!(env!("CARGO_TARGET_TMPDIR"), "/bench-gate-cache"));
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    let bench = || {
+        let mut cmd = lang();
+        cmd.env("NOETA_CACHE_DIR", &cache_dir);
+        cmd
+    };
+    bench()
         .arg("bench")
         .arg(&file)
         .arg("--save-baseline")
         .arg("gate")
         .assert()
         .success();
-    lang()
+    bench()
         .arg("bench")
         .arg(&file)
         .arg("--baseline")
@@ -195,7 +218,7 @@ fn bench_max_regress_gates_ci() {
         .arg("100000")
         .assert()
         .success();
-    lang()
+    bench()
         .arg("bench")
         .arg(&file)
         .arg("--baseline")

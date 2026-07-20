@@ -1798,28 +1798,72 @@ pub fn default_registry() -> Option<&'static Registry> {
     DEFAULT.get()
 }
 
+/// The **fallback provider**: the unit list [`single_registry_process`] installs when a lookup finds
+/// nothing installed. Registered at link time by whichever crate declares the units — `noeta-stdlib`
+/// does it for the std set — so a binary that uses that crate has a working default without any call
+/// site having to remember to seed, and without any ordering requirement.
+///
+/// Scope, precisely: registration rides in the declaring crate's object, and a linker pulls that
+/// object only into a binary that references *something* from the crate. A binary that names no item
+/// of it at all gets no registration and still panics on first lookup (no worse than before this
+/// seam, but it is not literally "linking is enough"). Every real front-end test binary carries such
+/// a reference already; `noeta-stdlib`'s `tests/fallback_provider.rs` pins the behaviour with a
+/// deliberately inert one.
+///
+/// Registering is deliberately **not** installing. The pointer sits here unused until the first
+/// lookup that finds [`DEFAULT`] empty, which is what keeps an assembling binary's explicit
+/// [`install`]/`install_with_extras` authoritative: it runs before that binary's first lookup, wins
+/// the `OnceLock`, and the provider is never consulted. Installing at registration time instead
+/// would seed std-only into every composed binary and make its `install` panic.
+static DEFAULT_PROVIDER: OnceLock<fn() -> Vec<&'static (dyn Extension + Sync)>> = OnceLock::new();
+
+/// Register the [`DEFAULT_PROVIDER`] — the units to fall back to when nothing was explicitly
+/// installed. Idempotent and first-registration-wins; it does not install anything (see
+/// [`DEFAULT_PROVIDER`]), so it can never race an assembling binary's explicit [`install`].
+///
+/// Called from a link-time initializer in the unit-declaring crate, not from application code.
+pub fn set_default_provider(provider: fn() -> Vec<&'static (dyn Extension + Sync)>) {
+    let _ = DEFAULT_PROVIDER.set(provider);
+}
+
 /// The process-global default [`Registry`], named for what calling it MEANS: **this call site
 /// assumes a single-registry process** (cross-cutting audit finding 5). The front-end crates
 /// (checker, loader, IR lowering, bytecode compiler, salsa db) fall back to this when no
 /// per-session registry was threaded in — they consume the registry as *data* and deliberately do
-/// not link the crate that declares the units (audit-6 finding 2), so the **assembling binary owns
-/// seeding**: `noeta_cli::run_cli`, `noeta-runner`, and `noeta-embed` install at entry, and any
-/// other driver (a test suite, a bench, a new binary) must call
-/// `noeta_stdlib::registry::default_seeded()` (or `install`/`install_with_extras`) before its
-/// first front-end lookup.
+/// not link the crate that declares the units (audit-6 finding 2), so the units reach this registry
+/// from outside: an assembling binary installs its exact set at entry
+/// (`noeta_cli::run_cli`, `noeta-runner`, `noeta-embed`), and otherwise the
+/// [`DEFAULT_PROVIDER`] registered by the unit-declaring crate is installed lazily, here.
 ///
-/// Panics if nothing is installed — loudly, because the silent alternative is a checker that
-/// reports every `std.*` name as unknown.
+/// That fallback is what makes seeding **structural rather than remembered** (within the linkage
+/// scope noted on [`DEFAULT_PROVIDER`]). It used to be neither:
+/// this function panicked unless something had already seeded, which an assembling binary does but a
+/// *test* binary does not — so a crate's tests passed only when some sibling test happened to run
+/// first through the lazily-seeding `noeta-stdlib` facade. Different scheduling, different set of
+/// panics; CI eventually drew the short straw across four crates at once. Linking the unit-declaring
+/// crate now suffices, which every such test binary already does.
+///
+/// Panics only if nothing installed *and* no provider was registered — i.e. no unit-declaring crate
+/// is linked at all. That is the genuine assembly error the panic was written for, and it stays
+/// loud, because the silent alternative is a checker that reports every `std.*` name as unknown.
 pub fn single_registry_process() -> &'static Registry {
-    default_registry().unwrap_or_else(|| {
-        panic!(
-            "no extension registry installed in this process — the assembling binary must seed \
-             the default registry before the first front-end lookup (call \
-             `noeta_stdlib::registry::default_seeded()` for the std units, or \
-             `install`/`install_with_extras` for a composed set), or thread a per-session \
-             registry through the options/`_with_registry` seams"
-        )
-    })
+    if let Some(registry) = DEFAULT.get() {
+        return registry;
+    }
+    if let Some(provider) = DEFAULT_PROVIDER.get() {
+        // `get_or_init`, so a racing explicit `install` on another thread still wins cleanly.
+        install_default(*provider);
+        return DEFAULT
+            .get()
+            .expect("`install_default` seeds the default registry immediately above");
+    }
+    panic!(
+        "no extension registry installed in this process and no default provider registered — \
+         link a crate that declares extension units (`noeta-stdlib` registers the std set at load \
+         time), install a composed set with `install`/`install_with_extras` before the first \
+         front-end lookup, or thread a per-session registry through the options/`_with_registry` \
+         seams"
+    )
 }
 
 /// Install the binary's complete extension-unit list into the **default** registry — callable

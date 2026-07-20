@@ -613,21 +613,25 @@ fn module_markdown(m: &ModuleDocs) -> String {
         Some(ns) => out.push_str(&format!("# `{ns}` ({})\n\n", m.file)),
         None => out.push_str(&format!("# `{}`\n\n", m.file)),
     }
+    // Prose may carry `// sample:start`/`// sample:end` context folding. Static markdown has no
+    // viewer to expand, so the fold is baked in as a `<details>` block — the reader gets the short
+    // sample, and the whole compiling program is still one click away. Unmarked prose is unchanged.
     if let Some(doc) = &m.doc {
-        out.push_str(doc);
+        out.push_str(&noeta_ide::sample::fold_markdown(doc));
         out.push_str("\n\n");
     }
     for item in &m.items {
         match item {
             Item::Section(text) => {
-                out.push_str(text);
+                out.push_str(&noeta_ide::sample::fold_markdown(text));
                 out.push_str("\n\n");
             }
             Item::Decl(d) => {
                 out.push_str(&format!("### `{} {}`\n\n", d.kind, d.name));
+                // The signature is a rendered one-liner, never a sample — emitted as-is.
                 out.push_str(&format!("```noeta\n{}\n```\n\n", d.signature));
                 if let Some(doc) = &d.doc {
-                    out.push_str(doc);
+                    out.push_str(&noeta_ide::sample::fold_markdown(doc));
                     out.push_str("\n\n");
                 }
             }

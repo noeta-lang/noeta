@@ -35,16 +35,13 @@ use crate::reference::reference_run;
 pub struct IrCorpusReport {
     /// Programs that lowered and ran through the IR interpreter.
     pub ran: usize,
-    /// Programs outside the IR lowering's current subset (skipped, not failed).
-    pub skipped: usize,
-    /// Programs that did not parse/check cleanly, so there is no eval-level run.
-    pub parse_failed: usize,
+    pub not_run: crate::NotRun,
 }
 
 impl IrCorpusReport {
     /// Programs eligible for the IR path (parsed + checked cleanly): ran + skipped.
     pub fn comparable(&self) -> usize {
-        self.ran + self.skipped
+        self.ran + self.not_run.unsupported
     }
 
     /// Percentage of comparable programs the lowering covers — the climbing coverage metric.
@@ -60,10 +57,10 @@ impl IrCorpusReport {
     /// A human-readable summary.
     pub fn to_human(&self) -> String {
         format!(
-            "ir-corpus: {} ran, {} skipped (unlowered), {} parse-failed; IR covers {:.1}% of comparable cases\n",
+            "ir-corpus: {} ran, {} not run ({}); IR covers {:.1}% of comparable cases\n",
             self.ran,
-            self.skipped,
-            self.parse_failed,
+            self.not_run.total(),
+            self.not_run.to_human(),
             self.coverage_pct(),
         )
     }
@@ -89,12 +86,12 @@ pub fn run_ir_corpus(root: &Path, only: Option<&Path>) -> IrCorpusReport {
         if case.multi {
             match noeta_loader::read_workspace(&case.entry) {
                 Ok(raw) => run_workspace(&raw, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         } else {
             match std::fs::read_to_string(&case.entry) {
                 Ok(text) => run_single(&text, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         }
     }
@@ -109,12 +106,14 @@ fn run_single(text: &str, report: &mut IrCorpusReport) {
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
     if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
-        report.parse_failed += 1;
+        report.not_run.parse_failed += 1;
         return;
     }
-    // A program the checker rejects never runs; its diagnostics are its whole result.
+    // A program the checker rejects never runs; its diagnostics are its whole result. Its own
+    // reason, not "parse-failed" — that conflation made an unparseable program and a rejected one
+    // indistinguishable in the summary.
     if !noeta_db::checked(&db, src).diagnostics.is_empty() {
-        report.parse_failed += 1;
+        report.not_run.checker_rejected += 1;
         return;
     }
     let checked = noeta_db::checked(&db, src);
@@ -128,12 +127,12 @@ fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) 
     let program = match &noeta_db::linked(&db, ws).0 {
         Ok(program) => program,
         Err(_) => {
-            report.parse_failed += 1;
+            report.not_run.link_failed += 1;
             return;
         }
     };
     if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
-        report.parse_failed += 1;
+        report.not_run.checker_rejected += 1;
         return;
     }
     let checked = noeta_db::linked_checked(&db, ws);
@@ -141,7 +140,7 @@ fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) 
 }
 
 /// Run one program through the reference (the Core-IR interpreter), counting it as `ran` when the
-/// lowering supports it and `skipped` otherwise. The result is discarded — only the side effects
+/// lowering supports it and `not_run.unsupported` otherwise. The result is discarded — only the side effects
 /// (drop-audit) and the coverage tally matter here.
 fn run(program: &noeta_ast::Program, checked: &noeta_db::Checked, report: &mut IrCorpusReport) {
     // Mirror `reference_run`'s lowering decision so the skip count reflects real lowering coverage
@@ -151,6 +150,6 @@ fn run(program: &noeta_ast::Program, checked: &noeta_db::Checked, report: &mut I
             let _ = reference_run(program, checked.sites.clone());
             report.ran += 1;
         }
-        Err(_) => report.skipped += 1,
+        Err(_) => report.not_run.unsupported += 1,
     }
 }

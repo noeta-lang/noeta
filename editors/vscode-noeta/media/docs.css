@@ -272,3 +272,39 @@ body.vscode-light .tok-com, body.vscode-high-contrast-light .tok-com { color: #0
 body.vscode-light .tok-ty,  body.vscode-high-contrast-light .tok-ty  { color: #267f99; }
 body.vscode-light .tok-fn,  body.vscode-high-contrast-light .tok-fn  { color: #795e26; }
 body.vscode-light .tok-dec, body.vscode-high-contrast-light .tok-dec { color: #af00db; }
+
+/* ---- Doc-sample context folding (`// sample:start` / `// sample:end`) --------------------------
+   A sample shows the lines worth reading and folds the setup that merely has to compile. The
+   expander sits directly under the code and stays quiet until used, so a folded block reads as one
+   unit rather than as two code boxes. */
+.sample {
+  margin: 0.6rem 0;
+}
+.sample > pre {
+  margin-bottom: 0;
+}
+.sample-context > summary {
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.85em;
+  opacity: 0.7;
+  padding: 0.25rem 0.1rem;
+  list-style: none;
+}
+.sample-context > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 0.12s ease;
+}
+.sample-context[open] > summary::before {
+  content: "▾ ";
+}
+.sample-context > summary:hover {
+  opacity: 1;
+}
+/* The revealed program is the same code with its context restored — indent it slightly so the
+   relationship to the sample above is visible at a glance. */
+.sample-context > pre {
+  margin-top: 0.2rem;
+  border-left: 2px solid var(--vscode-textBlockQuote-border, rgba(127, 127, 127, 0.4));
+}

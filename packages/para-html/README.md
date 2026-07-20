@@ -76,7 +76,7 @@ fn row(t: Todo): Html {
 
 ## Examples
 
-- `examples/liveview-counter/` — the counter above.
-- `examples/liveview-todos/` — a keyed list with per-row toggles and a "complete all" button.
-- `examples/liveview-events/` — the event model exercised without a browser (top-level clicks, an
+- `examples/para-html/liveview-counter/` — the counter above.
+- `examples/para-html/liveview-todos/` — a keyed list with per-row toggles and a "complete all" button.
+- `examples/para-html/liveview-events/` — the event model exercised without a browser (top-level clicks, an
   input with payload, and keyed per-row handlers), runnable with `noeta run`.

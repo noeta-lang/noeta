@@ -13,7 +13,7 @@ It ships as the **`para.html` package** (`packages/para-html/`): the `Html` type
 para = { path = "…/packages/para-html" }   # or a registry/git version once published
 ```
 
-The runnable apps are `examples/liveview-counter/` and `examples/liveview-todos/`.
+The runnable apps are `examples/para-html/liveview-counter/` and `examples/para-html/liveview-todos/`.
 
 ## The counter
 
@@ -111,7 +111,7 @@ n = todos.get()                            // read happens here, outside any hol
 return @html { <h1>${n.len()} items</h1> } // NOT reactive — the hole captured a value
 ```
 
-`examples/liveview-todos/` is a full example — a **keyed** loop of nested rows, a computed count, a conditional status line, escaped text, and a "complete all" event. Each row is its own reactive region (keyed by `t.id`), so toggling a single todo pushes exactly one row; the count and status update from the same signal read, and the unchanged rows and total are left alone. `examples/liveview-structural-app/` drives the structural side — buttons that append, prepend, remove, and reorder a keyed list, each pushing a lone insert / remove / move.
+`examples/para-html/liveview-todos/` is a full example — a **keyed** loop of nested rows, a computed count, a conditional status line, escaped text, and a "complete all" event. Each row is its own reactive region (keyed by `t.id`), so toggling a single todo pushes exactly one row; the count and status update from the same signal read, and the unchanged rows and total are left alone. `examples/para-html/liveview-structural-app/` drives the structural side — buttons that append, prepend, remove, and reorder a keyed list, each pushing a lone insert / remove / move.
 
 ## Events
 

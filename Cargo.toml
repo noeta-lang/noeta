@@ -246,6 +246,13 @@ compact_str = "0.9"
 # directly for that `Equivalent`-based lookup API.
 equivalent = "1"
 hashbrown = { version = "0.17", default-features = false, features = ["equivalent", "inline-more", "default-hasher"] }
+# Load-time registration of the std extension units as the registry's *fallback provider*
+# (`noeta-stdlib::registry`), so linking the unit-declaring crate is enough to give a binary a
+# working default registry — the property that makes test-binary seeding structural instead of
+# remembered. It registers a function pointer; it installs nothing, so an assembling binary's
+# explicit `install`/`install_with_extras` still wins. Deliberately NOT used on wasm (`#[ctor]` is
+# unsupported there, and every wasm driver assembles its registry explicitly anyway).
+ctor = "0.2"
 # std.crypto (crypto arc): RustCrypto digest family — never hand-roll primitives. sha1/md5 ship
 # for interop (uuid_v5, legacy checksums), documented as non-collision-resistant. `bcrypt` is the
 # password hasher; its salt comes through the Host `Entropy` capability, never self-generated.

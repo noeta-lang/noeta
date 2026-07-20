@@ -91,7 +91,29 @@
         i++; // closing fence
         const codeText = body.join("\n");
         const spans = hl && hl.blocks ? hl.blocks[fenceIdx] : null;
+        // `// sample:start` / `// sample:end` context folding. The split (and BOTH span sets) come
+        // from the server — see `fetchHighlights` — so the spans always describe the text they are
+        // painted onto. Without a sample the block renders exactly as before.
+        const sample = hl && hl.samples ? hl.samples[fenceIdx] : null;
         fenceIdx++;
+        if (sample && sample.hasContext) {
+          const shown = sample.visible;
+          const fullSpans = sample.fullSpans || null;
+          html.push(
+            '<div class="sample">' +
+              "<pre><code>" +
+              (spans ? renderHighlighted(shown, spans) : escapeHtml(shown)) +
+              "</code></pre>" +
+              '<details class="sample-context">' +
+              "<summary>Show full example</summary>" +
+              "<pre><code>" +
+              (fullSpans ? renderHighlighted(sample.full, fullSpans) : escapeHtml(sample.full)) +
+              "</code></pre>" +
+              "</details>" +
+              "</div>",
+          );
+          continue;
+        }
         html.push(
           "<pre><code>" +
             (spans ? renderHighlighted(codeText, spans) : escapeHtml(codeText)) +
