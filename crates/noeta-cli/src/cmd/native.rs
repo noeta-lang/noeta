@@ -622,6 +622,11 @@ mod tests {
         assert!(aot_ring_features(&non_http).is_empty());
     }
 
+    // Gated like `aot_ring_features` itself (and like the sibling test above): the function is
+    // `#[cfg(feature = "jit")]`, so an un-gated test referencing it breaks the Cranelift-free
+    // `--no-default-features` build that the CI `test` job builds to prove the lean CLI still
+    // compiles.
+    #[cfg(feature = "jit")]
     #[test]
     fn aot_ring_features_group_form_selects_http_client() {
         // The navigable namespace group (`use std.http; http.client.get(...)`, module-namespaces)

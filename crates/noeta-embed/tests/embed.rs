@@ -64,9 +64,11 @@ fn lists_and_maps_round_trip_through_arguments() {
 #[test]
 fn state_persists_across_calls_and_panics_recover() {
     let mut s = Session::new(
+        // `use (count)`: a named `fn` is sealed — it sees parameters and statics, not top-level
+        // bindings — so reaching the signal has to be declared in the signature.
         "use std.reactive.{signal}\n\
          count = signal(0)\n\
-         fn bump(): int {\n\
+         fn bump() use (count): int {\n\
          \x20   count.update(fn(n) { return n + 1 })\n\
          \x20   return count.get()\n\
          }\n\
@@ -99,9 +101,10 @@ fn stdout_is_drained_on_demand() {
 fn hot_swap_keeps_reactive_state_and_reports_the_outcome() {
     let v = |formula: &str| {
         format!(
+            // `use (score)` — a named `fn` is sealed against top-level bindings (see `bump` above).
             "use std.reactive.{{signal}}\n\
              score = signal(0)\n\
-             fn update(dt: float): int {{\n\
+             fn update(dt: float) use (score): int {{\n\
              \x20   score.update(fn(s) {{ return s + 1 }})\n\
              \x20   return {formula}\n\
              }}\n"

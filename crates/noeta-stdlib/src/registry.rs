@@ -562,14 +562,18 @@ pub fn interned_with_extras(
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static INTERNED: OnceLock<
-        Mutex<HashMap<Vec<usize>, &'static noeta_ext_abi::registry::Registry>>,
+        Mutex<HashMap<Vec<&'static str>, &'static noeta_ext_abi::registry::Registry>>,
     > = OnceLock::new();
-    // Key on the extras' pointer identities, order-normalized: `&'static dyn Extension` units are
-    // statics, so pointer equality is configuration equality.
-    let mut key: Vec<usize> = extra
-        .iter()
-        .map(|e| std::ptr::from_ref::<dyn Extension>(*e).cast::<()>() as usize)
-        .collect();
+    // Key on the extras' **names**, order-normalized. Extension names are unique by construction —
+    // `Registry::new`'s uniqueness sweep rejects a duplicate — so a name set *is* a configuration.
+    //
+    // This used to key on the units' data pointers, which is unsound: an extension type is
+    // typically a unit struct, and distinct **zero-sized** statics share one address, so any two
+    // ZST extensions collided onto the same key. Two sessions with disjoint extension sets then
+    // silently shared whichever registry was interned first — the second session's own extension
+    // resolved as an unknown name. Silent and configuration-dependent, which is the worst shape for
+    // an embedding host to debug.
+    let mut key: Vec<&'static str> = extra.iter().map(|e| e.name()).collect();
     key.sort_unstable();
     let mut interned = INTERNED
         .get_or_init(|| Mutex::new(HashMap::new()))

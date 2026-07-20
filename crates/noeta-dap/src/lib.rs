@@ -757,7 +757,15 @@ mod tests {
     /// Create an isolated temp directory holding a single `.noe` file, returning its path. The
     /// directory is unique per (test, name) so the loader's sibling scan sees only this file.
     fn fixture(name: &str, source: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("noeta-dap-{name}"));
+        // Unique per CALL, not per `name`: two tests may share one fixture builder (`tick_fixture`
+        // serves both watch-memo tests), and since this starts by deleting the directory, a shared
+        // name means each test races to delete the other's file out from under it — an
+        // intermittent `NotFound` that only appears when they run in parallel. The pid keeps
+        // concurrent test *processes* apart, the counter keeps calls within one process apart.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("noeta-dap-{name}-{}-{unique}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("main.noe");
@@ -978,8 +986,43 @@ mod tests {
         }
 
         /// Block until the adapter reports a `stopped` event (the program paused).
+        /// Wait for the program to stop (breakpoint, step, …).
+        ///
+        /// Fails loudly if the program **terminates** instead of stopping, quoting the adapter's
+        /// stderr — which is where a load/check/compile failure is replayed (`spawn_run`). Without
+        /// that arm this blocks forever: the adapter is behaving correctly (it reported the failure
+        /// and stays alive for further requests), so the stream never closes and there is no
+        /// `stopped` event coming. A fixture that stops compiling then presents as a **hung test
+        /// suite** rather than a failing assertion — which is exactly what happened when the
+        /// sealed-fn rule (a named `fn` no longer sees top-level bindings implicitly) invalidated
+        /// this module's `tick()` fixture, and CI's fail-fast hid it behind an earlier failure.
         fn wait_stopped(&mut self) -> Value {
-            self.recv_until(|m| m["type"] == "event" && m["event"] == "stopped")
+            let mut stderr = String::new();
+            loop {
+                let message = read_message(&mut self.from_adapter)
+                    .unwrap()
+                    .expect("adapter closed the stream unexpectedly");
+                if message["type"] == "event" {
+                    match message["event"].as_str() {
+                        Some("stopped") => return message,
+                        // Collect the diagnostics the failure replayed, so the panic below can quote
+                        // the actual reason rather than just "it never stopped".
+                        Some("output") if message["body"]["category"] == "stderr" => {
+                            stderr.push_str(message["body"]["output"].as_str().unwrap_or(""));
+                        }
+                        Some("terminated") => panic!(
+                            "the program terminated without stopping — it never reached a \
+                             breakpoint.\nadapter stderr:\n{}",
+                            if stderr.is_empty() {
+                                "(none)"
+                            } else {
+                                stderr.trim_end()
+                            }
+                        ),
+                        _ => {}
+                    }
+                }
+            }
         }
 
         /// Issue a step (`next`/`stepIn`/`stepOut`), wait for it to land, and return the resulting
@@ -1146,14 +1189,16 @@ mod tests {
         session.evaluate("mut bump = fn(n: int) => n + total");
         assert_eq!(session.evaluate("bump(1)")["body"]["result"], "61");
 
-        // A `mut` colliding with a frame local is a hard error — no silent shadowing.
+        // A `mut` colliding with a frame local is a hard error — no silent shadowing. The console
+        // used to phrase this itself ("frame local"); the language-level no-shadowing rule (E0059)
+        // now catches it first and names the same rule in general terms. Either diagnostic is
+        // acceptable — what this pins is that the collision is REFUSED and explains itself, not
+        // which layer got there first.
         let collision = session.evaluate("mut xs = [1]");
         assert_eq!(collision["success"], false, "{collision:#?}");
+        let message = collision["message"].as_str().unwrap();
         assert!(
-            collision["message"]
-                .as_str()
-                .unwrap()
-                .contains("frame local"),
+            message.contains("frame local") || message.contains("shadows"),
             "collision error names the rule: {collision:#?}"
         );
         // ...and the frame local is untouched.
@@ -1170,8 +1215,10 @@ mod tests {
     fn tick_fixture() -> String {
         let path = fixture(
             "watch_memo",
+            // `use (counter)`: a named `fn` is sealed — it sees its parameters and statics, not
+            // top-level bindings, so mutating `counter` has to be declared in the signature.
             "mut counter = 0\n\
-             fn tick(): int {\n    \
+             fn tick() use (counter): int {\n    \
              counter = counter + 1\n    \
              return counter\n}\n\
              fn probe(): void {\n    \
