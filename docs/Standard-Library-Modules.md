@@ -445,6 +445,28 @@ Retries sleep on the **Clock** capability, not the thread — so under the deter
 retrying program advances logical time instead of blocking, stays reproducible, and is covered by
 the conformance differential like any other code.
 
+#### Building and sending a request separately
+
+`prepare` builds a `Request` without performing it; `send` performs one. Between the two you can
+inspect or rewrite it with `Request`'s copy-modify builders:
+
+```noeta ignore
+req = api.prepare("get", "/users/1")
+resp = api.send(req.with_header("x-trace", request_id))?
+```
+
+This pair exists because it is the seam a **middleware** layer bottoms out in. `std.http`
+deliberately stops here: it never invokes user code. Middleware, mocking, and pagination live one
+level up in the `para/api` package, where a chain is composed from ordinary Noeta closures under
+ordinary garbage collection — rather than natively, which would mean holding user closures inside a
+native value.
+
+What std keeps is what needs the transport: configuration, retry, the error classification, and the
+`Link` parsing primitive.
+
+A worked example of the whole surface — configured client, `?` propagation, status-vs-error, typed
+decoding, `Link` pagination by hand, and `prepare`/`send` — is `examples/http_client.noe`.
+
 #### What is an error, and what isn't
 
 The `Err` arm is a **transport** failure only — the request never produced a response. So `?` on a

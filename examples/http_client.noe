@@ -1,0 +1,89 @@
+// Talking to an HTTP API with `std.http.client`.
+//
+// The shape to take away: a **client** binds configuration once (base URL, auth, deadline,
+// retries) and you spend it many times. `?` on a request means exactly one thing — the network
+// broke. An HTTP error *status* is an answer, not an error, so a 404 comes back as an ordinary
+// response you inspect.
+//
+// Middleware, mocking, and pagination live one level up, in the `para/api` package; `std.http`
+// stays the transport.
+
+use std.http.client
+use std.http.{Client, HttpError}
+use std.env
+
+struct Repo {
+    name: string
+    stargazers_count: int
+}
+
+// Configuration, bound once. Every builder returns a NEW client, so this is safe to share — a
+// derived client can never disturb the one it came from.
+fn github(): Client {
+    return client.new("https://api.github.com")
+        .header("accept", "application/vnd.github+json")
+        .bearer(env.get("GITHUB_TOKEN") ?? "")
+        .timeout(30_000)
+        // Retries transient transport failures and 429/502/503/504, backing off 250ms doubled per
+        // attempt. Only idempotent verbs — a POST is never replayed unless you ask.
+        .retry(3)
+}
+
+// `?` propagates a transport failure; the caller decides what to do about it.
+fn stars(owner: string, repo: string): Result<int, HttpError> {
+    resp = github().get("/repos/${owner}/${repo}")?
+    // A non-2xx is NOT an `Err` — it is an answer, so handle it explicitly.
+    if !resp.ok() {
+        echo "github answered ${resp.status()}"
+        return Ok(0)
+    }
+    // Decode the body into your own type. Recoverable by construction: a server that changes shape
+    // is a value you handle, never an abort.
+    return match resp.json::<Repo>() {
+        Ok(r) => Ok(r.stargazers_count),
+        Err(_) => Ok(0),
+    }
+}
+
+// Following pagination by hand. `links()` parses the standard RFC 8288 `Link` header into
+// `rel -> target`. An absolute target is used as-is, so a `next` link goes straight back through
+// the same configured client. (A general paginator — including the APIs that use cursors or page
+// numbers instead of `Link` — belongs in `para/api`, which owns strategy-based pagination.)
+fn first_two_pages(): Result<void, HttpError> {
+    api = github()
+    first = api.get("/users/nsrosenqvist/repos")?
+    echo "page 1: ${first.status()}"
+
+    next = first.links()["next"]
+    if next == "" {
+        echo "no next page"
+        return Ok()
+    }
+    echo "page 2: ${api.get(next)?.status()}"
+    return Ok()
+}
+
+// Building a request without sending it — the seam a middleware layer sits on. Between `prepare`
+// and `send` a request is an ordinary value you can inspect or rewrite.
+fn rate_limit(): Result<int, HttpError> {
+    api = github()
+    req = api.prepare("get", "/rate_limit").with_header("x-trace", "example")
+    echo "about to ${req.method()} ${req.url()}"
+    return Ok(api.send(req)?.status())
+}
+
+// `HttpError` is classified, so you can react to *why* a call failed rather than parse a message.
+fn report(label: string, outcome: Result<int, HttpError>): void {
+    match outcome {
+        Ok(n) => { echo "${label}: ${n}" },
+        Err(e) => { echo "${label} failed (${e.kind()}, retryable=${e.retryable()}): ${e}" },
+    }
+}
+
+report("stars", stars("nsrosenqvist", "php-api-toolkit"))
+report("rate_limit", rate_limit())
+
+match first_two_pages() {
+    Ok(_) => { echo "paged ok" },
+    Err(e) => { echo "paging failed: ${e.kind()}" },
+}
