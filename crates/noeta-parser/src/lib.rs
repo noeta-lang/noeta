@@ -94,6 +94,18 @@ type Extra<'src> = extra::Err<Rich<'src, T, SimpleSpan>>;
 #[derive(Clone, Copy)]
 pub(crate) struct Ctx<'src> {
     source: &'src Source,
+    /// The side-channel for code-carrying diagnostics.
+    ///
+    /// **Never push from a speculative branch.** Unlike chumsky's own errors — which are values,
+    /// pruned per alternative, and harvested once — a `push` here is an unconditional side effect
+    /// with no rollback when the enclosing alternative backtracks. Several statement alternatives
+    /// share a prefix (`fn_decl`, `attributed_tier_annotation` and `attributed_type_decl` all parse
+    /// a leading `#[...]`; `tier_block` and `tier_annotation` both parse `@name(args)`), so a push
+    /// from inside their shared prefix lands once per alternative that tries it.
+    ///
+    /// Push only from a form that has committed. Where a diagnostic is discovered inside a shared
+    /// prefix, carry it in the parsed value and drain it at the commit point — see
+    /// [`PendingAttrArg`] and [`commit_attr_args`], which do exactly that for argument folding.
     diags: &'src RefCell<Vec<Diagnostic>>,
     /// Byte offsets at which a newline terminates the preceding statement (every
     /// [`noeta_lexer::newline_boundaries`] entry, hard or soft). Consulted by [`stmt_terminator`]
@@ -204,6 +216,28 @@ enum UseTail {
 /// manifest-build time without running user code, so only literals and compositions of literals are
 /// accepted — never an operator, a general call, a closure, or a name read of runtime state. Sharing
 /// the expression grammar (rather than a parallel literal parser) keeps the two in lockstep.
+/// One attribute/directive argument as parsed, paired with the diagnostic its value fold produced.
+///
+/// The argument grammar runs inside speculative alternatives, so a diagnostic pushed at fold time
+/// belongs to a parse that may never be taken. Carrying it alongside the value lets the *committing*
+/// form decide: [`commit_attr_args`] pushes them, and an abandoned alternative simply drops them.
+type PendingAttrArg = (AttrArg, Option<Diagnostic>);
+
+/// Take the arguments of a form that has committed, pushing each argument's deferred diagnostic.
+///
+/// Call this exactly once per successfully-parsed argument list. Calling it from a form that then
+/// backtracks reintroduces the double-reporting this indirection exists to prevent.
+fn commit_attr_args(ctx: &Ctx, args: Vec<PendingAttrArg>) -> Vec<AttrArg> {
+    let mut out = Vec::with_capacity(args.len());
+    for (arg, deferred) in args {
+        if let Some(diag) = deferred {
+            ctx.diags.borrow_mut().push(diag);
+        }
+        out.push(arg);
+    }
+    out
+}
+
 fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
     let not_literal = || {
         (
@@ -970,6 +1004,28 @@ fn parse_inner(
     diagnostics.extend(structural);
     // Deterministic ordering regardless of which channel produced each diagnostic.
     diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
+    // One diagnostic per distinct (span, code, message).
+    //
+    // The side channel is not transactional: a `push` from a grammar closure survives its
+    // alternative backtracking, and several statement alternatives share a prefix, so the same
+    // fault is discovered more than once. `#[Foo(a + b)] struct P { … }` is found three times —
+    // `fn_decl`, `attributed_tier_annotation` and `attributed_type_decl` each parse the `#[...]`
+    // fully before the first two fail on the token after it.
+    //
+    // Deferring to the commit point (see [`commit_attr_args`]) solves this wherever the committing
+    // form *is* the statement, which is the case for every `@`-directive form. It cannot solve it
+    // for `#[...]`, whose committing form is the attribute itself — that succeeds, and the
+    // statement around it fails afterwards. Collapsing identical diagnostics here is the honest
+    // compensation for a side channel a backtracking parser can re-enter, and it makes the
+    // guarantee hold for every push site rather than the ones that happen to have been audited.
+    //
+    // `noeta check` already deduped on `(file, span, code)` downstream, which is why none of this
+    // was visible through the CLI; doing it here extends the guarantee to the LSP, MCP and tests.
+    // `retain` with a seen-set rather than `dedup_by`: the sort key is the span alone, so two
+    // identical diagnostics need not be adjacent (another code at the same span can sit between
+    // them). This is order-independent and keeps the first occurrence of each.
+    let mut seen = std::collections::HashSet::new();
+    diagnostics.retain(|d| seen.insert((d.span, d.code, d.message.clone())));
 
     Parsed {
         program: Program {
@@ -2655,32 +2711,43 @@ where
         // drift) and then fold the result into an [`AttrValue`] tree, rejecting any non-literal node.
         // Defined here (above `fn_decl`) so attributes can lead a function/method declaration as well
         // as a type declaration.
-        let attr_value = expr.clone().map_with(move |e, ext| {
-            match expr_to_attr_value(&e) {
-                Ok(value) => value,
-                Err((message, span)) => {
-                    ctx.diags.borrow_mut().push(Diagnostic::error(
-                        DiagnosticCode::UnexpectedToken,
-                        span,
-                        message,
-                    ));
-                    // A non-literal never reaches a runnable program; a defensive placeholder keeps
-                    // parsing going so every offending argument is reported in one pass.
-                    let _ = ext;
-                    noeta_ast::AttrValue::Bool(false)
-                }
-            }
+        // The fold's failure is **deferred**, not pushed. This grammar runs inside speculative
+        // alternatives — `tier_block` and `tier_annotation` both begin `@name(args)` and differ only
+        // in what follows — so a parser that reports at fold time reports for parses that are then
+        // abandoned, and reports twice when two alternatives parse the same arguments. That was
+        // observable: `@bench(a + b)\nfn f() {}` emitted its one real error twice, because
+        // `tier_block` parsed the arguments, failed for want of a `{`, and `tier_annotation` parsed
+        // them again. The enclosing form drains these once it has committed, via
+        // [`commit_attr_args`]; an abandoned alternative drops them with the rest of its output.
+        let attr_value = expr.clone().map(|e| match expr_to_attr_value(&e) {
+            Ok(value) => (value, None),
+            Err((message, span)) => (
+                // A non-literal never reaches a runnable program; a defensive placeholder keeps
+                // parsing going so every offending argument is reported in one pass.
+                noeta_ast::AttrValue::Bool(false),
+                Some(Diagnostic::error(
+                    DiagnosticCode::UnexpectedToken,
+                    span,
+                    message,
+                )),
+            ),
         });
-        // An attribute argument: optionally named (`ttl: 60`), then a literal value.
+        // An attribute argument: optionally named (`ttl: 60`), then a literal value. Paired with the
+        // deferred diagnostic its value fold produced (see above).
         let attr_arg = id
             .clone()
             .then_ignore(just(T::Colon))
             .or_not()
             .then(attr_value.clone())
-            .map_with(move |(name, value), e| noeta_ast::AttrArg {
-                name: name.map(|(n, _)| n),
-                value,
-                span: ctx.to_span(e.span()),
+            .map_with(move |(name, (value, deferred)), e| {
+                (
+                    noeta_ast::AttrArg {
+                        name: name.map(|(n, _)| n),
+                        value,
+                        span: ctx.to_span(e.span()),
+                    },
+                    deferred,
+                )
             });
         // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
         // the bare [`Attribute`]. A struct instance attached as metadata, consumed via the manifest;
@@ -2701,7 +2768,7 @@ where
             .map_with(move |((name, name_span), args), e| Attribute {
                 name,
                 name_span,
-                args: args.unwrap_or_default(),
+                args: commit_attr_args(&ctx, args.unwrap_or_default()),
                 span: ctx.to_span(e.span()),
             })
             // A `#[...]` is a prefix of the declaration it decorates; absorb the woven hard-boundary `;`
@@ -2866,7 +2933,7 @@ where
                     move |(((name, name_span), args), doc_text), e| MethodDirective {
                         name,
                         name_span,
-                        args,
+                        args: commit_attr_args(&ctx, args),
                         doc_text,
                         span: ctx.to_span(e.span()),
                     },
@@ -3812,7 +3879,7 @@ where
                 move |(((tier, tier_span), args), (items, doc_text)), e| Stmt::TierBlock {
                     tier,
                     tier_span,
-                    args,
+                    args: commit_attr_args(&ctx, args),
                     items,
                     doc_text,
                     span: ctx.to_span(e.span()),
@@ -3839,7 +3906,7 @@ where
                 move |(((tier, tier_span), args), item), e| Stmt::TierBlock {
                     tier,
                     tier_span,
-                    args,
+                    args: commit_attr_args(&ctx, args),
                     items: vec![item],
                     doc_text: None,
                     span: ctx.to_span(e.span()),
@@ -3874,7 +3941,7 @@ where
                 Stmt::TierBlock {
                     tier,
                     tier_span,
-                    args,
+                    args: commit_attr_args(&ctx, args),
                     items: vec![item],
                     doc_text: None,
                     span: ctx.to_span(e.span()),
@@ -3899,6 +3966,7 @@ where
             .then(fn_decl.clone())
             .map(move |(((_, tier_kw_span), args), mut item)| {
                 // The runner stays an ordinary top-level fn statement; the declaration rides on it.
+                let args = commit_attr_args(&ctx, args);
                 if let Stmt::Fn(f) = &mut item {
                     f.tier = tier_decl_from_args(&args, tier_kw_span, &ctx);
                 }
@@ -3951,6 +4019,34 @@ mod tests {
     use noeta_ast::Pretty;
     use noeta_lexer::lex;
     use noeta_span::SourceId;
+
+    #[test]
+    fn deferred_arg_diagnostics_are_reported_once() {
+        // The argument grammar sits at the head of several speculative statement alternatives, and
+        // `ctx.diags` is a `RefCell` side-channel with no rollback: a `push` from an alternative
+        // that later backtracks stays. chumsky's own errors are values and get pruned per branch,
+        // which is why a plain syntax error never doubled while these did.
+        //
+        // `#[Foo(a + b)]\nstruct P { … }` used to push **three** copies — `fn_decl`,
+        // `attributed_tier_annotation` and `attributed_type_decl` each parse the `#[...]` in full
+        // before the first two fail on the following token. It was invisible through `noeta check`
+        // only because `cmd_check` dedupes on `(file, span, code)`; that masking is incidental and
+        // stops working the moment two alternatives report at different spans.
+        //
+        // Deferring the fold error to the committing form removes the duplication at the source.
+        for src in [
+            "#[Foo(a + b)]\nstruct P { x: int }\n",
+            "@bench(a + b)\nfn f() {\n  return 1\n}\n",
+        ] {
+            let parsed = parse_str(src);
+            let n = parsed
+                .diagnostics
+                .iter()
+                .filter(|d| d.message.contains("attribute arguments must be literal"))
+                .count();
+            assert_eq!(n, 1, "expected exactly one for {src:?}, got {n}");
+        }
+    }
 
     fn parse_str(text: &str) -> Parsed {
         let source = Source::new(SourceId::FIRST, "test.noe", text);
