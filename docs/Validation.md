@@ -129,6 +129,7 @@ struct Email {
     }
 }
 
+// sample:start
 echo match Email.new("a@b.com") {
     Ok(e) => "ok: ${e.addr}",
     Err(m) => m,
@@ -137,6 +138,7 @@ echo match Email.new("nope") {
     Ok(e) => "ok: ${e.addr}",
     Err(m) => m,
 }
+// sample:end
 ```
 
 Building a `@validated` type with a bare literal from outside its `impl` is rejected:

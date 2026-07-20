@@ -1,0 +1,6 @@
+[package]
+name = "noeta/liveview_counter"
+version = "0.1.0"
+
+[dependencies]
+para = { path = "../../../packages/para-html" }

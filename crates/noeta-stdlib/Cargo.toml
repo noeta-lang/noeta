@@ -28,6 +28,10 @@ bcrypt = { workspace = true }
 # The `std.datetime` calendar/timezone backend (Ring 3 datetime arc). Optional + behind the
 # default-on `ring-datetime` feature so a footprint-tailored build sheds jiff and its tzdb.
 jiff = { workspace = true, optional = true }
+# Registers `std_units` as the registry's fallback provider at load time (see `registry::ensure`).
+# Native only: `#[ctor]` is unsupported on wasm, where every driver installs explicitly anyway.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ctor = { workspace = true }
 
 [features]
 # On by default — the plain toolchain/build has the full datetime surface. A `--no-default-features`

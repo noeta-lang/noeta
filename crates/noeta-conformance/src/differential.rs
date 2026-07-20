@@ -35,12 +35,17 @@ pub struct Mismatch {
 /// The outcome of a differential run over a corpus.
 #[derive(Debug, Default)]
 pub struct DiffReport {
-    /// Programs the VM compiled and that matched the tree-walker.
+    /// Programs both backends actually RAN, and on which they agreed. Strictly execution
+    /// coverage: a program the checker rejected never ran and is counted in [`not_run`], not here.
     pub matched: usize,
-    /// Programs outside the VM's current subset (skipped, not failed).
-    pub skipped: usize,
-    /// Programs that did not parse cleanly, so there is no eval-level result to compare.
-    pub parse_failed: usize,
+    /// Every case excluded before the comparison, by reason (see [`NotRun`]).
+    pub not_run: crate::NotRun,
+    /// Cases the checker rejected that declare **no** `// expect: error` — a rejection nobody asked
+    /// for. This is the teeth on the exclusion accounting: a corpus fixture invalidated by a
+    /// language change stops running and silently leaves backend coverage, and every count that
+    /// would reveal it (`matched`, then `checker_rejected`) moves by exactly one either way. Naming
+    /// the cases turns that into a failure that says which file.
+    pub unexpected_rejections: Vec<String>,
     /// Programs the VM compiled but whose result diverged — these are failures.
     pub mismatches: Vec<Mismatch>,
 }
@@ -51,9 +56,11 @@ impl DiffReport {
         self.matched + self.mismatches.len()
     }
 
-    /// Programs eligible for comparison (parsed cleanly): supported + skipped.
+    /// Programs eligible for comparison: those that reached the backend gate at all — the ones
+    /// that ran, plus the ones the VM could not compile. Cases excluded earlier (unparseable,
+    /// unlinkable, checker-rejected) were never candidates and must not dilute the metric.
     pub fn comparable(&self) -> usize {
-        self.supported() + self.skipped
+        self.supported() + self.not_run.unsupported
     }
 
     /// Percentage of comparable programs the VM compiles — the climbing coverage metric.
@@ -66,9 +73,10 @@ impl DiffReport {
         }
     }
 
-    /// Whether the two backends agreed on every program the VM compiled.
+    /// Whether the two backends agreed on every program the VM ran, and no case dropped out of
+    /// coverage without declaring it.
     pub fn ok(&self) -> bool {
-        self.mismatches.is_empty()
+        self.mismatches.is_empty() && self.unexpected_rejections.is_empty()
     }
 
     /// A human-readable summary.
@@ -77,19 +85,32 @@ impl DiffReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "differential: {} matched, {} skipped (unsupported), {} parse-failed; VM covers {:.1}% of comparable cases",
+            "differential: {} ran and agreed, {} not run ({}); VM covers {:.1}% of comparable cases",
             self.matched,
-            self.skipped,
-            self.parse_failed,
+            self.not_run.total(),
+            self.not_run.to_human(),
             self.coverage_pct(),
         );
-        if self.mismatches.is_empty() {
-            out.push_str("backends agree on every compiled program ✓\n");
-        } else {
+        if !self.unexpected_rejections.is_empty() {
+            let _ = writeln!(
+                out,
+                "{} case(s) REJECTED BY THE CHECKER WITHOUT DECLARING AN ERROR — they no longer \
+                 run, so they cover neither backend. Either fix the fixture or declare the \
+                 diagnostic with `// expect: error <CODE> at <line>:<col>`:",
+                self.unexpected_rejections.len()
+            );
+            for name in &self.unexpected_rejections {
+                let _ = writeln!(out, "  {name}");
+            }
+        }
+        if !self.mismatches.is_empty() {
             let _ = writeln!(out, "{} MISMATCH(es):", self.mismatches.len());
             for m in &self.mismatches {
                 let _ = writeln!(out, "  {} — {}", m.name, m.detail);
             }
+        }
+        if self.ok() {
+            out.push_str("backends agree on every compiled program ✓\n");
         }
         out
     }
@@ -123,16 +144,28 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
             // workspace queries — the multi-file analogue of the single-file path below.
             match noeta_loader::read_workspace(&case.entry) {
                 Ok(raw) => compare_backends_workspace(&name, &raw, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         } else {
             match std::fs::read_to_string(&case.entry) {
                 Ok(text) => compare_backends(&name, &text, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         }
     }
     report
+}
+
+/// Record a checker rejection that the case's own header does not account for. A case carrying
+/// `// expect: error …` is a deliberate negative fixture and belongs in the exclusion tally
+/// silently; one without is a fixture that stopped compiling, which is what this catches.
+fn note_rejection(name: &str, text: &str, report: &mut DiffReport) {
+    let declares_error = crate::Expectations::parse(text)
+        .map(|e| !e.errors.is_empty())
+        .unwrap_or(false);
+    if !declares_error {
+        report.unexpected_rejections.push(name.to_string());
+    }
 }
 
 fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
@@ -149,7 +182,7 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
     if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
-        report.parse_failed += 1;
+        report.not_run.parse_failed += 1;
         return;
     }
 
@@ -158,7 +191,8 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     // matter which backend would have run. So a type error is a guaranteed agreement, counted as
     // matched. (The corpus harness separately asserts the diagnostic's code+span.)
     if !noeta_db::checked(&db, src).diagnostics.is_empty() {
-        report.matched += 1;
+        report.not_run.checker_rejected += 1;
+        note_rejection(name, text, report);
         return;
     }
 
@@ -168,7 +202,7 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     let checked = noeta_db::checked(&db, src);
     let tree = reference_run(&parsed.0.program, checked.sites.clone());
     match &noeta_db::bytecode(&db, src).0 {
-        Err(_) => report.skipped += 1,
+        Err(_) => report.not_run.unsupported += 1,
         Ok(module) => {
             let vm = VmBackend::new().run_module(module);
             if vm == tree {
@@ -200,18 +234,19 @@ fn compare_backends_workspace(
     let program = match &noeta_db::linked(&db, ws).0 {
         Ok(program) => program,
         Err(_) => {
-            report.parse_failed += 1;
+            report.not_run.link_failed += 1;
             return;
         }
     };
     if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
-        report.matched += 1;
+        report.not_run.checker_rejected += 1;
+        note_rejection(name, raw.entry.text(), report);
         return;
     }
     let checked = noeta_db::linked_checked(&db, ws);
     let tree = reference_run(program, checked.sites.clone());
     match &noeta_db::linked_bytecode(&db, ws).0 {
-        Err(_) => report.skipped += 1,
+        Err(_) => report.not_run.unsupported += 1,
         Ok(module) => {
             let vm = VmBackend::new().run_module(module);
             if vm == tree {

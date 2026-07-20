@@ -1,0 +1,24 @@
+// `namespace` declares the file's module path; `use` imports names in both the single form
+// (`App.Models.User`) and the grouped form (`App.Billing.{Invoice, Receipt}`), each resolving to a
+// real declaration in a sibling module that the linker merges in.
+//
+// This was an M0 fixture asserting the opposite: back then an imported name resolved to an opaque
+// STUB, so `User { ... }` constructed something with no declaration behind it. Module loading has
+// since landed (E0019 for an unresolved import), which made the M0 form uncompilable — but it kept
+// passing, because the single-file harness path checked the raw text without ever running the
+// linker. Giving it the modules it imports is what makes the case test the language as it is.
+// expect: stdout "Ada"
+// expect: stdout "42"
+// expect: stdout "true"
+// expect: exit 0
+namespace App.Orders;
+
+use App.Models.User;
+use App.Billing.{Invoice, Receipt};
+
+customer = User { name: "Ada", id: 7 };
+invoice = Invoice { number: 42, paid: true };
+
+echo customer.name;
+echo invoice.number;
+echo invoice.paid;

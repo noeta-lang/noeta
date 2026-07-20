@@ -1,7 +1,7 @@
 //! Keyed-list **structural** reconciliation for the `para.html` LiveView package, driven headlessly
 //! through `noeta run` (no socket needed — the reconciliation is pure Noeta over `std.reactive`).
 //!
-//! `examples/liveview-structural/structural_demo.noe` exercises two levels: the diff **algorithm**
+//! `examples/para-html/liveview-structural/structural_demo.noe` exercises two levels: the diff **algorithm**
 //! (`keyed_op_stream` — the minimal insert/remove/move plan for a key-order change) and the
 //! **reconciliation** the websocket session runs (`reconcile_region` over a real `view()`, asserting
 //! the wire frame per append/prepend/remove/reorder and that a reorder leaves row content untouched).
@@ -15,7 +15,7 @@ use crate::support::*;
 #[test]
 fn keyed_structural_reconciliation_emits_minimal_ops() {
     lang()
-        .current_dir(workspace().join("examples/liveview-structural"))
+        .current_dir(workspace().join("examples/para-html/liveview-structural"))
         .arg("run")
         .arg("structural_demo.noe")
         .assert()
@@ -42,7 +42,7 @@ fn keyed_structural_reconciliation_emits_minimal_ops() {
 #[test]
 fn keyed_per_row_content_and_inline_handlers_still_route() {
     lang()
-        .current_dir(workspace().join("examples/liveview-events"))
+        .current_dir(workspace().join("examples/para-html/liveview-events"))
         .arg("run")
         .arg("events_demo.noe")
         .assert()
@@ -55,7 +55,7 @@ fn keyed_per_row_content_and_inline_handlers_still_route() {
 #[test]
 fn keyed_structural_showcase_app_type_checks() {
     lang()
-        .current_dir(workspace().join("examples/liveview-structural-app"))
+        .current_dir(workspace().join("examples/para-html/liveview-structural-app"))
         .arg("check")
         .arg("app.noe")
         .assert()

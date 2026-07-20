@@ -50,7 +50,9 @@ jobs:
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, and kept in lockstep with `ci.yml` (see the rationale there) — a release build must
+      # use the same compiler the gates proved the tree against, not whatever `stable` is that day.
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           targets: ${{ matrix.target }}
 

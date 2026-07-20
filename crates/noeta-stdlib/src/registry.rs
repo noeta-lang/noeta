@@ -476,6 +476,28 @@ fn ensure() {
     noeta_ext_abi::registry::install_default(std_units);
 }
 
+/// Register [`std_units`] as the registry's **fallback provider** at load time, so that merely
+/// *linking* this crate gives a process a working default registry — no call site has to remember
+/// to seed. That is what makes seeding structural: the front-end crates reach the registry through
+/// `noeta_ext_abi::registry::single_registry_process()`, which used to panic unless something had
+/// already seeded. An assembling binary does seed; a **test** binary does not, so a crate's tests
+/// passed only when a sibling test happened to run first through this crate's lazily-seeding facade
+/// — a race CI lost across four crates at once.
+///
+/// This registers a function pointer and installs **nothing** (see
+/// [`noeta_ext_abi::registry::set_default_provider`]): installation stays lazy on first lookup, so a
+/// binary composing its own set with [`install_with_extras`] still wins the `OnceLock` and is
+/// unaffected. Eager installation here would instead seed std-only into those binaries and make
+/// their `install` panic.
+///
+/// Native only — `#[ctor]` has no wasm support, and every wasm driver (the wasm runner, the
+/// playground engine) assembles its registry explicitly, so nothing there relies on the fallback.
+#[cfg(not(target_family = "wasm"))]
+#[ctor::ctor]
+fn register_default_provider() {
+    noeta_ext_abi::registry::set_default_provider(std_units);
+}
+
 /// The process-global default [`Registry`] as a first-class handle — the seeded-and-unwrapped form
 /// the instance-registry threading (server-hmr F2) hands to a checker/backend that was **not**
 /// given an explicit per-session registry. Ensures the std units are installed (like every facade
@@ -540,14 +562,18 @@ pub fn interned_with_extras(
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static INTERNED: OnceLock<
-        Mutex<HashMap<Vec<usize>, &'static noeta_ext_abi::registry::Registry>>,
+        Mutex<HashMap<Vec<&'static str>, &'static noeta_ext_abi::registry::Registry>>,
     > = OnceLock::new();
-    // Key on the extras' pointer identities, order-normalized: `&'static dyn Extension` units are
-    // statics, so pointer equality is configuration equality.
-    let mut key: Vec<usize> = extra
-        .iter()
-        .map(|e| std::ptr::from_ref::<dyn Extension>(*e).cast::<()>() as usize)
-        .collect();
+    // Key on the extras' **names**, order-normalized. Extension names are unique by construction —
+    // `Registry::new`'s uniqueness sweep rejects a duplicate — so a name set *is* a configuration.
+    //
+    // This used to key on the units' data pointers, which is unsound: an extension type is
+    // typically a unit struct, and distinct **zero-sized** statics share one address, so any two
+    // ZST extensions collided onto the same key. Two sessions with disjoint extension sets then
+    // silently shared whichever registry was interned first — the second session's own extension
+    // resolved as an unknown name. Silent and configuration-dependent, which is the worst shape for
+    // an embedding host to debug.
+    let mut key: Vec<&'static str> = extra.iter().map(|e| e.name()).collect();
     key.sort_unstable();
     let mut interned = INTERNED
         .get_or_init(|| Mutex::new(HashMap::new()))

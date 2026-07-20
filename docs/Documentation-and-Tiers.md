@@ -71,6 +71,38 @@ The only flag is `--target <NAME>`, which gates extraction on the `doc` tier bei
 
 ---
 
+## Folding a sample's context — `// sample:start` / `// sample:end`
+
+Every ` ```noeta ` block in these docs is run through the real `noeta` binary by CI, which is what
+keeps the documentation honest: a renamed method or a changed diagnostic fails the build instead of
+quietly misleading a reader. The cost is that a sample has to be a **complete program** — and the
+struct, imports and helper that make a two-line call compile can easily bury the two lines worth
+reading.
+
+Mark the interesting region and the rest folds away:
+
+```noeta
+struct Email { addr: string }
+
+// sample:start
+e = Email { addr: "a@b.com" }
+echo e.addr
+// sample:end
+```
+
+The markers are ordinary comments, so **the whole block still compiles and still runs in CI** —
+nothing about the gate changes. Only presentation does:
+
+- the **Docs browser** (VS Code) shows the marked region, with a *Show full example* expander;
+- **`noeta doc --out`** and other static markdown bake the same fold in as a `<details>` block, so a
+  reader on GitHub gets the short version with the full program one click away;
+- a block with **no markers** renders exactly as it always has.
+
+A block may mark several regions — they concatenate in order, so a page can show two interesting
+stretches of one program and fold the plumbing between them. Shortening a sample this way is
+strictly better than deleting the context: the deleted version stops compiling, and a sample that
+does not compile is a sample nothing can check.
+
 ## The tier model
 
 There are two orthogonal ideas:
@@ -258,7 +290,7 @@ The handler receives the hole thunks as closures and invokes them through the hi
 A tier's `text:` **is** the body's language, and it flows to the tooling three ways — the language is declared once, in the tier, and every consumer picks it up:
 
 - **The LSP reports it.** Hovering an embedded block's tier name (`@sql { … }`) shows `expression tier @sql — sql body, evaluates to Query` — the declared language and the value type, read from the tier registry. The registry unions the program's own `@tier` declarations with any an installed extension contributes, so a program-declared tier and a native package's tier hover identically. (The block itself already hovers as its value type, `Query`, like any expression.)
-- **Highlighting is extension-provided (VS Code / TextMate).** A package ships a TextMate injection grammar that colors its body as the foreign language, contributed with `injectTo: ["source.noeta"]`. It attaches by textual match (`injectionSelector: L:source.noeta`), so it needs no change to Noeta's own grammar — that is why an extension can provide it. `${…}` holes are scoped back to `source.noeta`, so they highlight as ordinary Noeta inside the foreign text — the same split the compiler makes (statics = foreign language, holes = checked Noeta). See `examples/sql_tier_injection.tmLanguage.json` for the shape. For tiers that ship no grammar of their own, the VS Code extension also **generates** a per-project injection grammar: on activation and on `.noe` change it scans the workspace's `@tier(…, text: "lang")` declarations and regenerates `syntaxes/generated-tiers.tmLanguage.json`, so a project-declared tier highlights without any hand-written grammar.
+- **Highlighting is extension-provided (VS Code / TextMate).** A package ships a TextMate injection grammar that colors its body as the foreign language, contributed with `injectTo: ["source.noeta"]`. It attaches by textual match (`injectionSelector: L:source.noeta`), so it needs no change to Noeta's own grammar — that is why an extension can provide it. `${…}` holes are scoped back to `source.noeta`, so they highlight as ordinary Noeta inside the foreign text — the same split the compiler makes (statics = foreign language, holes = checked Noeta). See `packages/para-db/editors/sql-tier.tmLanguage.json` for the shape. For tiers that ship no grammar of their own, the VS Code extension also **generates** a per-project injection grammar: on activation and on `.noe` change it scans the workspace's `@tier(…, text: "lang")` declarations and regenerates `syntaxes/generated-tiers.tmLanguage.json`, so a project-declared tier highlights without any hand-written grammar.
 - **tree-sitter** highlighting of third-party tiers needs a per-project generated grammar (a *static* grammar cannot read the declaration set to know which `@name` opens a verbatim body). The static grammar ships the `@doc` → markdown injection as its fallback; `noeta grammar tree-sitter --out <dir>` generates the overlay for a project's declared tiers — the same model as the TextMate generator, but sourced from the compiler's own tier scan (plus installed native tiers) rather than a regex. It writes `project-tiers.json` (the verbatim-body tier-name token list the grammar reads, so `@spec { … }` parses as prose) and regenerates `queries/injections.scm` (one language rule per tier); `tree-sitter generate` (or `--generate`) then rebuilds the parser. Drop the overlay into a `tree-sitter-noeta` checkout your editor points at.
 
 ---

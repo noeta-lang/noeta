@@ -568,8 +568,30 @@ struct DocsHighlightParams {
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DocsHighlightResult {
-    /// Per input snippet, its highlight spans (parallel to `snippets`).
+    /// Per input snippet, the highlight spans of its **visible** text (parallel to `snippets`).
     spans: Vec<Vec<HlSpanWire>>,
+    /// Per input snippet, its `// sample:start`/`// sample:end` split (see
+    /// [`noeta_ide::sample`]). The viewer renders `visible` with `spans` above and reveals `full`
+    /// with `fullSpans` behind an expander.
+    ///
+    /// The split is computed HERE rather than in the viewer on purpose: `spans` are byte offsets
+    /// into the text they describe, so a viewer that folded lines itself would paint the spans of
+    /// the unfolded code onto the folded code and slide every colour off its token.
+    samples: Vec<SampleWire>,
+}
+
+/// One code snippet's context-folding split on the wire.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SampleWire {
+    /// What to show by default (equals `full` when the snippet carries no markers).
+    visible: String,
+    /// The whole snippet, markers removed — what actually compiles.
+    full: String,
+    /// Whether anything was folded, i.e. whether to offer the expander at all.
+    has_context: bool,
+    /// Highlight spans for `full`, so expanding does not lose colouring.
+    full_spans: Vec<HlSpanWire>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -864,15 +886,27 @@ impl Backend {
         &self,
         params: DocsHighlightParams,
     ) -> Result<DocsHighlightResult> {
+        let samples: Vec<noeta_ide::sample::Sample> = params
+            .snippets
+            .iter()
+            .map(|code| noeta_ide::sample::split(code))
+            .collect();
+        let highlight = |code: &str| -> Vec<HlSpanWire> {
+            noeta_ide::highlight::highlight_code(code)
+                .into_iter()
+                .map(HlSpanWire::from)
+                .collect()
+        };
         Ok(DocsHighlightResult {
-            spans: params
-                .snippets
+            // Spans describe the VISIBLE text, which is what the viewer paints by default.
+            spans: samples.iter().map(|s| highlight(&s.visible)).collect(),
+            samples: samples
                 .iter()
-                .map(|code| {
-                    noeta_ide::highlight::highlight_code(code)
-                        .into_iter()
-                        .map(HlSpanWire::from)
-                        .collect()
+                .map(|s| SampleWire {
+                    visible: s.visible.clone(),
+                    full: s.full.clone(),
+                    has_context: s.has_context,
+                    full_spans: highlight(&s.full),
                 })
                 .collect(),
         })

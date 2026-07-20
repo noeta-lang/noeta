@@ -1080,10 +1080,7 @@ mod tests {
     fn display_short_reaches_nested_type_arguments() {
         // Shortening recurses through containers, generics, function types and unions.
         let vec2 = || TypeRepr::Struct("geometry.vec.Vec2".to_string(), vec![]);
-        assert_eq!(
-            TypeRepr::List(boxed(vec2())).display_short(),
-            "List<Vec2>"
-        );
+        assert_eq!(TypeRepr::List(boxed(vec2())).display_short(), "List<Vec2>");
         assert_eq!(
             TypeRepr::Map(boxed(TypeRepr::Str), boxed(vec2())).display_short(),
             "Map<string, Vec2>"

@@ -34,9 +34,7 @@ pub struct WasmDiffReport {
     /// Programs whose wasm run was byte-identical to the native run.
     pub matched: usize,
     /// Programs outside the VM's current subset (no module to bundle).
-    pub skipped: usize,
-    /// Programs that did not parse/check cleanly (no module produced).
-    pub parse_failed: usize,
+    pub not_run: crate::NotRun,
     /// Programs whose wasm run diverged from the native run.
     pub failures: Vec<WasmDiffFailure>,
 }
@@ -60,8 +58,10 @@ impl WasmDiffReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "wasm differential: {} matched, {} skipped (unsupported), {} parse-failed",
-            self.matched, self.skipped, self.parse_failed,
+            "wasm differential: {} ran and agreed, {} not run ({})",
+            self.matched,
+            self.not_run.total(),
+            self.not_run.to_human(),
         );
         if self.failures.is_empty() {
             out.push_str("every compiled program runs byte-identically under wasm ✓\n");
@@ -157,12 +157,12 @@ pub fn run_wasm_differential(root: &Path, only: Option<&Path>) -> Result<WasmDif
         if case.multi {
             match noeta_loader::read_workspace(&case.entry) {
                 Ok(raw) => diff_workspace(&name, &raw, &tools, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         } else {
             match std::fs::read_to_string(&case.entry) {
                 Ok(text) => diff_single(&name, &text, &tools, &mut report),
-                Err(_) => report.parse_failed += 1,
+                Err(_) => report.not_run.read_failed += 1,
             }
         }
     }
@@ -179,17 +179,18 @@ fn diff_single(name: &str, text: &str, tools: &WasmTools, report: &mut WasmDiffR
     if !noeta_db::tokens(&db, src).0.diagnostics.is_empty()
         || !noeta_db::ast(&db, src).0.diagnostics.is_empty()
     {
-        report.parse_failed += 1;
+        report.not_run.parse_failed += 1;
         return;
     }
     if !noeta_db::checked(&db, src).diagnostics.is_empty() {
-        // A checker-rejected program produces no bundle — its diagnostics are compile-time, out
-        // of the wasm runner's scope; count it matched, mirroring the bundle oracle.
-        report.matched += 1;
+        // A checker-rejected program produces no bundle, so nothing ever reaches the wasm runner
+        // — an exclusion, not a match. Its diagnostics are compile-time, out of this oracle's
+        // scope, and the corpus harness asserts them.
+        report.not_run.checker_rejected += 1;
         return;
     }
     match &noeta_db::bytecode(&db, src).0 {
-        Err(_) => report.skipped += 1,
+        Err(_) => report.not_run.unsupported += 1,
         Ok(module) => diff_module(name, module, tools, report),
     }
 }
@@ -205,15 +206,15 @@ fn diff_workspace(
     let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
     if noeta_db::linked(&db, ws).0.is_err() {
-        report.parse_failed += 1;
+        report.not_run.link_failed += 1;
         return;
     }
     if !noeta_db::linked_checked(&db, ws).diagnostics.is_empty() {
-        report.matched += 1;
+        report.not_run.checker_rejected += 1;
         return;
     }
     match &noeta_db::linked_bytecode(&db, ws).0 {
-        Err(_) => report.skipped += 1,
+        Err(_) => report.not_run.unsupported += 1,
         Ok(module) => diff_module(name, module, tools, report),
     }
 }
