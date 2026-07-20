@@ -2722,7 +2722,29 @@ where
         // `tier_block` parsed the arguments, failed for want of a `{`, and `tier_annotation` parsed
         // them again. The enclosing form drains these once it has committed, via
         // [`commit_attr_args`]; an abandoned alternative drops them with the rest of its output.
-        let attr_value = expr.clone().map(|e| match expr_to_attr_value(&e) {
+        // A **generic type application** in argument position: `Serialize<Json>`.
+        //
+        // Tried before the expression grammar, and it has to be. The expression grammar treats `<`
+        // as comparison, so `Serialize<Json>` parses there as `Serialize < Json` and then demands an
+        // operand after `>` — which is exactly why the `@`-directives grew a separate,
+        // identifiers-only argument grammar rather than reusing this one. A comparison is
+        // meaningless in argument position, so preferring the type reading is unambiguous and costs
+        // the literal grammar nothing.
+        //
+        // Speculating like this is only safe because the fallback below reports by *returning* its
+        // diagnostic rather than pushing it: an attempt that backtracks must leave no trace.
+        let generic_app = id
+            .clone()
+            .then(
+                type_parser(ctx)
+                    .separated_by(just(T::Comma))
+                    .allow_trailing()
+                    .at_least(1)
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::Lt), just(T::Gt)),
+            )
+            .map(|((name, _), args)| (noeta_ast::AttrValue::TypeRef { name, args }, None));
+        let attr_value = generic_app.or(expr.clone().map(|e| match expr_to_attr_value(&e) {
             Ok(value) => (value, None),
             Err((message, span)) => (
                 // A non-literal never reaches a runnable program; a defensive placeholder keeps
@@ -2734,7 +2756,7 @@ where
                     message,
                 )),
             ),
-        });
+        }));
         // An attribute argument: optionally named (`ttl: 60`), then a literal value. Paired with the
         // deferred diagnostic its value fold produced (see above).
         let attr_arg = id
@@ -4049,6 +4071,42 @@ mod tests {
                 .count();
             assert_eq!(n, 1, "expected exactly one for {src:?}, got {n}");
         }
+    }
+
+    #[test]
+    fn attribute_arguments_accept_generic_type_applications() {
+        // The two argument grammars differed in exactly one capability: the `@`-directives could
+        // write `Serialize<Json>`, the `#[...]` grammar could not, because it is built on the
+        // expression grammar where `<` is comparison. `#[Foo(Serialize<Json>)]` used to fail with
+        // "found `)` expected ..." — it parsed `Serialize < Json` and wanted an operand after `>`.
+        //
+        // Trying the type reading first closes that gap, which is what lets one combinator serve
+        // both families.
+        let parsed = parse_str("#[Foo(Serialize<Json>)]\nstruct P { x: int }\n");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "generic type argument should parse: {:?}",
+            parsed.diagnostics
+        );
+        let Stmt::Struct(decl) = &parsed.program.stmts[0] else {
+            panic!("expected a struct");
+        };
+        let arg = &decl.decorators.attrs[0].args[0];
+        match &arg.value {
+            AttrValue::TypeRef { name, args } => {
+                assert_eq!(name, "Serialize");
+                assert_eq!(args.len(), 1, "one generic argument");
+            }
+            other => panic!("expected a generic TypeRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comparison_still_parses_outside_argument_position() {
+        // Preferring the type reading is scoped to argument position; `<` in an ordinary
+        // expression must remain comparison.
+        let parsed = parse_str("fn f(a: int, b: int): bool {\n  return a < b\n}\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     }
 
     fn parse_str(text: &str) -> Parsed {
