@@ -1187,6 +1187,66 @@ impl Checker {
     /// Misapplied turbofish — an unknown method, a non-generic one, or a type-argument arity
     /// mismatch against the method's own parameters — is E0058.
     #[allow(clippy::too_many_arguments)]
+    /// Type a **call-site-typed extern method** (http arc H8) — the `resp.json::<User>()` twin of
+    /// the `json.parse::<User>(...)` module path, and structurally its mirror: resolve the
+    /// turbofish into a [`noeta_ext_abi::TypeRecipe`], record it at the call span for lowering,
+    /// then type the call from the method's declared signature and wrapper.
+    ///
+    /// Recording the recipe is what makes lowering emit a native `Rvalue::TypedMethodCall` instead
+    /// of erasing the turbofish to a plain method call — the two paths are distinguished by this
+    /// map alone.
+    #[allow(clippy::too_many_arguments)]
+    fn synth_typed_extern_method(
+        &mut self,
+        type_name: &str,
+        recv_args: &[Type],
+        name: &str,
+        name_span: Span,
+        t: &Type,
+        arg_types: &[Type],
+        arg_exprs: &[Expr],
+        span: Span,
+    ) -> Type {
+        // A type with no build recipe (an enum, a class, an unconstrained generic) cannot be
+        // constructed at the call site. Same rule, same wording shape, as the module path.
+        let has_recipe = match self.type_to_recipe(t) {
+            Some(recipe) => {
+                self.sites.typed_method_call_sites.insert(span, recipe);
+                true
+            }
+            None => false,
+        };
+        match stdlib::typed_type_method(
+            self.reg(),
+            type_name,
+            recv_args,
+            name,
+            arg_types,
+            t.clone(),
+        ) {
+            Some((params, required, result)) => {
+                self.check_args(&params, required, arg_types, arg_exprs, span, name);
+                if !has_recipe {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`{t}` cannot be built by `{name}::<T>`"),
+                    );
+                }
+                result
+            }
+            // Unreachable: the caller only routes here when `find_typed_method` already matched.
+            None => {
+                self.error(
+                    DiagnosticCode::UnknownName,
+                    name_span,
+                    format!("`{name}::<T>(...)` is not a call-site-typed native method"),
+                );
+                t.clone()
+            }
+        }
+    }
+
     pub(crate) fn synth_typed_method_call(
         &mut self,
         recv: &Expr,
@@ -1241,6 +1301,26 @@ impl Checker {
                 }
             },
         };
+        // A **call-site-typed extern method** (http arc H8) — `resp.json::<User>()`. Checked
+        // before the user-generic path because the two spellings are identical: presence in the
+        // receiver type's `typed_methods` table is the whole distinction. The associated form is
+        // excluded (a typed method is an instance method; there is no receiver to dispatch on),
+        // and so is the multi-argument spelling (the turbofish names ONE result type).
+        if !associated
+            && resolved.len() == 1
+            && self.reg().find_typed_method(&type_name, name).is_some()
+        {
+            return self.synth_typed_extern_method(
+                &type_name,
+                &recv_args,
+                name,
+                name_span,
+                &resolved[0],
+                args,
+                arg_exprs,
+                span,
+            );
+        }
         let Some(sig) = self
             .symbols
             .methods

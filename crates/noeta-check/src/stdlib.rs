@@ -832,6 +832,53 @@ pub(super) fn typed_module_call(
     Some((params, required, result))
 }
 
+/// The extern-type twin of [`typed_module_call`] (http arc H8): resolve `Type.method::<T>(args)`
+/// against the receiver type's `typed_methods` table.
+///
+/// `type_name` is the receiver's **qualified** identity (`std.http.Response`). Returns `None` when
+/// the method is not call-site-typed on that type — which is not an error here: it is exactly the
+/// signal that the turbofish is an ordinary generic-method instantiation to be erased, so the
+/// caller falls through to the existing path.
+///
+/// Signature-variable binding seeds from the **receiver's** type arguments first (the `Cell<T>`
+/// rule from [`method_return`]), then from the call's own arguments, so a typed method on a
+/// generic extern type can reference both.
+pub(super) fn typed_type_method(
+    reg: &registry::Registry,
+    type_name: &str,
+    recv_args: &[Type],
+    method: &str,
+    arg_types: &[Type],
+    t: Type,
+) -> Option<(Vec<Type>, usize, Type)> {
+    use registry::{RetTy, SigType, TypeArgWrap};
+    let f = reg.find_typed_method(type_name, method)?;
+    let mut bindings = receiver_bindings(recv_args);
+    for (i, bound) in bind_params(f.params, arg_types).into_iter().enumerate() {
+        match bindings.get_mut(i) {
+            Some(slot) if slot.is_none() => *slot = bound,
+            Some(_) => {}
+            None => bindings.push(bound),
+        }
+    }
+    let params = f
+        .params
+        .iter()
+        .map(|p| sig_to_type_bound(reg, p, &bindings))
+        .collect();
+    let required = SigType::required_count(f.params);
+    // The wrapper is validated to be `TypeArg` at registry assembly, so the fallback never fires.
+    let result = match f.ret {
+        RetTy::TypeArg(TypeArgWrap::Plain) => t,
+        RetTy::TypeArg(TypeArgWrap::Option) => opt(t),
+        RetTy::TypeArg(TypeArgWrap::Result(e)) => {
+            Type::Result(Box::new(t), Box::new(sig_to_type_bound(reg, &e, &[])))
+        }
+        _ => t,
+    };
+    Some((params, required, result))
+}
+
 /// A bundle method's parameter types under the receiver-at-0 convention (kernel-methods K2):
 /// the receiver is NOT in `params` (it rides as ctx slot 0), so binding and substitution run
 /// over the call's own arguments exactly like a module function's.

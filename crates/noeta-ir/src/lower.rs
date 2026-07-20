@@ -90,6 +90,9 @@ pub struct LoweringSites<'a> {
     pub index_field_sites: &'a HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::TypedModuleCall`].
     pub typed_module_call_sites: &'a HashMap<Span, noeta_ext_abi::TypeRecipe>,
+    /// Call-site-typed extern-METHOD recipes (`resp.json::<T>`, http arc H8), baked into
+    /// [`Rvalue::TypedMethodCall`]. Presence here overrides the turbofish erasure.
+    pub typed_method_call_sites: &'a HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// `json.decode_typed(name, text)` call spans (L2.2 DI) → lowered to [`Rvalue::DecodeTyped`]
     /// instead of a generic method call, routing to the runtime decode-by-type registry.
     pub decode_typed_sites: &'a HashSet<Span>,
@@ -175,6 +178,7 @@ impl LoweringSites<'static> {
             from_bytes_validated: SPANS.get_or_init(HashSet::new),
             index_field_sites: SPANS.get_or_init(HashSet::new),
             typed_module_call_sites: RECIPES.get_or_init(HashMap::new),
+            typed_method_call_sites: RECIPES.get_or_init(HashMap::new),
             decode_typed_sites: SPANS.get_or_init(HashSet::new),
             for_stream_sites: SPANS.get_or_init(HashSet::new),
             width_sites: WIDTHS.get_or_init(HashMap::new),
@@ -213,6 +217,7 @@ macro_rules! lowering_sites {
             from_bytes_validated: &$s.from_bytes_validated,
             index_field_sites: &$s.index_field_sites,
             typed_module_call_sites: &$s.typed_module_call_sites,
+            typed_method_call_sites: &$s.typed_method_call_sites,
             decode_typed_sites: &$s.decode_typed_sites,
             for_stream_sites: &$s.for_stream_sites,
             width_sites: &$s.width_sites,
@@ -1879,6 +1884,12 @@ impl Lowerer<'_> {
                 span,
                 ..
             } => {
+                // A call-site-typed EXTERN method (http arc H8) keeps its turbofish: the checker
+                // recorded a recipe here, so the native typed dispatch runs. Every other turbofish
+                // method call is an erased user-generic instantiation.
+                if self.sites.typed_method_call_sites.contains_key(span) {
+                    return self.lower_typed_method_call(recv, name, args, *span, out);
+                }
                 let desugared = Expr::Call {
                     callee: Box::new(Expr::Member {
                         receiver: recv.clone(),
@@ -2269,6 +2280,14 @@ impl Lowerer<'_> {
                 // lowers EXACTLY as the plain `recv.func(args)` method call does (the method's own
                 // type parameter is erased and never forwards). Rebuild the equivalent member call
                 // at the same span and reuse the one method-dispatch path.
+                //
+                // …UNLESS the checker recorded a typed-extern-method recipe here (http arc H8):
+                // `resp.json::<User>()` shares this same bare-ident-receiver surface, and a
+                // recorded recipe is exactly the signal that it is a native typed call, not an
+                // erased instantiation. Checked first, because the erasure marker is also set.
+                if self.sites.typed_method_call_sites.contains_key(span) {
+                    return self.lower_typed_method_call(recv, func, args, *span, out);
+                }
                 if self.sites.member_method_call_sites.contains(span) {
                     let desugared = Expr::Call {
                         callee: Box::new(Expr::Member {
@@ -2603,6 +2622,48 @@ impl Lowerer<'_> {
             span,
         });
         Ok(Atom::Temp(dst))
+    }
+
+    /// Lower a **call-site-typed extern method** (http arc H8) into [`Rvalue::TypedMethodCall`].
+    ///
+    /// Shared by both surface spellings, which the parser splits purely syntactically:
+    /// `resp.json::<T>()` (bare-ident receiver, one type argument) arrives as
+    /// `Expr::TypedModuleCall`, while `gh.get(p)?.json::<T>()` arrives as `Expr::TypedMethodCall`.
+    /// Both mean the same thing, so both land here.
+    fn lower_typed_method_call(
+        &mut self,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+        span: Span,
+        out: &mut Vec<Stmt>,
+    ) -> Result<Atom, Unsupported> {
+        let recv = self.lower_expr(recv, out)?;
+        let args = args
+            .iter()
+            .map(|a| self.lower_expr(a, out))
+            .collect::<Result<Vec<_>, _>>()?;
+        let recipe = self.sites.typed_method_call_sites.get(&span).cloned();
+        let dynamic = self
+            .sites
+            .dynamic_recipe_sites
+            .get(&span)
+            .map(|&i| Atom::Var {
+                name: hidden_param_name(i),
+                span,
+            });
+        Ok(self.emit(
+            out,
+            Rvalue::TypedMethodCall {
+                recv,
+                method: method.to_string(),
+                args,
+                recipe,
+                dynamic,
+                span,
+            },
+            span,
+        ))
     }
 
     /// Emit `let t = rvalue` into `out` and return the new temp as an atom.

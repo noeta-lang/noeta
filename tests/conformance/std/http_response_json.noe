@@ -1,0 +1,41 @@
+// Call-site-typed EXTERN METHODS (http arc H8): `resp.json::<T>()` — the extern-type twin of
+// `json.parse::<T>(...)`. Until this slice a turbofish on a method was always erased (it existed
+// only to instantiate a user generic), so a native method could never be told the caller's type.
+//
+// `Response.json` is recoverable by construction (`Result<T, JsonError>`): a response body is
+// remote input, so a server that changes its shape must be a value you can handle, never an abort.
+// `json.parse::<T>(resp.body())` stays the aborting spelling.
+//
+// Both surface spellings must work, and they take DIFFERENT parser paths: a bare-ident receiver
+// (`r.json::<T>()`) parses as `TypedModuleCall`, while a chained receiver
+// (`client.get(..)?.json::<T>()`) parses as `TypedMethodCall`.
+// expect: stdout "GET"
+// expect: stdout "/echo"
+// expect: stdout "GET /echo"
+// expect: stdout "err: mismatch method: expected int, found JSON string"
+// expect: stdout "aborting door: GET"
+// expect: exit 0
+use std.http.client
+use std.json
+
+struct Echo { method: string  path: string }
+
+struct Wrong { method: int }
+
+// Spelling 1 — bare-ident receiver (parses as a TypedModuleCall).
+r = client.get("https://svc.test/echo")?
+echo r.json::<Echo>()?.method
+echo r.json::<Echo>()?.path
+
+// Spelling 2 — chained receiver (parses as a TypedMethodCall). Same meaning, different path.
+e = client.get("https://svc.test/echo")?.json::<Echo>()?
+echo "${e.method} ${e.path}"
+
+// Recoverable: a body that does not fit the named type is an `Err`, not an abort.
+echo match r.json::<Wrong>() {
+    Ok(_) => "unreachable",
+    Err(err) => "err: ${err.kind()} ${err}",
+}
+
+// The aborting spelling still works and is unchanged.
+echo "aborting door: ${json.parse::<Echo>(r.body()).method}"

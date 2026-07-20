@@ -142,6 +142,69 @@ impl ExternValue for HttpClient {
     }
 }
 
+/// Parse an RFC 8288 `Link` header value into `rel -> target` pairs.
+///
+/// This is a **standard**, not one API's convention: `Link` is an IANA-registered header used by
+/// GitHub, GitLab, Jira, Shopify, WordPress and others. Keeping the parse here as a small,
+/// independently useful primitive (`resp.links()`) — rather than burying it inside a paginator —
+/// is what lets the `Link` pagination strategy be one of several rather than the privileged one.
+///
+/// The grammar handled is the one servers actually emit:
+/// `<url>; rel="next", <url>; rel="prev"`. Parameters other than `rel` are ignored, `rel` may be
+/// quoted or bare, and a multi-valued `rel` (`rel="next last"`) registers the target under each
+/// relation. First occurrence of a relation wins. A malformed element is skipped rather than
+/// failing the whole header — a paginator should not die because a server appended junk.
+pub fn parse_link_header(value: &str) -> Vec<(String, String)> {
+    let mut links: Vec<(String, String)> = Vec::new();
+    for element in split_link_elements(value) {
+        let element = element.trim();
+        // `<target>` must open the element; anything else is not a link-value.
+        let Some(rest) = element.strip_prefix('<') else {
+            continue;
+        };
+        let Some((target, params)) = rest.split_once('>') else {
+            continue;
+        };
+        for param in params.split(';') {
+            let Some((name, raw)) = param.split_once('=') else {
+                continue;
+            };
+            if !name.trim().eq_ignore_ascii_case("rel") {
+                continue;
+            }
+            let value = raw.trim().trim_matches('"');
+            for rel in value.split_whitespace() {
+                if !links.iter().any(|(existing, _)| existing == rel) {
+                    links.push((rel.to_string(), target.trim().to_string()));
+                }
+            }
+        }
+    }
+    links
+}
+
+/// Split a `Link` header on the commas that separate elements — the ones **outside** `<...>`.
+/// A target URL may legally contain a comma (`?ids=1,2`), so a naive `split(',')` would tear an
+/// element in half.
+fn split_link_elements(value: &str) -> Vec<&str> {
+    let mut elements = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                elements.push(&value[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    elements.push(&value[start..]);
+    elements
+}
+
 /// The `Authorization` value for HTTP Basic per RFC 7617: `Basic base64(user:pass)`.
 pub fn basic_auth_value(user: &str, password: &str) -> String {
     use base64::Engine;
@@ -228,6 +291,71 @@ mod tests {
             .with_header("x", "1")
             .with_header("X", "2");
         assert_eq!(client.headers, vec![("X".to_string(), "2".to_string())]);
+    }
+
+    #[test]
+    fn link_headers_parse_per_rfc_8288() {
+        // GitHub's actual shape.
+        let header = "<https://api.github.com/user/repos?page=2>; rel=\"next\", \
+                      <https://api.github.com/user/repos?page=9>; rel=\"last\"";
+        assert_eq!(
+            parse_link_header(header),
+            vec![
+                (
+                    "next".to_string(),
+                    "https://api.github.com/user/repos?page=2".to_string()
+                ),
+                (
+                    "last".to_string(),
+                    "https://api.github.com/user/repos?page=9".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_comma_inside_a_target_does_not_split_the_element() {
+        // The bug a naive `split(',')` would have: a legal comma in the query string.
+        let header = "<https://x.example/items?ids=1,2,3>; rel=\"next\"";
+        assert_eq!(
+            parse_link_header(header),
+            vec![(
+                "next".to_string(),
+                "https://x.example/items?ids=1,2,3".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn rel_may_be_bare_multi_valued_or_accompanied_by_other_params() {
+        let header = "<https://x.example/a>; title=\"A\"; rel=next, <https://x.example/b>; rel=\"prev last\"";
+        assert_eq!(
+            parse_link_header(header),
+            vec![
+                ("next".to_string(), "https://x.example/a".to_string()),
+                ("prev".to_string(), "https://x.example/b".to_string()),
+                ("last".to_string(), "https://x.example/b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_element_is_skipped_not_fatal() {
+        // A server appending junk must not cost the caller the links it did send.
+        let header = "garbage, <https://x.example/a>; rel=\"next\", <no-close; rel=\"prev\"";
+        assert_eq!(
+            parse_link_header(header),
+            vec![("next".to_string(), "https://x.example/a".to_string())]
+        );
+    }
+
+    #[test]
+    fn the_first_occurrence_of_a_relation_wins() {
+        let header = "<https://x.example/1>; rel=\"next\", <https://x.example/2>; rel=\"next\"";
+        assert_eq!(
+            parse_link_header(header),
+            vec![("next".to_string(), "https://x.example/1".to_string())]
+        );
     }
 
     #[test]

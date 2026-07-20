@@ -571,6 +571,18 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.extend(args.iter().copied());
             f.uses.extend(dynamic.iter().copied());
         }
+        Op::TypedMethodCall {
+            dst,
+            recv,
+            args,
+            dynamic,
+            ..
+        } => {
+            f.def = Some(*dst);
+            f.uses.push(*recv);
+            f.uses.extend(args.iter().copied());
+            f.uses.extend(dynamic.iter().copied());
+        }
         Op::DecodeTyped {
             dst, name, text, ..
         } => {
@@ -1056,6 +1068,22 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             dst, args, dynamic, ..
         } => {
             m(dst);
+            for r in args.iter_mut() {
+                m(r);
+            }
+            if let Some(slot) = dynamic {
+                m(slot);
+            }
+        }
+        Op::TypedMethodCall {
+            dst,
+            recv,
+            args,
+            dynamic,
+            ..
+        } => {
+            m(dst);
+            m(recv);
             for r in args.iter_mut() {
                 m(r);
             }

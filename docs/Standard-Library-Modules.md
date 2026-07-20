@@ -428,7 +428,25 @@ strict = client.get("https://api.example.com/users/1")?.error_for_status()?   //
 
 `Response` methods: `status() -> int`, `ok() -> bool` (2xx), `body() -> string`,
 `body_bytes() -> bytes`, `header(name) -> string?` (case-insensitive), `url() -> string` (the final
-URL after redirects), and `error_for_status() -> Result<Response, HttpError>`.
+URL after redirects), `links() -> Map<string, string>` (RFC 8288 `Link` relations),
+`error_for_status() -> Result<Response, HttpError>`, and the typed decoder
+`json::<T>() -> Result<T, JsonError>`.
+
+#### Decoding the body
+
+`resp.json::<T>()` decodes straight into your own type:
+
+```noeta ignore
+struct User { name: string  id: int }
+
+user = gh.get("/users/1")?.json::<User>()?
+echo user.name
+```
+
+It is **recoverable by construction** — a response body is remote input, so a server that changes
+shape is a value you handle, not an abort. The error is the same path-precise `JsonError` the JSON
+module produces (`method: expected int, found JSON string`). When you *do* want a malformed body to
+be fatal, `json.parse::<T>(resp.body())` is the aborting spelling.
 
 `HttpError` implements `Error` and `Display`, so it converts through `?` like any other error type.
 Its methods: `message()`, `kind()`, `url()`, and `retryable()`. `kind()` is one of `"timeout"`,

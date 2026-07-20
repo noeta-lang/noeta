@@ -174,6 +174,8 @@ const HTTP_TYPES: &[ExtType] = &[
         namespace: "std.http",
         methods: RESPONSE_METHODS,
         dispatch: response_method_dispatch,
+        typed_methods: RESPONSE_TYPED_METHODS,
+        typed_dispatch: Some(response_typed_method_dispatch),
         key_capable: false, // a response is not a map key
         docs: RESPONSE_DOCS,
         ..ExtType::DEFAULTS
@@ -1852,7 +1854,52 @@ const RESPONSE_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(Str),
     },
+    ExtFn {
+        name: "links",
+        params: &[],
+        ret: Concrete(SigType::Map(&Str, &Str)),
+    },
 ];
+
+/// `Response`'s **call-site-typed** methods (http arc H8): `resp.json::<User>()`.
+///
+/// Recoverable by construction — it returns `Result<T, JsonError>`, the `json.try_parse::<T>`
+/// wrapper, because a response body is remote input: a server that changes its shape must be a
+/// value you can handle, never an abort. The aborting spelling stays available as
+/// `json.parse::<T>(resp.body())` for callers who genuinely want a malformed body to be fatal.
+const RESPONSE_TYPED_METHODS: &[ExtFn] = &[ExtFn {
+    name: "json",
+    params: &[],
+    ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
+}];
+
+fn response_typed_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+    recipe: &TypeRecipe,
+) -> Result<NativeOut, StdError> {
+    let Some(resp) = recv.as_any().downcast_ref::<crate::NetResponse>() else {
+        return Err(type_error(method, "Response"));
+    };
+    match method {
+        "json" => {
+            want_arity(method, args, 0)?;
+            let body = String::from_utf8_lossy(&resp.body);
+            Ok(match crate::json::try_parse_typed(&body, recipe) {
+                Ok(out) => NativeOut::Ok(Box::new(out)),
+                Err(error) => {
+                    NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                }
+            })
+        }
+        _ => Err(crate::no_method_error(
+            crate::net::RESPONSE_TYPE_NAME,
+            method,
+        )),
+    }
+}
 
 fn response_method_dispatch(
     recv: &mut dyn crate::ExternValue,
@@ -1907,6 +1954,18 @@ fn response_method_dispatch(
         "url" => {
             want_arity(method, args, 0)?;
             Ok(NativeOut::Str(resp.url.clone()))
+        }
+        "links" => {
+            want_arity(method, args, 0)?;
+            // RFC 8288 `Link` relations, `rel -> target`. Empty when the header is absent, so a
+            // caller can walk relations without first testing for the header.
+            let header = resp.header_value("link").unwrap_or_default();
+            Ok(NativeOut::Map(
+                crate::http_client::parse_link_header(header)
+                    .into_iter()
+                    .map(|(rel, target)| (rel, NativeOut::Str(target)))
+                    .collect(),
+            ))
         }
         "error_for_status" => {
             want_arity(method, args, 0)?;
@@ -3567,6 +3626,19 @@ const RESPONSE_DOCS: &[(&str, &str)] = &[
         "The final URL this response came from, after redirects — the correct base for resolving \
          a relative `Location` or `Link` target. Empty for a response the program built with \
          `http.server.response(…)`.",
+    ),
+    (
+        "links",
+        "The response's RFC 8288 `Link` relations as `rel -> target` (`links()[\"next\"]` is the \
+         next page for any API that uses the standard header). Empty when the header is absent. \
+         Targets may be relative — resolve them against `url()`.",
+    ),
+    (
+        "json",
+        "Decode the body into the caller-named type: `resp.json::<User>()` yields \
+         `Result<User, JsonError>`. Recoverable by construction — a response body is remote \
+         input, so a server that changes shape is a value you handle, not an abort. Use \
+         `json.parse::<T>(resp.body())` when you do want a malformed body to be fatal.",
     ),
     (
         "error_for_status",

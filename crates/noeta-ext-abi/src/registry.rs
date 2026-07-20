@@ -590,6 +590,21 @@ pub type CtxTypeDispatch = fn(
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError>;
 
+/// A type's **call-site-typed** method dispatch (http arc H8) — the [`TypedDispatch`] twin for
+/// extern-type methods: `resp.json::<User>()`. Like [`TypeDispatch`] plus the `recipe` the
+/// checker resolved from the turbofish, so the method can build a value of the caller-named type.
+///
+/// The same contract as [`TypedDispatch`]: the returned [`NativeOut`] already carries its declared
+/// wrapper (`Ok`/`Err`, `Some`/`None`); a `Plain` door signals unrecoverable failure through
+/// `Err(StdError)`, a recoverable one never uses that channel.
+pub type TypedTypeDispatch = fn(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+    recipe: &TypeRecipe,
+) -> Result<NativeOut, StdError>;
+
 /// An [`ExtType::arena_getter`] declaration: the method name plus the projection reading the
 /// [`crate::Retained`] id off the extern box.
 pub type ArenaGetter = (&'static str, fn(&dyn crate::ExternValue) -> crate::Retained);
@@ -650,9 +665,20 @@ pub struct ExtType {
     /// type whose methods take a container argument (the metrics instruments' `*_with(_, attrs)`).
     /// Default `false` — most extern methods take scalars/handles.
     pub deep_marshal: bool,
+    /// The type's **call-site-typed** method signatures (http arc H8) — the turbofish surface
+    /// `resp.json::<User>()`, the extern-type analogue of [`ExtModule::typed_functions`]. Each
+    /// must declare a [`RetTy::TypeArg`] return (its result is named by the `::<T>`), and calls
+    /// route to [`ExtType::typed_dispatch`] with the checker-resolved [`TypeRecipe`].
+    ///
+    /// As on the module side, this table's names live in their **own space**: a name may appear in
+    /// both `methods` and `typed_methods` (a dynamic `json(): dyn` alongside a typed
+    /// `json::<T>(): T`), and is unique only within each table.
+    pub typed_methods: &'static [ExtFn],
+    /// The shared dispatch for [`ExtType::typed_methods`] (`None` when the table is empty).
+    pub typed_dispatch: Option<TypedTypeDispatch>,
     /// Per-method **documentation prose** (docs-browser Arc 2): `(method_name, markdown)` pairs, the
     /// extern-type analogue of [`ExtModule::docs`]. Opt-in and sparse; keyed by name so it covers
-    /// both [`ExtType::methods`] and [`ExtType::ctx_methods`].
+    /// [`ExtType::methods`], [`ExtType::ctx_methods`], and [`ExtType::typed_methods`].
     pub docs: &'static [(&'static str, &'static str)],
 }
 
@@ -675,6 +701,8 @@ impl ExtType {
         arena_getter: None,
         traits: &[],
         deep_marshal: false,
+        typed_methods: &[],
+        typed_dispatch: None,
         docs: &[],
     };
 
@@ -1543,10 +1571,53 @@ impl Registry {
             .find(|m| m.name == method)
     }
 
-    /// A type method's signature from **either** table — what the checker consults.
+    /// A type method's signature from **either** plain table — what the checker consults for an
+    /// ordinary (non-turbofish) call. Deliberately excludes [`ExtType::typed_methods`], whose names
+    /// live in their own space and are only reachable through a `::<T>` call site.
     pub fn find_type_method_sig(&self, type_name: &str, method: &str) -> Option<&'static ExtFn> {
         self.find_type_method(type_name, method)
             .or_else(|| self.find_type_ctx_method(type_name, method))
+    }
+
+    /// Find a registered extern type's **call-site-typed** method signature (http arc H8) — the
+    /// `resp.json::<T>()` turbofish surface, the [`Registry::find_typed_function`] twin. The single
+    /// predicate that decides whether a turbofish method call is a native typed call or an
+    /// ordinary (erased) generic-method instantiation.
+    pub fn find_typed_method(&self, type_name: &str, method: &str) -> Option<&'static ExtFn> {
+        self.resolve_type(type_name)?
+            .typed_methods
+            .iter()
+            .find(|m| m.name == method)
+    }
+
+    /// Route a **call-site-typed** method call to its type's typed dispatch (http arc H8).
+    pub fn dispatch_typed_method(
+        &self,
+        recv: &mut dyn crate::ExternValue,
+        method: &str,
+        host: &mut dyn Host,
+        args: &[NativeValue],
+        recipe: &TypeRecipe,
+    ) -> Result<NativeOut, StdError> {
+        let identity = recv.type_identity();
+        let Some(ext) = self.find_type_qualified(identity) else {
+            return Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("no registered type `{identity}`"),
+            });
+        };
+        let Some(dispatch) = ext.typed_dispatch else {
+            return Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("type `{identity}` has no call-site-typed method `{method}`"),
+            });
+        };
+        let result = dispatch(recv, method, host, args, recipe);
+        #[cfg(debug_assertions)]
+        if let Ok(out) = &result {
+            self.debug_verify_out(identity, method, out);
+        }
+        result
     }
 
     /// Route a **higher-order** method call to its type's ctx dispatch (higher-order-abi H4).
@@ -2031,7 +2102,28 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     unit.name()
                 ));
             }
-            for m in t.methods.iter().chain(t.ctx_methods) {
+            // The call-site-typed table mirrors the module side's rules (http arc H8): a dispatch
+            // is required, and every entry must name its result through the turbofish — a
+            // `Concrete` return would make the `::<T>` meaningless.
+            if !t.typed_methods.is_empty() && t.typed_dispatch.is_none() {
+                return Err(format!(
+                    "type `{}` (unit `{}`) declares typed_methods but no typed_dispatch",
+                    t.name,
+                    unit.name()
+                ));
+            }
+            for m in t.typed_methods {
+                if !matches!(m.ret, RetTy::TypeArg(_)) {
+                    return Err(format!(
+                        "call-site-typed method `{}` of type `{}` (unit `{}`) must declare a \
+                         `RetTy::TypeArg` return (its result is named by the turbofish `::<T>`)",
+                        m.name,
+                        t.name,
+                        unit.name()
+                    ));
+                }
+            }
+            for m in t.methods.iter().chain(t.ctx_methods).chain(t.typed_methods) {
                 validate_optional_tail(m, &format!("type `{}`", t.name), unit.name())?;
             }
         }

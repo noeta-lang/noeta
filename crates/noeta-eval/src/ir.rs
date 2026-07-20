@@ -1811,6 +1811,82 @@ impl Interpreter {
                     Err(error) => Err(self.std_dispatch_error(error, *span)),
                 }
             }
+            noeta_ir::Rvalue::TypedMethodCall {
+                recv,
+                method,
+                args,
+                recipe,
+                dynamic,
+                span,
+            } => {
+                // The extern-METHOD twin of `TypedModuleCall` above (http arc H8), step for step —
+                // the only differences are that the receiver's own runtime identity selects the
+                // type (no module name) and the dispatch takes the receiver. Mirrors the VM.
+                let recv_val = self.eval_ir_atom(recv, frame)?;
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_ir_atom(a, frame))
+                    .collect::<Result<_, _>>()?;
+                let recipe = match dynamic {
+                    Some(slot) => {
+                        let idx = self.eval_ir_atom(slot, frame)?;
+                        let Value::Int(i) = idx else {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "corrupt hidden type-argument slot".to_string(),
+                            ));
+                        };
+                        self.type_args
+                            .get(i as usize)
+                            .and_then(|e| e.recipe.clone())
+                    }
+                    None => recipe.clone(),
+                };
+                let Some(recipe) = recipe else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`{method}::<T>(...)` has no resolved result type"),
+                    ));
+                };
+                let Value::Extern(cell) = &recv_val else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`{method}::<T>(...)` needs a native receiver"),
+                    ));
+                };
+                let identity = cell.borrow().type_identity();
+                let deep = self
+                    .reg()
+                    .find_type_qualified(identity)
+                    .is_some_and(|t| t.deep_marshal);
+                let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
+                    arg_vals.iter().map(crate::value_to_native_deep).collect()
+                } else {
+                    arg_vals.iter().map(crate::marshal_native_arg).collect()
+                };
+                let out = self.reg().dispatch_typed_method(
+                    &mut **cell.borrow_mut(),
+                    method,
+                    &mut *self.host,
+                    &nargs,
+                    &recipe,
+                );
+                match out {
+                    Ok(out) => {
+                        let mut path = String::new();
+                        match self.materialize_recipe(out, &mut path, *span)? {
+                            MatOut::Value(v) => Ok(v),
+                            MatOut::Rejected(e) => {
+                                Err(self.std_dispatch_error(e.into_std_error(), *span))
+                            }
+                        }
+                    }
+                    Err(error) => Err(self.std_dispatch_error(error, *span)),
+                }
+            }
             noeta_ir::Rvalue::DecodeTyped { name, text, span } => {
                 // The router-facing runtime decode (L2.2 DI). Fully recoverable — an unknown type
                 // name, a non-string operand, or a malformed body all become `Result.Err` wrapping

@@ -615,6 +615,13 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             args.iter().for_each(&mut *f);
             dynamic.iter().for_each(&mut *f);
         }
+        Rvalue::TypedMethodCall {
+            recv, args, dynamic, ..
+        } => {
+            f(recv);
+            args.iter().for_each(&mut *f);
+            dynamic.iter().for_each(&mut *f);
+        }
         Rvalue::AttributesOf { dynamic, .. } => dynamic.iter().for_each(&mut *f),
         Rvalue::Closure { .. }
         | Rvalue::RolesOf { .. }

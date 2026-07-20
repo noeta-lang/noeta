@@ -275,6 +275,32 @@ fn build_typed_dispatch(func: &str, host: &mut dyn Host, args: &[NativeValue], r
 
 The dispatch returns a `NativeOut` tree **already carrying its declared wrapper** — `NativeOut::Ok`/`Err` for a `Result` shape, `NativeOut::Some`/`None` for `Option`, a plain value tree for `Plain` (a `Plain` door signals an unrecoverable failure with `Err(StdError)`, a runtime abort; a recoverable door never uses the `Err` channel, returning its `Err` arm *inside* the `NativeOut`). The backend materializes that one tree with no per-function wrapping logic — the reference interpreter through its real registered type, the VM through a fresh same-name shape (method dispatch is name-keyed) — so the two agree by construction. `json.parse::<T>`/`try_parse::<T>` are registered exactly this way; nothing about them is special-cased in the checker or either backend.
 
+### Call-site-typed **methods**
+
+An extern *type* gets the same surface through `ExtType::typed_methods` / `ExtType::typed_dispatch` — `resp.json::<User>()`. The rules are the module ones verbatim: a separate name space (a name may appear in both `methods` and `typed_methods`), a required `RetTy::TypeArg` return, and the same recipe contract. The dispatch just also takes the receiver:
+
+```rust
+fn response_typed_dispatch(recv: &mut dyn ExternValue, method: &str, host: &mut dyn Host,
+                           args: &[NativeValue], recipe: &TypeRecipe) -> Result<NativeOut, StdError>
+```
+
+```rust
+const RESPONSE_TYPED_METHODS: &[ExtFn] = &[ExtFn {
+    name: "json",
+    params: &[],
+    ret: RetTy::TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
+}];
+
+ExtType {
+    name: "Response",
+    typed_methods: RESPONSE_TYPED_METHODS,
+    typed_dispatch: Some(response_typed_dispatch),
+    ..ExtType::DEFAULTS
+}
+```
+
+One subtlety worth knowing if you are debugging this path: a turbofish method call reaches the checker as **either** `Expr::TypedModuleCall` (bare-identifier receiver with one type argument — `r.json::<T>()`) or `Expr::TypedMethodCall` (anything else — `get(u)?.json::<T>()`). The split is purely syntactic and predates this feature; both spellings mean the same thing and both lower to `Op::TypedMethodCall`. What distinguishes a native typed call from an ordinary **erased** generic-method instantiation is not the syntax but whether the checker found the name in the receiver type's `typed_methods` table and recorded a recipe for that span.
+
 ## Status
 
 - **Shipped (Phases A + B):** the registry and neutral marshalling seam; `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` all migrated onto it; the old `NativeModule` enum deleted; `json.parse::<T>` working end to end.

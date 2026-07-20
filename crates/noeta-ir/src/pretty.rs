@@ -418,6 +418,12 @@ impl Printer<'_> {
                 let args: Vec<String> = args.iter().map(atom).collect();
                 format!("{module}.{func}::<T>({})", args.join(", "))
             }
+            Rvalue::TypedMethodCall {
+                recv, method, args, ..
+            } => {
+                let args: Vec<String> = args.iter().map(atom).collect();
+                format!("{}.{method}::<T>({})", atom(recv), args.join(", "))
+            }
             Rvalue::ModuleFn { module, func, .. } => format!("fn {module}.{func}"),
             Rvalue::NativeModule { module, .. } => format!("module {module}"),
         }
