@@ -187,22 +187,69 @@ enum Decorator {
     Attr(Attribute),
 }
 
-/// The optional suffix on a directive argument: a `.Variant` qualifier (`@role(Enum.Variant)`) or a
-/// `<Type, …>` generic-argument list (`@derive(Serialize<Json>)`). The two are syntactically
-/// exclusive, so one shared grammar parses every directive's arguments.
-enum DirectiveSuffix {
-    Dotted((String, Span)),
-    Generic(Vec<TypeRef>),
-    /// A `: value` named-argument suffix (`name: value`): the head is the parameter name, this
-    /// carries the identifier value. No directive consumes one today (`@packed` retired its
-    /// `layout: …` form for the `Layout` enum, which parses as `Dotted`); it is kept in the shared
-    /// grammar so a directive gaining a named argument later needs no grammar change, and so the
-    /// retired `@packed(layout: row)` still parses to a targeted migration diagnostic.
-    Named((String, Span)),
+/// The interior spans of a directive argument's value.
+///
+/// [`AttrArg`] carries one span for a whole argument, which is the right granularity for the AST
+/// but too coarse for a validator: `@packed(Layout.Bogus)` should underline `Bogus`, not the whole
+/// argument. These are retained alongside the value while the argument is being validated and
+/// dropped before it reaches the AST, so precision costs nothing downstream.
+#[derive(Debug, Clone, Copy)]
+enum ValueSpans {
+    /// A bare name (`Comparable`) or a generic application (`Serialize<Json>`) — the name's span.
+    Name(Span),
+    /// A qualified `Enum.Variant` (`@role(Kind.Service)`, `@packed(Layout.Row)`) — the qualifier
+    /// and the variant separately, so either half can be blamed on its own.
+    Qualified { head: Span, variant: Span },
+    /// A literal (`"spec.yaml"`, `1000`, a list): no interior identifier to point at.
+    Literal(Span),
 }
 
-/// One argument of a `@name(...)` directive: a head identifier plus an optional [`DirectiveSuffix`].
-type DirectiveArg = ((String, Span), Option<DirectiveSuffix>);
+impl ValueSpans {
+    /// The span to blame for a fault with the argument's *head* — an unrecognized argument name, a
+    /// qualifier where none belongs.
+    fn head(self) -> Span {
+        match self {
+            ValueSpans::Name(span) | ValueSpans::Literal(span) => span,
+            ValueSpans::Qualified { head, .. } => head,
+        }
+    }
+}
+
+/// One argument of a `@name(...)` directive or a `#[Name(...)]` attribute, as parsed.
+///
+/// This is the single argument form. There used to be two: an identifiers-only grammar for the
+/// `@`-directives (which alone could write `Serialize<Json>`) and a literal grammar for `#[...]`
+/// (which alone could write `"spec.yaml"`). Neither could express the other's one capability, so
+/// every directive family carried its own bespoke interpreter over its own argument type.
+///
+/// Lowered to [`AttrArg`] by [`commit_attr_args`], which drops the validation-only fields.
+struct DirectiveArg {
+    /// `Some((name, span))` for a named argument (`via: cents`, `iterations: 1000`).
+    name: Option<(String, Span)>,
+    value: AttrValue,
+    spans: ValueSpans,
+    span: Span,
+    /// The diagnostic this argument's value fold produced, if any — deferred rather than pushed so
+    /// a speculative parse that backtracks leaves no trace. See [`Ctx::diags`].
+    deferred: Option<Diagnostic>,
+}
+
+/// The interior spans of an expression used as an argument value.
+fn value_spans(expr: &Expr) -> ValueSpans {
+    match expr {
+        Expr::Ident { span, .. } => ValueSpans::Name(*span),
+        // `Enum.Variant` reaches the fold as a member access.
+        Expr::Member {
+            receiver,
+            name_span,
+            ..
+        } => ValueSpans::Qualified {
+            head: receiver.span(),
+            variant: *name_span,
+        },
+        other => ValueSpans::Literal(other.span()),
+    }
+}
 
 /// One `.`-led segment of a `use` path: either another path identifier (with its span) or
 /// the trailing `{ a, b }` group (which, when present, is always last).
@@ -216,24 +263,24 @@ enum UseTail {
 /// manifest-build time without running user code, so only literals and compositions of literals are
 /// accepted — never an operator, a general call, a closure, or a name read of runtime state. Sharing
 /// the expression grammar (rather than a parallel literal parser) keeps the two in lockstep.
-/// One attribute/directive argument as parsed, paired with the diagnostic its value fold produced.
+/// Lower a committed form's arguments to their AST shape, pushing each deferred diagnostic.
 ///
-/// The argument grammar runs inside speculative alternatives, so a diagnostic pushed at fold time
-/// belongs to a parse that may never be taken. Carrying it alongside the value lets the *committing*
-/// form decide: [`commit_attr_args`] pushes them, and an abandoned alternative simply drops them.
-type PendingAttrArg = (AttrArg, Option<Diagnostic>);
-
-/// Take the arguments of a form that has committed, pushing each argument's deferred diagnostic.
+/// This is where a [`DirectiveArg`]'s validation-only fields — the interior spans and the deferred
+/// diagnostic — are dropped, leaving the [`AttrArg`] the AST stores.
 ///
 /// Call this exactly once per successfully-parsed argument list. Calling it from a form that then
-/// backtracks reintroduces the double-reporting this indirection exists to prevent.
-fn commit_attr_args(ctx: &Ctx, args: Vec<PendingAttrArg>) -> Vec<AttrArg> {
+/// backtracks reintroduces the double-reporting the deferral exists to prevent.
+fn commit_attr_args(ctx: &Ctx, args: Vec<DirectiveArg>) -> Vec<AttrArg> {
     let mut out = Vec::with_capacity(args.len());
-    for (arg, deferred) in args {
-        if let Some(diag) = deferred {
+    for arg in args {
+        if let Some(diag) = arg.deferred {
             ctx.diags.borrow_mut().push(diag);
         }
-        out.push(arg);
+        out.push(AttrArg {
+            name: arg.name.map(|(n, _)| n),
+            value: arg.value,
+            span: arg.span,
+        });
     }
     out
 }
@@ -380,8 +427,6 @@ fn set_sugar_items(callee: &Expr) -> Option<&[Expr]> {
     }
 }
 
-/// Project a directive's arguments onto their head identifiers (dropping any suffix), for the
-/// directives that take plain names (`@attribute`).
 /// Parse `@packed`'s optional layout argument (P-SIMD): the [`reflect::LAYOUT_ENUM`] vocabulary,
 /// `@packed(Layout.Row)` / `@packed(Layout.Column)` — the same `Enum.Variant` shape `@role` takes.
 /// Bare `@packed` (no args) is [`PackedLayout::Row`]. Any malformed argument — unknown name or
@@ -394,49 +439,53 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
                 .with_help("`@packed` takes at most `Layout.Row` or `Layout.Column`"),
         );
     };
-    let Some(((head, head_span), suffix)) = args.first() else {
+    let Some(arg) = args.first() else {
         return PackedLayout::Row; // bare `@packed`
     };
     if let Some(extra) = args.get(1) {
         reject(
-            extra.0.1,
+            extra.span,
             "`@packed` takes a single `Layout` argument".to_string(),
         );
     }
     // The retired pre-enum spelling gets a targeted migration message, naming the exact
-    // replacement when the old value identifies one.
-    if head.as_str() == "layout" {
-        let replacement = match suffix {
-            Some(DirectiveSuffix::Named((value, _))) if value == "row" => "`@packed(Layout.Row)`",
-            Some(DirectiveSuffix::Named((value, _))) if value == "column" => {
-                "`@packed(Layout.Column)`"
-            }
-            _ => "`@packed(Layout.Row)` or `@packed(Layout.Column)`",
-        };
+    // replacement when the old value identifies one. It now arrives as a *named* argument
+    // (`layout: row`) rather than a head with a suffix.
+    if let Some((key, key_span)) = &arg.name {
+        if key == "layout" {
+            let replacement = match &arg.value {
+                AttrValue::TypeRef { name, .. } if name == "row" => "`@packed(Layout.Row)`",
+                AttrValue::TypeRef { name, .. } if name == "column" => "`@packed(Layout.Column)`",
+                _ => "`@packed(Layout.Row)` or `@packed(Layout.Column)`",
+            };
+            reject(
+                *key_span,
+                format!(
+                    "the `layout: row|column` form was replaced by the `Layout` enum — write {replacement}"
+                ),
+            );
+            return PackedLayout::Row;
+        }
         reject(
-            *head_span,
+            *key_span,
             format!(
-                "the `layout: row|column` form was replaced by the `Layout` enum — write {replacement}"
+                "unknown `@packed` argument `{key}`; the only argument is `Layout.Row|Layout.Column`"
             ),
         );
         return PackedLayout::Row;
     }
-    if head.as_str() != noeta_ast::reflect::LAYOUT_ENUM {
-        reject(
-            *head_span,
-            format!(
-                "unknown `@packed` argument `{head}`; the only argument is `Layout.Row|Layout.Column`"
-            ),
-        );
-        return PackedLayout::Row;
-    }
-    match suffix {
-        Some(DirectiveSuffix::Dotted((variant, variant_span))) => match variant.as_str() {
+    match &arg.value {
+        AttrValue::Enum {
+            enum_name, variant, ..
+        } if enum_name == noeta_ast::reflect::LAYOUT_ENUM => match variant.as_str() {
             "Row" => PackedLayout::Row,
             "Column" => PackedLayout::Column,
             other => {
                 reject(
-                    *variant_span,
+                    match arg.spans {
+                        ValueSpans::Qualified { variant, .. } => variant,
+                        other_span => other_span.head(),
+                    },
                     format!(
                         "unknown layout `Layout.{other}`; the variants are {}",
                         noeta_ast::reflect::LAYOUT_VARIANTS
@@ -449,9 +498,36 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
                 PackedLayout::Row
             }
         },
+        // A qualified value naming some other enum.
+        AttrValue::Enum { enum_name, .. } => {
+            reject(
+                arg.spans.head(),
+                format!(
+                    "unknown `@packed` argument `{enum_name}`; the only argument is `Layout.Row|Layout.Column`"
+                ),
+            );
+            PackedLayout::Row
+        }
+        // A bare name: either `Layout` with no variant, or something else entirely.
+        AttrValue::TypeRef { name, .. } if name == noeta_ast::reflect::LAYOUT_ENUM => {
+            reject(
+                arg.spans.head(),
+                "`@packed(Layout)` needs a variant — `Layout.Row` or `Layout.Column`".to_string(),
+            );
+            PackedLayout::Row
+        }
+        AttrValue::TypeRef { name, .. } => {
+            reject(
+                arg.spans.head(),
+                format!(
+                    "unknown `@packed` argument `{name}`; the only argument is `Layout.Row|Layout.Column`"
+                ),
+            );
+            PackedLayout::Row
+        }
         _ => {
             reject(
-                *head_span,
+                arg.spans.head(),
                 "`@packed(Layout)` needs a variant — `Layout.Row` or `Layout.Column`".to_string(),
             );
             PackedLayout::Row
@@ -526,7 +602,21 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
 }
 
 fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
-    args.into_iter().map(|(head, _suffix)| head).collect()
+    args.into_iter()
+        .map(|arg| {
+            let name = match &arg.value {
+                AttrValue::TypeRef { name, .. } => name.clone(),
+                // A qualified or literal argument is not a plain name; the checker rejects it by
+                // name lookup (`E0030`). Rendering it keeps the diagnostic's text faithful to what
+                // was written rather than substituting a placeholder.
+                AttrValue::Enum {
+                    enum_name, variant, ..
+                } => format!("{enum_name}.{variant}"),
+                other => format!("{other:?}"),
+            };
+            (name, arg.spans.head())
+        })
+        .collect()
 }
 
 /// Project a directive's arguments onto [`DeriveSpec`]s — the trait name plus its generic type
@@ -537,24 +627,39 @@ fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
 /// binding — `@derive(Ordered, value: amount)`. A named argument with no preceding trait is E0037.
 fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec> {
     let mut specs: Vec<DeriveSpec> = Vec::new();
-    for ((name, span), suffix) in args {
-        match suffix {
-            Some(DirectiveSuffix::Named((target, target_span))) => {
+    for arg in args {
+        let span = arg.span;
+        match arg.name {
+            // A **named** argument configures the preceding trait: `via: field` is whole-trait
+            // delegation, anything else is a required-member binding.
+            Some((key, key_span)) => {
+                // The value of a `via:`/`member:` binding is a field or method name.
+                let (target, target_span) = match (&arg.value, arg.spans) {
+                    (AttrValue::TypeRef { name, .. }, spans) => (name.clone(), spans.head()),
+                    _ => {
+                        ctx.diags.borrow_mut().push(Diagnostic::error(
+                            DiagnosticCode::InvalidDirectiveArgument,
+                            arg.spans.head(),
+                            format!("`{key}:` needs a field or method name"),
+                        ));
+                        continue;
+                    }
+                };
                 let Some(spec) = specs.last_mut() else {
                     ctx.diags.borrow_mut().push(
                         Diagnostic::error(
                             DiagnosticCode::InvalidDirectiveArgument,
                             span,
-                            format!("`{name}: {target}` must follow the trait it configures"),
+                            format!("`{key}: {target}` must follow the trait it configures"),
                         )
                         .with_help(format!(
-                            "write `@derive(Trait, {name}: {target})` — a named argument binds to \
+                            "write `@derive(Trait, {key}: {target})` — a named argument binds to \
                              the trait before it"
                         )),
                     );
                     continue;
                 };
-                if name == "via" {
+                if key == "via" {
                     if spec.via.is_some() {
                         ctx.diags.borrow_mut().push(Diagnostic::error(
                             DiagnosticCode::InvalidDirectiveArgument,
@@ -566,52 +671,66 @@ fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec>
                     spec.via = Some((target, target_span));
                 } else {
                     spec.bindings.push(noeta_ast::MemberBinding {
-                        member: name,
+                        member: key,
                         target,
-                        span: span.merge(target_span),
+                        span: key_span.merge(target_span),
                     });
                 }
             }
-            suffix => specs.push(DeriveSpec {
-                name,
-                args: match suffix {
-                    Some(DirectiveSuffix::Generic(type_args)) => type_args,
-                    _ => Vec::new(),
-                },
-                bindings: Vec::new(),
-                via: None,
-                span,
-            }),
+            // A positional argument names the trait, optionally with generic arguments.
+            None => match arg.value {
+                AttrValue::TypeRef { name, args } => specs.push(DeriveSpec {
+                    name,
+                    args,
+                    bindings: Vec::new(),
+                    via: None,
+                    span: arg.spans.head(),
+                }),
+                _ => {
+                    ctx.diags.borrow_mut().push(
+                        Diagnostic::error(
+                            DiagnosticCode::InvalidDirectiveArgument,
+                            arg.spans.head(),
+                            "`@derive(...)` takes trait names".to_string(),
+                        )
+                        .with_help("write `@derive(Comparable)` or `@derive(Serialize<Json>)`"),
+                    );
+                }
+            },
         }
     }
     specs
 }
 
 /// Project one directive argument onto a [`RoleTag`]. A qualified `Enum.Variant` fills both names; a
-/// bare `Variant` (no suffix, or a stray generic suffix) leaves `enum_name` empty so the checker can
-/// require the qualifier (`E0031`).
+/// bare `Variant` leaves `enum_name` empty so the checker can require the qualifier (`E0031`).
 fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
-    let ((head, head_span), suffix) = arg;
-    match suffix {
-        Some(DirectiveSuffix::Dotted((variant, variant_span))) => RoleTag {
-            enum_name: head,
-            variant,
-            span: head_span.merge(variant_span),
+    match (&arg.value, arg.spans) {
+        (
+            AttrValue::Enum {
+                enum_name, variant, ..
+            },
+            ValueSpans::Qualified { head, variant: v },
+        ) => RoleTag {
+            enum_name: enum_name.clone(),
+            variant: variant.clone(),
+            span: head.merge(v),
         },
-        _ => RoleTag {
+        (AttrValue::TypeRef { name, .. }, spans) => RoleTag {
             enum_name: String::new(),
-            variant: head,
-            span: head_span,
+            variant: name.clone(),
+            span: spans.head(),
+        },
+        // Anything else (a literal, a qualified value whose spans did not survive) still produces a
+        // tag so the checker reports it as an unknown role rather than the parser dropping it.
+        (other, spans) => RoleTag {
+            enum_name: String::new(),
+            variant: format!("{other:?}"),
+            span: spans.head(),
         },
     }
 }
 
-/// Attach leading `@derive(...)` directives and `#[...]` data attributes to the type declaration
-/// they precede. Both are only valid on class/struct/enum declarations; the grammar only ever
-/// pairs them with one of those.
-// One parameter per decorator channel — a bundling helper (mirrors the formatter's
-// `decl_directives`); a struct would only relocate the same fields.
-#[allow(clippy::too_many_arguments)]
 /// Attach the parsed decorators to the declaration they precede.
 ///
 /// The parser's job here is **recording, not judging**: every directive written in source is stored
@@ -2743,19 +2862,29 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::Lt), just(T::Gt)),
             )
-            .map(|((name, _), args)| (noeta_ast::AttrValue::TypeRef { name, args }, None));
-        let attr_value = generic_app.or(expr.clone().map(|e| match expr_to_attr_value(&e) {
-            Ok(value) => (value, None),
-            Err((message, span)) => (
-                // A non-literal never reaches a runnable program; a defensive placeholder keeps
-                // parsing going so every offending argument is reported in one pass.
-                noeta_ast::AttrValue::Bool(false),
-                Some(Diagnostic::error(
-                    DiagnosticCode::UnexpectedToken,
-                    span,
-                    message,
-                )),
-            ),
+            .map(|((name, name_span), args)| {
+                (
+                    noeta_ast::AttrValue::TypeRef { name, args },
+                    ValueSpans::Name(name_span),
+                    None,
+                )
+            });
+        let attr_value = generic_app.or(expr.clone().map(|e| {
+            let spans = value_spans(&e);
+            match expr_to_attr_value(&e) {
+                Ok(value) => (value, spans, None),
+                Err((message, span)) => (
+                    // A non-literal never reaches a runnable program; a defensive placeholder keeps
+                    // parsing going so every offending argument is reported in one pass.
+                    noeta_ast::AttrValue::Bool(false),
+                    spans,
+                    Some(Diagnostic::error(
+                        DiagnosticCode::UnexpectedToken,
+                        span,
+                        message,
+                    )),
+                ),
+            }
         }));
         // An attribute argument: optionally named (`ttl: 60`), then a literal value. Paired with the
         // deferred diagnostic its value fold produced (see above).
@@ -2764,15 +2893,12 @@ where
             .then_ignore(just(T::Colon))
             .or_not()
             .then(attr_value.clone())
-            .map_with(move |(name, (value, deferred)), e| {
-                (
-                    noeta_ast::AttrArg {
-                        name: name.map(|(n, _)| n),
-                        value,
-                        span: ctx.to_span(e.span()),
-                    },
-                    deferred,
-                )
+            .map_with(move |(name, (value, spans, deferred)), e| DirectiveArg {
+                name,
+                value,
+                spans,
+                span: ctx.to_span(e.span()),
+                deferred,
             });
         // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
         // the bare [`Attribute`]. A struct instance attached as metadata, consumed via the manifest;
@@ -3683,31 +3809,20 @@ where
         // `Enum.Variant` and a derive's bare `Trait` share one grammar. The argument list is optional
         // so a bare `@attribute`/`@semantic` parses; any other `@name` is a diagnostic where
         // decorators are partitioned.
-        // A directive argument: a head identifier, then an optional suffix — `.Variant` (a role's
-        // qualifier) or `<Type, …>` (a derive's generic arguments, parsed with the full type grammar
-        // so `Serialize<Json>`/`Serialize<List<int>>` work). The two suffixes are syntactically
-        // exclusive, so one grammar serves every directive.
-        let directive_suffix = choice((
-            just(T::Dot)
-                .ignore_then(id.clone())
-                .map(DirectiveSuffix::Dotted),
-            // A `: value` named argument; unconsumed today (see `DirectiveSuffix::Named`).
-            just(T::Colon)
-                .ignore_then(id.clone())
-                .map(DirectiveSuffix::Named),
-            type_parser(ctx)
-                .separated_by(just(T::Comma))
-                .allow_trailing()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .delimited_by(just(T::Lt), just(T::Gt))
-                .map(DirectiveSuffix::Generic),
-        ));
-        let directive_arg = id.clone().then(directive_suffix.or_not());
+        // A directive argument is now the SAME grammar a `#[...]` attribute argument uses
+        // (`attr_arg`): a name, a qualified `Enum.Variant`, a generic application `Serialize<Json>`,
+        // a literal, or any of those preceded by `key:`. There is no longer a separate
+        // identifiers-only directive grammar with a `.Variant`/`<Type, …>`/`: value` suffix — the
+        // three suffix shapes are just the value forms the one grammar already had, or (for
+        // generics) the form it gained.
+        //
+        // This is what lets a directive take a literal: `@openapi("petstore.yaml")` parses because
+        // `@derive` and `#[Route("/x")]` read their arguments through the same combinator.
         let derive_directive = just(T::At)
             .ignore_then(id.clone())
             .then(
-                directive_arg
+                attr_arg
+                    .clone()
                     .separated_by(just(T::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -3772,7 +3887,7 @@ where
                                     ctx.diags.borrow_mut().push(
                                         Diagnostic::error(
                                             DiagnosticCode::InvalidDirectiveArgument,
-                                            arg.0.1,
+                                            arg.span,
                                             "`@semantic` takes no arguments".to_string(),
                                         )
                                         .with_help(
@@ -3802,7 +3917,7 @@ where
                                     ctx.diags.borrow_mut().push(
                                         Diagnostic::error(
                                             DiagnosticCode::InvalidDirectiveArgument,
-                                            arg.0.1,
+                                            arg.span,
                                             "`@validated` takes no arguments".to_string(),
                                         )
                                         .with_help(
@@ -4107,6 +4222,46 @@ mod tests {
         // expression must remain comparison.
         let parsed = parse_str("fn f(a: int, b: int): bool {\n  return a < b\n}\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    }
+
+    #[test]
+    fn a_directive_argument_may_be_a_literal() {
+        // The point of the unification. `@`-directives previously parsed through an
+        // identifiers-only grammar, so a string argument was a *syntax* error. Sharing one
+        // combinator with `#[...]` makes `@openapi("petstore.yaml")` parse; whether the name is
+        // known is then a separate, later question (the directive set is still closed).
+        let parsed = parse_str("@openapi(\"petstore.yaml\")\nstruct Client { base: string }\n");
+        let codes: Vec<_> = parsed.diagnostics.iter().map(|d| d.code).collect();
+        assert!(
+            !codes.is_empty(),
+            "an unregistered directive name is still rejected"
+        );
+        for d in &parsed.diagnostics {
+            assert!(
+                d.message.contains("unknown directive"),
+                "the only complaint should be the NAME, not the argument — got: {}",
+                d.message
+            );
+        }
+    }
+
+    #[test]
+    fn directive_diagnostics_still_point_at_the_offending_part() {
+        // `AttrArg` carries one span for a whole argument, which would have made this underline
+        // `Layout.Bogus` entire. The parser keeps interior spans (`ValueSpans`) alongside the value
+        // while validating and drops them before the AST, so precision is unchanged.
+        let src = "@packed(Layout.Bogus)\nstruct P { x: f32 }\n";
+        let parsed = parse_str(src);
+        let d = parsed
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("unknown layout"))
+            .expect("expected an unknown-layout diagnostic");
+        assert_eq!(
+            &src[d.span.start as usize..d.span.end as usize],
+            "Bogus",
+            "should underline the variant alone, not the whole argument"
+        );
     }
 
     fn parse_str(text: &str) -> Parsed {
