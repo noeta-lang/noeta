@@ -233,12 +233,17 @@ pub fn build(program: &Program) -> ReflectionInfo {
     for stmt in &program.stmts {
         match stmt {
             Stmt::Struct(decl) => {
-                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
+                push_attrs(
+                    &mut manifest,
+                    &decl.name,
+                    decl.name_span,
+                    &decl.decorators.attrs,
+                );
                 push_field_attrs(&mut manifest, &decl.name, &decl.fields);
                 // A role tag rides on the attribute struct; record each (validated) `Enum.Variant`
                 // so every declaration the attribute annotates inherits it. A malformed `@role`
                 // never reaches a runnable program (the checker rejects it).
-                if let Some(roles) = decl.role.as_ref() {
+                if let Some(roles) = decl.decorators.role.as_ref() {
                     for tag in roles {
                         role_of.push((
                             decl.name.clone(),
@@ -261,7 +266,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 });
             }
             Stmt::Class(decl) => {
-                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
+                push_attrs(
+                    &mut manifest,
+                    &decl.name,
+                    decl.name_span,
+                    &decl.decorators.attrs,
+                );
                 push_field_attrs(&mut manifest, &decl.name, &decl.fields);
                 // A method's attributes are keyed by its qualified `Class.method` name, so a
                 // `#[...]` on a method surfaces distinctly from the same name on another class.
@@ -284,6 +294,9 @@ pub fn build(program: &Program) -> ReflectionInfo {
             // A top-level function carries attributes too (keyed by its bare name); it is not a
             // declared *type*, so it contributes to the manifest only, not the type registry.
             Stmt::Fn(decl) => {
+                // `FnDecl` keeps its own `attrs` — only the four *type* declaration kinds moved
+                // their decorators into `Decorators`. A `fn` carries `#[...]` attributes and a
+                // `@tier(...)` declaration, neither of which is a type decorator.
                 push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
                 params.push(ParamRecord {
                     target: decl.name.clone(),
@@ -297,7 +310,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
             // `impl` methods, scanned via the class/struct arms). A direct `@role`/`@derive`/… on a
             // trait is a checker error, so a runnable program never carries one here.
             Stmt::Trait(decl) => {
-                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
+                push_attrs(
+                    &mut manifest,
+                    &decl.name,
+                    decl.name_span,
+                    &decl.decorators.attrs,
+                );
                 // A trait's abstract method signatures carry declared parameters too, keyed by the
                 // `Trait.method` convention — surfaced via `params_of` like a concrete method's.
                 for method in &decl.methods {
@@ -308,7 +326,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 }
             }
             Stmt::Enum(decl) => {
-                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
+                push_attrs(
+                    &mut manifest,
+                    &decl.name,
+                    decl.name_span,
+                    &decl.decorators.attrs,
+                );
                 // A variant's attributes are keyed by its qualified `Enum.Variant` name, mirroring
                 // the `Type.field`/`Type.method` convention.
                 for variant in &decl.variants {

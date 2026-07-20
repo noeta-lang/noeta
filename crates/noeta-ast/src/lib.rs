@@ -209,38 +209,63 @@ pub struct StructDecl {
     /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in
     /// `methods`; these entries let the checker validate each trait and its required signatures.
     pub impls: Vec<ImplBlock>,
+    /// Every `@`-decorator and `#[...]` attribute written on this declaration. See [`Decorators`].
+    pub decorators: Decorators,
+    pub span: Span,
+}
+
+/// Every built-in decorator a declaration can carry, in one place.
+///
+/// Each of [`StructDecl`], [`ClassDecl`], [`EnumDecl`] and [`TraitDecl`] holds exactly one of these,
+/// so **every declaration kind has a slot for every directive** — including the ones that are errors
+/// where they sit. That uniformity is the point, and it is the rule the individual fields already
+/// stated one at a time: a misplaced `@attribute` on a class is "kept so the checker can point at the
+/// mistake rather than silently dropping it".
+///
+/// Before this struct existed, that rule held only where someone had remembered to add the field.
+/// `EnumDecl` had no `attribute`/`role`/`validated` and `TraitDecl` had no `validated`, so the parser
+/// discarded those directives outright — no AST record, therefore no diagnostic, therefore a program
+/// whose `@validated` an enum author wrote and the compiler never saw. Adding a directive is now one
+/// field here rather than a decision repeated four times and forgotten twice.
+///
+/// Which placements are *legal* is not encoded here — it is the checker's call (`E0031`/`E0038`/
+/// `E0053`/`E0060`). This type's only job is that nothing written in source goes unrecorded.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Decorators {
     /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
-    /// across all directive lines. Validated by the checker; drives compiler codegen.
+    /// across all directive lines. Validated by the checker; drives compiler codegen. On a trait
+    /// this is always a checker error (a trait is not a data type), carried to report at the site.
     pub derives: Vec<DeriveSpec>,
-    /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; collected
-    /// into the compiler-built manifest, and gated by the checker (each must name a struct marked
+    /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; collected into
+    /// the compiler-built manifest, and gated by the checker (each must name a struct marked
     /// `@attribute`, and its arguments must construct it).
     pub attrs: Vec<Attribute>,
-    /// The `@attribute` opt-in directive (P2.5): `None` ⇒ an ordinary struct; `Some(kinds)` ⇒ this
-    /// struct is usable as an attribute. The `kinds` are the placement restriction from
+    /// The `@attribute` opt-in directive (P2.5): `None` ⇒ an ordinary declaration; `Some(kinds)` ⇒
+    /// usable as a `#[Name(…)]` attribute. The `kinds` are the placement restriction from
     /// `@attribute(Method, Function, …)` — empty (bare `@attribute`) ⇒ attaches anywhere. Attributes
-    /// are **structs only**; the same directive on a class/enum is a checker error.
+    /// are **structs only**; the same directive on a class/enum/trait is a checker error.
     pub attribute: Option<Vec<(String, Span)>>,
     /// The `@role(Enum.Variant)` semantic-role tags: `None` ⇒ no role; `Some(tags)` ⇒ this attribute
     /// confers each named architectural role on every declaration it annotates. Multiple roles are
-    /// allowed (a thing may be both an `EntryPoint` and a `TrustBoundary`). The checker validates each
-    /// (a fieldless variant of a `@semantic` enum, on a struct that is also `@attribute`) — `E0031`.
+    /// allowed (a thing may be both an `EntryPoint` and a `TrustBoundary`). The checker validates
+    /// each (a fieldless variant of a `@semantic` enum, on a struct that is also `@attribute`) —
+    /// `E0031`. On a class/enum this is a misplacement, carried so the checker can report it.
     pub role: Option<Vec<RoleTag>>,
-    /// The `@semantic` directive (a misplacement here — it marks *enums* role-eligible). `Some(span)`
-    /// on a struct is always a checker error (`E0031`), carried so the checker can point at it.
+    /// The `@semantic` directive: `Some(span)` marks an **enum** role-eligible, so its fieldless
+    /// variants may be referenced by `@role(Enum.Variant)`. The built-in `Semantic` enum is
+    /// implicitly semantic. `Some` on a struct/class/trait is always a checker error (`E0031`),
+    /// carried so the checker can point at it.
     pub semantic: Option<Span>,
-    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
-    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
-    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
-    /// an ordinary declaration.
+    /// The `@packed` layout directive (P-PACK): `Some` marks a value `struct` for an unboxed,
+    /// contiguous flat layout. A misplacement on a class/enum/trait is a checker error (`E0038`); on
+    /// a struct, every field must be a primitive or another packed struct (also `E0038`).
     pub packed: Option<PackedDirective>,
     /// The `@validated` directive (validation arc): `Some(span)` marks this type so that literal
     /// construction (`T { ... }`, incl. a record-update spread) from OUTSIDE its own `impl`/methods
-    /// is a compile error (`E0060`), forcing construction through a validating constructor. `None`
-    /// for an ordinary declaration. Construction inside the type's own methods stays legal, and the
-    /// recipe doors are exempt (they auto-validate).
+    /// is a compile error (`E0060`), forcing construction through a validating constructor.
+    /// Construction inside the type's own methods stays legal, and the recipe doors are exempt (they
+    /// auto-validate). On an enum/trait it is a misplacement the checker reports.
     pub validated: Option<Span>,
-    pub span: Span,
 }
 
 /// The closed set of **built-in decorator directives** — the `@`-directives the language itself
@@ -478,7 +503,7 @@ pub fn derives_trait(derives: &[DeriveSpec], trait_name: &str) -> bool {
 /// tuple, union, function) — and `None` for a non-packed declaration. Used by both backends and
 /// the checker so all agree on which packed structs may key a `Map` / member a `Set`.
 pub fn packed_named_fields(decl: &StructDecl) -> Option<Vec<Option<String>>> {
-    decl.packed.as_ref()?;
+    decl.decorators.packed.as_ref()?;
     Some(
         decl.fields
             .iter()
@@ -583,20 +608,13 @@ pub struct TraitDecl {
     pub type_params: Vec<TypeParam>,
     /// The trait's method contract, in source order.
     pub methods: Vec<TraitMethod>,
-    /// Leading `#[...]` data attributes on the trait (L1 UT6) — reflected via `attributes_of`
-    /// keyed by the trait name, like a type's.
-    pub attrs: Vec<Attribute>,
-    /// `@role(Enum.Variant, …)` tags on the trait (UT6) — surfaced via `roles_of`.
-    pub role: Option<Vec<RoleTag>>,
-    /// A `@derive(...)` on a trait — always a checker error (a trait is not a data type); carried
-    /// so the error can be reported at the site.
-    pub derives: Vec<DeriveSpec>,
-    /// A misplaced `@attribute` directive on a trait (attributes are structs only); checker error.
-    pub attribute: Option<Vec<(String, Span)>>,
-    /// A misplaced `@semantic` directive on a trait (marks enums); checker error.
-    pub semantic: Option<Span>,
-    /// A misplaced `@packed` directive on a trait (marks structs); checker error.
-    pub packed: Option<PackedDirective>,
+    /// Every `@`-decorator and `#[...]` attribute written on this trait. See [`Decorators`].
+    ///
+    /// Most are misplacements the checker reports (`E0053`) — a trait is not a data type — but
+    /// `attrs` and `role` are meaningful (L1 UT6: reflected via `attributes_of`/`roles_of` keyed by
+    /// the trait name, like a type's). `validated` previously had no field here at all and was
+    /// therefore discarded by the parser without a diagnostic.
+    pub decorators: Decorators,
     pub span: Span,
 }
 
@@ -649,31 +667,8 @@ pub struct ClassDecl {
     /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in
     /// `methods`; these entries let the checker validate each trait and its required signatures.
     pub impls: Vec<ImplBlock>,
-    /// Leading `@derive(...)` codegen directives on the class (e.g. `@derive(Comparable)`),
-    /// flattened across all directive lines.
-    pub derives: Vec<DeriveSpec>,
-    /// Leading `#[...]` data attributes on the class.
-    pub attrs: Vec<Attribute>,
-    /// A misplaced `@attribute` directive (attributes are structs only); see
-    /// [`StructDecl::attribute`]. `Some` here is always a checker error — kept so the checker can
-    /// point at the mistake rather than silently dropping it.
-    pub attribute: Option<Vec<(String, Span)>>,
-    /// A misplaced `@role(...)` tag (attributes — and thus roles — are records only); see
-    /// [`StructDecl::role`]. `Some` here is always a checker error, kept so the checker can report it.
-    pub role: Option<Vec<RoleTag>>,
-    /// A misplaced `@semantic` directive (it marks enums; a class is never role-eligible); see
-    /// [`StructDecl::semantic`]. `Some` is always a checker error, kept so the checker can report it.
-    pub semantic: Option<Span>,
-    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
-    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
-    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
-    /// an ordinary declaration.
-    pub packed: Option<PackedDirective>,
-    /// The `@validated` directive (validation arc): `Some(span)` marks this class so that literal
-    /// construction (`T { ... }`, incl. a record-update spread) from OUTSIDE its own `impl`/methods
-    /// is a compile error (`E0060`), forcing construction through a validating constructor. `None`
-    /// for an ordinary declaration. See [`StructDecl::validated`].
-    pub validated: Option<Span>,
+    /// Every `@`-decorator and `#[...]` attribute written on this class. See [`Decorators`].
+    pub decorators: Decorators,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.
@@ -733,19 +728,12 @@ pub struct EnumDecl {
     /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in `methods`;
     /// these entries let the checker validate each trait and its required signatures.
     pub impls: Vec<ImplBlock>,
-    /// Leading `@derive(...)` codegen directives on the enum, flattened across all directive lines.
-    pub derives: Vec<DeriveSpec>,
-    /// Leading `#[...]` data attributes on the enum.
-    pub attrs: Vec<Attribute>,
-    /// The `@semantic` directive: `Some(span)` marks this enum **role-eligible**, so its fieldless
-    /// variants may be referenced by `@role(Enum.Variant)`. `None` for an ordinary enum. The built-in
-    /// `Semantic` enum is implicitly semantic.
-    pub semantic: Option<Span>,
-    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
-    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
-    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
-    /// an ordinary declaration.
-    pub packed: Option<PackedDirective>,
+    /// Every `@`-decorator and `#[...]` attribute written on this enum. See [`Decorators`].
+    ///
+    /// `attribute`, `role` and `validated` previously had no fields here, so the parser discarded
+    /// those directives on an enum with no diagnostic at all. They are now recorded (and reported
+    /// as misplacements) like every other declaration kind's.
+    pub decorators: Decorators,
     pub span: Span,
 }
 

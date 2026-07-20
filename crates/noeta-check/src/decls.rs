@@ -121,12 +121,12 @@ impl Checker {
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&r.fields, env);
-        self.check_derives(&r.name, &r.derives, &r.fields, &r.methods);
+        self.check_derives(&r.name, &r.decorators.derives, &r.fields, &r.methods);
         let standalone = self.standalone_for(&r.name);
         // A struct carries in-body `impl Trait { }` blocks and inherent methods (the unified body),
         // checked exactly as a class's — coherence over its impls, then each method body.
-        self.check_coherence(&r.derives, &r.impls, &standalone);
-        self.check_attrs(&r.attrs, TargetKind::Struct);
+        self.check_coherence(&r.decorators.derives, &r.impls, &standalone);
+        self.check_attrs(&r.decorators.attrs, TargetKind::Struct);
         // Inside the type's own body, its (always-public) fields are accessible; the marker is
         // uniform with classes (a struct simply has no private fields to gate).
         let saved_type = self.coloring.current_type.replace(r.name.clone());
@@ -162,10 +162,10 @@ impl Checker {
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&c.fields, env);
-        self.check_derives(&c.name, &c.derives, &c.fields, &c.methods);
+        self.check_derives(&c.name, &c.decorators.derives, &c.fields, &c.methods);
         let standalone = self.standalone_for(&c.name);
-        self.check_coherence(&c.derives, &c.impls, &standalone);
-        self.check_attrs(&c.attrs, TargetKind::Class);
+        self.check_coherence(&c.decorators.derives, &c.impls, &standalone);
+        self.check_attrs(&c.decorators.attrs, TargetKind::Class);
         // Inside the class's own methods/destructor its private fields are accessible — on `self`
         // and on any same-type value (the type-scoped privacy rule, object-model slice 2d).
         let saved_type = self.coloring.current_type.replace(c.name.clone());
@@ -198,13 +198,13 @@ impl Checker {
             }
             self.check_attrs(&variant.attrs, TargetKind::Variant);
         }
-        self.check_derives(&e.name, &e.derives, &[], &e.methods);
+        self.check_derives(&e.name, &e.decorators.derives, &[], &e.methods);
         let standalone = self.standalone_for(&e.name);
         // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body,
         // object-model slice 3), checked exactly as a class's — coherence over its impls, then each
         // method body.
-        self.check_coherence(&e.derives, &e.impls, &standalone);
-        self.check_attrs(&e.attrs, TargetKind::Enum);
+        self.check_coherence(&e.decorators.derives, &e.impls, &standalone);
+        self.check_attrs(&e.decorators.attrs, TargetKind::Enum);
         // Inside an enum's own methods, `self` is the whole enum value (the variants differ, so —
         // unlike a struct/class — there is no implicit per-field scope; a method `match`es on
         // `self`). Bind `self` to the enum type so that `match self` is exhaustiveness-checked, and

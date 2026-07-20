@@ -381,9 +381,9 @@ pub fn hoist_impl_methods_with_registry(
                 || derives.iter().any(|d| traits.contains_key(d.name.as_str()))
         };
     let body_needs = program.stmts.iter().any(|s| match s {
-        AstStmt::Struct(d) => body_references_trait(&d.impls, &d.derives),
-        AstStmt::Class(d) => body_references_trait(&d.impls, &d.derives),
-        AstStmt::Enum(d) => body_references_trait(&d.impls, &d.derives),
+        AstStmt::Struct(d) => body_references_trait(&d.impls, &d.decorators.derives),
+        AstStmt::Class(d) => body_references_trait(&d.impls, &d.decorators.derives),
+        AstStmt::Enum(d) => body_references_trait(&d.impls, &d.decorators.derives),
         _ => false,
     });
     // A builtin `via:` derive (`@derive(Comparable, via: amount)`), a plain `@derive(Error)`
@@ -398,9 +398,9 @@ pub fn hoist_impl_methods_with_registry(
     };
     let body_needs = body_needs
         || program.stmts.iter().any(|s| match s {
-            AstStmt::Struct(d) => derive_needs(&d.derives),
-            AstStmt::Class(d) => derive_needs(&d.derives),
-            AstStmt::Enum(d) => derive_needs(&d.derives),
+            AstStmt::Struct(d) => derive_needs(&d.decorators.derives),
+            AstStmt::Class(d) => derive_needs(&d.decorators.derives),
+            AstStmt::Enum(d) => derive_needs(&d.decorators.derives),
             _ => false,
         });
     if additions.is_empty() && !body_needs {
@@ -415,21 +415,21 @@ pub fn hoist_impl_methods_with_registry(
                 &mut d.methods,
                 d.fields.as_slice(),
                 &d.impls,
-                &d.derives,
+                &d.decorators.derives,
             ),
             AstStmt::Class(d) => (
                 &d.name,
                 &mut d.methods,
                 d.fields.as_slice(),
                 &d.impls,
-                &d.derives,
+                &d.decorators.derives,
             ),
             AstStmt::Enum(d) => (
                 &d.name,
                 &mut d.methods,
                 &[] as &[noeta_ast::FieldDecl],
                 &d.impls,
-                &d.derives,
+                &d.decorators.derives,
             ),
             _ => continue,
         };

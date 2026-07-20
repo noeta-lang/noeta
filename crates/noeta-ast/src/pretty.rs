@@ -345,18 +345,7 @@ impl Pretty for EnumDecl {
             .collect();
         out.push_str(&format!(
             "({kind} {}{}{}{} [{}] {}",
-            // `EnumDecl` carries no `attribute`/`role`/`validated` fields — the parser drops those
-            // directives on an enum today (a silent discard this arc's next slice turns into a
-            // diagnostic). Passing `None`/`false` here is forced by the AST shape, not a choice.
-            decorators_str(&Decorators {
-                derives: &self.derives,
-                attrs: &self.attrs,
-                attribute: None,
-                role: None,
-                semantic: self.semantic.is_some(),
-                packed: self.packed.as_ref(),
-                validated: false,
-            }),
+            decorators_str(&self.decorators),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -374,26 +363,6 @@ impl Pretty for EnumDecl {
     }
 }
 
-/// Every decorator a declaration can carry, gathered into one borrowed view for [`decorators_str`].
-///
-/// This is a **struct** rather than a positional argument list on purpose: a new decorator adds a
-/// field here, and a struct literal must name every field, so each of the four call sites fails to
-/// compile until it decides what to pass. That is the second half of the exhaustiveness lock — the
-/// first half is the `match` in [`decorators_str`], which a new [`BuiltinDirective`] variant breaks.
-/// Before this pairing existed, `@validated` was simply absent from the rendering and therefore
-/// invisible to the fmt safety gate that this module's output backs.
-///
-/// [`BuiltinDirective`]: crate::BuiltinDirective
-pub(crate) struct Decorators<'a> {
-    pub derives: &'a [crate::DeriveSpec],
-    pub attrs: &'a [crate::Attribute],
-    pub attribute: Option<&'a [(String, noeta_span::Span)]>,
-    pub role: Option<&'a [crate::RoleTag]>,
-    pub semantic: bool,
-    pub packed: Option<&'a crate::PackedDirective>,
-    pub validated: bool,
-}
-
 /// The leading decorators of a declaration, rendered into the structural snapshot — the fmt safety
 /// gate compares this output, so a formatter dropping a decorator (a whole `@derive`, one of its
 /// `member: target` bindings or `via:`, a `@packed` layout, an `@attribute`/`@role` tag, a
@@ -403,13 +372,15 @@ pub(crate) struct Decorators<'a> {
 /// Emission order is [`BuiltinDirective::ALL`](crate::BuiltinDirective::ALL) order, with the
 /// `#[...]` data attributes last. Driving the loop off `ALL` — rather than a hand-written sequence
 /// of `if let`s — is what makes a newly added directive a compile error here instead of a silently
-/// unrendered (and therefore ungated) decorator.
-fn decorators_str(d: &Decorators<'_>) -> String {
+/// unrendered (and therefore ungated) decorator. The other half of that lock is [`Decorators`]
+/// itself: one struct shared by every declaration kind, so a directive cannot be rendered for a
+/// struct but forgotten for an enum, which is precisely how `@validated` came to be ungated.
+fn decorators_str(d: &crate::Decorators) -> String {
     let mut parts: Vec<String> = Vec::new();
     for directive in crate::BuiltinDirective::ALL {
         match directive {
             crate::BuiltinDirective::Derive => {
-                for spec in d.derives {
+                for spec in &d.derives {
                     let mut s = spec.name.clone();
                     if !spec.args.is_empty() {
                         s.push_str(&format!(
@@ -431,7 +402,7 @@ fn decorators_str(d: &Decorators<'_>) -> String {
                 }
             }
             crate::BuiltinDirective::Attribute => {
-                if let Some(kinds) = d.attribute {
+                if let Some(kinds) = d.attribute.as_deref() {
                     if kinds.is_empty() {
                         parts.push("@attribute".to_string());
                     } else {
@@ -447,7 +418,7 @@ fn decorators_str(d: &Decorators<'_>) -> String {
                 }
             }
             crate::BuiltinDirective::Role => {
-                if let Some(tags) = d.role {
+                if let Some(tags) = d.role.as_deref() {
                     parts.push(format!(
                         "@role({})",
                         tags.iter()
@@ -462,7 +433,7 @@ fn decorators_str(d: &Decorators<'_>) -> String {
                 }
             }
             crate::BuiltinDirective::Semantic => {
-                if d.semantic {
+                if d.semantic.is_some() {
                     parts.push("@semantic".to_string());
                 }
             }
@@ -475,7 +446,7 @@ fn decorators_str(d: &Decorators<'_>) -> String {
                 }
             }
             crate::BuiltinDirective::Validated => {
-                if d.validated {
+                if d.validated.is_some() {
                     parts.push("@validated".to_string());
                 }
             }
@@ -486,7 +457,7 @@ fn decorators_str(d: &Decorators<'_>) -> String {
             crate::BuiltinDirective::Tier => {}
         }
     }
-    for a in d.attrs {
+    for a in &d.attrs {
         parts.push(format!("#[{}{}]", a.name, attr_args_str(&a.args)));
     }
     if parts.is_empty() {
@@ -601,15 +572,7 @@ impl Pretty for StructDecl {
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
             "(struct {}{}{}{} [{}] {}",
-            decorators_str(&Decorators {
-                derives: &self.derives,
-                attrs: &self.attrs,
-                attribute: self.attribute.as_deref(),
-                role: self.role.as_deref(),
-                semantic: self.semantic.is_some(),
-                packed: self.packed.as_ref(),
-                validated: self.validated.is_some(),
-            }),
+            decorators_str(&self.decorators),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -632,15 +595,7 @@ impl Pretty for ClassDecl {
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
             "(class {}{}{}{} [{}] {}",
-            decorators_str(&Decorators {
-                derives: &self.derives,
-                attrs: &self.attrs,
-                attribute: self.attribute.as_deref(),
-                role: self.role.as_deref(),
-                semantic: self.semantic.is_some(),
-                packed: self.packed.as_ref(),
-                validated: self.validated.is_some(),
-            }),
+            decorators_str(&self.decorators),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -694,17 +649,7 @@ impl Pretty for TraitDecl {
         // to be free to silently rewrite the program: fmt runs on code that does not yet check.
         out.push_str(&format!(
             "(trait {}{} {}",
-            decorators_str(&Decorators {
-                derives: &self.derives,
-                attrs: &self.attrs,
-                attribute: self.attribute.as_deref(),
-                role: self.role.as_deref(),
-                semantic: self.semantic.is_some(),
-                packed: self.packed.as_ref(),
-                // `TraitDecl` carries no `validated` field; the parser drops `@validated` on a
-                // trait outright. Same AST asymmetry as `EnumDecl` above.
-                validated: false,
-            }),
+            decorators_str(&self.decorators),
             self.name,
             span(self.span)
         ));

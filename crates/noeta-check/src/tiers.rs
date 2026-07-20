@@ -722,9 +722,9 @@ pub fn activate_tiers_with(
         for stmt in &mut stmts {
             let (name_span, attrs) = match stmt {
                 Stmt::Fn(d) => (d.name_span, &mut d.attrs),
-                Stmt::Struct(d) => (d.name_span, &mut d.attrs),
-                Stmt::Class(d) => (d.name_span, &mut d.attrs),
-                Stmt::Enum(d) => (d.name_span, &mut d.attrs),
+                Stmt::Struct(d) => (d.name_span, &mut d.decorators.attrs),
+                Stmt::Class(d) => (d.name_span, &mut d.decorators.attrs),
+                Stmt::Enum(d) => (d.name_span, &mut d.decorators.attrs),
                 _ => continue,
             };
             if let Some(text) = doc_stamps.get(&name_span)
@@ -1189,16 +1189,20 @@ impl Checker {
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Struct(r) => {
-                    self.check_misplaced_semantic(r.semantic, &r.name, "record");
-                    self.check_role_tags(r.name_span, r.role.as_deref(), r.attribute.is_some());
+                    self.check_misplaced_semantic(r.decorators.semantic, &r.name, "record");
+                    self.check_role_tags(
+                        r.name_span,
+                        r.decorators.role.as_deref(),
+                        r.decorators.attribute.is_some(),
+                    );
                     self.check_packed_struct(r);
                 }
                 Stmt::Class(c) => {
-                    self.check_misplaced_semantic(c.semantic, &c.name, "class");
-                    self.check_misplaced_packed(c.packed, &c.name, "class");
+                    self.check_misplaced_semantic(c.decorators.semantic, &c.name, "class");
+                    self.check_misplaced_packed(c.decorators.packed, &c.name, "class");
                     // A role tags an attribute, and attributes are structs only, so `@role` on a
                     // class is an error (E0031).
-                    if c.role.is_some() {
+                    if c.decorators.role.is_some() {
                         self.error(
                             DiagnosticCode::InvalidRole,
                             c.name_span,
@@ -1211,7 +1215,7 @@ impl Checker {
                     }
                 }
                 Stmt::Enum(e) => {
-                    self.check_misplaced_packed(e.packed, &e.name, "enum");
+                    self.check_misplaced_packed(e.decorators.packed, &e.name, "enum");
                 }
                 _ => {}
             }

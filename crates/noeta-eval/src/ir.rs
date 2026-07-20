@@ -568,9 +568,9 @@ impl Interpreter {
             // Stamped below (and re-stamped by later declarations) from the fixpoint.
             key_capable: std::cell::Cell::new(false),
             // A hand-written `compare`/`to_json` takes precedence over derivation.
-            derives_comparable: noeta_ast::derives_trait(&decl.derives, "Comparable")
+            derives_comparable: noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
-            derives_tojson: noeta_ast::derives_trait(&decl.derives, "Serialize")
+            derives_tojson: noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                 && !decl.methods.iter().any(|m| m.name == "to_json"),
             opaque: false,
             field_defaults: strukt.field_defaults.clone(),
@@ -620,9 +620,9 @@ impl Interpreter {
             variants,
             // A hand-written `compare`/`to_json` takes precedence over derivation — the same
             // rule `declare_ir_struct` applies.
-            derives_comparable: noeta_ast::derives_trait(&decl.derives, "Comparable")
+            derives_comparable: noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
-            derives_tojson: noeta_ast::derives_trait(&decl.derives, "Serialize")
+            derives_tojson: noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                 && !decl.methods.iter().any(|m| m.name == "to_json"),
             methods,
         };
@@ -660,13 +660,13 @@ impl Interpreter {
             key_capable: std::cell::Cell::new(false),
             // A reference `class`: `==` is identity unless the class is `Equatable` (derives it or
             // hand-`impl`s `eq`) — the same rule `declare_class` applies.
-            structural_eq: noeta_ast::derives_trait(&decl.derives, "Equatable")
+            structural_eq: noeta_ast::derives_trait(&decl.decorators.derives, "Equatable")
                 || decl.methods.iter().any(|m| m.name == "eq"),
             // A hand-written `compare`/`to_json` takes precedence over derivation — the same
             // rule `declare_class` applies.
-            derives_comparable: noeta_ast::derives_trait(&decl.derives, "Comparable")
+            derives_comparable: noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
-            derives_tojson: noeta_ast::derives_trait(&decl.derives, "Serialize")
+            derives_tojson: noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                 && !decl.methods.iter().any(|m| m.name == "to_json"),
             opaque: false,
             field_defaults: class.field_defaults.clone(),

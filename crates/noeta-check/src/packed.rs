@@ -291,7 +291,7 @@ impl Checker {
     /// ordinary (non-packed) struct. Runs after `collect`, so a field naming a packed struct declared
     /// later resolves.
     pub(crate) fn check_packed_struct(&mut self, r: &StructDecl) {
-        if r.packed.is_none() {
+        if r.decorators.packed.is_none() {
             return;
         }
         for f in &r.fields {

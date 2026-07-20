@@ -479,7 +479,9 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
                 .stmts
                 .iter()
                 .find_map(|stmt| match stmt {
-                    Stmt::Enum(decl) if decl.name == *head && decl.semantic.is_some() => {
+                    Stmt::Enum(decl)
+                        if decl.name == *head && decl.decorators.semantic.is_some() =>
+                    {
                         Some(decl.variants.iter().map(|v| v.name.clone()).collect())
                     }
                     _ => None,
@@ -502,7 +504,7 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
     }];
     for stmt in &program.stmts {
         if let Stmt::Enum(decl) = stmt
-            && decl.semantic.is_some()
+            && decl.decorators.semantic.is_some()
         {
             candidates.push(Candidate {
                 label: decl.name.clone(),

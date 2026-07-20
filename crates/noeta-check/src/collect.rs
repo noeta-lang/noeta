@@ -189,13 +189,13 @@ impl Checker {
                         })
                         .collect();
                     self.symbols.records.insert(r.name.clone(), fields);
-                    if let Some(directive) = &r.packed {
+                    if let Some(directive) = &r.decorators.packed {
                         self.symbols.packed_structs.insert(r.name.clone());
                         if directive.layout == noeta_ast::PackedLayout::Column {
                             self.symbols.column_structs.insert(r.name.clone());
                         }
                     }
-                    if r.validated.is_some() {
+                    if r.decorators.validated.is_some() {
                         self.symbols.validated_types.insert(r.name.clone());
                     }
                     // A struct's `mut` fields are assignable via `x.f = v` (value-semantic, so the
@@ -220,14 +220,15 @@ impl Checker {
                     // `impl Comparable` never registered, so bounds falsely rejected it.)
                     self.record_trait_impls(
                         &r.name,
-                        r.derives
+                        r.decorators
+                            .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(r.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&r.name, &r.derives);
+                    self.record_derived(&r.name, &r.decorators.derives);
                     self.record_from_impls(&r.name, &r.impls);
-                    self.record_attribute(&r.name, r.attribute.as_deref());
+                    self.record_attribute(&r.name, r.decorators.attribute.as_deref());
                     self.symbols.generic_types.insert(
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -269,7 +270,7 @@ impl Checker {
                         })
                         .collect();
                     self.symbols.records.insert(c.name.clone(), fields);
-                    if c.validated.is_some() {
+                    if c.decorators.validated.is_some() {
                         self.symbols.validated_types.insert(c.name.clone());
                     }
                     let muts: HashSet<String> = c
@@ -305,15 +306,16 @@ impl Checker {
                     // enforcement (the `impl`/`derive` *names* are validated elsewhere).
                     self.record_trait_impls(
                         &c.name,
-                        c.derives
+                        c.decorators
+                            .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&c.name, &c.derives);
+                    self.record_derived(&c.name, &c.decorators.derives);
                     self.record_from_impls(&c.name, &c.impls);
                     // Attributes are structs only: `@attribute` on a class is an error (E0029).
-                    if c.attribute.is_some() {
+                    if c.decorators.attribute.is_some() {
                         self.error(
                             DiagnosticCode::NotAnAttribute,
                             c.name_span,
@@ -386,7 +388,7 @@ impl Checker {
                         .insert(e.name.clone(), noeta_types::TypeKind::Enum);
                     // `@semantic` makes the enum role-eligible (its fieldless variants may be named
                     // by `@role(Enum.Variant)`); recorded for the post-collect role-validation pass.
-                    if e.semantic.is_some() {
+                    if e.decorators.semantic.is_some() {
                         self.symbols.semantic_enums.insert(e.name.clone());
                     }
                     // An enum satisfies a trait it `@derive`s or `impl`s (its in-body blocks are
@@ -394,12 +396,13 @@ impl Checker {
                     // trait (`impl Add`, `impl Comparable`, …) is accepted on an enum operand.
                     self.record_trait_impls(
                         &e.name,
-                        e.derives
+                        e.decorators
+                            .derives
                             .iter()
                             .map(|d| d.name.as_str())
                             .chain(e.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_derived(&e.name, &e.derives);
+                    self.record_derived(&e.name, &e.decorators.derives);
                     self.record_from_impls(&e.name, &e.impls);
                     self.symbols.generic_types.insert(
                         e.name.clone(),
@@ -531,9 +534,9 @@ impl Checker {
                             .or_insert(args);
                         continue;
                     }
-                    Stmt::Struct(d) => (&d.name, &d.impls, &d.derives),
-                    Stmt::Class(d) => (&d.name, &d.impls, &d.derives),
-                    Stmt::Enum(d) => (&d.name, &d.impls, &d.derives),
+                    Stmt::Struct(d) => (&d.name, &d.impls, &d.decorators.derives),
+                    Stmt::Class(d) => (&d.name, &d.impls, &d.decorators.derives),
+                    Stmt::Enum(d) => (&d.name, &d.impls, &d.decorators.derives),
                     _ => continue,
                 };
             for (trait_name, trait_args) in impls
@@ -569,9 +572,9 @@ impl Checker {
                 &[noeta_ast::FnDecl],
                 &[DeriveSpec],
             ) = match stmt {
-                Stmt::Struct(d) => (&d.name, &d.fields, &d.methods, &d.derives),
-                Stmt::Class(d) => (&d.name, &d.fields, &d.methods, &d.derives),
-                Stmt::Enum(d) => (&d.name, &[], &d.methods, &d.derives),
+                Stmt::Struct(d) => (&d.name, &d.fields, &d.methods, &d.decorators.derives),
+                Stmt::Class(d) => (&d.name, &d.fields, &d.methods, &d.decorators.derives),
+                Stmt::Enum(d) => (&d.name, &[], &d.methods, &d.decorators.derives),
                 _ => continue,
             };
             for spec in derives {

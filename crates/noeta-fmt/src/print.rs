@@ -1053,13 +1053,13 @@ impl Printer<'_> {
 
     fn struct_decl(&self, d: &StructDecl) -> Result<Doc, FmtError> {
         let mut parts = self.decl_directives(
-            &d.derives,
-            &d.attrs,
-            d.attribute.as_deref(),
-            d.role.as_deref(),
-            d.semantic.is_some(),
-            d.packed,
-            d.validated.is_some(),
+            &d.decorators.derives,
+            &d.decorators.attrs,
+            d.decorators.attribute.as_deref(),
+            d.decorators.role.as_deref(),
+            d.decorators.semantic.is_some(),
+            d.decorators.packed,
+            d.decorators.validated.is_some(),
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1074,13 +1074,13 @@ impl Printer<'_> {
 
     fn class_decl(&self, d: &ClassDecl) -> Result<Doc, FmtError> {
         let mut parts = self.decl_directives(
-            &d.derives,
-            &d.attrs,
-            d.attribute.as_deref(),
-            d.role.as_deref(),
-            d.semantic.is_some(),
-            d.packed,
-            d.validated.is_some(),
+            &d.decorators.derives,
+            &d.decorators.attrs,
+            d.decorators.attribute.as_deref(),
+            d.decorators.role.as_deref(),
+            d.decorators.semantic.is_some(),
+            d.decorators.packed,
+            d.decorators.validated.is_some(),
         )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
@@ -1248,12 +1248,12 @@ impl Printer<'_> {
         // carries only data attributes, but fmt must preserve whatever parsed (even a to-be-rejected
         // `@…`) so re-parsing is identical.
         let mut parts = self.decl_directives(
-            &d.derives,
-            &d.attrs,
-            d.attribute.as_deref(),
-            d.role.as_deref(),
-            d.semantic.is_some(),
-            d.packed,
+            &d.decorators.derives,
+            &d.decorators.attrs,
+            d.decorators.attribute.as_deref(),
+            d.decorators.role.as_deref(),
+            d.decorators.semantic.is_some(),
+            d.decorators.packed,
             false,
         )?;
         if d.is_public {
@@ -1309,12 +1309,12 @@ impl Printer<'_> {
 
     fn enum_decl(&self, d: &EnumDecl) -> Result<Doc, FmtError> {
         let mut parts = self.decl_directives(
-            &d.derives,
-            &d.attrs,
+            &d.decorators.derives,
+            &d.decorators.attrs,
             None,
             None,
-            d.semantic.is_some(),
-            d.packed,
+            d.decorators.semantic.is_some(),
+            d.decorators.packed,
             false,
         )?;
         if d.is_public {

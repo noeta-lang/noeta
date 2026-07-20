@@ -383,15 +383,15 @@ impl Checker {
         }
         // A trait accepts `#[...]` data attributes only; the `@`-directives are type-only and do not
         // apply to a trait (UT6). Report the first offender.
-        let bad_directive = if !decl.derives.is_empty() {
+        let bad_directive = if !decl.decorators.derives.is_empty() {
             Some("@derive")
-        } else if decl.attribute.is_some() {
+        } else if decl.decorators.attribute.is_some() {
             Some("@attribute")
-        } else if decl.role.is_some() {
+        } else if decl.decorators.role.is_some() {
             Some("@role")
-        } else if decl.semantic.is_some() {
+        } else if decl.decorators.semantic.is_some() {
             Some("@semantic")
-        } else if decl.packed.is_some() {
+        } else if decl.decorators.packed.is_some() {
             Some("@packed")
         } else {
             None

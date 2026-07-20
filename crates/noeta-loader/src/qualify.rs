@@ -522,7 +522,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Class(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.attrs {
+            for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
             }
             for f in &mut decl.fields {
@@ -541,7 +541,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Struct(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.attrs {
+            for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
             }
             for f in &mut decl.fields {
@@ -557,7 +557,7 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Enum(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.attrs {
+            for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
             }
             q_opt_typeref(&mut decl.backing, visit);

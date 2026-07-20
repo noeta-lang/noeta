@@ -31,11 +31,11 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use noeta_ast::{
-    AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl, ClosureBody, DeriveSpec,
-    EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, MethodDirective,
-    ObjectLit, PackedDirective, PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl,
-    TierDecl, TraitBound, TraitDecl, TraitMethod, TypeParam, TypeRef, UnaryOp, UseName,
-    VariantDecl,
+    AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl, ClosureBody, Decorators,
+    DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm,
+    MethodDirective, ObjectLit, PackedDirective, PackedLayout, Param, Pattern, Program, RoleTag,
+    Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeParam, TypeRef, UnaryOp,
+    UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -575,74 +575,40 @@ fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
 // One parameter per decorator channel — a bundling helper (mirrors the formatter's
 // `decl_directives`); a struct would only relocate the same fields.
 #[allow(clippy::too_many_arguments)]
-fn attach_decorators(
-    stmt: Stmt,
-    derives: Vec<DeriveSpec>,
-    attrs: Vec<Attribute>,
-    attribute: Option<Vec<(String, Span)>>,
-    role: Option<Vec<RoleTag>>,
-    semantic: Option<Span>,
-    packed: Option<PackedDirective>,
-    validated: Option<Span>,
-) -> Stmt {
-    if derives.is_empty()
-        && attrs.is_empty()
-        && attribute.is_none()
-        && role.is_none()
-        && semantic.is_none()
-        && packed.is_none()
-        && validated.is_none()
-    {
+/// Attach the parsed decorators to the declaration they precede.
+///
+/// The parser's job here is **recording, not judging**: every directive written in source is stored
+/// on whatever declaration it decorates, and which placements are legal is entirely the checker's
+/// call (`E0031`/`E0038`/`E0053`/`E0060`). That split used to be violated per-arm — an enum's
+/// `@attribute`/`@role`/`@validated` and a trait's `@validated` were dropped on the floor here,
+/// because [`EnumDecl`]/[`TraitDecl`] had no field to put them in. A dropped directive leaves no AST
+/// record, so the checker never saw it and the author got silence instead of a diagnostic.
+///
+/// With one [`Decorators`] on every declaration kind there is nowhere left to drop anything, and
+/// this reduces to a single assignment per arm.
+fn attach_decorators(stmt: Stmt, decorators: Decorators) -> Stmt {
+    if decorators == Decorators::default() {
         return stmt;
     }
     match stmt {
         Stmt::Class(mut c) => {
-            c.derives = derives;
-            c.attrs = attrs;
-            // `@attribute`/`@role`/`@semantic`/`@packed` on a class is invalid (attributes are structs
-            // only, `@semantic` marks enums, `@packed` marks structs); carried so the checker reports it.
-            c.attribute = attribute;
-            c.role = role;
-            c.semantic = semantic;
-            c.packed = packed;
-            // `@validated` (validation arc) applies to a class — construction channeling.
-            c.validated = validated;
+            c.decorators = decorators;
             Stmt::Class(c)
         }
         Stmt::Struct(mut r) => {
-            r.derives = derives;
-            r.attrs = attrs;
-            r.attribute = attribute;
-            r.role = role;
-            // `@semantic` marks enums, not records; carried so the checker can report the misplacement.
-            r.semantic = semantic;
-            // `@packed` is the struct-only layout marker; the checker validates its fields.
-            r.packed = packed;
-            // `@validated` (validation arc) applies to a struct — construction channeling.
-            r.validated = validated;
+            r.decorators = decorators;
             Stmt::Struct(r)
         }
         Stmt::Enum(mut e) => {
-            // An enum cannot be an attribute, so a stray `@attribute`/`@role` is dropped;
-            // `@semantic` is the one directive an enum accepts. `@packed` on an enum is a checker
-            // error (carried). derives/attrs still apply.
-            e.derives = derives;
-            e.attrs = attrs;
-            e.semantic = semantic;
-            e.packed = packed;
+            e.decorators = decorators;
             Stmt::Enum(e)
         }
         Stmt::Trait(mut t) => {
-            // A trait accepts `#[...]` data attributes and `@role`; `@derive`/`@attribute`/
-            // `@semantic`/`@packed` do not apply to a trait and are carried for the checker (UT6).
-            t.attrs = attrs;
-            t.role = role;
-            t.derives = derives;
-            t.attribute = attribute;
-            t.semantic = semantic;
-            t.packed = packed;
+            t.decorators = decorators;
             Stmt::Trait(t)
         }
+        // Not a declaration that can carry decorators. `attributed_type_decl` only ever produces
+        // the four arms above, so this is unreachable in practice rather than a silent drop.
         other => other,
     }
 }
@@ -3067,10 +3033,7 @@ where
                     variants,
                     methods,
                     impls,
-                    derives: Vec::new(),
-                    attrs: Vec::new(),
-                    semantic: None,
-                    packed: None,
+                    decorators: Decorators::default(),
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -3180,12 +3143,7 @@ where
                     is_public: false,
                     type_params,
                     methods,
-                    attrs: Vec::new(),
-                    role: None,
-                    derives: Vec::new(),
-                    attribute: None,
-                    semantic: None,
-                    packed: None,
+                    decorators: Decorators::default(),
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -3232,13 +3190,7 @@ where
                     fields,
                     methods,
                     impls,
-                    derives: Vec::new(),
-                    attrs: Vec::new(),
-                    attribute: None,
-                    role: None,
-                    semantic: None,
-                    packed: None,
-                    validated: None,
+                    decorators: Decorators::default(),
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -3283,13 +3235,7 @@ where
                     fields,
                     methods,
                     impls,
-                    derives: Vec::new(),
-                    attrs: Vec::new(),
-                    attribute: None,
-                    role: None,
-                    semantic: None,
-                    packed: None,
-                    validated: None,
+                    decorators: Decorators::default(),
                     destructor,
                     span: ctx.to_span(e.span()),
                 })
@@ -3795,7 +3741,16 @@ where
                 }
                 set_public(
                     attach_decorators(
-                        stmt, derives, attrs, attribute, role, semantic, packed, validated,
+                        stmt,
+                        Decorators {
+                            derives,
+                            attrs,
+                            attribute,
+                            role,
+                            semantic,
+                            packed,
+                            validated,
+                        },
                     ),
                     pub_kw.is_some(),
                 )
@@ -4235,11 +4190,14 @@ mod tests {
         let Stmt::Enum(e) = &parsed.program.stmts[0] else {
             panic!("expected enum");
         };
-        assert!(e.semantic.is_some(), "@semantic should mark the enum");
+        assert!(
+            e.decorators.semantic.is_some(),
+            "@semantic should mark the enum"
+        );
         let Stmt::Struct(r) = &parsed.program.stmts[1] else {
             panic!("expected record");
         };
-        let roles = r.role.as_ref().expect("@role tags");
+        let roles = r.decorators.role.as_ref().expect("@role tags");
         assert_eq!(roles.len(), 2);
         assert_eq!(roles[0].enum_name, "Semantic");
         assert_eq!(roles[0].variant, "EntryPoint");
@@ -4256,13 +4214,13 @@ mod tests {
         let Stmt::Struct(r) = &parsed.program.stmts[0] else {
             panic!("expected record");
         };
-        assert_eq!(r.derives.len(), 2);
-        assert_eq!(r.derives[0].name, "Comparable");
-        assert!(r.derives[0].args.is_empty());
-        assert_eq!(r.derives[1].name, "Serialize");
-        assert_eq!(r.derives[1].args.len(), 1);
+        assert_eq!(r.decorators.derives.len(), 2);
+        assert_eq!(r.decorators.derives[0].name, "Comparable");
+        assert!(r.decorators.derives[0].args.is_empty());
+        assert_eq!(r.decorators.derives[1].name, "Serialize");
+        assert_eq!(r.decorators.derives[1].args.len(), 1);
         assert!(matches!(
-            &r.derives[1].args[0],
+            &r.decorators.derives[1].args[0],
             noeta_ast::TypeRef::Named { name, .. } if name == "Json"
         ));
     }
@@ -4276,7 +4234,7 @@ mod tests {
         let Stmt::Struct(r) = &parsed.program.stmts[0] else {
             panic!("expected record");
         };
-        let roles = r.role.as_ref().expect("@role tags");
+        let roles = r.decorators.role.as_ref().expect("@role tags");
         assert_eq!(roles[0].enum_name, "");
         assert_eq!(roles[0].variant, "EntryPoint");
     }
@@ -4511,8 +4469,11 @@ mod tests {
         let Stmt::Struct(s) = &parsed.program.stmts[0] else {
             panic!("expected struct, got {:?}", parsed.program.stmts[0]);
         };
-        assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Row));
-        assert_eq!(s.derives.len(), 1); // @packed coexists with @derive
+        assert_eq!(
+            s.decorators.packed.map(|p| p.layout),
+            Some(PackedLayout::Row)
+        );
+        assert_eq!(s.decorators.derives.len(), 1); // @packed coexists with @derive
     }
 
     #[test]
@@ -4525,15 +4486,18 @@ mod tests {
         let Stmt::Struct(s) = &parsed.program.stmts[0] else {
             panic!("expected struct");
         };
-        assert_eq!(s.derives.len(), 2);
-        assert_eq!(s.derives[0].name, "Ordered");
-        assert_eq!(s.derives[0].bindings.len(), 1);
-        assert_eq!(s.derives[0].bindings[0].member, "value");
-        assert_eq!(s.derives[0].bindings[0].target, "amount");
-        assert!(s.derives[0].via.is_none());
-        assert_eq!(s.derives[1].name, "Greet");
+        assert_eq!(s.decorators.derives.len(), 2);
+        assert_eq!(s.decorators.derives[0].name, "Ordered");
+        assert_eq!(s.decorators.derives[0].bindings.len(), 1);
+        assert_eq!(s.decorators.derives[0].bindings[0].member, "value");
+        assert_eq!(s.decorators.derives[0].bindings[0].target, "amount");
+        assert!(s.decorators.derives[0].via.is_none());
+        assert_eq!(s.decorators.derives[1].name, "Greet");
         assert_eq!(
-            s.derives[1].via.as_ref().map(|(f, _)| f.as_str()),
+            s.decorators.derives[1]
+                .via
+                .as_ref()
+                .map(|(f, _)| f.as_str()),
             Some("inner")
         );
         // A named argument with no preceding trait is E0037.
@@ -4556,13 +4520,19 @@ mod tests {
         let Stmt::Struct(s) = &col.program.stmts[0] else {
             panic!("expected struct");
         };
-        assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Column));
+        assert_eq!(
+            s.decorators.packed.map(|p| p.layout),
+            Some(PackedLayout::Column)
+        );
 
         let row = parse_str("@packed(Layout.Row)\nstruct V { a: int }\n");
         let Stmt::Struct(s) = &row.program.stmts[0] else {
             panic!("expected struct");
         };
-        assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Row));
+        assert_eq!(
+            s.decorators.packed.map(|p| p.layout),
+            Some(PackedLayout::Row)
+        );
 
         // Unknown variant, unknown arg name, a variant-less `Layout`, and the retired
         // `layout: row|column` spelling are each E0037.
@@ -4612,6 +4582,45 @@ mod tests {
     }
 
     #[test]
+    fn every_directive_is_recorded_on_every_declaration_kind() {
+        // The parser records; the checker judges. Before `Decorators` unified the storage, that
+        // split held only where a field happened to exist: `EnumDecl` had no `attribute`/`role`/
+        // `validated` and `TraitDecl` had no `validated`, so `attach_decorators` dropped those on
+        // the floor. A dropped directive leaves no AST record, so the checker could never report it
+        // and the author got silence — the worst possible answer, since the code looks accepted.
+        //
+        // These placements are all *illegal*; that is the point. Legality is the checker's call
+        // (E0031/E0038/E0053/E0060), and it cannot make that call about something it never sees.
+        let enum_decl = |src: &str| match &parse_str(src).program.stmts[0] {
+            Stmt::Enum(d) => d.decorators.clone(),
+            other => panic!("expected an enum, got {other:?}"),
+        };
+        assert!(
+            enum_decl("@validated\nenum E { A }\n").validated.is_some(),
+            "@validated on an enum is dropped by the parser"
+        );
+        assert!(
+            enum_decl("@attribute\nenum E { A }\n").attribute.is_some(),
+            "@attribute on an enum is dropped by the parser"
+        );
+        assert!(
+            enum_decl("@role(Kind.A)\nenum E { A }\n").role.is_some(),
+            "@role on an enum is dropped by the parser"
+        );
+
+        let trait_decl = |src: &str| match &parse_str(src).program.stmts[0] {
+            Stmt::Trait(d) => d.decorators.clone(),
+            other => panic!("expected a trait, got {other:?}"),
+        };
+        assert!(
+            trait_decl("@validated\ntrait T { fn f(): int }\n")
+                .validated
+                .is_some(),
+            "@validated on a trait is dropped by the parser"
+        );
+    }
+
+    #[test]
     fn positional_tier_args_and_name_dispatch() {
         // Name-based dispatch decouples tiers from decorators: a tier directive accepts the full
         // (positional + named) argument grammar, while a `@derive(...)` with a generic type argument
@@ -4641,7 +4650,7 @@ mod tests {
         let Stmt::Struct(s) = &parsed.program.stmts[0] else {
             panic!("expected struct");
         };
-        let attr = &s.attrs[0];
+        let attr = &s.decorators.attrs[0];
         assert_eq!(attr.name, "Cache");
         assert!(matches!(attr.args[0].value, AttrValue::Int(-1)));
         assert!(matches!(attr.args[1].value, AttrValue::Float(f) if (f + 2.5).abs() < 1e-9));
