@@ -30,6 +30,9 @@ bcrypt = { workspace = true }
 # The `std.datetime` calendar/timezone backend (Ring 3 datetime arc). Optional + behind the
 # default-on `ring-datetime` feature so a footprint-tailored build sheds jiff and its tzdb.
 jiff = { workspace = true, optional = true }
+# The `std.regex` engine (Ring 3 regex arc). Optional + behind the default-on `ring-regex` feature
+# so a footprint-tailored build sheds the engine and its Unicode tables.
+regex = { workspace = true, optional = true }
 # Registers `std_units` as the registry's fallback provider at load time (see `registry::ensure`).
 # Native only: `#[ctor]` is unsupported on wasm, where every driver installs explicitly anyway.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
@@ -38,9 +41,11 @@ ctor = { workspace = true }
 [features]
 # On by default — the plain toolchain/build has the full datetime surface. A `--no-default-features`
 # build (or the AOT footprint scan, which reads the `std.datetime` module's `ring`) drops jiff.
-default = ["ring-datetime"]
+default = ["ring-datetime", "ring-regex"]
 # The `std.datetime` ring: pulls jiff (calendar/timezone/formatting) and registers the datetime unit.
 ring-datetime = ["dep:jiff"]
+# The `std.regex` ring: pulls the regex engine + Unicode tables and registers the regex unit.
+ring-regex = ["dep:regex"]
 
 [dev-dependencies]
 criterion = { workspace = true }

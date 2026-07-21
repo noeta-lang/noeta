@@ -1,0 +1,83 @@
+// `std.regex` matching (regex arc) — the `Pattern`/`Match` extern-type pair, both in the pure +
+// host-free corner of the seam matrix (no Host capability at all, like `math`/`json`).
+//
+// The load-bearing case here is the character-offset one: the engine reports BYTE offsets into
+// UTF-8, every string position in Noeta is a CHARACTER index, and the seam converts. `héllo 42`
+// puts the match at char 6 but byte 7, so `subject.slice(m.start(), m.end()) == m.text()` is the
+// assertion that would fail if the conversion were ever dropped.
+// expect: stdout "true"
+// expect: stdout "\\d+"
+// expect: stdout "<pattern \\d+>"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "none"
+// expect: stdout "true"
+// expect: stdout "12"
+// expect: stdout "1"
+// expect: stdout "3"
+// expect: stdout "42"
+// expect: stdout "6"
+// expect: stdout "true"
+// expect: stdout "some(2026-07)"
+// expect: stdout "some(2026)"
+// expect: stdout "some(2026)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "[some(2026), some(07)]"
+// expect: stdout "3"
+// expect: stdout "1"
+// expect: stdout "6"
+// expect: exit 0
+use std.{regex}
+use std.regex.Pattern
+use std.regex.Match
+
+// Raw single-quoted strings are the idiomatic pattern literal: no interpolation, so `\d` and
+// `${...}` reach the engine untouched.
+p = regex.compile('\d+')
+echo p is Pattern
+echo p.source()
+echo p
+
+echo p.is_match("a1b")
+echo p.is_match("abc")
+// No match is `none`, never an error.
+echo p.find("abc")
+
+m = match p.find("a12b") {
+    some(x) => x,
+    none => panic("expected a match"),
+}
+echo m is Match
+echo m.text()
+echo m.start()
+echo m.end()
+
+// Character indices, not byte offsets — 'é' is two bytes, so a byte-offset seam would say 7.
+subject = "héllo 42 wörld"
+m2 = match p.find(subject) {
+    some(x) => x,
+    none => panic("expected a match"),
+}
+echo m2.text()
+echo m2.start()
+echo subject.slice(m2.start(), m2.end()) == m2.text()
+
+// Groups: numbered, named, and the ones that did not participate.
+d = regex.compile('(?<year>\d{4})-(\d{2})')
+g = match d.find("on 2026-07 ok") {
+    some(x) => x,
+    none => panic("expected a match"),
+}
+echo g.group(0)
+echo g.group(1)
+echo g.named("year")
+// An unknown name and an out-of-range index are both `none` — the `char_at` safe-probe contract.
+echo g.named("nope")
+echo g.group(99)
+echo g.groups()
+
+all = p.find_all("a1b22c333")
+echo all.len()
+echo all[0].text()
+echo all[2].start()

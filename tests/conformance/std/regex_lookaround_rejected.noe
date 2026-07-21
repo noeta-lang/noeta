@@ -1,0 +1,8 @@
+// Lookaround is the documented price of the linear-time engine (regex arc): `std.regex` is a
+// finite-automata matcher, so `(?=…)`/`(?<=…)` and backreferences do not exist here. Pinned as a
+// conformance case so the trade stays a loud compile-time diagnostic — if the engine were ever
+// swapped for a backtracker, this case is what would notice.
+// expect: error E0007 at 7:5
+use std.{regex}
+p = regex.compile('(?=foo)bar')
+echo p.source()

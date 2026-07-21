@@ -56,6 +56,10 @@ pub mod net;
 pub mod quat;
 pub mod random;
 pub mod reactive;
+/// The `std.regex` engine surface (Ring 3), gated behind the default-on `ring-regex` feature so a
+/// footprint-tailored build can shed the engine and its Unicode tables.
+#[cfg(feature = "ring-regex")]
+pub mod regex;
 pub mod registry;
 pub mod serve;
 pub mod task;
@@ -68,4 +72,6 @@ pub mod vec3;
 pub use handle::{FileHandle, FileMode, Flush};
 pub use host::{CounterIds, DeterministicClock, DeterministicEntropy, SandboxHost, SeededRng};
 pub use iter::IterMethod;
+#[cfg(feature = "ring-regex")]
+pub use regex::RegexExtension;
 pub use registry::{CoreExtension, CryptoExtension, HttpExtension, IdExtension, VecExtension};

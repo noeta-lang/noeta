@@ -1,0 +1,45 @@
+// `std.regex` rewriting (regex arc): replace/split/escape, plus `Pattern`'s key-capability.
+//
+// `Pattern` is immutable and ordered by its source, so it satisfies the `key_capable` contract and
+// can key a map — which is what makes a user-level compile cache expressible in Noeta itself,
+// rather than something the module has to provide.
+// expect: stdout "a#b22"
+// expect: stdout "a#b#"
+// expect: stdout "[\"a\", \"b\", \"c\"]"
+// expect: stdout "here/me"
+// expect: stdout "$"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "compiled once"
+// expect: exit 0
+use std.{regex}
+use std.regex.Pattern
+
+p = regex.compile('\d+')
+echo p.replace("a1b22", "#")
+echo p.replace_all("a1b22", "#")
+echo p.split("a1b22c")
+
+// `$1` group expansion, and `$$` for a literal dollar.
+pair = regex.compile('(\w+)@(\w+)')
+echo pair.replace_all("me@here", "$2/$1")
+echo pair.replace_all("me@here", "$$")
+
+// `escape` turns arbitrary text into a pattern matching it literally.
+lit = regex.compile(regex.escape("a.b*c"))
+echo lit.is_match("a.b*c")
+echo lit.is_match("axbyc")
+
+// Flags travel inline in the source, so a pattern's source is its full identity.
+ci = regex.compile('(?i)hello')
+echo ci.is_match("HELLO")
+
+// Key-capability: equal by source, hashable, so a `Map<Pattern, _>` works.
+echo regex.compile('ab+') == regex.compile('ab+')
+echo regex.compile('ab+') == regex.compile('zz')
+mut cache: Map<Pattern, string> = {}
+cache[regex.compile('ab+')] = "compiled once"
+echo cache[regex.compile('ab+')]
