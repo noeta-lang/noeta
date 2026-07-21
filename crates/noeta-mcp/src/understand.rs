@@ -160,7 +160,7 @@ pub struct ProjectDocsOutput {
 pub fn project_docs(p: &Prepared) -> ProjectDocsOutput {
     let linked = noeta_db::linked(&p.db, p.ws);
     let entry_ast = noeta_db::ast(&p.db, analyze::entry_program(p));
-    let program: &Program = match &linked.0 {
+    let program: &Program = match &linked.program {
         Ok(prog) => prog,
         Err(_) => &entry_ast.0.program,
     };
@@ -397,7 +397,7 @@ pub fn symbols(p: &Prepared) -> SymbolsOutput {
     // an attribute declared in a sibling module still lands; entry-file targets only, since the
     // outline is entry-file only). Nested members key as `Type.member`, matching the index.
     let linked = noeta_db::linked(&p.db, p.ws);
-    let role_program: &Program = match &linked.0 {
+    let role_program: &Program = match &linked.program {
         Ok(prog) => prog,
         Err(_) => program,
     };

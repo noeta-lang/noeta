@@ -162,7 +162,19 @@ pub struct Bytecode(pub Result<Module, Unsupported>);
 /// `use`-resolution diagnostics (entry parse errors, E0019, E0020). The whole-workspace analogue
 /// of [`Ast`] — what [`linked_checked`] and [`linked_bytecode`] build on.
 #[derive(Debug, Clone)]
-pub struct LinkedProgram(pub Result<Program, Vec<Diagnostic>>);
+pub struct LinkedProgram {
+    pub program: Result<Program, Vec<Diagnostic>>,
+    /// Sources minted by **compile-time directive expansion** during this link, ids continuing past
+    /// every member and dependency module (see [`linked_from`]). Empty for a program with no
+    /// expanding directive, which is nearly every program.
+    ///
+    /// **This memo owns the generated text**, and deliberately so: unlike a member or a dependency
+    /// module, an expansion has no file and no salsa input behind it — it is produced *by* this
+    /// query. Minting a [`SourceProgram`] input per expansion instead would leak a slot per
+    /// expansion ever produced, because salsa 0.27 cannot delete an input (see [`release_source`]).
+    /// Consumers borrow the text out of the memo for as long as they borrow the db.
+    pub expansions: Vec<noeta_loader::ExpandedSource>,
+}
 
 /// Give a foreign-result newtype the two traits salsa needs for a memoized output, both in
 /// the conservative "always changed" direction:
@@ -577,6 +589,13 @@ pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> As
 /// and memoize once per file no matter how many entries link over the same workspace. The merge
 /// means both backends run the linked program unchanged, so the differential oracle is preserved
 /// by construction.
+///
+/// **Compile-time directive expansion runs here**, through the loader's one
+/// [`run_expansion`](noeta_loader::run_expansion) — the same decision the CLI's `link`/
+/// `link_with_deps`/`ParsedDir::link_entry` make. Without it the editor and the compiler disagreed
+/// about what a decorated type's members are: a generated method resolved under `noeta run`/
+/// `noeta check` and showed as an unknown name in the editor. The generated sources come back in
+/// [`LinkedProgram::expansions`] rather than becoming inputs (see that field).
 #[salsa::tracked(returns(ref))]
 pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram) -> LinkedProgram {
     let entry_tokens = tokens_in(db, ws, entry);
@@ -591,7 +610,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         .cloned()
         .collect();
     if !entry_diags.is_empty() {
-        return LinkedProgram(Err(entry_diags));
+        return unlinked(entry_diags);
     }
 
     let entry_source = source_of(db, entry);
@@ -645,11 +664,13 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     // right, so nothing else would ever report it — dropping it left the consumer with only the
     // "no module" cascade at its `use`.
     if !broken.deps.is_empty() {
-        return LinkedProgram(Err(broken
-            .deps
-            .iter()
-            .flat_map(|m| m.diagnostics.iter().cloned())
-            .collect()));
+        return unlinked(
+            broken
+                .deps
+                .iter()
+                .flat_map(|m| m.diagnostics.iter().cloned())
+                .collect(),
+        );
     }
 
     // No dependencies → the exact single-package path (byte-for-byte unchanged); otherwise the
@@ -680,9 +701,60 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
             None,
         )
     };
-    match result {
-        Ok(program) => LinkedProgram(Ok(program)),
-        Err(load) => LinkedProgram(Err(load.into_iter().map(|d| d.diagnostic).collect())),
+    let mut program = match result {
+        Ok(program) => program,
+        Err(load) => return unlinked(load.into_iter().map(|d| d.diagnostic).collect()),
+    };
+
+    // Compile-time directive expansion, through the loader's single decision point. The sources are
+    // handed over as a **provider**: reconstructing every member's `Source` clones its whole text, a
+    // price only a program that actually expands should pay (the guard inside `run_expansion` runs
+    // first, and returns before calling this for every program without an expanding directive).
+    //
+    // The first unused `SourceId` is the member count plus the dependency-module count, which is the
+    // workspace's id layout: members occupy `0..members.len()` and dependency modules continue past
+    // them (the editor's `WorkspaceCache` writes the same layout down in its `first_dep_id`). Nothing
+    // here re-derives an offset; both counts are read off the workspace.
+    let members = ws.members(db);
+    let dep_modules = ws.dep_modules(db);
+    let next_id = (members.len() + dep_modules.len()) as u32;
+    let expansion = noeta_loader::run_expansion(
+        &mut program,
+        || {
+            members
+                .iter()
+                .copied()
+                .chain(dep_modules.iter().map(|dm| dm.src(db)))
+                .map(|src| source_of(db, src))
+                .collect()
+        },
+        next_id,
+        edition_of(db, entry),
+        &noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned()),
+    );
+    match expansion {
+        // A failed expansion fails the link, exactly as it does under `noeta run`/`noeta check` —
+        // silently checking a program without the members it declares is the divergence this whole
+        // seam exists to prevent. The E0062 diagnostic blames the directive's own span, in the user's
+        // file, so the per-document view already renders it.
+        Err(load) => unlinked(load.into_iter().map(|d| d.diagnostic).collect()),
+        // `reads` — the non-`.noe` files the hooks read (an OpenAPI spec, say) — is the batch
+        // compiler's rebuild trigger. The editor drops it: its file watching is over `.noe` members,
+        // so editing a spec does not yet re-run the expansion. A known gap of the watcher, not of
+        // this seam; closing it means teaching the document store to watch foreign paths.
+        Ok((expansions, _reads)) => LinkedProgram {
+            program: Ok(program),
+            expansions,
+        },
+    }
+}
+
+/// A link that produced no program: the diagnostics, and no expansions (nothing was generated —
+/// expansion runs only over a program that linked).
+fn unlinked(diagnostics: Vec<Diagnostic>) -> LinkedProgram {
+    LinkedProgram {
+        program: Err(diagnostics),
+        expansions: Vec::new(),
     }
 }
 
@@ -810,7 +882,7 @@ pub fn linked_checked_from(
     ws: Workspace,
     entry: SourceProgram,
 ) -> Checked {
-    match &linked_from(db, ws, entry).0 {
+    match &linked_from(db, ws, entry).program {
         // The shared helper maps every checker output field — both the LSP track's
         // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
         Ok(program) => from_check_output(noeta_check::check_all_cancellable(
@@ -844,7 +916,7 @@ pub fn linked_checked_ide_from(
     ws: Workspace,
     entry: SourceProgram,
 ) -> Checked {
-    match &linked_from(db, ws, entry).0 {
+    match &linked_from(db, ws, entry).program {
         Ok(program) => from_check_output(noeta_check::check_all_cancellable(
             program,
             workspace_editions(db, ws),
@@ -876,7 +948,7 @@ pub fn linked_bytecode_from(
     ws: Workspace,
     entry: SourceProgram,
 ) -> Bytecode {
-    match &linked_from(db, ws, entry).0 {
+    match &linked_from(db, ws, entry).program {
         Ok(program) => {
             let checked = linked_checked_from(db, ws, entry);
             Bytecode(noeta_compiler::compile_with_sites(
@@ -1091,7 +1163,7 @@ mod tests {
             noeta_lexer::Edition::DEFAULT,
         );
 
-        let prog = match &linked(&db, ws).0 {
+        let prog = match &linked(&db, ws).program {
             Ok(p) => p,
             Err(e) => panic!("link failed: {e:?}"),
         };
@@ -1142,7 +1214,7 @@ mod tests {
             std::slice::from_ref(&a),
             noeta_lexer::Edition::DEFAULT,
         );
-        let salsa = match &linked(&db, ws).0 {
+        let salsa = match &linked(&db, ws).program {
             Ok(p) => p.clone(),
             Err(e) => panic!("{e:?}"),
         };
@@ -1180,7 +1252,7 @@ mod tests {
         let b_src = source_program(&db, &b, noeta_lexer::Edition::DEFAULT);
         let ws = Workspace::new(&db, vec![entry_src, a_src, b_src], Vec::new());
 
-        assert!(linked(&db, ws).0.is_ok());
+        assert!(linked(&db, ws).program.is_ok());
         let a_ast_before = ast(&db, a_src) as *const Ast;
 
         // Edit module B — which the entry does not import — by adding a field.
@@ -1195,7 +1267,7 @@ mod tests {
             "editing module B must not recompute module A's ast"
         );
         // The link itself re-runs (it depends on every module) and stays well-formed.
-        assert!(linked(&db, ws).0.is_ok());
+        assert!(linked(&db, ws).program.is_ok());
     }
 
     #[test]
@@ -1222,10 +1294,10 @@ mod tests {
 
         // Link from `main` (imports the sibling), then from `a` (a library module, no imports).
         let from_main = linked_from(&db, ws, main_src);
-        assert!(from_main.0.is_ok(), "{:?}", from_main.0);
+        assert!(from_main.program.is_ok(), "{:?}", from_main.program);
         let a_ast_after_first_link = ast_in(&db, ws, a_src) as *const Ast;
         let from_a = linked_from(&db, ws, a_src);
-        assert!(from_a.0.is_ok(), "{:?}", from_a.0);
+        assert!(from_a.program.is_ok(), "{:?}", from_a.program);
 
         // The second entry's link did not re-parse the shared member: identical memoized value.
         assert_eq!(
@@ -1235,7 +1307,7 @@ mod tests {
         );
         // The two merges are per-entry: main's merge carries the qualified Foo, a's own merge is
         // just its own declarations.
-        let main_prog = from_main.0.as_ref().unwrap();
+        let main_prog = from_main.program.as_ref().unwrap();
         assert!(
             main_prog
                 .stmts
@@ -1288,13 +1360,13 @@ mod tests {
         );
         let linked = linked(&db, ws);
         assert!(
-            linked.0.is_ok(),
+            linked.program.is_ok(),
             "cross-package use must resolve: {:?}",
-            linked.0
+            linked.program
         );
         // The dependency's `greeting` fn was merged into the linked program (and its `use` no longer
         // survives as an unresolved import).
-        let program = linked.0.as_ref().unwrap();
+        let program = linked.program.as_ref().unwrap();
         assert!(
             program
                 .stmts

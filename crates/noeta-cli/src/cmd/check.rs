@@ -189,29 +189,44 @@ pub(crate) fn cmd_check(
         // Entry lex/parse errors' spans live in the entry, and the shared map renders them
         // against it — the same (file, span, code) dedup key as the per-entry load produced.
         let mut check_entry = |parsed: &noeta_loader::ParsedDir,
-                               sources: &std::rc::Rc<SourceMap>,
+                               shared: &std::rc::Rc<SourceMap>,
                                index: usize| {
             match parsed.link_entry(index) {
                 Err(load_diagnostics) => {
                     for ld in &load_diagnostics {
-                        fold(sources, &ld.diagnostic);
+                        fold(shared, &ld.diagnostic);
                     }
                 }
-                Ok(program) => {
+                Ok(linked) => {
+                    // An entry whose directive expanded at compile time has sources of its own —
+                    // the generated declarations — that the directory's shared map does not hold,
+                    // so it renders against its own extended map and edition map. That is the rare
+                    // path: with no expanding directive (nearly every program) `expansions` is
+                    // empty and the shared `Rc<SourceMap>` is reused untouched, so this loop —
+                    // once per file in the directory — still clones nothing.
+                    let (sources, editions);
+                    if linked.expansions.is_empty() {
+                        sources = std::rc::Rc::clone(shared);
+                        editions = None;
+                    } else {
+                        sources = std::rc::Rc::new(parsed.source_map_with(&linked.expansions));
+                        editions = Some(parsed.editions_with(&linked.expansions));
+                    }
+                    let editions = editions.as_ref().unwrap_or_else(|| parsed.editions());
+                    let program = linked.program;
                     let program_diags = if active_refs.is_empty() {
-                        crate::context::check_under(&program, parsed.editions()).diagnostics
+                        crate::context::check_under(&program, editions).diagnostics
                     } else {
                         let activated =
                             noeta_check::activate_tiers_with(&program, &active_refs, &providers);
                         let mut ds = activated.diagnostics;
                         ds.extend(
-                            crate::context::check_under(&activated.program, parsed.editions())
-                                .diagnostics,
+                            crate::context::check_under(&activated.program, editions).diagnostics,
                         );
                         ds
                     };
                     for d in &program_diags {
-                        fold(sources, d);
+                        fold(&sources, d);
                     }
                 }
             }
