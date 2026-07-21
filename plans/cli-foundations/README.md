@@ -33,18 +33,37 @@ own slices, so `para/cli` is built on ground that holds.
 
 ## Slices
 
+All language-side prerequisites are **done and merged** (arc `23f659bd`, gate 7/7 including
+`differential_backends_agree`). Main's directive-expansion arc was integrated mid-flight (`6c26832f`)
+and re-verified. What remains is the std/host layer and the framework itself.
+
 | # | Slice | Branch | State |
 |---|---|---|---|
-| 0 | Computed-callee calls type-checked (soundness) | `slice-callee-soundness` | done |
-| 1 | `BuiltinTy` enum — collapse ~17 stringly-typed name→kind/arity tables to one | `slice-builtinty` | done |
-| 2 | `.{ }` target-typed struct literals + inlay hint | `slice-dot-brace` | in flight |
-| 3 | Free-function `invoke("name", args)` | — | queued |
-| 4 | `env.get -> ?string` | `slice-env-get` | done |
-| 5 | `optional` on `ParamSig` | `slice-param-optional` | in flight |
-| 6 | Parameter attributes (`#[Arg(...)]` on a parameter) | — | queued |
-| 7 | std/host: stderr, stdin, TTY detection | — | queued |
+| 0 | Computed-callee calls type-checked (soundness) | `slice-callee-soundness` | ✅ done |
+| 1 | `BuiltinTy` enum — collapse ~17 stringly-typed name→kind/arity tables to one | `slice-builtinty` | ✅ done |
+| 2 | `.{ }` target-typed struct literals + inlay hint | `slice-dot-brace` | ✅ done |
+| 3 | Free-function `invoke("name", args)` | `slice-invoke-free-fn` | ✅ done |
+| 4 | `env.get -> ?string` | `slice-env-get` | ✅ done |
+| 5 | `optional` on `ParamSig` | `slice-param-optional` | ✅ done |
+| 6 | Parameter attributes (`#[Arg(...)]` on a parameter) + `ParamInfo.attrs` | `slice-param-attrs` | ✅ done |
+| — | Attribute type-ref generic args preserved + validated | `slice-attr-typeref-args` | ✅ done |
+| 7 | std/host: **stderr** (the real blocker), stdin, TTY detection | — | queued |
 | 8 | `para/cli` itself | — | queued |
-| — | Attribute type-ref generic args preserved + validated | `slice-attr-typeref-args` | done |
+
+The signature-is-the-spec loop is proven end to end (five slices at once):
+
+```
+#[Command("build")]
+fn build(#[Arg(help: "target triple")] target: string,
+         #[Arg(short: "r", help: "optimize")] release: bool = false): int { ... }
+
+for p in params_of("build") {
+    for a in p.attrs { if a is Arg { help = a.help } }
+    echo "${p.name}: optional=${p.optional} help='${help}'"
+}
+// target:  optional=false help='target triple'
+// release: optional=true  help='optimize'
+```
 
 ### Open, awaiting a decision
 
