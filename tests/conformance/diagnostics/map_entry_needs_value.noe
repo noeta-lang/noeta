@@ -1,0 +1,9 @@
+// A brace group in VALUE position whose entry has no `: value` and is not a bare field name. The
+// map-entry rule rejects it — it does not accept it and complain afterwards, which is what would
+// consume the braces and break the block fallback in a match arm (see
+// `control_flow/match_block_arm_single_call.noe`). Rejecting still lets the rule carry its own
+// reason, so here, where no block alternative exists to win instead, the pointed message surfaces
+// rather than the raw expected-set wall.
+// expect: error E0003 at 9:7
+// expect: exit 1
+x = { "a" };

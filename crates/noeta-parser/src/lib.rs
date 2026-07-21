@@ -1193,15 +1193,34 @@ fn weave_hard_semicolons(
     out
 }
 
-/// Map a chumsky [`Rich`] structural error onto the central diagnostic catalog. A
-/// missing `found` token means the parser hit end-of-input.
+/// The reason carried by a map entry that has no `: value` and is not a bare field name. Named
+/// because [`custom_reason`] keys the rest of the diagnostic off it: a [`Rich::custom`] reason is
+/// only a string, so message, code and help are declared together here rather than reconstructed
+/// from message text at the rendering site.
+const MAP_ENTRY_NEEDS_VALUE: &str =
+    "a map entry needs `: value`, or a bare field name for the shorthand";
+
+/// The catalog entry a parser-stage [`Rich::custom`] reason declares for itself, if it is one this
+/// module raises deliberately. A rule that matched a token and then rejected it on its own terms
+/// knows better than the generic expected-vs-found classifier what it is complaining about, so it
+/// names its own code and help. Reasons not listed here (chumsky's own, and the
+/// end-of-input-reachable "expected a statement terminator") keep the generic classification.
+fn custom_reason(reason: &str) -> Option<(DiagnosticCode, Option<&'static str>)> {
+    match reason {
+        MAP_ENTRY_NEEDS_VALUE => Some((
+            DiagnosticCode::UnexpectedToken,
+            Some(
+                "write `{\"key\": value}` for an explicit entry, or `{name}` to pun a variable \
+                 into the key of the same name",
+            ),
+        )),
+        _ => None,
+    }
+}
+
+/// Map a chumsky [`Rich`] structural error onto the central diagnostic catalog.
 fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     let span = ctx.to_span(*err.span());
-    let code = if err.found().is_none() {
-        DiagnosticCode::UnexpectedEndOfInput
-    } else {
-        DiagnosticCode::UnexpectedToken
-    };
     // Render `found`/`expected` via the human-facing token descriptions. The expected set is
     // rebuilt by hand with a SORTED alternative list: chumsky's own Display iterates its
     // internal set in an order that is not stable across builds, which made every pinned
@@ -1210,31 +1229,41 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     // Display impl: `describe()` already delimits tokens (backticks), and going through Display
     // would stack chumsky's own quoting on top (twice, in 1.0.0-alpha.8).
     let err = err.map_token(|t| t.describe());
-    let message = {
-        let mut expected: Vec<String> = err.expected().map(pattern_text).collect();
-        if expected.is_empty() {
-            // Labelled/custom reasons (e.g. "expected a statement terminator") carry no
-            // alternative set — chumsky's own rendering is already deterministic there.
-            err.to_string()
-        } else {
-            expected.sort_unstable();
-            expected.dedup();
-            let found = match err.found() {
-                Some(d) => format!("found {d} "),
-                None => "found end of input ".to_string(),
-            };
-            let list = match expected.len() {
-                1 => expected[0].clone(),
-                _ => format!(
-                    "{}, or {}",
-                    expected[..expected.len() - 1].join(", "),
-                    expected[expected.len() - 1]
-                ),
-            };
-            format!("{found}expected {list}")
-        }
+    let mut expected: Vec<String> = err.expected().map(pattern_text).collect();
+    // An empty alternative set means a labelled/custom reason rather than chumsky's own
+    // expected-vs-found.
+    let message = if expected.is_empty() {
+        // chumsky's own rendering is already deterministic for these.
+        err.to_string()
+    } else {
+        expected.sort_unstable();
+        expected.dedup();
+        let found = match err.found() {
+            Some(d) => format!("found {d} "),
+            None => "found end of input ".to_string(),
+        };
+        let list = match expected.len() {
+            1 => expected[0].clone(),
+            _ => format!(
+                "{}, or {}",
+                expected[..expected.len() - 1].join(", "),
+                expected[expected.len() - 1]
+            ),
+        };
+        format!("{found}expected {list}")
     };
-    Diagnostic::error(code, span, message)
+    // A custom reason declares its own catalog entry; everything else is classified by whether
+    // there was a token to be surprised by.
+    let (code, help) = match custom_reason(&message) {
+        Some(declared) => declared,
+        None if err.found().is_none() => (DiagnosticCode::UnexpectedEndOfInput, None),
+        None => (DiagnosticCode::UnexpectedToken, None),
+    };
+    let mut diag = Diagnostic::error(code, span, message);
+    if let Some(help) = help {
+        diag.help(help);
+    }
+    diag
 }
 
 /// Render one expected-set alternative. Token descriptions come from
@@ -1923,25 +1952,27 @@ where
         // identifier to the string key of the same name with the in-scope variable as its value
         // (`{ host, port }`). The colon form is unchanged; an omitted value is the shorthand.
         //
-        // The shorthand is restricted to a bare identifier **in the grammar**, not by a diagnostic
-        // raised after the fact. That distinction is load-bearing wherever `{ … }` is ambiguous
-        // between a map literal and a statement block (a match arm's body, aether F1): those sites
-        // try the value EXPRESSION first and fall back to the block only when the expression parse
-        // *fails*. A rule that accepts `{ f(x) }` as a one-entry map and then rejects it with an
-        // error has already consumed the braces — the block alternative is never reached, and
-        // `1 => { log.info("hi") }` dies on a map-shorthand complaint. So the map grammar must
-        // accept exactly the maps: an entry with no `: value` is a map entry only if it is a bare
-        // name, and anything else under the braces means these braces were never a map.
-        let entry_kv = expr
+        // The shorthand is restricted to a bare identifier by REJECTING anything else, not by
+        // accepting it and reporting a diagnostic afterwards. That distinction is load-bearing
+        // wherever `{ … }` is ambiguous between a map literal and a statement block (a match arm's
+        // body, aether F1): those sites try the value EXPRESSION first and fall back to the block
+        // only when the expression parse *fails*. A rule that accepts `{ f(x) }` as a one-entry map
+        // and then complains has already consumed the braces — the block alternative is never
+        // reached, and `1 => { log.info("hi") }` dies on a map-shorthand error.
+        //
+        // So the rejection goes through `try_map`, which FAILS the parse (the braces stay
+        // unconsumed and `or` backtracks normally) while carrying a pointed reason. Where a block
+        // is a legal alternative it wins and this error is dropped with the branch; where only a
+        // value is legal — `x = { "a" }` — nothing else can succeed, and the reason surfaces
+        // instead of the raw expected-set wall. Failing with a good message is not the same as
+        // accepting with a bad one, and only the latter breaks backtracking.
+        let entry = expr
             .clone()
-            .then(just(T::Colon).ignore_then(sub.clone()))
-            .map(|(key, value)| (key, Some(value)));
-        let entry_shorthand = id
-            .clone()
-            .map(|(name, span)| (Expr::Ident { name, span }, None));
-        // The `key: value` form is tried first: it commits only on seeing the colon, so a bare
-        // `{ host, port }` backtracks cleanly into the shorthand.
-        let entry = entry_kv.or(entry_shorthand);
+            .then(just(T::Colon).ignore_then(sub.clone()).or_not())
+            .try_map(|(key, value), span| match (&value, &key) {
+                (Some(_), _) | (None, Expr::Ident { .. }) => Ok((key, value)),
+                (None, _) => Err(Rich::custom(span, MAP_ENTRY_NEEDS_VALUE)),
+            });
         let map = entry
             .separated_by(just(T::Comma))
             .allow_trailing()
@@ -1952,9 +1983,9 @@ where
                     .into_iter()
                     .map(|(key, value)| match value {
                         Some(value) => (key, value),
-                        // Shorthand `{ name }`: the grammar guarantees the key is a bare
-                        // identifier, so desugar it to its string key plus a reference to the
-                        // same-named variable.
+                        // Shorthand `{ name }`: the entry rule rejected every non-identifier key,
+                        // so desugar it to its string key plus a reference to the same-named
+                        // variable.
                         None => match key {
                             Expr::Ident { name, span } => {
                                 (Expr::Str { value: name.clone(), span }, Expr::Ident { name, span })
@@ -5216,6 +5247,75 @@ mod tests {
             parsed.diagnostics[0].code,
             DiagnosticCode::UnexpectedEndOfInput
         );
+    }
+
+    #[test]
+    fn a_valueless_non_ident_map_entry_is_pointed_where_only_a_value_is_legal() {
+        // In value position nothing else can succeed, so the entry rule's own reason surfaces
+        // instead of the raw expected-set wall — with the help that spells both valid forms.
+        for src in [
+            "x = { \"a\" };",
+            "x = { foo.bar };",
+            "x = { f() };",
+            "xs = [{ f() }];",
+        ] {
+            let parsed = parse_str(src);
+            let pointed = parsed
+                .diagnostics
+                .iter()
+                .find(|d| d.message == MAP_ENTRY_NEEDS_VALUE)
+                .unwrap_or_else(|| panic!("no pointed map-entry diagnostic for `{src}`"));
+            assert_eq!(pointed.code, DiagnosticCode::UnexpectedToken, "{src}");
+            assert!(
+                pointed
+                    .help
+                    .as_deref()
+                    .is_some_and(|h| h.contains("\"key\": value") && h.contains("{name}")),
+                "help missing or unhelpful for `{src}`: {:?}",
+                pointed.help
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_arm_body_never_leaks_the_map_entry_reason() {
+        // The same brace body that is pointed at in value position is a legal statement BLOCK
+        // here. The entry rule FAILS rather than accepting, so the block alternative wins and its
+        // discarded reason must not reach the diagnostics — that leak is what a permissive rule
+        // would have caused, and it is the regression this pairs with.
+        for src in [
+            "match n { 1 => { f(x) }, _ => {} }",
+            "match n { 1 => { a.b }, _ => {} }",
+            "c = fn(): void { f(x) };",
+        ] {
+            let parsed = parse_str(src);
+            assert!(
+                !parsed
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message == MAP_ENTRY_NEEDS_VALUE),
+                "map-entry reason leaked out of a block body in `{src}`: {:?}",
+                parsed.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn map_literals_and_shorthand_survive_the_strict_entry_rule() {
+        for src in [
+            "m = {\"a\": 1};",
+            "m = {host, port};",
+            "m = {host, \"k\": 2};",
+            "m = {};",
+            "m = {\"in\": {\"x\": 1}};",
+        ] {
+            let parsed = parse_str(src);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "`{src}` should parse cleanly: {:?}",
+                parsed.diagnostics
+            );
+        }
     }
 
     #[test]
