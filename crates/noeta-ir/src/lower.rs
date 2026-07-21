@@ -2664,7 +2664,15 @@ impl Lowerer<'_> {
                 mask |= 1 << p;
             }
         }
-        Ok((permuted, Some(mask)))
+        // A mask is only worth carrying when it says something the prefix rule cannot. A pure
+        // reordering (`sub(b: 1, a: 10)`) fills a *prefix* of the parameters, and `permuted` is
+        // already in parameter order — so the ordinary rule describes it exactly, and every fast
+        // path that assumes the prefix rule (the JIT's direct-call setup, the tier-1 helpers)
+        // keeps applying. `Some` then means precisely "this call skips a defaulted parameter".
+        // `mask` has exactly `permuted.len()` bits set by construction, so "the low `len` bits are
+        // all set" is the same as "the set bits are the prefix" — and it does not overflow at 64.
+        let is_prefix = mask.trailing_ones() as usize == permuted.len();
+        Ok((permuted, if is_prefix { None } else { Some(mask) }))
     }
 
     /// Lower `a && b` / `a || b` to a [`Stmt::Logical`] writing into a fresh temp, so the

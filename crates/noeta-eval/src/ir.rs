@@ -1171,14 +1171,14 @@ impl Interpreter {
             noeta_ir::Rvalue::Call {
                 callee,
                 args,
-                // Always `None` while a hole is rejected at check time: a pure reordering is
-                // already applied to `args` by lowering, so there is nothing left to say.
-                supplied: _,
+                // `None` for a pure reordering — lowering already permuted `args`, so there is
+                // nothing left to say. `Some` only when the call skips a defaulted parameter.
+                supplied,
                 span,
             } => {
                 let callee = self.eval_ir_atom(callee, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
-                self.call(callee, values, *span)
+                self.call_masked(callee, values, *span, *supplied)
             }
             noeta_ir::Rvalue::Method {
                 receiver,

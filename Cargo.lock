@@ -4275,6 +4275,7 @@ dependencies = [
  "noeta-ast",
  "noeta-backend",
  "noeta-builtins",
+ "noeta-bytecode",
  "noeta-check",
  "noeta-diagnostics",
  "noeta-ir",

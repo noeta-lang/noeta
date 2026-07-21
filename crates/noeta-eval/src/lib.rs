@@ -3520,6 +3520,26 @@ impl Interpreter {
         }
     }
 
+    /// Call a value whose arguments may skip a defaulted parameter (`f(1, c: 9)`), per the
+    /// supplied-mask the checker recorded and lowering carried. Only a user closure can be masked
+    /// — nothing else has defaulted parameters — so every other callee ignores it, and a mask
+    /// reaching one is a lowering bug rather than a user error.
+    fn call_masked(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        span: Span,
+        supplied: Option<u64>,
+    ) -> Eval<Value> {
+        match (&callee, supplied) {
+            (Value::Function(closure), Some(_)) => {
+                let closure = Rc::clone(closure);
+                self.call_closure_masked(&closure, args, span, supplied)
+            }
+            _ => self.call(callee, args, span),
+        }
+    }
+
     fn call(&mut self, callee: Value, args: Vec<Value>, span: Span) -> Eval<Value> {
         match callee {
             Value::Builtin(builtin) => self.call_builtin(builtin, args, span),
@@ -3594,6 +3614,16 @@ impl Interpreter {
     }
 
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
+        self.call_closure_masked(closure, args, span, None)
+    }
+
+    fn call_closure_masked(
+        &mut self,
+        closure: &Rc<Closure>,
+        args: Vec<Value>,
+        span: Span,
+        supplied: Option<u64>,
+    ) -> Eval<Value> {
         let required = required_count(&closure.defaults);
         if args.len() < required || args.len() > closure.params.len() {
             return Err(self.runtime_error(
@@ -3605,17 +3635,25 @@ impl Interpreter {
         // Safepoint-GC poll at the call boundary (memory-management 6.x) — with the loop
         // polls, this bounds a recursion-driven cycle builder too.
         cycles::poll_safepoint();
-        let supplied = args.len();
+        let n_args = args.len();
         let call_scope = match &closure.body.captures {
             Some(allow) => Scope::sealed_child(&closure.captured, allow),
             None => Scope::child(&closure.captured),
         };
-        for (param, arg) in closure.params.iter().zip(args) {
-            call_scope.declare(param.clone(), arg, false);
+        // Each argument binds the parameter it was bound to at check time — its own position
+        // without a mask, the i-th supplied parameter with one.
+        for (i, arg) in args.into_iter().enumerate() {
+            let p = noeta_bytecode::param_of_arg(i, supplied);
+            call_scope.declare(closure.params[p].clone(), arg, false);
         }
-        // Fill any omitted trailing parameters from their defaults, each evaluated in the closure's
-        // captured (definition/global) scope — never seeing the call's other arguments.
-        for i in supplied..closure.params.len() {
+        // Fill every parameter the caller left out from its default, each evaluated in the closure's
+        // captured (definition/global) scope — never seeing the call's other arguments. Without a
+        // mask these are exactly the trailing parameters; with one, a skipped middle parameter is
+        // filled here too.
+        for i in 0..closure.params.len() {
+            if noeta_bytecode::is_param_filled(i, n_args, supplied) {
+                continue;
+            }
             let value = self.eval_default(closure, i)?;
             call_scope.declare(closure.params[i].clone(), value, false);
         }

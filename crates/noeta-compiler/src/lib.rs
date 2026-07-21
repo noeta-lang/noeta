@@ -3075,8 +3075,12 @@ impl<'m> FnCompiler<'m> {
                 Ok(())
             }
             Rvalue::Call {
-                callee, args, span, ..
-            } => self.lower_call(callee, args, dst, *span),
+                callee,
+                args,
+                span,
+                supplied,
+                ..
+            } => self.lower_call(callee, args, dst, *span, *supplied),
             Rvalue::Method {
                 receiver,
                 name,
@@ -3748,12 +3752,19 @@ impl<'m> FnCompiler<'m> {
         args: &[Atom],
         dst: Reg,
         span: Span,
+        supplied: Option<u64>,
     ) -> Result<(), Unsupported> {
         // A prelude function called directly by name. A user binding of the same name shadows the
         // prelude (then `resolve` is not `Prelude`, so this falls to the ordinary call below).
         if let Atom::Var { name, .. } = callee
             && matches!(self.resolve(name), Resolved::Prelude)
         {
+            // Prelude/builtin callees have no defaulted parameters, so the checker never binds a
+            // hole against one. Refuse rather than drop the mask: silently lowering it would call
+            // the builtin with the args shifted into the wrong positions.
+            if supplied.is_some() {
+                return unsupported("named arguments that skip a parameter of a prelude function");
+            }
             // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)`, `panic(msg)` — an arity-correct direct call
             // keeps its dedicated fast op (`MakeEnum` / `Op::Panic`, which tier-1 also compiles).
             // A wrong-arity call falls through to the generic `CallBuiltin` below, whose RUNTIME
@@ -3801,6 +3812,7 @@ impl<'m> FnCompiler<'m> {
                 global,
                 args,
                 span,
+                supplied,
             });
             return Ok(());
         }
@@ -3811,6 +3823,7 @@ impl<'m> FnCompiler<'m> {
             callee: callee_reg,
             args,
             span,
+            supplied,
         });
         Ok(())
     }
@@ -4366,6 +4379,7 @@ impl<'m> FnCompiler<'m> {
             callee,
             args: arg_regs.into_boxed_slice(),
             span,
+            supplied: None,
         });
         Ok(())
     }

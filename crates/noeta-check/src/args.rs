@@ -123,25 +123,25 @@ impl Checker {
     ) -> Option<(Vec<CallArg>, Vec<crate::Type>)> {
         let binding = self.bind_arguments(args, param_names, callee)?;
 
-        // A named argument that skips a defaulted parameter (`f(1, c: 9)`) leaves a *hole*. The
-        // chosen design is a **supplied mask** on the call — the callee still evaluates the
-        // default, over its own upvalues, and the mask tells its prologue which ones to run
-        // instead of inferring "the trailing remainder" from a count. `Rvalue::Call::supplied`
-        // carries it and lowering computes it; the two backends' prologues do not read it yet, so
-        // a hole is still diagnosed here rather than mis-bound.
-        let supplied_set: Vec<bool> = binding.iter().map(Option::is_some).collect();
-        if let Some(hole) = supplied_set.iter().position(|s| !s)
-            && supplied_set[hole..].iter().any(|s| *s)
+        // A named argument that skips a defaulted parameter (`f(1, c: 9)`) leaves a *hole*, carried
+        // to the callee as a **supplied mask** on the call: the callee still evaluates the default,
+        // over its own upvalues, and the mask tells its prologue which ones to run rather than
+        // inferring "the trailing remainder" from a count. The mask is one `u64`, so a hole beyond
+        // parameter 64 has nowhere to live — refuse it here instead of lowering a call the
+        // prologues would fill wrongly.
+        if let Some(hole) = binding.iter().position(Option::is_none)
+            && hole >= 64
+            && binding[hole..].iter().any(Option::is_some)
         {
             self.error(
                 DiagnosticCode::InvalidArgument,
                 span,
                 format!(
-                    "`{callee}` would skip parameter `{}`, which is not supported yet",
+                    "`{callee}` skips parameter `{}`, which is past the 64-parameter limit for named arguments",
                     param_names[hole]
                 ),
             )
-            .help("pass it explicitly for now — skipping a defaulted parameter needs the callee to be told which defaults to run");
+            .help("pass it explicitly, or move it within the first 64 parameters");
             return None;
         }
         // Every parameter without a default must be supplied — by position or by name. Reported

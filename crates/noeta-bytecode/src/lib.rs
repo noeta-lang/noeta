@@ -963,6 +963,13 @@ pub enum Op {
         callee: Reg,
         args: Box<[Reg]>,
         span: Span,
+        /// Which parameters `args` fills, when the call cannot be described by the ordinary
+        /// "args fill parameters 0..n in order" prefix rule — i.e. a named-argument call that
+        /// *skips* a defaulted parameter (`f(1, c: 9)`). Bit `p` set means parameter `p` is
+        /// supplied, and the supplied bits, read low to high, correspond to `args` in order.
+        /// `None` means the prefix rule applies, which is every call that omits only trailing
+        /// parameters — so the common path carries no extra work.
+        supplied: Option<u64>,
     },
     /// `dst = f(args)` where `f` is a statically-known top-level `fn` bound to global slot
     /// `global` (immutable, zero upvalues). Reads the callee closure straight from its slot —
@@ -974,6 +981,8 @@ pub enum Op {
         global: GlobalId,
         args: Box<[Reg]>,
         span: Span,
+        /// The [`Op::Call::supplied`] twin — same meaning, same `None` fast path.
+        supplied: Option<u64>,
     },
     /// Return `src` from the current frame to the caller's destination register (or end the
     /// program if returning from the top-level frame).
@@ -1500,6 +1509,58 @@ fn const_repr(c: &Const) -> String {
     }
 }
 
+/// Is parameter `p` filled by the caller's arguments?
+///
+/// This is the single statement of the argument→parameter rule, shared by every call prologue in
+/// both backends. Without a mask the prefix rule applies: `n_args` arguments fill parameters
+/// `0..n_args`, and everything above that runs its default thunk. With a mask, parameter `p` is
+/// filled exactly when bit `p` is set — which is what lets a named call skip a defaulted parameter
+/// in the middle (`f(1, c: 9)` fills 0 and 2, and `b` still runs its default).
+///
+/// A parameter index at or past 64 is never in the mask, so masked calls are limited to the first
+/// 64 parameters; [`param_of_arg`] and the checker agree on that bound.
+#[inline]
+pub fn is_param_filled(p: usize, n_args: usize, supplied: Option<u64>) -> bool {
+    match supplied {
+        None => p < n_args,
+        Some(mask) => p < 64 && mask & (1 << p) != 0,
+    }
+}
+
+/// Which parameter argument `i` fills — the inverse of [`is_param_filled`]. Without a mask that is
+/// `i` itself; with one it is the position of the `i`-th set bit, read from the low end.
+#[inline]
+pub fn param_of_arg(i: usize, supplied: Option<u64>) -> usize {
+    let Some(mask) = supplied else { return i };
+    let mut remaining = mask;
+    for _ in 0..i {
+        remaining &= remaining - 1; // clear the lowest set bit
+    }
+    remaining.trailing_zeros() as usize
+}
+
+/// Render a call's argument registers, showing a skipped parameter as `_` so a masked call reads
+/// as what it is — `f(r1, _, r2)` fills parameters 0 and 2 and leaves 1 to its default thunk.
+fn call_args(args: &[Reg], supplied: Option<u64>) -> String {
+    let Some(mask) = supplied else {
+        let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+        return args.join(", ");
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut next = args.iter();
+    for p in 0..=(u64::BITS - 1 - mask.leading_zeros()) {
+        if mask & (1 << p) != 0 {
+            out.push(
+                next.next()
+                    .map_or_else(|| "?".to_string(), |r| format!("r{r}")),
+            );
+        } else {
+            out.push("_".to_string());
+        }
+    }
+    out.join(", ")
+}
+
 fn op_repr(
     op: &Op,
     diagnostics: &[Diagnostic],
@@ -1908,16 +1969,29 @@ fn op_repr(
         Op::ExtractField { dst, src, index } => format!("ExtractField r{dst} <- r{src}.{index}"),
         Op::MatchFail { src, .. } => format!("MatchFail   r{src}"),
         Op::Call {
-            dst, callee, args, ..
+            dst,
+            callee,
+            args,
+            supplied,
+            ..
         } => {
-            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
-            format!("Call        r{dst} <- r{callee}({})", args.join(", "))
+            format!(
+                "Call        r{dst} <- r{callee}({})",
+                call_args(args, *supplied)
+            )
         }
         Op::CallGlobal {
-            dst, global, args, ..
+            dst,
+            global,
+            args,
+            supplied,
+            ..
         } => {
-            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
-            format!("CallGlobal  r{dst} <- {:?}({})", g(global), args.join(", "))
+            format!(
+                "CallGlobal  r{dst} <- {:?}({})",
+                g(global),
+                call_args(args, *supplied)
+            )
         }
         Op::Return { src } => format!("Return      r{src}"),
         Op::Unary { op, dst, src, .. } => format!("Unary       r{dst} <- {} r{src}", op.symbol()),

@@ -1538,6 +1538,9 @@ impl<'m> Vm<'m> {
                                                 args,
                                                 *span,
                                                 pc + 1,
+                                                // A member call carries no mask yet — named
+                                                // arguments bind only to top-level `fn`s so far.
+                                                None,
                                             )? {
                                                 continue 'reload;
                                             }
@@ -3287,6 +3290,7 @@ impl<'m> Vm<'m> {
                         callee,
                         args,
                         span,
+                        supplied,
                     } => {
                         let callee_val = regs[fbase + *callee as usize];
                         // Shared closure-call setup (also used by the JIT's `jit_call` helper): pushes
@@ -3302,6 +3306,7 @@ impl<'m> Vm<'m> {
                             args,
                             *span,
                             pc + 1,
+                            *supplied,
                         )? {
                             continue 'reload;
                         }
@@ -3312,6 +3317,7 @@ impl<'m> Vm<'m> {
                         global,
                         args,
                         span,
+                        supplied,
                     } => {
                         // A statically-known top-level `fn`: read the callee straight from its
                         // global slot. No retain — the slot owns the reference for the whole call,
@@ -3338,6 +3344,7 @@ impl<'m> Vm<'m> {
                             args,
                             *span,
                             pc + 1,
+                            *supplied,
                         )? {
                             continue 'reload;
                         }
