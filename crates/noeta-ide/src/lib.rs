@@ -453,8 +453,8 @@ impl DocumentStore {
     /// shared per-directory workspace. What every document-addressed feature resolves through.
     fn doc_cache(&self, uri: &str) -> Option<(&WorkspaceCache, SourceProgram, SourceId)> {
         let cache = self.workspaces.get(&workspace_key(uri))?;
-        let idx = cache.source_uris.iter().position(|u| u == uri)?;
-        Some((cache, cache.programs[idx], SourceId(idx as u32)))
+        let (source, entry) = cache.find_member(uri)?;
+        Some((cache, entry.program, source))
     }
 
     /// The `uri`'s own diagnostics (cross-module resolution, but only this file's own diagnostics
@@ -1669,11 +1669,12 @@ impl DocumentStore {
             };
             return Some((cache, entry, source));
         }
-        // A dependency module discovered by some open workspace (ids continue past the members).
+        // A dependency module discovered by some open workspace (its id is the workspace's, looked
+        // up explicitly — see `WorkspaceCache::find_dep`).
         self.workspaces.values().find_map(|cache| {
-            let idx = cache.dep_uris.iter().position(|u| u == uri)?;
+            let (source, _) = cache.find_dep(uri)?;
             let entry = self.entry_for(cache, cache.programs[0]);
-            Some((cache, entry, SourceId((idx + cache.programs.len()) as u32)))
+            Some((cache, entry, source))
         })
     }
 
@@ -1690,16 +1691,11 @@ impl DocumentStore {
             .unwrap_or(fallback)
     }
 
-    /// The source text of `source` within `cache` (entry + siblings, then dependency modules —
-    /// the same id layout [`Self::locate`] maps).
+    /// The source text of `source` within `cache` — any category the workspace maps (member or
+    /// dependency module), resolved through the one [`WorkspaceCache::source`] lookup. `None` when
+    /// the workspace does not map the id at all.
     fn source_text(&self, cache: &WorkspaceCache, source: SourceId) -> Option<&String> {
-        let idx = source.0 as usize;
-        let program = if idx < cache.programs.len() {
-            cache.programs.get(idx)?
-        } else {
-            cache.dep_programs.get(idx - cache.programs.len())?
-        };
-        Some(program.text(&self.db))
+        Some(cache.source(source)?.program.text(&self.db))
     }
 
     /// The function the cursor addresses, as a call-hierarchy item (ide-ui U0): its declared name,
@@ -2228,10 +2224,13 @@ impl DocumentStore {
                     if !direct.contains(&root) {
                         continue;
                     }
+                    let Some(source) = cache.dep_source_id(i) else {
+                        continue;
+                    };
                     deps.push(docs::DepDoc {
                         root,
                         module_name: basename(&cache.dep_uris[i]),
-                        source: SourceId((cache.programs.len() + i) as u32),
+                        source,
                         program: &ast.0.program,
                     });
                 }
@@ -2354,12 +2353,11 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
         let ide = noeta_db::linked_checked_ide_from(db, cache.workspace, entry);
-        // Texts by SourceId index: members, then dependency modules (ids continue past).
+        // Texts by SourceId index — `WorkspaceCache::sources` yields in SourceId order, so element
+        // `n` IS `SourceId(n)` without this site knowing the id layout.
         let texts: Vec<&str> = cache
-            .programs
-            .iter()
-            .chain(&cache.dep_programs)
-            .map(|p| p.text(db).as_str())
+            .sources()
+            .map(|s| s.program.text(db).as_str())
             .collect();
         let graph = callgraph::build(program, &ide.expr_types, &texts);
         (graph, noeta_ast::reflect::build(program))
@@ -2400,23 +2398,13 @@ impl DocumentStore {
         span: Span,
         encoding: Encoding,
     ) -> Option<(String, Range)> {
-        let idx = span.source.0 as usize;
-        // Entry + siblings are indexed directly; a dependency module's SourceId continues past them
-        // (see `resolve_dep_modules`), so it maps into the dep arrays (package-manager P2.1c).
-        let (uri, program) = if idx < cache.programs.len() {
-            (
-                cache.source_uris.get(idx)?.clone(),
-                *cache.programs.get(idx)?,
-            )
-        } else {
-            let di = idx - cache.programs.len();
-            (
-                cache.dep_uris.get(di)?.clone(),
-                *cache.dep_programs.get(di)?,
-            )
-        };
-        let index = LineIndex::new(program.text(&self.db));
-        Some((uri, index.range(span, encoding)))
+        // Members and dependency modules (package-manager P2.1c) both jump the same way — the
+        // difference is only which file the id names, which is the lookup's job, not this site's.
+        // An id the workspace does not map is `None`: the editor gets no jump rather than a jump
+        // into the wrong file.
+        let source = cache.source(span.source)?;
+        let index = LineIndex::new(source.program.text(&self.db));
+        Some((source.uri.to_string(), index.range(span, encoding)))
     }
 }
 
@@ -2541,13 +2529,11 @@ impl docs::DocEnv for StoreDocEnv<'_> {
     }
 
     fn source_name(&self, source: SourceId) -> Option<String> {
-        let idx = source.0 as usize;
-        // Project sources are entry + siblings (indices below `programs.len()`); a dependency
-        // module's id continues past them and is excluded from the project corpus.
-        if idx >= self.cache.programs.len() {
-            return None;
-        }
-        self.cache.source_uris.get(idx).map(|uri| basename(uri))
+        // The project corpus is the workspace's **members** only — a dependency module (and any
+        // later non-member category) is excluded, and an id this workspace does not map names no
+        // project source at all.
+        let source = self.cache.source(source)?;
+        source.is_member().then(|| basename(source.uri))
     }
 
     fn dependencies(&self) -> Vec<docs::DepInfo> {

@@ -17,7 +17,60 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use noeta_db::{DepModule, LangDatabase, SourceProgram, Workspace};
+use noeta_span::SourceId;
 use salsa::Setter as _;
+
+/// What **category** of source a [`SourceId`] names within a [`WorkspaceCache`].
+///
+/// The IDE's addressing was, until this type existed, a *range convention*: an id below
+/// `programs.len()` meant a member, anything above meant a dependency, and the caller subtracted.
+/// That rule was open-coded at nine sites, and when it drifted it did not crash — it attributed a
+/// span to the WRONG FILE. Naming the category makes the decision explicit at each site.
+///
+/// A **third** category is expected (compile-time directive expansion mints sources of its own).
+/// Call sites therefore ask predicates like [`SourceRef::is_member`] rather than matching every
+/// arm, so a new variant slots in without a nine-site sweep — and the sites that must exclude
+/// non-members already exclude it by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceKind {
+    /// A workspace member: a `.noe` file of the directory the user has open.
+    Member,
+    /// A module of a resolved dependency package (package-manager P2.1c).
+    Dependency,
+}
+
+/// The [`SourceId`] the **first dependency module** carries, given the member count — the single
+/// place the member/dependency id layout is written down. Dependency ids continue past the members,
+/// so every id→source lookup ([`WorkspaceCache::source`]), every dependency id
+/// ([`WorkspaceCache::dep_source_id`]) and the origin handed to [`resolve_dep_modules`] derive from
+/// here; nothing else may re-derive it. A third category would extend this function, not the ~nine
+/// call sites that used to open-code it.
+fn first_dep_id(member_count: usize) -> u32 {
+    member_count as u32
+}
+
+/// One **resolved** source: its category, its URI, and its salsa input handle.
+///
+/// Deliberately NOT a [`noeta_span::SourceMap`] entry: that type *owns* the source text, which the
+/// IDE must never do — text lives in the salsa [`SourceProgram`] input and is memoized per file, so
+/// an owning map would duplicate every open buffer and fight incrementality. A `SourceRef` borrows
+/// the URI out of the cache and carries the salsa handle, so the text is still read through salsa
+/// (`program.text(db)`) at the one moment it is needed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SourceRef<'a> {
+    pub(crate) kind: SourceKind,
+    pub(crate) uri: &'a str,
+    pub(crate) program: SourceProgram,
+}
+
+impl SourceRef<'_> {
+    /// Whether this source is a workspace **member** (as opposed to any non-member category —
+    /// today a dependency module, later an expansion). The question the exclusion sites actually
+    /// ask, phrased so a new category is excluded by default rather than silently included.
+    pub(crate) fn is_member(&self) -> bool {
+        matches!(self.kind, SourceKind::Member)
+    }
+}
 
 /// One **directory's** workspace (audit-4 finding 6): the salsa [`Workspace`] input over the
 /// directory's `.noe` members — sorted by path, which is the stable
@@ -35,10 +88,11 @@ pub(crate) struct WorkspaceCache {
     pub(crate) source_uris: Vec<String>,
     /// Per `SourceId`: the salsa input, for in-place text updates.
     pub(crate) programs: Vec<SourceProgram>,
-    /// Dependency-package modules (package-manager P2.1c), indexed by `SourceId - programs.len()`
-    /// (their ids continue past the members). Kept apart from `source_uris`/`programs` so the
-    /// per-keystroke reuse check and text-update loop stay over members only, while cross-package
-    /// navigation still maps a dependency span back to its file.
+    /// Dependency-package modules (package-manager P2.1c); their [`SourceId`]s continue past the
+    /// members, per [`first_dep_id`]. Kept apart from `source_uris`/`programs` so the per-keystroke
+    /// reuse check and text-update loop stay over members only, while cross-package navigation still
+    /// maps a dependency span back to its file. **Address these through [`WorkspaceCache::source`]
+    /// / [`WorkspaceCache::dep_source_id`]**, never by open-coding the id offset.
     pub(crate) dep_uris: Vec<String>,
     pub(crate) dep_programs: Vec<SourceProgram>,
     /// The [`DepModule`] inputs backing `workspace.dep_modules`, kept so a file-set rescan can
@@ -62,6 +116,56 @@ pub(crate) struct WorkspaceCache {
 }
 
 impl WorkspaceCache {
+    /// The [`SourceId`] of the `index`-th dependency module, or `None` if there is no such module.
+    pub(crate) fn dep_source_id(&self, index: usize) -> Option<SourceId> {
+        (index < self.dep_programs.len())
+            .then(|| SourceId(first_dep_id(self.programs.len()) + index as u32))
+    }
+
+    /// **The** `SourceId` → source lookup. `None` for an id this workspace does not map — an id
+    /// from another workspace, or one past every source — which every caller must handle
+    /// explicitly instead of falling into a range and being attributed to the wrong file.
+    pub(crate) fn source(&self, id: SourceId) -> Option<SourceRef<'_>> {
+        let idx = id.0 as usize;
+        let dep_origin = first_dep_id(self.programs.len()) as usize;
+        if idx < dep_origin {
+            return Some(SourceRef {
+                kind: SourceKind::Member,
+                uri: self.source_uris.get(idx)?,
+                program: *self.programs.get(idx)?,
+            });
+        }
+        let dep = idx - dep_origin;
+        Some(SourceRef {
+            kind: SourceKind::Dependency,
+            uri: self.dep_uris.get(dep)?,
+            program: *self.dep_programs.get(dep)?,
+        })
+    }
+
+    /// Every source this workspace maps, in [`SourceId`] order — so `nth` element IS `SourceId(n)`.
+    /// What the `SourceId`-indexed text vectors the call graph consumes are built from.
+    pub(crate) fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
+        (0..self.programs.len() + self.dep_programs.len())
+            .filter_map(|i| self.source(SourceId(i as u32)))
+    }
+
+    /// The workspace **member** at `uri`, with the [`SourceId`] it carries. `None` if `uri` is not a
+    /// member — a dependency module's URI deliberately does NOT resolve here.
+    pub(crate) fn find_member(&self, uri: &str) -> Option<(SourceId, SourceRef<'_>)> {
+        let idx = self.source_uris.iter().position(|u| u == uri)?;
+        let id = SourceId(idx as u32);
+        Some((id, self.source(id)?))
+    }
+
+    /// The **dependency module** at `uri`, with the [`SourceId`] it carries. `None` if no resolved
+    /// dependency module has that URI.
+    pub(crate) fn find_dep(&self, uri: &str) -> Option<(SourceId, SourceRef<'_>)> {
+        let idx = self.dep_uris.iter().position(|u| u == uri)?;
+        let id = self.dep_source_id(idx)?;
+        Some((id, self.source(id)?))
+    }
+
     /// Reclaim every input's resident content when the whole workspace is torn down — its last open
     /// document closed (audit F9 residual a). salsa 0.27 cannot free the input slots themselves, but
     /// [`noeta_db::release_source`] releases each member and dependency source's text and overwrites
@@ -69,8 +173,8 @@ impl WorkspaceCache {
     /// its whole analysis resident. (Already-emptied tombstones are skipped — they hold nothing.)
     pub(crate) fn release_all(&self, db: &mut LangDatabase) {
         let ws = self.workspace;
-        for &src in self.programs.iter().chain(&self.dep_programs) {
-            noeta_db::release_source(db, ws, src);
+        for src in self.sources() {
+            noeta_db::release_source(db, ws, src.program);
         }
     }
 }
@@ -169,7 +273,7 @@ pub(crate) fn sync(
     // dep module as a `DepModule` input (SourceIds continue past the members), so cross-package
     // `use <dep-key>.…` resolves exactly as the CLI resolves it. Every member of one directory
     // shares one manifest, so one resolution serves them all.
-    let mut deps = resolve_dep_modules(db, existing.as_ref(), &uris, programs.len() as u32);
+    let mut deps = resolve_dep_modules(db, existing.as_ref(), &uris, first_dep_id(programs.len()));
     // Dependency sources whose modules vanished from the resolution (finding a): reclaimed below.
     let deleted_deps = std::mem::take(&mut deps.deleted);
     let mut cache = match existing {
@@ -381,6 +485,137 @@ mod tests {
             uri.to_string(),
             format!("namespace {ns}\npub fn {name}(): int {{ return 1 }}\n"),
         )
+    }
+
+    /// A cache with `members` member sources and `deps` dependency modules, wired exactly as
+    /// [`sync`]/[`resolve_dep_modules`] wire them — member ids `0..members`, dependency ids
+    /// continuing from [`first_dep_id`] — without running dependency resolution.
+    fn cache_with(db: &mut LangDatabase, members: &[&str], deps: &[&str]) -> WorkspaceCache {
+        let ed = noeta_lexer::Edition::default();
+        let programs: Vec<SourceProgram> = members
+            .iter()
+            .enumerate()
+            .map(|(i, u)| SourceProgram::new(db, i as u32, (*u).to_string(), String::new(), ed))
+            .collect();
+        let first = first_dep_id(programs.len());
+        let dep_programs: Vec<SourceProgram> = deps
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                SourceProgram::new(db, first + i as u32, (*u).to_string(), String::new(), ed)
+            })
+            .collect();
+        let dep_modules: Vec<DepModule> = dep_programs
+            .iter()
+            .map(|src| DepModule::new(db, *src, "root".into(), "key".into(), Vec::new()))
+            .collect();
+        WorkspaceCache {
+            workspace: Workspace::new(db, programs.clone(), dep_modules.clone()),
+            source_uris: members.iter().map(|u| (*u).to_string()).collect(),
+            programs,
+            dep_uris: deps.iter().map(|u| (*u).to_string()).collect(),
+            dep_programs,
+            dep_modules,
+            tombstones: Vec::new(),
+            dep_error: None,
+        }
+    }
+
+    /// A member's `SourceId` resolves to that member — the category is named, not inferred from a
+    /// range, and the URI is the member's own.
+    #[test]
+    fn a_member_id_resolves_to_that_member() {
+        let mut db = LangDatabase::default();
+        let cache = cache_with(
+            &mut db,
+            &["file:///w/a.noe", "file:///w/b.noe"],
+            &["dep:///d"],
+        );
+        for (i, uri) in ["file:///w/a.noe", "file:///w/b.noe"].iter().enumerate() {
+            let source = cache.source(SourceId(i as u32)).expect("a mapped member");
+            assert_eq!(source.kind, SourceKind::Member);
+            assert!(source.is_member());
+            assert_eq!(source.uri, *uri);
+            assert_eq!(source.program, cache.programs[i]);
+        }
+        // …and the reverse lookup agrees, while a dependency URI is deliberately not a member.
+        assert_eq!(
+            cache.find_member("file:///w/b.noe").map(|(id, _)| id),
+            Some(SourceId(1))
+        );
+        assert!(cache.find_member("dep:///d0").is_none());
+    }
+
+    /// A dependency module's `SourceId` resolves to **that** dependency — the case the open-coded
+    /// subtraction silently got wrong, attributing a span to a member instead.
+    #[test]
+    fn a_dep_id_resolves_to_that_dep() {
+        let mut db = LangDatabase::default();
+        let cache = cache_with(
+            &mut db,
+            &["file:///w/a.noe", "file:///w/b.noe"],
+            &["dep:///d0", "dep:///d1"],
+        );
+        for (i, uri) in ["dep:///d0", "dep:///d1"].iter().enumerate() {
+            let id = cache.dep_source_id(i).expect("a mapped dependency");
+            let source = cache.source(id).expect("a mapped dependency");
+            assert_eq!(source.kind, SourceKind::Dependency);
+            assert!(!source.is_member());
+            assert_eq!(source.uri, *uri);
+            assert_eq!(source.program, cache.dep_programs[i]);
+            assert_eq!(cache.find_dep(uri).map(|(id, _)| id), Some(id));
+        }
+        // A member URI is not a dependency, and vice versa.
+        assert!(cache.find_dep("file:///w/a.noe").is_none());
+    }
+
+    /// The member/dependency **boundary** — the off-by-one the arithmetic invited — resolves
+    /// correctly on both sides: the last member is still a member, and the first id past it is the
+    /// first dependency, not a member and not the second dependency.
+    #[test]
+    fn the_member_dep_boundary_resolves_on_both_sides() {
+        let mut db = LangDatabase::default();
+        let cache = cache_with(
+            &mut db,
+            &["file:///w/a.noe", "file:///w/b.noe"],
+            &["dep:///d0", "dep:///d1"],
+        );
+        let last_member = cache.source(SourceId(1)).expect("the last member");
+        assert_eq!(last_member.kind, SourceKind::Member);
+        assert_eq!(last_member.uri, "file:///w/b.noe");
+
+        let first_dep = cache.source(SourceId(2)).expect("the first dependency");
+        assert_eq!(first_dep.kind, SourceKind::Dependency);
+        assert_eq!(first_dep.uri, "dep:///d0");
+
+        // And `sources()` really is SourceId-ordered — the invariant the text vectors rely on.
+        let seen: Vec<&str> = cache.sources().map(|s| s.uri).collect();
+        assert_eq!(
+            seen,
+            vec![
+                "file:///w/a.noe",
+                "file:///w/b.noe",
+                "dep:///d0",
+                "dep:///d1"
+            ]
+        );
+    }
+
+    /// An id past every source is **explicitly unresolved** — `None`, which the caller must handle
+    /// — rather than falling into the dependency range and being attributed to the wrong file.
+    #[test]
+    fn an_out_of_range_id_is_explicitly_unresolved() {
+        let mut db = LangDatabase::default();
+        let cache = cache_with(&mut db, &["file:///w/a.noe"], &["dep:///d0"]);
+        assert!(cache.source(SourceId(2)).is_none(), "one past the last dep");
+        assert!(cache.source(SourceId(9)).is_none(), "far past the last dep");
+        assert!(cache.dep_source_id(1).is_none(), "no such dependency index");
+
+        // A dependency-less workspace: every id past the members is unresolved, not a dependency.
+        let members_only = cache_with(&mut db, &["file:///w/a.noe"], &[]);
+        assert!(members_only.source(SourceId(0)).is_some());
+        assert!(members_only.source(SourceId(1)).is_none());
+        assert!(members_only.dep_source_id(0).is_none());
     }
 
     /// audit F9 residual (a) at the editor seam: deleting a member from the file set must reclaim its
