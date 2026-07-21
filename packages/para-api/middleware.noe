@@ -127,9 +127,9 @@ pub struct Mock {
         return method.upper() ~ " " ~ path
     }
 
-    // The canned reply for a request. Lives here rather than in the `impl` block below for a linker
-    // reason that applies to every middleware in this file — see the note above `impl Middleware
-    // for Mock`.
+    // The canned reply for a request — the "what would I answer" half, kept apart from the `impl`
+    // block's "wrap it in the middleware's `Result`" half. Returning a `Response` rather than a
+    // `Result` lets `to_mock` and any future caller reuse the lookup without unwrapping.
     fn answer(req: Request): Response {
         // Most specific first: a route that named a query string beats one that named only a path.
         precise = Mock.key(req.method(), target(req))
@@ -148,17 +148,9 @@ pub struct Mock {
     }
 }
 
-// Every `impl Middleware` block from here down is a one-line delegation to an inherent method on
-// the type, and that is a workaround rather than a style choice.
-//
-// The cross-module linker walks an imported declaration's body to drag in the same-module
-// declarations it depends on — but it does NOT walk the body of a *standalone* `impl` block. A
-// `handle` that called the private `target` helper directly type-checks inside this package and
-// fails with E0005 in every consumer of it, because `target` is never linked. An inherent method's
-// body *is* walked, so routing the work through one makes the dependency visible.
-//
 // A `Mock` that never calls `next` is the short-circuit in its purest form: nothing inside this
-// layer runs, including the transport.
+// layer runs, including the transport. `answer` does the lookup; `handle` only lifts its `Response`
+// into the middleware's `Result`.
 impl Middleware for Mock {
     fn handle(req: Request, next: Next): Result<Response, HttpError> {
         return Ok(self.answer(req))
@@ -215,7 +207,10 @@ pub class Record {
         return mock
     }
 
-    fn capture(req: Request, next: Next): Result<Response, HttpError> {
+}
+
+impl Middleware for Record {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
         k = Mock.key(req.method(), target(req))
         self.calls = self.calls ~ [k]
         outcome = next.run(req)
@@ -226,12 +221,6 @@ pub class Record {
             Err(_) => {},
         }
         return outcome
-    }
-}
-
-impl Middleware for Record {
-    fn handle(req: Request, next: Next): Result<Response, HttpError> {
-        return self.capture(req, next)
     }
 }
 
@@ -271,7 +260,10 @@ pub class Cache {
         return m == "GET" || m == "HEAD"
     }
 
-    fn lookup(req: Request, next: Next): Result<Response, HttpError> {
+}
+
+impl Middleware for Cache {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
         if !Cache.cacheable(req.method()) {
             return next.run(req)
         }
@@ -295,12 +287,6 @@ pub class Cache {
             Err(_) => {},
         }
         return outcome
-    }
-}
-
-impl Middleware for Cache {
-    fn handle(req: Request, next: Next): Result<Response, HttpError> {
-        return self.lookup(req, next)
     }
 }
 
@@ -364,7 +350,10 @@ pub struct Retry {
         return if secs * 1000 > 30000 then 30000 else secs * 1000
     }
 
-    fn attempt_until(req: Request, next: Next): Result<Response, HttpError> {
+}
+
+impl Middleware for Retry {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
         mut attempt = 0
         while true {
             outcome = next.run(req)
@@ -388,11 +377,5 @@ pub struct Retry {
         }
         // Unreachable: the loop only leaves through a `return`.
         return next.run(req)
-    }
-}
-
-impl Middleware for Retry {
-    fn handle(req: Request, next: Next): Result<Response, HttpError> {
-        return self.attempt_until(req, next)
     }
 }

@@ -27,8 +27,20 @@
 //! something better besides: the tests exercise the package **the way a consumer does**, across the
 //! package boundary, through the same `use` paths and the same linker closure a user gets. That
 //! distinction is not academic here — writing these tests is what surfaced the fact that a
-//! standalone `impl` block's body is not walked for same-module dependencies, a defect invisible
-//! from inside the package and fatal to every consumer of it.
+//! standalone `impl` block's body was not walked for same-module dependencies, a defect invisible
+//! from inside the package and fatal to every consumer of it (since fixed, in the loader's
+//! reachability closure — and this gate is what would catch its regression).
+//!
+//! ## The compose cost, and why it is paid here
+//!
+//! `para/api` ships a native crate (the `@openapi` directive's expansion hook), so an example that
+//! depends on it composes a toolchain — a real cargo build — before it runs. An earlier version of
+//! this gate skipped native-dependent examples to stay fast, which was safe only while `para/api`
+//! was pure Noeta; the moment it gained native code, that skip silenced the one suite this gate
+//! exists to run. So the skip is gone, and the cost is paid down two ways instead: `noeta_test`
+//! sets `NOETA_COMPOSE_DEBUG` + `NOETA_COMPOSE_TARGET_DIR` so the compose reuses the workspace's
+//! already-built debug artifacts rather than a cold release build, and `NOETA_CACHE_DIR` keeps the
+//! whole thing hermetic under the test's target tmp dir.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,46 +67,28 @@ fn noe_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Does this example depend on a package that ships **native** code?
-///
-/// Such a package composes a toolchain — a real cargo build of the composed binary — which costs
-/// minutes cold and cannot run concurrently with its siblings. That cost is why the sibling check
-/// gate is `#[ignore]`d, and this gate stays fast (and therefore stays un-ignored, and therefore
-/// actually runs) by declining the same work: a native package example is skipped here and its
-/// tests belong in the `--ignored` step alongside its build.
-///
-/// Detection walks the example's `[dependencies]` path entries and looks for a `native` key in the
-/// depended-on package's own manifest — the same key `noeta-pm` reads to decide whether a package
-/// has a Rust half.
-fn depends_on_a_native_package(example_dir: &Path) -> bool {
-    let Ok(manifest) = std::fs::read_to_string(example_dir.join("noeta.toml")) else {
-        return false;
-    };
-    manifest.lines().any(|line| {
-        // `para = { path = "../../../packages/para-db" }`
-        let Some(start) = line.find("path = \"") else {
-            return false;
-        };
-        let rest = &line[start + "path = \"".len()..];
-        let Some(end) = rest.find('"') else {
-            return false;
-        };
-        let dep = example_dir.join(&rest[..end]).join("noeta.toml");
-        std::fs::read_to_string(dep)
-            .is_ok_and(|text| text.lines().any(|l| l.trim_start().starts_with("native")))
-    })
-}
-
 /// `noeta test <path>`, run from the example's own directory so its `noeta.toml` (and therefore its
 /// package scope deps) resolve exactly as they do for a user standing in that directory.
 fn noeta_test(path: &Path) -> std::process::Output {
     let dir = path.parent().expect("an example has a parent directory");
     Command::cargo_bin("noeta")
         .expect("the `noeta` binary builds")
-        // Hermetic startup cache — never touch the developer's real ~/.cache/noeta.
+        // Hermetic caches — never touch the developer's real ~/.cache/noeta. This redirects the
+        // startup `.noeb` cache AND the compose workspace (both resolve under `Cache::locate`).
         .env(
             "NOETA_CACHE_DIR",
             concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+        )
+        // A native-dependency example composes a toolchain before it runs. Build it in the debug
+        // profile against the workspace's existing target dir, so the compose reuses already-built
+        // debug artifacts instead of a cold release build — the difference between seconds and
+        // minutes. Mirrors `pm_native.rs::composed_env`.
+        .env("NOETA_COMPOSE_DEBUG", "1")
+        .env(
+            "NOETA_COMPOSE_TARGET_DIR",
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+                .parent()
+                .expect("target tmp dir has a parent"),
         )
         .current_dir(dir)
         .arg("test")
@@ -117,7 +111,6 @@ fn package_example_tests_pass() {
         .filter(|path| {
             let dir = path.parent().expect("an example has a parent directory");
             dir.join("noeta.toml").is_file()
-                && !depends_on_a_native_package(dir)
                 && std::fs::read_to_string(path).is_ok_and(|text| text.contains("@test"))
         })
         .collect();

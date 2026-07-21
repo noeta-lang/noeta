@@ -30,20 +30,6 @@ namespace para.api.pagination
 use std.http.{Request, Response, HttpError}
 use para.api.Api
 
-// A note on the shape every strategy below takes: the real work lives in an inherent method on the
-// type (`Link.follow`, `Offset.advance`, …) and the `impl PageStrategy` block is a one-line
-// delegation to it.
-//
-// That is not a style preference, it is a workaround. The cross-module linker walks an imported
-// declaration's body to drag in the same-module declarations it depends on, but it does NOT walk
-// the body of a *standalone* `impl` block. So a strategy whose `next_page` called `set_query`
-// directly type-checks inside this package and fails with E0005 in every consumer of it — the
-// helper is simply never linked. An inherent method's body *is* walked, so routing the work
-// through one makes the dependency visible to the linker.
-//
-// If that linker gap is ever closed, these delegations can collapse back into their `impl` blocks
-// with no change in behaviour.
-
 // One paging convention. Given the request that produced `resp`, answer the request that fetches
 // the page after it — or `none` when `resp` was the last page.
 //
@@ -215,7 +201,10 @@ pub struct Link {
         return Link { rel: rel }
     }
 
-    fn follow(req: Request, resp: Response): ?Request {
+}
+
+impl PageStrategy for Link {
+    fn next_page(req: Request, resp: Response): ?Request {
         target = resp.links().get(self.rel) ?? ""
         // No such relation is precisely how RFC 8288 spells "last page". This is the *only* stop
         // condition Link needs — no counting, no probing for an empty body.
@@ -233,12 +222,6 @@ pub struct Link {
         // a hermetic test could not cover.
         base = if resp.url() == "" then req.url() else resp.url()
         return some(req.with_url(resolve_url(base, target)))
-    }
-}
-
-impl PageStrategy for Link {
-    fn next_page(req: Request, resp: Response): ?Request {
-        return self.follow(req, resp)
     }
 }
 
@@ -275,7 +258,10 @@ pub struct Offset {
         return Offset { limit: limit, offset_param: offset_param, limit_param: limit_param, is_last: is_last }
     }
 
-    fn advance(req: Request, resp: Response): ?Request {
+}
+
+impl PageStrategy for Offset {
+    fn next_page(req: Request, resp: Response): ?Request {
         if !resp.ok() {
             return none
         }
@@ -292,12 +278,6 @@ pub struct Offset {
         window = (req.query(self.limit_param) ?? "").to_int() ?? self.limit
         url = set_query(req.url(), self.offset_param, "${cur + window}")
         return some(req.with_url(set_query(url, self.limit_param, "${window}")))
-    }
-}
-
-impl PageStrategy for Offset {
-    fn next_page(req: Request, resp: Response): ?Request {
-        return self.advance(req, resp)
     }
 }
 
@@ -323,7 +303,10 @@ pub struct Page {
         return Page { param: param, start: start, is_last: is_last }
     }
 
-    fn advance(req: Request, resp: Response): ?Request {
+}
+
+impl PageStrategy for Page {
+    fn next_page(req: Request, resp: Response): ?Request {
         if !resp.ok() {
             return none
         }
@@ -332,12 +315,6 @@ pub struct Page {
         }
         cur = (req.query(self.param) ?? "").to_int() ?? self.start
         return some(req.with_url(set_query(req.url(), self.param, "${cur + 1}")))
-    }
-}
-
-impl PageStrategy for Page {
-    fn next_page(req: Request, resp: Response): ?Request {
-        return self.advance(req, resp)
     }
 }
 
@@ -372,7 +349,10 @@ pub struct Cursor {
         return Cursor { param: param }
     }
 
-    fn advance(req: Request, resp: Response): ?Request {
+}
+
+impl PageStrategy for Cursor {
+    fn next_page(req: Request, resp: Response): ?Request {
         if !resp.ok() {
             return none
         }
@@ -389,11 +369,5 @@ pub struct Cursor {
             return none
         }
         return some(req.with_url(set_query(req.url(), self.param, env.next_cursor)))
-    }
-}
-
-impl PageStrategy for Cursor {
-    fn next_page(req: Request, resp: Response): ?Request {
-        return self.advance(req, resp)
     }
 }
