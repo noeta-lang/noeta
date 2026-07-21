@@ -457,6 +457,13 @@ fn decorators_str(d: &crate::Decorators) -> String {
             crate::BuiltinDirective::Tier => {}
         }
     }
+    // Directives the decorator grammar does not own (an extension's, a misplaced `@tier`, a typo).
+    // They MUST appear in the gate: the formatter has to round-trip them, and a decorator the gate
+    // cannot see is a decorator the formatter may silently delete — exactly how `@validated` went
+    // unnoticed before it was rendered here.
+    for f in &d.foreign {
+        parts.push(format!("@{}{}", f.name, attr_args_str(&f.args)));
+    }
     for a in &d.attrs {
         parts.push(format!("#[{}{}]", a.name, attr_args_str(&a.args)));
     }

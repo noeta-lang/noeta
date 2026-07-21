@@ -1105,15 +1105,24 @@ impl DocumentStore {
         // the table makes the omission impossible: a directive without a `doc` does not compile.
         // `None` here is not a built-in directive (a tier name, an arbitrary `@foo`) — `hover_tier`
         // handles the tier name-space.
-        let descriptor = noeta_ast::BuiltinDirective::from_name(&text[name_tok.span.range()])?
-            .info()
-            .doc;
+        // A built-in directive's prose comes from the metadata table; an extension's from its own
+        // declaration. Both resolve through the one registry, so a directive that completes is a
+        // directive that hovers regardless of which half of the name-space declared it. `None` is
+        // a tier name — `hover_tier` handles those.
+        let name = &text[name_tok.span.range()];
+        let descriptor = match noeta_ast::BuiltinDirective::from_name(name) {
+            Some(d) => d.info().doc.to_string(),
+            None => noeta_stdlib::registry::single_registry_process()
+                .find_ext_directive(name)?
+                .doc
+                .to_string(),
+        };
         let span = Span {
             start: at.span.start,
             end: name_tok.span.end,
             source,
         };
-        Some((descriptor.to_string(), index.range(span, encoding)))
+        Some((descriptor, index.range(span, encoding)))
     }
 
     /// The quick-fixes offered over `range` — today, the one the `@`-directive name-space can

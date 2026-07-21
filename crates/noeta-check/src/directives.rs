@@ -61,6 +61,9 @@ pub enum DirectiveKind<'a> {
     ExtTier(&'static noeta_ext_abi::registry::ExtTier),
     /// A tier declared in the (linked) program by `@tier(name) fn runner(…)`.
     DeclaredTier(&'a DeclaredTier),
+    /// A directive an installed extension declares. Resolved last, so an extension can shadow
+    /// neither a built-in directive nor a tier.
+    ExtDirective(&'static noeta_ext_abi::registry::ExtDirective),
 }
 
 /// One offerable `@name`, as completion and hover want it.
@@ -102,6 +105,12 @@ impl DirectiveRegistry {
         }
     }
 
+    /// Wrap a [`TierRegistry`] the caller already collected — the checker holds one for the whole
+    /// check, and re-collecting per declaration would walk the program once per decorated type.
+    pub fn from_tiers(tiers: TierRegistry) -> DirectiveRegistry {
+        DirectiveRegistry { tiers }
+    }
+
     /// The tier half on its own, for the consumers that genuinely want tiers rather than directives
     /// (activation, runner dispatch).
     pub fn tiers(&self) -> &TierRegistry {
@@ -118,7 +127,13 @@ impl DirectiveRegistry {
         if let Some(t) = self.tiers.extension_tiers().find(|t| t.name == name) {
             return Some(DirectiveKind::ExtTier(t));
         }
-        self.tiers.declared(name).map(DirectiveKind::DeclaredTier)
+        if let Some(t) = self.tiers.declared(name) {
+            return Some(DirectiveKind::DeclaredTier(t));
+        }
+        self.tiers
+            .registry()
+            .find_ext_directive(name)
+            .map(DirectiveKind::ExtDirective)
     }
 
     /// Every offerable `@name`: the built-ins in declaration order, then the extension tiers, then
@@ -136,6 +151,9 @@ impl DirectiveRegistry {
         }
         for t in self.tiers.extension_tiers() {
             push(t.name.to_string(), tier_detail(t.expr, t.text, ""));
+        }
+        for d in self.tiers.registry().ext_directives() {
+            push(d.name.to_string(), d.detail.to_string());
         }
         for t in self.tiers.declared_tiers() {
             let provider = if t.root.is_empty() {
@@ -213,7 +231,115 @@ impl Checker {
             self.error(code, span, message)
                 .help(format!("`@{directive}` applies to {legal}"));
         }
+        self.check_foreign_directives(decorators, at);
     }
+
+    /// Resolve every directive the decorator grammar does not own against the full name-space.
+    ///
+    /// The parser used to answer this, which meant it could only ever answer for the *closed*
+    /// set — an extension's directive was indistinguishable from a typo, so `@openapi(…)` was a
+    /// syntax error no extension could make legal. Deciding here is what opens the name-space,
+    /// and it also folds the old parser-level errors into the one placement check: `@tier` on a
+    /// type is now a misplacement like any other, rather than a separate `UnexpectedToken`.
+    fn check_foreign_directives(&mut self, decorators: &Decorators, at: &Placement<'_>) {
+        if decorators.foreign.is_empty() {
+            return;
+        }
+        // Over the registry the check already holds — collected once for the whole program.
+        let registry = DirectiveRegistry::from_tiers(self.symbols.tier_registry.clone());
+        for f in &decorators.foreign {
+            match registry.lookup(&f.name) {
+                // An extension directive: legal here unless it restricts its sites.
+                Some(DirectiveKind::ExtDirective(d)) => {
+                    let allowed = sites_of(d.sites);
+                    if !allowed.is_empty() && !allowed.contains(at.site) {
+                        self.error(
+                            DiagnosticCode::InvalidDirectiveSite,
+                            f.name_span,
+                            format!(
+                                "`@{}` does not apply to {} `{}`",
+                                f.name, at.article_noun, at.name
+                            ),
+                        )
+                        .help(format!(
+                            "`@{}` applies to {}",
+                            f.name,
+                            allowed.label()
+                        ));
+                    }
+                }
+                // `@tier` decorates the `fn` that runs a tier, never a type.
+                Some(DirectiveKind::Builtin(BuiltinDirective::Tier)) => {
+                    self.error(
+                        DiagnosticCode::InvalidDirectiveSite,
+                        f.name_span,
+                        format!(
+                            "`@tier` does not apply to {} `{}`",
+                            at.article_noun, at.name
+                        ),
+                    )
+                    .help(
+                        "a tier is declared by decorating its runner: `@tier(name) fn run(…)`"
+                            .to_string(),
+                    );
+                }
+                // A tier name used as a decorator. A tier annotates a `fn` or introduces a block;
+                // it is not a declaration decorator.
+                Some(DirectiveKind::ExtTier(_)) | Some(DirectiveKind::DeclaredTier(_)) => {
+                    self.error(
+                        DiagnosticCode::InvalidDirectiveSite,
+                        f.name_span,
+                        format!(
+                            "`@{}` is a tier, and does not decorate {} `{}`",
+                            f.name, at.article_noun, at.name
+                        ),
+                    )
+                    .help(format!(
+                        "write a tier as a block — `@{} {{ … }}` — or annotate a `fn` with it",
+                        f.name
+                    ));
+                }
+                // Any other built-in reaching here would mean the parser failed to consume a name
+                // its own grammar owns.
+                Some(DirectiveKind::Builtin(d)) => {
+                    self.error(
+                        DiagnosticCode::InvalidDirectiveSite,
+                        f.name_span,
+                        format!("`@{d}` does not apply to {} `{}`", at.article_noun, at.name),
+                    );
+                }
+                None => {
+                    let known: Vec<String> = registry.all().into_iter().map(|e| e.name).collect();
+                    let d = self.error(
+                        DiagnosticCode::UnknownDirective,
+                        f.name_span,
+                        format!("unknown directive `@{}`", f.name),
+                    );
+                    match noeta_diagnostics::closest(&f.name, known.iter().map(String::as_str)) {
+                        Some(s) => d.help(format!("did you mean `@{s}`?")),
+                        None => d.help(format!(
+                            "the directives that decorate a declaration are {}",
+                            BuiltinDirective::decorator_list()
+                        )),
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Widen the extension ABI's three-variant [`TierSite`](noeta_ext_abi::registry::TierSite) into the
+/// checker's finer site model. An extension says "a type"; the checker knows that means a struct, a
+/// class or an enum — and never a trait.
+fn sites_of(sites: &[noeta_ext_abi::registry::TierSite]) -> Sites {
+    use noeta_ext_abi::registry::TierSite;
+    sites.iter().fold(Sites::NONE, |acc, s| {
+        acc.union(match s {
+            TierSite::Function => Sites::FN,
+            TierSite::Method => Sites::METHOD,
+            TierSite::Type => Sites::TYPE,
+        })
+    })
 }
 
 /// The span of the directive keyword itself, for the directives whose AST slot records one.

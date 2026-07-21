@@ -1443,6 +1443,13 @@ impl Printer<'_> {
                 noeta_ast::BuiltinDirective::Tier => {}
             }
         }
+        // Directives the decorator grammar does not own — an extension's, a misplaced `@tier`, a
+        // typo. The formatter must round-trip them verbatim: it runs on code that does not yet
+        // check, and deleting a directive the author is mid-way through typing would be the worst
+        // possible behavior.
+        for f in &d.foreign {
+            lines.push(self.foreign_directive(f)?);
+        }
         for a in &d.attrs {
             lines.push(self.attribute(a)?);
         }
@@ -1499,6 +1506,19 @@ impl Printer<'_> {
             Doc::text(format!("#[{}(", a.name)),
             Doc::join(args?, Doc::text(", ")),
             Doc::text(")]"),
+        ]))
+    }
+
+    /// Emit a directive whose name the decorator grammar does not own, exactly as written.
+    fn foreign_directive(&self, f: &noeta_ast::ForeignDirective) -> Result<Doc, FmtError> {
+        if f.args.is_empty() {
+            return Ok(Doc::text(format!("@{}", f.name)));
+        }
+        let args: Result<Vec<_>, _> = f.args.iter().map(|arg| self.attr_arg(arg)).collect();
+        Ok(Doc::concat([
+            Doc::text(format!("@{}(", f.name)),
+            Doc::join(args?, Doc::text(", ")),
+            Doc::text(")"),
         ]))
     }
 

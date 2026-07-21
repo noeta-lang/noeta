@@ -152,6 +152,12 @@ impl TierRegistry {
 
     /// The extension registry this name-space's extension tiers resolve against — the threaded one,
     /// or the process-global default (instance-registry IR4).
+    /// The extension registry this name-space resolves against — public so the directive registry
+    /// composed over this one can reach the extension-declared `@`-directives.
+    pub fn registry(&self) -> &'static noeta_ext_abi::registry::Registry {
+        self.reg()
+    }
+
     fn reg(&self) -> &'static noeta_ext_abi::registry::Registry {
         self.registry
             .unwrap_or_else(noeta_ext_abi::registry::single_registry_process)
@@ -1198,7 +1204,7 @@ impl Checker {
                         &r.decorators,
                         &crate::directives::Placement {
                             site: Sites::STRUCT,
-                            article_noun: "a record",
+                            article_noun: "a struct",
                             name: &r.name,
                             name_span: r.name_span,
                         },

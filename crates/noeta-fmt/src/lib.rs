@@ -757,6 +757,21 @@ mod tests {
                 "#[Entity]\ntrait T { fn f(): int }",
                 "trait T { fn f(): int }",
             ),
+            // A directive the decorator grammar does not own — an extension's, or a name not yet
+            // registered. The formatter runs on code that does not check, so it will see these;
+            // dropping one, or losing its arguments, must be a detected program change.
+            (
+                "@openapi(\"petstore.yaml\")\nstruct P { x: int }",
+                "struct P { x: int }",
+            ),
+            (
+                "@openapi(\"petstore.yaml\")\nstruct P { x: int }",
+                "@openapi(\"other.yaml\")\nstruct P { x: int }",
+            ),
+            (
+                "@openapi(\"a.yaml\")\nstruct P { x: int }",
+                "@openapi\nstruct P { x: int }",
+            ),
         ] {
             assert!(
                 !gate(a, b),

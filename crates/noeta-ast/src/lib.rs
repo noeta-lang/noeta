@@ -266,6 +266,29 @@ pub struct Decorators {
     /// Construction inside the type's own methods stays legal, and the recipe doors are exempt (they
     /// auto-validate). On an enum/trait it is a misplacement the checker reports.
     pub validated: Option<Span>,
+    /// Directives in decorator position that the **decorator grammar does not own**: an
+    /// extension-declared `@`-directive, a misplaced `@tier`, or a typo.
+    ///
+    /// The parser records them verbatim rather than judging them, because the directive name-space
+    /// includes an extension set the parser cannot see — `noeta-parser` depends on the lexer and
+    /// the AST, not on the registry. Resolution is the checker's, which is also what folds the
+    /// old parser-level "unknown directive" into the one placement check.
+    pub foreign: Vec<ForeignDirective>,
+}
+
+/// One `@name(args)` written in decorator position whose name the parser does not resolve.
+///
+/// Kept as written — name, arguments, spans — so the checker can resolve it against the full
+/// name-space and the formatter can round-trip it. An extension directive's *meaning* is read back
+/// by the extension's own code, exactly as a `#[...]` data attribute's is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignDirective {
+    pub name: String,
+    /// The name token alone, for a diagnostic that blames the name rather than the whole directive.
+    pub name_span: Span,
+    pub args: Vec<AttrArg>,
+    /// The whole `@name(args)`.
+    pub span: Span,
 }
 
 /// The closed set of **built-in decorator directives** — the `@`-directives the language itself

@@ -270,6 +270,12 @@ pub enum DiagnosticCode {
     /// Construction inside the type's own methods stays legal, and the recipe doors (`json.parse`,
     /// `from_bytes`, …) are exempt because they auto-validate.
     ValidatedConstruction,
+    /// An `@name` in decorator position resolves to nothing: not a built-in directive, not a tier
+    /// (extension-declared or program-declared), and not a directive any installed extension
+    /// declares. Reported by the checker rather than the parser, because the name-space includes an
+    /// extension set the parser has no dependency on — which is also what lets an extension make a
+    /// previously unknown name legal.
+    UnknownDirective,
 }
 
 impl DiagnosticCode {
@@ -336,6 +342,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidTypeArguments,
         DiagnosticCode::ShadowedBinding,
         DiagnosticCode::ValidatedConstruction,
+        DiagnosticCode::UnknownDirective,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -402,6 +409,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidTypeArguments => "E0058",
             DiagnosticCode::ShadowedBinding => "E0059",
             DiagnosticCode::ValidatedConstruction => "E0060",
+            DiagnosticCode::UnknownDirective => "E0061",
         }
     }
 

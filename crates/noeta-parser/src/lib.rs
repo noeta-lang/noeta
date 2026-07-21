@@ -3859,6 +3859,7 @@ where
                 let mut semantic: Option<Span> = None;
                 let mut packed: Option<PackedDirective> = None;
                 let mut validated: Option<Span> = None;
+                let mut foreign: Vec<noeta_ast::ForeignDirective> = Vec::new();
                 for decorator in decorators {
                     match decorator {
                         Decorator::Derive {
@@ -3927,39 +3928,31 @@ where
                                 }
                                 validated = Some(name_span);
                             }
-                            // `@tier` is a built-in directive, but its only valid form is the tier
-                            // *declaration* `@tier(...) fn runner` (parsed by `tier_decl_fn`); as a
-                            // leading decorator on a *type* it is not accepted. Grouped with `None`
-                            // (a genuinely unknown name) rather than a `_` wildcard so a newly added
-                            // `BuiltinDirective` variant forces a decision here — but the two get
-                            // different prose, because "unknown directive `@tier`" is a lie: the
-                            // name is known, the *site* is wrong, and saying so is the difference
-                            // between the author moving the directive and hunting for a typo.
-                            Some(BuiltinDirective::Tier) => {
-                                ctx.diags.borrow_mut().push(
-                                    Diagnostic::error(
-                                        DiagnosticCode::UnexpectedToken,
-                                        name_span,
-                                        "`@tier` decorates a function, not a type declaration"
-                                            .to_string(),
-                                    )
-                                    .with_help(
-                                        "a tier is declared by decorating its runner: \
-                                         `@tier(name) fn run(…)`",
-                                    ),
-                                )
-                            }
-                            None => ctx.diags.borrow_mut().push(
-                                Diagnostic::error(
-                                    DiagnosticCode::UnexpectedToken,
+                            // A name the decorator grammar does not own: an extension-declared
+                            // directive, a misplaced `@tier` (whose only valid form is the
+                            // declaration `@tier(…) fn runner`, parsed by `tier_decl_fn`), or a
+                            // typo. The parser cannot tell them apart — the name-space includes an
+                            // extension set it has no dependency on — so it records the directive
+                            // verbatim and the checker resolves it against the full registry.
+                            //
+                            // `Tier` is named rather than folded into a `_` wildcard so a newly
+                            // added `BuiltinDirective` variant still forces a decision here.
+                            Some(BuiltinDirective::Tier) | None => {
+                                let span = args
+                                    .last()
+                                    .map(|a| Span {
+                                        start: name_span.start,
+                                        end: a.span.end,
+                                        source: name_span.source,
+                                    })
+                                    .unwrap_or(name_span);
+                                foreign.push(noeta_ast::ForeignDirective {
+                                    name,
                                     name_span,
-                                    format!("unknown directive `@{name}`"),
-                                )
-                                .with_help(format!(
-                                    "the directives that decorate a declaration are {}",
-                                    BuiltinDirective::decorator_list()
-                                )),
-                            ),
+                                    args: commit_attr_args(&ctx, args),
+                                    span,
+                                });
+                            }
                         },
                         Decorator::Attr(attr) => attrs.push(attr),
                     }
@@ -3975,6 +3968,7 @@ where
                             semantic,
                             packed,
                             validated,
+                            foreign,
                         },
                     ),
                     pub_kw.is_some(),
@@ -4249,18 +4243,21 @@ mod tests {
         // combinator with `#[...]` makes `@openapi("petstore.yaml")` parse; whether the name is
         // known is then a separate, later question (the directive set is still closed).
         let parsed = parse_str("@openapi(\"petstore.yaml\")\nstruct Client { base: string }\n");
-        let codes: Vec<_> = parsed.diagnostics.iter().map(|d| d.code).collect();
         assert!(
-            !codes.is_empty(),
-            "an unregistered directive name is still rejected"
+            parsed.diagnostics.is_empty(),
+            "the parser judges no directive name — it cannot see the extension set that would \
+             make this one legal: {:?}",
+            parsed.diagnostics
         );
-        for d in &parsed.diagnostics {
-            assert!(
-                d.message.contains("unknown directive"),
-                "the only complaint should be the NAME, not the argument — got: {}",
-                d.message
-            );
-        }
+        // Recorded verbatim, argument and all, for the checker to resolve and the formatter to
+        // round-trip.
+        let Stmt::Struct(decl) = &parsed.program.stmts[0] else {
+            panic!("expected the struct");
+        };
+        let foreign = &decl.decorators.foreign;
+        assert_eq!(foreign.len(), 1);
+        assert_eq!(foreign[0].name, "openapi");
+        assert_eq!(foreign[0].args.len(), 1, "the string argument survives");
     }
 
     #[test]

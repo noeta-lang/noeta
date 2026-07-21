@@ -128,6 +128,20 @@ pub fn directive_signature(
             let config = match directives.lookup(tier)? {
                 DirectiveKind::ExtTier(t) => t.config.map(String::from)?,
                 DirectiveKind::DeclaredTier(d) => d.config.clone()?,
+                // An extension's own directive carries its parameter names in its declaration —
+                // no config attribute to go and read.
+                DirectiveKind::ExtDirective(d) => {
+                    if d.params.is_empty() {
+                        return None;
+                    }
+                    let parameters: Vec<String> =
+                        d.params.iter().map(|p| (*p).to_string()).collect();
+                    return Some(SignatureData {
+                        label: format!("@{}({}) — {}", d.name, parameters.join(", "), d.detail),
+                        active_param: ctxt.active.min(parameters.len() - 1),
+                        parameters,
+                    });
+                }
                 // `from_name` already returned `None`, so the lookup cannot answer `Builtin`.
                 DirectiveKind::Builtin(_) => return None,
             };

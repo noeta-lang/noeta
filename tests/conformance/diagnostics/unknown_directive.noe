@@ -1,11 +1,13 @@
-// An unregistered `@name` in decorator position is rejected by NAME (E0003) — and only by name.
-// Its argument is not a syntax error: the directive grammar was unified with `#[...]`'s, so
-// `@openapi("petstore.yaml")` parses as a directive with one string argument. That is the seam a
-// registered extension directive will slot into; today nothing registers the name.
+// An `@name` in decorator position that resolves to nothing is E0061 — reported by the CHECKER,
+// not the parser. That distinction is the point: the directive name-space includes the installed
+// extensions' directives, which the parser has no dependency on, so only the checker can tell a
+// typo from a name an extension declares. The parser records the directive verbatim and resolves
+// nothing.
 //
-// The help lists the decorator directives, generated from the directive set rather than written
-// out, so it cannot list a directive that no longer exists or omit one that does.
-// expect: error E0003 at 10:2
+// Its argument is not a syntax error either: the directive grammar was unified with `#[...]`'s,
+// so `@openapi("petstore.yaml")` parses as a directive with one string argument. An extension that
+// declares `openapi` makes this exact program legal with no front-end change.
+// expect: error E0061 at 12:2
 // expect: exit 1
 @openapi("petstore.yaml")
 struct Pet { name: string }
