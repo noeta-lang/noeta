@@ -10,7 +10,7 @@ use std.{env}
 
 echo "start"
 env.set("STDLIB_GAP", "42")
-echo env.get("STDLIB_GAP")
+echo env.get("STDLIB_GAP") ?? "<unset>"
 echo env.keys()
 env.set("STDLIB_GAP", "overwritten")
-echo env.get("STDLIB_GAP")
+echo env.get("STDLIB_GAP") ?? "<unset>"

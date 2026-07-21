@@ -2299,10 +2299,12 @@ fn env_dispatch(
         "get" => {
             want_arity(func, args, 1)?;
             let key = want_str(func, args, 0)?;
-            match host.env_get(key) {
-                Some(value) => Ok(NativeOut::Str(value)),
-                None => Err(crate::env::not_found_error(key)),
-            }
+            // An unset variable is `none`, not a failure: optional configuration is the common
+            // case for CLI/config code, and the host layer already models absence as `Option`.
+            Ok(match host.env_get(key) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value))),
+                None => NativeOut::None,
+            })
         }
         "keys" => {
             want_arity(func, args, 0)?;
@@ -3314,7 +3316,8 @@ const TIME_DOCS: &[(&str, &str)] = &[
 const ENV_DOCS: &[(&str, &str)] = &[
     (
         "get",
-        "The value of environment variable `name`, or an empty string if it is unset.",
+        "The value of environment variable `name`, or `none` if it is unset — pair it with `??` \
+         to supply a default.",
     ),
     (
         "keys",
@@ -4129,7 +4132,7 @@ const ENV_FNS: &[ExtFn] = &[
     ExtFn {
         name: "get",
         params: &[Str],
-        ret: Concrete(Str),
+        ret: Concrete(SigType::Option(&Str)),
     },
     ExtFn {
         name: "keys",
@@ -5157,7 +5160,25 @@ mod tests {
             &mut h,
             &[NativeValue::Str("HOME".to_string())],
         );
-        assert_eq!(out, Ok(NativeOut::Str("/home/sandbox".to_string())));
+        assert_eq!(
+            out,
+            Ok(NativeOut::Some(Box::new(NativeOut::Str(
+                "/home/sandbox".to_string()
+            ))))
+        );
+    }
+
+    #[test]
+    fn env_get_is_none_when_unset() {
+        // An absent variable is a value, not an abort — the whole point of the `?string` return.
+        let mut h = host();
+        let out = dispatch(
+            "env",
+            "get",
+            &mut h,
+            &[NativeValue::Str("DOES_NOT_EXIST".to_string())],
+        );
+        assert_eq!(out, Ok(NativeOut::None));
     }
 
     #[test]

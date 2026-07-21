@@ -38,7 +38,7 @@ own slices, so `para/cli` is built on ground that holds.
 | 1 | `BuiltinTy` enum — collapse ~17 stringly-typed name→kind/arity tables to one | `slice-builtinty` | in flight |
 | 2 | `.{ }` target-typed struct literals + inlay hint | `slice-dot-brace` | in flight |
 | 3 | Free-function `invoke("name", args)` | — | queued |
-| 4 | `env.get -> ?string` | — | queued |
+| 4 | `env.get -> ?string` | `slice-env-get` | done |
 | 5 | `optional` on `ParamSig` | — | queued |
 | 6 | Parameter attributes (`#[Arg(...)]` on a parameter) | — | queued |
 | 7 | std/host: stderr, stdin, TTY detection | — | queued |
