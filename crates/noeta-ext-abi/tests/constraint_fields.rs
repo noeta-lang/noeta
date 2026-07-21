@@ -108,6 +108,7 @@ const VM_NATIVE_CTX: &str = "crates/noeta-vm/src/native_ctx.rs";
 const CLI_SERVE: &str = "crates/noeta-cli/src/cmd/serve.rs";
 const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforcement.rs";
 const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
+const LOADER_EXPAND: &str = "crates/noeta-loader/src/expand.rs";
 
 use Verdict::{Constraint, Data, Prose};
 
@@ -457,6 +458,18 @@ const TABLE: &[Row] = &[
         "ExtDirective",
         "params",
         Prose("signature-help parameter LABELS; `max_args`/`named_keys` are the checked contract"),
+    ),
+    // `Data`, not `Constraint`: the compiler CALLS this hook rather than checking a rule with it.
+    // The constraints around it belong to other fields — `sites` and `max_args`/`named_keys` decide
+    // whether the hook runs at all, which is why a hook may assume it only ever sees a legal
+    // invocation. What the hook itself owes in return (declare every file you read) is a promise the
+    // compiler cannot check: an under-reporting hook is indistinguishable from an honest one until
+    // its output goes stale. That asymmetry is documented on `Expansion::reads` rather than gated
+    // here, because gating it would mean claiming an enforcement that does not exist.
+    Row(
+        "ExtDirective",
+        "expand",
+        Data(Anchor(LOADER_EXPAND, "plan.directive.expand")),
     ),
     // --- ExtDerive ---------------------------------------------------------------------------
     Row(
