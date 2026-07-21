@@ -1057,11 +1057,40 @@ impl Checker {
             }
             _ => {
                 let ty = self.synth(callee, env);
+                // A computed callee whose static type is a FUNCTION type (`h["x"](1)`,
+                // `mk()(1)`, `fns[0](1)`) is checked exactly as a `Fn`-typed local or field is:
+                // the callee's type carries its parameter and return types whether it arrived
+                // through a name or through an index/call, so where it came from cannot be what
+                // decides whether the call is checked. Binding first (`f = h["x"]; f("nope")`)
+                // already produced the argument E0007 via the `Ident` arm above — the two
+                // spellings now agree, and the call's type is the function's declared return
+                // rather than `Unknown` (which used to let the result flow into any annotation).
+                // `required` is `0` for the same reason as those arms: a function *value* does not
+                // record which parameters carry defaults, so only the upper arity bound is
+                // enforced. Ordering matches the `Ident` arm (`Fn` before the object protocol);
+                // the two are disjoint anyway — `synth_callable_object` answers only for
+                // `Type::Named` — so no `Callable` receiver changes route.
+                if let Type::Fn { params, ret } = ty {
+                    let ret = *ret;
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
+                    // The same erased selective-import placeholder the other `Fn` arms exempt:
+                    // `fn() -> dyn` carries no real signature, so checking against it would
+                    // reject every argument of a perfectly good call.
+                    let erased_import = params.is_empty() && matches!(ret, Type::Dyn);
+                    if !erased_import {
+                        let label = callee_label(callee);
+                        self.check_args(&params, 0, args, arg_exprs, span, &label);
+                    }
+                    return ret;
+                }
                 // Any other callee expression whose static type is a user OBJECT type — the
                 // `Callable` protocol for computed callees (`make()(args)`, `pipeline[0](x)`).
                 if let Some(ret) = self.synth_callable_object(&ty, args, arg_exprs, span, env) {
                     return ret;
                 }
+                // A `dyn`/hole callee stays deferred, its arguments unchecked — the dynamic
+                // escape hatch, caught by the runtime's "not callable"/arity checks. Only the
+                // statically-known `Fn` case above tightened.
                 Type::Unknown
             }
         }
@@ -1571,5 +1600,21 @@ impl Checker {
                 );
             }
         }
+    }
+}
+
+/// A compact human label for a **computed callee** — the expression standing in for a name in an
+/// arity diagnostic. A call through a name reports that name (`` `f` expects … ``); a computed
+/// callee has none, so the shape it was computed from is reported instead (`h[…]`, `mk(…)`,
+/// `obj.f`). Purely cosmetic: it never affects whether a call is accepted, only how the arity
+/// message reads. Anything unrecognized falls back to a neutral description rather than an
+/// invented name.
+fn callee_label(callee: &Expr) -> String {
+    match callee {
+        Expr::Ident { name, .. } => name.clone(),
+        Expr::Index { receiver, .. } => format!("{}[…]", callee_label(receiver)),
+        Expr::Call { callee, .. } => format!("{}(…)", callee_label(callee)),
+        Expr::Member { receiver, name, .. } => format!("{}.{name}", callee_label(receiver)),
+        _ => "this function value".to_string(),
     }
 }

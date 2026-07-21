@@ -1,0 +1,8 @@
+// A computed callee's call has the function type's declared RETURN type, not `Unknown`. The
+// degraded result used to satisfy any annotation at all; now an `int` result flowing into a
+// `string` binding is caught at the binding, as it is for a call through a name.
+// expect: error E0007 at 7:13
+// expect: exit 1
+handlers: Map<string, (int) -> int> = { "x": fn(v: int): int => v }
+q: string = handlers["x"](1)
+echo q
