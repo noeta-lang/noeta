@@ -64,9 +64,11 @@ pub const TIERS: &[ExtTier] = &[
     },
     ExtTier {
         name: "debug",
-        // A statement-position block tier: `@debug { … }` stands alone and decorates nothing, so
-        // its site set is empty — which now *means* that, rather than "attaches to anything".
-        sites: &[],
+        // A code tier, so its annotation form is containment sugar with full equivalence to the
+        // block: `@debug fn f()` IS `@debug { fn f() {} }`, and the block is legal, so the
+        // annotation must be. It carried an empty set only because nobody had considered the
+        // annotation form for it — the absence of a decision, not a decision to attach to nothing.
+        sites: &[TierSite::Function, TierSite::Method],
         config: None,
         text: None,
         expr: None,
