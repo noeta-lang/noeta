@@ -423,6 +423,36 @@ fn a_path_dependency_resolves_and_runs() {
 }
 
 #[test]
+fn a_dependency_syntax_error_is_reported_against_the_dependency_file() {
+    // A `.noe` file inside a dependency package that fails to PARSE used to be swallowed — the
+    // module never reached the link pool, and the consumer got
+    // `[E0019] no module `greet.hello` in this project` pointed at its own `use`. That sends the
+    // reader to inspect their import and the package's module naming while the real fault — a
+    // syntax error in a file they were never told about — goes unreported. The parse error must be
+    // what prints, naming the dependency's file, and the E0019 cascade must not print at all.
+    for cmd in ["check", "run"] {
+        let entry = path_dep_project(&format!("pm_dep_parse_error_{cmd}"));
+        let lib = entry.parent().unwrap().parent().unwrap().join("greetlib");
+        std::fs::write(
+            lib.join("hello.noe"),
+            "namespace greet.hello;\npub fn greeting(): string {\n  let ] = ;\n}\n",
+        )
+        .unwrap();
+        let assert = lang().arg(cmd).arg(&entry).assert().failure();
+        let out = String::from_utf8_lossy(&assert.get_output().stderr).to_string()
+            + &String::from_utf8_lossy(&assert.get_output().stdout);
+        assert!(
+            out.contains("hello.noe"),
+            "`noeta {cmd}` should point at the dependency file that failed to parse, got:\n{out}"
+        );
+        assert!(
+            !out.contains("no module"),
+            "the misleading `no module` cascade must be suppressed, got:\n{out}"
+        );
+    }
+}
+
+#[test]
 fn noeta_audit_reports_the_trust_footprint() {
     // A pure path-dependency project: audit lists the dependency and reports no elevated authority.
     let entry = path_dep_project("pm_audit");

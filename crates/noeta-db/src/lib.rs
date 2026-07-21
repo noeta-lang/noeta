@@ -599,14 +599,34 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     // Only a cleanly-parsed module contributes; `link_parsed` keeps just the ones declaring a
     // namespace.
     let mut module_programs: Vec<&Program> = Vec::new();
+    // Broken siblings are kept, not dropped: a `use` of a namespace one of them declares reports
+    // that file's parse error instead of the misleading "no module" cascade (see
+    // `noeta_loader::BrokenModule`). Their own diagnostics still reach the editor through each
+    // member's per-file `diagnostics` query, so this only changes *attribution*, never severity.
+    let mut broken_modules: Vec<noeta_loader::BrokenModule> = Vec::new();
     for &m in ws.members(db) {
         if m == entry {
             continue;
         }
         let toks = tokens_in(db, ws, m);
         let parsed = ast_in(db, ws, m);
-        if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
+        let diagnostics: Vec<Diagnostic> = toks
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter())
+            .cloned()
+            .collect();
+        if diagnostics.is_empty() {
             module_programs.push(&parsed.0.program);
+        } else {
+            let source = source_of(db, m);
+            let namespace = noeta_loader::namespace_from_tokens(&source, &toks.0.tokens);
+            broken_modules.push(noeta_loader::BrokenModule {
+                source,
+                namespace,
+                diagnostics,
+            });
         }
     }
 
@@ -615,11 +635,23 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     // of the CLI's `link_with_deps`. Depends on each dep module's `ast`, so editing a path-dependency
     // source re-links, but leaves sibling parses untouched.
     let mut dep_programs: Vec<Program> = Vec::new();
+    // A dependency module that does not parse is a hard error, exactly as in the CLI's
+    // `link_with_deps`. Unlike a workspace member it is not a file the editor checks in its own
+    // right, so nothing else would ever report it — dropping it left the consumer with only the
+    // "no module" cascade at its `use`.
+    let mut broken_deps: Vec<Diagnostic> = Vec::new();
     for &dm in ws.dep_modules(db) {
         let src = dm.src(db);
         let toks = tokens_in(db, ws, src);
         let parsed = ast_in(db, ws, src);
-        if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
+        let diagnostics: Vec<Diagnostic> = toks
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter())
+            .cloned()
+            .collect();
+        if diagnostics.is_empty() {
             let mut program = parsed.0.program.clone();
             noeta_loader::reroot_program(
                 &mut program,
@@ -628,13 +660,24 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
                 &reroot_map(dm.renames(db)),
             );
             dep_programs.push(program);
+        } else {
+            broken_deps.extend(diagnostics);
         }
+    }
+    if !broken_deps.is_empty() {
+        return LinkedProgram(Err(broken_deps));
     }
 
     // No dependencies → the exact single-package path (byte-for-byte unchanged); otherwise the
     // deps-aware linker with the re-rooted dep programs as candidates and import drivers.
+    let broken_refs: Vec<&noeta_loader::BrokenModule> = broken_modules.iter().collect();
     let result = if dep_programs.is_empty() {
-        noeta_loader::link_parsed(&entry_source, &entry_ast.0.program, &module_programs)
+        noeta_loader::link_parsed(
+            &entry_source,
+            &entry_ast.0.program,
+            &module_programs,
+            &broken_refs,
+        )
     } else {
         let dep_refs: Vec<&Program> = dep_programs.iter().collect();
         // The IDE query links from re-rooted dep *sources* but does not carry the resolved native
@@ -645,6 +688,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
             &entry_ast.0.program,
             &module_programs,
             &dep_refs,
+            &broken_refs,
             None,
         )
     };
