@@ -1,0 +1,48 @@
+// `ParamInfo.optional` reports whether a call may leave a parameter unsupplied — true exactly when
+// the parameter declared a default. Reflection alone could not express this before: a defaulted
+// parameter and a required one of the same type were indistinguishable, which blocks the case
+// reflection exists for — deriving an interface from a signature, where a required parameter becomes
+// a positional argument (or a mandatory query parameter) and an optional one becomes a flag.
+//
+// The flag is the *fact*, not the default value: a default is an arbitrary expression, so surfacing
+// the value would pull const evaluation into the reflection manifest for something no consumer of a
+// signature needs. It reads `Param::is_optional`, the same predicate the checker's arity rule uses,
+// so what reflection reports and what a call is allowed to omit cannot drift apart.
+//
+// Pinned across the shapes that reach `param_sigs` by different arms of the reflection builder: a
+// free fn mixing required and defaulted parameters, a *method* (a qualified `Type.method` target),
+// and a zero-parameter fn. Both backends materialize `ParamInfo` from the shared artifact, so the
+// differential holds by construction — the risk is a slot-order mismatch between the two
+// materializers, which the field values below would catch.
+// expect: stdout "build/target: Type.String optional=false"
+// expect: stdout "build/release: Type.Bool optional=true"
+// expect: stdout "build/jobs: Type.Int optional=true"
+// expect: stdout "Server.listen/port: Type.Int optional=false"
+// expect: stdout "Server.listen/host: Type.String optional=true"
+// expect: stdout "nullary=0"
+// expect: stdout "required=1"
+// expect: exit 0
+class Server {
+    fn new(): Server { return Server {} }
+    fn listen(port: int, host: string = "127.0.0.1"): string { return host }
+}
+
+fn build(target: string, release: bool = false, jobs: int = 4): int { return 0 }
+
+fn nullary(): void { return }
+
+for p in params_of("build") {
+    echo "build/${p.name}: ${p.type} optional=${p.optional}";
+}
+for p in params_of("Server.listen") {
+    echo "Server.listen/${p.name}: ${p.type} optional=${p.optional}";
+}
+
+// A zero-parameter fn reflects as the empty list — not as a one-element list of nothing.
+nullary_count = params_of("nullary").len();
+echo "nullary=${nullary_count}";
+
+// The motivating query: how many of a callable's parameters must a caller supply? With defaults
+// enforced trailing-only, filtering on `optional` is the reflected form of the checker's arity rule.
+required = params_of("build").filter(fn(p) => !p.optional).len();
+echo "required=${required}";

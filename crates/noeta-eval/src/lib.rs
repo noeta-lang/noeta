@@ -1909,14 +1909,19 @@ impl Interpreter {
     }
 
     /// Materialize a callable's declared parameter list from the reflection info into a
-    /// `List<ParamInfo>` — each `{ name: string, type: Type }`. `type` is the prelude `Type` ADT
-    /// value built from the parameter's declared type (the same `build_type_value` `type_of` uses).
-    /// Builds a fresh `TypeDef`; the VM builds the matching shape the same way, so the values agree
-    /// by construction. An unknown target yields an empty list.
+    /// `List<ParamInfo>` — each `{ name: string, type: Type, optional: bool }`. `type` is the
+    /// prelude `Type` ADT value built from the parameter's declared type (the same
+    /// `build_type_value` `type_of` uses), and `optional` reports whether the parameter declared a
+    /// default. Builds a fresh `TypeDef`; the VM builds the matching shape the same way, so the
+    /// values agree by construction. An unknown target yields an empty list.
     fn materialize_params(&self, target: &str) -> Value {
         let info_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::PARAM_INFO,
-            &["name".to_string(), "type".to_string()],
+            &[
+                "name".to_string(),
+                "type".to_string(),
+                "optional".to_string(),
+            ],
             true,
         ));
         let items: Vec<Value> = self
@@ -1924,8 +1929,12 @@ impl Interpreter {
             .params_for(target)
             .iter()
             .map(|p| {
-                // `info_def` is `{ name, type }` — build the slots in that order.
-                let slots = vec![Value::Str(p.name.clone()), build_type_value(&p.ty)];
+                // `info_def` is `{ name, type, optional }` — build the slots in that order.
+                let slots = vec![
+                    Value::Str(p.name.clone()),
+                    build_type_value(&p.ty),
+                    Value::Bool(p.optional),
+                ];
                 Value::Object(Rc::new(ObjectValue::new(info_def.clone(), slots)))
             })
             .collect();

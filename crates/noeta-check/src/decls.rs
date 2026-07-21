@@ -17,7 +17,7 @@ impl Checker {
     pub(crate) fn validate_param_defaults(&mut self, params: &[Param], env: &mut Env) {
         let mut seen_default = false;
         for p in params {
-            if p.default.is_some() {
+            if p.is_optional() {
                 seen_default = true;
             } else if seen_default {
                 self.error(

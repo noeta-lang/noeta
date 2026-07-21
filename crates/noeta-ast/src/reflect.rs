@@ -157,7 +157,7 @@ pub struct RoleRecord {
 
 /// One callable's declared parameter list — a top-level fn or a method — keyed by the same target
 /// convention as the attribute manifest (a bare fn name, or a qualified `Type.method`). `params_of()`
-/// materializes each into a `List<ParamInfo>` (each `{ name: string, type: Type }`).
+/// materializes each into a `List<ParamInfo>` (each `{ name: string, type: Type, optional: bool }`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ParamRecord {
     /// The callable's target: a top-level fn's bare name, or a method's qualified `Type.method` name.
@@ -166,13 +166,21 @@ pub struct ParamRecord {
     pub params: Vec<ParamSig>,
 }
 
-/// One declared parameter — its name and the reflection [`TypeRepr`] of its annotated type. An
-/// unannotated parameter's type is [`TypeRepr::Dyn`]. `params_of()` materializes each into a
-/// `ParamInfo { name: string, type: Type }` whose `type` is the `Type` ADT value `type_of` builds.
+/// One declared parameter — its name, the reflection [`TypeRepr`] of its annotated type, and
+/// whether it is optional. An unannotated parameter's type is [`TypeRepr::Dyn`]. `params_of()`
+/// materializes each into a `ParamInfo { name: string, type: Type, optional: bool }` whose `type` is
+/// the `Type` ADT value `type_of` builds.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ParamSig {
     pub name: String,
     pub ty: TypeRepr,
+    /// Whether a call may leave this parameter unsupplied — [`crate::Param::is_optional`], i.e. the
+    /// parameter declared a default. Deliberately a *flag*, not the default value: a default is an
+    /// arbitrary [`crate::Expr`], so surfacing the value would drag const evaluation into the
+    /// reflection manifest, and optionality is the fact a signature-driven consumer actually needs
+    /// (a CLI framework mapping required parameters to positional arguments and optional ones to
+    /// flags; a router splitting required from optional query parameters).
+    pub optional: bool,
 }
 
 /// The declaration base a param record's target keys on for latest-wins purging: the type name
@@ -390,14 +398,17 @@ pub fn build(program: &Program) -> ReflectionInfo {
 
 /// Project a callable's declared parameters onto their reflection [`ParamSig`]s — each parameter's
 /// name paired with the [`TypeRepr`] of its annotated type (an unannotated parameter is
-/// [`TypeRepr::Dyn`]). Shared by every callable arm of [`build`] so a fn, method, and trait method
-/// sig all surface their parameters identically.
+/// [`TypeRepr::Dyn`]) and its optionality. Shared by every callable arm of [`build`] so a fn,
+/// method, and trait method sig all surface their parameters identically.
 fn param_sigs(params: &[crate::Param]) -> Vec<ParamSig> {
     params
         .iter()
         .map(|p| ParamSig {
             name: p.name.clone(),
             ty: p.ty.as_ref().map(typeref_to_repr).unwrap_or(TypeRepr::Dyn),
+            // Through `Param::is_optional`, not an open-coded `default.is_some()`: reflection must
+            // report the same optionality the checker's arity rule enforces.
+            optional: p.is_optional(),
         })
         .collect()
 }
@@ -942,9 +953,10 @@ pub const SEMANTIC_ENUM: &str = "Semantic";
 /// may be any `@semantic` enum (the built-in `Semantic` or a user one), not a single fixed type.
 pub const ROLE_BINDING: &str = "RoleBinding";
 
-/// The `ParamInfo` prelude struct's name — `{ name: string, type: Type }`, the element type of
-/// `params_of()`'s result list. `type` is the reflection `Type` ADT value (the same ADT `type_of`
-/// returns), built from the parameter's declared type annotation.
+/// The `ParamInfo` prelude struct's name — `{ name: string, type: Type, optional: bool }`, the
+/// element type of `params_of()`'s result list. `type` is the reflection `Type` ADT value (the same
+/// ADT `type_of` returns), built from the parameter's declared type annotation; `optional` reports
+/// whether the parameter declared a default, and so whether a call may omit it.
 pub const PARAM_INFO: &str = "ParamInfo";
 
 /// The built-in **test-metadata attributes** (object-model slice 6h) — prelude `@attribute` structs

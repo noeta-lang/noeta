@@ -136,10 +136,12 @@ impl Checker {
                 ("role".to_string(), Type::Kind(noeta_types::TypeKind::Enum)),
             ],
         );
-        // `ParamInfo { name: string, type: Type }` — the element type of `params_of()`'s result.
-        // `type` is the prelude `Type` enum (the same ADT `type_of` returns), built from the
-        // parameter's declared type annotation. Registered like any prelude struct, so a user
-        // declaration of the same name shadows it.
+        // `ParamInfo { name: string, type: Type, optional: bool }` — the element type of
+        // `params_of()`'s result. `type` is the prelude `Type` enum (the same ADT `type_of`
+        // returns), built from the parameter's declared type annotation; `optional` is true when the
+        // parameter declared a default, so a signature-driven consumer can tell a required parameter
+        // from one a call may omit. Registered like any prelude struct, so a user declaration of the
+        // same name shadows it.
         self.symbols.type_kinds.insert(
             noeta_ast::reflect::PARAM_INFO.to_string(),
             noeta_types::TypeKind::Struct,
@@ -155,6 +157,7 @@ impl Checker {
                     "type".to_string(),
                     Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new()),
                 ),
+                ("optional".to_string(), Type::Bool),
             ],
         );
         // `FieldEntry { name: string, value: dyn }` — the element type of `fields_of()`'s result

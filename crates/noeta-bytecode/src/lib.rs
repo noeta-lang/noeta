@@ -775,7 +775,7 @@ pub enum Op {
         role_enum: Option<NameId>,
     },
     /// `params_of(target)`: `dst = List<ParamInfo>` — the declared parameter list of the fn/method
-    /// named by the runtime `string` in `src`, each materialized into a `ParamInfo { name, type }`
+    /// named by the runtime `string` in `src`, each materialized into a `ParamInfo { name, type, optional }`
     /// from the module's reflection info. The `type` is the `Type` ADT value built from the
     /// parameter's declared type. An unknown target yields an empty list. Reads `Module::reflection`.
     ParamsOf {

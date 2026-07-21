@@ -52,7 +52,15 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// where the package version stays put across such a change. Without the bump a `.noeb` written by
 /// an earlier build passes the version gate and is then postcard-decoded against the new layout —
 /// a silent misread. The gate turns that into an explicit `UnsupportedFormat`.
-pub const FORMAT_VERSION: u8 = 2;
+///
+/// Bumped to 3 when `reflect::ParamSig` gained its `optional` flag. `Module::reflection` is part of
+/// the postcard payload, and postcard is **not** self-describing: a struct is its fields back to
+/// back with no names or tags, so an extra `bool` shifts every byte after it. A version-2 bundle
+/// decoded by a version-3 reader would read the next parameter's name length as the flag and
+/// desynchronise from there — a corrupt manifest, not a clean error. Same reasoning as the bump
+/// before it: any change to the serialized shape, however additive it looks in Rust, is a format
+/// break on the wire.
+pub const FORMAT_VERSION: u8 = 3;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a
