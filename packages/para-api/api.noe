@@ -21,7 +21,7 @@ namespace para.api
 
 use std.http.client
 use std.http.{Client, Request, Response, HttpError}
-use para.api.url
+use para.url
 
 // One layer of the onion. `handle` receives the request on its way in and `next` — the rest of the
 // chain — so a layer may rewrite the request before continuing, inspect the response on the way out,
@@ -78,6 +78,16 @@ pub struct Api {
     // client's base URL, client headers applied — without performing it.
     fn prepare(method: string, path: string, body: string = "", headers: Map<string, string> = {}): Request {
         return self.client.prepare(method, path, body, headers)
+    }
+
+    // Percent-encode one value for use in a URL (RFC 3986).
+    //
+    // Exposed as a method on `Api` rather than left to `use para.url` so that code holding an `Api`
+    // — including everything `@openapi` generates — can encode without importing anything. That
+    // matters most for generated code, which lands in the *user's* file: every import it needs is an
+    // import the user has to have written for code they did not write.
+    fn encode(value: string): string {
+        return url.encode(value)
     }
 
     // Build the `?a=1&b=2` tail for a set of query parameters, percent-encoding both halves of every

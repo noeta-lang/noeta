@@ -701,8 +701,11 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
             None,
         )
     };
-    let mut program = match result {
-        Ok(program) => program,
+    let noeta_loader::Linkage {
+        mut program,
+        source_maps,
+    } = match result {
+        Ok(linkage) => linkage,
         Err(load) => return unlinked(load.into_iter().map(|d| d.diagnostic).collect()),
     };
 
@@ -720,6 +723,7 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     let next_id = (members.len() + dep_modules.len()) as u32;
     let expansion = noeta_loader::run_expansion(
         &mut program,
+        &source_maps,
         || {
             members
                 .iter()

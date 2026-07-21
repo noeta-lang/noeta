@@ -103,12 +103,19 @@ fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, String> {
     })
 }
 
-/// `para.api.url` — the percent-encoder generated query strings are built with.
+/// `para.url` — the percent-encoder generated query strings are built with.
 ///
 /// It is native because correct percent-encoding is byte-wise over UTF-8, which Noeta's string
 /// surface does not reach; and it lives in `para/api` rather than `std.http` because std owns
 /// transport and this is the composition layer's need. If std ever grows one, this becomes a
 /// forward.
+///
+/// It is `para.url` and **not** `para.api.url` because module nesting only runs one way: a native
+/// module may be the parent of Noeta modules (as `para.db` is of `para.db.query`), but a native
+/// module cannot hang beneath a Noeta namespace — `para.api` is `api.noe`, so `para.api.url`
+/// resolves as an export of that file and is not found. Nothing outside the package should need
+/// this name anyway: `Api` re-exposes both entry points as methods precisely so generated code and
+/// user code alike reach them through the `Api` they already hold.
 const URL_FNS: &[ExtFn] = &[ExtFn {
     name: "encode",
     params: &[SigType::String],
@@ -164,7 +171,7 @@ impl Extension for ParaApiExtension {
 
     fn modules(&self) -> &'static [ExtModule] {
         &[ExtModule {
-            name: "api.url",
+            name: "url",
             functions: URL_FNS,
             dispatch: url_dispatch,
             ..ExtModule::DEFAULTS

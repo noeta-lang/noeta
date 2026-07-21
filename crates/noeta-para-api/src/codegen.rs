@@ -110,8 +110,16 @@ fn method(name: &str, op: &Operation) -> String {
     // whose value happens to look like a placeholder cannot rewrite the path.
     let mut path = format!("\"{}\"", escape(&op.path));
     for (p, ident) in bound.iter().filter(|(p, _)| p.loc == In::Path) {
+        // `Api.encode`, not a bare `url.encode`: generated members land in the user's file, so
+        // anything they name has to be a name that file can resolve. `Api` is one the author
+        // already imported to write the decorated struct at all, and the linker qualifies it here
+        // exactly as it does in hand-written code — including when the consumer renamed the
+        // dependency, which a hard-coded `para.api.Api` would get wrong.
+        //
+        // Called on the type rather than through `self.api` because it takes no receiver: Noeta
+        // infers a method static when its body never touches `self`, and encoding needs no state.
         path.push_str(&format!(
-            ".replace(\"{{{}}}\", url.encode(\"${{{ident}}}\"))",
+            ".replace(\"{{{}}}\", Api.encode(\"${{{ident}}}\"))",
             escape(&p.name)
         ));
     }
@@ -127,7 +135,7 @@ fn method(name: &str, op: &Operation) -> String {
 
     let body = if op.has_body { ", body" } else { "" };
     out.push_str(&format!(
-        "    return self.api.request(\"{}\", path ~ self.api.query_string({map}){body})\n}}\n",
+        "    return self.api.request(\"{}\", path ~ Api.query_string({map}){body})\n}}\n",
         op.method
     ));
     out
@@ -197,7 +205,7 @@ mod tests {
                {"name":"petId","in":"path","schema":{"type":"string"}}]}}}}"#,
         );
         assert!(
-            out.contains(r#"path = "/pets/{petId}".replace("{petId}", url.encode("${pet_id}"))"#),
+            out.contains(r#"path = "/pets/{petId}".replace("{petId}", Api.encode("${pet_id}"))"#),
             "{out}"
         );
     }
@@ -209,7 +217,7 @@ mod tests {
                {"name":"q","in":"query","required":true,"schema":{"type":"string"}}]}}}}"#,
         );
         assert!(out.contains("fn search(q: string, query: Map<string, string> = {})"), "{out}");
-        assert!(out.contains(r#"self.api.query_string(query.set("q", "${q}"))"#), "{out}");
+        assert!(out.contains(r#"Api.query_string(query.set("q", "${q}"))"#), "{out}");
     }
 
     #[test]
@@ -276,6 +284,6 @@ mod tests {
                {"name":"query","in":"path","schema":{"type":"string"}}]}}}}"#,
         );
         assert!(out.contains("fn x(query_2: string, query: Map<string, string> = {})"), "{out}");
-        assert!(out.contains(r#"url.encode("${query_2}")"#), "{out}");
+        assert!(out.contains(r#"Api.encode("${query_2}")"#), "{out}");
     }
 }
