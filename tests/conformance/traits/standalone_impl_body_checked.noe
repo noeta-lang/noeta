@@ -1,0 +1,23 @@
+// A standalone `impl Trait for T { … }`'s method BODY is type-checked (body-coverage arc).
+//
+// It was not, for a long time, and nothing said so. `check_standalone_impl` validated the
+// *contract* — arity and annotated types against the trait (E0015) — while the hoist that grafts
+// these methods onto the target so they can be dispatched lives in the BACKENDS. Nothing on the
+// checking path ever walked the statements in between, so a body could be arbitrarily wrong and
+// still check clean, failing only at run time. The identical body written in an *in-body*
+// `impl Trait { }` block WAS checked (those methods are flattened into the type's own `methods`),
+// so the two spellings disagreed about whether your code was checked at all.
+//
+// This is the guard: the return type is `int`, the body answers a `string`.
+// expect: error E0007 at 20:16
+// expect: exit 1
+trait Answer { fn answer(): int }
+class Wrong {
+    fn new(): Wrong { return Wrong {} }
+}
+impl Answer for Wrong {
+    fn answer(): int {
+        return "not an int"
+    }
+}
+echo Wrong.new().answer()

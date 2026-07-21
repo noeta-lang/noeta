@@ -10,6 +10,7 @@
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
+pub mod bodies;
 pub mod derive;
 pub mod desugar;
 mod pretty;
