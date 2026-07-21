@@ -1305,6 +1305,11 @@ pub enum PackedFieldDef {
     Float,
     /// A 32-bit float field (P-PACK Phase 3).
     F32,
+    /// An explicit 64-bit float field `f64` (packed-widths arc).
+    F64,
+    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc): `bits/8` bytes, `signed`
+    /// deciding read-back extension.
+    IntN { bits: u8, signed: bool },
     Bool,
     Struct(u32),
 }
@@ -1454,6 +1459,10 @@ impl Module {
                         PackedFieldDef::Int => "int".to_string(),
                         PackedFieldDef::Float => "float".to_string(),
                         PackedFieldDef::F32 => "f32".to_string(),
+                        PackedFieldDef::F64 => "f64".to_string(),
+                        PackedFieldDef::IntN { bits, signed } => {
+                            format!("{}{bits}", if *signed { 'i' } else { 'u' })
+                        }
                         PackedFieldDef::Bool => "bool".to_string(),
                         PackedFieldDef::Struct(idx) => format!("packed{idx}"),
                     })

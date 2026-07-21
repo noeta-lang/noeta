@@ -75,11 +75,15 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// that slice came from a compiler that could not parse an attribute in a parameter list, so its
 /// source cannot have contained one, and the rows it lacks are rows its program never had.
 ///
-/// Bumped to 5 when `NarrowTarget` (embedded in `Op::As`/`Op::TypeTest`, part of `Module::code`)
-/// gained an `F32` head for reified `f32` narrowing (packed-widths slice 2). The variant was
-/// inserted after `Float`, so every later variant's postcard discriminant shifted by one — a
-/// version-4 reader would decode a `Bool` head as `F32`, an `Int` mismatch cascading through the
-/// chunk. Same rule as the bumps before it: a variant added to a serialized enum is a wire break.
+/// Bumped to 5 by the packed-widths arc, which added variants to three serialized enums in the
+/// postcard payload — all non-self-describing, so a new variant shifts every discriminant after it.
+/// `NarrowTarget` (embedded in `Op::As`/`Op::TypeTest`, part of `Module::code`) gained an `F32` head
+/// for reified `f32` narrowing; `PackedFieldDef` (in `Module::packed_schemas`) gained `F64` and
+/// `IntN { bits, signed }`; and `reflect::TypeRepr` (baked into `Op` narrow targets and
+/// construction-site tags) gained the matching `F64` and `IntN { signed, bits }`. A version-4 bundle
+/// decoded by a version-5 reader would map the old discriminants onto the wrong variants — a `Bool`
+/// head read as `F32`, a `Struct` field read as an `IntN` — and desynchronise the chunk. Same rule
+/// as the bumps before it: any change to a serialized enum's variant set is a wire break.
 pub const FORMAT_VERSION: u8 = 5;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's

@@ -1,0 +1,46 @@
+// Packed-widths arc: every fixed width packs at its natural size inside a `@packed` struct, tightly
+// (no alignment padding), and round-trips through pack/unpack on both backends. A signed slot
+// sign-extends on read-back, an unsigned one zero-extends, so a negative `i8` and a large `u16`/`u32`
+// survive. The flat layout stays invisible to RunResult — index and fused field read observe the same
+// scalar values a boxed struct would — while `to_bytes` exposes the compact storage: this element is
+// 39 bytes (1+1+2+2+4+4+8+8+8+1), where before the arc every non-`f32`/`bool` field was 8 bytes (73).
+// expect: stdout "-1"
+// expect: stdout "255"
+// expect: stdout "-30000"
+// expect: stdout "60000"
+// expect: stdout "-2000000000"
+// expect: stdout "4000000000"
+// expect: stdout "-5000000000"
+// expect: stdout "18000000000"
+// expect: stdout "2.5"
+// expect: stdout "true"
+// expect: stdout "39"
+// expect: stdout "true"
+// expect: exit 0
+@packed struct Cell {
+  a: i8; b: u8; c: i16; d: u16; e: i32; f: u32; g: i64; h: u64; k: f64; m: bool
+}
+
+xs = [Cell {
+  a: -1i8, b: 255u8, c: -30000i16, d: 60000u16,
+  e: -2000000000i32, f: 4000000000u32,
+  g: -5000000000i64, h: 18000000000u64,
+  k: 2.5f64, m: true,
+}]
+
+echo xs[0].a   // signed narrow read-back
+echo xs[0].b   // unsigned zero-extension
+echo xs[0].c
+echo xs[0].d
+echo xs[0].e
+echo xs[0].f
+echo xs[0].g
+echo xs[0].h
+echo xs[0].k
+echo xs[0].m
+
+// Tight packing — the element is exactly the sum of its field widths, no padding.
+echo xs.to_bytes().len()
+
+// The flat buffer round-trips: `from_bytes` reconstructs an element equal to the original.
+echo from_bytes::<Cell>(xs.to_bytes()) == xs

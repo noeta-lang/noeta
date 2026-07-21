@@ -349,11 +349,16 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         TypeRepr::Int
         | TypeRepr::Float
         | TypeRepr::F32
+        | TypeRepr::F64
         | TypeRepr::Bool
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
         | TypeRepr::Dyn => Vec::new(),
+        // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
+        TypeRepr::IntN { signed, bits } => {
+            vec![Value::int(i64::from(*bits)), Value::bool(*signed)]
+        }
         TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => {
             vec![build_type_value(t)]
         }

@@ -1,0 +1,48 @@
+// Packed-widths arc (reflection): a fixed width is reified in **container-element** position, so
+// `List<i32>` is a genuinely distinct type from `List<int>` and `List<f64>` from `List<float>` — the
+// element carries its width in the runtime type tag, and a parametrized `is` checks it. The width is
+// storage/identity only, never equality: two lists whose elements are numerically equal stay `==`
+// across widths. A bare *scalar* width still erases (a scalar has no storage slot to tag), so
+// `type_of(5i32)` is `Type.Int`. Both backends consult the tag identically (differential-pinned).
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "iN 32 true"
+// expect: stdout "Type.Int"
+// expect: stdout "Type.Float"
+// expect: exit 0
+
+// Launder through `dyn` so only the runtime tag remains — the static type can no longer answer `is`.
+fn launder(v: dyn): dyn { return v; }
+
+xs: dyn = launder([1i32, 2i32]);   // tagged List(i32)
+ys: dyn = launder([1, 2]);         // tagged List(int)
+
+echo xs is List<i32>;              // true  — width matches
+echo xs is List<int>;              // false — i32 is distinct from int
+echo ys is List<int>;              // true
+echo ys is List<i32>;              // false
+
+// Width-blind equality: the numerically equal elements compare equal across the two list types.
+echo [1i32, 2i32] == [1, 2];      // true
+
+fs: dyn = launder([1.5f64, 2.5f64]);  // tagged List(f64)
+echo fs is List<f64>;             // true
+echo fs is List<float>;           // false — f64 is distinct from float
+echo [1.5f64, 2.5f64] == [1.5, 2.5];  // true (bit-identical floats)
+
+// The width surfaces in the reflected `Type` ADT as `Type.IntN(bits, signed)`.
+echo match type_of(launder([1i32, 2i32])) {
+  Type.List(Type.IntN(bits, signed)) => "iN ${bits} ${signed}",
+  Type.List(Type.Int) => "int",
+  _ => "other",
+};                                // iN 32 true
+
+// A bare scalar width erases — no storage slot to reify onto.
+echo type_of(5i32);               // Type.Int
+echo type_of(1.5f64);             // Type.Float

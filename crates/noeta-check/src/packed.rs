@@ -230,6 +230,11 @@ impl Checker {
                 Type::Int => PackedKind::Int,
                 Type::Float => PackedKind::Float,
                 Type::F32 => PackedKind::F32,
+                Type::F64 => PackedKind::F64,
+                Type::IntN { signed, bits } => PackedKind::IntN {
+                    bits: *bits,
+                    signed: *signed,
+                },
                 Type::Bool => PackedKind::Bool,
                 Type::Named(..) => PackedKind::Struct(Box::new(self.packed_layout(fty)?)),
                 _ => return None,
@@ -306,7 +311,7 @@ impl Checker {
                         ),
                     )
                     .help(
-                        "a `@packed` struct's fields must be primitives (`int`, `float`, `bool`) or other packed structs",
+                        "a `@packed` struct's fields must be primitives (`int`, `float`, `bool`, a fixed width like `i32`/`u8`/`f64`, or `f32`) or other packed structs",
                     );
             }
         }

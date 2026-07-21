@@ -1,0 +1,24 @@
+// Packed-widths arc: signedness is a property of the *slot*, not the bits. The single byte `0xFF`
+// reads back as `255` through a `u8` slot (zero-extension) but as `-1` through an `i8` slot (sign-
+// extension) — proven by packing a `255u8`, then re-reading the identical byte buffer through an `i8`
+// element via `from_bytes`. Conversely `-1i8` packs to that very same `0xFF` byte, so the two buffers
+// are byte-identical: the width is one byte for both, and only the read-back extension differs.
+// expect: stdout "255"
+// expect: stdout "-1"
+// expect: stdout "true"
+// expect: stdout "1"
+// expect: exit 0
+@packed struct S { v: i8 }
+@packed struct U { v: u8 }
+
+us = [U { v: 255u8 }]
+echo us[0].v                            // unsigned: 255
+
+// Re-interpret the identical `0xFF` byte through a signed `i8` slot — sign-extends to -1.
+ss = from_bytes::<S>(us.to_bytes())
+echo ss[0].v                            // signed: -1
+
+// `-1i8` packs to the same single `0xFF` byte an unsigned `255` does.
+neg = [S { v: -1i8 }]
+echo neg.to_bytes() == us.to_bytes()    // true — same bits
+echo neg.to_bytes().len()               // 1 byte per element, tightly packed

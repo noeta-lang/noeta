@@ -295,6 +295,8 @@ impl Checker {
                     // the interface a parameter is bound to (service injection). A bare `dyn` param
                     // is still `Type.Dyn`.
                     AdtFields::Name => vec![Type::String],
+                    // `Type.IntN(bits: int, signed: bool)` — a fixed-width integer's descriptor.
+                    AdtFields::IntWidth => vec![Type::Int, Type::Bool],
                 },
             })
             .collect();
