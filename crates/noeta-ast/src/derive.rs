@@ -411,7 +411,7 @@ pub fn plan_builtin_via(
         }
         // fn add(other: T): T { return T { f: self.f + other.f } }
         let construct = Expr::Object(ObjectLit {
-            type_name: type_name.to_string(),
+            type_name: Some(type_name.to_string()),
             type_name_span: span,
             fields: vec![FieldInit {
                 name: via_field.clone(),

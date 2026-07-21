@@ -525,6 +525,9 @@ pub(crate) fn is_deferred_literal_arg(expr: &Expr) -> bool {
     matches!(
         expr,
         Expr::Closure { .. } | Expr::List { .. } | Expr::Map { .. }
+        // A target-typed `.{ … }` is the *most* deferred literal there is: without the expectation
+        // it has no type at all, not merely an imprecise one. A named `Name { … }` stays eager.
+        | Expr::Object(noeta_ast::ObjectLit { type_name: None, .. })
     )
 }
 

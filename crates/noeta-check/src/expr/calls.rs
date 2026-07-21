@@ -42,6 +42,15 @@ impl Checker {
                     Expr::List { .. } | Expr::Map { .. },
                     Some(expected @ (Type::List(_) | Type::Map(..))),
                 ) => self.check(expr, expected, env),
+                // A target-typed `.{ … }` absorbs **whatever** the parameter type is — unlike the
+                // arms above it does not pre-filter on the expected type's shape, because the
+                // literal has no standalone meaning to fall back to. `check` owns the decision:
+                // a concrete named record type is adopted, anything else is E0023 reported there.
+                // Falling through to `synth` instead would report "no expected type", which would
+                // be a lie at a call site that has one.
+                (Expr::Object(lit), Some(expected)) if lit.type_name.is_none() => {
+                    self.check(expr, expected, env)
+                }
                 _ => self.synth(expr, env),
             };
         }

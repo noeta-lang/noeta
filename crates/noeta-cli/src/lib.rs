@@ -1375,7 +1375,7 @@ pub(crate) fn run_declared_tier(
     let str_expr = |value: String| Expr::Str { value, span };
     let object = |fields: Vec<noeta_ast::FieldInit>| {
         Expr::Object(noeta_ast::ObjectLit {
-            type_name: root_ty.to_string(),
+            type_name: Some(root_ty.to_string()),
             type_name_span: span,
             fields,
             spread: None,

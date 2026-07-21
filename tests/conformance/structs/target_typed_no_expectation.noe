@@ -1,0 +1,8 @@
+// A target-typed `.{ … }` in a position with no expected type has no name to adopt — `E0023`. The
+// fix is either the named form (`x = Retry { … }`) or an annotation on what it flows into
+// (`x: Retry = .{ … }`); the language never guesses a nominal type from field names alone.
+// expect: error E0023 at 7:5
+// expect: exit 1
+struct Retry { attempts: int }
+x = .{ attempts: 3 };
+echo x;
