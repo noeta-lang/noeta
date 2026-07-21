@@ -49,8 +49,8 @@ pub use noeta_ast::{BinaryOp, ForPattern, Pattern, TypeRef, UnaryOp};
 mod lower;
 mod pretty;
 pub use lower::{
-    LowerOptions, LoweringSites, Unsupported, hoist_standalone_impl_methods, lower,
-    lower_with_sites, lower_with_sites_opts,
+    LowerOptions, LoweringSites, Unsupported, hoist_impl_methods_with_registry,
+    hoist_standalone_impl_methods, lower, lower_with_sites, lower_with_sites_opts,
 };
 pub use pretty::dump;
 
