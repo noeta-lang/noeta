@@ -149,7 +149,8 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
                 // generate" — the sources it appended, told apart from hand-written ones by the
                 // loader rather than by guessing at a source's name here.
                 Ok(linked) => {
-                    for source in &linked.expansions {
+                    for expansion in &linked.expansions {
+                        let source = &expansion.source;
                         expansions.insert((source.name().to_string(), source.text().to_string()));
                     }
                 }

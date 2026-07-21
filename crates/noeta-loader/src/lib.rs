@@ -29,6 +29,8 @@ use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::{Source, SourceId, SourceMap};
 
+pub use expand::ExpandedSource;
+
 /// A loaded, linked program ready to type-check and run.
 #[derive(Debug)]
 pub struct Linked {
@@ -495,29 +497,47 @@ fn expand_into(
     root_edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<Vec<String>, Vec<LoadDiagnostic>> {
-    let (expansions, reads) = run_expansion(program, sources, root_edition, text_tiers)?;
-    for source in expansions {
-        editions.set(source.id(), root_edition);
-        sources.push(source);
+    let next_id = sources.len() as u32;
+    let (expansions, reads) = run_expansion(
+        program,
+        || sources.clone(),
+        next_id,
+        root_edition,
+        text_tiers,
+    )?;
+    for expansion in expansions {
+        editions.set(expansion.source.id(), root_edition);
+        sources.push(expansion.source);
     }
     Ok(reads)
 }
 
 /// Decide whether to expand, and run it — the **one** place either happens.
 ///
-/// Split from [`expand_into`] because [`ParsedDir::link_entry`] links from `&self` and so cannot
-/// append to the shared source list at all: it hands its caller the expansion sources to render
-/// against instead ([`EntryLink::expansions`]). Both paths must nonetheless agree on when a
-/// directive expands and what its output is, so the decision lives here and the two differ only in
-/// what they do with the sources that come back.
+/// Split from [`expand_into`] because the other callers cannot append to a shared source list at
+/// all: [`ParsedDir::link_entry`] links from `&self` over an immutable directory parse, and
+/// `noeta_db::linked_from` is a salsa query over inputs it may not mutate. Both hand their caller
+/// the expansion sources to render against instead ([`EntryLink::expansions`]). Every path must
+/// nonetheless agree on when a directive expands and what its output is — otherwise the editor and
+/// the compiler disagree about a decorated type's members, which is the whole reason this function
+/// is one function — so the decision lives here and the callers differ only in what they do with the
+/// sources that come back.
 ///
-/// Returns the expansion sources (already id'd) and every file the hooks reported reading.
-fn run_expansion(
+/// `next_id` is the first unused [`SourceId`], and `sources` is a **provider**: the caller's sources
+/// in id order, materialized only if there is something to expand. The provider exists for
+/// `noeta_db::linked_from`, whose sources live in salsa inputs and cost a text clone each to
+/// reconstruct — a price no program without an expanding directive (nearly all of them) should pay
+/// per keystroke. Callers that already hold a slice pass a cheap clone of it.
+///
+/// Returns the expansion sources (already id'd, each with the directive that produced it) and every
+/// file the hooks reported reading.
+pub fn run_expansion(
     program: &mut Program,
-    sources: &[Source],
+    sources: impl FnOnce() -> Vec<Source>,
+    next_id: u32,
     root_edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
-) -> Result<(Vec<Source>, Vec<String>), Vec<LoadDiagnostic>> {
+) -> Result<(Vec<ExpandedSource>, Vec<String>), Vec<LoadDiagnostic>> {
     let registry = noeta_ext_abi::registry::single_registry_process();
     if !expand::has_expansions(program, registry) {
         return Ok((Vec::new(), Vec::new()));
@@ -528,10 +548,11 @@ fn run_expansion(
     // resolved through that entry's own map ([`ParsedDir::source_map_with`]). Do not "fix" this into
     // a directory-global counter — the ids would then be gapped and meaningless in every map that
     // holds only one entry's expansions.
+    let sources = sources();
     let expanded = expand::expand_program(
         program,
-        sources,
-        sources.len() as u32,
+        &sources,
+        next_id,
         root_edition,
         text_tiers,
         registry,
@@ -753,9 +774,10 @@ pub struct EntryLink {
     /// The linked program, with any generated members already spliced in.
     pub program: Program,
     /// Sources produced by compile-time expansion, ids continuing past every directory and
-    /// dependency source. **Empty** for the overwhelmingly common case of a program with no
-    /// expanding directive — the caller then reuses the shared map untouched.
-    pub expansions: Vec<Source>,
+    /// dependency source, each paired with the directive that produced it. **Empty** for the
+    /// overwhelmingly common case of a program with no expanding directive — the caller then reuses
+    /// the shared map untouched.
+    pub expansions: Vec<ExpandedSource>,
     /// Every file an expansion hook reported reading, in expansion order (a rebuild trigger).
     pub reads: Vec<String>,
 }
@@ -842,20 +864,20 @@ impl ParsedDir {
     ///
     /// Only an entry that expanded needs this; with an empty `expansions` it is exactly
     /// [`Self::source_map`].
-    pub fn source_map_with(&self, expansions: &[Source]) -> SourceMap {
+    pub fn source_map_with(&self, expansions: &[ExpandedSource]) -> SourceMap {
         let mut sources = Vec::with_capacity(self.sources.len() + expansions.len());
         sources.extend(self.sources.iter().cloned());
-        sources.extend(expansions.iter().cloned());
+        sources.extend(expansions.iter().map(|e| e.source.clone()));
         SourceMap::new(sources)
     }
 
     /// [`Self::editions`] extended with one entry's expansions, each at the root package's edition —
     /// generated code was written by the extension the *root* installed, for this program. With an
     /// empty `expansions` it is a clone of [`Self::editions`].
-    pub fn editions_with(&self, expansions: &[Source]) -> noeta_lexer::EditionMap {
+    pub fn editions_with(&self, expansions: &[ExpandedSource]) -> noeta_lexer::EditionMap {
         let mut editions = self.editions.clone();
-        for source in expansions {
-            editions.set(source.id(), self.root_edition);
+        for expansion in expansions {
+            editions.set(expansion.source.id(), self.root_edition);
         }
         editions
     }
@@ -913,7 +935,8 @@ impl ParsedDir {
         )?;
         let (expansions, reads) = run_expansion(
             &mut program,
-            &self.sources,
+            || self.sources.clone(),
+            self.sources.len() as u32,
             self.root_edition,
             &self.text_tiers,
         )?;

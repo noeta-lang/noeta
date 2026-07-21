@@ -46,12 +46,27 @@ use noeta_span::{Source, SourceId, Span};
 
 use crate::LoadDiagnostic;
 
+/// One successful expansion: the generated [`Source`], and the `@directive` token that generated it.
+///
+/// The origin is carried, not recoverable: a consumer holding only the generated source can render a
+/// fault *inside* it, but cannot say where to go and change something — the author did not write that
+/// text. The one span in a file they can edit is the directive itself, so it travels with the output.
+/// (The IDE needs exactly this: a per-document diagnostics view filters to spans its document owns, so
+/// a checker error landing in generated code is invisible unless it can be re-blamed on the directive.)
+#[derive(Debug, Clone)]
+pub struct ExpandedSource {
+    /// The generated declaration, id'd past every source the caller already had.
+    pub source: Source,
+    /// The `@name` token that produced it, in the file the author wrote.
+    pub origin: Span,
+}
+
 /// Everything one pass of expansion produced.
 #[derive(Debug)]
 pub struct Expanded {
-    /// One source per successful expansion, with ids continuing from where the caller stopped. The
+    /// One entry per successful expansion, with ids continuing from where the caller stopped. The
     /// caller appends these to its source map and its edition map together.
-    pub sources: Vec<Source>,
+    pub sources: Vec<ExpandedSource>,
     /// Every file every hook reported reading, in expansion order. This is the program's rebuild
     /// trigger: the caller registers these paths so editing one re-runs the expansion.
     pub reads: Vec<String>,
@@ -91,7 +106,10 @@ pub fn expand_program(
             match run_one(&plan, id, edition, text_tiers, sources) {
                 Ok(done) => {
                     splice(&mut program.stmts[index], done.members);
-                    out.sources.push(done.source);
+                    out.sources.push(ExpandedSource {
+                        source: done.source,
+                        origin: plan.span,
+                    });
                     out.reads.extend(done.reads);
                 }
                 Err(diagnostic) => out.diagnostics.push(*diagnostic),

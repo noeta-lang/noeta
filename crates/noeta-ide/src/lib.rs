@@ -454,7 +454,7 @@ impl DocumentStore {
     fn doc_cache(&self, uri: &str) -> Option<(&WorkspaceCache, SourceProgram, SourceId)> {
         let cache = self.workspaces.get(&workspace_key(uri))?;
         let (source, entry) = cache.find_member(uri)?;
-        Some((cache, entry.program, source))
+        Some((cache, entry.input()?, source))
     }
 
     /// The `uri`'s own diagnostics (cross-module resolution, but only this file's own diagnostics
@@ -492,7 +492,82 @@ impl DocumentStore {
             );
         }
         diags.extend(self.broken_import_diagnostics(cache, doc, source));
+        diags.extend(self.expansion_diagnostics(cache, doc, source));
         Some((diags, doc.text(db).clone()))
+    }
+
+    /// Re-blame, **on the directive that generated it**, every checker diagnostic that landed inside
+    /// compile-time-generated code.
+    ///
+    /// The same shape as [`Self::broken_import_diagnostics`], for the same reason. Expansion gives
+    /// generated members true spans in a generated source, which is what makes a fault in them
+    /// *locatable* at all — but [`Self::diagnostics`] is a per-document view and filters to
+    /// `d.span.source == source`, so a generated method calling an unknown function produced a
+    /// diagnostic the user saw **nowhere**. Silence is the worst outcome available: the editor shows
+    /// the file as clean while `noeta check` fails on it, which is exactly the compiler/editor
+    /// disagreement this arc exists to end.
+    ///
+    /// The directive's `@name` span is the one place in a file the author can act on — they did not
+    /// write the generated line — so that is where the diagnostic is shown, quoting the fault and its
+    /// position inside the expansion. It is *re-attributed*, not duplicated: an expansion belongs to
+    /// exactly one directive in exactly one file, and only that document reports it (the origin-span
+    /// filter below), so one fault stays one diagnostic.
+    ///
+    /// (The loader's own E0062 — a hook that failed, or output that does not parse — already blames
+    /// the directive's span and so never reaches here.)
+    fn expansion_diagnostics(
+        &self,
+        cache: &WorkspaceCache,
+        doc: SourceProgram,
+        source: SourceId,
+    ) -> Vec<noeta_diagnostics::Diagnostic> {
+        let db = &self.db;
+        let expansions = &noeta_db::linked_from(db, cache.workspace, doc).expansions;
+        // The overwhelmingly common case: this entry generated nothing, so no diagnostic can be in
+        // generated code and there is nothing to scan.
+        if expansions.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for diagnostic in &noeta_db::linked_checked_ide_from(db, cache.workspace, doc).diagnostics {
+            let Some(generated) = cache.source_with(diagnostic.span.source, expansions) else {
+                continue;
+            };
+            if !matches!(generated.kind, workspace::SourceKind::Expansion) {
+                continue;
+            }
+            // Only the document holding the directive speaks for it. Reporting from any other open
+            // document would put one fault on several files, none of which but this one can fix it.
+            let Some(origin) = expansions
+                .iter()
+                .find(|e| e.source.id() == diagnostic.span.source)
+                .map(|e| e.origin)
+                .filter(|origin| origin.source == source)
+            else {
+                continue;
+            };
+            let at =
+                noeta_span::Source::new(diagnostic.span.source, generated.uri, generated.text(db))
+                    .line_col(diagnostic.span.start);
+            // The original code and severity are kept — this is the same fault, moved to the one
+            // span the reader can act on, not a new one about it.
+            out.push(noeta_diagnostics::Diagnostic {
+                code: diagnostic.code,
+                severity: diagnostic.severity,
+                span: origin,
+                message: format!(
+                    "this directive generated code that does not check: {} (at {}:{} of `{}`)",
+                    diagnostic.message, at.line, at.col, generated.uri
+                ),
+                labels: Vec::new(),
+                help: Some(
+                    "the fault is in the generated members, not in this file — the extension \
+                     providing the directive has to produce code that checks"
+                        .to_string(),
+                ),
+            });
+        }
+        out
     }
 
     /// Explain, **at this document's own `use` statements**, every import that names a module which
@@ -578,7 +653,7 @@ impl DocumentStore {
 
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -668,7 +743,7 @@ impl DocumentStore {
 
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -755,7 +830,7 @@ impl DocumentStore {
 
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -874,7 +949,7 @@ impl DocumentStore {
 
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -915,7 +990,7 @@ impl DocumentStore {
 
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -952,7 +1027,7 @@ impl DocumentStore {
             _ => None,
         })?;
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -1076,7 +1151,7 @@ impl DocumentStore {
         // file). A built-in `doc` has no declaration but a known language.
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -1216,7 +1291,7 @@ impl DocumentStore {
 
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -1281,7 +1356,7 @@ impl DocumentStore {
         // navigation still works while a sibling is broken).
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -1372,7 +1447,7 @@ impl DocumentStore {
         let db = &self.db;
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -1484,7 +1559,7 @@ impl DocumentStore {
 
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -1541,7 +1616,7 @@ impl DocumentStore {
         // the document's own AST while a sibling is unparseable.
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -1694,8 +1769,8 @@ impl DocumentStore {
     /// The source text of `source` within `cache` — any category the workspace maps (member or
     /// dependency module), resolved through the one [`WorkspaceCache::source`] lookup. `None` when
     /// the workspace does not map the id at all.
-    fn source_text(&self, cache: &WorkspaceCache, source: SourceId) -> Option<&String> {
-        Some(cache.source(source)?.program.text(&self.db))
+    fn source_text<'a>(&'a self, cache: &'a WorkspaceCache, source: SourceId) -> Option<&'a str> {
+        Some(cache.source(source)?.text(&self.db))
     }
 
     /// The function the cursor addresses, as a call-hierarchy item (ide-ui U0): its declared name,
@@ -2313,7 +2388,7 @@ impl DocumentStore {
         let db = &self.db;
         let linked = noeta_db::linked_from(db, cache.workspace, entry);
         let entry_ast = noeta_db::ast(db, entry);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
@@ -2348,16 +2423,19 @@ impl DocumentStore {
         let db = &self.db;
         let linked = noeta_db::linked_from(db, cache.workspace, entry);
         let entry_ast = noeta_db::ast(db, entry);
-        let program = match &linked.0 {
+        let program = match &linked.program {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
         let ide = noeta_db::linked_checked_ide_from(db, cache.workspace, entry);
-        // Texts by SourceId index — `WorkspaceCache::sources` yields in SourceId order, so element
-        // `n` IS `SourceId(n)` without this site knowing the id layout.
+        // Texts by SourceId index — `WorkspaceCache::sources_with` yields in SourceId order, so
+        // element `n` IS `SourceId(n)` without this site knowing the id layout. This link's
+        // expansions are included: a generated function is in the merged program like any other, and
+        // its call sites carry expansion ids, so a short vector would silently drop them from the
+        // graph.
         let texts: Vec<&str> = cache
-            .sources()
-            .map(|s| s.program.text(db).as_str())
+            .sources_with(&linked.expansions)
+            .map(|s| s.text(db))
             .collect();
         let graph = callgraph::build(program, &ide.expr_types, &texts);
         (graph, noeta_ast::reflect::build(program))
@@ -2403,7 +2481,7 @@ impl DocumentStore {
         // An id the workspace does not map is `None`: the editor gets no jump rather than a jump
         // into the wrong file.
         let source = cache.source(span.source)?;
-        let index = LineIndex::new(source.program.text(&self.db));
+        let index = LineIndex::new(source.text(&self.db));
         Some((source.uri.to_string(), index.range(span, encoding)))
     }
 }

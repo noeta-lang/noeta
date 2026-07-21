@@ -200,7 +200,7 @@ fn roundtrip_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mu
     let db = LangDatabase::default();
     let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
-    if noeta_db::linked(&db, ws).0.is_err() {
+    if noeta_db::linked(&db, ws).program.is_err() {
         report.not_run.link_failed += 1;
         return;
     }

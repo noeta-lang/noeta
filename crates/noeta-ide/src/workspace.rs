@@ -27,16 +27,25 @@ use salsa::Setter as _;
 /// That rule was open-coded at nine sites, and when it drifted it did not crash — it attributed a
 /// span to the WRONG FILE. Naming the category makes the decision explicit at each site.
 ///
-/// A **third** category is expected (compile-time directive expansion mints sources of its own).
-/// Call sites therefore ask predicates like [`SourceRef::is_member`] rather than matching every
-/// arm, so a new variant slots in without a nine-site sweep — and the sites that must exclude
-/// non-members already exclude it by construction.
+/// The **third** category, [`SourceKind::Expansion`], is why the predicate discipline exists: call
+/// sites ask [`SourceRef::is_member`] rather than matching every arm, so the variant slotted in
+/// without a nine-site sweep and the sites that must exclude non-members excluded it by
+/// construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceKind {
     /// A workspace member: a `.noe` file of the directory the user has open.
     Member,
     /// A module of a resolved dependency package (package-manager P2.1c).
     Dependency,
+    /// A source **generated during linking** by compile-time directive expansion — the text an
+    /// `@openapi("petstore.yaml")` hook returned, wrapped in the declaration it decorates.
+    ///
+    /// Unlike the other two it has no file: no URI to open, no salsa input, and no id of its own
+    /// until an entry links. Its ids therefore belong to *one link*, not to the workspace (two
+    /// entries of one directory each number their expansions from the same first unused id), which
+    /// is why they are never in [`WorkspaceCache::source`]'s own tables — a caller resolving a span
+    /// from a link passes that link's expansions to [`WorkspaceCache::source_with`].
+    Expansion,
 }
 
 /// The [`SourceId`] the **first dependency module** carries, given the member count — the single
@@ -49,26 +58,62 @@ fn first_dep_id(member_count: usize) -> u32 {
     member_count as u32
 }
 
-/// One **resolved** source: its category, its URI, and its salsa input handle.
+/// One **resolved** source: its category, how it is named, and where its text lives.
 ///
-/// Deliberately NOT a [`noeta_span::SourceMap`] entry: that type *owns* the source text, which the
-/// IDE must never do — text lives in the salsa [`SourceProgram`] input and is memoized per file, so
-/// an owning map would duplicate every open buffer and fight incrementality. A `SourceRef` borrows
-/// the URI out of the cache and carries the salsa handle, so the text is still read through salsa
-/// (`program.text(db)`) at the one moment it is needed.
+/// Deliberately NOT a [`noeta_span::SourceMap`] entry: that type *owns* the source text, which a
+/// `SourceRef` must never do — it always borrows from whoever owns the text already. For a member or
+/// a dependency module that owner is the salsa [`SourceProgram`] input, memoized per file, so an
+/// owning copy would duplicate every open buffer and fight incrementality. For an **expansion** the
+/// owner is the `linked_from` memo that generated the text (see [`noeta_db::LinkedProgram`]); it has
+/// no file and no input to read through, so the text is borrowed straight out of that memo.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SourceRef<'a> {
     pub(crate) kind: SourceKind,
+    /// How this source is addressed: a `file:` URI for a member or a dependency module. For an
+    /// [`SourceKind::Expansion`] it is the generated source's **display name**
+    /// (`PetStore ⟨@openapi "petstore.yaml"⟩`) and **not openable** — showing generated code in the
+    /// editor needs a virtual-document scheme, which is a separate arc. A site that turns this into
+    /// something the editor navigates to must therefore keep to members and dependencies (which is
+    /// what resolving through [`WorkspaceCache::source`], with no expansions, gives it).
     pub(crate) uri: &'a str,
-    pub(crate) program: SourceProgram,
+    body: SourceBody<'a>,
 }
 
-impl SourceRef<'_> {
-    /// Whether this source is a workspace **member** (as opposed to any non-member category —
-    /// today a dependency module, later an expansion). The question the exclusion sites actually
-    /// ask, phrased so a new category is excluded by default rather than silently included.
+/// Where a [`SourceRef`]'s text lives — the one difference between a source backed by a file and one
+/// generated during linking.
+#[derive(Debug, Clone, Copy)]
+enum SourceBody<'a> {
+    /// A salsa input; the text is read through the db, memoized per file.
+    Input(SourceProgram),
+    /// Text owned by the `linked_from` memo that generated it.
+    Generated(&'a str),
+}
+
+impl<'a> SourceRef<'a> {
+    /// Whether this source is a workspace **member** (as opposed to any non-member category — a
+    /// dependency module or an expansion). The question the exclusion sites actually ask, phrased so
+    /// a new category is excluded by default rather than silently included.
     pub(crate) fn is_member(&self) -> bool {
         matches!(self.kind, SourceKind::Member)
+    }
+
+    /// The salsa input behind this source, or `None` for an [`SourceKind::Expansion`] — which has
+    /// none, and deliberately: minting an input per expansion would leak a slot per expansion ever
+    /// produced (salsa 0.27 cannot delete an input; see [`noeta_db::release_source`]).
+    pub(crate) fn input(&self) -> Option<SourceProgram> {
+        match self.body {
+            SourceBody::Input(program) => Some(program),
+            SourceBody::Generated(_) => None,
+        }
+    }
+
+    /// This source's text, read through salsa for a file-backed source and borrowed out of the
+    /// generating memo for an expansion. Both borrows live as long as the db borrow.
+    pub(crate) fn text(self, db: &'a dyn salsa::Database) -> &'a str {
+        match self.body {
+            SourceBody::Input(program) => program.text(db).as_str(),
+            SourceBody::Generated(text) => text,
+        }
     }
 }
 
@@ -122,32 +167,85 @@ impl WorkspaceCache {
             .then(|| SourceId(first_dep_id(self.programs.len()) + index as u32))
     }
 
-    /// **The** `SourceId` → source lookup. `None` for an id this workspace does not map — an id
-    /// from another workspace, or one past every source — which every caller must handle
-    /// explicitly instead of falling into a range and being attributed to the wrong file.
+    /// The [`SourceId`] the **first expansion** of a link carries: past every member and every
+    /// dependency module. The second half of the id layout `first_dep_id` opens, and the editor's
+    /// statement of the same rule `noeta_db::linked_from` links under (it takes the first unused id
+    /// as the member count plus the dependency-module count). Nothing may re-derive it.
+    fn first_expansion_id(&self) -> u32 {
+        first_dep_id(self.programs.len()) + self.dep_programs.len() as u32
+    }
+
+    /// **The** `SourceId` → source lookup, for the sources the *workspace* owns: members and
+    /// dependency modules. `None` for an id this workspace does not map — an id from another
+    /// workspace, one past every source, or one belonging to a link's generated code — which every
+    /// caller must handle explicitly instead of falling into a range and being attributed to the
+    /// wrong file.
+    ///
+    /// A caller holding a span that may come from generated code resolves it through
+    /// [`Self::source_with`] instead, passing the expansions of the link that produced the span.
+    /// This one is not merely the `expansions = &[]` convenience it is written as: a site that turns
+    /// a resolved source into a location the editor opens **must** use it, because an expansion has
+    /// no openable URI.
     pub(crate) fn source(&self, id: SourceId) -> Option<SourceRef<'_>> {
+        self.source_with(id, &[])
+    }
+
+    /// [`Self::source`] extended with **one link's expansions** — the generated sources
+    /// `noeta_db::linked_from` produced for a particular entry, whose ids continue past
+    /// [`Self::first_expansion_id`].
+    ///
+    /// The expansions are a parameter rather than a field of the cache because they belong to a
+    /// link, not to a workspace: every entry of a directory links on its own and numbers its
+    /// expansions from the same first unused id, so one flat per-workspace table would attribute an
+    /// id to whichever entry happened to fill it — precisely the wrong-file failure naming the
+    /// categories was introduced to end. A caller therefore passes the expansions of the link the
+    /// span came from, or none.
+    pub(crate) fn source_with<'a>(
+        &'a self,
+        id: SourceId,
+        expansions: &'a [noeta_loader::ExpandedSource],
+    ) -> Option<SourceRef<'a>> {
         let idx = id.0 as usize;
         let dep_origin = first_dep_id(self.programs.len()) as usize;
         if idx < dep_origin {
             return Some(SourceRef {
                 kind: SourceKind::Member,
                 uri: self.source_uris.get(idx)?,
-                program: *self.programs.get(idx)?,
+                body: SourceBody::Input(*self.programs.get(idx)?),
             });
         }
-        let dep = idx - dep_origin;
+        let expansion_origin = self.first_expansion_id() as usize;
+        if idx < expansion_origin {
+            let dep = idx - dep_origin;
+            return Some(SourceRef {
+                kind: SourceKind::Dependency,
+                uri: self.dep_uris.get(dep)?,
+                body: SourceBody::Input(*self.dep_programs.get(dep)?),
+            });
+        }
+        let generated = &expansions.get(idx - expansion_origin)?.source;
         Some(SourceRef {
-            kind: SourceKind::Dependency,
-            uri: self.dep_uris.get(dep)?,
-            program: *self.dep_programs.get(dep)?,
+            kind: SourceKind::Expansion,
+            uri: generated.name(),
+            body: SourceBody::Generated(generated.text()),
         })
     }
 
     /// Every source this workspace maps, in [`SourceId`] order — so `nth` element IS `SourceId(n)`.
     /// What the `SourceId`-indexed text vectors the call graph consumes are built from.
     pub(crate) fn sources(&self) -> impl Iterator<Item = SourceRef<'_>> {
-        (0..self.programs.len() + self.dep_programs.len())
-            .filter_map(|i| self.source(SourceId(i as u32)))
+        self.sources_with(&[])
+    }
+
+    /// [`Self::sources`] continued through one link's expansions, still in [`SourceId`] order — so a
+    /// span in generated code indexes the id-keyed vectors built from this exactly as one in a
+    /// hand-written file does.
+    pub(crate) fn sources_with<'a>(
+        &'a self,
+        expansions: &'a [noeta_loader::ExpandedSource],
+    ) -> impl Iterator<Item = SourceRef<'a>> {
+        (0..self.first_expansion_id() as usize + expansions.len())
+            .filter_map(move |i| self.source_with(SourceId(i as u32), expansions))
     }
 
     /// The workspace **member** at `uri`, with the [`SourceId`] it carries. `None` if `uri` is not a
@@ -173,8 +271,10 @@ impl WorkspaceCache {
     /// its whole analysis resident. (Already-emptied tombstones are skipped — they hold nothing.)
     pub(crate) fn release_all(&self, db: &mut LangDatabase) {
         let ws = self.workspace;
-        for src in self.sources() {
-            noeta_db::release_source(db, ws, src.program);
+        // Members and dependency modules only — `sources()` yields no expansion (they belong to a
+        // link, not to the workspace), and an expansion has no input to release in any case.
+        for program in self.sources().filter_map(|src| src.input()) {
+            noeta_db::release_source(db, ws, program);
         }
     }
 }
@@ -487,6 +587,16 @@ mod tests {
         )
     }
 
+    /// One expansion as a link hands it back: a generated source at `id`, blamed on a directive in
+    /// the first member. (The origin span is what the diagnostics view re-attributes to; the
+    /// addressing tests only need it to be well-formed.)
+    fn generated(id: SourceId, name: &str, text: &str) -> noeta_loader::ExpandedSource {
+        noeta_loader::ExpandedSource {
+            source: noeta_span::Source::new(id, name, text),
+            origin: noeta_span::Span::new_in(SourceId(0), 0, 3),
+        }
+    }
+
     /// A cache with `members` member sources and `deps` dependency modules, wired exactly as
     /// [`sync`]/[`resolve_dep_modules`] wire them — member ids `0..members`, dependency ids
     /// continuing from [`first_dep_id`] — without running dependency resolution.
@@ -536,7 +646,7 @@ mod tests {
             assert_eq!(source.kind, SourceKind::Member);
             assert!(source.is_member());
             assert_eq!(source.uri, *uri);
-            assert_eq!(source.program, cache.programs[i]);
+            assert_eq!(source.input().unwrap(), cache.programs[i]);
         }
         // …and the reverse lookup agrees, while a dependency URI is deliberately not a member.
         assert_eq!(
@@ -562,7 +672,7 @@ mod tests {
             assert_eq!(source.kind, SourceKind::Dependency);
             assert!(!source.is_member());
             assert_eq!(source.uri, *uri);
-            assert_eq!(source.program, cache.dep_programs[i]);
+            assert_eq!(source.input().unwrap(), cache.dep_programs[i]);
             assert_eq!(cache.find_dep(uri).map(|(id, _)| id), Some(id));
         }
         // A member URI is not a dependency, and vice versa.
@@ -599,6 +709,67 @@ mod tests {
                 "dep:///d1"
             ]
         );
+    }
+
+    /// An expansion's `SourceId` — past every member *and* every dependency module — resolves to
+    /// that expansion, with its generated text, once the link that produced it is supplied. This is
+    /// what makes a span in generated code addressable at all: the id is beyond everything the
+    /// workspace itself maps.
+    #[test]
+    fn an_expansion_id_resolves_to_its_generated_source() {
+        let mut db = LangDatabase::default();
+        let cache = cache_with(
+            &mut db,
+            &["file:///w/a.noe", "file:///w/b.noe"],
+            &["dep:///d0"],
+        );
+        // Members 0,1; dependency 2; so the first expansion is 3.
+        let id = SourceId(3);
+        let expansions = vec![generated(
+            id,
+            "Api ⟨@dx \"petstore\"⟩",
+            "fn gen(): int { return 1 }",
+        )];
+
+        // Without the link's expansions the id is honestly unresolved — the lookup never guesses.
+        assert!(cache.source(id).is_none());
+
+        let source = cache
+            .source_with(id, &expansions)
+            .expect("the expansion resolves once its link is supplied");
+        assert_eq!(source.kind, SourceKind::Expansion);
+        assert!(
+            !source.is_member(),
+            "an expansion must be excluded wherever members are what is meant"
+        );
+        assert_eq!(source.uri, "Api ⟨@dx \"petstore\"⟩");
+        assert_eq!(source.text(&db), "fn gen(): int { return 1 }");
+        assert!(
+            source.input().is_none(),
+            "an expansion has no salsa input — minting one would leak a slot per expansion"
+        );
+
+        // The boundary below it still resolves to the dependency, not to the expansion.
+        let dep = cache
+            .source_with(SourceId(2), &expansions)
+            .expect("the dep");
+        assert_eq!(dep.kind, SourceKind::Dependency);
+        assert_eq!(dep.uri, "dep:///d0");
+
+        // And `sources_with` continues in SourceId order, so an id-indexed vector built from it
+        // addresses generated code at the right slot.
+        let seen: Vec<&str> = cache.sources_with(&expansions).map(|s| s.uri).collect();
+        assert_eq!(
+            seen,
+            vec![
+                "file:///w/a.noe",
+                "file:///w/b.noe",
+                "dep:///d0",
+                "Api ⟨@dx \"petstore\"⟩"
+            ]
+        );
+        // One past this link's expansions is unresolved, not the next link's.
+        assert!(cache.source_with(SourceId(4), &expansions).is_none());
     }
 
     /// An id past every source is **explicitly unresolved** — `None`, which the caller must handle

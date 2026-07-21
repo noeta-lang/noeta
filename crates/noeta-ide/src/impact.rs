@@ -429,7 +429,8 @@ impl ImpactSession {
             };
         };
         let entry_program = cache.programs[entry_index];
-        let linked = match &noeta_db::linked_from(&self.db, cache.workspace, entry_program).0 {
+        let link = noeta_db::linked_from(&self.db, cache.workspace, entry_program);
+        let linked = match &link.program {
             Ok(program) => program,
             Err(_) => {
                 return Impact::All {
@@ -455,11 +456,13 @@ impl ImpactSession {
                 reason: "the edit does not check".into(),
             };
         }
-        // Every source's text by SourceId — `WorkspaceCache::sources` yields in SourceId order, the
-        // same assignment `workspace::sync` made — for the graph's call-site syntax probes.
+        // Every source's text by SourceId — `WorkspaceCache::sources_with` yields in SourceId order,
+        // the same assignment `workspace::sync` made — for the graph's call-site syntax probes. This
+        // link's generated sources are included: a call written by an expansion is a call, and a
+        // short vector would silently drop it from the graph and so from the impact closure.
         let texts: Vec<&str> = cache
-            .sources()
-            .map(|s| s.program.text(&self.db).as_str())
+            .sources_with(&link.expansions)
+            .map(|s| s.text(&self.db))
             .collect();
         let graph = callgraph::build(&activated.program, &checked.expr_types, &texts);
         match reverse_closure(&graph, seeds, members) {

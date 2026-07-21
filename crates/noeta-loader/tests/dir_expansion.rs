@@ -221,7 +221,7 @@ fn each_entry_expands_independently_and_ids_may_repeat() {
 
     assert_eq!(methods_of(&one, "A"), vec!["from_one"]);
     assert_eq!(methods_of(&two, "B"), vec!["from_two"]);
-    assert_eq!(one.expansions[0].id(), two.expansions[0].id());
+    assert_eq!(one.expansions[0].source.id(), two.expansions[0].source.id());
     assert_eq!(
         map_len(parsed.source_map_with(&one.expansions)),
         map_len(parsed.source_map_with(&two.expansions))
@@ -230,7 +230,7 @@ fn each_entry_expands_independently_and_ids_may_repeat() {
     assert_eq!(
         parsed
             .source_map_with(&one.expansions)
-            .source(one.expansions[0].id())
+            .source(one.expansions[0].source.id())
             .name(),
         r#"A ⟨@dx_twice "one"⟩"#
     );
