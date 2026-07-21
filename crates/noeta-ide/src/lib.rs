@@ -551,6 +551,12 @@ impl DocumentStore {
                     .line_col(diagnostic.span.start);
             // The original code and severity are kept — this is the same fault, moved to the one
             // span the reader can act on, not a new one about it.
+            //
+            // `labels` is deliberately dropped rather than carried over. A label's span points into
+            // the *generated* source, and `noeta_lsp::to_lsp_diagnostic` resolves every label
+            // against the document being published — so a carried label would render at whatever
+            // offset happens to sit there in the user's file, underlining unrelated code. Do not
+            // "restore" them without first giving labels their own per-span source resolution.
             out.push(noeta_diagnostics::Diagnostic {
                 code: diagnostic.code,
                 severity: diagnostic.severity,
