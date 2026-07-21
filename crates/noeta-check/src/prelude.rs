@@ -260,50 +260,32 @@ impl Checker {
     /// reflected types are pattern-matchable (`match type_of(x) { Type.List(e) => … }`). It is a
     /// recursive enum: payload-carrying variants reference `Type` itself.
     pub(crate) fn register_type_enum(&mut self) {
+        use noeta_ast::reflect::AdtFields;
         let ty = || Type::Named("Type".to_string(), Vec::new());
         let list_of_ty = || Type::List(Box::new(ty()));
-        let mut variants = Vec::new();
-        for name in [
-            "Int", "Float", "F32", "Bool", "String", "Bytes", "Unit", "Dyn",
-        ] {
-            variants.push(VariantInfo {
-                name: name.to_string(),
-                fields: Vec::new(),
-            });
-        }
-        for name in ["List", "Set", "Option"] {
-            variants.push(VariantInfo {
-                name: name.to_string(),
-                fields: vec![ty()],
-            });
-        }
-        for name in ["Map", "Result"] {
-            variants.push(VariantInfo {
-                name: name.to_string(),
-                fields: vec![ty(), ty()],
-            });
-        }
-        // The three nominal kinds + the unknown-kind `Named` fallback all carry `(name, args)`.
-        for name in ["Enum", "Struct", "Class", "Named"] {
-            variants.push(VariantInfo {
-                name: name.to_string(),
-                fields: vec![Type::String, list_of_ty()],
-            });
-        }
-        variants.push(VariantInfo {
-            name: "Fn".to_string(),
-            fields: vec![list_of_ty(), ty()],
-        });
-        variants.push(VariantInfo {
-            name: "Union".to_string(),
-            fields: vec![list_of_ty()],
-        });
-        // A trait object `dyn Trait` carries its trait name — so `params_of` can recover the interface
-        // a parameter is bound to (service injection). A bare `dyn` param is still `Type.Dyn`.
-        variants.push(VariantInfo {
-            name: "DynTrait".to_string(),
-            fields: vec![Type::String],
-        });
+        // The variant list is *derived* from `TypeRepr` rather than re-listed here: the reflection
+        // descriptor is what both backends materialize a `Type` value from, so the enum the checker
+        // registers must be exactly its shape. A hand-kept parallel table could disagree — this one
+        // cannot, and adding a `TypeRepr` variant fails to compile in `noeta-ast` until it is
+        // handled there. Order is preserved (variant ordinals are baked into compiled programs).
+        let variants: Vec<VariantInfo> = noeta_ast::reflect::type_adt_variants()
+            .iter()
+            .map(|repr| VariantInfo {
+                name: repr.variant_name().to_string(),
+                fields: match repr.adt_fields() {
+                    AdtFields::None => Vec::new(),
+                    AdtFields::Types(n) => (0..n).map(|_| ty()).collect(),
+                    // The three nominal kinds + the unknown-kind `Named` fallback.
+                    AdtFields::NameAndArgs => vec![Type::String, list_of_ty()],
+                    AdtFields::TypeList => vec![list_of_ty()],
+                    AdtFields::ParamsAndRet => vec![list_of_ty(), ty()],
+                    // A trait object `dyn Trait` carries its trait name — so `params_of` can recover
+                    // the interface a parameter is bound to (service injection). A bare `dyn` param
+                    // is still `Type.Dyn`.
+                    AdtFields::Name => vec![Type::String],
+                },
+            })
+            .collect();
         self.symbols.types.insert("Type".to_string());
         self.symbols.enums.insert("Type".to_string(), variants);
         self.symbols

@@ -4751,6 +4751,45 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
     )
 }
 
+/// The runtime head constructor a **built-in type name** narrows to, or `None` when the name has
+/// no dedicated head and falls back to a nominal (`NarrowTarget::Named`) match by shape name.
+///
+/// Exhaustive over [`BuiltinTy`] so this and the tree-walker's `runtime_matches` — the two halves
+/// of the differential — cannot drift: a new built-in fails to compile in both until handled.
+///
+/// This funnel dropped a bare `tuple` head the VM alone recognized. `tuple` is not a built-in type
+/// name (`Type::is_builtin_name` rejects it, so the checker reports an unknown type before any
+/// narrowing runs) and the tree-walker always treated it nominally — so the two backends now agree
+/// on an unreachable case they used to answer differently. A tuple target is written `(A, B)`,
+/// which reaches [`NarrowTarget::Tuple`] through `TypeRef::Tuple`.
+fn narrow_head(name: &str) -> Option<NarrowTarget> {
+    use noeta_ast::BuiltinTy;
+    Some(match BuiltinTy::from_name_any(name)? {
+        BuiltinTy::Int => NarrowTarget::Int,
+        BuiltinTy::Float => NarrowTarget::Float,
+        BuiltinTy::Bool => NarrowTarget::Bool,
+        BuiltinTy::Str => NarrowTarget::String,
+        BuiltinTy::Bytes => NarrowTarget::Bytes,
+        BuiltinTy::Unit => NarrowTarget::Unit,
+        BuiltinTy::Dyn => NarrowTarget::Dyn,
+        BuiltinTy::List => NarrowTarget::List,
+        BuiltinTy::Map => NarrowTarget::Map,
+        BuiltinTy::Set => NarrowTarget::Set,
+        // Abstract kind-types match any value of that declaration kind.
+        BuiltinTy::KindEnum => NarrowTarget::AnyEnum,
+        BuiltinTy::KindStruct => NarrowTarget::AnyStruct,
+        BuiltinTy::KindClass => NarrowTarget::AnyClass,
+        // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow through
+        // the nominal path like a user enum rather than needing a head of their own.
+        BuiltinTy::Option | BuiltinTy::Result => return None,
+        // The strict numerics have no narrowing head today: `x is f32` / `x is i32` falls to the
+        // nominal path and so never matches (an `f32`/erased-int value carries no such shape name).
+        // Deliberately preserved rather than fixed here — giving them heads is a language change,
+        // not a refactor. Both backends agree on the current answer.
+        BuiltinTy::F32 | BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+    })
+}
+
 /// Reduce a narrowing target type (`x.as<T>()`) to its runtime head constructor. Mirrors the
 /// tree-walker's `runtime_matches` mapping exactly so both backends decide a narrowing the same
 /// way. `Option`/`Result` and user records/classes/enums all become `Named` (matched by shape
@@ -4770,23 +4809,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // element type.
         TypeRef::Fn { .. } => NarrowTarget::Fn,
         TypeRef::Named { name, args, .. } => {
-            let head = match name.as_str() {
-                "int" => NarrowTarget::Int,
-                "float" => NarrowTarget::Float,
-                "bool" => NarrowTarget::Bool,
-                "string" => NarrowTarget::String,
-                "bytes" => NarrowTarget::Bytes,
-                "void" | "unit" => NarrowTarget::Unit,
-                "dyn" | "Any" => NarrowTarget::Dyn,
-                "List" | "list" => NarrowTarget::List,
-                "Map" | "map" => NarrowTarget::Map,
-                "Set" | "set" => NarrowTarget::Set,
-                "tuple" => NarrowTarget::Tuple,
-                "Enum" => NarrowTarget::AnyEnum,
-                "Struct" => NarrowTarget::AnyStruct,
-                "Class" => NarrowTarget::AnyClass,
-                other => NarrowTarget::Named(other.to_string()),
-            };
+            let head = narrow_head(name).unwrap_or_else(|| NarrowTarget::Named(name.clone()));
             // A parametrized target (`List<int>`, `Box<int>`) additionally checks its type arguments
             // against the value's reflected tag (R3); a bare name (`List`, `Box`, `Struct`) stays the
             // head-only target, preserving the widening `x is List` and the untagged fallback.

@@ -11,12 +11,14 @@ use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
 pub mod bodies;
+pub mod builtin_ty;
 pub mod derive;
 pub mod desugar;
 mod pretty;
 pub mod reflect;
 mod syntax_kind;
 
+pub use builtin_ty::{BuiltinTy, Spelling, parse_int_width};
 pub use pretty::Pretty;
 pub use syntax_kind::SyntaxKind;
 

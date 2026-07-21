@@ -151,24 +151,9 @@ pub enum Type {
     DynTrait(String),
 }
 
-/// Decode a **fixed-width integer type name** (`i8 i16 i32 i64 u8 u16 u32 u64`) into its
-/// `(signed, bits)`, or `None` for any other name. Deliberately rejects `int`/`unit`/bare `i`/`u`
-/// (the prefix must be followed by exactly one of the four legal widths). The single source of
-/// truth for what spellings the Tier-W width types accept — the lexer, parser, `from_ref`, and
-/// `is_builtin_name` all route through it.
-pub fn parse_int_width(name: &str) -> Option<(bool, u8)> {
-    let (signed, rest) = match name.strip_prefix('i') {
-        Some(r) => (true, r),
-        None => (false, name.strip_prefix('u')?),
-    };
-    match rest {
-        "8" => Some((signed, 8)),
-        "16" => Some((signed, 16)),
-        "32" => Some((signed, 32)),
-        "64" => Some((signed, 64)),
-        _ => None,
-    }
-}
+/// Re-exported from `noeta-ast`, where it sits beside [`BuiltinTy`] — the width parser is one arm
+/// of the built-in name decoder, so it lives with the rest of the vocabulary rather than above it.
+pub use noeta_ast::{BuiltinTy, Spelling, parse_int_width};
 
 impl Type {
     /// Whether this is one of the two numeric types arithmetic (`+ - * / %`) accepts. (The
@@ -342,32 +327,7 @@ impl Type {
     /// `noeta-check` uses this to decide whether a `TypeRef` base name needs to resolve to a
     /// *declared* type (for the unknown-type diagnostic).
     pub fn is_builtin_name(name: &str) -> bool {
-        parse_int_width(name).is_some()
-            || matches!(
-                name,
-                "int"
-                    | "float"
-                    | "f32"
-                    | "f64"
-                    | "bool"
-                    | "string"
-                    | "bytes"
-                    | "void"
-                    | "unit"
-                    | "dyn"
-                    | "Any"
-                    | "List"
-                    | "Map"
-                    | "Set"
-                    | "list"
-                    | "map"
-                    | "set"
-                    | "Option"
-                    | "Result"
-                    | "Enum"
-                    | "Struct"
-                    | "Class"
-            )
+        BuiltinTy::from_name(name).is_some()
     }
 
     /// Build a union from its members, **normalizing**: flatten nested unions, drop structural
@@ -427,37 +387,37 @@ impl Type {
             TypeRef::Optional { inner, .. } => Type::Option(Box::new(Type::from_ref(inner))),
             TypeRef::DynTrait { trait_name, .. } => Type::DynTrait(trait_name.clone()),
             TypeRef::Named { name, args, .. } => {
-                let arg = |i: usize| args.get(i).map(Type::from_ref).unwrap_or(Type::Unknown);
-                match name.as_str() {
-                    "int" => Type::Int,
-                    "float" => Type::Float,
-                    "f32" => Type::F32,
-                    "f64" => Type::F64,
-                    fixed if parse_int_width(fixed).is_some() => {
-                        let (signed, bits) = parse_int_width(fixed).unwrap();
-                        Type::IntN { signed, bits }
-                    }
-                    "bool" => Type::Bool,
-                    "string" => Type::String,
-                    "bytes" => Type::Bytes,
-                    "void" | "unit" => Type::Unit,
-                    "dyn" | "Any" => Type::Dyn,
-                    "List" => Type::List(Box::new(arg(0))),
-                    "Map" => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
-                    "Set" => Type::Set(Box::new(arg(0))),
-                    // The bare lowercase collection spellings leave the element type *unspecified*
-                    // — an inference hole the checker fills by forward inference (a literal's
-                    // elements, an argument's declared type); an annotation can pin it explicitly
-                    // (`List<int>` / `List<dyn>`).
-                    "list" => Type::List(Box::new(Type::Unknown)),
-                    "map" => Type::Map(Box::new(Type::Unknown), Box::new(Type::Unknown)),
-                    "set" => Type::Set(Box::new(Type::Unknown)),
-                    "Option" => Type::Option(Box::new(arg(0))),
-                    "Result" => Type::Result(Box::new(arg(0)), Box::new(arg(1))),
-                    "Enum" => Type::Kind(TypeKind::Enum),
-                    "Struct" => Type::Kind(TypeKind::Struct),
-                    "Class" => Type::Kind(TypeKind::Class),
-                    _ => Type::Named(name.clone(), args.iter().map(Type::from_ref).collect()),
+                let Some((builtin, spelling)) = BuiltinTy::from_name(name) else {
+                    return Type::Named(name.clone(), args.iter().map(Type::from_ref).collect());
+                };
+                // The bare lowercase collection spellings (`list`, `map`, `set`) leave their
+                // element types *unspecified* — an inference hole the checker fills by forward
+                // inference (a literal's elements, an argument's declared type); an annotation can
+                // pin them explicitly (`List<int>` / `List<dyn>`). A canonical spelling reads its
+                // arguments, and a missing one is the same hole.
+                let arg = |i: usize| match spelling {
+                    Spelling::Bare => Type::Unknown,
+                    Spelling::Canonical => args.get(i).map(Type::from_ref).unwrap_or(Type::Unknown),
+                };
+                match builtin {
+                    BuiltinTy::Int => Type::Int,
+                    BuiltinTy::Float => Type::Float,
+                    BuiltinTy::F32 => Type::F32,
+                    BuiltinTy::F64 => Type::F64,
+                    BuiltinTy::IntN { signed, bits } => Type::IntN { signed, bits },
+                    BuiltinTy::Bool => Type::Bool,
+                    BuiltinTy::Str => Type::String,
+                    BuiltinTy::Bytes => Type::Bytes,
+                    BuiltinTy::Unit => Type::Unit,
+                    BuiltinTy::Dyn => Type::Dyn,
+                    BuiltinTy::List => Type::List(Box::new(arg(0))),
+                    BuiltinTy::Set => Type::Set(Box::new(arg(0))),
+                    BuiltinTy::Map => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
+                    BuiltinTy::Option => Type::Option(Box::new(arg(0))),
+                    BuiltinTy::Result => Type::Result(Box::new(arg(0)), Box::new(arg(1))),
+                    BuiltinTy::KindEnum => Type::Kind(TypeKind::Enum),
+                    BuiltinTy::KindStruct => Type::Kind(TypeKind::Struct),
+                    BuiltinTy::KindClass => Type::Kind(TypeKind::Class),
                 }
             }
         }

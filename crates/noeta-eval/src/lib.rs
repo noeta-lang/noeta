@@ -5171,34 +5171,48 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 | Value::BoundMethod(..)
         ),
         TypeRef::Named { name, args, .. } => {
-            let head_ok = match name.as_str() {
-                "int" => matches!(value, Value::Int(_)),
-                "float" => matches!(value, Value::Float(_)),
-                "bool" => matches!(value, Value::Bool(_)),
-                "string" => matches!(value, Value::Str(_)),
-                "bytes" => matches!(value, Value::Bytes(_)),
-                "void" | "unit" => matches!(value, Value::Unit),
-                // Narrowing to the open top is a no-op: every value is a `dyn`.
-                "dyn" | "Any" => true,
-                "List" | "list" => matches!(value, Value::List(_)),
-                "Map" | "map" => matches!(value, Value::Map(..)),
-                "Set" | "set" => matches!(value, Value::Set(..)),
-                // Abstract kind-types match any value of that declaration kind (structs and classes are
-                // both `Object`s, told apart by `TypeDef::is_struct`).
-                "Enum" => matches!(value, Value::Enum(_)),
-                "Struct" => matches!(value, Value::Object(o) if o.def.is_struct),
-                "Class" => matches!(value, Value::Object(o) if !o.def.is_struct),
-                // `Option`/`Result` are enums whose shape name is the type name, like a user
-                // enum; an extern-type value matches its registered type name (`x is Uuid`).
-                other => match value {
-                    Value::Object(object) => object.def.name() == other,
-                    Value::Enum(enum_value) => enum_value.enum_name == other,
+            // The built-in heads, exhaustive over `BuiltinTy` so this and the VM's `narrow_head` —
+            // the two halves of the differential — cannot drift apart. `None` means the name has no
+            // built-in head and falls through to the nominal match below.
+            let builtin_ok = noeta_ast::BuiltinTy::from_name_any(name).and_then(|b| {
+                use noeta_ast::BuiltinTy;
+                Some(match b {
+                    BuiltinTy::Int => matches!(value, Value::Int(_)),
+                    BuiltinTy::Float => matches!(value, Value::Float(_)),
+                    BuiltinTy::Bool => matches!(value, Value::Bool(_)),
+                    BuiltinTy::Str => matches!(value, Value::Str(_)),
+                    BuiltinTy::Bytes => matches!(value, Value::Bytes(_)),
+                    BuiltinTy::Unit => matches!(value, Value::Unit),
+                    // Narrowing to the open top is a no-op: every value is a `dyn`.
+                    BuiltinTy::Dyn => true,
+                    BuiltinTy::List => matches!(value, Value::List(_)),
+                    BuiltinTy::Map => matches!(value, Value::Map(..)),
+                    BuiltinTy::Set => matches!(value, Value::Set(..)),
+                    // Abstract kind-types match any value of that declaration kind (structs and
+                    // classes are both `Object`s, told apart by `TypeDef::is_struct`).
+                    BuiltinTy::KindEnum => matches!(value, Value::Enum(_)),
+                    BuiltinTy::KindStruct => matches!(value, Value::Object(o) if o.def.is_struct),
+                    BuiltinTy::KindClass => matches!(value, Value::Object(o) if !o.def.is_struct),
+                    // `Option`/`Result` are enums whose shape name *is* the type name, so they fall
+                    // to the nominal path like a user enum.
+                    BuiltinTy::Option | BuiltinTy::Result => return None,
+                    // The strict numerics have no narrowing head today — see the VM's `narrow_head`
+                    // for why this is preserved rather than fixed here.
+                    BuiltinTy::F32 | BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+                })
+            });
+            let head_ok = match builtin_ok {
+                Some(ok) => ok,
+                // A nominal target: a user record/class/enum, `Option`/`Result`, or an extern type.
+                None => match value {
+                    Value::Object(object) => object.def.name() == name,
+                    Value::Enum(enum_value) => &enum_value.enum_name == name,
                     // An extern value matches by its qualified identity (`std.id.Uuid`) — the
                     // target an imported native type lowers to, compared directly against the
                     // identity the value itself carries — so it never matches a same-short-named
                     // user type nor another namespace's same-short-named extern type (mirrors
                     // the VM's `narrow_matches`).
-                    Value::Extern(e) => e.borrow().type_identity() == other,
+                    Value::Extern(e) => e.borrow().type_identity() == name.as_str(),
                     _ => false,
                 },
             };
