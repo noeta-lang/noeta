@@ -41,6 +41,7 @@
 
 use noeta_ast::{BuiltinDirective, Decorators, Program, Sites};
 use noeta_diagnostics::DiagnosticCode;
+use noeta_parser::directives::{ArgFault, arg_faults, attaches_to, sites_of};
 use noeta_span::Span;
 
 use crate::Checker;
@@ -323,7 +324,11 @@ impl Checker {
     /// its own way — they agreed only because they were written together, which is the condition
     /// that precedes drift rather than a defence against it.
     ///
-    /// Empty `declared` is **unrestricted**, matching every other site gate in the language. A
+    /// Empty `declared` **attaches to nothing** (see
+    /// [`attaches_to`](noeta_parser::directives::attaches_to), which owns that decision now that
+    /// the loader asks it too), matching every other site gate in the language — this doc said
+    /// "unrestricted" while the code it documents said the opposite, which is the drift the gate
+    /// exists to prevent, spelled in prose. A
     /// `Sites::NONE` `at` is a place nothing can be attached, so a restricted directive is rejected
     /// there. `subject` names the declaration when the caller has one, for the richer message.
     pub(crate) fn check_declared_sites(
@@ -371,6 +376,12 @@ impl Checker {
     /// Deliberately mirrors what a `#[...]` data attribute already gets (E0005 for an unknown
     /// key, E0009 for the wrong count), because an extension directive's arguments are the same
     /// kind of thing — compile-time values named against a declared shape.
+    ///
+    /// Deciding *whether* the arguments conform is
+    /// [`arg_faults`](noeta_parser::directives::arg_faults): the loader must ask the same question
+    /// before it hands an invocation to a directive's `expand` hook, and a rule with two consumers
+    /// is a rule that gets written twice and drifts. This method words the answer, which is the
+    /// half only the checker has the spans and the diagnostic vocabulary for.
     pub(crate) fn check_declared_args(
         &mut self,
         directive: &'static noeta_ext_abi::registry::ExtDirective,
@@ -378,67 +389,38 @@ impl Checker {
         span: Span,
     ) {
         let name = directive.name;
-        let positional = args.iter().filter(|a| a.name.is_none()).count();
-        if let Some(max) = directive.max_args
-            && positional > max
-        {
-            let plural = if max == 1 { "" } else { "s" };
-            self.error(
-                DiagnosticCode::InvalidDirectiveArgument,
-                span,
-                format!(
-                    "`@{name}` takes at most {max} argument{plural}, but {positional} were given"
-                ),
-            );
-        }
-        for arg in args {
-            let Some(key) = &arg.name else { continue };
-            if directive.named_keys.contains(&key.as_str()) {
-                continue;
-            }
-            let d = self.error(
-                DiagnosticCode::UnknownName,
-                arg.span,
-                format!("`@{name}` has no argument `{key}`"),
-            );
-            if directive.named_keys.is_empty() {
-                d.help(format!("`@{name}` takes positional arguments only"));
-            } else {
-                let keys: Vec<String> = directive
-                    .named_keys
-                    .iter()
-                    .map(|k| format!("`{k}:`"))
-                    .collect();
-                d.help(format!("it understands {}", keys.join(", ")));
+        for fault in arg_faults(directive, args) {
+            match fault {
+                ArgFault::TooManyPositional { max, given } => {
+                    let plural = if max == 1 { "" } else { "s" };
+                    self.error(
+                        DiagnosticCode::InvalidDirectiveArgument,
+                        span,
+                        format!(
+                            "`@{name}` takes at most {max} argument{plural}, but {given} were given"
+                        ),
+                    );
+                }
+                ArgFault::UnknownKey { index, key } => {
+                    let d = self.error(
+                        DiagnosticCode::UnknownName,
+                        args[index].span,
+                        format!("`@{name}` has no argument `{key}`"),
+                    );
+                    if directive.named_keys.is_empty() {
+                        d.help(format!("`@{name}` takes positional arguments only"));
+                    } else {
+                        let keys: Vec<String> = directive
+                            .named_keys
+                            .iter()
+                            .map(|k| format!("`{k}:`"))
+                            .collect();
+                        d.help(format!("it understands {}", keys.join(", ")));
+                    }
+                }
             }
         }
     }
-}
-
-/// Whether something declaring `sites` may attach to a declaration at `at` — the one predicate
-/// behind every attachment question in the language.
-///
-/// An empty `sites` attaches to **nothing** (a pure block tier: `@debug { … }`, `@json { … }`),
-/// and `Sites::NONE` is not a declaration, so both answer `false`. That the empty case used to
-/// mean "unrestricted" is why this could never be enforced: the tiers that attach to nothing were
-/// spelled identically to the tiers that attach to everything.
-pub(crate) fn attaches_to(sites: &[noeta_ext_abi::registry::TierSite], at: Sites) -> bool {
-    !at.is_empty() && sites_of(sites).contains(at)
-}
-
-/// Widen the extension ABI's three-variant [`TierSite`](noeta_ext_abi::registry::TierSite) into the
-/// checker's finer site model. An extension says "a type"; the checker knows that means a struct, a
-/// class or an enum — and never a trait.
-fn sites_of(sites: &[noeta_ext_abi::registry::TierSite]) -> Sites {
-    use noeta_ext_abi::registry::TierSite;
-    sites.iter().fold(Sites::NONE, |acc, s| {
-        acc.union(match s {
-            TierSite::Function => Sites::FN,
-            TierSite::Method => Sites::METHOD,
-            TierSite::Type => Sites::TYPE,
-            TierSite::Trait => Sites::TRAIT,
-        })
-    })
 }
 
 /// The span of the directive keyword itself, for the directives whose AST slot records one.

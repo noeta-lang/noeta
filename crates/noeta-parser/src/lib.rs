@@ -42,6 +42,8 @@ use noeta_edition::Edition;
 use noeta_lexer::{Token, TokenKind as T};
 use noeta_span::{Source, SourceId, Span};
 
+pub mod directives;
+
 mod literals;
 use literals::{
     parse_f32_literal, parse_f64_literal, parse_float_literal, parse_int_literal,

@@ -917,15 +917,24 @@ pub struct ExtTier {
 /// rather than a syntax error.
 ///
 /// The built-in directives stay a closed enum: they have *semantics* in the checker and the
-/// backends, which an extension cannot contribute. What an extension contributes is a **declared,
-/// validated annotation** — the name, where it may sit, what arguments it takes, and the prose the
-/// editor shows. Its meaning is read back by the extension's own code through the reflection
-/// surface, exactly as a `#[...]` data attribute's is.
+/// backends, which an extension cannot contribute. What an extension contributes is a **codegen
+/// directive** — the name, where it may sit, what arguments it takes, the prose the editor shows,
+/// and optionally an [`expand`](Self::expand) hook that synthesizes members of the declaration it
+/// is attached to.
+///
+/// `@` is the codegen half of the language's decorator split (see the Attributes and Reflection
+/// reference): `@…` runs at **compile time** and its meaning is the code it produces, while
+/// `#[…]` data attributes are the runtime-readable half, reached through `attributes_of::<T>()`.
+/// A directive is therefore *not* readable at runtime, by design — an extension that wants
+/// runtime-visible metadata declares an attribute instead, and one that wants to consume an
+/// external resource dynamically returns an invocable value rather than reaching for a directive.
 ///
 /// Sites use [`TierSite`], the vocabulary this ABI already owns; the checker widens it into its
 /// own finer-grained site model (which distinguishes `struct` from `class` from `enum` in ways a
-/// three-variant enum cannot). **Empty ⇒ unrestricted**, matching [`ExtTier::sites`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// three-variant enum cannot). **Empty ⇒ attaches to nothing**, matching [`ExtTier::sites`] — the
+/// same polarity, for the same reason: a directive that genuinely goes everywhere can list the
+/// sites it goes to, but one that decorates nothing has no other way to say so.
+#[derive(Debug, Clone, Copy)]
 pub struct ExtDirective {
     /// The name programs write after `@`. Resolved *after* the built-in directives and the tier
     /// name-space, so an extension can never shadow either.
@@ -944,6 +953,89 @@ pub struct ExtDirective {
     pub doc: &'static str,
     /// Signature-help parameter names, in order.
     pub params: &'static [&'static str],
+    /// **Compile-time expansion**: synthesize members of the declaration this directive is attached
+    /// to. `None` for a directive that only marks and validates.
+    ///
+    /// Returns **Noeta source** for the members — not AST. That keeps this ABI free of a
+    /// `noeta-ast` dependency, routes generated code through the real parser so it earns the same
+    /// diagnostics as hand-written code, and leaves the output inspectable (`noeta expand` prints
+    /// it). An `Err(message)` is reported as a diagnostic at the directive's span.
+    ///
+    /// What it may emit follows from *where it attached* — members of the decorated declaration,
+    /// exactly as `@derive` synthesizes methods onto a type. There is no separate notion of output
+    /// scope: [`Self::sites`] already answers it.
+    ///
+    /// Runs only after the directive has passed the shared placement gate and its declared
+    /// argument contract ([`Self::max_args`] / [`Self::named_keys`]), so a hook never sees a
+    /// misplaced or malformed invocation.
+    ///
+    /// It may read the filesystem — the package's `[trust]` grant is the authorization — but must
+    /// be a **pure function of [`DirectiveCtx`] plus the files it reports in [`Expansion::reads`]**.
+    /// The compiler memoizes the result and re-runs it only when one of those inputs changes, so a
+    /// hook that consults anything it does not report (the clock, the environment, a file it kept
+    /// quiet about) will serve stale members until something unrelated invalidates it.
+    pub expand: Option<DirectiveExpand>,
+}
+
+/// An [`ExtDirective::expand`] hook: the decorated declaration in, an [`Expansion`] out, or a
+/// message to report at the directive's span.
+pub type DirectiveExpand = fn(&DirectiveCtx) -> Result<Expansion, String>;
+
+/// What an expansion produced: the members, and the files it took them from.
+#[derive(Debug, Clone, Default)]
+pub struct Expansion {
+    /// **Noeta source** for the members of the decorated declaration.
+    pub source: String,
+    /// Every file the hook read, absolute or relative to [`DirectiveCtx::source_dir`].
+    ///
+    /// This is the hook's **incrementality contract**, and it is why the compiler does not simply
+    /// hand over the contents of the path in the directive's arguments: a spec routinely pulls in
+    /// further files (an OpenAPI `$ref` into a sibling document), and only the hook knows which.
+    /// The compiler tracks each path it is given, so editing any of them re-runs the expansion and
+    /// everything downstream of it.
+    ///
+    /// A hook that under-reports reads a file whose edits will not be noticed — the expansion goes
+    /// stale until something else invalidates it. Report every file opened, including ones that
+    /// turned out to be missing or empty (their *appearing* later is a change too).
+    pub reads: Vec<String>,
+}
+
+/// Two directives are equal when they **declare** the same thing. `expand` is excluded: a function
+/// pointer's address is not a meaningful identity (two identical hooks may compare unequal, and
+/// distinct ones equal), so comparing it would make equality unreliable rather than more precise.
+/// A directive is identified by what it says it is.
+impl PartialEq for ExtDirective {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.sites == other.sites
+            && self.max_args == other.max_args
+            && self.named_keys == other.named_keys
+            && self.detail == other.detail
+            && self.doc == other.doc
+            && self.params == other.params
+            && self.expand.is_some() == other.expand.is_some()
+    }
+}
+
+/// What an [`ExtDirective::expand`] hook is given: the invocation, and the declaration it decorates.
+///
+/// Deliberately narrow. A hook receives what the directive was written with and what it was written
+/// on — not the surrounding program — so its output depends only on inputs the compiler can key a
+/// memoized result on.
+#[derive(Debug, Clone)]
+pub struct DirectiveCtx {
+    /// Positional arguments, already checked against [`ExtDirective::max_args`], rendered as source
+    /// text (a string literal arrives without its quotes).
+    pub args: Vec<String>,
+    /// Named arguments, already checked against [`ExtDirective::named_keys`], in written order.
+    pub named: Vec<(String, String)>,
+    /// The decorated declaration's name — the type or function the synthesized members join.
+    pub target: String,
+    /// Which kind of declaration that is, so one hook can serve several sites.
+    pub site: TierSite,
+    /// The directory of the source file the directive was written in, so a relative path argument
+    /// (`"petstore.yaml"`) resolves against the file rather than the process's working directory.
+    pub source_dir: String,
 }
 
 /// An extension-declared **derive recipe** (derive layer 4) — the native counterpart of deriving
