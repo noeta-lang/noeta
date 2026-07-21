@@ -10,6 +10,7 @@
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
+pub mod bodies;
 pub mod derive;
 pub mod desugar;
 mod pretty;
@@ -786,12 +787,56 @@ pub struct Attribute {
 
 /// A single argument to a `#[...]` data attribute. Positional (`name` is `None`) or named
 /// (`#[Cache(ttl: 60)]`, `name` is `Some("ttl")`); the value is always a literal.
+/// One argument in a written argument list: an optional `name:` label and a value.
+///
+/// **One shape for every argument list in the language**, parameterised by its value language —
+/// `Arg<AttrValue>` for a `#[...]` attribute or an `@`-directive (compile-time literals),
+/// `Arg<Expr>` for a call (any expression). The two were separate structs with identical fields,
+/// which meant the label rules — unknown name, duplicate name, positional-after-named — had to be
+/// written twice, and in practice were written once: attributes validated their labels while calls
+/// silently ignored theirs.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct AttrArg {
-    /// The field name for a named argument; `None` for a positional argument.
+pub struct Arg<V> {
+    /// The parameter/field name for a named argument; `None` for a positional one.
     pub name: Option<String>,
-    pub value: AttrValue,
+    pub value: V,
+    /// The whole argument, label included — what a diagnostic about it points at.
     pub span: Span,
+}
+
+impl<V> Arg<V> {
+    /// The values in written order, for consumers that do not care about labels.
+    pub fn values(args: &[Arg<V>]) -> impl Iterator<Item = &V> {
+        args.iter().map(|a| &a.value)
+    }
+
+    /// Whether any argument carries a label — the cheap guard before doing label work.
+    pub fn any_named(args: &[Arg<V>]) -> bool {
+        args.iter().any(|a| a.name.is_some())
+    }
+}
+
+/// An argument to a `#[...]` data attribute, an `@`-directive, or a `@tier(…)`.
+pub type AttrArg = Arg<AttrValue>;
+
+/// An argument at a **call site**.
+///
+/// The label used to be *parsed and discarded*: `call_arg` read `name:` for surface fidelity and
+/// threw it away with `ignore_then`, so `Expr::Call` carried a bare `Vec<Expr>` and nothing
+/// downstream could validate a label the AST never received. `add(b: 1, a: 10)` bound positionally
+/// and `add(nonsense: 1)` was accepted silently — the failure looked like a working feature.
+pub type CallArg = Arg<Expr>;
+
+impl CallArg {
+    /// A positional argument — what every desugar and synthesized call produces.
+    pub fn positional(value: Expr) -> CallArg {
+        let span = value.span();
+        Arg {
+            name: None,
+            value,
+            span,
+        }
+    }
 }
 
 /// A `@<tier>` directive attached to a **method** (`@test`/`@doc { … }`/`@bench(1000)` leading a
@@ -1372,7 +1417,7 @@ pub enum Expr {
     /// A call: `callee(args)`.
     Call {
         callee: Box<Expr>,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
         span: Span,
     },
     /// An anonymous function: an arrow closure `fn(params) => expr` or a statement-bodied closure
@@ -1526,7 +1571,7 @@ pub enum Expr {
         func: String,
         func_span: Span,
         ty: TypeRef,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
         span: Span,
     },
     /// An **explicitly instantiated call of a user generic function** — the general turbofish
@@ -1541,7 +1586,7 @@ pub enum Expr {
         name: String,
         name_span: Span,
         type_args: Vec<TypeRef>,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
         span: Span,
     },
     /// An **explicitly instantiated METHOD call** — `recv.m::<U, ...>(args)` (generic methods,
@@ -1555,7 +1600,7 @@ pub enum Expr {
         name: String,
         name_span: Span,
         type_args: Vec<TypeRef>,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
         span: Span,
     },
     /// The reflection query `roles_of()` / `roles_of::<RoleEnum>()` — the compiler-built
@@ -1918,6 +1963,8 @@ impl Expr {
     /// deliberately not modelled — it can only push the answer toward `true`.
     pub fn mentions(&self, name: &str) -> bool {
         let any = |exprs: &[Expr]| exprs.iter().any(|e| e.mentions(name));
+        // A call's arguments carry labels now; only their values can mention a binding.
+        let any_args = |args: &[CallArg]| Arg::values(args).any(|e| e.mentions(name));
         match self {
             Expr::Str { .. }
             | Expr::Int { .. }
@@ -1951,7 +1998,7 @@ impl Expr {
                 end: rhs,
                 ..
             } => lhs.mentions(name) || rhs.mentions(name),
-            Expr::Call { callee, args, .. } => callee.mentions(name) || any(args),
+            Expr::Call { callee, args, .. } => callee.mentions(name) || any_args(args),
             Expr::Closure { params, body, .. } => {
                 let body_mentions = match body {
                     ClosureBody::Expr(e) => e.mentions(name),
@@ -1997,10 +2044,10 @@ impl Expr {
                 args,
                 ..
             } => recv.mentions(name) || n.mentions(name) || args.mentions(name),
-            Expr::TypedModuleCall { recv, args, .. } => recv.mentions(name) || any(args),
+            Expr::TypedModuleCall { recv, args, .. } => recv.mentions(name) || any_args(args),
             // The callee is a top-level fn name, never a local binding, so only the arguments count.
-            Expr::TypedCall { args, .. } => any(args),
-            Expr::TypedMethodCall { recv, args, .. } => recv.mentions(name) || any(args),
+            Expr::TypedCall { args, .. } => any_args(args),
+            Expr::TypedMethodCall { recv, args, .. } => recv.mentions(name) || any_args(args),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),
@@ -2017,6 +2064,7 @@ impl Expr {
     /// enforce the coloring rule. Total over `Expr` so it can never miss an await.
     pub fn has_await(&self) -> bool {
         let any = |exprs: &[Expr]| exprs.iter().any(Expr::has_await);
+        let any_args = |args: &[CallArg]| Arg::values(args).any(Expr::has_await);
         match self {
             Expr::Await { .. } => true,
             Expr::Str { .. }
@@ -2059,7 +2107,7 @@ impl Expr {
                 end: rhs,
                 ..
             } => lhs.has_await() || rhs.has_await(),
-            Expr::Call { callee, args, .. } => callee.has_await() || any(args),
+            Expr::Call { callee, args, .. } => callee.has_await() || any_args(args),
             Expr::List { items, .. } | Expr::Tuple { items, .. } => any(items),
             Expr::TupleIndex { receiver, .. } => receiver.has_await(),
             Expr::Map { entries, .. } => {
@@ -2089,9 +2137,9 @@ impl Expr {
             Expr::Invoke {
                 recv, name, args, ..
             } => recv.has_await() || name.has_await() || args.has_await(),
-            Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any(args),
-            Expr::TypedCall { args, .. } => any(args),
-            Expr::TypedMethodCall { recv, args, .. } => recv.has_await() || any(args),
+            Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any_args(args),
+            Expr::TypedCall { args, .. } => any_args(args),
+            Expr::TypedMethodCall { recv, args, .. } => recv.has_await() || any_args(args),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.has_await() || value.has_await(),

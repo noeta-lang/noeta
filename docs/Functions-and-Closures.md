@@ -66,6 +66,67 @@ echo greet("Ada", "Hi")   // Hi, Ada!
 > [!NOTE]
 > A default is evaluated in the function's **sealed definition scope**: it sees statics and the fn's `use (…)` captures — exactly like the body — but *not* other arguments, `self`, or fields (naming another parameter is E0005). A default that reads a module-level binding therefore needs the binding in the capture clause: `fn f(x: int, step: int = base) use (base)`. A default widens the accepted arity to a range.
 
+## Named arguments
+
+An argument may name the parameter it fills, `name: value`. Positional arguments come first; once an argument is named, every argument after it must be named too (`f(a: 1, 2)` is rejected — the labels have already claimed parameters out of order, so `2` has no position left to take). Named arguments themselves may appear in any order:
+
+```noeta
+fn sub(a: int, b: int): int { return a - b }
+
+echo sub(10, 1)          // 9  — positional
+echo sub(a: 10, b: 1)    // 9  — labelled
+echo sub(b: 1, a: 10)    // 9  — labelled, any order
+```
+
+Labels bind; they do not reorder evaluation. Arguments are evaluated in the order **written**, so a call's side effects never depend on how its parameters happen to be declared:
+
+```noeta
+fn sub(a: int, b: int): int { return a - b }
+
+fn trace(tag: string, v: int): int {
+    echo tag
+    return v
+}
+
+// sample:start
+echo sub(b: trace("b", 1), a: trace("a", 10))   // prints b, then a, then 9
+// sample:end
+```
+
+Because a label names its parameter, a call can supply a later defaulted parameter while leaving an earlier one to its default:
+
+```noeta
+fn f(a: int, b: int = 2, c: int = 3): int { return a * 100 + b * 10 + c }
+
+echo f(1)          // 123 — every default
+echo f(1, 5)       // 153 — `b` supplied positionally
+echo f(1, c: 9)    // 129 — `b` skipped, and still defaults
+```
+
+The skipped parameter's default is evaluated by the callee in its own scope, exactly as when an argument list simply stops early — skipping one and omitting a trailing one are the same thing to the function being called.
+
+Named arguments work the same on methods and associated functions:
+
+```noeta
+class M {
+    pub k: int
+    fn make(): M { return M { k: 0 } }
+    fn f(a: int, b: int = 2, c: int = 3): int { return self.k + a * 100 + b * 10 + c }
+    fn mk(a: int, b: int = 2, c: int = 3): M { return M { k: a * 100 + b * 10 + c } }
+}
+m = M.make()
+
+// sample:start
+echo m.f(1, c: 9)        // 129
+echo M.mk(b: 5, a: 1).k  // 153
+// sample:end
+```
+
+A label must name a parameter of the callee (an unknown one is E0061, with the closest match suggested), and no parameter may be filled twice — once positionally and again by name.
+
+> [!NOTE]
+> Only the first 64 parameters can be *skipped* by name; a call that skips one beyond that is rejected. Reordering and labelling are unaffected.
+
 ## Multiple return via tuples
 
 Return a [tuple](Structs-Classes-and-Enums#tuples) to hand back several values, and destructure at the call site:

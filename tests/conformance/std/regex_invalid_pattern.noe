@@ -1,0 +1,6 @@
+// An invalid pattern is a runtime argument error (regex arc), carrying the engine's own
+// caret-and-span diagnostic rather than a paraphrase of it.
+// expect: error E0007 at 5:5
+use std.{regex}
+p = regex.compile('a(b')
+echo p.source()

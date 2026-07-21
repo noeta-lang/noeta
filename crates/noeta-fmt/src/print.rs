@@ -43,7 +43,7 @@ enum ChainOp<'a> {
     /// `?` try-postfix.
     Try,
     /// `(args)` call — the args and the byte just before `(` (for source-directed arg breaking).
-    Call(&'a [Expr], u32),
+    Call(&'a [noeta_ast::CallArg], u32),
     /// `[index]` subscript.
     Index(&'a Expr),
 }
@@ -2349,14 +2349,21 @@ impl Printer<'_> {
 
     /// A call's `(arg, …)` list. `open_ref` is the byte just before the `(` (the callee's end), so a
     /// source-directed break — the author put the args on their own lines — is detected and kept.
-    fn arg_list(&self, args: &[Expr], open_ref: u32) -> Result<Doc, FmtError> {
+    fn arg_list(&self, args: &[noeta_ast::CallArg], open_ref: u32) -> Result<Doc, FmtError> {
         let mut ds = Vec::new();
         for a in args {
-            ds.push(self.expr(a)?);
+            // A labelled argument keeps its label. Dropping it here would silently rebind every
+            // argument by position — `f(b: 1, a: 2)` becoming `f(1, 2)` — which is a change of
+            // meaning, not of layout. The safety gate renders labels for exactly this reason.
+            let value = self.expr(&a.value)?;
+            ds.push(match &a.name {
+                Some(name) => Doc::concat([Doc::text(format!("{name}: ")), value]),
+                None => value,
+            });
         }
         let broke = args
             .first()
-            .is_some_and(|f| self.seq_broke(open_ref, f.span().start));
+            .is_some_and(|f| self.seq_broke(open_ref, f.span.start));
         Ok(self.delimited("(", ds, ")", false, broke))
     }
 
@@ -2552,9 +2559,9 @@ impl Printer<'_> {
                 } if method == "set" && reads_target(receiver) => Ok(Some(Doc::concat([
                     Doc::text(name.to_string()),
                     Doc::text("["),
-                    self.expr(&args[0])?,
+                    self.expr(&args[0].value)?,
                     Doc::text("] = "),
-                    self.expr(&args[1])?,
+                    self.expr(&args[1].value)?,
                 ]))),
                 _ => Ok(None),
             },
@@ -2600,9 +2607,9 @@ impl Printer<'_> {
                 } if method == "set" && reads_field(read) => Ok(Some(Doc::concat([
                     self.expr(receiver)?,
                     Doc::text(format!(".{field}[")),
-                    self.expr(&args[0])?,
+                    self.expr(&args[0].value)?,
                     Doc::text("] = "),
-                    self.expr(&args[1])?,
+                    self.expr(&args[1].value)?,
                 ]))),
                 _ => Ok(None),
             },

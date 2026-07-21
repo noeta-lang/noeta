@@ -345,6 +345,84 @@ the host's entropy capability — exactly reproducible in the deterministic sand
 entropy under `noeta run`. The digest functions are pure: the same input gives the same digest
 everywhere (the conformance suite pins the published NIST/RFC vectors).
 
+## `regex`
+
+Regular expressions. Two value types: a compiled **`Pattern`**, and a **`Match`** describing one hit.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `compile` | `compile(pattern: string) -> Pattern` | Compile a pattern. **Errors** on an invalid pattern, carrying the engine's own caret-and-span diagnostic. |
+| `escape` | `escape(text: string) -> string` | Escape every metacharacter, so the result matches `text` literally. |
+
+`Pattern` methods:
+
+| Method | Signature | Notes |
+|---|---|---|
+| `is_match` | `is_match(text: string) -> bool` | The cheapest question — no groups, no offsets, no allocation. |
+| `find` | `find(text: string) -> Option<Match>` | The leftmost match, or `none`. No match is never an error. |
+| `find_all` | `find_all(text: string) -> List<Match>` | Every non-overlapping match, left to right. |
+| `replace`, `replace_all` | `replace(text: string, replacement: string) -> string` | `replacement` expands `$1` / `${name}`; write `$$` for a literal `$`. |
+| `split` | `split(text: string) -> List<string>` | Adjacent and edge matches yield empty strings, matching `string.split`. |
+| `source` | `source() -> string` | The pattern source this was compiled from. |
+
+`Match` methods:
+
+| Method | Signature | Notes |
+|---|---|---|
+| `text` | `text() -> string` | The matched text (group 0). |
+| `start`, `end` | `start() -> int` | **Character** indices, not byte offsets — so they compose with `slice` and `char_at`. |
+| `group` | `group(n: int) -> Option<string>` | Group `n`; 0 is the whole match. `none` if the group didn't participate, or `n` is out of range. |
+| `named` | `named(name: string) -> Option<string>` | The group captured by `(?<name>…)`, or `none`. |
+| `groups` | `groups() -> List<Option<string>>` | Groups 1..n in order. |
+
+Write patterns as **raw single-quoted strings** (`'\d+'`): they don't interpolate, so `\d` and
+`${…}` reach the engine untouched.
+
+Compiling is deliberately explicit — there is no `regex.is_match(pattern, text)` free function.
+Compile once, match many. For a genuine one-shot, chain it:
+
+```noeta check
+use std.{regex}
+echo regex.compile('\d+').is_match("a1b")   // true
+```
+
+The chain costs eight characters over a free function, and buys a cost that stays visible: on 200k
+matches of an email pattern, compiling once and matching in a loop takes 0.06s, while recompiling
+per call takes 104s. A free function would make those two spellings identical. If you do want a
+cache, build it yourself — a `Pattern` is immutable and equal-by-source, so it can key a `Map`.
+
+```noeta
+use std.{regex}
+
+digits = regex.compile('\d+')
+echo digits.is_match("a1b")            // true
+echo digits.replace_all("a1b22", "#")  // a#b#
+echo digits.split("a1b22c")            // ["a", "b", "c"]
+
+date = regex.compile('(?<year>\d{4})-(?<month>\d{2})')
+echo match date.find("shipped 2026-07") {
+    some(m) => m.named("year"),
+    none => none,
+}                                      // some(2026)
+
+// Offsets are character indices, so they slice correctly through multi-byte text.
+subject = "héllo 42"
+m = match digits.find(subject) { some(x) => x, none => panic("unreachable") }
+echo subject.slice(m.start(), m.end()) == m.text()   // true
+```
+
+The engine is a finite-automata matcher with a **linear-time guarantee**: matching cannot blow up
+on hostile input, so it is safe to point a pattern at a request body. The price is the two
+constructs a backtracking engine gives you for free — **lookaround** (`(?=…)`, `(?<=…)`) and
+**backreferences** (`\1`) — which this engine does not support and rejects at `compile` time. That
+trade is deliberate: a pattern that fails to compile is a diagnostic you see immediately, whereas a
+pattern that backtracks catastrophically is an outage you see in production. Most lookaround uses
+rewrite as a capture group plus a `group(n)` read.
+
+Everything here is pure — no host capability, so results are identical across backends, the
+sandbox, and native builds. The engine rides the `ring-regex` ring: a program that never imports
+`std.regex` links neither it nor its Unicode tables.
+
 ## `http.client` and `http.server`
 
 HTTP is two modules: **`std.http.client`** (outbound requests) and **`std.http.server`** (an inbound

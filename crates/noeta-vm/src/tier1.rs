@@ -235,34 +235,37 @@ extern "C" fn jit_call(
     // `emit_call` emits this helper for `Op::Call` *and* `Op::CallGlobal`; source the callee from a
     // register (Call) or straight from its global slot (CallGlobal — a known top-level `fn`, read
     // without a retain, exactly like the interpreter arm).
-    let (dst, callee_val, args, span) = match &module.protos[proto as usize].code[pc as usize] {
-        Op::Call {
-            dst,
-            callee,
-            args,
-            span,
-        } => (*dst, regs[base + *callee as usize], args, *span),
-        Op::CallGlobal {
-            dst,
-            global,
-            args,
-            span,
-        } => {
-            let cv = vm.persist.globals[global.0 as usize];
-            if cv.is_unbound() {
-                let msg = format!(
-                    "cannot find `{}` in this scope",
-                    module.global_name(*global)
-                );
-                let _ = vm.error(DiagnosticCode::UnknownName, *span, msg);
-                return noeta_jit_abi::OUTCOME_ABORTED;
+    let (dst, callee_val, args, span, supplied) =
+        match &module.protos[proto as usize].code[pc as usize] {
+            Op::Call {
+                dst,
+                callee,
+                args,
+                span,
+                supplied,
+            } => (*dst, regs[base + *callee as usize], args, *span, *supplied),
+            Op::CallGlobal {
+                dst,
+                global,
+                args,
+                span,
+                supplied,
+            } => {
+                let cv = vm.persist.globals[global.0 as usize];
+                if cv.is_unbound() {
+                    let msg = format!(
+                        "cannot find `{}` in this scope",
+                        module.global_name(*global)
+                    );
+                    let _ = vm.error(DiagnosticCode::UnknownName, *span, msg);
+                    return noeta_jit_abi::OUTCOME_ABORTED;
+                }
+                (*dst, cv, args, *span, *supplied)
             }
-            (*dst, cv, args, *span)
-        }
-        // `emit_call` only emits this helper for a call op, so this is unreachable; treat a
-        // mismatch defensively as an abort rather than misbehave.
-        _ => return noeta_jit_abi::OUTCOME_ABORTED,
-    };
+            // `emit_call` only emits this helper for a call op, so this is unreachable; treat a
+            // mismatch defensively as an abort rather than misbehave.
+            _ => return noeta_jit_abi::OUTCOME_ABORTED,
+        };
     let caller_top = frames.len() - 1;
     match vm.setup_closure_call(
         frames,
@@ -274,6 +277,7 @@ extern "C" fn jit_call(
         args,
         span,
         pc as usize + 1,
+        supplied,
     ) {
         Ok(true) => noeta_jit_abi::OUTCOME_CALLED,
         Ok(false) => pc as i64 + 1,
@@ -357,13 +361,34 @@ extern "C" fn jit_prepare_call(
     // Direct-call setup for `Op::Call` or `Op::CallGlobal`; the callee comes from a register or its
     // global slot. An unbound `CallGlobal` slot falls back to `jit_call`, which raises the E0005.
     const FALLBACK: PreparedCall = PreparedCall { fnptr: 0, base: 0 };
+    // A supplied-mask means the call skips a defaulted parameter, so the callee's prologue must run
+    // default thunks — not this path, which copies arguments positionally into a full window. The
+    // exact-arity check below already excludes such a call (a hole leaves a parameter unfilled);
+    // this is the explicit statement of that, so relaxing the arity check cannot silently
+    // reintroduce a misplaced-argument bug.
     let (dst, callee_val, args) = match &module.protos[proto as usize].code[pc as usize] {
         Op::Call {
-            dst, callee, args, ..
-        } => (*dst, regs[base + *callee as usize], args),
-        Op::CallGlobal {
-            dst, global, args, ..
+            dst,
+            callee,
+            args,
+            supplied,
+            ..
         } => {
+            if supplied.is_some() {
+                return FALLBACK;
+            }
+            (*dst, regs[base + *callee as usize], args)
+        }
+        Op::CallGlobal {
+            dst,
+            global,
+            args,
+            supplied,
+            ..
+        } => {
+            if supplied.is_some() {
+                return FALLBACK;
+            }
             let cv = vm.persist.globals[global.0 as usize];
             if cv.is_unbound() {
                 return FALLBACK;

@@ -264,6 +264,14 @@ hmac = { version = "0.12", default-features = false }
 # hmac verify twins rely on) — already in-tree transitively via `hmac`; never hand-roll this.
 subtle = { version = "2", default-features = false }
 bcrypt = { version = "0.17", default-features = false, features = ["alloc"] }
+# std.regex (Ring 3): the finite-automata engine, behind noeta-stdlib's default-on `ring-regex`.
+# Chosen for its linear-time guarantee — a pattern cannot backtrack catastrophically on hostile
+# input, which is the property that makes it safe to point at a request body. The cost is no
+# lookaround and no backreferences; `fancy-regex` adds both by falling back to a backtracker and
+# forfeits exactly that guarantee, so it is not the default. `unicode` is kept in full (it is the
+# bulk of the crate's size) precisely BECAUSE the ring gates it: a build that wants regex wants
+# `\p{...}` and correct case-folding to work, and a build that doesn't sheds the whole tree.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
 # Real p2p transport (p2p P3, behind noeta-host-real's `ring-p2p` feature — OFF by default): a
 # p2panda-net node (gossip + log-sync over iroh/QUIC). Pre-1.0; pinned exactly because its
 # user-facing API may break before 1.0. Never in a default build. `p2panda-core` supplies the

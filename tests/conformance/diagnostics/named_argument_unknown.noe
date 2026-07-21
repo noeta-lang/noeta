@@ -1,0 +1,6 @@
+// A label naming no parameter is E0061 — with a did-you-mean. It used to be accepted in total
+// silence, because the parser discarded the label before anything could check it.
+// expect: error E0061 at 6:10
+// expect: exit 1
+fn sub(a: int, b: int): int { return a - b }
+echo sub(aa: 1, b: 2)

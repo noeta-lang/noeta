@@ -1168,10 +1168,17 @@ impl Interpreter {
                 }
                 Ok(Value::Str(out))
             }
-            noeta_ir::Rvalue::Call { callee, args, span } => {
+            noeta_ir::Rvalue::Call {
+                callee,
+                args,
+                // `None` for a pure reordering — lowering already permuted `args`, so there is
+                // nothing left to say. `Some` only when the call skips a defaulted parameter.
+                supplied,
+                span,
+            } => {
                 let callee = self.eval_ir_atom(callee, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
-                self.call(callee, values, *span)
+                self.call_masked(callee, values, *span, *supplied)
             }
             noeta_ir::Rvalue::Method {
                 receiver,
@@ -1180,6 +1187,7 @@ impl Interpreter {
                 reuse,
                 reflect,
                 span,
+                supplied,
                 ..
             } => {
                 // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
@@ -1227,11 +1235,12 @@ impl Interpreter {
                     // call (Phase 4.4). `call_method` consumes the receiver, so clone for the call
                     // and destroy the held copy — last-reference-gated, so a method that returns
                     // `self` (the result aliases it) correctly defers destruction.
-                    let result = self.call_method(recv.clone(), name, values, *span);
+                    let result =
+                        self.call_method_masked(recv.clone(), name, values, *span, *supplied);
                     self.destroy_value(recv);
                     result
                 } else {
-                    self.call_method(recv, name, values, *span)
+                    self.call_method_masked(recv, name, values, *span, *supplied)
                 };
                 // When this "method call" was a generic enum-variant construction, stamp the reflected
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.

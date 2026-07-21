@@ -568,7 +568,11 @@ fn call_stmt(name: &str, args: Vec<Expr>, span: noeta_span::Span) -> Stmt {
                 name: name.to_string(),
                 span,
             }),
-            args,
+            // A synthesized call is positional by construction.
+            args: args
+                .into_iter()
+                .map(noeta_ast::CallArg::positional)
+                .collect(),
             span,
         },
         span,

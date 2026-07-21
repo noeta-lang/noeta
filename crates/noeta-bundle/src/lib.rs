@@ -46,7 +46,13 @@ use noeta_bytecode::Module;
 pub const MAGIC: &[u8; 4] = b"NOEB";
 
 /// The container format version this crate reads and writes.
-pub const FORMAT_VERSION: u8 = 1;
+///
+/// Bumped to 2 when `Op::Call`/`Op::CallGlobal` gained their supplied-mask field: that changes the
+/// serialized [`Module`] layout, and `RUNTIME_VERSION` alone does not catch it during development,
+/// where the package version stays put across such a change. Without the bump a `.noeb` written by
+/// an earlier build passes the version gate and is then postcard-decoded against the new layout —
+/// a silent misread. The gate turns that into an explicit `UnsupportedFormat`.
+pub const FORMAT_VERSION: u8 = 2;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

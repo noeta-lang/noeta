@@ -239,7 +239,7 @@ impl Walker<'_> {
             Expr::Call { callee, args, .. } => {
                 self.param_name_hints(callee, args);
                 self.expr(callee);
-                self.exprs(args);
+                self.arg_exprs(args);
             }
             Expr::Pipeline { left, right, .. } => {
                 self.expr(left);
@@ -313,12 +313,12 @@ impl Walker<'_> {
             Expr::Channel { capacity, .. } => self.expr(capacity),
             Expr::TypedModuleCall { recv, args, .. } => {
                 self.expr(recv);
-                self.exprs(args);
+                self.arg_exprs(args);
             }
-            Expr::TypedCall { args, .. } => self.exprs(args),
+            Expr::TypedCall { args, .. } => self.arg_exprs(args),
             Expr::TypedMethodCall { recv, args, .. } => {
                 self.expr(recv);
-                self.exprs(args);
+                self.arg_exprs(args);
             }
             Expr::Invoke {
                 recv, name, args, ..
@@ -352,12 +352,19 @@ impl Walker<'_> {
         }
     }
 
+    /// Walk a call's arguments — the values; a label carries no expression to hint.
+    fn arg_exprs(&mut self, args: &[noeta_ast::CallArg]) {
+        for expr in noeta_ast::CallArg::values(args) {
+            self.expr(expr);
+        }
+    }
+
     /// Parameter-NAME hints at a call site (`f(⟨n:⟩ 42)`): the callee resolves through the same
     /// lookups signature-help uses — a bare identifier to a top-level function, a member call to
     /// the receiver-type's method (methods carry an implicit receiver, so declared params zip
     /// against the arguments directly). An argument that is already an identifier with the
     /// parameter's own name shows nothing — the hint would repeat the code.
-    fn param_name_hints(&mut self, callee: &Expr, args: &[Expr]) {
+    fn param_name_hints(&mut self, callee: &Expr, args: &[noeta_ast::CallArg]) {
         let decl = match callee {
             Expr::Ident { name, .. } => crate::top_level_fn(self.program, name),
             Expr::Member { receiver, name, .. } => self
@@ -369,12 +376,17 @@ impl Walker<'_> {
         };
         let Some(decl) = decl else { return };
         for (param, arg) in decl.params.iter().zip(args) {
-            if let Expr::Ident { name, .. } = arg
+            // An argument the author already labelled needs no hint — the name is right there,
+            // and a hint beside it would read as a second, conflicting one.
+            if arg.name.is_some() {
+                continue;
+            }
+            if let Expr::Ident { name, .. } = &arg.value
                 && *name == param.name
             {
                 continue;
             }
-            let arg_span = arg.span();
+            let arg_span = arg.span;
             if arg_span.source != self.source {
                 continue;
             }

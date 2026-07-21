@@ -56,6 +56,81 @@ pub struct LoadDiagnostic {
     pub diagnostic: Diagnostic,
 }
 
+/// A module that failed to lex/parse, and so is **absent from the link pool**.
+///
+/// Dropping these on the floor is what made a syntax error in one file surface as
+/// `[E0019] no module \`a.b.c\` in this project` at some *other* file's `use` — the consumer was sent
+/// to inspect its own import and the package's naming while the real fault sat unreported in a file
+/// it was never told about. A broken module is therefore kept, not discarded:
+///
+/// - A **dependency package's** broken module is a hard error (see [`link_with_deps`]): a package is
+///   a closed unit that must be internally valid, and its files are never anyone's entry, so no other
+///   pass would ever report them.
+/// - A **sibling's** broken module keeps the historical skip-and-continue policy (a lone script must
+///   not fail because an unrelated file in its directory is mid-edit), but a `use` that resolves to
+///   nothing is checked against these first: if a broken module *declares that namespace*, its parse
+///   error is reported instead of the cascading E0019 ([`link_core`]).
+///
+/// `namespace` is what makes that attribution possible, and it is read off the module's **token
+/// stream**, not its AST: the parser yields no output at all on a hard failure, so a broken module's
+/// "partial" program is empty and could never have named itself. See [`namespace_from_tokens`].
+#[derive(Debug, Clone)]
+pub struct BrokenModule {
+    pub source: Source,
+    pub namespace: Option<Vec<String>>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// The `namespace a.b.c;` a module declares, read straight off its **token stream**.
+///
+/// The AST cannot answer this for the module that needs it most: chumsky produces no output on a
+/// hard parse failure, so a broken module's program is empty. Its `namespace` line, on the other
+/// hand, is the file's first statement and virtually always intact — and it is the one fact needed
+/// to tell a consumer's unresolved `use` which broken file it is really about. Scanning tokens is
+/// deliberately more forgiving than parsing: it stops at the first token that is not part of the
+/// dotted path and answers `None` rather than erroring (a second diagnostic about the file that is
+/// already reporting one would be noise).
+///
+/// Public so the salsa layer (`noeta-db`), which lexes and parses through its own memoized queries,
+/// builds [`BrokenModule`]s that attribute identically to the CLI's.
+pub fn namespace_from_tokens(
+    source: &Source,
+    tokens: &[noeta_lexer::Token],
+) -> Option<Vec<String>> {
+    use noeta_lexer::TokenKind;
+    let start = tokens
+        .iter()
+        .position(|t| t.kind == TokenKind::NamespaceKw)?;
+    let mut path: Vec<String> = Vec::new();
+    // Alternating `Ident` `.` `Ident` …; the path is complete only on a segment (never a trailing dot).
+    let mut want_ident = true;
+    for token in &tokens[start + 1..] {
+        match token.kind {
+            TokenKind::Ident if want_ident => {
+                let text = &source.text()[token.span.start as usize..token.span.end as usize];
+                path.push(text.to_string());
+                want_ident = false;
+            }
+            TokenKind::Dot if !want_ident => want_ident = true,
+            _ => break,
+        }
+    }
+    (!want_ident).then_some(path)
+}
+
+impl BrokenModule {
+    /// This module's parse errors as [`LoadDiagnostic`]s rendering against its own file.
+    pub fn load_diagnostics(&self) -> Vec<LoadDiagnostic> {
+        self.diagnostics
+            .iter()
+            .map(|diagnostic| LoadDiagnostic {
+                source: self.source.clone(),
+                diagnostic: diagnostic.clone(),
+            })
+            .collect()
+    }
+}
+
 /// Load and link the program rooted at `entry_path`. Returns the linked program, or the
 /// load-time (lex/parse) diagnostics of the entry, each paired with its source. An `io::Error`
 /// is only for a failure to read the entry file itself.
@@ -173,7 +248,11 @@ pub struct DepPackage {
 /// package's global `key`; otherwise, if it is one of the package's local dependency keys, it becomes
 /// that dependency's global segment (`renames`). A path leading with anything else — `std`, or a
 /// malformed package path — is left untouched.
-fn reroot_path(
+/// Public so a caller holding a namespace **outside** a [`Program`] can address it the same way
+/// [`reroot_program`] addresses a parsed one — the salsa layer recovers a broken dependency module's
+/// namespace from its tokens (it has no usable AST), and that namespace must be re-rooted to the
+/// consumer's key or it will never match the `use` that names it.
+pub fn reroot_path(
     path: &mut [String],
     root: &str,
     key: &str,
@@ -356,20 +435,24 @@ pub fn link(
             .collect());
     }
 
-    // Parse each sibling under the root edition. Only cleanly-parsed modules contribute (a module
-    // that fails to lex/parse cannot be resolved against and is skipped — surfacing a
-    // *referenced-but-broken* module's errors is the deferred SourceMap work). Keep the parsed
-    // programs alive for [`link_parsed`]. Every sibling's `Source` is retained (whether or not it
-    // parsed) so the `SourceMap` indices line up with the `SourceId`s the parser stamped onto spans.
+    // Parse each sibling under the root edition. Only cleanly-parsed modules contribute to the
+    // resolution pool (a broken module cannot be resolved against), but a broken one is now *kept*
+    // rather than dropped: if the entry imports the namespace it declares, the linker reports its
+    // parse error instead of the cascading "no module" (see [`BrokenModule`]). Every sibling's
+    // `Source` is retained (whether or not it parsed) so the `SourceMap` indices line up with the
+    // `SourceId`s the parser stamped onto spans.
     let mut module_programs: Vec<Program> = Vec::new();
+    let mut broken: Vec<BrokenModule> = Vec::new();
     for (source, lexed) in sources.iter().zip(&lexeds).skip(1) {
-        if let Some(program) = parse_clean(source, lexed, root_edition, &text_tiers) {
-            module_programs.push(program);
+        match parse_module(source, lexed, root_edition, &text_tiers) {
+            Ok(program) => module_programs.push(program),
+            Err(module) => broken.push(*module),
         }
     }
 
     let refs: Vec<&Program> = module_programs.iter().collect();
-    let program = link_parsed(&entry, &entry_parsed.program, &refs)?;
+    let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
+    let program = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs)?;
     Ok(Linked {
         program,
         entry,
@@ -383,8 +466,9 @@ pub fn link(
 /// consumer's dependency key ([`reroot_program`]), and linked as a closed unit (their own `use`s
 /// drive imports). SourceIds continue past the siblings (entry = 0, siblings `1..=S`, dependency
 /// modules after), so every declaration's spans and diagnostics still render against their own file.
-/// A dependency module that fails to lex/parse is skipped (its `Source` is still retained so the
-/// `SourceMap` indices line up), mirroring the sibling policy.
+/// A dependency module that fails to lex/parse is a **hard error** attributed to that file (see
+/// [`BrokenModule`]); a broken *sibling* keeps the skip policy but is still available to attribute an
+/// unresolved `use`.
 pub fn link_with_deps(
     entry_name: &str,
     entry_text: &str,
@@ -443,26 +527,44 @@ pub fn link_with_deps(
             .collect());
     }
 
-    // Parse the siblings (pure decl-sources) under the root edition.
+    // Parse the siblings (pure decl-sources) under the root edition. A broken sibling is kept for
+    // attribution rather than dropped (see [`BrokenModule`]).
     let mut sibling_programs: Vec<Program> = Vec::new();
+    let mut broken: Vec<BrokenModule> = Vec::new();
     for (source, lexed) in sources[1..sibling_end].iter().zip(&lexeds[1..sibling_end]) {
-        if let Some(program) = parse_clean(source, lexed, root_edition, &text_tiers) {
-            sibling_programs.push(program);
+        match parse_module(source, lexed, root_edition, &text_tiers) {
+            Ok(program) => sibling_programs.push(program),
+            Err(module) => broken.push(*module),
         }
     }
 
     // Parse + re-root each dependency package's modules under *that package's* edition (the sources
     // continue past the siblings in the same package order they were assembled above).
-    let dep_programs = parse_dep_programs(&sources, &lexeds, sibling_end, deps, &text_tiers);
+    let (dep_programs, broken_deps) =
+        parse_dep_programs(&sources, &lexeds, sibling_end, deps, &text_tiers);
+
+    // A dependency package that does not parse is a hard error, reported against the offending file
+    // and span, and reported *before* linking so the cascade it would otherwise produce at the
+    // consumer's `use` (`no module \`para.thing.broken\``) never fires. A package is a closed unit:
+    // unlike a sibling it is never anyone's entry, so this is the only pass that will ever look at
+    // it, and "skip it quietly" means the fault is never reported anywhere at all.
+    if !broken_deps.is_empty() {
+        return Err(broken_deps
+            .iter()
+            .flat_map(BrokenModule::load_diagnostics)
+            .collect());
+    }
 
     let sibling_refs: Vec<&Program> = sibling_programs.iter().collect();
     let dep_refs: Vec<&Program> = dep_programs.iter().collect();
+    let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let native_roots = native_dep_roots(deps);
     let program = link_parsed_with_deps(
         &entry,
         &entry_parsed.program,
         &sibling_refs,
         &dep_refs,
+        &broken_refs,
         Some(&native_roots),
     )?;
     Ok(Linked {
@@ -475,29 +577,32 @@ pub fn link_with_deps(
 
 /// Parse + re-root each dependency package's modules under *that package's* edition. The dependency
 /// modules occupy `sources[offset..]` in package order (the order the caller assembled them); a
-/// module that fails to lex/parse is skipped (its `Source` stays, so ids keep lining up). Shared by
-/// [`link_with_deps`] and the directory batch ([`parse_dir`]).
+/// module that fails to lex/parse is returned as a [`BrokenModule`] rather than silently skipped
+/// (its `Source` stays either way, so ids keep lining up), for the caller to report against its own
+/// file. Shared by [`link_with_deps`] and the directory batch ([`parse_dir`]).
 fn parse_dep_programs(
     sources: &[Source],
     lexeds: &[noeta_lexer::Lexed],
     offset: usize,
     deps: &[DepPackage],
     text_tiers: &noeta_lexer::TextTiers,
-) -> Vec<Program> {
+) -> (Vec<Program>, Vec<BrokenModule>) {
     let mut dep_programs: Vec<Program> = Vec::new();
+    let mut broken: Vec<BrokenModule> = Vec::new();
     let mut dep_idx = offset;
     for dep in deps {
         for _ in &dep.modules {
-            if let Some(mut program) =
-                parse_clean(&sources[dep_idx], &lexeds[dep_idx], dep.edition, text_tiers)
-            {
-                reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
-                dep_programs.push(program);
+            match parse_module(&sources[dep_idx], &lexeds[dep_idx], dep.edition, text_tiers) {
+                Ok(mut program) => {
+                    reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
+                    dep_programs.push(program);
+                }
+                Err(module) => broken.push(*module),
             }
             dep_idx += 1;
         }
     }
-    dep_programs
+    (dep_programs, broken)
 }
 
 /// A resolved dependency graph is complete knowledge: the always-legitimate non-std roots are the
@@ -509,15 +614,12 @@ fn native_dep_roots(deps: &[DepPackage]) -> Vec<String> {
         .collect()
 }
 
-/// One directory module's parse outcome inside a [`ParsedDir`]: the parsed program plus its
-/// chained lex + parse diagnostics. As an **entry** the diagnostics are reported (exactly as
-/// [`link_with_deps`] reports the entry's); as a **sibling** any diagnostic skips the module
-/// ([`parse_clean`]'s policy — both roles come from this one parse).
-#[derive(Debug)]
-struct ModuleParse {
-    program: Program,
-    diagnostics: Vec<Diagnostic>,
-}
+/// One directory module's parse outcome inside a [`ParsedDir`] — the [`parse_module`] result, whose
+/// two roles fall straight out of it. As an **entry**, `Err`'s diagnostics are reported (exactly as
+/// [`link_with_deps`] reports the entry's); as a **sibling**, `Ok` joins the pool and `Err` becomes
+/// the [`BrokenModule`] that attributes a consumer's unresolved `use`. Both roles come from this one
+/// parse.
+type ModuleParse = Result<Program, Box<BrokenModule>>;
 
 /// A directory's modules (plus the entry's dependency packages) lexed and parsed **once**, and
 /// linkable against *any* member as the entry — `noeta check`'s directory mode (audit-4 F4).
@@ -535,6 +637,11 @@ pub struct ParsedDir {
     editions: noeta_lexer::EditionMap,
     modules: Vec<ModuleParse>,
     dep_programs: Vec<Program>,
+    /// Dependency-package modules that failed to lex/parse — a hard error for *every* entry in the
+    /// directory (a dependency is shared by all of them), reported against the dependency's own
+    /// file. `noeta check` dedups by (file, span, code), so one broken dependency file prints once
+    /// however many entries the directory holds.
+    broken_deps: Vec<BrokenModule>,
     native_roots: Vec<String>,
 }
 
@@ -572,48 +679,24 @@ pub fn parse_dir(
     }
     let (lexeds, text_tiers) = lex_program(&sources, &editions);
 
-    // Parse every directory module once, keeping its chained lex + parse diagnostics — the
-    // entry role parses even after lex errors (as `link_with_deps` does for its entry), and
-    // the sibling role's "cleanly parsed" test is exactly `diagnostics.is_empty()`.
+    // Parse every directory module once — [`parse_module`] parses even after lex errors (as the
+    // entry role always did) and chains lex + parse diagnostics onto the partial program, which is
+    // exactly what both the entry and the sibling role need here.
     let parsed_modules: Vec<ModuleParse> = sources[..modules.len()]
         .iter()
         .zip(&lexeds)
-        .map(|(source, lexed)| {
-            let parsed = noeta_parser::parse_in(source, &lexed.tokens, root_edition, &text_tiers);
-            let diagnostics: Vec<Diagnostic> = lexed
-                .diagnostics
-                .iter()
-                .chain(parsed.diagnostics.iter())
-                .cloned()
-                // Lex/parse diagnostics are single-file by construction, but a few lexer/parser
-                // spans are built with the default entry id (`Span::new` → `SourceId::FIRST`) —
-                // harmless in the per-entry loader, where the file being lexed IS id 0 (and its
-                // reporting wraps a one-element `SourceMap` that resolves *every* id to the
-                // entry), but a misattribution under this batch's directory-stable ids.
-                // Normalize every span to the module's own id: exactly the file the per-entry
-                // path rendered them against.
-                .map(|mut diagnostic| {
-                    diagnostic.span.source = source.id();
-                    for label in &mut diagnostic.labels {
-                        label.span.source = source.id();
-                    }
-                    diagnostic
-                })
-                .collect();
-            ModuleParse {
-                program: parsed.program,
-                diagnostics,
-            }
-        })
+        .map(|(source, lexed)| parse_module(source, lexed, root_edition, &text_tiers))
         .collect();
 
-    let dep_programs = parse_dep_programs(&sources, &lexeds, modules.len(), deps, &text_tiers);
+    let (dep_programs, broken_deps) =
+        parse_dep_programs(&sources, &lexeds, modules.len(), deps, &text_tiers);
     let native_roots = native_dep_roots(deps);
     ParsedDir {
         sources,
         editions,
         modules: parsed_modules,
         dep_programs,
+        broken_deps,
         native_roots,
     }
 }
@@ -642,31 +725,43 @@ impl ParsedDir {
     /// semantics over the shared parse. An entry with lex/parse diagnostics returns them, as the
     /// per-entry load did; their spans resolve against [`Self::source_map`].
     pub fn link_entry(&self, index: usize) -> Result<Program, Vec<LoadDiagnostic>> {
-        let entry = &self.modules[index];
         let entry_source = &self.sources[index];
-        if !entry.diagnostics.is_empty() {
-            return Err(entry
-                .diagnostics
+        let entry = match &self.modules[index] {
+            Ok(program) => program,
+            Err(broken) => return Err(broken.load_diagnostics()),
+        };
+        // A broken dependency module fails every entry in the directory (see [`Self::broken_deps`]),
+        // before linking, so it is not overwritten by the "no module" cascade it would cause.
+        if !self.broken_deps.is_empty() {
+            return Err(self
+                .broken_deps
                 .iter()
-                .map(|diagnostic| LoadDiagnostic {
-                    source: entry_source.clone(),
-                    diagnostic: diagnostic.clone(),
-                })
+                .flat_map(BrokenModule::load_diagnostics)
                 .collect());
         }
         let siblings: Vec<&Program> = self
             .modules
             .iter()
             .enumerate()
-            .filter(|(i, m)| *i != index && m.diagnostics.is_empty())
-            .map(|(_, m)| &m.program)
+            .filter(|&(i, _)| i != index)
+            .filter_map(|(_, m)| m.as_ref().ok())
+            .collect();
+        // A broken *sibling* is not itself an error here — it is reported when it is the entry of
+        // its own pass — but it is still what an unresolved `use` of its namespace should point at.
+        let broken: Vec<&BrokenModule> = self
+            .modules
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != index)
+            .filter_map(|(_, m)| m.as_ref().err().map(Box::as_ref))
             .collect();
         let dep_refs: Vec<&Program> = self.dep_programs.iter().collect();
         link_parsed_with_deps(
             entry_source,
-            &entry.program,
+            entry,
             &siblings,
             &dep_refs,
+            &broken,
             Some(&self.native_roots),
         )
     }
@@ -721,21 +816,51 @@ fn lex_program(
     (relexed, set)
 }
 
-/// Parse an already-lexed source, yielding its [`Program`] only if both lex and parse are clean
-/// (a module that fails cannot be resolved against and is skipped). The shared helper behind
-/// [`link`]'s sibling loop and [`link_with_deps`].
-fn parse_clean(
+/// Parse an already-lexed source, yielding its [`Program`] when both lex and parse are clean and a
+/// [`BrokenModule`] — its diagnostics, plus the namespace it declares — when they are not. The
+/// shared helper behind [`link`]'s sibling loop, [`link_with_deps`], and [`parse_dir`].
+///
+/// A broken module still cannot be resolved against, so it stays out of the pool; what changed is
+/// that its errors are no longer *discarded*. The source is parsed even after a lex error (as the
+/// entry role always was), so one parse serves both roles.
+fn parse_module(
     source: &Source,
     lexed: &noeta_lexer::Lexed,
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
-) -> Option<Program> {
-    (lexed.diagnostics.is_empty())
-        // Parse under the owning package's edition — the entry/sibling's root edition or a
-        // dependency's own — so a future edition-gated grammar applies per package.
-        .then(|| noeta_parser::parse_in(source, &lexed.tokens, edition, text_tiers))
-        .filter(|parsed| parsed.diagnostics.is_empty())
-        .map(|parsed| parsed.program)
+) -> Result<Program, Box<BrokenModule>> {
+    // Parse under the owning package's edition — the entry/sibling's root edition or a
+    // dependency's own — so a future edition-gated grammar applies per package.
+    let parsed = noeta_parser::parse_in(source, &lexed.tokens, edition, text_tiers);
+    let diagnostics: Vec<Diagnostic> = lexed
+        .diagnostics
+        .iter()
+        .chain(parsed.diagnostics.iter())
+        .cloned()
+        .map(|d| retarget(d, source.id()))
+        .collect();
+    if diagnostics.is_empty() {
+        Ok(parsed.program)
+    } else {
+        Err(Box::new(BrokenModule {
+            source: source.clone(),
+            namespace: namespace_from_tokens(source, &lexed.tokens),
+            diagnostics,
+        }))
+    }
+}
+
+/// Stamp `id` onto a diagnostic's spans. Lex/parse diagnostics are single-file by construction, but
+/// a few lexer/parser spans are built with the default entry id (`Span::new` → `SourceId::FIRST`) —
+/// harmless where the file being lexed *is* id 0, a misattribution anywhere else (a sibling, or a
+/// dependency module several ids along). Rendering a module's own error against the shared
+/// [`SourceMap`] depends on this.
+fn retarget(mut diagnostic: Diagnostic, id: SourceId) -> Diagnostic {
+    diagnostic.span.source = id;
+    for label in &mut diagnostic.labels {
+        label.span.source = id;
+    }
+    diagnostic
 }
 
 /// Resolve and merge an *already-parsed* entry against already-parsed candidate modules — the pure
@@ -749,10 +874,18 @@ pub fn link_parsed(
     entry: &Source,
     entry_program: &Program,
     modules: &[&Program],
+    broken: &[&BrokenModule],
 ) -> Result<Program, Vec<LoadDiagnostic>> {
     // Sibling-only linking has no resolved dependency graph, so it is lenient: it can flag a missing
     // intra-project module but must not adjudicate foreign roots (see [`RetainPolicy`]).
-    link_core(entry, entry_program, modules, &[], RetainPolicy::Lenient)
+    link_core(
+        entry,
+        entry_program,
+        modules,
+        &[],
+        broken,
+        RetainPolicy::Lenient,
+    )
 }
 
 /// The cross-package variant (package-manager P2.1): like [`link_parsed`], but `dep_modules` are the
@@ -767,11 +900,15 @@ pub fn link_parsed(
 /// caller resolved the **complete** dependency graph (the CLI), so every legitimate import root is
 /// known — std extensions plus these declared native-package roots — and any other unresolved import
 /// is an error. `None` means the caller (the IDE `linked` query) lacks that graph and stays lenient.
+/// `broken` are the modules that failed to lex/parse and so are missing from `pool` — consulted only
+/// when a `use` resolves to nothing, to report the real parse error in place of a misleading
+/// "no module" ([`BrokenModule`]).
 pub fn link_parsed_with_deps(
     entry: &Source,
     entry_program: &Program,
     siblings: &[&Program],
     dep_modules: &[&Program],
+    broken: &[&BrokenModule],
     native_roots: Option<&[String]>,
 ) -> Result<Program, Vec<LoadDiagnostic>> {
     // Dependency modules join the resolution pool; only they (not siblings) also drive imports.
@@ -783,7 +920,7 @@ pub fn link_parsed_with_deps(
         },
         None => RetainPolicy::Lenient,
     };
-    link_core(entry, entry_program, &pool, dep_modules, retain)
+    link_core(entry, entry_program, &pool, dep_modules, broken, retain)
 }
 
 /// Where a merged top-level name came from — its local declaration, or the namespace an import
@@ -806,6 +943,7 @@ fn link_core(
     entry_program: &Program,
     pool: &[&Program],
     dep_drivers: &[&Program],
+    broken: &[&BrokenModule],
     retain: RetainPolicy,
 ) -> Result<Program, Vec<LoadDiagnostic>> {
     // For the complete policy: the always-retained roots are the installed extensions. The loader
@@ -886,6 +1024,17 @@ fn link_core(
     let mut seen_retained: HashSet<(Vec<String>, String)> = HashSet::new();
     let mut dep_retained: Vec<Stmt> = Vec::new();
     let mut entry_stmts: Vec<Stmt> = Vec::with_capacity(entry_program.stmts.len());
+
+    // Every broken file names itself once however many `use`s cascade off it.
+    let mut reported_broken: HashSet<String> = HashSet::new();
+    // Broken files whose namespace could *not* be read (the syntax error precedes the `namespace`
+    // declaration) — nameable as a hint on an E0019, since one of them may well be the module the
+    // user is looking for.
+    let unattributable: Vec<&str> = broken
+        .iter()
+        .filter(|m| m.namespace.is_none())
+        .map(|m| m.source.name())
+        .collect();
 
     // Resolve one `use`'s names against the pool. Resolved names merge their declaration (deduped by
     // origin); unresolved names are collected for retention. Returns the still-unresolved names.
@@ -987,12 +1136,30 @@ fn link_core(
                     };
                     if retained {
                         unresolved.push(name.clone());
+                    // A namespace that IS declared, by a file that simply failed to parse, is not a
+                    // missing module: it is a syntax error the consumer was never shown.
+                    } else if let Some(module) =
+                        broken_module_for(broken.iter().copied(), path, &name.name)
+                    {
+                        // The namespace *is* declared — by a file that failed to parse, which is
+                        // the only reason it is missing from the pool. Report that file's parse
+                        // error (the real fault, at its own span) and drop the "no module" here,
+                        // which is merely its cascade and sends the reader to the wrong file.
+                        if reported_broken.insert(module.source.name().to_string()) {
+                            errors.extend(module.load_diagnostics());
+                        }
                     } else {
                         let suggestion = noeta_diagnostics::closest(
                             &path.join("."),
                             import_targets.iter().map(String::as_str),
                         );
-                        errors.push(unknown_module_error(entry, path, name, suggestion));
+                        errors.push(unknown_module_error(
+                            entry,
+                            path,
+                            name,
+                            suggestion,
+                            &unattributable,
+                        ));
                     }
                 }
                 Resolution::Private => {
@@ -1453,11 +1620,15 @@ fn import_error(
 /// linked workspace — a typo'd or missing sibling/dependency module (`use App.Modles.User`). Only
 /// raised in a complete link (the linker sees the whole pool); a single-file check never runs the
 /// linker, so an isolated file's forward references stay lenient.
+/// `unparseable` are broken modules whose own `namespace` could not be recovered, so the linker
+/// cannot tell whether one of them *is* this module; naming them keeps the reader from concluding
+/// the module does not exist when it does and merely does not parse.
 fn unknown_module_error(
     entry: &Source,
     path: &[String],
     name: &UseName,
     suggestion: Option<&str>,
+    unparseable: &[&str],
 ) -> LoadDiagnostic {
     let namespace = path.join(".");
     let mut diagnostic = Diagnostic::error(
@@ -1468,10 +1639,41 @@ fn unknown_module_error(
     if let Some(s) = suggestion {
         diagnostic.help(format!("did you mean `{s}`?"));
     }
+    if !unparseable.is_empty() {
+        diagnostic.help(format!(
+            "these files failed to parse, so the modules they declare are not loaded: {}",
+            unparseable.join(", ")
+        ));
+    }
     LoadDiagnostic {
         source: entry.clone(),
         diagnostic,
     }
+}
+
+/// The broken module that declares the namespace a `use <path>.<name>` names — either exactly
+/// (`path`, an item import) or as `path` + `name` (a whole-module import), mirroring [`resolve`] and
+/// [`module_with_namespace`]. `None` when no broken module accounts for the import, which is when
+/// "no module" is the honest answer.
+///
+/// **THE** matching rule, public and iterator-shaped because two layers ask the same question and
+/// must not answer it differently: the linker, deciding whether to report a parse error in place of
+/// an E0019, and the IDE (`noeta_ide`), explaining an import at the *consumer's* own span. A module
+/// whose namespace could not be recovered (`namespace: None`) matches nothing — it cannot be shown
+/// to be the module in question.
+pub fn broken_module_for<'b>(
+    broken: impl IntoIterator<Item = &'b BrokenModule>,
+    path: &[String],
+    name: &str,
+) -> Option<&'b BrokenModule> {
+    broken.into_iter().find(|m| {
+        m.namespace.as_deref().is_some_and(|ns| {
+            ns == path
+                || (ns.len() == path.len() + 1
+                    && ns[..path.len()] == *path
+                    && ns.last().is_some_and(|last| last == name))
+        })
+    })
 }
 
 /// Build the `E0020` diagnostic for an import whose name collides with another top-level name in
@@ -1626,7 +1828,7 @@ mod tests {
             root: "a".to_string(),
             modules: vec![module(
                 "a.noe",
-                "namespace a;\npub fn ay() -> int {\n  1\n}\n",
+                "namespace a;\npub fn ay(): int {\n  1\n}\n",
             )],
             dep_renames: Default::default(),
             native: false,
@@ -1637,7 +1839,7 @@ mod tests {
             root: "b".to_string(),
             modules: vec![module(
                 "b.noe",
-                "namespace b;\npub fn bee() -> int {\n  2\n}\n",
+                "namespace b;\npub fn bee(): int {\n  2\n}\n",
             )],
             dep_renames: Default::default(),
             native: false,
@@ -1781,6 +1983,249 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, Stmt::Use { path, .. } if path == &["imgfx".to_string()])),
             "the declared native import `use imgfx.fx` should be retained"
+        );
+    }
+
+    // --- broken modules surface their own parse errors (the "no module" cascade) ---------------
+
+    /// A dependency package whose `broken.noe` has a syntax error, plus a clean sibling module.
+    fn dep_with_broken_module() -> DepPackage {
+        DepPackage {
+            key: "para".to_string(),
+            root: "para".to_string(),
+            modules: vec![
+                module(
+                    "pkg/thing.noe",
+                    "namespace para.thing;\npub fn greet(): string { return \"hi\"; }\n",
+                ),
+                module(
+                    "pkg/broken.noe",
+                    "namespace para.thing.broken;\npub fn Something(): string {\n  let ] = ;\n}\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+        }
+    }
+
+    #[test]
+    fn a_dependency_module_that_does_not_parse_reports_its_own_parse_error() {
+        // THE wart: a syntax error inside a dependency package used to be swallowed — the module
+        // simply never reached the link pool — and the consumer was handed
+        // `[E0019] no module `para.thing.broken` in this project` at its own `use`, sending it to
+        // inspect its import and the package's naming while the real fault sat unreported in a file
+        // it was never told about. The parse error must be the diagnostic, attributed to the
+        // offending FILE, and the E0019 cascade must not be printed alongside it.
+        let entry = "use para.thing.broken.Something;\necho Something();\n";
+        let errors = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep_with_broken_module()),
+        )
+        .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.source.name() == "pkg/broken.noe"),
+            "every diagnostic must be attributed to the broken file, got {errors:?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport),
+            "the misleading `no module` cascade must be suppressed, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_broken_dependency_module_fails_even_when_nothing_imports_it() {
+        // A package is a closed unit that must be internally valid, and its files are never anyone's
+        // entry — so this is the only pass that will ever look at them. "Skip it quietly" means the
+        // fault is reported nowhere at all, however long the file stays broken.
+        let entry = "use para.thing.greet;\necho greet();\n";
+        let errors = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep_with_broken_module()),
+        )
+        .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.source.name() == "pkg/broken.noe"),
+            "expected the unreferenced broken module's parse error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_native_package_contributing_no_modules_is_still_retained() {
+        // The guard on the fix above: a NATIVE package's modules are *legitimately* absent from the
+        // link pool (they live in its Rust extension, composed downstream) — that is not a broken
+        // module, and a `use` under its key must still be retained, never flagged. A pure-Noeta
+        // package with a broken file and a native package with no files must not be confused.
+        let native = DepPackage {
+            key: "imgfx".to_string(),
+            root: "imgfx".to_string(),
+            modules: Vec::new(),
+            dep_renames: Default::default(),
+            native: true,
+            edition: noeta_lexer::Edition::DEFAULT,
+        };
+        let entry = "use imgfx.fx;\necho fx.double(21);\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&native),
+        )
+        .expect("a native package's absent modules are not a parse failure");
+        assert!(
+            linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Use { path, .. } if path == &["imgfx".to_string()])),
+            "the native import must still be retained"
+        );
+    }
+
+    #[test]
+    fn a_broken_sibling_attributes_the_import_that_cascades_off_it() {
+        // The same wart in its intra-project shape. A broken *sibling* keeps the skip-and-continue
+        // policy (a lone script must not fail because an unrelated file in its directory is
+        // mid-edit), so it is only reported when something actually imports the namespace it
+        // declares — and then it is the parse error, at the sibling's own span, not the E0019.
+        let entry =
+            "namespace App.Orders;\nuse App.Models.User;\npub fn make(): ?User { return none; }\n";
+        let sibling = module(
+            "models.noe",
+            "namespace App.Models;\npub struct User { let ] = ; }\n",
+        );
+        let errors = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.source.name() == "models.noe"),
+            "expected the broken sibling's own parse errors, got {errors:?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport),
+            "the `no module `App.Models`` cascade must be suppressed, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn an_unimported_broken_sibling_does_not_fail_the_entry() {
+        // The other half of the sibling policy: a file the entry never imports must not break it.
+        // (`noeta check` visits that file as its own entry and reports it there.)
+        let entry = "namespace App.Orders;\necho 1;\n";
+        let sibling = module("scratch.noe", "namespace App.Scratch;\nlet ] = ;\n");
+        link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .expect("an unimported broken sibling is not the entry's error");
+    }
+
+    #[test]
+    fn attribution_survives_a_syntax_error_before_the_namespace() {
+        // Reading the namespace off the *tokens* rather than the ast buys this: even when the
+        // syntax error comes first, the `namespace` line is still a token sequence, so the broken
+        // file is still identified as the module the consumer wanted.
+        let entry =
+            "namespace App.Orders;\nuse App.Models.User;\npub fn make(): ?User { return none; }\n";
+        let sibling = module("models.noe", "let ] = ;\nnamespace App.Models;\n");
+        let errors = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .unwrap_err();
+        assert!(
+            errors.iter().all(|e| e.source.name() == "models.noe"),
+            "expected the broken sibling's own parse errors, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_broken_module_that_cannot_name_itself_is_still_pointed_at() {
+        // When not even the tokens yield a namespace — here an unterminated block comment swallows
+        // the whole file — the linker cannot tell which module the broken file *would* have been,
+        // so "no module" is the honest answer. The file is named on the diagnostic all the same, so
+        // the reader is never left concluding the module does not exist when it does and merely
+        // does not parse.
+        let entry =
+            "namespace App.Orders;\nuse App.Models.User;\npub fn make(): ?User { return none; }\n";
+        let sibling = module(
+            "models.noe",
+            "/* namespace App.Models;\npub struct User {}\n",
+        );
+        let errors = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .unwrap_err();
+        let err = errors
+            .iter()
+            .find(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport)
+            .unwrap_or_else(|| panic!("expected E0019 for `App.Models`, got {errors:?}"));
+        assert!(
+            err.diagnostic
+                .help
+                .as_deref()
+                .is_some_and(|h| h.contains("models.noe")),
+            "the E0019 should name the file that failed to parse, got {:?}",
+            err.diagnostic.help
+        );
+    }
+
+    #[test]
+    fn namespace_is_recovered_from_tokens_when_the_ast_is_not() {
+        // The mechanism the attribution rests on: the namespace comes off the TOKEN stream, never
+        // the ast.
+        //
+        // This originally asserted the ast could name nothing, because a hard parse failure
+        // produced no output at all. That premise stopped holding when statement recovery learned
+        // to resync past a failed statement's own brace group — this fixture now recovers far
+        // enough to salvage its `namespace` statement. The token path is not thereby redundant:
+        // recovery is best-effort and salvages nothing when the fault PRECEDES the `namespace`
+        // line (see `attribution_survives_an_error_before_the_namespace`), so attribution must
+        // never depend on how much of the ast happened to survive. What is pinned here is the
+        // token path's answer, which is the one attribution actually uses.
+        let text = "namespace App.Models.Deep;\npub struct User { let ] = ; }\n";
+        let source = Source::new(SourceId(0), "models.noe", text);
+        let lexed = noeta_lexer::lex_in(
+            &source,
+            noeta_lexer::Edition::DEFAULT,
+            &noeta_lexer::TextTiers::default(),
+        );
+        let parsed = noeta_parser::parse_in(
+            &source,
+            &lexed.tokens,
+            noeta_lexer::Edition::DEFAULT,
+            &noeta_lexer::TextTiers::default(),
+        );
+        assert!(!parsed.diagnostics.is_empty(), "the fixture must not parse");
+        assert_eq!(
+            namespace_from_tokens(&source, &lexed.tokens),
+            Some(vec![
+                "App".to_string(),
+                "Models".to_string(),
+                "Deep".to_string()
+            ])
         );
     }
 

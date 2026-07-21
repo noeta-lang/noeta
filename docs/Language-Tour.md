@@ -132,6 +132,17 @@ echo greet("Ada")           // Hello, Ada!
 echo greet("Ada", "Hi")     // Hi, Ada!
 ```
 
+An argument can **name** the parameter it fills, in any order — which also lets a call skip a defaulted parameter and supply a later one:
+
+```noeta
+fn f(a: int, b: int = 2, c: int = 3): int { return a * 100 + b * 10 + c }
+
+echo f(b: 5, a: 1)   // 153
+echo f(1, c: 9)      // 129 — `b` still defaults
+```
+
+See [Functions and Closures](Functions-and-Closures#named-arguments).
+
 Return several values with a **tuple**:
 
 ```noeta

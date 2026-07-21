@@ -1,0 +1,45 @@
+// A standalone `impl`'s method body gets the SAME context an in-body method gets (body-coverage
+// arc) — now that those bodies are checked at all, this pins what they are checked *against*.
+//
+// Three things must hold, or checking them would reject code that legitimately works:
+//   * `self` is bound to the target type, so `self.field` resolves and types;
+//   * the target's own PRIVATE fields are visible (the type-scoped privacy rule — a class's fields
+//     default private, and an impl written beside the class is still the type's own code);
+//   * the target's generic parameters are in scope WITH their bounds, so a body may call what a
+//     bound guarantees.
+// expect: stdout "counter=7"
+// expect: stdout "9"
+// expect: exit 0
+trait Describe { fn describe(): string }
+trait Peek { fn peek(): string }
+
+// `count` is private (no `pub`), and the impl below reads it through `self`.
+class Counter {
+    count: int
+    fn new(count: int): Counter { return Counter { count: count } }
+}
+
+impl Describe for Counter {
+    fn describe(): string {
+        return "counter=${self.count}"
+    }
+}
+
+echo Counter.new(7).describe()
+
+// A generic target. A standalone impl names the target bare (`for Holder`, never `for Holder<int>`
+// — that is not the grammar), so the body sees the CLASS's own parameters: `T` is a legal referent
+// here only because the target's parameters are put back in scope before its bodies are checked.
+class Holder<T> {
+    item: T
+    fn new(item: T): Holder<T> { return Holder { item: item } }
+}
+
+impl Peek for Holder {
+    fn peek(): string {
+        held: T = self.item
+        return "${held}"
+    }
+}
+
+echo Holder.new(9).peek()

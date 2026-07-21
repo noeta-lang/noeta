@@ -144,6 +144,7 @@ impl Checker {
             (type_name.to_string(), m.name.clone()),
             FnSig {
                 params,
+                param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                 ret,
                 required: required_params(&m.params),
                 generic,
@@ -233,6 +234,10 @@ impl Checker {
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
+                    self.symbols
+                        .type_params
+                        .insert(r.name.clone(), r.type_params.clone());
                     // Record each struct method's signature + instance classification, exactly as
                     // for a class (this closed a long-standing gap: struct associated calls —
                     // `B.new(1)` — previously typed as a hole because struct methods were never
@@ -337,6 +342,10 @@ impl Checker {
                         c.name.clone(),
                         c.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
+                    self.symbols
+                        .type_params
+                        .insert(c.name.clone(), c.type_params.clone());
                     let methods: Vec<&FnDecl> = c
                         .methods
                         .iter()
@@ -393,6 +402,10 @@ impl Checker {
                         e.name.clone(),
                         e.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
+                    self.symbols
+                        .type_params
+                        .insert(e.name.clone(), e.type_params.clone());
                     // Record each enum method's signature (inherent + impl-block, the unified body —
                     // object-model slice 3) under `(Enum, method)`, exactly like a class's, so an
                     // instance call `status.label()` and an associated call `Status.parse(s)` resolve
@@ -459,6 +472,7 @@ impl Checker {
                         f.name.clone(),
                         FnSig {
                             params,
+                            param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                             ret,
                             required: required_params(&f.params),
                             generic,
@@ -744,6 +758,7 @@ impl Checker {
             key,
             FnSig {
                 params,
+                param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                 ret,
                 required: required_params(&m.params),
                 generic: None,
@@ -1018,15 +1033,15 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         }
         Expr::Call { callee, args, .. } => {
             collect_nested_fns_in_expr(callee, out);
-            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+            noeta_ast::CallArg::values(args).for_each(|a| collect_nested_fns_in_expr(a, out));
         }
         Expr::TypedModuleCall { recv, args, .. } | Expr::TypedMethodCall { recv, args, .. } => {
             collect_nested_fns_in_expr(recv, out);
-            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+            noeta_ast::CallArg::values(args).for_each(|a| collect_nested_fns_in_expr(a, out));
         }
         // A turbofish call (`f::<T>(args)`) carries only a name and arguments — walk the args.
         Expr::TypedCall { args, .. } => {
-            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+            noeta_ast::CallArg::values(args).for_each(|a| collect_nested_fns_in_expr(a, out));
         }
         Expr::Invoke {
             recv, name, args, ..

@@ -75,6 +75,7 @@ use noeta_edition::{Edition, EditionMap};
 use noeta_span::Span;
 use noeta_types::{BuiltinTrait, Type};
 
+mod args;
 mod attributes;
 mod collect;
 mod decls;
@@ -563,6 +564,24 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
     check_all(program).diagnostics
 }
 
+/// Check `program` and report every body the checker **never entered** — the body-coverage ledger's
+/// result as a value, for tests and tooling that want to assert the property rather than rely on the
+/// `debug_assert` in [`Checker::verify_body_coverage`] firing.
+///
+/// Empty means every construct that owns a body was type-checked. A non-empty result is a defect in
+/// the *checker*, not in `program`.
+pub fn unchecked_bodies_for(program: &Program) -> Vec<noeta_ast::bodies::BodySite> {
+    let mut checker = Checker {
+        ..Checker::default()
+    };
+    checker.register_prelude();
+    checker.collect_imports(program);
+    checker.collect(program);
+    let mut env: Env = vec![HashMap::new()];
+    checker.check_program_in(program, &mut env);
+    checker.unchecked_bodies(program)
+}
+
 /// Resolve the precise static type of every `type_of(value)` whose operand is concretely typed,
 /// keyed by the `Expr::TypeOf` span — the input both backends use to bake a full-fidelity `Type`
 /// constant (`type_of([1])` ⇒ `Type.List(Type.Int)`) instead of the erased runtime head constructor
@@ -755,6 +774,13 @@ struct Symbols {
     functions: HashMap<String, FnSig>,
     /// Records/classes: name → declared fields (name, type).
     records: HashMap<String, Vec<(String, Type)>>,
+    /// Declared type → its generic parameters **with their bounds**.
+    ///
+    /// [`Self::generic_types`] keeps only the parameter *names*, which is all erasure needs. Type-
+    /// checking a standalone `impl`'s method bodies needs the bounds too — a body may call a method
+    /// the bound provides (`<T: Comparable>` → `t.compare(u)`) — so that a body written outside its
+    /// type's own declaration sees exactly what one written inside it sees.
+    type_params: HashMap<String, Vec<TypeParam>>,
     /// Class name → the set of its fields declared `mut`. Drives the `x.f = v` field-assignment
     /// check (Phase 5.2): only a `mut` field may be assigned in place (else E0033). Records never
     /// have `mut` fields, so they never appear here.
@@ -1071,6 +1097,15 @@ struct Checker {
     /// arm. Cleared unconditionally after the synthesis returns; sub-expression calls have
     /// different spans, so it can never mis-seed a nested call.
     pending_member_ret: Option<(Span, Type)>,
+    /// The span of every declaration body this run actually **entered** — the checker's half of the
+    /// body ledger ([`noeta_ast::bodies`]). Compared against [`noeta_ast::bodies::body_sites`] once
+    /// the program is checked: a site that was enumerated but never visited is a hole in the
+    /// checker, and is reported as one rather than passing in silence.
+    ///
+    /// This exists because a standalone `impl Trait for T`'s method bodies were never checked at
+    /// all — not checked wrongly, never *visited* — and nothing could have told us. Coverage is now
+    /// a thing the checker proves about itself on every run.
+    visited_bodies: HashSet<Span>,
     diags: Vec<Diagnostic>,
 }
 
@@ -1358,6 +1393,43 @@ impl Checker {
         }
         self.coloring.current_async = false;
         self.check_unrefined_muts(&program.stmts);
+        self.verify_body_coverage(program);
+    }
+
+    /// **The body-coverage gate.** Assert that every body-owning site in the program was actually
+    /// entered ([`noeta_ast::bodies`]).
+    ///
+    /// A checker bug that makes it *wrong* about a body shows up as a bad diagnostic, and a test
+    /// catches it. A checker bug that makes it never *look* at a body shows up as nothing at all —
+    /// which is how standalone `impl` method bodies went unchecked indefinitely. This closes that
+    /// class: coverage is a property the checker proves about itself on every single run, so a
+    /// construct added later that nobody wires up fails loudly instead of silently type-checking to
+    /// `ok`.
+    ///
+    /// It is a `debug_assert`: every test, corpus run, and dev build pays for it and gets the
+    /// guarantee, while a release compiler does no work. A discrepancy is a *compiler* defect, not
+    /// a user error, so it panics rather than emitting a diagnostic — there is no action a user
+    /// could take.
+    fn verify_body_coverage(&self, program: &Program) {
+        debug_assert!(
+            self.unchecked_bodies(program).is_empty(),
+            "the checker never visited these bodies, so their contents were never type-checked \
+             — every construct that owns a body must be wired into the checker:\n{}",
+            self.unchecked_bodies(program)
+                .iter()
+                .map(|s| format!("  {} ({:?}) at {:?}", s.describe(), s.kind, s.span))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// The body sites this run enumerated but never entered. Empty on a correct run; see
+    /// [`Self::verify_body_coverage`]. Exposed for the coverage gate that sweeps the corpus.
+    fn unchecked_bodies(&self, program: &Program) -> Vec<noeta_ast::bodies::BodySite> {
+        noeta_ast::bodies::body_sites(program)
+            .into_iter()
+            .filter(|site| !self.visited_bodies.contains(&site.span))
+            .collect()
     }
 
     /// Flag a `mut` binding to a context-free polymorphic literal (`mut x = []`/`{}`/`none`/
@@ -1913,10 +1985,10 @@ impl Checker {
             Stmt::Impl(decl) => {
                 let saved = self.coloring.in_merged_decl;
                 self.coloring.in_merged_decl = saved || decl.target.contains('.');
-                self.check_standalone_impl(decl);
+                self.check_standalone_impl(decl, env);
                 self.coloring.in_merged_decl = saved;
             }
-            Stmt::Trait(decl) => self.check_trait_decl(decl),
+            Stmt::Trait(decl) => self.check_trait_decl(decl, env),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
             // A dev-tier block reaching the checker is an *inactive* residual (object-model
             // slice 6): the strip pass already spliced any *active* block's items into the
@@ -2071,13 +2143,17 @@ impl Checker {
 
     /// Check a function (or method) body. `extra` seeds the body scope with additional bindings
     /// (a class's fields, when checking a method).
-    fn check_fn(
+    pub(crate) fn check_fn(
         &mut self,
         decl: &FnDecl,
         env: &mut Env,
         extra: &[(String, Type)],
         target: TargetKind,
     ) {
+        // The checker's half of the body ledger: this run has entered this body. Recorded at the
+        // one place every function/method body funnels through, so it cannot drift from what is
+        // actually checked.
+        self.visited_bodies.insert(decl.name_span);
         self.require_signature(decl);
         // A function/method's `#[...]` attributes are validated like a type's: each names an
         // `Attribute` capability (E0029) and constructs it from its literal args (E0009/E0007/E0005).
