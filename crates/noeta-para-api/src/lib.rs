@@ -31,7 +31,7 @@
 //! whole answer to output scope.
 
 use noeta_ext_abi::registry::{
-    DirectiveCtx, ExtDirective, ExtFn, ExtModule, Expansion, Extension, NativeOut, NativeValue,
+    DirectiveCtx, Expansion, ExtDirective, ExtFn, ExtModule, Extension, NativeOut, NativeValue,
     RetTy, SigType, TierSite,
 };
 use noeta_ext_abi::{Host, StdError};
@@ -71,8 +71,10 @@ fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, String> {
     // *zero* is also legal under that contract, and `args[0]` would panic. A hook must still handle
     // the shapes its declaration permits; it is only relieved of the ones it forbids.
     let Some(arg) = ctx.args.first() else {
-        return Err("needs the path to an OpenAPI document, as in `@openapi(\"petstore.json\")`"
-            .to_string());
+        return Err(
+            "needs the path to an OpenAPI document, as in `@openapi(\"petstore.json\")`"
+                .to_string(),
+        );
     };
 
     let path = std::path::Path::new(&ctx.source_dir).join(arg);
@@ -93,8 +95,8 @@ fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, String> {
         ));
     }
 
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("could not read `{display}`: {e}"))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("could not read `{display}`: {e}"))?;
     let spec = spec::parse(&text).map_err(|e| format!("`{arg}`: {e}"))?;
 
     Ok(Expansion {

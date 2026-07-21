@@ -85,7 +85,9 @@ const METHODS: [&str; 7] = ["get", "put", "post", "delete", "options", "head", "
 /// serde type error naming an internal path.
 pub fn parse(text: &str) -> Result<Spec, String> {
     let doc: Value = serde_json::from_str(text).map_err(|e| {
-        format!("the spec is not valid JSON: {e} (only JSON specs are read — convert a YAML spec first)")
+        format!(
+            "the spec is not valid JSON: {e} (only JSON specs are read — convert a YAML spec first)"
+        )
     })?;
 
     let base_url = doc
@@ -106,7 +108,9 @@ pub fn parse(text: &str) -> Result<Spec, String> {
     // generated methods come out in document order — a spec edit produces a reviewable diff rather
     // than a reshuffle.
     for (path, item) in paths {
-        let Some(item) = item.as_object() else { continue };
+        let Some(item) = item.as_object() else {
+            continue;
+        };
         // Parameters declared on the path item are shared by every operation under it, so they are
         // read once and prepended to each. Missing this is the classic OpenAPI generator bug: the
         // `{id}` declared once at the path level vanishes from every method that needs it.
@@ -405,7 +409,11 @@ mod tests {
     #[test]
     fn a_document_that_cannot_generate_a_client_says_which_way_it_failed() {
         assert!(parse("not json").unwrap_err().contains("not valid JSON"));
-        assert!(parse(r#"{"openapi":"3.0.0"}"#).unwrap_err().contains("`paths`"));
+        assert!(
+            parse(r#"{"openapi":"3.0.0"}"#)
+                .unwrap_err()
+                .contains("`paths`")
+        );
         assert!(
             parse(r#"{"paths":{}}"#)
                 .unwrap_err()
