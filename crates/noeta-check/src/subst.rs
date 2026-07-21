@@ -758,6 +758,6 @@ pub(crate) fn param_type(p: &Param, xt: &HashMap<String, String>) -> Type {
 pub(crate) fn required_params(params: &[Param]) -> usize {
     params
         .iter()
-        .position(|p| p.default.is_some())
+        .position(|p| p.is_optional())
         .unwrap_or(params.len())
 }

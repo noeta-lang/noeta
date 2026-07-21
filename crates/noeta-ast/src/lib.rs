@@ -1321,6 +1321,23 @@ pub struct Param {
     pub span: Span,
 }
 
+impl Param {
+    /// Is this parameter **optional** — may a well-formed call leave it unsupplied?
+    ///
+    /// This is the declaration-side half of the calling convention, and the counterpart of
+    /// `noeta_bytecode::is_param_filled`, which answers the call-site half ("did *this* call supply
+    /// parameter `p`?") from an argument count and a supplied mask. The two meet at the checker's
+    /// arity rule: a call is well-formed only if every parameter it leaves unfilled is optional, so
+    /// an unfilled parameter always has a default thunk to run. Naming the declaration side here
+    /// keeps the pair legible — and keeps `required_params`, the trailing-only `E0026` check, and
+    /// the reflected `ParamInfo.optional` reading the same predicate rather than three independent
+    /// spellings of `default.is_some()` that can drift apart if optionality ever grows a second
+    /// source (a `?`-marked parameter, say).
+    pub fn is_optional(&self) -> bool {
+        self.default.is_some()
+    }
+}
+
 /// A type reference in source (e.g. `int`, `List<Item>`, `Result<Order, OrderError>`,
 /// `?User`). Parsed and retained for M1's type checker; M0 does not interpret it.
 ///
@@ -1613,7 +1630,7 @@ pub enum Expr {
     /// `Semantic` variant; bare `roles_of()` (`ty = None`) returns the whole index.
     RolesOf { ty: Option<TypeRef>, span: Span },
     /// The reflection query `params_of(target)` — a callable's declared parameter list, returned as a
-    /// `List<ParamInfo>` (each `{ name: string, type: Type }`). `target` is a runtime `string`
+    /// `List<ParamInfo>` (each `{ name: string, type: Type, optional: bool }`). `target` is a runtime `string`
     /// naming a function or method (a bare fn name, or a qualified `Type.method`), the same target
     /// keying the attribute manifest. Built from the same compiler-built parameter index both
     /// backends read; surfaces a controller method's declared parameter types for dependency injection.

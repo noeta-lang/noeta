@@ -912,15 +912,20 @@ impl<'m> Vm<'m> {
     }
 
     /// Materialize a callable's declared parameter list from the module's reflection info into a
-    /// `List<ParamInfo>` — each `{ name: string, type: Type }`. `type` is the prelude `Type` ADT
-    /// value built from the parameter's declared type (the same `build_type_value` `type_of` uses).
-    /// The `ParamInfo` shape is built fresh; because shape equality is structural, it matches the
-    /// tree-walker's by construction. An unknown target yields an empty list.
+    /// `List<ParamInfo>` — each `{ name: string, type: Type, optional: bool }`. `type` is the
+    /// prelude `Type` ADT value built from the parameter's declared type (the same
+    /// `build_type_value` `type_of` uses), and `optional` reports whether the parameter declared a
+    /// default. The `ParamInfo` shape is built fresh; because shape equality is structural, it
+    /// matches the tree-walker's by construction. An unknown target yields an empty list.
     pub(crate) fn materialize_params(&self, target: &str) -> Value {
         let info_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::PARAM_INFO,
-            vec!["name".to_string(), "type".to_string()],
+            vec![
+                "name".to_string(),
+                "type".to_string(),
+                "optional".to_string(),
+            ],
         ));
         let items: Vec<Value> = self
             .module
@@ -930,7 +935,11 @@ impl<'m> Vm<'m> {
             .map(|p| {
                 Value::object(
                     info_shape,
-                    vec![Value::string(&p.name), build_type_value(&p.ty)],
+                    vec![
+                        Value::string(&p.name),
+                        build_type_value(&p.ty),
+                        Value::bool(p.optional),
+                    ],
                 )
             })
             .collect();
