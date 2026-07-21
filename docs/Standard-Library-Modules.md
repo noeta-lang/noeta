@@ -650,8 +650,7 @@ all on Noeta's own async runtime. A handler that errors becomes a `500`; the ser
 | `server.response` | `response(status: int, body?: string\|bytes, headers?: Map<string, string>) -> Response` | The reply builder a handler uses. |
 | `Request` methods | `method() -> string`, `path() -> string`, `query(name) -> string?`, `header(name) -> string?` (case-insensitive), `body() -> string`, `body_bytes() -> bytes` | Read the inbound request. |
 | `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). **Replaces** any existing header of that name. |
-| `Response.with_added_header` | `with_added_header(name, value) -> Response` | The **append** twin, for repeatable headers (`Set-Cookie`, `Vary`, `Link`). |
-| `Response.headers_all` | `headers_all(name) -> List<string>` | Every value of a repeatable header, in order. `header` sees only the first. |
+| `Response.headers_all` | `headers_all(name) -> List<string>` | Every value of a repeated header, in order. `header` sees only the first. |
 
 #### Cookies
 
@@ -661,9 +660,19 @@ want for a session.
 
 Two properties are worth knowing, because both are places cookie code usually goes wrong:
 
-**Setting two cookies works.** `Set-Cookie` has no comma-joined form (a cookie's `Expires` attribute
-contains a comma), so two cookies must be two headers. `with_cookie` appends; had it been built on
-`with_header`, the second cookie would silently discard the first.
+**Setting two cookies works.** `Set-Cookie` is the one header RFC 7230 exempts from comma-folding — a
+cookie's `Expires` attribute contains a comma, so the fold would be ambiguous — which means two
+cookies must be two headers. `with_header` could not express that, since it replaces.
+
+`with_cookie` replaces per **cookie name**, not per header: two different cookies both survive, and
+setting the same one twice does what you meant rather than emitting a duplicate the browser has to
+break a tie on. So the one rule `with_X` sets `X` holds across the whole type, and the multi-header
+shape stays an implementation detail.
+
+There is deliberately **no generic multi-value write** to match `headers_all`'s multi-value read. The
+asymmetry tracks who controls the bytes: a peer may repeat any header it likes and you must be able
+to see all of them, whereas everything *you* emit can be comma-joined — except `Set-Cookie`, which
+has its own door.
 
 **An invalid cookie cannot be built.** `server.cookie` validates the name and value and *errors*
 rather than escaping. A cookie value is derived from user input more reliably than any other header,
@@ -675,7 +684,7 @@ UTF-8 text — before it goes in; base64url is the usual choice.
 | Type / function | Signature | Notes |
 |---|---|---|
 | `server.cookie` | `cookie(name: string, value: string) -> Cookie` | Errors on a name or value outside RFC 6265. |
-| `Response.with_cookie` | `with_cookie(cookie: Cookie) -> Response` | Appends a `Set-Cookie` header — accumulates, never replaces. |
+| `Response.with_cookie` | `with_cookie(cookie: Cookie) -> Response` | Sets a cookie. Replaces one of the same name; otherwise adds. |
 | `Request.cookies` | `cookies() -> Map<string, string>` | Every cookie the client sent. Empty when the header is absent. |
 | `Request.cookie` | `cookie(name) -> string?` | One cookie by name. Cookie names are case-**sensitive**, unlike header names. |
 | `Cookie` builders | `with_value(v)`, `with_path(p)`, `with_domain(d)`, `with_max_age(secs: int)`, `with_http_only(b)`, `with_secure(b)`, `with_same_site("strict"\|"lax"\|"none")` | Copy-modify, like `Response.with_header`. |

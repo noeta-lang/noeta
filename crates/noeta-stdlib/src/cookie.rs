@@ -292,6 +292,21 @@ impl Cookie {
     }
 }
 
+/// Whether a `Set-Cookie` header value sets the cookie named `name`.
+///
+/// The name is everything before the first `=`, which is exact rather than approximate because
+/// [`Cookie::new`] has already refused any name containing one. Cookie names are case-**sensitive**
+/// (RFC 6265), unlike the header names around them.
+///
+/// This is what lets `Response.with_cookie` replace per *cookie* rather than per header: setting
+/// `sid` twice on one response is a bug in every case, and the alternative — emitting both and
+/// letting the browser pick — makes the outcome depend on a tie-break the author never saw.
+pub fn header_sets_cookie_named(header_value: &str, name: &str) -> bool {
+    header_value
+        .split_once('=')
+        .is_some_and(|(candidate, _)| candidate.trim() == name)
+}
+
 /// Parse a `Cookie:` request header into its pairs, in header order.
 ///
 /// Deliberately lenient where the request side has to be: a browser sends what it was given, and a
@@ -401,6 +416,18 @@ mod tests {
             "clearing Secure would make the browser drop it silently"
         );
         assert!(none.to_header().contains("SameSite=None; Secure"));
+    }
+
+    #[test]
+    fn a_set_cookie_header_is_matched_by_cookie_name() {
+        let header = Cookie::new("sid", "abc").expect("valid").to_header();
+        assert!(header_sets_cookie_named(&header, "sid"));
+        // Case-sensitive (RFC 6265), unlike the header name around it.
+        assert!(!header_sets_cookie_named(&header, "SID"));
+        // A prefix must not match, or setting `s` would silently drop `sid`.
+        assert!(!header_sets_cookie_named(&header, "s"));
+        // The attributes trailing the value must not be mistaken for a name.
+        assert!(!header_sets_cookie_named(&header, "Path"));
     }
 
     #[test]

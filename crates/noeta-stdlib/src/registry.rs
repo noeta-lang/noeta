@@ -2040,32 +2040,25 @@ const RESPONSE_METHODS: &[ExtFn] = &[
         params: &[Str, Str],
         ret: Concrete(RESPONSE_SIG),
     },
-    // The **append** twin of `with_header` (cookie arc C1). Separate rather than a mode flag,
-    // because the two are genuinely different operations and the choice is never incidental:
-    // `with_header` states "this is the value", `with_added_header` states "this is *a* value".
-    //
-    // It exists because some headers are legitimately repeatable and cannot be expressed any other
-    // way — `Set-Cookie` above all, which has no comma-joined form at all (a cookie's `Expires`
-    // attribute contains a comma), so two cookies *must* be two headers. `Vary`, `Link`, and
-    // `WWW-Authenticate` are the others. Replacing `with_header`'s semantics to cover this was the
-    // rejected alternative: para/api's `Header` middleware documents its dependence on
-    // last-writer-wins, and silently turning that into accumulation would have every layered
-    // header quietly duplicate.
-    ExtFn {
-        name: "with_added_header",
-        params: &[Str, Str],
-        ret: Concrete(RESPONSE_SIG),
-    },
-    // The read twin: `header` answers with the *first* match, which is a lossy question to ask of
-    // a repeatable header. Empty when absent, so a caller can iterate without testing first.
+    // Reading a repeatable header. Deliberately **asymmetric** with the write side, and the
+    // asymmetry tracks who controls the bytes: a peer may repeat any header it likes and you must
+    // be able to see all of them, whereas what *you* emit can always be comma-joined — except for
+    // `Set-Cookie`, which gets its own door below. So there is a generic multi-value read and no
+    // generic multi-value write. `header` answers with the first match only, which is a lossy
+    // question to ask of a repeated header. Empty when absent.
     ExtFn {
         name: "headers_all",
         params: &[Str],
         ret: Concrete(SigType::List(&Str)),
     },
-    // Attach a cookie — `with_added_header("Set-Cookie", c.to_header())`, named. The convenience
-    // spelling is the point: it is the one that is correct by default, so nobody reaches for
-    // `with_header` and loses the cookie they set a moment earlier.
+    // Set a cookie — the whole write side of repeatable headers, because `Set-Cookie` is the only
+    // header RFC 7230 §3.2.2 exempts from comma-folding (a cookie's `Expires` attribute contains a
+    // comma, so the fold would be ambiguous). Two cookies must therefore be two headers.
+    //
+    // It replaces per **cookie name** rather than appending blindly, which keeps one rule across
+    // the whole type — `with_X` sets X — and leaves the multi-header shape an implementation
+    // detail no caller reasons about. A generic append was the rejected alternative: it would have
+    // been a second, subtly-different header operation existing to serve exactly one header.
     ExtFn {
         name: "with_cookie",
         params: &[COOKIE_SIG],
@@ -2181,15 +2174,6 @@ fn response_method_dispatch(
             next.headers.push((name, value));
             Ok(NativeOut::Extern(crate::ExternBox::new(next)))
         }
-        "with_added_header" => {
-            want_arity(method, args, 2)?;
-            let name = want_str(method, args, 0)?.to_string();
-            let value = want_str(method, args, 1)?.to_string();
-            // The `with_header` body without the `retain` — that one line is the whole difference.
-            let mut next = resp.clone();
-            next.headers.push((name, value));
-            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
-        }
         "headers_all" => {
             want_arity(method, args, 1)?;
             let name = want_str(method, args, 0)?;
@@ -2205,6 +2189,15 @@ fn response_method_dispatch(
             want_arity(method, args, 1)?;
             let cookie = want_cookie(method, args, 0)?;
             let mut next = resp.clone();
+            // Replace per **cookie**, not per header — the `with_header` rule ("this is the value
+            // of X") applied to the right X. A different cookie name appends and so becomes a
+            // second `Set-Cookie` header, which is what the wire format demands; the same name
+            // replaces, because setting one cookie twice in a response is a bug in every case.
+            // The multi-header shape is therefore an implementation detail no caller reasons about.
+            next.headers.retain(|(k, v)| {
+                !k.eq_ignore_ascii_case("set-cookie")
+                    || !crate::cookie::header_sets_cookie_named(v, &cookie.name)
+            });
             next.headers
                 .push(("set-cookie".to_string(), cookie.to_header()));
             Ok(NativeOut::Extern(crate::ExternBox::new(next)))
@@ -4187,20 +4180,15 @@ const RESPONSE_DOCS: &[(&str, &str)] = &[
         "A copy of the response with header `name: value` set.",
     ),
     (
-        "with_added_header",
-        "A copy of the response with `name: value` **appended**, keeping any existing header of \
-         the same name. For repeatable headers — `Set-Cookie` above all, which has no \
-         comma-joined form, so two cookies must be two headers — plus `Vary` and `Link`.",
-    ),
-    (
         "headers_all",
         "Every value of response header `name`, in order, or empty if absent. The multi-value \
          read `header` cannot express, since it answers with the first match only.",
     ),
     (
         "with_cookie",
-        "A copy of the response with a `Set-Cookie` header for `cookie` appended. The correct \
-         default: it accumulates, so setting a second cookie never discards the first.",
+        "A copy of the response setting `cookie`. Replaces any cookie of the same name, and \
+         otherwise adds one — so setting two different cookies keeps both, as `Set-Cookie` \
+         requires, while setting the same one twice does what you meant.",
     ),
     (
         "url",

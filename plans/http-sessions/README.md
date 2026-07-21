@@ -38,18 +38,32 @@ Three defects, closed:
 
 1. **No multi-value emit.** `Response.with_header` `retain`s away same-named headers before pushing,
    and `server.response`'s `headers` argument is a `Map`, so a key is unique by construction. There
-   was no way to emit two `Set-Cookie` headers — and `Set-Cookie` has no comma-joined form (the
-   `Expires` attribute contains a comma), so two cookies *must* be two headers.
-   Closed by `Response.with_added_header`, an **append** twin.
+   was no way to emit two `Set-Cookie` headers — and `Set-Cookie` is the one header RFC 7230 §3.2.2
+   exempts from comma-folding (the `Expires` attribute contains a comma), so two cookies *must* be
+   two headers. Closed by `Response.with_cookie`.
 
-   `with_header` was deliberately left alone. `para/api`'s `Header` middleware documents its
+   **A generic `with_added_header` was built first and then removed.** The justification for it —
+   "it generalizes past cookies to `Vary`, `Link`, `WWW-Authenticate`" — does not survive checking:
+   all three are comma-joinable lists. `Set-Cookie` is the sole exception in HTTP, so a general
+   append operation would have existed to serve exactly one header, which is the thing this repo
+   otherwise refuses to do (cf. the `[suggests]` row in `backlog.md`).
+
+   `with_cookie` therefore replaces per **cookie name** rather than appending. That keeps one rule
+   across the type — `with_X` sets `X` — and makes the multi-header shape an implementation detail
+   no caller reasons about: two different cookies both survive, and setting the same one twice does
+   what the author meant instead of emitting a duplicate the browser breaks a tie on.
+
+   `with_header` itself was left alone regardless. `para/api`'s `Header` middleware documents its
    dependence on last-writer-wins ("a per-request header set by an inner layer wins, because
    `with_header` replaces case-insensitively"); turning that into accumulation would have every
-   layered header quietly duplicate. Two operations, because the choice between them is never
-   incidental.
+   layered header quietly duplicate.
 
 2. **No multi-value read.** `header(name)` is a `.find` — first match only. Closed by
    `Response.headers_all(name) -> List<string>`.
+
+   The read side stays generic while the write side does not, and the asymmetry is the point: it
+   tracks **who controls the bytes**. A peer may repeat any header it likes and you must be able to
+   see all of them; everything you emit can be comma-joined except `Set-Cookie`.
 
 3. **No cookie codec.** Closed by a typed `Cookie` (`crates/noeta-stdlib/src/cookie.rs`) built by
    `server.cookie(name, value)`, attached by `Response.with_cookie`, and read back by
