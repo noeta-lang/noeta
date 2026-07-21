@@ -3607,6 +3607,32 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            Rvalue::TypedMethodCall {
+                recv,
+                method,
+                args,
+                recipe,
+                dynamic,
+                span,
+            } => {
+                let recv = self.atom_reg(recv)?;
+                let args = self.atom_regs(args)?;
+                let dynamic = match dynamic {
+                    Some(slot) => Some(self.atom_reg(slot)?),
+                    None => None,
+                };
+                let method_id = self.module.intern_name(method);
+                self.code.push(Op::TypedMethodCall {
+                    dst,
+                    recv,
+                    method: method_id,
+                    args,
+                    recipe: recipe.clone().map(Box::new),
+                    dynamic,
+                    span: *span,
+                });
+                Ok(())
+            }
             Rvalue::DecodeTyped { name, text, span } => {
                 // The router-facing runtime decode (L2.2 DI): load the type-name and JSON-text
                 // operands into registers and carry the `Result.Ok`/`Result.Err` shapes (as

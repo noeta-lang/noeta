@@ -353,20 +353,167 @@ and a program that only *calls out* never links the server — each `use` pulls 
 
 ### Client: `http.client`
 
-`use std.http.client` binds `client`. Each verb performs a request and returns a `Response`; the
-`*_async` twins return a `Future<Response>` for concurrent work.
+`use std.http.client` binds `client`. Each verb performs a request and returns a
+`Result<Response, HttpError>`; the `*_async` twins return a `Future<Result<Response, HttpError>>`
+for concurrent work.
 
 | Function | Signature | Notes |
 |---|---|---|
-| `get` / `head` / `delete` | `get(url: string, headers?: Map<string, string>) -> Response` | Bodyless verbs. |
-| `post` / `put` | `post(url: string, body: string\|bytes, headers?: Map<string, string>) -> Response` | Body-carrying. |
-| `query` | `query(url: string, body: string\|bytes, headers?: Map<string, string>) -> Response` | The HTTP QUERY method — a safe, idempotent request that carries a body (for complex reads a URL can't express). |
-| `request` | `request(method: string, url: string, headers?: Map<string, string>) -> Response` | Any other (bodyless) verb. |
-| `*_async` | `get_async(url, headers?) -> Future<Response>`, … | Async twin of every verb above; `.await` yields the `Response`. |
+| `get` / `head` / `delete` | `get(url: string, headers?: Map<string, string>) -> Result<Response, HttpError>` | Bodyless verbs. |
+| `post` / `put` | `post(url: string, body: string\|bytes, headers?: Map<string, string>) -> Result<Response, HttpError>` | Body-carrying. |
+| `query` | `query(url: string, body: string\|bytes, headers?: Map<string, string>) -> Result<Response, HttpError>` | The HTTP QUERY method — a safe, idempotent request that carries a body (for complex reads a URL can't express). |
+| `request` | `request(method: string, url: string, headers?: Map<string, string>) -> Result<Response, HttpError>` | Any other (bodyless) verb. |
+| `*_async` | `get_async(url, headers?) -> Future<Result<Response, HttpError>>`, … | Async twin of every verb above; `.await?` yields the `Response`. |
 
-Every verb takes an **optional** trailing `headers: Map<string, string>`. `Response` methods:
-`status() -> int`, `ok() -> bool` (2xx), `body() -> string`, `body_bytes() -> bytes`, and
-`header(name) -> string?` (case-insensitive).
+Every verb takes an **optional** trailing `headers: Map<string, string>`.
+
+#### Configured clients
+
+The verbs above are the **one-shot** door. When you talk to the same API repeatedly, bind the
+configuration once with `client.new(base_url?)` and spend it many times:
+
+```noeta ignore
+use std.http.client
+
+gh = client.new("https://api.github.com")
+    .header("accept", "application/vnd.github+json")
+    .bearer(env.get("GITHUB_TOKEN"))
+    .timeout(30_000)
+
+repo = gh.get("/repos/nsrosenqvist/noeta")?
+```
+
+A `Client` carries a base URL, headers applied to every request, an auth scheme, and a per-request
+deadline. Its verbs mirror the free functions exactly — same names, same optional trailing headers,
+same `Result<Response, HttpError>` — differing only in that the first argument is a **path**
+resolved against the base. An absolute target (one with a scheme) is used as-is, so following a
+`next` link back through a based client works.
+
+| Method | Returns | Notes |
+|---|---|---|
+| `header(name, value)` | `Client` | Applied to every request. |
+| `bearer(token)` | `Client` | `Authorization: Bearer <token>`. |
+| `basic(user, password)` | `Client` | HTTP Basic (RFC 7617). |
+| `timeout(ms)` | `Client` | Per-request deadline; exceeding it is an `HttpError` with `kind() == "timeout"`. |
+| `retry(max, base_ms?, on?)` | `Client` | Retry transient failures — see below. |
+| `retry_non_idempotent()` | `Client` | Extend retries to POST. |
+| `prepare(method, path, body?, headers?)` | `Request` | Build a request **without** performing it. |
+| `send(req)` | `Result<Response, HttpError>` | Perform an already-built request. |
+| `base_url()` | `string` | The configured base, or empty. |
+| `get` / `head` / `delete` / `post` / `put` / `query` / `request` | `Result<Response, HttpError>` | As the free verbs, but path-relative. |
+
+A `Client` is **immutable**: every configuration method returns a *new* client. So a derived client
+can never disturb the one it came from, and sharing a configured client across a program is safe by
+construction:
+
+```noeta ignore
+api = client.new("https://api.example.com").header("accept", "application/json")
+tracing = api.header("x-trace", request_id)   // `api` is unchanged
+```
+
+Header precedence is **call over client** — a per-request header replaces the client's same-named
+one (matched case-insensitively) rather than duplicating it, so a client-wide `accept` can be
+overridden for exactly one call.
+
+#### Retries
+
+```noeta ignore
+api = client.new("https://api.example.com").retry(3)              // defaults
+api = client.new("https://api.example.com").retry(3, 500)          // 500ms first backoff
+api = client.new("https://api.example.com").retry(3, 500, [429])   // only rate limits
+```
+
+`retry(max, base_ms?, on?)` retries two things: a **transient transport failure** (an `HttpError`
+whose `retryable()` is true — `timeout`, `dns`, `connect`) and any **status** in `on`, which
+defaults to `[429, 502, 503, 504]`. Backoff starts at `base_ms` (default 250) and doubles per
+attempt, capped at 30s. A server's own `Retry-After` header wins over the computed backoff — it
+knows its rate limit better than a curve does — but is capped too, so a broken `Retry-After:
+86400` cannot park your program for a day.
+
+Note what is *not* in the default status set: **500**. A generic server error is usually
+deterministic, and hammering it helps nobody. Name it explicitly if your API means something
+transient by it.
+
+**POST is not retried by default.** Retrying a request that may already have been applied can
+duplicate a side effect — a second charge, a second order — and a timeout is exactly the case where
+the client cannot tell whether the server processed it. Everything RFC 7231 defines as idempotent
+(GET, HEAD, PUT, DELETE, OPTIONS, TRACE) plus QUERY is retried freely; POST needs
+`retry_non_idempotent()`, which you should reach for only when the endpoint is safe to repeat or
+you send an idempotency key.
+
+Retries sleep on the **Clock** capability, not the thread — so under the deterministic sandbox a
+retrying program advances logical time instead of blocking, stays reproducible, and is covered by
+the conformance differential like any other code.
+
+#### Building and sending a request separately
+
+`prepare` builds a `Request` without performing it; `send` performs one. Between the two you can
+inspect or rewrite it with `Request`'s copy-modify builders:
+
+```noeta ignore
+req = api.prepare("get", "/users/1")
+resp = api.send(req.with_header("x-trace", request_id))?
+```
+
+This pair exists because it is the seam a **middleware** layer bottoms out in. `std.http`
+deliberately stops here: it never invokes user code. Middleware, mocking, and pagination live one
+level up in the `para/api` package, where a chain is composed from ordinary Noeta closures under
+ordinary garbage collection — rather than natively, which would mean holding user closures inside a
+native value.
+
+What std keeps is what needs the transport: configuration, retry, the error classification, and the
+`Link` parsing primitive.
+
+A worked example of the whole surface — configured client, `?` propagation, status-vs-error, typed
+decoding, `Link` pagination by hand, and `prepare`/`send` — is `examples/http_client.noe`.
+
+#### What is an error, and what isn't
+
+The `Err` arm is a **transport** failure only — the request never produced a response. So `?` on a
+request means exactly one thing: *the network broke*.
+
+An HTTP error **status is not an error**. A `404` is an answer: it arrives as `Ok(Response)`, and
+you check it with `ok()` or `status()`. This is deliberate — folding status into `Err` is the
+mistake that makes `http_errors`-style flags necessary elsewhere. When you *do* want a non-2xx to
+short-circuit, opt in per call with `error_for_status()`:
+
+```noeta ignore
+resp = client.get("https://api.example.com/users/1")?   // Err only if the network broke
+strict = client.get("https://api.example.com/users/1")?.error_for_status()?   // Err on 4xx/5xx too
+```
+
+`Response` methods: `status() -> int`, `ok() -> bool` (2xx), `body() -> string`,
+`body_bytes() -> bytes`, `header(name) -> string?` (case-insensitive), `url() -> string` (the final
+URL after redirects), `links() -> Map<string, string>` (RFC 8288 `Link` relations),
+`error_for_status() -> Result<Response, HttpError>`, and the typed decoder
+`json::<T>() -> Result<T, JsonError>`.
+
+#### Decoding the body
+
+`resp.json::<T>()` decodes straight into your own type:
+
+```noeta ignore
+struct User { name: string  id: int }
+
+user = gh.get("/users/1")?.json::<User>()?
+echo user.name
+```
+
+It is **recoverable by construction** — a response body is remote input, so a server that changes
+shape is a value you handle, not an abort. The error is the same path-precise `JsonError` the JSON
+module produces (`method: expected int, found JSON string`). When you *do* want a malformed body to
+be fatal, `json.parse::<T>(resp.body())` is the aborting spelling.
+
+`HttpError` implements `Error` and `Display`, so it converts through `?` like any other error type.
+Its methods: `message()`, `kind()`, `url()`, and `retryable()`. `kind()` is one of `"timeout"`,
+`"dns"`, `"connect"`, `"tls"`, `"protocol"` (the response was unreadable), `"invalid_url"`, or
+`"other"`; `retryable()` is true for the transient three (`timeout`/`dns`/`connect`) and false for
+the rest — a TLS failure will not fix itself, and a `protocol` failure may already have been
+applied server-side.
+
+A request never yields `"status"`. That kind exists only for `error_for_status()`, and it is
+deliberately distinct from `"protocol"`: a 404 is perfectly valid HTTP, so folding the two together
+would make a "corrupt upstream" check fire on every opted-in 404.
 
 ```noeta check
 use std.http.client
@@ -377,7 +524,7 @@ token = "s3cret"
 payload = {"name": "Niro"}
 filter = {"q": "cats"}
 
-resp = client.get("https://api.example.com/users/1", {"authorization": "Bearer " ~ token})
+resp = client.get("https://api.example.com/users/1", {"authorization": "Bearer " ~ token})?
 if resp.ok() {
     user = json.parse::<User>(resp.body())
     echo user.name
@@ -386,8 +533,8 @@ if resp.ok() {
 }
 
 // POST a JSON body; QUERY for a body-carrying read.
-client.post("https://api.example.com/users", json.stringify(payload), {"content-type": "application/json"})
-found = client.query("https://api.example.com/search", json.stringify(filter))
+client.post("https://api.example.com/users", json.stringify(payload), {"content-type": "application/json"})?
+found = client.query("https://api.example.com/search", json.stringify(filter))?
 ```
 
 Concurrent fan-out: `all` (from `std.task`) awaits a batch of futures together, returning their
@@ -400,7 +547,7 @@ codes = all([
     client.get_async("https://a.example"),
     client.get_async("https://b.example"),
 ])
-echo [codes[0].status(), codes[1].status()].join(",")
+echo [codes[0]?.status(), codes[1]?.status()].join(",")
 ```
 
 **Sandbox vs. real.** Under `noeta run` (and the REPL) requests hit the real network. Under the

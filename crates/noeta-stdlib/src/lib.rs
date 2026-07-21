@@ -43,6 +43,7 @@ pub mod env;
 pub mod fs;
 pub mod handle;
 pub mod host;
+pub mod http_client;
 pub mod id;
 pub mod iter;
 pub mod json;

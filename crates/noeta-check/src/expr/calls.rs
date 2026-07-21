@@ -1063,6 +1063,23 @@ impl Checker {
                 self.call_user_method("call", &sig, args, arg_exprs, span, recv_args, None, env),
             );
         }
+        // An **extern** type participates in the protocol exactly as a user type does (http arc
+        // H10): a registered `call` method makes its values invocable. Extern types already join
+        // every other protocol (`Display`, `Error`, `Equatable`); being uncallable was an
+        // inconsistency, not a decision. This is what lets a native extension hand user code a
+        // callable value — a middleware's `next` — without a parallel callback mechanism.
+        // Resolved as a unit: a registered `call` whose parameters do not resolve would otherwise
+        // be checked against an EMPTY signature, reporting "call expects 0 arguments" for a
+        // perfectly good call instead of surfacing the inconsistency. Falling through keeps the
+        // honest diagnostic below.
+        if let Some(params) = stdlib::method_params(self.reg(), recv, "call") {
+            let required =
+                stdlib::method_required(self.reg(), recv, "call").unwrap_or(params.len());
+            let result = stdlib::method_return(self.reg(), recv, "call").unwrap_or(Type::Dyn);
+            self.finalize_closure_args(&params, args, arg_exprs, env);
+            self.check_args(&params, required, args, arg_exprs, span, "call");
+            return Some(result);
+        }
         if self.symbols.types.contains(n) || self.symbols.enums.contains_key(n) {
             self.finalize_closure_args(&[], args, arg_exprs, env);
             self.error(
@@ -1241,6 +1258,26 @@ impl Checker {
                 }
             },
         };
+        // A **call-site-typed extern method** (http arc H8) — `resp.json::<User>()`. Checked
+        // before the user-generic path because the two spellings are identical: presence in the
+        // receiver type's `typed_methods` table is the whole distinction. The associated form is
+        // excluded (a typed method is an instance method; there is no receiver to dispatch on),
+        // and so is the multi-argument spelling (the turbofish names ONE result type).
+        if !associated
+            && resolved.len() == 1
+            && self.reg().find_typed_method(&type_name, name).is_some()
+        {
+            return self.synth_typed_extern_method(
+                &type_name,
+                &recv_args,
+                name,
+                name_span,
+                &resolved[0],
+                args,
+                arg_exprs,
+                span,
+            );
+        }
         let Some(sig) = self
             .symbols
             .methods
@@ -1333,6 +1370,66 @@ impl Checker {
             None,
             env,
         )
+    }
+
+    /// Type a **call-site-typed extern method** (http arc H8) — the `resp.json::<User>()` twin of
+    /// the `json.parse::<User>(...)` module path, and structurally its mirror: resolve the
+    /// turbofish into a [`noeta_ext_abi::TypeRecipe`], record it at the call span for lowering,
+    /// then type the call from the method's declared signature and wrapper.
+    ///
+    /// Recording the recipe is what makes lowering emit a native `Rvalue::TypedMethodCall` instead
+    /// of erasing the turbofish to a plain method call — the two paths are distinguished by this
+    /// map alone.
+    #[allow(clippy::too_many_arguments)]
+    fn synth_typed_extern_method(
+        &mut self,
+        type_name: &str,
+        recv_args: &[Type],
+        name: &str,
+        name_span: Span,
+        t: &Type,
+        arg_types: &[Type],
+        arg_exprs: &[Expr],
+        span: Span,
+    ) -> Type {
+        // A type with no build recipe (an enum, a class, an unconstrained generic) cannot be
+        // constructed at the call site. Same rule, same wording shape, as the module path.
+        let has_recipe = match self.type_to_recipe(t) {
+            Some(recipe) => {
+                self.sites.typed_method_call_sites.insert(span, recipe);
+                true
+            }
+            None => false,
+        };
+        match stdlib::typed_type_method(
+            self.reg(),
+            type_name,
+            recv_args,
+            name,
+            arg_types,
+            t.clone(),
+        ) {
+            Some((params, required, result)) => {
+                self.check_args(&params, required, arg_types, arg_exprs, span, name);
+                if !has_recipe {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`{t}` cannot be built by `{name}::<T>`"),
+                    );
+                }
+                result
+            }
+            // Unreachable: the caller only routes here when `find_typed_method` already matched.
+            None => {
+                self.error(
+                    DiagnosticCode::UnknownName,
+                    name_span,
+                    format!("`{name}::<T>(...)` is not a call-site-typed native method"),
+                );
+                t.clone()
+            }
+        }
     }
 
     /// Arity- and type-check a method call's arguments against the resolved parameter signature

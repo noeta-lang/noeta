@@ -554,6 +554,23 @@ pub enum Rvalue {
         dynamic: Option<Atom>,
         span: Span,
     },
+    /// A **call-site-typed** native extern-METHOD call (http arc H8) — `resp.json::<T>()`, the
+    /// [`Rvalue::TypedModuleCall`] twin. The receiver's own runtime identity selects the type (as
+    /// every extern method call does), so no type name is carried; `method` names the entry in
+    /// that type's `typed_methods` table.
+    ///
+    /// Emitted only where the checker recorded a recipe (`typed_method_call_sites`); every other
+    /// turbofish method call is an erased user-generic instantiation and lowers as a plain
+    /// method call.
+    TypedMethodCall {
+        recv: Atom,
+        method: String,
+        args: Vec<Atom>,
+        recipe: Option<noeta_ext_abi::TypeRecipe>,
+        /// A per-instantiation recipe source — the [`Rvalue::TypedModuleCall`] `dynamic` twin.
+        dynamic: Option<Atom>,
+        span: Span,
+    },
     /// The **router-facing** runtime JSON decode `json.decode_typed(name, text)` (L2.2 DI): decode
     /// `text` into the type named by the runtime string `name`, using the recipe a
     /// `@derive(Deserialize<Json>)` type registered (baked into the backend's per-type recipe

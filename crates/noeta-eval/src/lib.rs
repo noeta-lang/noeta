@@ -3563,6 +3563,18 @@ impl Interpreter {
                 // the validated way to populate it. Deliberately method-only — a closure-valued
                 // FIELD named `call` does not make the object invocable (that is member-call
                 // territory: `obj.call(args)` reaches it) — so both backends gate identically.
+                // An **extern** value participates in the protocol too (http arc H10): a
+                // registered `call` method makes it invocable, routed through ordinary extern
+                // method dispatch. Mirrors the VM, so both backends gate identically. (The
+                // field-vs-method rule described above governs the `Value::Object` arm below.)
+                if let Value::Extern(cell) = &other
+                    && self
+                        .reg()
+                        .find_type_method_sig(cell.borrow().type_identity(), "call")
+                        .is_some()
+                {
+                    return self.call_method(other, "call", args, span);
+                }
                 if matches!(&other, Value::Object(o) if o.def.methods.contains_key("call")) {
                     return self.call_method(other, "call", args, span);
                 }

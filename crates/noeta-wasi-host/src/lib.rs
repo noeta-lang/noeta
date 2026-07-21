@@ -23,8 +23,8 @@ use compact_str::CompactString;
 use noeta_stdlib::{
     AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
     InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue,
-    Metrics, NetRequest, NetResponse, Network, Os, ReadSource, Rng, SpanId, SpanKind, SpanStatus,
-    SpanTracker, StdError, TraceContext, Tracing,
+    Metrics, NetError, NetErrorKind, NetRequest, NetResponse, Network, Os, ReadSource, Rng, SpanId,
+    SpanKind, SpanStatus, SpanTracker, StdError, TraceContext, Tracing,
 };
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -471,10 +471,19 @@ impl Os for WasiHost {
 }
 
 impl Network for WasiHost {
-    fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, StdError> {
+    fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, NetError> {
+        let url = request.url.clone();
         match &mut self.outbound {
-            Some(hook) => hook(request),
-            None => Err(no_network("outbound HTTP (`http.*`)")),
+            // The platform hook still speaks `StdError` (it predates the classified seam and is
+            // set by embedders); a failure from it is an unclassified transport failure.
+            Some(hook) => {
+                hook(request).map_err(|e| NetError::new(NetErrorKind::Other, url, e.message))
+            }
+            None => Err(NetError::new(
+                NetErrorKind::Other,
+                url,
+                no_network("outbound HTTP (`http.*`)").message,
+            )),
         }
     }
 
@@ -703,6 +712,7 @@ mod tests {
             url: "/ping".into(),
             headers: vec![("x-a".into(), "1".into())],
             body: Vec::new(),
+            timeout_ms: None,
         });
         let listener = host.net_listen("ignored:0").expect("armed listener");
         let (conn, request) = host
@@ -722,6 +732,7 @@ mod tests {
                 status: 200,
                 headers: Vec::new(),
                 body: b"pong".to_vec(),
+                url: String::new(),
             },
         )
         .expect("reply lands");
@@ -742,9 +753,10 @@ mod tests {
                 url: "http://example.com".into(),
                 headers: Vec::new(),
                 body: Vec::new(),
+                timeout_ms: None,
             })
             .expect_err("no client");
-        assert!(err.message.contains("wasi:http"), "{}", err.message);
+        assert!(err.message().contains("wasi:http"), "{}", err.message());
     }
 
     #[test]

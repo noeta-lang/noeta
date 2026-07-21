@@ -174,6 +174,8 @@ const HTTP_TYPES: &[ExtType] = &[
         namespace: "std.http",
         methods: RESPONSE_METHODS,
         dispatch: response_method_dispatch,
+        typed_methods: RESPONSE_TYPED_METHODS,
+        typed_dispatch: Some(response_typed_method_dispatch),
         key_capable: false, // a response is not a map key
         docs: RESPONSE_DOCS,
         ..ExtType::DEFAULTS
@@ -185,6 +187,33 @@ const HTTP_TYPES: &[ExtType] = &[
         dispatch: request_method_dispatch,
         key_capable: false, // an inbound request is not a map key
         docs: REQUEST_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    // `Client` (http arc H7) — the configured client: base URL, headers, auth, deadline. Pure,
+    // content-equal config; immutable, so every builder method returns a new one.
+    ExtType {
+        name: crate::http_client::CLIENT_TYPE_NAME,
+        namespace: "std.http",
+        methods: CLIENT_METHODS,
+        dispatch: client_method_dispatch,
+        key_capable: false, // a client is not a map key
+        // The verbs take the same optional `headers: Map<string, string>` the free functions do,
+        // so the map must arrive marshalled rather than as an opaque handle.
+        deep_marshal: true,
+        docs: CLIENT_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    // `HttpError` (http arc H6) — the transport failure the client's `Result` door carries. Pure,
+    // content-equal data like `Response`; declares `Error` + `Display` (the `JsonError` model) so
+    // `<E: Error>` bounds accept it and `?` converts through `From`.
+    ExtType {
+        name: crate::net::HTTP_ERROR_TYPE_NAME,
+        namespace: "std.http",
+        methods: HTTP_ERROR_METHODS,
+        dispatch: http_error_method_dispatch,
+        key_capable: false, // a transport failure is not a map key
+        traits: &["Error", "Display"],
+        docs: HTTP_ERROR_DOCS,
         ..ExtType::DEFAULTS
     },
     // The websocket session handle (server-hmr L0) — its methods reach the `Network` hijack seam
@@ -1292,7 +1321,19 @@ fn crypto_dispatch(
 // --- `http`: an HTTP client over the Network capability (http arc H2) ----------------------------
 
 /// The `Response` signature type, named once.
+use crate::serve::REQUEST_SIG;
+
 const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
+const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME);
+
+/// What every client verb returns (http arc H6): `Result<Response, HttpError>`.
+///
+/// The split is deliberate and load-bearing. A **transport** failure — the request never produced
+/// a response — is the `Err`, so `?` on a request means exactly "the network broke". An HTTP error
+/// **status** is an ordinary `Ok(Response)`: a 404 is an answer, and folding it into `Err` is the
+/// `http_errors` flag that confuses everyone in Guzzle. Callers opt into status-as-error with
+/// `resp.error_for_status()?`.
+const RESPONSE_RESULT_SIG: SigType = SigType::Result(&RESPONSE_SIG, &HTTP_ERROR_SIG);
 
 /// A request-headers argument type — `Map<string, string>`, named once.
 const HEADERS: SigType = SigType::Map(&SigType::String, &SigType::String);
@@ -1312,75 +1353,82 @@ const OPT_BODY: SigType = SigType::Optional(&STR_OR_BYTES);
 /// of the former single `http` module (package-manager P0.3b) so a whole-module `use std.http.client`
 /// is precisely the client-ring signal, and `use std.http.server` sheds reqwest entirely.
 const HTTP_CLIENT_FNS: &[ExtFn] = &[
+    // The configured door (http arc H7): `client.new(base?)` mints a `Client` carrying base URL,
+    // headers, auth, and a deadline. The free verbs below stay the one-shot door.
+    ExtFn {
+        name: "new",
+        params: &[SigType::Optional(&Str)],
+        ret: Concrete(CLIENT_SIG),
+    },
     ExtFn {
         name: "get",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "head",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "delete",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "post",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "put",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "query",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "request",
         params: &[Str, Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
+        ret: Concrete(RESPONSE_RESULT_SIG),
     },
     ExtFn {
         name: "get_async",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "head_async",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "delete_async",
         params: &[Str, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "post_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "put_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "query_async",
         params: &[Str, STR_OR_BYTES, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
     ExtFn {
         name: "request_async",
         params: &[Str, Str, OPT_HEADERS],
-        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+        ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
 ];
 
@@ -1426,6 +1474,9 @@ fn http_request(
         url: url.to_string(),
         headers,
         body,
+        // The free verbs carry no deadline — a timeout is configuration, and configuration lives
+        // on a `Client` (`client.new(base).timeout(ms)`).
+        timeout_ms: None,
     }
 }
 
@@ -1451,7 +1502,19 @@ fn http_dispatch(
                 status: status as u16,
                 headers,
                 body,
+                url: String::new(), // a server-built reply has no originating URL
             },
+        )));
+    }
+    // The configured-client constructor (http arc H7) — pure, no request performed.
+    if func == "new" {
+        want_arity_range(func, args, 0, 1)?;
+        let base = match args.first() {
+            None => "",
+            Some(_) => want_str(func, args, 0)?,
+        };
+        return Ok(NativeOut::Extern(crate::ExternBox::new(
+            crate::http_client::HttpClient::new(base),
         )));
     }
     // Build the request from the call, per verb shape. Bodyless verbs put headers at index 1;
@@ -1492,8 +1555,421 @@ fn http_dispatch(
     if func.ends_with("_async") {
         Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
     } else {
-        let response = host.net_fetch(request)?;
-        Ok(NativeOut::Extern(crate::ExternBox::new(response)))
+        // A transport failure is `Err(HttpError)`, never a `StdError` abort (http arc H6) — the
+        // caller decides whether to `?` it, retry it, or inspect its `kind()`.
+        Ok(crate::net::fetch_outcome(host.net_fetch(request)))
+    }
+}
+
+const CLIENT_SIG: SigType = SigType::Named(crate::http_client::CLIENT_TYPE_NAME);
+
+/// The `Client` instance methods (http arc H7): the immutable configuration chain, then the verbs
+/// that spend it.
+///
+/// Every configuration method returns a **new** `Client` (`-> Client`), the copy-modify shape
+/// `Response.with_header` already uses — so a derived client can never mutate the one it came
+/// from, and sharing a configured client across a program is safe by construction.
+///
+/// The verbs mirror the free functions exactly (same names, same optional trailing headers, same
+/// `Result<Response, HttpError>`), differing only in that their first argument is a *path*
+/// resolved against the base URL rather than a whole URL. An absolute target still wins, so a
+/// paginator can hand back an absolute `next` link through a based client.
+const CLIENT_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "header",
+        params: &[Str, Str],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "bearer",
+        params: &[Str],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "basic",
+        params: &[Str, Str],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "timeout",
+        params: &[Int],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "retry",
+        params: &[
+            Int,
+            SigType::Optional(&Int),
+            SigType::Optional(&SigType::List(&Int)),
+        ],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "retry_non_idempotent",
+        params: &[],
+        ret: Concrete(CLIENT_SIG),
+    },
+    ExtFn {
+        name: "base_url",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    // Build a request WITHOUT performing it: the value a middleware chain above std starts from.
+    // Resolves the path against the base URL and applies the client's headers, so what the outermost
+    // middleware sees is the request as configured, not a half-formed one.
+    ExtFn {
+        name: "prepare",
+        params: &[Str, Str, SigType::Optional(&STR_OR_BYTES), OPT_HEADERS],
+        ret: Concrete(REQUEST_SIG),
+    },
+    // The **terminal**: perform an already-built `Request` through this client's configuration —
+    // base URL resolution, client headers, deadline, retry. This is the seam a middleware layer
+    // above std bottoms out in: compose the onion in Noeta, and `send` is the innermost call. std
+    // deliberately does not compose chains itself, because doing so would mean holding user
+    // closures inside a native value.
+    ExtFn {
+        name: "send",
+        params: &[REQUEST_SIG],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "get",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "head",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "delete",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "post",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "put",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "query",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "request",
+        params: &[Str, Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+];
+
+const CLIENT_DOCS: &[(&str, &str)] = &[
+    (
+        "header",
+        "A copy of the client with header `name: value` applied to every request. A per-request \
+         header of the same name replaces it for that call.",
+    ),
+    (
+        "bearer",
+        "A copy of the client sending `Authorization: Bearer <token>`.",
+    ),
+    (
+        "basic",
+        "A copy of the client sending HTTP Basic credentials (RFC 7617).",
+    ),
+    (
+        "timeout",
+        "A copy of the client with a per-request deadline in milliseconds. Exceeding it is an \
+         `HttpError` whose `kind()` is `\"timeout\"` (and `retryable()` is true).",
+    ),
+    (
+        "retry",
+        "A copy of the client that retries failed requests: `retry(max, base_ms?, on?)`. \
+         Retries a **transient** transport failure (`timeout`/`dns`/`connect`) and any status in \
+         `on` (default `[429, 502, 503, 504]`), backing off `base_ms` doubled per attempt \
+         (default 250ms, capped at 30s). A server's own `Retry-After` wins over the computed \
+         backoff. Only **idempotent** verbs are retried — see `retry_non_idempotent`.",
+    ),
+    (
+        "retry_non_idempotent",
+        "Extend the retry policy to POST. Off by default because retrying a request that may \
+         already have been applied can duplicate a side effect — a second charge, a second \
+         order — and a timeout is exactly the case where the client cannot tell. Opt in when the \
+         endpoint is safe to repeat or you send an idempotency key.",
+    ),
+    (
+        "base_url",
+        "The client's base URL, or empty if it has none.",
+    ),
+    (
+        "prepare",
+        "Build a `Request` without performing it — path resolved against the base URL, client \
+         headers applied. The value a middleware chain starts from; pair it with `send`.",
+    ),
+    (
+        "send",
+        "Perform an already-built `Request` through this client's configuration (base URL, \
+         headers, deadline, retry). The terminal a composed middleware chain bottoms out in — \
+         see the `para/api` package, which owns middleware, mocking, and pagination.",
+    ),
+    (
+        "get",
+        "GET the path, resolved against the base URL. An absolute target (one with a scheme) is \
+         used as-is. Returns `Result<Response, HttpError>` exactly like the free verb.",
+    ),
+    ("head", "HEAD the path — see `get`."),
+    ("delete", "DELETE the path — see `get`."),
+    ("post", "POST a body to the path — see `get`."),
+    ("put", "PUT a body to the path — see `get`."),
+    (
+        "query",
+        "QUERY the path (a safe, idempotent, body-carrying read) — see `get`.",
+    ),
+    (
+        "request",
+        "Any other bodyless verb against the path — see `get`.",
+    ),
+];
+
+fn client_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    use crate::http_client::{HttpClient, basic_auth_value};
+    let Some(client) = recv.as_any().downcast_ref::<HttpClient>() else {
+        return Err(type_error(method, crate::http_client::CLIENT_TYPE_NAME));
+    };
+    // The configuration half: each returns a NEW client, never mutating the receiver.
+    let configured = |next: HttpClient| Ok(NativeOut::Extern(crate::ExternBox::new(next)));
+    match method {
+        "header" => {
+            want_arity(method, args, 2)?;
+            let name = want_str(method, args, 0)?.to_string();
+            let value = want_str(method, args, 1)?;
+            return configured(client.with_header(&name, value));
+        }
+        "bearer" => {
+            want_arity(method, args, 1)?;
+            let token = want_str(method, args, 0)?;
+            return configured(client.with_header("authorization", &format!("Bearer {token}")));
+        }
+        "basic" => {
+            want_arity(method, args, 2)?;
+            let user = want_str(method, args, 0)?.to_string();
+            let password = want_str(method, args, 1)?;
+            return configured(
+                client.with_header("authorization", &basic_auth_value(&user, password)),
+            );
+        }
+        "timeout" => {
+            want_arity(method, args, 1)?;
+            let ms = want_int(method, args, 0)?;
+            if ms <= 0 {
+                return Err(type_error(method, "a positive timeout in milliseconds"));
+            }
+            return configured(client.with_timeout(ms as u64));
+        }
+        "retry" => {
+            want_arity_range(method, args, 1, 3)?;
+            let max = want_int(method, args, 0)?;
+            if max < 0 {
+                return Err(type_error(method, "a non-negative retry count"));
+            }
+            let mut policy = crate::http_client::RetryPolicy::new(max as u32);
+            if args.len() > 1 {
+                let base = want_int(method, args, 1)?;
+                if base <= 0 {
+                    return Err(type_error(method, "a positive backoff in milliseconds"));
+                }
+                policy.base_ms = base as u64;
+            }
+            if args.len() > 2 {
+                let Some(NativeValue::List(statuses)) = args.get(2) else {
+                    return Err(type_error(method, "a list of status codes"));
+                };
+                policy.on_status = statuses
+                    .iter()
+                    .map(|v| match v {
+                        NativeValue::Scalar(Scalar::Int(n)) if (100..=599).contains(n) => {
+                            Ok(*n as u16)
+                        }
+                        _ => Err(type_error(
+                            method,
+                            "a list of HTTP status codes in 100..=599",
+                        )),
+                    })
+                    .collect::<Result<_, _>>()?;
+            }
+            // Inherit the opt-in when re-configuring an already-unsafe client, so the order of
+            // `.retry(..)` and `.retry_non_idempotent()` in a chain does not change behavior.
+            policy.non_idempotent = client.retry.as_ref().is_some_and(|r| r.non_idempotent);
+            return configured(client.with_retry(policy));
+        }
+        "retry_non_idempotent" => {
+            want_arity(method, args, 0)?;
+            return configured(client.with_non_idempotent_retry());
+        }
+        "base_url" => {
+            want_arity(method, args, 0)?;
+            return Ok(NativeOut::Str(client.base_url.clone()));
+        }
+        "prepare" => {
+            want_arity_range(method, args, 2, 4)?;
+            let verb = want_str(method, args, 0)?.to_string();
+            let target = want_str(method, args, 1)?.to_string();
+            let body = match args.get(2) {
+                None => Vec::new(),
+                Some(_) => want_data(method, args, 2)?.to_vec(),
+            };
+            let inner = client.build(&verb, &target, body, want_headers(method, args, 3)?);
+            return Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::net::Request {
+                    conn: None, // outbound: there is no connection to reply on
+                    inner,
+                },
+            )));
+        }
+        "send" => {
+            want_arity(method, args, 1)?;
+            let Some(NativeValue::Extern(value)) = args.first() else {
+                return Err(type_error(method, crate::net::REQUEST_TYPE_NAME));
+            };
+            let Some(request) = value.as_any().downcast_ref::<crate::net::Request>() else {
+                return Err(type_error(method, crate::net::REQUEST_TYPE_NAME));
+            };
+            // The request arrives fully formed, so only the client's own configuration is layered
+            // on: its headers (the request's own win), its base URL for a relative target, its
+            // deadline, its retry policy.
+            let outgoing = client.build(
+                &request.inner.method,
+                &request.inner.url,
+                request.inner.body.clone(),
+                request.inner.headers.clone(),
+            );
+            return Ok(crate::net::fetch_outcome(client.perform(outgoing, host)));
+        }
+        _ => {}
+    }
+    // The verb half: expand the client into a plain request, then take the shared fetch door, so a
+    // configured call and a free call are indistinguishable from the Host's side.
+    let request = match method {
+        "get" | "head" | "delete" => {
+            want_arity_range(method, args, 1, 2)?;
+            client.build(
+                method,
+                want_str(method, args, 0)?,
+                Vec::new(),
+                want_headers(method, args, 1)?,
+            )
+        }
+        "post" | "put" | "query" => {
+            want_arity_range(method, args, 2, 3)?;
+            let target = want_str(method, args, 0)?.to_string();
+            let body = want_data(method, args, 1)?.to_vec();
+            client.build(method, &target, body, want_headers(method, args, 2)?)
+        }
+        "request" => {
+            want_arity_range(method, args, 2, 3)?;
+            let verb = want_str(method, args, 0)?.to_string();
+            let target = want_str(method, args, 1)?.to_string();
+            client.build(&verb, &target, Vec::new(), want_headers(method, args, 2)?)
+        }
+        _ => {
+            return Err(crate::no_method_error(
+                crate::http_client::CLIENT_TYPE_NAME,
+                method,
+            ));
+        }
+    };
+    // Through the client's own `perform`, which applies the retry policy (http arc H9); without a
+    // policy it is exactly `host.net_fetch`, so a non-retrying client costs nothing extra.
+    Ok(crate::net::fetch_outcome(client.perform(request, host)))
+}
+
+/// The `HttpError` instance methods (http arc H6): pure reads over the transport failure. Mirrors
+/// `JsonError` — `message`/`to_string` satisfy the `Error` + `Display` declarations on its
+/// registration, so `?` converts it through `From` and `${e}` interpolates the sentence.
+const HTTP_ERROR_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "message",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "kind",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "url",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "retryable",
+        params: &[],
+        ret: Concrete(SigType::Bool),
+    },
+];
+
+const HTTP_ERROR_DOCS: &[(&str, &str)] = &[
+    (
+        "message",
+        "The composed human message (`timeout request to `https://api.example.com`: …`). The \
+         `Error` trait's required method.",
+    ),
+    (
+        "to_string",
+        "Same as `message()` — the `Display` rendering, so `${e}` interpolates the message.",
+    ),
+    (
+        "kind",
+        "What went wrong: `\"timeout\"`, `\"dns\"`, `\"connect\"`, `\"tls\"`, `\"protocol\"` (the \
+         response was unreadable), `\"invalid_url\"`, or `\"other\"`. A request never yields \
+         `\"status\"` — an HTTP error status is an ordinary `Response`, checked with `ok()`; that \
+         kind appears only when you opt in with `error_for_status()`.",
+    ),
+    ("url", "The request URL that failed."),
+    (
+        "retryable",
+        "Whether retrying the identical request could plausibly succeed. True for `timeout`, \
+         `dns`, and `connect` (transient); false for `tls` and `invalid_url` (deterministic) and \
+         for `protocol`/`other`, where the request may already have been applied server-side.",
+    ),
+];
+
+fn http_error_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(error) = recv.as_any().downcast_ref::<crate::NetError>() else {
+        return Err(type_error(method, "HttpError"));
+    };
+    want_arity(method, args, 0)?;
+    match method {
+        "message" | "to_string" => Ok(NativeOut::Str(error.message())),
+        "kind" => Ok(NativeOut::Str(error.kind.label().to_string())),
+        "url" => Ok(NativeOut::Str(error.url.clone())),
+        "retryable" => Ok(NativeOut::Scalar(Scalar::Bool(error.kind.retryable()))),
+        _ => Err(crate::no_method_error(
+            crate::net::HTTP_ERROR_TYPE_NAME,
+            method,
+        )),
     }
 }
 
@@ -1529,7 +2005,65 @@ const RESPONSE_METHODS: &[ExtFn] = &[
         params: &[Str, Str],
         ret: Concrete(RESPONSE_SIG),
     },
+    // The opt-in status-as-error door (http arc H6): `resp.error_for_status()?` turns a non-2xx
+    // into the `Err` arm, for callers who want a 404 to short-circuit like a transport failure.
+    // Kept explicit rather than folded into the verbs, so `?` on a request keeps one meaning.
+    ExtFn {
+        name: "error_for_status",
+        params: &[],
+        ret: Concrete(RESPONSE_RESULT_SIG),
+    },
+    ExtFn {
+        name: "url",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "links",
+        params: &[],
+        ret: Concrete(SigType::Map(&Str, &Str)),
+    },
 ];
+
+/// `Response`'s **call-site-typed** methods (http arc H8): `resp.json::<User>()`.
+///
+/// Recoverable by construction — it returns `Result<T, JsonError>`, the `json.try_parse::<T>`
+/// wrapper, because a response body is remote input: a server that changes its shape must be a
+/// value you can handle, never an abort. The aborting spelling stays available as
+/// `json.parse::<T>(resp.body())` for callers who genuinely want a malformed body to be fatal.
+const RESPONSE_TYPED_METHODS: &[ExtFn] = &[ExtFn {
+    name: "json",
+    params: &[],
+    ret: TypeArg(TypeArgWrap::Result(SigType::Named("JsonError"))),
+}];
+
+fn response_typed_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+    recipe: &TypeRecipe,
+) -> Result<NativeOut, StdError> {
+    let Some(resp) = recv.as_any().downcast_ref::<crate::NetResponse>() else {
+        return Err(type_error(method, "Response"));
+    };
+    match method {
+        "json" => {
+            want_arity(method, args, 0)?;
+            let body = String::from_utf8_lossy(&resp.body);
+            Ok(match crate::json::try_parse_typed(&body, recipe) {
+                Ok(out) => NativeOut::Ok(Box::new(out)),
+                Err(error) => {
+                    NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(error))))
+                }
+            })
+        }
+        _ => Err(crate::no_method_error(
+            crate::net::RESPONSE_TYPE_NAME,
+            method,
+        )),
+    }
+}
 
 fn response_method_dispatch(
     recv: &mut dyn crate::ExternValue,
@@ -1581,6 +2115,42 @@ fn response_method_dispatch(
             next.headers.push((name, value));
             Ok(NativeOut::Extern(crate::ExternBox::new(next)))
         }
+        "url" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(resp.url.clone()))
+        }
+        "links" => {
+            want_arity(method, args, 0)?;
+            // RFC 8288 `Link` relations, `rel -> target`. Empty when the header is absent, so a
+            // caller can walk relations without first testing for the header.
+            let header = resp.header_value("link").unwrap_or_default();
+            Ok(NativeOut::Map(
+                crate::http_client::parse_link_header(header)
+                    .into_iter()
+                    .map(|(rel, target)| (rel, NativeOut::Str(target)))
+                    .collect(),
+            ))
+        }
+        "error_for_status" => {
+            want_arity(method, args, 0)?;
+            // A status is not a transport failure, so it gets its OWN kind rather than borrowing
+            // `Protocol` (which means "the response could not be read as HTTP" — a 404 is
+            // perfectly valid HTTP). Sharing them would make `kind() == "protocol"` fire for every
+            // opted-in 404, defeating the point of classifying at all.
+            Ok(if (200..=299).contains(&resp.status) {
+                NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
+                    resp.clone(),
+                ))))
+            } else {
+                NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(
+                    crate::NetError::new(
+                        crate::net::NetErrorKind::Status,
+                        resp.url.clone(),
+                        format!("the server answered with status {}", resp.status),
+                    ),
+                ))))
+            })
+        }
         _ => Err(crate::no_method_error(
             crate::net::RESPONSE_TYPE_NAME,
             method,
@@ -1619,6 +2189,23 @@ const REQUEST_METHODS: &[ExtFn] = &[
         name: "body_bytes",
         params: &[],
         ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "url",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    // Copy-modify (the `Response.with_header` shape). A middleware layer above std — para/api —
+    // rewrites a request before passing it on, so `Request` needs builders, not just accessors.
+    ExtFn {
+        name: "with_header",
+        params: &[Str, Str],
+        ret: Concrete(REQUEST_SIG),
+    },
+    ExtFn {
+        name: "with_url",
+        params: &[Str],
+        ret: Concrete(REQUEST_SIG),
     },
 ];
 
@@ -1668,6 +2255,27 @@ fn request_method_dispatch(
         "body_bytes" => {
             want_arity(method, args, 0)?;
             Ok(NativeOut::Bytes(req.body.clone()))
+        }
+        "url" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(req.url.clone()))
+        }
+        "with_header" => {
+            want_arity(method, args, 2)?;
+            let name = want_str(method, args, 0)?.to_string();
+            let value = want_str(method, args, 1)?.to_string();
+            let mut next = request.clone();
+            next.inner
+                .headers
+                .retain(|(k, _)| !k.eq_ignore_ascii_case(&name));
+            next.inner.headers.push((name, value));
+            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
+        }
+        "with_url" => {
+            want_arity(method, args, 1)?;
+            let mut next = request.clone();
+            next.inner.url = want_str(method, args, 0)?.to_string();
+            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
         }
         _ => Err(crate::no_method_error(
             crate::net::REQUEST_TYPE_NAME,
@@ -3216,6 +3824,31 @@ const RESPONSE_DOCS: &[(&str, &str)] = &[
         "with_header",
         "A copy of the response with header `name: value` set.",
     ),
+    (
+        "url",
+        "The final URL this response came from, after redirects — the correct base for resolving \
+         a relative `Location` or `Link` target. Empty for a response the program built with \
+         `http.server.response(…)`.",
+    ),
+    (
+        "links",
+        "The response's RFC 8288 `Link` relations as `rel -> target` (`links()[\"next\"]` is the \
+         next page for any API that uses the standard header). Empty when the header is absent. \
+         Targets may be relative — resolve them against `url()`.",
+    ),
+    (
+        "json",
+        "Decode the body into the caller-named type: `resp.json::<User>()` yields \
+         `Result<User, JsonError>`. Recoverable by construction — a response body is remote \
+         input, so a server that changes shape is a value you handle, not an abort. Use \
+         `json.parse::<T>(resp.body())` when you do want a malformed body to be fatal.",
+    ),
+    (
+        "error_for_status",
+        "`Ok(self)` for a 2xx status, `Err(HttpError)` otherwise — the opt-in door for callers \
+         who want a non-2xx to short-circuit through `?` like a transport failure. Requests \
+         themselves never do this: a 404 is an answer, not a broken network.",
+    ),
 ];
 const SOCKET_DOCS: &[(&str, &str)] = &[
     ("send", "Send a message over the WebSocket."),
@@ -4356,12 +4989,13 @@ mod tests {
     #[test]
     fn request_accessors_read_the_inbound_request() {
         let mut req = crate::net::Request {
-            conn: 0,
+            conn: Some(0),
             inner: crate::NetRequest {
                 method: "POST".to_string(),
                 url: "/users/42?active=true".to_string(),
                 headers: vec![("Content-Type".to_string(), "application/json".to_string())],
                 body: b"{}".to_vec(),
+                timeout_ms: None,
             },
         };
         let call = |req: &mut crate::net::Request, method: &str, args: &[NativeValue]| {

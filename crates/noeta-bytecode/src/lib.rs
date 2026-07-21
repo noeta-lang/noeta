@@ -860,6 +860,26 @@ pub enum Op {
         dynamic: Option<Reg>,
         span: Span,
     },
+    /// A **call-site-typed** native extern-METHOD call (`resp.json::<T>()`, http arc H8) — the
+    /// [`Op::TypedModuleCall`] twin. The receiver register's runtime identity selects the extern
+    /// type (as every method call does), so no type name is carried; `method` names the entry in
+    /// that type's `typed_methods` table. The VM marshals receiver + arguments, runs the type's
+    /// typed dispatch, and materializes the result tree per `recipe`.
+    ///
+    /// Deliberately a distinct op rather than a fourth `ExternRoute` on `CallMethod`: it carries a
+    /// baked recipe and must bypass the per-site extern route cache, exactly as the module twin
+    /// bypasses ordinary module dispatch.
+    TypedMethodCall {
+        dst: Reg,
+        recv: Reg,
+        method: NameId,
+        args: Box<[Reg]>,
+        /// Boxed for the same reason as [`Op::TypedModuleCall::recipe`] — op-size ceiling.
+        recipe: Option<Box<noeta_ext_abi::TypeRecipe>>,
+        /// A forwarded type parameter — the [`Op::TypedModuleCall::dynamic`] twin.
+        dynamic: Option<Reg>,
+        span: Span,
+    },
     /// The **router-facing** runtime JSON decode (`json.decode_typed(name, text)` → `Result<dyn,
     /// JsonError>`, L2.2 DI): decode the JSON in register `text` into the type named by the runtime
     /// string in register `name`, using the recipe registered for a `@derive(Deserialize<Json>)`
@@ -1780,6 +1800,20 @@ fn op_repr(
                 "TypedModuleCall r{dst} <- {}.{}::<T>({})",
                 n(module),
                 n(func),
+                args.join(", ")
+            )
+        }
+        Op::TypedMethodCall {
+            dst,
+            recv,
+            method,
+            args,
+            ..
+        } => {
+            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            format!(
+                "TypedMethodCall r{dst} <- r{recv}.{}::<T>({})",
+                n(method),
                 args.join(", ")
             )
         }

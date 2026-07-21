@@ -147,7 +147,7 @@ A namespace that holds several submodules can be imported as a single **group** 
 ```noeta check
 use std.http
 
-r = http.client.get("https://example.com")   // the `client` submodule
+r = http.client.get("https://example.com")?  // the `client` submodule
 echo r.status()
 echo r is http.Response                        // a type reached through the group too
 ```

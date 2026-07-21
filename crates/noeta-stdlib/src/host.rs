@@ -439,7 +439,10 @@ noeta_ext_abi::delegate_host!(SandboxHost => ids : Ids);
 impl Network for SandboxHost {
     /// The whole outbound network is the pure sandbox responder — deterministic, so both backends
     /// agree.
-    fn net_fetch(&mut self, request: crate::NetRequest) -> Result<crate::NetResponse, StdError> {
+    fn net_fetch(
+        &mut self,
+        request: crate::NetRequest,
+    ) -> Result<crate::NetResponse, noeta_ext_abi::NetError> {
         Ok(crate::net::sandbox_respond(&request))
     }
 
@@ -1277,6 +1280,7 @@ mod tests {
                     status: 200,
                     headers: vec![],
                     body: format!("re:{}", request.method).into_bytes(),
+                    url: String::new(),
                 },
             )
             .unwrap();

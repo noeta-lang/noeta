@@ -37,6 +37,12 @@ pub struct Sites {
     /// [`noeta_ext_abi::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
     /// program, like the other site maps.
     pub typed_module_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
+    /// Call-site-typed **extern-method** recipes (`resp.json::<T>`, http arc H8): the turbofish `T`
+    /// resolved into a [`noeta_ext_abi::TypeRecipe`] the lowering bakes into
+    /// `Rvalue::TypedMethodCall`. The extern-type twin of [`Sites::typed_module_call_sites`] —
+    /// presence here is exactly what distinguishes a *native typed* method call from an ordinary
+    /// (erased) generic-method instantiation. A pure function of the program.
+    pub typed_method_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI): each deriving **struct**'s type name
     /// paired with the [`noeta_ext_abi::TypeRecipe`] the checker resolved from its fields, in declaration
     /// order. Baked into a per-type runtime registry both backends lift, so `json.decode_typed(name,
@@ -176,6 +182,12 @@ pub(crate) struct SiteMaps {
     /// span → the turbofish `T` resolved into a [`noeta_ext_abi::TypeRecipe`]. Both backends harvest
     /// this on the same program, so the lowering bakes identical recipes into `Rvalue::TypedModuleCall`.
     pub(crate) typed_module_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
+    /// Call-site-typed **extern-method** recipes (`resp.json::<T>`, http arc H8): the turbofish `T`
+    /// resolved into a [`noeta_ext_abi::TypeRecipe`] the lowering bakes into
+    /// `Rvalue::TypedMethodCall`. The extern-type twin of `typed_module_call_sites` —
+    /// presence here is exactly what distinguishes a *native typed* method call from an ordinary
+    /// (erased) generic-method instantiation. A pure function of the program.
+    pub(crate) typed_method_call_sites: HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// `@derive(Deserialize<Json>)` decode recipes (L2.2 DI) — see [`Sites::deserialize_recipes`].
     /// Accumulated as each deriving struct is validated in `check_derives`.
     pub(crate) deserialize_recipes: Vec<(String, noeta_ext_abi::TypeRecipe)>,
@@ -248,6 +260,7 @@ impl SiteMaps {
             packed_list_sites: self.packed_list_sites,
             from_bytes_validated: self.from_bytes_validated,
             typed_module_call_sites: self.typed_module_call_sites,
+            typed_method_call_sites: self.typed_method_call_sites,
             deserialize_recipes: self.deserialize_recipes,
             decode_typed_sites: self.decode_typed_sites,
             map_packed_sites: self.map_packed_sites,

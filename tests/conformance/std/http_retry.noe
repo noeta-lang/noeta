@@ -1,0 +1,46 @@
+// Retry with exponential backoff (http arc H9). The sandbox's `/status/{n}` route answers `n`
+// deterministically forever, so a retryable status exhausts the budget — which is exactly what
+// makes the loop observable: sleeping goes through the **Clock** capability, so the logical clock
+// advances by the backoff curve and a retrying program stays in-oracle. That is the whole reason
+// retries sleep on the clock seam rather than the thread.
+// expect: stdout "503"
+// expect: stdout "750"
+// expect: stdout "200"
+// expect: stdout "0"
+// expect: stdout "404"
+// expect: stdout "0"
+// expect: stdout "0"
+// expect: exit 0
+use std.http.client
+use std.time
+
+// `time.monotonic()` READS-then-advances by one tick, so bracketing a block with two reads costs
+// one tick of its own. `elapsed` cancels it, leaving exactly the milliseconds slept — without the
+// adjustment every assertion below would be off by one for reasons nothing on screen explains.
+fn elapsed(before: int): int { return time.monotonic() - before - 1 }
+
+// Three retries over a permanent 503: attempts at 0, then sleeps of 250 + 500 = 750ms before the
+// budget runs out. The LAST outcome is what the caller sees — a 503 response, not a synthesized
+// summary error.
+before = time.monotonic()
+r = client.new("https://svc.test").retry(2, 250).get("/status/503")?
+echo r.status()
+echo elapsed(before)
+
+// A success never sleeps.
+before2 = time.monotonic()
+ok = client.new("https://svc.test").retry(3).get("/status/200")?
+echo ok.status()
+echo elapsed(before2)
+
+// A status OUTSIDE the retry set is returned immediately — 404 is an answer, not a hiccup.
+before3 = time.monotonic()
+nf = client.new("https://svc.test").retry(3).get("/status/404")?
+echo nf.status()
+echo elapsed(before3)
+
+// POST is NOT retried by default: a request that may already have been applied must not be
+// repeated silently. No sleeps, even against a retryable status.
+before4 = time.monotonic()
+p = client.new("https://svc.test").retry(3).post("/status/503", "body")?
+echo elapsed(before4)

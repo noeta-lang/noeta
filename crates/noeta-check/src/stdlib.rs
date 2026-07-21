@@ -68,6 +68,12 @@ fn sig_to_type_bound(
             Box::new(sig_to_type_bound(reg, k, bindings)),
             Box::new(sig_to_type_bound(reg, v, bindings)),
         ),
+        // `Result<T, E>` is a first-class `Type`, not a `Named` — mapping straight onto it is what
+        // makes `?` propagation and `From`-based error conversion work on a registry signature.
+        SigType::Result(ok, err) => Type::Result(
+            Box::new(sig_to_type_bound(reg, ok, bindings)),
+            Box::new(sig_to_type_bound(reg, err, bindings)),
+        ),
         SigType::Future(t) => Type::Named(
             FUTURE.to_string(),
             vec![sig_to_type_bound(reg, t, bindings)],
@@ -140,6 +146,10 @@ fn bind_sig(sig: &registry::SigType, arg: &Type, bindings: &mut Vec<Option<Type>
             bind_sig(k, ak, bindings);
             bind_sig(v, av, bindings);
         }
+        (SigType::Result(s_ok, s_err), Type::Result(a_ok, a_err)) => {
+            bind_sig(s_ok, a_ok, bindings);
+            bind_sig(s_err, a_err, bindings);
+        }
         (SigType::Future(s), Type::Named(n, targs)) if n == FUTURE => {
             if let Some(t) = targs.first() {
                 bind_sig(s, t, bindings);
@@ -210,7 +220,7 @@ fn collect_bounded_vars(sig: &registry::SigType, out: &mut Vec<(u8, &'static str
         SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
             collect_bounded_vars(t, out)
         }
-        SigType::Map(k, v) => {
+        SigType::Map(k, v) | SigType::Result(k, v) => {
             collect_bounded_vars(k, out);
             collect_bounded_vars(v, out);
         }
@@ -804,6 +814,53 @@ pub(super) fn typed_module_call(
     use registry::{RetTy, SigType, TypeArgWrap};
     let f = reg.find_typed_function(module, func)?;
     let bindings = bind_params(f.params, arg_types);
+    let params = f
+        .params
+        .iter()
+        .map(|p| sig_to_type_bound(reg, p, &bindings))
+        .collect();
+    let required = SigType::required_count(f.params);
+    // The wrapper is validated to be `TypeArg` at registry assembly, so the fallback never fires.
+    let result = match f.ret {
+        RetTy::TypeArg(TypeArgWrap::Plain) => t,
+        RetTy::TypeArg(TypeArgWrap::Option) => opt(t),
+        RetTy::TypeArg(TypeArgWrap::Result(e)) => {
+            Type::Result(Box::new(t), Box::new(sig_to_type_bound(reg, &e, &[])))
+        }
+        _ => t,
+    };
+    Some((params, required, result))
+}
+
+/// The extern-type twin of [`typed_module_call`] (http arc H8): resolve `Type.method::<T>(args)`
+/// against the receiver type's `typed_methods` table.
+///
+/// `type_name` is the receiver's **qualified** identity (`std.http.Response`). Returns `None` when
+/// the method is not call-site-typed on that type — which is not an error here: it is exactly the
+/// signal that the turbofish is an ordinary generic-method instantiation to be erased, so the
+/// caller falls through to the existing path.
+///
+/// Signature-variable binding seeds from the **receiver's** type arguments first (the `Cell<T>`
+/// rule from [`method_return`]), then from the call's own arguments, so a typed method on a
+/// generic extern type can reference both.
+pub(super) fn typed_type_method(
+    reg: &registry::Registry,
+    type_name: &str,
+    recv_args: &[Type],
+    method: &str,
+    arg_types: &[Type],
+    t: Type,
+) -> Option<(Vec<Type>, usize, Type)> {
+    use registry::{RetTy, SigType, TypeArgWrap};
+    let f = reg.find_typed_method(type_name, method)?;
+    let mut bindings = receiver_bindings(recv_args);
+    for (i, bound) in bind_params(f.params, arg_types).into_iter().enumerate() {
+        match bindings.get_mut(i) {
+            Some(slot) if slot.is_none() => *slot = bound,
+            Some(_) => {}
+            None => bindings.push(bound),
+        }
+    }
     let params = f
         .params
         .iter()

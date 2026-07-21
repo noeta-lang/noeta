@@ -40,7 +40,7 @@ fn shutdown_requested() -> bool {
     SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
+pub(crate) const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 
 /// The websocket session handle's type name (server-hmr L0).
 pub const SOCKET_TYPE_NAME: &str = "Socket";
@@ -328,6 +328,7 @@ fn server_error() -> NetResponse {
         status: 500,
         headers: Vec::new(),
         body: b"Internal Server Error".to_vec(),
+        url: String::new(), // built, not received
     }
 }
 
@@ -598,6 +599,7 @@ pub fn http_ctx_dispatch(
                                                 status: 400,
                                                 headers: Vec::new(),
                                                 body: b"not a websocket request".to_vec(),
+                                                url: String::new(), // built, not received
                                             },
                                         )?;
                                         true
@@ -898,9 +900,11 @@ fn server_span_error_status(status: u16) -> Option<SpanStatus> {
 fn request_conn(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<u64> {
     let mut conn = None;
     ctx.with_extern(request, &mut |e| {
-        conn = e.as_any().downcast_ref::<Request>().map(|r| r.conn);
+        conn = e.as_any().downcast_ref::<Request>().and_then(|r| r.conn);
     })?;
-    Ok(conn.expect("accept yields a Request extern value"))
+    // The serve loop only ever sees requests minted by `accept_outcome`, which always carries a
+    // connection; an outbound request (`conn: None`) can never reach here.
+    Ok(conn.expect("an accepted Request carries its connection"))
 }
 
 #[cfg(test)]
@@ -916,6 +920,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             body: Vec::new(),
+            timeout_ms: None,
         }
     }
 

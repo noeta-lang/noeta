@@ -827,6 +827,83 @@ impl<'m> Vm<'m> {
                         }
                         pc += 1;
                     }
+                    Op::TypedMethodCall {
+                        dst,
+                        recv,
+                        method: method_id,
+                        args,
+                        recipe,
+                        dynamic,
+                        span,
+                    } => {
+                        // The extern-METHOD twin of `TypedModuleCall` above (http arc H8), step for
+                        // step — the only differences are that the receiver's own runtime identity
+                        // selects the type (no module lookup) and the dispatch takes the receiver.
+                        // Mirrors the tree-walker, so the two backends agree by construction.
+                        let method = module.name(*method_id);
+                        let dynamic_recipe = dynamic.and_then(|slot| {
+                            let idx = regs[fbase + slot as usize].as_int().unwrap_or(-1);
+                            module
+                                .type_args
+                                .get(idx.max(0) as usize)
+                                .and_then(|e| e.recipe.clone().map(Box::new))
+                        });
+                        let recipe = match dynamic {
+                            Some(_) => &dynamic_recipe,
+                            None => recipe,
+                        };
+                        let Some(recipe) = recipe else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("`{method}::<T>(...)` has no resolved result type"),
+                            ));
+                        };
+                        let receiver = regs[fbase + *recv as usize];
+                        if receiver.heap_kind() != Some(HeapKind::Extern) {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("`{method}::<T>(...)` needs a native receiver"),
+                            ));
+                        }
+                        let deep = receiver.with_extern(|e| {
+                            self.reg()
+                                .find_type_qualified(e.type_identity())
+                                .is_some_and(|t| t.deep_marshal)
+                        });
+                        let nargs: Vec<noeta_stdlib::NativeValue> = args
+                            .iter()
+                            .map(|r| {
+                                let v = regs[fbase + *r as usize];
+                                if deep {
+                                    v.to_native_deep()
+                                } else {
+                                    marshal_native_arg(v)
+                                }
+                            })
+                            .collect();
+                        let reg = self.reg();
+                        let host = &mut *self.persist.host;
+                        let out = receiver.with_extern_mut(|e| {
+                            reg.dispatch_typed_method(e, method, host, &nargs, recipe)
+                        });
+                        match out {
+                            Ok(out) => {
+                                let mut path = String::new();
+                                match self.materialize_recipe(out, &mut path, *span)? {
+                                    MatOut::Value(v) => set_reg(regs, fbase, *dst, v),
+                                    MatOut::Rejected(e) => {
+                                        return Err(
+                                            self.std_dispatch_error(e.into_std_error(), *span)
+                                        );
+                                    }
+                                }
+                            }
+                            Err(error) => return Err(self.std_dispatch_error(error, *span)),
+                        }
+                        pc += 1;
+                    }
                     Op::DecodeTyped {
                         dst,
                         name,

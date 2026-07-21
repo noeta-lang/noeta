@@ -1,0 +1,34 @@
+// RFC 8288 `Link` relations (http arc H8): `resp.links()` is `rel -> target`.
+//
+// This is a **standard header**, not one API's convention — GitHub, GitLab, Jira, Shopify and
+// WordPress all use it — so it lives as a small independently useful primitive rather than being
+// buried inside a paginator. That is what lets `Link` be one pagination strategy among several
+// (cursor-in-body, offset, page) rather than the privileged one.
+// expect: stdout "https://api.example.com/repos?page=2"
+// expect: stdout "https://api.example.com/repos?page=9"
+// expect: stdout "2"
+// expect: stdout "https://x.example/items?ids=1,2,3"
+// expect: stdout "0"
+// expect: stdout "true"
+// expect: exit 0
+use std.http.server
+
+// The header GitHub actually sends.
+paged = server.response(200, "", {
+    "link": "<https://api.example.com/repos?page=2>; rel=\"next\", <https://api.example.com/repos?page=9>; rel=\"last\"",
+})
+echo paged.links()["next"]
+echo paged.links()["last"]
+echo paged.links().len()
+
+// A comma INSIDE a target must not split the element — a naive `split(',')` would tear this in
+// half and hand back a truncated URL.
+commas = server.response(200, "", {"link": "<https://x.example/items?ids=1,2,3>; rel=\"next\""})
+echo commas.links()["next"]
+
+// No header at all is an empty map, not an error — a caller can walk relations unconditionally.
+echo server.response(200, "").links().len()
+
+// A malformed element is skipped rather than costing the caller the links the server did send.
+junk = server.response(200, "", {"link": "garbage, <https://x.example/a>; rel=\"next\", <unclosed"})
+echo junk.links()["next"] == "https://x.example/a"

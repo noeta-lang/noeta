@@ -109,10 +109,13 @@ pub trait Ids {
 /// **Network** capability (http arc H1) — outbound HTTP. The sandbox answers every request with a
 /// deterministic pure responder (a pure function of the request, so the differential holds
 /// regardless of URL); the real host performs it over the network. A transport failure (DNS,
-/// connection, TLS) is an [`ErrorKind::Io`](crate::ErrorKind::Io) error; an HTTP error *status* is
-/// an ordinary response, not an error.
+/// connection, TLS) is a classified [`crate::NetError`]; an HTTP error *status* is an ordinary
+/// response, not an error — that split is what makes `?` on a request mean "the network broke".
 pub trait Network {
-    fn net_fetch(&mut self, request: crate::NetRequest) -> Result<crate::NetResponse, StdError>;
+    fn net_fetch(
+        &mut self,
+        request: crate::NetRequest,
+    ) -> Result<crate::NetResponse, crate::NetError>;
 
     /// Build the async work descriptor for `request` (http arc H3, the `http.*_async` surface).
     /// The dispatch tickets the returned descriptor on the executor. The default is a

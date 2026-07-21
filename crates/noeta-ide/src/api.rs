@@ -115,6 +115,10 @@ fn types_impl(root: Option<&str>) -> Vec<ApiType> {
                 .methods
                 .iter()
                 .chain(t.ctx_methods.iter())
+                // Call-site-typed methods (http arc H8) are part of the type's surface — without
+                // them `resp.json::<T>()` would be invisible to completion, hover, and the docs
+                // browser, which is most of what makes the turbofish discoverable at all.
+                .chain(t.typed_methods.iter())
                 .map(|f| ApiFn {
                     name: f.name.to_string(),
                     signature: f.render(),
@@ -254,6 +258,7 @@ mod tests {
                     .methods
                     .iter()
                     .chain(t.ctx_methods.iter())
+                    .chain(t.typed_methods.iter())
                     .map(|f| f.name)
                     .collect();
                 for (key, _) in t.docs {

@@ -1,0 +1,40 @@
+// `prepare` / `send` — the seam a middleware layer above std bottoms out in (http arc H10).
+//
+// std deliberately stops here: it never invokes user code, because composing a chain natively
+// would mean holding user closures inside a native value. Middleware, mocking and pagination live
+// in `para/api`, where the onion is composed from ordinary Noeta closures under ordinary GC.
+//
+// `prepare` builds the request the outermost middleware sees; `send` performs one. `Request`
+// therefore needs copy-modify builders, not just accessors — a layer above must be able to rewrite
+// a request before passing it on.
+// expect: stdout "GET"
+// expect: stdout "https://svc.test/headers"
+// expect: stdout "{"x-from-middleware":"1"}"
+// expect: stdout "https://other.test/echo"
+// expect: stdout "{"accept":"application/json","x-from-middleware":"1"}"
+// expect: stdout "{"body":"payload","method":"POST","path":"/echo"}"
+// expect: exit 0
+use std.http.client
+
+api = client.new("https://svc.test")
+
+// `prepare` resolves the path against the base URL and applies the client's headers, without
+// performing anything.
+req = api.prepare("get", "/headers")
+echo req.method()
+echo req.url()
+
+// Copy-modify, the shape a middleware uses to inject a header before passing the request on.
+echo api.send(req.with_header("x-from-middleware", "1"))?.body()
+
+// `with_url` retargets; an absolute URL is used as-is.
+echo req.with_url("https://other.test/echo").url()
+
+// A client's own headers are layered on, and the request's win over them.
+withdefault = client.new("https://svc.test").header("accept", "application/json")
+echo withdefault
+    .send(withdefault.prepare("get", "/headers").with_header("x-from-middleware", "1"))?
+    .body()
+
+// A body-carrying verb round-trips through prepare/send unchanged.
+echo api.send(api.prepare("post", "/echo", "payload"))?.body()
