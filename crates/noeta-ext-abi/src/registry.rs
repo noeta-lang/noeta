@@ -931,7 +931,9 @@ pub struct ExtTier {
 ///
 /// Sites use [`TierSite`], the vocabulary this ABI already owns; the checker widens it into its
 /// own finer-grained site model (which distinguishes `struct` from `class` from `enum` in ways a
-/// three-variant enum cannot). **Empty ⇒ unrestricted**, matching [`ExtTier::sites`].
+/// three-variant enum cannot). **Empty ⇒ attaches to nothing**, matching [`ExtTier::sites`] — the
+/// same polarity, for the same reason: a directive that genuinely goes everywhere can list the
+/// sites it goes to, but one that decorates nothing has no other way to say so.
 #[derive(Debug, Clone, Copy)]
 pub struct ExtDirective {
     /// The name programs write after `@`. Resolved *after* the built-in directives and the tier

@@ -561,7 +561,7 @@ fn attr_args_str(args: &[AttrArg]) -> String {
 }
 
 /// A compact rendering of an attribute-argument literal value, enough to make a snapshot legible.
-fn attr_value_str(value: &AttrValue) -> String {
+pub(crate) fn attr_value_str(value: &AttrValue) -> String {
     match value {
         AttrValue::Str(s) => format!("{s:?}"),
         AttrValue::Int(n) => n.to_string(),

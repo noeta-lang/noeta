@@ -4544,6 +4544,7 @@ dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
  "noeta-edition",
+ "noeta-ext-abi",
  "noeta-lexer",
  "noeta-span",
  "proptest",

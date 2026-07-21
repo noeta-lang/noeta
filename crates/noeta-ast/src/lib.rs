@@ -899,6 +899,23 @@ pub enum AttrValue {
     },
 }
 
+impl AttrValue {
+    /// This value as an extension's directive hook receives it: a **string literal without its
+    /// quotes**, everything else in its source spelling.
+    ///
+    /// The unquoting is the whole point. A hook's arguments are overwhelmingly paths and names —
+    /// `@openapi("petstore.yaml")` — and handing over `"\"petstore.yaml\""` would make every hook
+    /// strip the quotes itself, which is one more thing for each of them to get subtly wrong (a
+    /// path that legitimately contains a quote, an argument that was not a string at all). Doing
+    /// it once here means a hook's `args[0]` is directly a path.
+    pub fn as_directive_arg(&self) -> String {
+        match self {
+            AttrValue::Str(s) => s.clone(),
+            other => crate::pretty::attr_value_str(other),
+        }
+    }
+}
+
 /// One `@derive(...)` entry: the trait name plus any **generic type arguments** it carries
 /// (`@derive(Serialize<Json>)` → `name: "Serialize"`, `args: [Json]`). A plain `@derive(Comparable)`
 /// has empty `args`. The checker validates the name, arity, and arguments; the compiler synthesizes

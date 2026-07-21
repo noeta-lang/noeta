@@ -12,6 +12,10 @@ noeta-span = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-lexer = { workspace = true }
+# The extension-directive metadata only (`ExtDirective`'s declared sites and argument contract), so
+# the rule deciding whether an invocation is legal has one home that both the checker and the
+# loader can reach. Every crate that already depends on this one also already depends on ext-abi.
+noeta-ext-abi = { workspace = true }
 chumsky = { workspace = true }
 stacker = { workspace = true }
 

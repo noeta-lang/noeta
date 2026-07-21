@@ -18,6 +18,7 @@
 //! is tagged at parse time with its [`SourceId`], so the caller resolves it through the [`Linked`]
 //! [`SourceMap`] rather than against the entry (slice F4).
 
+pub mod expand;
 mod qualify;
 
 use std::collections::HashSet;
@@ -47,6 +48,15 @@ pub struct Linked {
     /// edition. The checker consults this per declaration (via a span's `SourceId`) so a merged
     /// program applies each package's own edition rules — the editions compiler arc's whole point.
     pub editions: noeta_lexer::EditionMap,
+    /// Every **non-Noeta file** a compile-time directive expansion read (an OpenAPI spec and the
+    /// documents it `$ref`s, say), as the hooks reported them.
+    ///
+    /// These are inputs to the program exactly as its `.noe` files are — the difference is only
+    /// that the compiler cannot discover them by parsing, so a hook has to say. A consumer that
+    /// caches or watches (the salsa layer, `--watch`) registers these alongside the sources;
+    /// editing one must re-run the expansion, or the program is built from a spec that no longer
+    /// exists in that form.
+    pub reads: Vec<String>,
 }
 
 /// A diagnostic produced while loading, paired with the source it renders against.
@@ -452,13 +462,59 @@ pub fn link(
 
     let refs: Vec<&Program> = module_programs.iter().collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
-    let program = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs)?;
+    let mut program = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs)?;
+    let reads = expand_into(
+        &mut program,
+        &mut sources,
+        &mut editions,
+        root_edition,
+        &text_tiers,
+    )?;
     Ok(Linked {
         program,
         entry,
         sources: SourceMap::new(sources),
         editions,
+        reads,
     })
+}
+
+/// Run compile-time directive expansion over the linked program, appending each expansion's source
+/// to `sources` and its edition to `editions` in lock-step.
+///
+/// The one place expansion happens, called from every link path so the CLI and the IDE cannot end
+/// up with different ideas of what a decorated type's members are. Generated code takes the root
+/// package's edition: it was written by the extension the *root* installed, for this program.
+///
+/// Expansion sources continue the id numbering, so a diagnostic inside generated code resolves
+/// through the same [`SourceMap`] as one in a hand-written file.
+fn expand_into(
+    program: &mut Program,
+    sources: &mut Vec<Source>,
+    editions: &mut noeta_lexer::EditionMap,
+    root_edition: noeta_lexer::Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Result<Vec<String>, Vec<LoadDiagnostic>> {
+    let registry = noeta_ext_abi::registry::single_registry_process();
+    if !expand::has_expansions(program, registry) {
+        return Ok(Vec::new());
+    }
+    let expanded = expand::expand_program(
+        program,
+        sources,
+        sources.len() as u32,
+        root_edition,
+        text_tiers,
+        registry,
+    );
+    if !expanded.diagnostics.is_empty() {
+        return Err(expanded.diagnostics);
+    }
+    for source in expanded.sources {
+        editions.set(source.id(), root_edition);
+        sources.push(source);
+    }
+    Ok(expanded.reads)
 }
 
 /// Link the entry against its sibling modules **and its dependency packages** (package-manager P2.1).
@@ -559,7 +615,7 @@ pub fn link_with_deps(
     let dep_refs: Vec<&Program> = dep_programs.iter().collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let native_roots = native_dep_roots(deps);
-    let program = link_parsed_with_deps(
+    let mut program = link_parsed_with_deps(
         &entry,
         &entry_parsed.program,
         &sibling_refs,
@@ -567,11 +623,19 @@ pub fn link_with_deps(
         &broken_refs,
         Some(&native_roots),
     )?;
+    let reads = expand_into(
+        &mut program,
+        &mut sources,
+        &mut editions,
+        root_edition,
+        &text_tiers,
+    )?;
     Ok(Linked {
         program,
         entry,
         sources: SourceMap::new(sources),
         editions,
+        reads,
     })
 }
 
