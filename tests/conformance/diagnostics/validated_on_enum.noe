@@ -1,0 +1,9 @@
+// `@validated` channels literal construction and applies to a struct or a class. On an enum it is a
+// misplacement (E0054). This reported NOTHING before the directive placement check was unified:
+// `EnumDecl` had no `validated` field, so the parser discarded the directive and the author got
+// silence — the program looked accepted.
+// expect: error E0054 at 7:2
+// expect: exit 1
+@validated
+enum Color { Red; Green }
+echo "unreached"

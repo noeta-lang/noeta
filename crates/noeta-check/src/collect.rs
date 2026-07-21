@@ -314,21 +314,6 @@ impl Checker {
                     );
                     self.record_derived(&c.name, &c.decorators.derives);
                     self.record_from_impls(&c.name, &c.impls);
-                    // Attributes are structs only: `@attribute` on a class is an error (E0029).
-                    if c.decorators.attribute.is_some() {
-                        self.error(
-                            DiagnosticCode::NotAnAttribute,
-                            c.name_span,
-                            format!(
-                                "a class cannot be an attribute: `{}` must be a record",
-                                c.name
-                            ),
-                        )
-                        .help(
-                            "attributes are records (their `#[...]` arguments map to fields); \
-                                 declare it as `@attribute type` instead of `class`",
-                        );
-                    }
                     // Record each method's signature (class methods and impl-block methods alike),
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at

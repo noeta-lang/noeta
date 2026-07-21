@@ -24,7 +24,7 @@
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
 use noeta_ast::reflect::TIER_ATTR_DOC;
-use noeta_ast::{AttrArg, Attribute, Program, Stmt};
+use noeta_ast::{AttrArg, Attribute, Program, Sites, Stmt};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
@@ -1188,8 +1188,21 @@ impl Checker {
     pub(crate) fn check_semantic_roles(&mut self, program: &Program) {
         for stmt in &program.stmts {
             match stmt {
+                // Placement — which directive may sit on which declaration — is one check for
+                // every kind, driven off the metadata table (`directives.rs`). What stays here is
+                // the per-directive work that placement does not cover: a `@role`'s tags must name
+                // variants of a `@semantic` enum, and a `@packed` struct's fields must all be
+                // packable.
                 Stmt::Struct(r) => {
-                    self.check_misplaced_semantic(r.decorators.semantic, &r.name, "record");
+                    self.check_directive_placement(
+                        &r.decorators,
+                        &crate::directives::Placement {
+                            site: Sites::STRUCT,
+                            article_noun: "a record",
+                            name: &r.name,
+                            name_span: r.name_span,
+                        },
+                    );
                     self.check_role_tags(
                         r.name_span,
                         r.decorators.role.as_deref(),
@@ -1198,24 +1211,26 @@ impl Checker {
                     self.check_packed_struct(r);
                 }
                 Stmt::Class(c) => {
-                    self.check_misplaced_semantic(c.decorators.semantic, &c.name, "class");
-                    self.check_misplaced_packed(c.decorators.packed, &c.name, "class");
-                    // A role tags an attribute, and attributes are structs only, so `@role` on a
-                    // class is an error (E0031).
-                    if c.decorators.role.is_some() {
-                        self.error(
-                            DiagnosticCode::InvalidRole,
-                            c.name_span,
-                            format!(
-                                "a class cannot carry a role: `{}` must be a record attribute",
-                                c.name
-                            ),
-                        )
-                        .help("declare it as an `@attribute type` and tag that with `@role`");
-                    }
+                    self.check_directive_placement(
+                        &c.decorators,
+                        &crate::directives::Placement {
+                            site: Sites::CLASS,
+                            article_noun: "a class",
+                            name: &c.name,
+                            name_span: c.name_span,
+                        },
+                    );
                 }
                 Stmt::Enum(e) => {
-                    self.check_misplaced_packed(e.decorators.packed, &e.name, "enum");
+                    self.check_directive_placement(
+                        &e.decorators,
+                        &crate::directives::Placement {
+                            site: Sites::ENUM,
+                            article_noun: "an enum",
+                            name: &e.name,
+                            name_span: e.name_span,
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -1288,24 +1303,6 @@ impl Checker {
             }
             _ => return None,
         })
-    }
-
-    /// Flag a `@semantic` directive on a non-enum declaration (`E0031`): it marks enums role-eligible
-    /// and has no meaning on a struct or class.
-    pub(crate) fn check_misplaced_semantic(
-        &mut self,
-        semantic: Option<Span>,
-        name: &str,
-        kind: &str,
-    ) {
-        if let Some(span) = semantic {
-            self.error(
-                DiagnosticCode::InvalidRole,
-                span,
-                format!("`@semantic` may only mark an enum, not the {kind} `{name}`"),
-            )
-            .help("`@semantic` makes an enum's variants usable as `@role(Enum.Variant)`");
-        }
     }
 
     /// Validate a struct's `@role(Enum.Variant)` tags. Each must name a **fieldless** variant of a

@@ -1,0 +1,7 @@
+// A `@role` tags an attribute, and attributes are structs, so `@role` on an enum is a misplacement
+// (E0031). The class case was checked; the enum case was not.
+// expect: error E0031 at 6:6
+// expect: exit 1
+@role(Kind.A)
+enum Tagged { X; Y }
+echo "unreached"

@@ -311,23 +311,4 @@ impl Checker {
             }
         }
     }
-
-    /// Flag a `@packed` directive on a non-struct declaration (`E0038`): it is a value-`struct` layout
-    /// marker and has no meaning on a class or enum.
-    pub(crate) fn check_misplaced_packed(
-        &mut self,
-        packed: Option<PackedDirective>,
-        name: &str,
-        kind: &str,
-    ) {
-        if let Some(directive) = packed {
-            let span = directive.span;
-            self.error(
-                DiagnosticCode::InvalidPackedType,
-                span,
-                format!("`@packed` may only mark a struct, not the {kind} `{name}`"),
-            )
-            .help("`@packed` gives a value `struct` of primitives an unboxed flat layout");
-        }
-    }
 }

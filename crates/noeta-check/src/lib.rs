@@ -67,8 +67,8 @@ use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl, FnDecl,
-    ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, PackedDirective, Param, Pattern,
-    Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
+    ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, Param, Pattern, Program, Stmt,
+    StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::{Edition, EditionMap};
@@ -78,6 +78,7 @@ use noeta_types::{BuiltinTrait, Type};
 mod attributes;
 mod collect;
 mod decls;
+mod directives;
 mod effects;
 mod env;
 mod expr;
