@@ -17,7 +17,7 @@
 //! thunk once for an eager DSL; wrap them in computeds for a reactive one), and a hole's lexical
 //! captures ride the ordinary closure machinery.
 
-use crate::{ClosureBody, Expr, Program, Stmt};
+use crate::{CallArg, ClosureBody, Expr, Program, Stmt};
 use noeta_span::Span;
 
 /// The resolved handler an expression tier's block desugars to. A **program**-declared tier's
@@ -113,7 +113,10 @@ pub fn tier_expr_call(
     };
     Expr::Call {
         callee: Box::new(callee),
-        args: vec![statics_list, holes_list],
+        args: vec![
+            CallArg::positional(statics_list),
+            CallArg::positional(holes_list),
+        ],
         span,
     }
 }

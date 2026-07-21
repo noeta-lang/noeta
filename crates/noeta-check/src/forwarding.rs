@@ -346,7 +346,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
             if cx.mentions(&t) {
                 mark(t, true);
             }
-            for a in args {
+            for a in noeta_ast::CallArg::values(args) {
                 rec!(a);
             }
         }
@@ -385,7 +385,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
                     }
                 }
             }
-            for a in args {
+            for a in noeta_ast::CallArg::values(args) {
                 rec!(a);
             }
         }
@@ -394,7 +394,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         // its receiver/arguments recurse like any call's.
         Expr::TypedMethodCall { recv, args, .. } => {
             rec!(recv);
-            for a in args {
+            for a in noeta_ast::CallArg::values(args) {
                 rec!(a);
             }
         }
@@ -445,7 +445,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         }
         Expr::Call { callee, args, .. } => {
             rec!(callee);
-            for a in args {
+            for a in noeta_ast::CallArg::values(args) {
                 rec!(a);
             }
         }

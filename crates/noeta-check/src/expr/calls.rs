@@ -4,6 +4,7 @@
 //! verbatim out of the crate root.
 
 use crate::*;
+use noeta_ast::CallArg;
 
 impl Checker {
     /// Finalize the deferred closure arguments of a call once the callee's parameter types are
@@ -15,10 +16,10 @@ impl Checker {
         &mut self,
         params: &[Type],
         args: &mut [Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         env: &mut Env,
     ) {
-        for (i, expr) in arg_exprs.iter().enumerate() {
+        for (i, expr) in CallArg::values(arg_exprs).enumerate() {
             if !self.is_deferred_arg(expr, env) {
                 continue;
             }
@@ -296,7 +297,7 @@ impl Checker {
         name: &str,
         generic: &GenericInfo,
         required: usize,
-        args: &[Expr],
+        args: &[CallArg],
         callee_span: Span,
         call_span: Span,
         seed: HashMap<String, Type>,
@@ -305,10 +306,10 @@ impl Checker {
         let mut arg_types: Vec<Type> = args
             .iter()
             .map(|a| {
-                if self.is_deferred_arg(a, env) {
+                if self.is_deferred_arg(&a.value, env) {
                     Type::Unknown
                 } else {
-                    self.synth(a, env)
+                    self.synth(&a.value, env)
                 }
             })
             .collect();
@@ -324,7 +325,7 @@ impl Checker {
             env,
         );
         // The deferred-argument safety net, mirroring `synth_call`.
-        for (i, arg) in args.iter().enumerate() {
+        for (i, arg) in CallArg::values(args).enumerate() {
             if self.is_deferred_arg(arg, env) && matches!(arg_types.get(i), Some(Type::Unknown)) {
                 self.synth(arg, env);
             }
@@ -422,7 +423,7 @@ impl Checker {
         name_span: Span,
         type_args: &[TypeRef],
         args: &mut [Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         span: Span,
         env: &mut Env,
     ) -> Type {
@@ -536,7 +537,7 @@ impl Checker {
         &mut self,
         callee: &Expr,
         args: &[Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         call_span: Span,
         env: &mut Env,
     ) -> Type {
@@ -547,7 +548,7 @@ impl Checker {
         // synthesized standalone here, so its body is always checked (diagnostics, hover index)
         // exactly as before the deferral existed. A closure's type is never `Unknown` once typed,
         // so the placeholder is an unambiguous marker.
-        for (i, expr) in arg_exprs.iter().enumerate() {
+        for (i, expr) in noeta_ast::CallArg::values(arg_exprs).enumerate() {
             if self.is_deferred_arg(expr, env) && matches!(args.get(i), Some(Type::Unknown)) {
                 self.synth(expr, env);
             }
@@ -559,7 +560,7 @@ impl Checker {
         &mut self,
         callee: &Expr,
         args: &mut [Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         call_span: Span,
         env: &mut Env,
     ) -> Type {
@@ -1046,7 +1047,7 @@ impl Checker {
         &mut self,
         recv: &Type,
         args: &mut [Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         span: Span,
         env: &mut Env,
     ) -> Option<Type> {
@@ -1151,7 +1152,7 @@ impl Checker {
         name: &str,
         sig: &FnSig,
         args: &mut [Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         span: Span,
         recv_args: &[Type],
         call_span: Option<Span>,
@@ -1211,7 +1212,7 @@ impl Checker {
         name_span: Span,
         type_args: &[TypeRef],
         args: &mut [Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         span: Span,
         env: &mut Env,
     ) -> Type {
@@ -1389,7 +1390,7 @@ impl Checker {
         name_span: Span,
         t: &Type,
         arg_types: &[Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         span: Span,
     ) -> Type {
         // A type with no build recipe (an enum, a class, an unconstrained generic) cannot be
@@ -1440,7 +1441,7 @@ impl Checker {
         recv: &Type,
         name: &str,
         args: &[Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         span: Span,
     ) {
         if let Some(params) = stdlib::method_params(self.reg(), recv, name) {
@@ -1463,7 +1464,7 @@ impl Checker {
         params: &[Type],
         required: usize,
         args: &[Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[CallArg],
         span: Span,
         callee: &str,
     ) {
@@ -1491,8 +1492,8 @@ impl Checker {
             // `u8` param, `f(1.5)` for `f32`/`f64`) — exactly as it does at a binding of that type
             // (P-NUM-SYM). Try that first; a non-literal or non-adapting arg falls to `arg_assignable`
             // (which keeps the `int`/`float` widening leniency the strict fixed-width types lack).
-            if let Some(expr) = arg_exprs.get(i)
-                && self.try_adapt_literal(expr, param).is_some()
+            if let Some(arg) = arg_exprs.get(i)
+                && self.try_adapt_literal(&arg.value, param).is_some()
             {
                 continue;
             }

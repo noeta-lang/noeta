@@ -313,7 +313,10 @@ pub(crate) fn call_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
                 name: name.to_string(),
                 span,
             }),
-            args,
+            args: args
+                .into_iter()
+                .map(noeta_ast::CallArg::positional)
+                .collect(),
             span,
         },
         span,
@@ -329,7 +332,10 @@ pub(crate) fn call_root_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
     Stmt::Expr {
         expr: Expr::Call {
             callee: Box::new(root_ref(name, span)),
-            args,
+            args: args
+                .into_iter()
+                .map(noeta_ast::CallArg::positional)
+                .collect(),
             span,
         },
         span,

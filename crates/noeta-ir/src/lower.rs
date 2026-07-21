@@ -613,7 +613,11 @@ fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
     };
     let call = |callee: Expr, args: Vec<Expr>| Expr::Call {
         callee: Box::new(callee),
-        args,
+        // A desugar builds positional calls by construction.
+        args: args
+            .into_iter()
+            .map(noeta_ast::CallArg::positional)
+            .collect(),
         span,
     };
     let arm = |variant: &str, body: Expr| noeta_ast::MatchArm {
@@ -1430,9 +1434,11 @@ impl Lowerer<'_> {
                     }),
                     args: params
                         .iter()
-                        .map(|p| Expr::Ident {
-                            name: p.name.clone(),
-                            span: *span,
+                        .map(|p| {
+                            noeta_ast::CallArg::positional(Expr::Ident {
+                                name: p.name.clone(),
+                                span: *span,
+                            })
                         })
                         .collect(),
                     span: *span,
@@ -1688,7 +1694,7 @@ impl Lowerer<'_> {
                     && name == POLL_FN
                     && let [arg] = args.as_slice()
                 {
-                    let future = self.lower_expr(arg, out)?;
+                    let future = self.lower_expr(&arg.value, out)?;
                     return Ok(self.emit(
                         out,
                         Rvalue::PollFuture {
@@ -1710,7 +1716,7 @@ impl Lowerer<'_> {
                     if name == SCOPE_READY_FN
                         && let [arg] = args.as_slice()
                     {
-                        let scope = self.lower_expr(arg, out)?;
+                        let scope = self.lower_expr(&arg.value, out)?;
                         return Ok(self.emit(
                             out,
                             Rvalue::ScopeReady { scope, span: *span },
@@ -1720,7 +1726,7 @@ impl Lowerer<'_> {
                     if name == SCOPE_END_FN
                         && let [arg] = args.as_slice()
                     {
-                        let scope = self.lower_expr(arg, out)?;
+                        let scope = self.lower_expr(&arg.value, out)?;
                         // Effect-only (closes the scope); no value binding — `Stmt::Eval`, not a `let`.
                         out.push(Stmt::Eval {
                             rvalue: Rvalue::ScopeEndAt { scope, span: *span },
@@ -2061,12 +2067,12 @@ impl Lowerer<'_> {
                             name: "panic".to_string(),
                             span: *tier_span,
                         }),
-                        args: vec![Expr::Str {
+                        args: vec![noeta_ast::CallArg::positional(Expr::Str {
                             value: format!(
                                 "`@{tier}` is not an expression tier — its blocks are not values"
                             ),
                             span: *span,
-                        }],
+                        })],
                         span: *span,
                     },
                 };
@@ -2321,7 +2327,7 @@ impl Lowerer<'_> {
                 };
                 let args = args
                     .iter()
-                    .map(|a| self.lower_expr(a, out))
+                    .map(|a| self.lower_expr(&a.value, out))
                     .collect::<Result<Vec<_>, _>>()?;
                 // The recipe was resolved by the checker at this span (the same channel the other
                 // typed sites use); `None` means `T` had no decoding (already a checker error) —
@@ -2513,7 +2519,7 @@ impl Lowerer<'_> {
                     if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
                         let mut arg_atoms = vec![left_atom];
                         for a in args {
-                            arg_atoms.push(self.lower_expr(a, out)?);
+                            arg_atoms.push(self.lower_expr(&a.value, out)?);
                         }
                         let text = arg_atoms.pop().expect("decode_typed takes 2 args");
                         let name = arg_atoms.pop().expect("decode_typed takes 2 args");
@@ -2530,7 +2536,7 @@ impl Lowerer<'_> {
                     let receiver = self.lower_expr(receiver, out)?;
                     let mut arg_atoms = vec![left_atom];
                     for a in args {
-                        arg_atoms.push(self.lower_expr(a, out)?);
+                        arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     Ok(self.emit(
                         out,
@@ -2551,7 +2557,7 @@ impl Lowerer<'_> {
                     let callee = self.lower_expr(callee, out)?;
                     let mut arg_atoms = vec![left_atom];
                     for a in args {
-                        arg_atoms.push(self.lower_expr(a, out)?);
+                        arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     Ok(self.emit(
                         out,
@@ -2603,9 +2609,17 @@ impl Lowerer<'_> {
     }
 
     /// Lower a call's argument list left-to-right (the tree-walker's order).
-    fn lower_args(&mut self, args: &[Expr], out: &mut Vec<Stmt>) -> Result<Vec<Atom>, Unsupported> {
+    /// Lower a call's argument list to atoms, in **written** order.
+    ///
+    /// The one funnel every call form goes through, which is why it is also where re-ordering a
+    /// labelled argument list into parameter order belongs once the checker resolves the binding.
+    fn lower_args(
+        &mut self,
+        args: &[noeta_ast::CallArg],
+        out: &mut Vec<Stmt>,
+    ) -> Result<Vec<Atom>, Unsupported> {
         let mut atoms = Vec::with_capacity(args.len());
-        for arg in args {
+        for arg in noeta_ast::CallArg::values(args) {
             atoms.push(self.lower_expr(arg, out)?);
         }
         Ok(atoms)
@@ -2648,14 +2662,14 @@ impl Lowerer<'_> {
         &mut self,
         recv: &Expr,
         method: &str,
-        args: &[Expr],
+        args: &[noeta_ast::CallArg],
         span: Span,
         out: &mut Vec<Stmt>,
     ) -> Result<Atom, Unsupported> {
         let recv = self.lower_expr(recv, out)?;
         let args = args
             .iter()
-            .map(|a| self.lower_expr(a, out))
+            .map(|a| self.lower_expr(&a.value, out))
             .collect::<Result<Vec<_>, _>>()?;
         let recipe = self.sites.typed_method_call_sites.get(&span).cloned();
         let dynamic = self

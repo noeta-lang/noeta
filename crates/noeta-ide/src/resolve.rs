@@ -729,7 +729,7 @@ impl Resolver {
             }
             Expr::Call { callee, args, .. } => {
                 self.walk_expr(callee);
-                self.walk_exprs(args);
+                self.walk_args(args);
             }
             Expr::Closure {
                 params, body, span, ..
@@ -828,12 +828,12 @@ impl Resolver {
             Expr::Channel { capacity, .. } => self.walk_expr(capacity),
             Expr::TypedModuleCall { recv, args, .. } => {
                 self.walk_expr(recv);
-                self.walk_exprs(args);
+                self.walk_args(args);
             }
-            Expr::TypedCall { args, .. } => self.walk_exprs(args),
+            Expr::TypedCall { args, .. } => self.walk_args(args),
             Expr::TypedMethodCall { recv, args, .. } => {
                 self.walk_expr(recv);
-                self.walk_exprs(args);
+                self.walk_args(args);
             }
             Expr::Invoke {
                 recv, name, args, ..
@@ -869,6 +869,13 @@ impl Resolver {
 
     fn walk_exprs(&mut self, exprs: &[Expr]) {
         for expr in exprs {
+            self.walk_expr(expr);
+        }
+    }
+
+    /// Walk a call's argument values; a label binds nothing and resolves to nothing.
+    fn walk_args(&mut self, args: &[noeta_ast::CallArg]) {
+        for expr in noeta_ast::CallArg::values(args) {
             self.walk_expr(expr);
         }
     }

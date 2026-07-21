@@ -5,6 +5,7 @@
 //! left this file are only the delegated siblings (`ops`/`calls`/`member`/`patterns`).
 
 use crate::*;
+use noeta_ast::CallArg;
 
 impl Checker {
     // ----- bidirectional judgments -----
@@ -93,7 +94,7 @@ impl Checker {
                 let Type::Option(inner) = expected else {
                     unreachable!()
                 };
-                self.check(&args[0], inner, env);
+                self.check(&args[0].value, inner, env);
                 expected.clone()
             }
             Expr::Call { callee, args, .. }
@@ -106,7 +107,7 @@ impl Checker {
                 };
                 match args.first() {
                     Some(arg) => {
-                        self.check(arg, ok, env);
+                        self.check(&arg.value, ok, env);
                     }
                     // `Ok()` carries a unit payload (`Result<void, E>`).
                     None => self.subsume(&Type::Unit, ok, expr.span()),
@@ -121,7 +122,7 @@ impl Checker {
                 let Type::Result(_, err) = expected else {
                     unreachable!()
                 };
-                self.check(&args[0], err, env);
+                self.check(&args[0].value, err, env);
                 expected.clone()
             }
             // A call of a generic user function absorbs the expected type through its RETURN
@@ -691,10 +692,10 @@ impl Checker {
                 let arg_types: Vec<Type> = args
                     .iter()
                     .map(|a| {
-                        if self.is_deferred_arg(a, env) {
+                        if self.is_deferred_arg(&a.value, env) {
                             Type::Unknown
                         } else {
-                            self.synth(a, env)
+                            self.synth(&a.value, env)
                         }
                     })
                     .collect();
@@ -1383,10 +1384,10 @@ impl Checker {
                     let mut arg_types: Vec<Type> = args
                         .iter()
                         .map(|a| {
-                            if self.is_deferred_arg(a, env) {
+                            if self.is_deferred_arg(&a.value, env) {
                                 Type::Unknown
                             } else {
-                                self.synth(a, env)
+                                self.synth(&a.value, env)
                             }
                         })
                         .collect();
@@ -1402,7 +1403,7 @@ impl Checker {
                         env,
                     );
                     // The deferred-argument safety net, as the `TypedMethodCall` arm does.
-                    for (i, expr) in args.iter().enumerate() {
+                    for (i, expr) in CallArg::values(args).enumerate() {
                         if self.is_deferred_arg(expr, env)
                             && matches!(arg_types.get(i), Some(Type::Unknown))
                         {
@@ -1418,7 +1419,8 @@ impl Checker {
                     .cloned()
                     .unwrap_or_else(|| binding.clone());
                 // Arguments are synthesized (checked as expressions) regardless of which function.
-                let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
+                let arg_types: Vec<Type> =
+                    CallArg::values(args).map(|a| self.synth(a, env)).collect();
                 self.check_type_ref(ty);
                 let t = from_ref_q(ty, &self.imports.extern_types);
                 // A turbofish MENTIONING an in-scope type parameter (poly-values F2b; composites
@@ -1507,10 +1509,10 @@ impl Checker {
                 let mut arg_types: Vec<Type> = args
                     .iter()
                     .map(|a| {
-                        if self.is_deferred_arg(a, env) {
+                        if self.is_deferred_arg(&a.value, env) {
                             Type::Unknown
                         } else {
-                            self.synth(a, env)
+                            self.synth(&a.value, env)
                         }
                     })
                     .collect();
@@ -1525,7 +1527,7 @@ impl Checker {
                 );
                 // The deferred-argument safety net, mirroring `synth_call`: any deferred argument
                 // no branch finalized is synthesized standalone so its body is always checked.
-                for (i, expr) in args.iter().enumerate() {
+                for (i, expr) in CallArg::values(args).enumerate() {
                     if self.is_deferred_arg(expr, env)
                         && matches!(arg_types.get(i), Some(Type::Unknown))
                     {
@@ -1547,10 +1549,10 @@ impl Checker {
                 let mut arg_types: Vec<Type> = args
                     .iter()
                     .map(|a| {
-                        if self.is_deferred_arg(a, env) {
+                        if self.is_deferred_arg(&a.value, env) {
                             Type::Unknown
                         } else {
-                            self.synth(a, env)
+                            self.synth(&a.value, env)
                         }
                     })
                     .collect();
@@ -1565,7 +1567,7 @@ impl Checker {
                     env,
                 );
                 // The deferred-argument safety net, as above.
-                for (i, expr) in args.iter().enumerate() {
+                for (i, expr) in CallArg::values(args).enumerate() {
                     if self.is_deferred_arg(expr, env)
                         && matches!(arg_types.get(i), Some(Type::Unknown))
                     {

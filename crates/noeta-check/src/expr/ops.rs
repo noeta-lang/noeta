@@ -237,7 +237,7 @@ impl Checker {
         match right {
             Expr::Call { callee, args, .. } => {
                 let mut arg_types = vec![piped];
-                arg_types.extend(args.iter().map(|a| self.synth(a, env)));
+                arg_types.extend(noeta_ast::CallArg::values(args).map(|a| self.synth(a, env)));
                 self.synth_call(callee, &arg_types, &[], right.span(), env)
             }
             Expr::Ident { .. } | Expr::Member { .. } => {

@@ -28,8 +28,8 @@
 
 use crate::pretty::type_ref_str;
 use crate::{
-    BinaryOp, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, ObjectLit, Param, Stmt, StrPart,
-    TraitDecl, TypeRef,
+    BinaryOp, CallArg, DeriveSpec, Expr, FieldDecl, FieldInit, FnDecl, ObjectLit, Param, Stmt,
+    StrPart, TraitDecl, TypeRef,
 };
 use noeta_span::Span;
 
@@ -209,7 +209,11 @@ fn plan_user_trait_via(
                     &m.name,
                     spec.span,
                 )),
-                args: m.params.iter().map(|p| ident(&p.name, spec.span)).collect(),
+                args: m
+                    .params
+                    .iter()
+                    .map(|p| CallArg::positional(ident(&p.name, spec.span)))
+                    .collect(),
                 span: spec.span,
             };
             synth_fn(m, ret_stmt(call, spec.span), spec.span)
@@ -263,7 +267,11 @@ fn bridge_to_target(
         // fn m(a: T, …): R { return self.<target>(a, …) }
         let call = Expr::Call {
             callee: Box::new(member(ident("self", span), target, span)),
-            args: m.params.iter().map(|p| ident(&p.name, span)).collect(),
+            args: m
+                .params
+                .iter()
+                .map(|p| CallArg::positional(ident(&p.name, span)))
+                .collect(),
             span,
         };
         return Ok(synth_fn(m, ret_stmt(call, span), span));
@@ -436,7 +444,7 @@ pub fn plan_builtin_via(
             sig("compare", named("Ordering", span)),
             Expr::Call {
                 callee: Box::new(member(self_f(), "compare", span)),
-                args: vec![other_f()],
+                args: vec![CallArg::positional(other_f())],
                 span,
             },
         )),
@@ -537,6 +545,7 @@ pub fn plan_native_derive(methods: &[(String, usize, String)], span: Span) -> Ve
                 callee: Box::new(callee),
                 args: std::iter::once(ident("self", span))
                     .chain(params.iter().map(|p| ident(&p.name, span)))
+                    .map(CallArg::positional)
                     .collect(),
                 span,
             };
@@ -766,7 +775,8 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         Expr::Unary { operand, .. } => visit_expr_types(operand, f),
         Expr::Call { callee, args, .. } => {
             visit_expr_types(callee, f);
-            args.iter_mut().for_each(|a| visit_expr_types(a, f));
+            args.iter_mut()
+                .for_each(|a| visit_expr_types(&mut a.value, f));
         }
         Expr::Invoke {
             recv, name, args, ..
@@ -777,13 +787,15 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         }
         Expr::TypedModuleCall { ty, args, .. } => {
             f(ty);
-            args.iter_mut().for_each(|a| visit_expr_types(a, f));
+            args.iter_mut()
+                .for_each(|a| visit_expr_types(&mut a.value, f));
         }
         Expr::TypedCall {
             type_args, args, ..
         } => {
             type_args.iter_mut().for_each(&mut *f);
-            args.iter_mut().for_each(|a| visit_expr_types(a, f));
+            args.iter_mut()
+                .for_each(|a| visit_expr_types(&mut a.value, f));
         }
         Expr::TypedMethodCall {
             recv,
@@ -793,7 +805,8 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         } => {
             visit_expr_types(recv, f);
             type_args.iter_mut().for_each(&mut *f);
-            args.iter_mut().for_each(|a| visit_expr_types(a, f));
+            args.iter_mut()
+                .for_each(|a| visit_expr_types(&mut a.value, f));
         }
         Expr::Member { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
             visit_expr_types(receiver, f)

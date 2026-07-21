@@ -1018,15 +1018,15 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         }
         Expr::Call { callee, args, .. } => {
             collect_nested_fns_in_expr(callee, out);
-            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+            noeta_ast::CallArg::values(args).for_each(|a| collect_nested_fns_in_expr(a, out));
         }
         Expr::TypedModuleCall { recv, args, .. } | Expr::TypedMethodCall { recv, args, .. } => {
             collect_nested_fns_in_expr(recv, out);
-            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+            noeta_ast::CallArg::values(args).for_each(|a| collect_nested_fns_in_expr(a, out));
         }
         // A turbofish call (`f::<T>(args)`) carries only a name and arguments — walk the args.
         Expr::TypedCall { args, .. } => {
-            args.iter().for_each(|a| collect_nested_fns_in_expr(a, out));
+            noeta_ast::CallArg::values(args).for_each(|a| collect_nested_fns_in_expr(a, out));
         }
         Expr::Invoke {
             recv, name, args, ..
