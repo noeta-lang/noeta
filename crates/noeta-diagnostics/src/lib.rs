@@ -294,6 +294,12 @@ pub enum DiagnosticCode {
     /// directive misbehaved. The position inside the generated source goes in the message, because
     /// that source is real and openable rather than a fiction the compiler made up.
     DirectiveExpansionFailed,
+    /// **Warning.** A bare-scalar type test `x is iN`/`x is f64` names a fixed-width numeric that is
+    /// *erased* to `int`/`float` on a scalar value — no scalar carries a width tag, so the test is
+    /// statically always false. `f32` is exempt (reified at runtime) and container targets like
+    /// `List<i32>` are exempt (packed element widths are distinct). The fix is to test the base type
+    /// (`x is int` / `x is float`). Advisory, not an error: the program still compiles.
+    ErasedWidthNarrow,
 }
 
 impl DiagnosticCode {
@@ -362,6 +368,7 @@ impl DiagnosticCode {
         DiagnosticCode::ValidatedConstruction,
         DiagnosticCode::InvalidArgument,
         DiagnosticCode::DirectiveExpansionFailed,
+        DiagnosticCode::ErasedWidthNarrow,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -430,6 +437,7 @@ impl DiagnosticCode {
             DiagnosticCode::ValidatedConstruction => "E0060",
             DiagnosticCode::InvalidArgument => "E0061",
             DiagnosticCode::DirectiveExpansionFailed => "E0062",
+            DiagnosticCode::ErasedWidthNarrow => "E0063",
         }
     }
 
@@ -489,6 +497,20 @@ impl Diagnostic {
         Diagnostic {
             code,
             severity: Severity::Error,
+            span,
+            message: message.into(),
+            labels: Vec::new(),
+            help: None,
+        }
+    }
+
+    /// A **warning**-severity diagnostic: the program is well-formed and still compiles, but the
+    /// construct is almost certainly a mistake (e.g. a statically always-false test). Same shape as
+    /// [`error`](Diagnostic::error), only the severity differs.
+    pub fn warning(code: DiagnosticCode, span: Span, message: impl Into<String>) -> Diagnostic {
+        Diagnostic {
+            code,
+            severity: Severity::Warning,
             span,
             message: message.into(),
             labels: Vec::new(),

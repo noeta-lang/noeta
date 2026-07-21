@@ -2643,3 +2643,82 @@ fn the_checker_visits_every_body_it_is_given() {
         missed.iter().map(|s| s.describe()).collect::<Vec<_>>()
     );
 }
+
+// ----- E0063: erased-width scalar `is` narrowing (packed-widths slice 2) -----
+//
+// A bare-scalar `x is iN` / `x is f64` is statically always false: an erased width carries no
+// runtime tag on a scalar. Rather than silently compile an always-false test, the checker emits an
+// advisory **warning** (E0063). Warnings are not corpus-pinnable — the `.noe` `// expect:` header
+// has no `warning` directive and the differential harness treats any diagnostic as a rejection — so
+// this rule is pinned here instead. (The reified `f32` narrowing is corpus-pinned in
+// `tests/conformance/narrowing/f32_width_subtype.noe`.)
+
+/// Return every warning-severity diagnostic's code for `text`, in order.
+fn warn_codes(text: &str) -> Vec<String> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    check(&parsed.program)
+        .iter()
+        .filter(|d| d.severity == noeta_diagnostics::Severity::Warning)
+        .map(|d| d.code.to_string())
+        .collect()
+}
+
+#[test]
+fn scalar_is_fixed_width_int_warns_erased() {
+    for width in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+        let src = format!("fn f(x: dyn): bool {{ return x is {width}; }}\n");
+        assert_eq!(codes(&src), ["E0063"], "`is {width}` should warn E0063");
+    }
+}
+
+#[test]
+fn scalar_is_f64_warns_erased() {
+    assert_eq!(
+        codes("fn f(x: dyn): bool { return x is f64; }\n"),
+        ["E0063"]
+    );
+}
+
+#[test]
+fn the_erased_width_diagnostic_is_a_warning_not_an_error() {
+    // Advisory: the program is well-formed and still compiles (a warning, never an error), so the
+    // erased-width test emits exactly one warning and no errors.
+    let src = "fn f(x: dyn): bool { return x is i32; }\n";
+    assert_eq!(warn_codes(src), ["E0063"]);
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        check(&parsed.program)
+            .iter()
+            .all(|d| d.severity != noeta_diagnostics::Severity::Error),
+        "E0063 must be advisory, never an error"
+    );
+}
+
+#[test]
+fn scalar_is_f32_does_not_warn() {
+    // `f32` is reified at runtime, so `x is f32` is a real test, not an always-false one.
+    assert!(codes("fn f(x: dyn): bool { return x is f32; }\n").is_empty());
+}
+
+#[test]
+fn scalar_is_base_types_do_not_warn() {
+    for base in ["int", "float", "string", "bool", "bytes"] {
+        let src = format!("fn f(x: dyn): bool {{ return x is {base}; }}\n");
+        assert!(codes(&src).is_empty(), "`is {base}` should not warn");
+    }
+}
+
+#[test]
+fn container_of_erased_width_does_not_warn() {
+    // A container target reifies its element width (packed storage, sibling slice), so
+    // `x is List<i32>` is legitimate — only a *bare scalar* width target is always-false.
+    assert!(codes("fn f(x: dyn): bool { return x is List<i32>; }\n").is_empty());
+    assert!(codes("fn f(x: dyn): bool { return x is List<f64>; }\n").is_empty());
+}

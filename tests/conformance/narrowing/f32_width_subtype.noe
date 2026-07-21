@@ -1,0 +1,30 @@
+// `f32` is reified at runtime (a distinct `Value::F32` / NaN-box tag), so unlike the erased widths
+// it has a real narrowing head with the asymmetric width-subtype edge `f32 <: float`: an `f32`
+// value matches BOTH `f32` and `float` (the specific matches its base), while a plain `float`
+// matches only `float` (the base is not the specific). The numeric families stay disjoint (an `f32`
+// is not an `int`). `.as<T>()` honors the same edge. One shared matcher drives both backends
+// (`NarrowTarget::F32` on the VM, `runtime_matches` in the tree-walker), so M0 and M1 agree.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "some(1.5)"
+// expect: stdout "some(1.5)"
+// expect: stdout "none"
+// expect: exit 0
+fn is_f32(v: dyn): bool { return v is f32; }
+fn is_float(v: dyn): bool { return v is float; }
+fn is_int(v: dyn): bool { return v is int; }
+fn as_f32(v: dyn): ?f32 { return v.as<f32>(); }
+fn as_float(v: dyn): ?float { return v.as<float>(); }
+
+echo is_f32(1.5f32);    // an f32 IS an f32
+echo is_float(1.5f32);  // an f32 IS a float (specific matches base)
+echo is_f32(1.5);       // a float is NOT an f32 (base is not the specific)
+echo is_float(1.5);     // a float IS a float
+echo is_int(1.5f32);    // families stay disjoint
+
+echo as_f32(1.5f32);    // dyn f32 narrows to f32
+echo as_float(1.5f32);  // dyn f32 narrows to float (subtype edge)
+echo as_f32(1.5);       // dyn float does not narrow to f32
