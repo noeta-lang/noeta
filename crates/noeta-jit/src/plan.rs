@@ -520,6 +520,7 @@ mod tests {
                 callee: 2,
                 args: Box::new([]),
                 span: sp(),
+                supplied: None,
             },
             Op::Halt,
         ];

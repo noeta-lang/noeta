@@ -147,7 +147,7 @@ impl<'m> Vm<'m> {
                         arity_message("function", required, num_params, supplied),
                     ));
                 }
-                let filled = args.len();
+                let n_args = args.len();
                 let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
                 for (i, v) in args.into_iter().enumerate() {
                     regs[i] = v;
@@ -159,7 +159,7 @@ impl<'m> Vm<'m> {
                 let cells: Vec<Value> = (0..count).map(|i| callee.closure_upvalue(i)).collect();
                 // Fill any omitted trailing parameters from their default thunks.
                 for (reg, dproto) in &defaults {
-                    if *reg as usize >= filled {
+                    if !noeta_bytecode::is_param_filled(*reg as usize, n_args, None) {
                         let value = self.run_thunk(*dproto, &cells)?;
                         regs[*reg as usize] = value;
                     }
@@ -623,7 +623,7 @@ impl<'m> Vm<'m> {
                     arity_message("associated function", required, total, supplied),
                 ));
             }
-            let filled = args.len() + 1;
+            let n_args = args.len() + 1;
             let num_registers = chunk.num_registers as usize;
             let defaults = chunk.defaults.clone();
             let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
@@ -631,7 +631,7 @@ impl<'m> Vm<'m> {
                 regs[i + 1] = v;
             }
             for (reg, dproto) in &defaults {
-                if *reg as usize >= filled {
+                if !noeta_bytecode::is_param_filled(*reg as usize, n_args, None) {
                     let value = self.run_thunk(*dproto, &[])?;
                     regs[*reg as usize] = value;
                 }
@@ -690,7 +690,7 @@ impl<'m> Vm<'m> {
                 arity_message("method", required, num_params, supplied),
             ));
         }
-        let filled = args.len();
+        let n_args = args.len();
         let defaults = chunk.defaults.clone();
         let (mut frames, mut regs) = self.pooled_run_stacks(num_registers);
         for (i, v) in args.into_iter().enumerate() {
@@ -698,7 +698,7 @@ impl<'m> Vm<'m> {
         }
         // A method never captures upvalues; fill any omitted trailing defaults from module scope.
         for (reg, dproto) in &defaults {
-            if *reg as usize >= filled {
+            if !noeta_bytecode::is_param_filled(*reg as usize, n_args, None) {
                 let value = self.run_thunk(*dproto, &[])?;
                 regs[*reg as usize] = value;
             }
@@ -759,6 +759,7 @@ impl<'m> Vm<'m> {
         arg_regs: &[u16],
         span: Span,
         resume_pc: usize,
+        supplied: Option<u64>,
     ) -> Result<bool, Abort> {
         match callee_val.as_closure() {
             Some(proto_idx) => {
@@ -777,7 +778,7 @@ impl<'m> Vm<'m> {
                 for (i, &arg_reg) in arg_regs.iter().enumerate() {
                     let v = regs[caller_base + arg_reg as usize];
                     retain(v);
-                    regs[new_base + i] = v;
+                    regs[new_base + noeta_bytecode::param_of_arg(i, supplied)] = v;
                 }
                 let count = callee_val.closure_upvalue_count();
                 // Fast path (B): a plain function — no defaults to fill and no upvalues to carry —
@@ -789,9 +790,9 @@ impl<'m> Vm<'m> {
                     let defaults = callee_chunk.defaults.clone();
                     let cells: Vec<Value> =
                         (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
-                    let filled = arg_regs.len();
+                    let n_args = arg_regs.len();
                     for (reg, proto) in &defaults {
-                        if *reg as usize >= filled {
+                        if !noeta_bytecode::is_param_filled(*reg as usize, n_args, supplied) {
                             let value = self.run_thunk(*proto, &cells)?;
                             regs[new_base + *reg as usize] = value;
                         }

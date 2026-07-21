@@ -1,0 +1,42 @@
+// Named arguments work on METHODS and ASSOCIATED FUNCTIONS, not only free functions — including
+// the case that skips a defaulted parameter (`m.f(1, c: 9)`).
+//
+// A method's supplied-mask needs one adjustment the free-function case does not: the two backends
+// disagree on where the receiver lives. The VM gives it register 0, so every declared parameter's
+// bit shifts up by one; the reference interpreter binds it as `self`, outside the parameter list,
+// so the mask applies unshifted. The IR carries the mask over the DECLARED parameters and each
+// backend adapts on the way in — which is what keeps the two agreeing here.
+//
+// Before methods were routed through the same binder as free functions, `m.f(1, c: 9)` bound `9`
+// to `b` and printed 193.
+// expect: stdout "123"
+// expect: stdout "153"
+// expect: stdout "153"
+// expect: stdout "129"
+// expect: stdout "123"
+// expect: stdout "153"
+// expect: stdout "129"
+// expect: exit 0
+class M {
+    pub k: int
+
+    fn make(): M { return M { k: 0 }; }
+
+    fn f(a: int, b: int = 2, c: int = 3): int {
+        return self.k + a * 100 + b * 10 + c;
+    }
+
+    fn mk(a: int, b: int = 2, c: int = 3): M {
+        return M { k: a * 100 + b * 10 + c };
+    }
+}
+
+m = M.make();
+echo m.f(1);          // every default
+echo m.f(1, 5);       // prefix
+echo m.f(b: 5, a: 1); // pure reorder
+echo m.f(1, c: 9);    // hole: `b` defaults
+
+echo M.mk(1).k;          // an associated function takes the same shapes
+echo M.mk(b: 5, a: 1).k;
+echo M.mk(1, c: 9).k;

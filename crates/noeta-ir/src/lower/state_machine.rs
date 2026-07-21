@@ -1089,7 +1089,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         Expr::Call { callee, args, .. } => {
             hoist_in_expr(callee, pre, ctr);
             for a in args {
-                hoist_in_expr(a, pre, ctr);
+                hoist_in_expr(&mut a.value, pre, ctr);
             }
         }
         Expr::List { items, .. } | Expr::Tuple { items, .. } => {
@@ -1151,18 +1151,18 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         Expr::TypedModuleCall { recv, args, .. } => {
             hoist_in_expr(recv, pre, ctr);
             for a in args {
-                hoist_in_expr(a, pre, ctr);
+                hoist_in_expr(&mut a.value, pre, ctr);
             }
         }
         Expr::TypedCall { args, .. } => {
             for a in args {
-                hoist_in_expr(a, pre, ctr);
+                hoist_in_expr(&mut a.value, pre, ctr);
             }
         }
         Expr::TypedMethodCall { recv, args, .. } => {
             hoist_in_expr(recv, pre, ctr);
             for a in args {
-                hoist_in_expr(a, pre, ctr);
+                hoist_in_expr(&mut a.value, pre, ctr);
             }
         }
         Expr::FieldSet {
@@ -1194,7 +1194,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
 fn poll_call(future: Expr, span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(ident(POLL_FN, span)),
-        args: vec![future],
+        args: vec![noeta_ast::CallArg::positional(future)],
         span,
     }
 }
@@ -1217,7 +1217,7 @@ fn scope_begin_call(span: Span) -> Expr {
 fn scope_ready_call(scope: Expr, span: Span) -> Expr {
     Expr::Call {
         callee: Box::new(ident(SCOPE_READY_FN, span)),
-        args: vec![scope],
+        args: vec![noeta_ast::CallArg::positional(scope)],
         span,
     }
 }
@@ -1229,7 +1229,7 @@ fn scope_end_stmt(scope: &str, span: Span) -> AstStmt {
     AstStmt::Expr {
         expr: Expr::Call {
             callee: Box::new(ident(SCOPE_END_FN, span)),
-            args: vec![ident(scope, span)],
+            args: vec![noeta_ast::CallArg::positional(ident(scope, span))],
             span,
         },
         span,
@@ -1723,7 +1723,7 @@ fn call_some(value: Expr, span: Span) -> Expr {
             name: "some".to_string(),
             span,
         }),
-        args: vec![value],
+        args: vec![noeta_ast::CallArg::positional(value)],
         span,
     }
 }

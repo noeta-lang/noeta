@@ -1263,7 +1263,7 @@ impl Checker {
         generic: &GenericInfo,
         required: usize,
         args: &mut [Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         recv_args: &[Type],
         hidden_site: Option<Span>,
@@ -1304,7 +1304,7 @@ impl Checker {
         generic: &GenericInfo,
         required: usize,
         args: &mut [Type],
-        arg_exprs: &[Expr],
+        arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         seed: HashMap<String, Type>,
         hidden_site: Option<Span>,
@@ -1338,7 +1338,8 @@ impl Checker {
             // pinned by `xs` before `f` is looked at — and its now-known type (the inferred
             // return especially) then binds any parameter the earlier arguments did not
             // (`fn pick<T>(f: () -> T): T`).
-            if let Some(expr) = arg_exprs.get(i)
+            if let Some(arg) = arg_exprs.get(i)
+                && let expr = &arg.value
                 && self.is_deferred_arg(expr, env)
                 && matches!(args[i], Type::Unknown)
             {
@@ -1366,8 +1367,8 @@ impl Checker {
             // parameter is a concrete `u8`/`f32`/`f64` or a type variable already bound to one
             // (`g(200u8, 200)` binds `T = u8`, so the second `200` narrows). Tried before the
             // type-based `arg_assignable`, exactly as in `check_args`.
-            if let Some(expr) = arg_exprs.get(i)
-                && self.try_adapt_literal(expr, &expected).is_some()
+            if let Some(a) = arg_exprs.get(i)
+                && self.try_adapt_literal(&a.value, &expected).is_some()
             {
                 continue;
             }

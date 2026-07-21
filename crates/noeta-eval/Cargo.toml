@@ -12,6 +12,10 @@ noeta-diagnostics = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-ir = { workspace = true }
 noeta-ir-passes = { workspace = true }
+# For the argument→parameter calling convention only (`is_param_filled`/`param_of_arg`). That rule
+# has to be stated once for both backends, and `noeta-vm` deliberately does not depend on noeta-ir
+# (see its manifest), so `noeta-bytecode` is the one crate both call prologues can share.
+noeta-bytecode = { workspace = true }
 noeta-builtins = { workspace = true }
 noeta-backend = { workspace = true }
 noeta-stdlib = { workspace = true }

@@ -3074,7 +3074,13 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::Call { callee, args, span } => self.lower_call(callee, args, dst, *span),
+            Rvalue::Call {
+                callee,
+                args,
+                span,
+                supplied,
+                ..
+            } => self.lower_call(callee, args, dst, *span, *supplied),
             Rvalue::Method {
                 receiver,
                 name,
@@ -3082,12 +3088,13 @@ impl<'m> FnCompiler<'m> {
                 reuse,
                 reflect,
                 span,
+                supplied,
                 ..
             } => {
                 // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
                 // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
                 let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
-                self.lower_method(receiver, name, args, *reuse, reflect, dst, *span)
+                self.lower_method(receiver, name, args, *reuse, reflect, dst, *span, *supplied)
             }
             Rvalue::Field {
                 receiver,
@@ -3746,12 +3753,19 @@ impl<'m> FnCompiler<'m> {
         args: &[Atom],
         dst: Reg,
         span: Span,
+        supplied: Option<u64>,
     ) -> Result<(), Unsupported> {
         // A prelude function called directly by name. A user binding of the same name shadows the
         // prelude (then `resolve` is not `Prelude`, so this falls to the ordinary call below).
         if let Atom::Var { name, .. } = callee
             && matches!(self.resolve(name), Resolved::Prelude)
         {
+            // Prelude/builtin callees have no defaulted parameters, so the checker never binds a
+            // hole against one. Refuse rather than drop the mask: silently lowering it would call
+            // the builtin with the args shifted into the wrong positions.
+            if supplied.is_some() {
+                return unsupported("named arguments that skip a parameter of a prelude function");
+            }
             // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)`, `panic(msg)` — an arity-correct direct call
             // keeps its dedicated fast op (`MakeEnum` / `Op::Panic`, which tier-1 also compiles).
             // A wrong-arity call falls through to the generic `CallBuiltin` below, whose RUNTIME
@@ -3799,6 +3813,7 @@ impl<'m> FnCompiler<'m> {
                 global,
                 args,
                 span,
+                supplied,
             });
             return Ok(());
         }
@@ -3809,6 +3824,7 @@ impl<'m> FnCompiler<'m> {
             callee: callee_reg,
             args,
             span,
+            supplied,
         });
         Ok(())
     }
@@ -3826,6 +3842,7 @@ impl<'m> FnCompiler<'m> {
         reflect: Option<u32>,
         dst: Reg,
         span: Span,
+        supplied: Option<u64>,
     ) -> Result<(), Unsupported> {
         // `Type.something(args)` where `Type` is a known type name. Keyed purely on the type
         // registry (a same-named local does not shadow a type member), matching the tree-walker.
@@ -3843,7 +3860,7 @@ impl<'m> FnCompiler<'m> {
                 // resolved at compile time when the name is a method, not a variant. Variant
                 // construction still wins for a variant name (uppercase by convention, so no clash).
                 if let Some(&proto) = fns.get(name) {
-                    return self.call_associated(proto, args, dst, span);
+                    return self.call_associated(proto, args, dst, span, supplied);
                 }
                 return self.make_enum(type_name, name, args, reflect, dst);
             }
@@ -3853,7 +3870,7 @@ impl<'m> FnCompiler<'m> {
                 self.module.types.get(type_name)
                 && let Some(&proto) = fns.get(name)
             {
-                return self.call_associated(proto, args, dst, span);
+                return self.call_associated(proto, args, dst, span, supplied);
             }
         }
         // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance
@@ -3906,6 +3923,9 @@ impl<'m> FnCompiler<'m> {
             cache,
             reuse: recv_reuse,
             consume_key,
+            // Into the callee's register space: the receiver lands in register 0 and is always
+            // supplied, so every declared parameter's bit moves up by one.
+            supplied: supplied.map(|m| (m << 1) | 1),
         });
         // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path); the
         // receiver is always a `Var` (never an owned `Temp`), so `drop_temp_receiver` is a no-op there.
@@ -4344,6 +4364,7 @@ impl<'m> FnCompiler<'m> {
         args: &[Atom],
         dst: Reg,
         span: Span,
+        supplied: Option<u64>,
     ) -> Result<(), Unsupported> {
         let self_reg = self.alloc_reg();
         let k = self.add_const(Const::Unit);
@@ -4364,6 +4385,8 @@ impl<'m> FnCompiler<'m> {
             callee,
             args: arg_regs.into_boxed_slice(),
             span,
+            // A unit receiver occupies register 0 above, so the declared parameters shift by one.
+            supplied: supplied.map(|m| (m << 1) | 1),
         });
         Ok(())
     }

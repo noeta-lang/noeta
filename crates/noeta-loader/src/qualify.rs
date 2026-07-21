@@ -20,8 +20,8 @@
 use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{
-    AttrValue, Attribute, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl, Param,
-    Pattern, Stmt, StrPart, TypeParam, TypeRef, VariantDecl,
+    AttrValue, Attribute, CallArg, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl,
+    Param, Pattern, Stmt, StrPart, TypeParam, TypeRef, VariantDecl,
 };
 
 /// A module's qualification map: a **local** type name (an in-module declaration's short name, or an
@@ -413,13 +413,13 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         }
         Expr::Call { callee, args, .. } => {
             bound_in_expr(callee, names);
-            args.iter().for_each(|a| bound_in_expr(a, names));
+            CallArg::values(args).for_each(|a| bound_in_expr(a, names));
         }
         // A turbofish call binds nothing itself — walk the argument expressions.
-        Expr::TypedCall { args, .. } => args.iter().for_each(|a| bound_in_expr(a, names)),
+        Expr::TypedCall { args, .. } => CallArg::values(args).for_each(|a| bound_in_expr(a, names)),
         Expr::TypedModuleCall { recv, args, .. } | Expr::TypedMethodCall { recv, args, .. } => {
             bound_in_expr(recv, names);
-            args.iter().for_each(|a| bound_in_expr(a, names));
+            CallArg::values(args).for_each(|a| bound_in_expr(a, names));
         }
         Expr::Invoke {
             recv, name, args, ..
@@ -778,13 +778,13 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         Expr::TypedModuleCall { recv, ty, args, .. } => {
             q_expr(recv, visit);
             q_typeref(ty, visit);
-            args.iter_mut().for_each(|a| q_expr(a, visit));
+            args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
         }
         Expr::TypedCall {
             type_args, args, ..
         } => {
             type_args.iter_mut().for_each(|t| q_typeref(t, visit));
-            args.iter_mut().for_each(|a| q_expr(a, visit));
+            args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
         }
         Expr::TypedMethodCall {
             recv,
@@ -794,7 +794,7 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         } => {
             q_expr(recv, visit);
             type_args.iter_mut().for_each(|t| q_typeref(t, visit));
-            args.iter_mut().for_each(|a| q_expr(a, visit));
+            args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
         }
         Expr::Unary { operand, .. } => q_expr(operand, visit),
         Expr::Binary { lhs, rhs, .. } => {
@@ -803,7 +803,7 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         }
         Expr::Call { callee, args, .. } => {
             q_expr(callee, visit);
-            args.iter_mut().for_each(|a| q_expr(a, visit));
+            args.iter_mut().for_each(|a| q_expr(&mut a.value, visit));
         }
         Expr::Closure {
             params, ret, body, ..

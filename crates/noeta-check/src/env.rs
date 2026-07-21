@@ -22,6 +22,13 @@ pub(crate) struct VariantInfo {
 #[derive(Clone, Default)]
 pub(crate) struct FnSig {
     pub(crate) params: Vec<Type>,
+    /// The parameter **names**, in declaration order and parallel to `params`.
+    ///
+    /// Needed to bind a named argument (`add(b: 1, a: 10)`) to the parameter it names. The
+    /// signature carried only types, which is one of the three places a name was dropped on the
+    /// way from source to meaning — the parser discarded the call's label, this discarded the
+    /// declaration's parameter name, and `ExtFn` still has neither.
+    pub(crate) param_names: Vec<String>,
     pub(crate) ret: Type,
     /// The number of leading parameters that are *required* — those without a default value. A
     /// call may supply anywhere from `required` to `params.len()` arguments; the trailing

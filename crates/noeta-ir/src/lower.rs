@@ -88,6 +88,10 @@ pub struct LoweringSites<'a> {
     /// A `list[i].field` member read whose span is here (the index receiver is a built-in `List`) fuses
     /// to a single [`Rvalue::IndexField`], reading a packed element's field without materializing it.
     pub index_field_sites: &'a HashSet<Span>,
+    /// Calls whose labelled arguments bind out of written order: parameter position → written
+    /// index. Applied in [`Lowerer::lower_args`], so the VM and the reference agree by
+    /// construction rather than by each re-deriving the binding.
+    pub arg_orders: &'a HashMap<Span, Vec<Option<usize>>>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::TypedModuleCall`].
     pub typed_module_call_sites: &'a HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// Call-site-typed extern-METHOD recipes (`resp.json::<T>`, http arc H8), baked into
@@ -173,10 +177,12 @@ impl LoweringSites<'static> {
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
         static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
+        static ORDERS: OnceLock<HashMap<Span, Vec<Option<usize>>>> = OnceLock::new();
         LoweringSites {
             packed_list_sites: PACKED.get_or_init(HashMap::new),
             from_bytes_validated: SPANS.get_or_init(HashSet::new),
             index_field_sites: SPANS.get_or_init(HashSet::new),
+            arg_orders: ORDERS.get_or_init(HashMap::new),
             typed_module_call_sites: RECIPES.get_or_init(HashMap::new),
             typed_method_call_sites: RECIPES.get_or_init(HashMap::new),
             decode_typed_sites: SPANS.get_or_init(HashSet::new),
@@ -216,6 +222,7 @@ macro_rules! lowering_sites {
             packed_list_sites: &$s.packed_list_sites,
             from_bytes_validated: &$s.from_bytes_validated,
             index_field_sites: &$s.index_field_sites,
+            arg_orders: &$s.arg_orders,
             typed_module_call_sites: &$s.typed_module_call_sites,
             typed_method_call_sites: &$s.typed_method_call_sites,
             decode_typed_sites: &$s.decode_typed_sites,
@@ -613,7 +620,11 @@ fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
     };
     let call = |callee: Expr, args: Vec<Expr>| Expr::Call {
         callee: Box::new(callee),
-        args,
+        // A desugar builds positional calls by construction.
+        args: args
+            .into_iter()
+            .map(noeta_ast::CallArg::positional)
+            .collect(),
         span,
     };
     let arm = |variant: &str, body: Expr| noeta_ast::MatchArm {
@@ -1430,9 +1441,11 @@ impl Lowerer<'_> {
                     }),
                     args: params
                         .iter()
-                        .map(|p| Expr::Ident {
-                            name: p.name.clone(),
-                            span: *span,
+                        .map(|p| {
+                            noeta_ast::CallArg::positional(Expr::Ident {
+                                name: p.name.clone(),
+                                span: *span,
+                            })
                         })
                         .collect(),
                     span: *span,
@@ -1688,7 +1701,7 @@ impl Lowerer<'_> {
                     && name == POLL_FN
                     && let [arg] = args.as_slice()
                 {
-                    let future = self.lower_expr(arg, out)?;
+                    let future = self.lower_expr(&arg.value, out)?;
                     return Ok(self.emit(
                         out,
                         Rvalue::PollFuture {
@@ -1710,7 +1723,7 @@ impl Lowerer<'_> {
                     if name == SCOPE_READY_FN
                         && let [arg] = args.as_slice()
                     {
-                        let scope = self.lower_expr(arg, out)?;
+                        let scope = self.lower_expr(&arg.value, out)?;
                         return Ok(self.emit(
                             out,
                             Rvalue::ScopeReady { scope, span: *span },
@@ -1720,7 +1733,7 @@ impl Lowerer<'_> {
                     if name == SCOPE_END_FN
                         && let [arg] = args.as_slice()
                     {
-                        let scope = self.lower_expr(arg, out)?;
+                        let scope = self.lower_expr(&arg.value, out)?;
                         // Effect-only (closes the scope); no value binding — `Stmt::Eval`, not a `let`.
                         out.push(Stmt::Eval {
                             rvalue: Rvalue::ScopeEndAt { scope, span: *span },
@@ -1744,7 +1757,7 @@ impl Lowerer<'_> {
                     // atoms — the receiver (the `json` module handle) is not a runtime value, so it is
                     // not lowered.
                     if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
-                        let mut arg_atoms = self.lower_args(args, out)?;
+                        let (mut arg_atoms, _supplied) = self.lower_args(args, *span, out)?;
                         let text = arg_atoms.pop().expect("decode_typed takes 2 args");
                         let name = arg_atoms.pop().expect("decode_typed takes 2 args");
                         return Ok(self.emit(
@@ -1774,18 +1787,33 @@ impl Lowerer<'_> {
                             },
                             *span,
                         );
-                        let arg_atoms = self.lower_args(args, out)?;
+                        let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
                         return Ok(self.emit(
                             out,
                             Rvalue::Call {
                                 callee,
                                 args: arg_atoms,
+                                supplied,
                                 span: *span,
                             },
                             *span,
                         ));
                     }
-                    let arg_atoms = self.lower_args(args, out)?;
+                    let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
+                    // The receiver's dedicated forms below — `WidthIntMethod`, `BundleMethod`,
+                    // `DecodeTyped` — carry no mask, because the intrinsics and bundle methods they
+                    // route to declare no defaulted parameters, so no call of one can leave a hole.
+                    // Asserted rather than assumed: if that ever stops holding, a dropped mask would
+                    // place arguments on the wrong parameters silently, which is precisely the class
+                    // of failure this whole change exists to remove.
+                    debug_assert!(
+                        supplied.is_none()
+                            || !(self.sites.width_sites.contains_key(span)
+                                || self.sites.bundle_call_sites.contains_key(span)
+                                || self.sites.decode_typed_sites.contains(span)),
+                        "a call with a skipped parameter lowered to a form that cannot carry its \
+                         supplied-mask"
+                    );
                     // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
                     // this call span in `width_sites`. Emit the width-carrying `WidthIntMethod` so both
                     // backends compute within the width via `int_method_width`, rather than the generic
@@ -1834,13 +1862,14 @@ impl Lowerer<'_> {
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
                             reflect: self.sites.construction_sites.get(span).cloned(),
+                            supplied,
                             span: *span,
                         },
                         *span,
                     ))
                 } else {
                     let callee = self.lower_expr(callee, out)?;
-                    let mut arg_atoms = self.lower_args(args, out)?;
+                    let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
                     // A call of a FORWARDING generic (F2b): prepend its hidden type-argument
                     // atoms, mirroring the callee's prepended hidden parameters.
                     self.prepend_hidden_args(&mut arg_atoms, span);
@@ -1849,6 +1878,7 @@ impl Lowerer<'_> {
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
+                            supplied,
                             span: *span,
                         },
                         *span,
@@ -1870,7 +1900,7 @@ impl Lowerer<'_> {
                     name: name.clone(),
                     span: *name_span,
                 };
-                let mut arg_atoms = self.lower_args(args, out)?;
+                let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
                 // A call of a FORWARDING generic (F2b): prepend its hidden type-argument atoms.
                 self.prepend_hidden_args(&mut arg_atoms, span);
                 Ok(self.emit(
@@ -1878,6 +1908,13 @@ impl Lowerer<'_> {
                     Rvalue::Call {
                         callee,
                         args: arg_atoms,
+                        // Hidden type-argument atoms are prepended above, shifting every parameter
+                        // position, so a binding recorded for the surface call does not apply.
+                        supplied: if self.sites.hidden_arg_sites.contains_key(span) {
+                            None
+                        } else {
+                            supplied
+                        },
                         span: *span,
                     },
                     *span,
@@ -2061,12 +2098,12 @@ impl Lowerer<'_> {
                             name: "panic".to_string(),
                             span: *tier_span,
                         }),
-                        args: vec![Expr::Str {
+                        args: vec![noeta_ast::CallArg::positional(Expr::Str {
                             value: format!(
                                 "`@{tier}` is not an expression tier — its blocks are not values"
                             ),
                             span: *span,
-                        }],
+                        })],
                         span: *span,
                     },
                 };
@@ -2176,7 +2213,7 @@ impl Lowerer<'_> {
                     unreachable!("guarded by the match arm");
                 };
                 let callee = self.lower_expr(callee, out)?;
-                let arg_atoms = self.lower_args(args, out)?;
+                let (arg_atoms, _supplied) = self.lower_args(args, *span, out)?;
                 Ok(self.emit(
                     out,
                     Rvalue::SpawnIsolate {
@@ -2321,7 +2358,7 @@ impl Lowerer<'_> {
                 };
                 let args = args
                     .iter()
-                    .map(|a| self.lower_expr(a, out))
+                    .map(|a| self.lower_expr(&a.value, out))
                     .collect::<Result<Vec<_>, _>>()?;
                 // The recipe was resolved by the checker at this span (the same channel the other
                 // typed sites use); `None` means `T` had no decoding (already a checker error) —
@@ -2513,7 +2550,7 @@ impl Lowerer<'_> {
                     if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
                         let mut arg_atoms = vec![left_atom];
                         for a in args {
-                            arg_atoms.push(self.lower_expr(a, out)?);
+                            arg_atoms.push(self.lower_expr(&a.value, out)?);
                         }
                         let text = arg_atoms.pop().expect("decode_typed takes 2 args");
                         let name = arg_atoms.pop().expect("decode_typed takes 2 args");
@@ -2530,7 +2567,7 @@ impl Lowerer<'_> {
                     let receiver = self.lower_expr(receiver, out)?;
                     let mut arg_atoms = vec![left_atom];
                     for a in args {
-                        arg_atoms.push(self.lower_expr(a, out)?);
+                        arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     Ok(self.emit(
                         out,
@@ -2543,6 +2580,8 @@ impl Lowerer<'_> {
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
                             reflect: self.sites.construction_sites.get(span).cloned(),
+                            // A `|>` desugar builds its argument list positionally.
+                            supplied: None,
                             span: *span,
                         },
                         *span,
@@ -2551,13 +2590,17 @@ impl Lowerer<'_> {
                     let callee = self.lower_expr(callee, out)?;
                     let mut arg_atoms = vec![left_atom];
                     for a in args {
-                        arg_atoms.push(self.lower_expr(a, out)?);
+                        arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
                     Ok(self.emit(
                         out,
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
+                            // A pipeline prepends its left operand, so the parameter positions are
+                            // shifted by one and the checker's binding does not describe this list.
+                            // Labels through a pipeline are rejected at the call site instead.
+                            supplied: None,
                             span: *span,
                         },
                         *span,
@@ -2581,6 +2624,8 @@ impl Lowerer<'_> {
                         args: vec![left_atom],
                         reuse: false,
                         reflect: self.sites.construction_sites.get(span).cloned(),
+                        // A `|>` desugar builds its argument list positionally.
+                        supplied: None,
                         span: *span,
                     },
                     *span,
@@ -2594,6 +2639,7 @@ impl Lowerer<'_> {
                     Rvalue::Call {
                         callee,
                         args: vec![left_atom],
+                        supplied: None,
                         span,
                     },
                     span,
@@ -2603,12 +2649,49 @@ impl Lowerer<'_> {
     }
 
     /// Lower a call's argument list left-to-right (the tree-walker's order).
-    fn lower_args(&mut self, args: &[Expr], out: &mut Vec<Stmt>) -> Result<Vec<Atom>, Unsupported> {
+    /// Lower a call's argument list to atoms, in **written** order.
+    ///
+    /// The one funnel every call form goes through, which is why it is also where re-ordering a
+    /// labelled argument list into parameter order belongs once the checker resolves the binding.
+    fn lower_args(
+        &mut self,
+        args: &[noeta_ast::CallArg],
+        call_span: Span,
+        out: &mut Vec<Stmt>,
+    ) -> Result<(Vec<Atom>, Option<u64>), Unsupported> {
+        // Arguments are evaluated in the order the author WROTE them — a call's side effects must
+        // not be resequenced by how its parameters happen to be declared — and then permuted into
+        // parameter order, using the binding the checker resolved.
         let mut atoms = Vec::with_capacity(args.len());
-        for arg in args {
+        for arg in noeta_ast::CallArg::values(args) {
             atoms.push(self.lower_expr(arg, out)?);
         }
-        Ok(atoms)
+        let Some(binding) = self.sites.arg_orders.get(&call_span) else {
+            return Ok((atoms, None));
+        };
+        // Permute into parameter order, and say which parameters were supplied. A skipped one
+        // contributes no atom — the callee fills its default, over its own upvalues, exactly as it
+        // does for an argument list that simply stopped early.
+        let permuted: Vec<Atom> = binding
+            .iter()
+            .flatten()
+            .filter_map(|&i| atoms.get(i).cloned())
+            .collect();
+        let mut mask: u64 = 0;
+        for (p, b) in binding.iter().enumerate() {
+            if b.is_some() && p < 64 {
+                mask |= 1 << p;
+            }
+        }
+        // A mask is only worth carrying when it says something the prefix rule cannot. A pure
+        // reordering (`sub(b: 1, a: 10)`) fills a *prefix* of the parameters, and `permuted` is
+        // already in parameter order — so the ordinary rule describes it exactly, and every fast
+        // path that assumes the prefix rule (the JIT's direct-call setup, the tier-1 helpers)
+        // keeps applying. `Some` then means precisely "this call skips a defaulted parameter".
+        // `mask` has exactly `permuted.len()` bits set by construction, so "the low `len` bits are
+        // all set" is the same as "the set bits are the prefix" — and it does not overflow at 64.
+        let is_prefix = mask.trailing_ones() as usize == permuted.len();
+        Ok((permuted, if is_prefix { None } else { Some(mask) }))
     }
 
     /// Lower `a && b` / `a || b` to a [`Stmt::Logical`] writing into a fresh temp, so the
@@ -2648,14 +2731,14 @@ impl Lowerer<'_> {
         &mut self,
         recv: &Expr,
         method: &str,
-        args: &[Expr],
+        args: &[noeta_ast::CallArg],
         span: Span,
         out: &mut Vec<Stmt>,
     ) -> Result<Atom, Unsupported> {
         let recv = self.lower_expr(recv, out)?;
         let args = args
             .iter()
-            .map(|a| self.lower_expr(a, out))
+            .map(|a| self.lower_expr(&a.value, out))
             .collect::<Result<Vec<_>, _>>()?;
         let recipe = self.sites.typed_method_call_sites.get(&span).cloned();
         let dynamic = self

@@ -1,0 +1,32 @@
+// A named argument may SKIP a defaulted parameter: `f(1, c: 9)` supplies `a` and `c` and leaves
+// `b` to its default. That leaves a *hole* the ordinary "arguments fill parameters 0..n" prefix
+// rule cannot describe, so the call carries a **supplied mask** (`Rvalue::Call::supplied`, bit `p`
+// set = parameter `p` supplied) and each callee prologue runs the default thunk for every
+// parameter the mask leaves clear — instead of inferring "the trailing remainder" from a count.
+//
+// The default is still evaluated by the CALLEE, over its own scope, exactly as for an argument
+// list that simply stopped early — so a skipped default and an omitted trailing one are the same
+// thing to the callee, which is what keeps the two backends and the JIT in agreement.
+//
+// `b`'s default reads a CAPTURED binding rather than a literal, so the skipped parameter is filled
+// by a thunk that has to resolve over the callee's own upvalues — the path where a prologue that
+// ran the wrong default, or ran it in the caller's scope, would show up.
+// expect: stdout "123"
+// expect: stdout "153"
+// expect: stdout "129"
+// expect: stdout "129"
+// expect: stdout "153"
+// expect: stdout "159"
+// expect: exit 0
+base = 2;
+
+fn f(a: int, b: int = base, c: int = 3) use (base): int {
+    return a * 100 + b * 10 + c;
+}
+
+echo f(1);          // every default
+echo f(1, 5);       // prefix — no mask needed
+echo f(1, c: 9);    // hole: `b` defaults
+echo f(c: 9, a: 1); // the same hole, written out of order
+echo f(b: 5, a: 1); // pure reorder — a prefix, so still no mask
+echo f(1, 5, 9);    // fully supplied

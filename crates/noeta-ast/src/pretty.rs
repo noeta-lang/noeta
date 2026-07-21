@@ -6,9 +6,9 @@
 //! parse→print→parse property test (Slice 9) builds on.
 
 use crate::{
-    AttrArg, AttrValue, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern,
-    ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitBound, TraitDecl,
-    TypeParam, TypeRef,
+    AttrArg, AttrValue, CallArg, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl,
+    ForPattern, ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl,
+    TraitBound, TraitDecl, TypeParam, TypeRef,
 };
 use noeta_span::Span;
 
@@ -39,6 +39,24 @@ fn param_list(params: &[Param]) -> String {
         .map(|p| p.name.as_str())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+impl Pretty for CallArg {
+    /// A labelled argument renders its label. The fmt safety gate compares this form before and
+    /// after formatting, so an unrendered label would be a label the formatter could silently
+    /// drop — turning `f(b: 1, a: 2)` into `f(1, 2)` and changing which parameter each value
+    /// binds to. That is precisely the failure this representation exists to prevent.
+    fn pretty(&self, out: &mut String, level: usize) {
+        match &self.name {
+            Some(name) => {
+                indent(out, level);
+                out.push_str(&format!("(arg {name} {}\n", span(self.span)));
+                self.value.pretty(out, level + 1);
+                out.push(')');
+            }
+            None => self.value.pretty(out, level),
+        }
+    }
 }
 
 impl Pretty for Program {

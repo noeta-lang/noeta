@@ -2988,8 +2988,9 @@ fn tier_name_at(
             } => covers(*tier_span, offset, source)
                 .then(|| (tier.clone(), *tier_span))
                 .or_else(|| holes.iter().find_map(|h| in_expr(h, offset, source))),
-            Expr::Call { callee, args, .. } => in_expr(callee, offset, source)
-                .or_else(|| args.iter().find_map(|a| in_expr(a, offset, source))),
+            Expr::Call { callee, args, .. } => in_expr(callee, offset, source).or_else(|| {
+                noeta_ast::CallArg::values(args).find_map(|a| in_expr(a, offset, source))
+            }),
             Expr::Binary { lhs, rhs, .. }
             | Expr::Pipeline {
                 left: lhs,

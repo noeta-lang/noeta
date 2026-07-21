@@ -7,4 +7,5 @@ expression: "pretty(\"x = OrderError.NegativePrice(index: i);\")"
     (call @4..38
       (member NegativePrice @4..28
         (ident OrderError @4..14))
-      (ident i @36..37))))
+      (arg index @29..37
+        (ident i @36..37)))))

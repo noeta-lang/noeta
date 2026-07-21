@@ -1,5 +1,6 @@
 ---
 source: crates/noeta-parser/src/lib.rs
+assertion_line: 5183
 expression: pretty(src)
 ---
 (program @0..2729
@@ -95,7 +96,8 @@ expression: pretty(src)
               (call @1794..1828
                 (member NegativePrice @1794..1818
                   (ident OrderError @1794..1804))
-                (ident i @1826..1827)))))))
+                (arg index @1819..1827
+                  (ident i @1826..1827))))))))
     (return @1851..1863
       (call @1858..1862
         (ident Ok @1858..1860))))

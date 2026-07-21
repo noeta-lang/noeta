@@ -355,8 +355,7 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
         },
         // A constructor call: `Enum.Variant(args)` or a built-in `Ok`/`Err`/`some` constructor.
         Expr::Call { callee, args, .. } => {
-            let conv: Vec<AttrValue> = args
-                .iter()
+            let conv: Vec<AttrValue> = noeta_ast::CallArg::values(args)
                 .map(expr_to_attr_value)
                 .collect::<Result<_, _>>()?;
             match &**callee {
@@ -2041,9 +2040,13 @@ where
                         // so desugar it to its string key plus a reference to the same-named
                         // variable.
                         None => match key {
-                            Expr::Ident { name, span } => {
-                                (Expr::Str { value: name.clone(), span }, Expr::Ident { name, span })
-                            }
+                            Expr::Ident { name, span } => (
+                                Expr::Str {
+                                    value: name.clone(),
+                                    span,
+                                },
+                                Expr::Ident { name, span },
+                            ),
                             other => unreachable!(
                                 "map shorthand is grammatically a bare identifier, got {other:?}"
                             ),
@@ -2186,16 +2189,29 @@ where
         // atom — `ident . ident ::< T > ( args )` — rather than a postfix; that keeps it off the
         // (arity-bounded) pratt op table and disambiguates cleanly: a plain identifier or a `.member`
         // with no `::` fails here and falls through to `obj_or_ident` (then ordinary postfix calls).
+        // **The** call-argument grammar: an optional `name:` label and a value. Defined once and
+        // shared by every call form — the plain postfix call and both turbofish forms — which
+        // previously each carried their own copy of it, and so each carried their own copy of the
+        // bug that discarded the label.
+        let labelled_arg = ident_parser(ctx)
+            .then_ignore(just(T::Colon))
+            .or_not()
+            .then(sub.clone())
+            .map_with(move |(name, value), e| noeta_ast::CallArg {
+                name: name.map(|(n, _): (String, Span)| n),
+                value,
+                span: ctx.to_span(e.span()),
+            })
+            .boxed();
+
         let typed_module_call = ident_parser(ctx)
             .then_ignore(just(T::Dot))
             .then(ident_parser(ctx))
             .then_ignore(just(T::ColonColon))
             .then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
             .then(
-                ident_parser(ctx)
-                    .then_ignore(just(T::Colon))
-                    .or_not()
-                    .ignore_then(sub.clone())
+                labelled_arg
+                    .clone()
                     .separated_by(just(T::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -2235,10 +2251,8 @@ where
                     .delimited_by(just(T::Lt), just(T::Gt)),
             )
             .then(
-                ident_parser(ctx)
-                    .then_ignore(just(T::Colon))
-                    .or_not()
-                    .ignore_then(sub.clone())
+                labelled_arg
+                    .clone()
                     .separated_by(just(T::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -2335,14 +2349,14 @@ where
         ))
         .boxed();
 
-        // Postfix call argument list (no trailing comma). An argument may carry a `name:`
-        // label (`NegativePrice(index: i)`); in M0 the label is parsed for surface fidelity
-        // but arguments bind positionally — M1 will validate/reorder names against the
-        // callee's declared parameters/fields.
-        let call_arg = ident_parser(ctx)
-            .then_ignore(just(T::Colon))
-            .or_not()
-            .ignore_then(sub.clone());
+        // Postfix call argument list. An argument may carry a `name:` label
+        // (`NegativePrice(index: i)`), which is **kept**.
+        //
+        // It used to be read and thrown away — `.or_not().ignore_then(sub)` — so the AST received
+        // a bare expression and nothing downstream could check a label it never saw. That made
+        // `add(b: 1, a: 10)` bind positionally and `add(nonsense: 1)` pass silently: the label
+        // looked like a working feature and was decoration.
+        let call_arg = labelled_arg.clone();
         let call_args = call_arg
             .separated_by(just(T::Comma))
             .allow_trailing()
@@ -3704,7 +3718,10 @@ where
                                     name_span: idx_span,
                                     span,
                                 }),
-                                args: vec![*index, rhs],
+                                args: vec![
+                                    noeta_ast::CallArg::positional(*index),
+                                    noeta_ast::CallArg::positional(rhs),
+                                ],
                                 span,
                             };
                             Stmt::Binding {
@@ -3766,7 +3783,10 @@ where
                                     name_span: idx_span,
                                     span,
                                 }),
-                                args: vec![*index, rhs],
+                                args: vec![
+                                    noeta_ast::CallArg::positional(*index),
+                                    noeta_ast::CallArg::positional(rhs),
+                                ],
                                 span,
                             };
                             // `x.f = <updated>`
@@ -5284,9 +5304,10 @@ mod tests {
     }
 
     #[test]
-    fn named_call_arguments_parse_positionally() {
-        // The `index:` label is parsed for surface fidelity; the call still binds by
-        // position in M0 (so this is one positional arg).
+    fn a_call_argument_keeps_its_label() {
+        // The `index:` label reaches the AST. It used to be read and thrown away
+        // (`.or_not().ignore_then(sub)`), so the snapshot showed a bare `(ident i)` and no
+        // later pass could see — let alone check — what the author wrote.
         insta::assert_snapshot!(pretty("x = OrderError.NegativePrice(index: i);"));
     }
 

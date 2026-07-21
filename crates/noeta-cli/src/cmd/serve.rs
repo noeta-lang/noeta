@@ -189,7 +189,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 span: sp,
             };
             let hot = std::env::var_os("NOETA_HOT").is_some();
-            let args = entry
+            let args: Vec<Expr> = entry
                 .args
                 .iter()
                 .map(|arg| match arg {
@@ -216,7 +216,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                         ret: None,
                         body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
                             callee: Box::new(ident(name)),
-                            args: vec![ident("req")],
+                            args: vec![noeta_ast::CallArg::positional(ident("req"))],
                             span: sp,
                         })),
                         span: sp,
@@ -226,7 +226,10 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 .collect();
             let call = Expr::Call {
                 callee: Box::new(callee),
-                args,
+                args: args
+                    .into_iter()
+                    .map(noeta_ast::CallArg::positional)
+                    .collect(),
                 span: sp,
             };
             loaded.program.stmts.push(Stmt::Expr {
@@ -332,7 +335,7 @@ pub(crate) fn serve_parallel_impl(
             ret: None,
             body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
                 callee: Box::new(ident("fetch")),
-                args: vec![ident("req")],
+                args: vec![noeta_ast::CallArg::positional(ident("req"))],
                 span: sp,
             })),
             span: sp,
@@ -357,7 +360,10 @@ pub(crate) fn serve_parallel_impl(
                 value: host.to_string(),
                 span: sp,
             },
-        ],
+        ]
+        .into_iter()
+        .map(noeta_ast::CallArg::positional)
+        .collect(),
         span: sp,
     };
     loaded.program.stmts.push(Stmt::Expr {
