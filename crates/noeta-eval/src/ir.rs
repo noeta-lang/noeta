@@ -1734,7 +1734,10 @@ impl Interpreter {
                 args,
                 span,
             } => {
-                let receiver = self.eval_ir_atom(recv, frame)?;
+                let receiver = match recv {
+                    Some(recv) => Some(self.eval_ir_atom(recv, frame)?),
+                    None => None,
+                };
                 let name_val = self.eval_ir_atom(name, frame)?;
                 let args_val = self.eval_ir_atom(args, frame)?;
                 self.invoke_dynamic(receiver, name_val, args_val, *span)

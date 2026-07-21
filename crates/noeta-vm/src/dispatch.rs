@@ -7,6 +7,19 @@
 
 use crate::*;
 
+/// What an `Op::Invoke` resolved its runtime name to. The two arms are executed by *different*
+/// mechanisms — a prototype is pushed onto the current frame stack, a free function re-enters
+/// through the first-class-callee path — so keeping them apart here means the resolution block
+/// stays a pure decision and the execution block cannot accidentally run one as the other.
+enum InvokeTarget {
+    /// A method or associated-function prototype. `is_assoc` decides whether register 0 receives
+    /// the receiver or stays unit; either way the callee reserves that register.
+    Proto { proto: u32, is_assoc: bool },
+    /// A top-level function value read from its global slot (the two-argument form). Reserves no
+    /// `self` register, and may carry upvalues, so it does not fit the prototype path.
+    Free(Value),
+}
+
 impl<'m> Vm<'m> {
     /// Run a frame stack until its bottom frame returns (`Return`) or the program/function
     /// halts (an implicit unit return). Returns the produced value, which the caller owns.
@@ -2778,9 +2791,9 @@ impl<'m> Vm<'m> {
                         args,
                         ok_shape,
                         err_shape,
-                        ..
+                        span,
                     } => {
-                        let recv_val = regs[fbase + *recv as usize];
+                        let recv_val = recv.map(|r| regs[fbase + r as usize]);
                         let name_val = regs[fbase + *name as usize];
                         let args_val = regs[fbase + *args as usize];
                         // A packed args list (P-PACK 2.4) is materialized to a temporary boxed list for
@@ -2791,7 +2804,7 @@ impl<'m> Vm<'m> {
                         // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
                         // non-list args, non-invokable receiver, unknown name, arity mismatch — is a
                         // runtime `Err`, never an abort (only a panic *inside* the called body aborts).
-                        let outcome: Result<(u32, bool, Vec<Value>), String> = 'resolve: {
+                        let outcome: Result<(InvokeTarget, Vec<Value>), String> = 'resolve: {
                             let Some(method) = name_val.as_string() else {
                                 break 'resolve Err(format!(
                                     "invoke name must be a string, found {}",
@@ -2807,6 +2820,37 @@ impl<'m> Vm<'m> {
                             let args_list = args_val.realize_list();
                             args_to_release = Some(args_list);
                             let arg_items = args_list.list_items().expect("checked is_list");
+                            // No receiver: the free-function form. The name resolves against the
+                            // module's global slot table and nothing else — the same binding
+                            // `Op::CallGlobal` reads for a statically-known top-level `fn`, which is
+                            // what makes the two-argument form pair with `params_of("name")`. A
+                            // global that is absent, unbound, or holds a non-closure is one and the
+                            // same miss (see `free_fn_miss_message`).
+                            let Some(recv_val) = recv_val else {
+                                let callee = self
+                                    .global_slots
+                                    .get(&*method)
+                                    .map(|slot| self.persist.globals[*slot as usize])
+                                    .filter(|v| !v.is_unbound() && v.as_closure().is_some());
+                                let Some(callee) = callee else {
+                                    break 'resolve Err(free_fn_miss_message(&method));
+                                };
+                                // A free fn reserves no `self` register, so its declared arity is
+                                // the parameter count itself — unlike the method path below.
+                                let chunk =
+                                    &module.protos[callee.as_closure().expect("filtered") as usize];
+                                let total = chunk.num_params as usize;
+                                let required = total - chunk.defaults.len();
+                                if arg_items.len() < required || arg_items.len() > total {
+                                    break 'resolve Err(arity_message(
+                                        "function",
+                                        required,
+                                        total,
+                                        arg_items.len(),
+                                    ));
+                                }
+                                break 'resolve Ok((InvokeTarget::Free(callee), arg_items));
+                            };
                             // A type handle dispatches an associated function (no receiver); an object
                             // dispatches an instance method (receiver in register 0). A reflection `Type`
                             // value (a stored type-ref) names the type for an associated call too.
@@ -2844,7 +2888,7 @@ impl<'m> Vm<'m> {
                                     arg_items.len(),
                                 ));
                             }
-                            Ok((proto, is_assoc, arg_items))
+                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items))
                         };
                         match outcome {
                             Err(message) => {
@@ -2853,12 +2897,38 @@ impl<'m> Vm<'m> {
                                 set_reg(regs, fbase, *dst, err);
                                 pc += 1;
                             }
-                            Ok((proto, is_assoc, arg_items)) => {
+                            // A free function has no receiver register and no `self` slot, so it
+                            // cannot ride `push_callee_frame` (which reserves register 0). It runs
+                            // through the ordinary first-class-callee path instead — the same
+                            // re-entry `map`/`filter` use — which carries the closure's upvalues and
+                            // fills its defaults. Arity was pre-checked above, so `call_value`'s own
+                            // (aborting) arity guard is unreachable and a soft `Err` is preserved.
+                            Ok((InvokeTarget::Free(callee), arg_items)) => {
+                                // `call_value` consumes owned arguments; the list still owns these.
+                                let owned: Vec<Value> = arg_items
+                                    .iter()
+                                    .map(|&a| {
+                                        retain(a);
+                                        a
+                                    })
+                                    .collect();
+                                if let Some(list) = args_to_release.take() {
+                                    list.release();
+                                }
+                                let result = self.call_value(callee, owned, *span)?;
+                                let ok = self.persist.shapes[*ok_shape as usize];
+                                set_reg(regs, fbase, *dst, Value::enum_value(ok, vec![result]));
+                                pc += 1;
+                            }
+                            Ok((InvokeTarget::Proto { proto, is_assoc }, arg_items)) => {
                                 // An associated call leaves register 0 as unit (no receiver); an instance
                                 // call places the retained receiver there. The result is wrapped in
                                 // `Result.Ok` as it lands in the caller, so the invocation yields a
                                 // `Result` whichever way the body returns.
-                                let recv = (!is_assoc).then_some(recv_val);
+                                // An instance dispatch always resolved through a receiver, so the
+                                // flatten never discards one: `is_assoc` is false only on the
+                                // `recv_val.is_object()` arm.
+                                let recv = (!is_assoc).then_some(recv_val).flatten();
                                 let ok = self.persist.shapes[*ok_shape as usize];
                                 self.push_callee_frame(
                                     frames,

@@ -341,7 +341,9 @@ impl Walker<'_> {
             Expr::Invoke {
                 recv, name, args, ..
             } => {
-                self.expr(recv);
+                if let Some(recv) = recv {
+                    self.expr(recv);
+                }
                 self.expr(name);
                 self.expr(args);
             }

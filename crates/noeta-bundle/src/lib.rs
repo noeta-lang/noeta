@@ -60,7 +60,13 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// desynchronise from there — a corrupt manifest, not a clean error. Same reasoning as the bump
 /// before it: any change to the serialized shape, however additive it looks in Rust, is a format
 /// break on the wire.
-pub const FORMAT_VERSION: u8 = 3;
+///
+/// Bumped to 4 when `Op::Invoke` gained the free-function form and its `recv` register became an
+/// `Option<Reg>`. Same non-self-describing-encoding reasoning: an `Option` writes a discriminant
+/// byte ahead of the register, so a version-3 reader would take that byte *as* the receiver
+/// register and desynchronise for the rest of the chunk. `Module::code` is part of the payload, so
+/// an op-layout change is a format break exactly as a manifest change is.
+pub const FORMAT_VERSION: u8 = 4;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

@@ -605,7 +605,9 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::Invoke {
             recv, name, args, ..
         } => {
-            f(recv);
+            if let Some(recv) = recv {
+                f(recv);
+            }
             f(name);
             f(args);
         }

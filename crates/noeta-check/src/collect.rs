@@ -1046,7 +1046,9 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            collect_nested_fns_in_expr(recv, out);
+            if let Some(recv) = recv {
+                collect_nested_fns_in_expr(recv, out);
+            }
             collect_nested_fns_in_expr(name, out);
             collect_nested_fns_in_expr(args, out);
         }

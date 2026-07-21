@@ -2446,7 +2446,10 @@ impl Lowerer<'_> {
                 args,
                 span,
             } => {
-                let recv = self.lower_expr(recv, out)?;
+                let recv = match recv {
+                    Some(recv) => Some(self.lower_expr(recv, out)?),
+                    None => None,
+                };
                 let name = self.lower_expr(name, out)?;
                 let args = self.lower_expr(args, out)?;
                 Ok(self.emit(

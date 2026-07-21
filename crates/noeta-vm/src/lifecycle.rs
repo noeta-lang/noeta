@@ -306,6 +306,15 @@ impl<'m> Vm<'m> {
                 .or_default()
                 .insert(m.method.clone(), m.proto);
         }
+        // Name → global slot, for the free-function `Op::Invoke`. A later slot wins, matching the
+        // compiler's own `global_slots` map (which a rebinding overwrites in place), so the VM
+        // resolves a name to the same slot the statically-compiled `Op::CallGlobal` would.
+        let global_slots: HashMap<String, u32> = module
+            .global_names
+            .iter()
+            .enumerate()
+            .map(|(slot, name)| (name.clone(), slot as u32))
+            .collect();
         let destructors = module.destructors.iter().cloned().collect();
         let field_defaults = module
             .field_defaults
@@ -350,6 +359,7 @@ impl<'m> Vm<'m> {
             persist,
             map_packed,
             methods,
+            global_slots,
             destructors,
             field_defaults,
             destruct_reachable,

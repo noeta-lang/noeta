@@ -1560,19 +1560,28 @@ impl Checker {
             Expr::Invoke {
                 recv, name, args, ..
             } => {
-                // The receiver is either a value (→ instance method) or a bare type name (→
+                // With a receiver, it is either a value (→ instance method) or a bare type name (→
                 // associated function). A bare type name is not an ordinary value expression, so it
                 // is licensed here rather than synthesized; any other receiver is synthesized
                 // normally (it must be well-typed, but its type is unconstrained — dispatch is
                 // dynamic). The name (a `string`) and args (a `List`) are runtime-checked, so they
                 // are synthesized leniently. By-name invocation is fallible by construction:
                 // unknown name / wrong arity are runtime `Err`, never static errors.
-                let recv_is_type = matches!(
-                    recv.as_ref(),
-                    Expr::Ident { name, .. } if self.symbols.types.contains(name)
-                );
-                if !recv_is_type {
-                    self.synth(recv, env);
+                //
+                // Without a receiver (`invoke(name, args)`), the name is a runtime string naming a
+                // top-level function. Nothing is licensed and nothing is resolved statically: the
+                // name need not be a literal, so there is no declaration to point at, and treating
+                // an unresolvable one as a static error would contradict the primitive's contract
+                // that *every* resolution failure is a runtime `Err`. Both forms therefore
+                // synthesize to the same lenient `Result<dyn, dyn>`.
+                if let Some(recv) = recv {
+                    let recv_is_type = matches!(
+                        recv.as_ref(),
+                        Expr::Ident { name, .. } if self.symbols.types.contains(name)
+                    );
+                    if !recv_is_type {
+                        self.synth(recv, env);
+                    }
                 }
                 self.synth(name, env);
                 self.synth(args, env);

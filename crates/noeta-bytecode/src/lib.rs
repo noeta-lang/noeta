@@ -826,15 +826,22 @@ pub enum Op {
         dst: Reg,
         name: NameId,
     },
-    /// `invoke(recv, name, args)`: `dst = Result<dyn, dyn>` — fallible by-name dispatch. `recv` holds
-    /// an object (→ instance method, keyed `(shape, name)`) or a reflection `Type` value (→ associated
-    /// function, keyed `(type, name)`); `name` is a runtime `string`; `args` a runtime `List`. An unknown name,
-    /// a non-string name, a non-list args, or an arity mismatch builds `Result.Err(string)` (via
-    /// `err_shape`); a hit pushes a call frame whose result is wrapped in `Result.Ok` (via
+    /// `invoke(recv, name, args)` / `invoke(name, args)`: `dst = Result<dyn, dyn>` — fallible
+    /// by-name dispatch. `name` is a runtime `string`; `args` a runtime `List`. An unknown name, a
+    /// non-string name, a non-list args, or an arity mismatch builds `Result.Err(string)` (via
+    /// `err_shape`); a hit calls the resolved body and wraps its result in `Result.Ok` (via
     /// `ok_shape`). A panic inside the invoked body propagates as a normal abort (P2.6).
+    ///
+    /// `recv` selects the namespace, and there is no sentinel register for "no receiver" — a
+    /// register always holds *some* value, so a sentinel would be indistinguishable from a real
+    /// receiver that happened to be unit:
+    /// - `Some(reg)` — the register holds an object (→ instance method, keyed `(shape, name)`) or a
+    ///   reflection `Type` value (→ associated function, keyed `(type, name)`).
+    /// - `None` — the free-function form: `name` resolves against the module's **global slot
+    ///   table**, the same binding `Op::CallGlobal` reads for a statically-known top-level `fn`.
     Invoke {
         dst: Reg,
-        recv: Reg,
+        recv: Option<Reg>,
         name: Reg,
         args: Reg,
         ok_shape: u32,
@@ -1853,7 +1860,10 @@ fn op_repr(
             name,
             args,
             ..
-        } => format!("Invoke      r{dst} <- invoke(r{recv}, r{name}, r{args})"),
+        } => match recv {
+            Some(recv) => format!("Invoke      r{dst} <- invoke(r{recv}, r{name}, r{args})"),
+            None => format!("Invoke      r{dst} <- invoke(r{name}, r{args})"),
+        },
         Op::TypedModuleCall {
             dst,
             module,

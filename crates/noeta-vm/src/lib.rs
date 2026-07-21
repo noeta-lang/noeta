@@ -547,6 +547,11 @@ struct Vm<'m> {
     /// allocations per uncached dynamic dispatch (enum methods, operator overloads,
     /// `Op::Invoke`).
     methods: HashMap<String, HashMap<String, u32>>,
+    /// The reverse of [`Module::global_names`]: global name → slot. Built once at load, because the
+    /// forward table is slot-ordered and the only consumer that starts from a *name* is the
+    /// free-function `Op::Invoke` — which would otherwise scan every global name on each dispatch.
+    /// The tree-walker twin is its `globals` scope map.
+    global_slots: HashMap<String, u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
     destructors: HashMap<String, u32>,
     /// `(type_name, field_name)` to the field's default-value thunk prototype (object-model

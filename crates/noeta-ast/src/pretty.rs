@@ -1152,9 +1152,18 @@ impl Pretty for Expr {
                 args,
                 span: s,
             } => {
-                out.push_str(&format!("(invoke {}\n", span(*s)));
-                recv.pretty(out, level + 1);
-                out.push('\n');
+                // The free-fn form prints as `invoke-free`, so a snapshot can never confuse the two
+                // dispatch namespaces by operand count alone.
+                let head = if recv.is_some() {
+                    "invoke"
+                } else {
+                    "invoke-free"
+                };
+                out.push_str(&format!("({head} {}\n", span(*s)));
+                if let Some(recv) = recv {
+                    recv.pretty(out, level + 1);
+                    out.push('\n');
+                }
                 name.pretty(out, level + 1);
                 out.push('\n');
                 args.pretty(out, level + 1);

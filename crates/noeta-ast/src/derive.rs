@@ -781,7 +781,9 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            visit_expr_types(recv, f);
+            if let Some(recv) = recv {
+                visit_expr_types(recv, f);
+            }
             visit_expr_types(name, f);
             visit_expr_types(args, f);
         }
