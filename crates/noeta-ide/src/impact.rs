@@ -455,13 +455,11 @@ impl ImpactSession {
                 reason: "the edit does not check".into(),
             };
         }
-        // Every source's text by SourceId — members then dependency modules, the same
-        // assignment `workspace::sync` made — for the graph's call-site syntax probes.
+        // Every source's text by SourceId — `WorkspaceCache::sources` yields in SourceId order, the
+        // same assignment `workspace::sync` made — for the graph's call-site syntax probes.
         let texts: Vec<&str> = cache
-            .programs
-            .iter()
-            .chain(cache.dep_programs.iter())
-            .map(|p| p.text(&self.db).as_str())
+            .sources()
+            .map(|s| s.program.text(&self.db).as_str())
             .collect();
         let graph = callgraph::build(&activated.program, &checked.expr_types, &texts);
         match reverse_closure(&graph, seeds, members) {
