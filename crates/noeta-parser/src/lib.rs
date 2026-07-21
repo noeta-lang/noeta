@@ -2662,25 +2662,60 @@ where
 // --- Statements -------------------------------------------------------------------
 
 /// Wrap a statement parser so a failed statement is recovered by skipping to the next
-/// statement boundary (a `;`, consumed) without crossing a block's closing `}`. A
-/// recovered statement contributes nothing to the list; the failure is still reported.
-/// Mirrors the original hand-written `synchronize` behaviour.
+/// statement boundary (a `;`, consumed) without crossing the enclosing block's closing `}` — a
+/// balanced `{ … }` group inside the abandoned statement is skipped whole rather than treated as
+/// that boundary. A recovered statement contributes nothing to the list; the failure is still
+/// reported. Mirrors the original hand-written `synchronize` behaviour.
 fn recovering_list<'src, I, P>(stmt: P) -> impl Parser<'src, I, Vec<Stmt>, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
     P: Parser<'src, I, Stmt, Extra<'src>> + Clone,
 {
-    // Skip ≥1 token that is neither `;` nor `}`, then an optional `;`; or a lone `;`.
-    // Requiring progress (`at_least(1)` / a `;`) lets the surrounding `repeated()`
-    // terminate at `}`/EOF instead of looping.
-    let skip = any()
-        .and_is(just(T::Semicolon).not())
-        .and_is(just(T::RBrace).not())
-        .repeated()
-        .at_least(1)
-        .then_ignore(just(T::Semicolon).or_not())
-        .ignored()
-        .or(just(T::Semicolon).ignored());
+    // A BALANCED `{ … }` group, skipped as one unit. Everything inside belongs to the statement
+    // being abandoned — nested groups and `;` alike — so none of it is a resync point.
+    //
+    // Skipping the group whole is what keeps `}` meaning "the enclosing block ends here". Stopping
+    // at the first `}` regardless of nesting instead parks recovery on a brace the failed statement
+    // itself opened: the next iteration then has a statement that cannot start and a skip that
+    // cannot make progress, `repeated()` terminates, and every following statement's faults are
+    // lost. That is invisible while a malformed brace group still *parses* — which is why it only
+    // surfaced once the map-entry rule started failing for real, and why `x = (1 + ;` never showed
+    // it (no guard token, so recovery walks to the `;` as intended).
+    let group = recursive(|group| {
+        let inner = choice((
+            group,
+            any()
+                .and_is(just(T::LBrace).not())
+                .and_is(just(T::RBrace).not())
+                .ignored(),
+        ));
+        just(T::LBrace)
+            .ignore_then(inner.repeated())
+            .then_ignore(just(T::RBrace))
+            .ignored()
+    });
+    // Skip ≥1 unit, then an optional `;`; or a lone `;`. A closing `}` is the one token never
+    // skipped — that is the enclosing block's boundary, and leaving it lets `repeated()` terminate
+    // there instead of looping.
+    //
+    // An unmatched OPENING `{` is skipped as a plain token by the last alternative, reached only
+    // after `group` has failed to balance it. Without that, unbalanced input (`x = { "a" ;`) parks
+    // recovery on the `{` and swallows the rest of the file — the same fault as parking on `}`,
+    // just one token over.
+    let skip = choice((
+        group,
+        any()
+            .and_is(just(T::Semicolon).not())
+            .and_is(just(T::LBrace).not())
+            .and_is(just(T::RBrace).not())
+            .ignored(),
+        just(T::LBrace).ignored(),
+    ))
+    .repeated()
+    .at_least(1)
+    .then_ignore(just(T::Semicolon).or_not())
+    .ignored()
+    .or(just(T::Semicolon).ignored());
 
     // An empty statement — a lone `;` — produces no statement. With optional line-end semicolons
     // (object-model slice 7) the parse input carries a woven zero-width `;` after a block-bodied
@@ -5349,6 +5384,34 @@ mod tests {
                     .iter()
                     .any(|d| d.message == MAP_ENTRY_NEEDS_VALUE),
                 "map-entry reason leaked out of a block body in `{src}`: {:?}",
+                parsed.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_resyncs_past_a_failed_statements_brace_group() {
+        // A statement that fails INSIDE a `{ … }` group must still resync at the next statement
+        // boundary, exactly as a failure inside `( … )` does. Skipping only to the group's closing
+        // `}` parks recovery on a token nothing can consume and drops the rest of the file.
+        for (src, want) in [
+            ("x = { \"a\" };\necho ;\n", 2),
+            ("x = (1 + ;\necho ;\n", 2),
+            ("x = {\"k\": { \"a\" }};\necho ;\n", 2),
+            ("x = [{ \"a\" }];\necho ;\n", 2),
+            ("x = {\"a\": {\"b\": {\"c\": { \"z\" }}}};\necho ;\n", 2),
+            // Unmatched braces resync too — the `{` is skipped as a plain token once it cannot be
+            // balanced, so the following statement is still reached.
+            ("x = { \"a\" ;\necho ;\n", 2),
+            // A bad statement inside a block does NOT run past the block: the block's own `}` is
+            // still the boundary, so the statement after it is parsed (and faulted) separately.
+            ("fn f(): void {\n  echo ;\n}\necho ;\n", 2),
+        ] {
+            let parsed = parse_str(src);
+            assert_eq!(
+                parsed.diagnostics.len(),
+                want,
+                "recovery lost a fault in `{src}`: {:?}",
                 parsed.diagnostics
             );
         }
