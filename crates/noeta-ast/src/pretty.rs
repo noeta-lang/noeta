@@ -33,10 +33,25 @@ fn span(s: Span) -> String {
     format!("@{}..{}", s.start, s.end)
 }
 
+/// A callable's parameters, for the S-expression dump.
+///
+/// Each parameter renders its `#[...]` attributes ahead of its name. The fmt safety gate compares
+/// this form before and after formatting, so an unrendered attribute would be an attribute the
+/// formatter could silently drop — the same failure the labelled-argument rendering below exists to
+/// prevent, and a worse one here: dropping `#[Arg(short: "r")]` changes what a signature-driven
+/// framework generates while leaving the program's own behaviour identical, so nothing else would
+/// notice.
 fn param_list(params: &[Param]) -> String {
     params
         .iter()
-        .map(|p| p.name.as_str())
+        .map(|p| {
+            let attrs: String = p
+                .attrs
+                .iter()
+                .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
+                .collect();
+            format!("{attrs}{}", p.name)
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }

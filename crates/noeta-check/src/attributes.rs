@@ -68,6 +68,19 @@ impl Checker {
         }
     }
 
+    /// Validate the `#[...]` attributes on each of a callable's declared parameters.
+    ///
+    /// A thin fan-out over [`check_attrs`](Self::check_attrs) with `TargetKind::Param` — deliberately
+    /// not its own set of rules. A parameter attribute is an attribute: same capability gate
+    /// (E0029), same placement gate (E0030), same construction rules for its literal arguments. The
+    /// only thing particular to a parameter is *which* target kind it reports, and that is this
+    /// function's whole content.
+    pub(crate) fn check_param_attrs(&mut self, params: &[noeta_ast::Param]) {
+        for param in params {
+            self.check_attrs(&param.attrs, TargetKind::Param);
+        }
+    }
+
     /// Check that a `#[Foo(...)]` attribute's arguments construct a valid `Foo` — the all-fields
     /// contract of any struct literal, applied to the literal arguments. Positional arguments bind
     /// to fields in declaration order, named arguments by name; each field must be set exactly once

@@ -1,0 +1,11 @@
+// `Param` joins the `@attribute(...)` placement vocabulary, so an attribute can declare itself
+// parameter-only — and, symmetrically, an attribute restricted to some OTHER kind is rejected on a
+// parameter. `@attribute(Field)` names a struct/class field; a parameter is a different site, so
+// writing `#[Column]` on one is a placement error (E0030) at the misplaced attribute, exactly as it
+// would be on a method. The parameter is a target kind like any other, not a hole in the rule.
+// expect: error E0030 at 11:11
+// expect: exit 1
+@attribute(Field)
+struct Column { name: string }
+
+fn save(#[Column("id")] id: int): void { return; }

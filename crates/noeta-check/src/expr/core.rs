@@ -310,6 +310,7 @@ impl Checker {
                 // A closure default is evaluated in the captured (enclosing) scope, so validate it
                 // against `env` before the parameter frame is pushed.
                 self.validate_param_defaults(params, env);
+                self.check_param_attrs(params);
                 env.push(HashMap::new());
                 // Each parameter's bound type: an explicit annotation wins, else the expectation.
                 // KEPT for the closure's own type below — returning `param_type` here used to
@@ -778,6 +779,13 @@ impl Checker {
                 ..
             } => {
                 self.validate_param_defaults(params, env);
+                // A closure's parameters take the same annotation grammar as a named callable's, so
+                // an attribute written on one must face the same gates: it has to BE an attribute
+                // struct (E0029), permitted at `Param` (E0030), and constructible from its literal
+                // arguments. It is inert beyond that — the attribute manifest keys on a callable's
+                // name and a closure has none, so nothing can ever query it back — but "inert" and
+                // "unvalidated" are different things, and only the first is acceptable.
+                self.check_param_attrs(params);
                 env.push(HashMap::new());
                 for p in params {
                     self.check_reserved_name(&p.name, p.name_span);

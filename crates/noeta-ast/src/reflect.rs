@@ -47,9 +47,27 @@ impl ReflectionInfo {
             .chain(fragment.manifest.iter().map(|a| a.target.as_str()))
             .chain(fragment.roles.iter().map(|r| r.target.as_str()))
             .collect();
+        // Every callable this fragment (re)declares, by the target its parameters are keyed under.
+        // A callable always emits a `ParamRecord` (`push_params` emits both renderings together), so
+        // this set is exactly "the callables whose parameter lists this fragment redefines".
+        let fragment_callables: std::collections::HashSet<&str> =
+            fragment.params.iter().map(|p| p.target.as_str()).collect();
         self.types.retain(|t| !redeclared.contains(t.name.as_str()));
-        self.manifest
-            .retain(|a| !redeclared.contains(a.target.as_str()));
+        self.manifest.retain(|a| {
+            match split_param_attr_target(&a.target) {
+                // A parameter row lives and dies with its callable's parameter list, not with its
+                // own key: redeclaring `fn build(target: string)` without the `#[Arg]` it used to
+                // carry must *drop* the old row, and the new fragment names no such target to
+                // supersede it. Keying the purge on the callable is the same move the `params`
+                // purge below makes, for the same reason — and it is why the parameter key is
+                // built to be splittable back into its callable at all.
+                Some((callable, _)) => {
+                    !fragment_callables.contains(callable)
+                        && !redeclared.contains(param_base(callable))
+                }
+                None => !redeclared.contains(a.target.as_str()),
+            }
+        });
         self.roles
             .retain(|r| !redeclared.contains(r.target.as_str()));
         // Param records are keyed by a callable's target (`fn` or `Type.method`); a redeclared
@@ -69,6 +87,7 @@ impl ReflectionInfo {
         });
         drop(redeclared);
         drop(param_bases);
+        drop(fragment_callables);
         self.types.extend(fragment.types);
         self.manifest.extend(fragment.manifest);
         self.roles.extend(fragment.roles);
@@ -83,6 +102,18 @@ impl ReflectionInfo {
             .find(|p| p.target == target)
             .map(|p| p.params.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// The data attributes attached to one **parameter** of `callable`, in source order.
+    ///
+    /// The join that makes `ParamInfo.attrs` a *view* of the attribute manifest rather than a second
+    /// copy of it: `params_of` materializes each parameter's attributes through here, and
+    /// `attributes_of::<T>()` reads the very same rows off the same table. Both go through
+    /// [`param_attr_target`] for the key, so the two surfaces cannot disagree about which attribute
+    /// belongs to which parameter — they are one fact rendered twice.
+    pub fn param_attributes_for(&self, callable: &str, param: &str) -> Vec<&AttributeRecord> {
+        let key = param_attr_target(callable, param);
+        self.manifest.iter().filter(|a| a.target == key).collect()
     }
 
     /// The data attributes attached to `target`, in source order — the manifest query tooling and
@@ -204,6 +235,39 @@ fn param_base(target: &str) -> &str {
     target.split_once('.').map(|(ty, _)| ty).unwrap_or(target)
 }
 
+/// The separator between a callable's target and one of its **parameters** in an attribute-manifest
+/// key: `Tools.build#target`, `build#release`.
+///
+/// Deliberately *not* a third `.`. A parameter attribute needs three components where the rest of
+/// the manifest needs two, and the existing two-component form is already ambiguous under a third:
+/// `build.target` would read equally as "parameter `target` of the free function `build`" and as
+/// "method `target` of the type `build`", with no way for a reader to choose. Every consumer that
+/// splits a target — [`param_base`] here, and the `para/aether` package, which takes `parts[0]` /
+/// `parts[1]` off a naive `split(".")` — would have silently picked one reading.
+///
+/// A distinct separator makes the key **self-describing** instead: the presence of a `#` *is* the
+/// statement "this target names a parameter", so one rule ([`split_param_attr_target`]) decides it
+/// for every reader, and the dotted rule that came before is left meaning exactly what it always
+/// meant. Nothing that splits on `.` today changes behaviour, because no key it can see grew a
+/// component.
+pub const PARAM_ATTR_SEP: char = '#';
+
+/// The attribute-manifest key of one **parameter** of `callable` — the write half of the rule
+/// [`split_param_attr_target`] reads. `callable` is the target the parameter's callable is already
+/// known by (a bare fn name, or a qualified `Type.method`), so a parameter key extends its
+/// callable's key rather than being spelled independently of it.
+pub fn param_attr_target(callable: &str, param: &str) -> String {
+    format!("{callable}{PARAM_ATTR_SEP}{param}")
+}
+
+/// Split a manifest target back into `(callable, parameter)`, or `None` if it does not name a
+/// parameter — the read half of [`param_attr_target`], and the **only** place a target string is
+/// interpreted as naming a parameter. Both the `params_of` join and the latest-wins purge go
+/// through it, so "what a parameter key looks like" cannot come to mean two things.
+pub fn split_param_attr_target(target: &str) -> Option<(&str, &str)> {
+    target.split_once(PARAM_ATTR_SEP)
+}
+
 /// The kind of a declared type.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
@@ -272,10 +336,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                     }
                 }
                 for method in &decl.methods {
-                    params.push(ParamRecord {
-                        target: format!("{}.{}", decl.name, method.name),
-                        params: param_sigs(&method.params),
-                    });
+                    push_params(
+                        &mut manifest,
+                        &mut params,
+                        format!("{}.{}", decl.name, method.name),
+                        &method.params,
+                    );
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -298,10 +364,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
-                    params.push(ParamRecord {
-                        target,
-                        params: param_sigs(&method.params),
-                    });
+                    push_params(&mut manifest, &mut params, target, &method.params);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -318,10 +381,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 // their decorators into `Decorators`. A `fn` carries `#[...]` attributes and a
                 // `@tier(...)` declaration, neither of which is a type decorator.
                 push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
-                params.push(ParamRecord {
-                    target: decl.name.clone(),
-                    params: param_sigs(&decl.params),
-                });
+                push_params(
+                    &mut manifest,
+                    &mut params,
+                    decl.name.clone(),
+                    &decl.params,
+                );
             }
             // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
             // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
@@ -339,10 +404,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 // A trait's abstract method signatures carry declared parameters too, keyed by the
                 // `Trait.method` convention — surfaced via `params_of` like a concrete method's.
                 for method in &decl.methods {
-                    params.push(ParamRecord {
-                        target: format!("{}.{}", decl.name, method.sig.name),
-                        params: param_sigs(&method.sig.params),
-                    });
+                    push_params(
+                        &mut manifest,
+                        &mut params,
+                        format!("{}.{}", decl.name, method.sig.name),
+                        &method.sig.params,
+                    );
                 }
             }
             Stmt::Enum(decl) => {
@@ -363,10 +430,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
-                    params.push(ParamRecord {
-                        target,
-                        params: param_sigs(&method.params),
-                    });
+                    push_params(&mut manifest, &mut params, target, &method.params);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -415,6 +479,38 @@ pub fn build(program: &Program) -> ReflectionInfo {
 /// name paired with the [`TypeRepr`] of its annotated type (an unannotated parameter is
 /// [`TypeRepr::Dyn`]) and its optionality. Shared by every callable arm of [`build`] so a fn,
 /// method, and trait method sig all surface their parameters identically.
+/// Record one callable's parameters — **both** of the renderings they have, from one walk.
+///
+/// A callable's parameter list reaches reflection twice: as the [`ParamRecord`] `params_of(target)`
+/// materializes, and as attribute-manifest rows keyed [`param_attr_target`] so `attributes_of::<T>()`
+/// discovers a parameter attribute exactly as it discovers one on a field or a method. They are one
+/// fact, so one function emits both: there is no parameter list that can appear in the manifest but
+/// not in `params_of`, and no key the two sides could spell differently.
+///
+/// The `params_of` side then *joins back* on the manifest at materialization time rather than
+/// carrying its own copy of the attributes — see `ParamSig`, which is deliberately unchanged. That
+/// is what keeps the two renderings a projection of one table instead of two tables that must be
+/// kept in step.
+fn push_params(
+    manifest: &mut Vec<AttributeRecord>,
+    params: &mut Vec<ParamRecord>,
+    target: String,
+    decls: &[crate::Param],
+) {
+    for p in decls {
+        push_attrs(
+            manifest,
+            &param_attr_target(&target, &p.name),
+            p.name_span,
+            &p.attrs,
+        );
+    }
+    params.push(ParamRecord {
+        target,
+        params: param_sigs(decls),
+    });
+}
+
 fn param_sigs(params: &[crate::Param]) -> Vec<ParamSig> {
     params
         .iter()
@@ -995,10 +1091,18 @@ pub const SEMANTIC_ENUM: &str = "Semantic";
 /// may be any `@semantic` enum (the built-in `Semantic` or a user one), not a single fixed type.
 pub const ROLE_BINDING: &str = "RoleBinding";
 
-/// The `ParamInfo` prelude struct's name — `{ name: string, type: Type, optional: bool }`, the
-/// element type of `params_of()`'s result list. `type` is the reflection `Type` ADT value (the same
-/// ADT `type_of` returns), built from the parameter's declared type annotation; `optional` reports
-/// whether the parameter declared a default, and so whether a call may omit it.
+/// The `ParamInfo` prelude struct's name — `{ name: string, type: Type, optional: bool, attrs:
+/// List<dyn> }`, the element type of `params_of()`'s result list. `type` is the reflection `Type`
+/// ADT value (the same ADT `type_of` returns), built from the parameter's declared type annotation;
+/// `optional` reports whether the parameter declared a default, and so whether a call may omit it;
+/// `attrs` holds the parameter's materialized `#[...]` attribute instances, in source order.
+///
+/// `attrs` exists so a signature-driven consumer can read a signature *once*: `params_of("build")`
+/// yields each parameter beside its own metadata, which is what a CLI or router derivation actually
+/// wants. The alternative — `attributes_of::<Arg>()` and re-joining its `target` strings back onto
+/// the parameter list — works, and still does, but makes every such consumer re-implement the key
+/// format. It is a view, not a second table: the values come from the same manifest rows
+/// `attributes_of` returns, via [`ReflectionInfo::param_attributes_for`].
 pub const PARAM_INFO: &str = "ParamInfo";
 
 /// The built-in **test-metadata attributes** (object-model slice 6h) — prelude `@attribute` structs
@@ -1052,7 +1156,7 @@ pub const SEMANTIC_VARIANTS: &[&str] = &[
 /// spellings the checker's `TargetKind::from_name` accepts, shared so its diagnostics help and IDE
 /// completion can never drift from the accepted set (a checker test asserts lockstep).
 pub const ATTRIBUTE_TARGET_KINDS: &[&str] = &[
-    "Struct", "Class", "Enum", "Function", "Method", "Field", "Variant",
+    "Struct", "Class", "Enum", "Function", "Method", "Field", "Variant", "Param",
 ];
 
 /// The prelude `FieldEntry` struct — the element type of `fields_of(value)`'s result (derive

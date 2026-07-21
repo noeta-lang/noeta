@@ -220,6 +220,11 @@ impl Checker {
                 self.check_type_opt(&field.ty);
             }
             self.check_attrs(&variant.attrs, TargetKind::Variant);
+            // A variant's payload fields are parsed by the shared parameter grammar, so they can
+            // carry `#[...]` too. Validate them as parameters — capability gate and construction —
+            // rather than leaving the one parameter list in the language whose attributes nothing
+            // looks at.
+            self.check_param_attrs(&variant.fields);
         }
         self.check_derives(&e.name, &e.decorators.derives, &[], &e.methods);
         let standalone = self.standalone_for(&e.name);

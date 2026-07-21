@@ -1,0 +1,13 @@
+// A TRAIT method's parameters reach the reflection manifest — `build` keys a trait's signatures
+// `Trait.method` and pushes their parameter rows exactly as it does a concrete method's — so they
+// must be validated on the way in. An abstract signature has no body, so it does not pass through
+// the callable-checking path that validates every other parameter list; without a check of its own,
+// a trait was the one route by which a `#[Nope]` that names no attribute struct at all could reach
+// the manifest. It is E0029 here, as it would be anywhere else.
+// expect: error E0029 at 12:17
+// expect: exit 1
+struct NotAnAttribute { x: int }
+
+trait Handler {
+    fn handle(#[NotAnAttribute(x: 1)] request: string): string
+}

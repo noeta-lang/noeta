@@ -60,6 +60,15 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// desynchronise from there — a corrupt manifest, not a clean error. Same reasoning as the bump
 /// before it: any change to the serialized shape, however additive it looks in Rust, is a format
 /// break on the wire.
+///
+/// **Not** bumped for parameter attributes, and the reason is the rule stated above read the other
+/// way round: that slice added no field to any serialized struct. A parameter's `#[...]` attributes
+/// ride as ordinary rows in `reflection.manifest`, which is a `Vec<AttributeRecord>` whose element
+/// shape is untouched — a longer vector, not a different layout, and postcard length-prefixes
+/// vectors. Nor can a version-3 artifact be *stale* in the way a layout change makes one: a bundle
+/// written before that slice was written by a compiler that could not parse an attribute in a
+/// parameter list, so its source cannot have contained one, and the rows it lacks are rows its
+/// program never had. The gate exists to catch silent misreads; there is nothing here to misread.
 pub const FORMAT_VERSION: u8 = 3;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
