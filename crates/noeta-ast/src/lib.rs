@@ -156,6 +156,23 @@ pub enum Stmt {
         /// re-emits the raw source (sliced from `span`), *not* this — this is unescaped, so
         /// printing it would drop `\{ \}` and unbalance the block.
         doc_text: Option<String>,
+        /// Whether this block is an **annotation** — `@test fn foo()`, which the parser desugars
+        /// into a one-item block so activation, lowering and the runner need no second machinery.
+        ///
+        /// The desugar is deliberate and stays, but it erased the one thing attachment checking
+        /// needs. This flag is exactly **"there were no braces"**, carried past the desugar
+        /// because it cannot be recovered afterwards: `@debug { fn f() {} }` and `@debug fn f()`
+        /// produce byte-identical `TierBlock`s — same tier, same one-`Fn` `items`, no `doc_text` —
+        /// and must be judged differently. Re-reading the source at `span` to look for a `{` would
+        /// work only for nodes that came from source at all.
+        ///
+        /// It concerns the **annotation** mechanism only, which is not the language's only form of
+        /// attachment. A *text* tier attaches by **adjacency** — `@doc { … } struct P` keeps its
+        /// body in `doc_text`, leaves `items` empty, and decorates the next *sibling* statement
+        /// (see `resolve_texts`). Such a block has braces and still attaches; this flag is `false`
+        /// for it and correctly never consulted, because nothing about its attachment lives in
+        /// `items`.
+        attached: bool,
         span: Span,
     },
 }

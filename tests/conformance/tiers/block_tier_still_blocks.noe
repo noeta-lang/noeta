@@ -1,0 +1,20 @@
+// The other half of the same rule: a block tier's BLOCK form is untouched, and a code tier that
+// also attaches keeps both forms. `@test { … }` holding a type is the documented way to write a
+// test-only type, so the attachment gate must not mistake a block's contents for a decoration.
+// expect: stdout "ok"
+// expect: exit 0
+@debug {
+  echo "never — an inactive tier is stripped"
+}
+
+@test {
+  struct Fixture { n: int }
+  fn uses_it(): int { return Fixture { n: 1 }.n }
+}
+
+@doc {
+  Documented by adjacency — `doc` declares that it attaches to a type.
+}
+struct Real { n: int }
+
+echo "ok"

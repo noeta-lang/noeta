@@ -1,0 +1,18 @@
+// The annotation form is the base form the block is grouping sugar for — "full equivalence", as
+// the parser puts it. So for a code tier, `@debug fn f()` IS `@debug { fn f() {} }`: whatever the
+// block admits, the annotation admits, and both strip on a normal run.
+//
+// This is a regression guard. While unifying the attachment model I read `debug`'s empty site set
+// as "attaches to nothing" and made `@debug fn f()` an error. The empty set was not a decision to
+// forbid the annotation — nobody had considered the annotation form for `debug` at all — and
+// rejecting it removed expressiveness (a debug-only helper) for no gain.
+// expect: stdout "ok"
+// expect: exit 0
+@debug
+fn debug_only_helper(): int { return 41 }
+
+@debug {
+  fn also_debug_only(): int { return 42 }
+}
+
+echo "ok"

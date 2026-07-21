@@ -2000,8 +2000,10 @@ impl Checker {
                 tier_span,
                 args,
                 items,
+                attached,
                 ..
             } => {
+                let diags_before = self.diags.len();
                 // A top-level declaration's leading `@name` is parsed as a one-item `TierBlock`
                 // (the adjacency form), so an extension's own `@`-directive arrives here too. It
                 // is not a tier: resolve it as a directive and site-check it against what it wraps,
@@ -2037,6 +2039,30 @@ impl Checker {
                     // rejects exactly what the activated path's stamped attributes would.
                     let synth = tiers::synthesized_config_attr(&attr_name, args, *tier_span);
                     self.check_attrs(std::slice::from_ref(&synth), TargetKind::Function);
+                }
+                // The **annotation** form: `@test fn foo()` is desugared by the parser into a
+                // one-item `TierBlock`, so a tier attaching to a top-level declaration arrives
+                // here rather than at `check_directives` (a top-level `FnDecl::directives` is
+                // always empty — the parser says so). Nothing gated it, which is why
+                // `TierSite::Function` was declared by every std tier and enforced for none of
+                // them. A standalone block (`@debug { … }`) wraps items that came from *inside*
+                // the braces, so it is not an annotation and is skipped.
+                //
+                // Only when the branches above found nothing better to say. An unknown tier is
+                // already an E0036 and an expression tier an E0052 — both name the actual problem,
+                // where a site error would be a second, vaguer complaint about the same line.
+                let already_reported = self.diags.len() != diags_before;
+                if *attached && !already_reported {
+                    let sites = self.symbols.tier_registry.sites(tier);
+                    for item in items {
+                        self.check_declared_sites(
+                            tier,
+                            sites,
+                            item.attachment_site(),
+                            None,
+                            *tier_span,
+                        );
+                    }
                 }
             }
         }

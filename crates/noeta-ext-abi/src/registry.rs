@@ -861,8 +861,15 @@ pub enum TierSite {
     Function,
     /// A method inside a `struct`/`class`/`enum` body (`@test fn method()`).
     Method,
-    /// A type declaration — `struct`, `class`, or `enum` (`@doc { … } struct Point`).
+    /// A data type declaration — `struct`, `class`, or `enum` (`@doc { … } struct Point`).
     Type,
+    /// A `trait` declaration (`@doc { … } trait Shape`).
+    ///
+    /// Separate from [`Type`](Self::Type) because the language draws the line: a trait is a
+    /// contract, not a data type, and the type directives are all rejected on one. Documentation,
+    /// though, attaches to a trait perfectly well — and could not say so until this variant
+    /// existed, which is why a `@doc` above a trait silently became the *module* doc.
+    Trait,
 }
 
 /// An extension-declared **dev-tier** — the extension counterpart of a program's `@tier`
@@ -873,11 +880,17 @@ pub enum TierSite {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtTier {
     pub name: &'static str,
-    /// Which declaration sites this tier's annotation/adjacency form may attach to (directive
-    /// attachment-site model). **Empty ⇒ unrestricted** — the directive attaches anywhere the
-    /// grammar admits it, which keeps a tier that predates the model (and every statement/expression
-    /// block tier, which is never attachment-checked) working unchanged. `test`/`bench` list
-    /// `Function`+`Method`; `doc` adds `Type`.
+    /// Which declarations this tier may **attach** to — as an annotation (`@test fn foo()`) or by
+    /// adjacency (`@doc { … } struct Point`).
+    ///
+    /// **Empty ⇒ attaches to nothing**: a pure block tier, whose `@<name> { … }` stands alone in
+    /// statement position (`debug`) or expression position (`json`) and decorates no declaration.
+    /// It does *not* mean "unrestricted" — that reading made the field unenforceable, because the
+    /// two tiers that attach to nothing and the tiers that attach to everything were spelled the
+    /// same way, so no gate could act on either without breaking the other.
+    ///
+    /// A tier may still have a block form *and* attach: `test` is both `@test { … }` and
+    /// `@test fn foo()`. The set constrains the attaching form only.
     pub sites: &'static [TierSite],
     /// The knob attribute a `@<tier>(args)` block stamps onto its fns — one of the extension's
     /// [`Extension::attributes`] — or `None` for a knob-less tier (whose directive rejects args).
@@ -917,7 +930,9 @@ pub struct ExtDirective {
     /// The name programs write after `@`. Resolved *after* the built-in directives and the tier
     /// name-space, so an extension can never shadow either.
     pub name: &'static str,
-    /// Which declaration sites it may attach to. Empty ⇒ unrestricted.
+    /// Which declarations it may attach to. **Empty ⇒ attaches to nothing** — the same meaning as
+    /// [`ExtTier::sites`], so one gate serves both. A directive that genuinely goes anywhere lists
+    /// the sites it goes to.
     pub sites: &'static [TierSite],
     /// Maximum positional arguments; `None` is variadic, `Some(0)` takes none.
     pub max_args: Option<usize>,
