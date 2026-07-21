@@ -329,12 +329,17 @@ An extension can register **`@`-directives**: `Extension::directives()` returns 
 A directive with an `expand` hook does not merely mark a declaration — it **generates its members**. The hook receives the invocation and returns Noeta source:
 
 ```rust
-fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     let spec_path = std::path::Path::new(&ctx.source_dir).join(&ctx.args[0]);
-    let spec = std::fs::read_to_string(&spec_path).map_err(|e| e.to_string())?;
+    let reads = vec![spec_path.display().to_string()];
+    // Report the read on the ERROR path too: a spec missing today may be written tomorrow, and its
+    // appearing is a change that must re-run the hook. `ExpansionError` carries `reads` for exactly
+    // this; a bare `Err("msg".into())` leaves them empty when nothing was opened.
+    let spec = std::fs::read_to_string(&spec_path)
+        .map_err(|e| ExpansionError { message: e.to_string(), reads: reads.clone() })?;
     Ok(Expansion {
         source: methods_for(&spec)?,             // e.g. "fn list_pets(): List<Pet> { … }"
-        reads: vec![spec_path.display().to_string()],
+        reads,
     })
 }
 ```
@@ -355,7 +360,7 @@ Five things are worth knowing before writing one.
 
 **Each expansion becomes a real source file.** It is registered in the program's source map under a name that says what caused it — `PetStore ⟨@openapi "petstore.yaml"⟩` — so generated members have true spans. A fault inside a generated method points at that method rather than at the one-line directive that produced a hundred of them. Those sources are what [`noeta expand`](The-CLI#noeta-expand) prints, so a hook can be debugged against its real output — and its output diffed in CI — without having to provoke an error first.
 
-**You must declare every file you read.** `Expansion::reads` is the hook's incrementality contract. The compiler cannot discover these by parsing, and it does not simply hand you the file named in your arguments, because a spec routinely pulls in others (an OpenAPI `$ref` into a sibling document) and only the hook knows which. Report every file opened — *including ones that turned out to be missing*, since their appearing later is a change too. A hook that under-reports will serve stale members until something unrelated invalidates it.
+**You must declare every file you read — on the error path too.** `Expansion::reads` (and `ExpansionError::reads`) is the hook's incrementality contract. The compiler cannot discover these by parsing, and it does not simply hand you the file named in your arguments, because a spec routinely pulls in others (an OpenAPI `$ref` into a sibling document) and only the hook knows which. Report every file opened — *including ones that turned out to be missing*, since their appearing later is a change too, and *including when the hook then fails*: the reads survive the `Err`, so a spec that is missing today re-runs the expansion the moment it is written. A hook that under-reports will serve stale members until something unrelated invalidates it. Under `--watch` (`test`/`run`/`serve`), the reported reads are watched alongside the `.noe` sources, so editing (or creating) a spec re-runs the generation; the editor's incremental engine treats a change to one as a full re-check.
 
 **A hook only ever sees a legal invocation.** Placement and the declared argument contract are checked before it runs, so it need not defend against a directive that sat somewhere it does not belong or was called with arguments it never declared. Reading the filesystem is authorized by the package's `[trust]` grant; beyond that, a hook must be a pure function of its `DirectiveCtx` and the files it reports.
 

@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use noeta_ext_abi::registry::{
-    DirectiveCtx, Expansion, ExtDirective, ExtModule, Extension, TierSite,
+    DirectiveCtx, Expansion, ExpansionError, ExtDirective, ExtModule, Extension, TierSite,
 };
 use noeta_loader::{DepPackage, EntryLink, LoadDiagnostic, ParsedDir, RawModule, parse_dir};
 
@@ -21,20 +21,20 @@ use noeta_loader::{DepPackage, EntryLink, LoadDiagnostic, ParsedDir, RawModule, 
 /// so a counter more than one test touched would be racy by construction.
 static TWICE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     Ok(Expansion {
         source: format!("fn from_{}(): int {{ return 1; }}\n", ctx.args[0]),
         reads: vec![format!("{}/spec.yaml", ctx.source_dir)],
     })
 }
 
-fn expand_counted(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_counted(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     TWICE_CALLS.fetch_add(1, Ordering::SeqCst);
     expand_ok(ctx)
 }
 
-fn expand_err(_: &DirectiveCtx) -> Result<Expansion, String> {
-    Err("the spec has no paths".to_string())
+fn expand_err(_: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    Err("the spec has no paths".into())
 }
 
 struct Fixture;
