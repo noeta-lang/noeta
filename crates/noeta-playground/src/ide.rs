@@ -50,17 +50,27 @@ fn range_json(range: Range) -> serde_json::Value {
     })
 }
 
-/// The type under the cursor: `{"found": true, "type": …, "note": …, "range": …}` — the type in
-/// its Noeta surface spelling (the same rendering the LSP hover and the debugger's Variables view
-/// use), `note` the optional storage fact (`@packed` / flat list layout).
+/// The composed hover under the cursor: `{"found": true, "value": <markdown>, "range": …}` — the
+/// exact rich Markdown the VS Code hover shows, assembled by
+/// [`noeta_ide::DocumentStore::hover_markdown`] so the playground and the LSP cannot drift. A
+/// callable name yields its full `fn add(a: int, b: int): int` signature (plus doc), a type name
+/// its declaration, a plain sub-expression the bare type — not just the return type.
+///
+/// The doc-only fallback (a declaration's own name, no expression span) has no range: it comes
+/// back `{"found": true, "value": …}` with the `range` key **omitted**. `{"found": false}` when
+/// nothing hovers.
 pub fn hover_source(text: &str, line: u32, character: u32) -> String {
     with_document(text, |store| {
-        match store.hover_type(URI, position(line, character), Encoding::Utf16) {
-            Some((repr, note, range)) => json!({
+        match store.hover_markdown(URI, position(line, character), Encoding::Utf16) {
+            Some((value, Some(range))) => json!({
                 "found": true,
-                "type": repr.to_string(),
-                "note": note,
+                "value": value,
                 "range": range_json(range),
+            })
+            .to_string(),
+            Some((value, None)) => json!({
+                "found": true,
+                "value": value,
             })
             .to_string(),
             None => json!({ "found": false }).to_string(),
