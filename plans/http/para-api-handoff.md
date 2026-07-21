@@ -39,7 +39,9 @@ Two things worth knowing about the error model, because they shape your API:
   `?` on a request means exactly "the network broke". `error_for_status()` is the opt-in door.
 - **`HttpError.kind()` is classified, not stringly-typed** — `timeout`/`dns`/`connect`/`tls`/
   `protocol`/`invalid_url`/`other`, with `retryable()` derived from it. Build your policies on that
-  predicate, never on message text.
+  predicate, never on message text. `error_for_status()` yields its own `status` kind, distinct
+  from `protocol` (which means the response was unreadable), so you can tell "the server said no"
+  from "the response was garbage".
 
 Retry already lives in std (it calls no user code) and applies **inside** `send`, i.e. innermost —
 beneath any middleware you wrap around it. If you need retry *outside* a middleware (to re-run the

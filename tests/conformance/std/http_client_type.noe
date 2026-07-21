@@ -10,6 +10,8 @@
 // expect: stdout "{"Accept":"text/plain","authorization":"Bearer t0ken"}"
 // expect: stdout "{"accept":"application/vnd.github+json","authorization":"Bearer t0ken"}"
 // expect: stdout "https://other.test/echo"
+// expect: stdout "{"body":"","method":"GET","path":"/echo"}"
+// expect: stdout "status false"
 // expect: stdout "{"body":"hi","method":"POST","path":"/echo"}"
 // expect: stdout "204"
 // expect: stdout "200"
@@ -41,6 +43,19 @@ echo gh.get("/headers")?.body()
 // An absolute target ignores the base — what lets a paginator follow an absolute `next` link
 // back through a based client (S6 depends on this).
 echo gh.get("https://other.test/echo")?.url()
+
+// A URL in the QUERY STRING does not make a path absolute — the base still applies. (A naive
+// `contains("://")` test dropped the base here and produced an unusable relative URL.)
+echo gh.get("/echo?redirect=https://app.example.com")?.body()
+
+// `error_for_status()` gets its OWN kind: `status`, not `protocol` (which means the response was
+// unreadable). Sharing them would make a "corrupt upstream" check fire on every 404.
+// `retryable()` is false: WHICH statuses are worth another attempt is the retry policy's
+// question, not a property of the kind.
+echo match gh.get("/status/404")?.error_for_status() {
+    Ok(_) => "unreachable unreachable",
+    Err(e) => "${e.kind()} ${e.retryable()}",
+}
 
 // The verbs mirror the free functions.
 echo gh.post("/echo", "hi")?.body()

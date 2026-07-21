@@ -495,15 +495,43 @@ fn net_error(url: &str, error: &reqwest::Error) -> NetError {
 /// Distinguish DNS and TLS inside a connect-class reqwest failure by inspecting the source chain's
 /// rendered text — the only signal reqwest exposes without depending on hyper/rustls error types
 /// directly, which would couple this crate to their versions.
+///
+/// The markers are deliberately **phrases, not words**. A bare `contains("dns")` or
+/// `contains("tls")` also matches the *host name* in an error like
+/// `error connecting to https://dns.google/` or `https://tls.internal/`, and misclassifying a
+/// connect failure as `Tls` is not cosmetic — `Tls` is not retryable, so a transient failure to
+/// such a host would silently stop being retried. Every marker below is a diagnostic phrase that
+/// cannot appear in an authority component (each contains a space, or is a token no hostname
+/// label may contain).
 #[cfg(feature = "ring-http-client")]
 fn connect_cause(error: &reqwest::Error) -> Option<NetErrorKind> {
+    /// Resolver-failure phrasings across platforms and resolver stacks.
+    const DNS_MARKERS: &[&str] = &[
+        "dns error",
+        "failed to lookup address",
+        "name or service not known",
+        "nodename nor servname",
+        "no such host",
+        "temporary failure in name resolution",
+    ];
+    /// TLS/certificate-failure phrasings (rustls, openssl, schannel).
+    const TLS_MARKERS: &[&str] = &[
+        "invalid peer certificate",
+        "certificate verify failed",
+        "certificate has expired",
+        "unknown issuer",
+        "self-signed certificate",
+        "tls handshake",
+        "handshake failure",
+        "bad certificate",
+    ];
     let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(error);
     while let Some(cause) = source {
         let text = cause.to_string().to_ascii_lowercase();
-        if text.contains("dns") || text.contains("name or service not known") {
+        if DNS_MARKERS.iter().any(|m| text.contains(m)) {
             return Some(NetErrorKind::Dns);
         }
-        if text.contains("certificate") || text.contains("tls") || text.contains("handshake") {
+        if TLS_MARKERS.iter().any(|m| text.contains(m)) {
             return Some(NetErrorKind::Tls);
         }
         source = std::error::Error::source(cause);

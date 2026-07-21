@@ -900,9 +900,11 @@ fn server_span_error_status(status: u16) -> Option<SpanStatus> {
 fn request_conn(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<u64> {
     let mut conn = None;
     ctx.with_extern(request, &mut |e| {
-        conn = e.as_any().downcast_ref::<Request>().map(|r| r.conn);
+        conn = e.as_any().downcast_ref::<Request>().and_then(|r| r.conn);
     })?;
-    Ok(conn.expect("accept yields a Request extern value"))
+    // The serve loop only ever sees requests minted by `accept_outcome`, which always carries a
+    // connection; an outbound request (`conn: None`) can never reach here.
+    Ok(conn.expect("an accepted Request carries its connection"))
 }
 
 #[cfg(test)]

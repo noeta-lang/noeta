@@ -60,6 +60,13 @@ pub enum NetErrorKind {
     Tls,
     /// The response could not be read as HTTP (a malformed frame, a truncated body).
     Protocol,
+    /// The server answered with a non-2xx **status**, and the caller opted into treating that as
+    /// an error (`Response.error_for_status()`).
+    ///
+    /// Never produced by a request itself — a status is an answer, not a transport failure — so
+    /// code matching on `kind()` can distinguish "the server said no" from "the response was
+    /// unreadable" (`Protocol`), which sharing one variant would have made impossible.
+    Status,
     /// The URL itself is not a valid request target.
     InvalidUrl,
     /// A transport failure that does not fit the classes above.
@@ -75,6 +82,7 @@ impl NetErrorKind {
             NetErrorKind::Connect => "connect",
             NetErrorKind::Tls => "tls",
             NetErrorKind::Protocol => "protocol",
+            NetErrorKind::Status => "status",
             NetErrorKind::InvalidUrl => "invalid_url",
             NetErrorKind::Other => "other",
         }
@@ -87,6 +95,8 @@ impl NetErrorKind {
     /// valid, the URL will not become parseable, so retrying only burns the budget. `Protocol` and
     /// `Other` are conservatively **not** retried, because a request that reached the server and
     /// came back mangled may well have been applied — retrying it risks a duplicate write.
+    /// `Status` is not retried here either: which statuses are worth another attempt is a policy
+    /// question the retry configuration answers, not a property of the kind.
     pub fn retryable(self) -> bool {
         matches!(
             self,
@@ -278,8 +288,13 @@ pub const REQUEST_TYPE_IDENTITY: &str = "std.http.Request";
 /// (http-server S2); `conn` is invisible to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
-    /// The connection this request arrived on — the serve loop replies here.
-    pub conn: u64,
+    /// The connection this request arrived on — the serve loop replies here — or `None` for an
+    /// **outbound** request the program built itself (`Client.prepare`), which has no connection.
+    ///
+    /// `Option` rather than a sentinel: connection ids start at 0, so any in-band "not a real
+    /// connection" value would collide with a live socket, and a reply meant for nobody would go
+    /// to a real client.
+    pub conn: Option<u64>,
     /// The request line, headers, and body.
     pub inner: NetRequest,
 }
@@ -324,7 +339,10 @@ impl ExternValue for Request {
 pub fn accept_outcome(next: Option<(u64, NetRequest)>) -> crate::NativeOut {
     match next {
         Some((conn, inner)) => crate::NativeOut::Some(Box::new(crate::NativeOut::Extern(
-            crate::ExternBox::new(Request { conn, inner }),
+            crate::ExternBox::new(Request {
+                conn: Some(conn),
+                inner,
+            }),
         ))),
         None => crate::NativeOut::None,
     }

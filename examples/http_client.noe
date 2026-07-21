@@ -20,13 +20,18 @@ struct Repo {
 // Configuration, bound once. Every builder returns a NEW client, so this is safe to share — a
 // derived client can never disturb the one it came from.
 fn github(): Client {
-    return client.new("https://api.github.com")
+    api = client.new("https://api.github.com")
         .header("accept", "application/vnd.github+json")
-        .bearer(env.get("GITHUB_TOKEN") ?? "")
         .timeout(30_000)
         // Retries transient transport failures and 429/502/503/504, backing off 250ms doubled per
         // attempt. Only idempotent verbs — a POST is never replayed unless you ask.
         .retry(3)
+
+    // Only send `Authorization` when there is something to send: an empty `Bearer ` is a
+    // malformed header many servers reject outright — worse than calling anonymously. Because
+    // every builder returns a NEW client, adding auth is just another value.
+    token = env.get("GITHUB_TOKEN") ?? ""
+    return if token == "" then api else api.bearer(token)
 }
 
 // `?` propagates a transport failure; the caller decides what to do about it.

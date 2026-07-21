@@ -506,9 +506,14 @@ be fatal, `json.parse::<T>(resp.body())` is the aborting spelling.
 
 `HttpError` implements `Error` and `Display`, so it converts through `?` like any other error type.
 Its methods: `message()`, `kind()`, `url()`, and `retryable()`. `kind()` is one of `"timeout"`,
-`"dns"`, `"connect"`, `"tls"`, `"protocol"`, `"invalid_url"`, or `"other"`; `retryable()` is true
-for the transient three (`timeout`/`dns`/`connect`) and false for the rest — a TLS failure will not
-fix itself, and a `protocol` failure may already have been applied server-side.
+`"dns"`, `"connect"`, `"tls"`, `"protocol"` (the response was unreadable), `"invalid_url"`, or
+`"other"`; `retryable()` is true for the transient three (`timeout`/`dns`/`connect`) and false for
+the rest — a TLS failure will not fix itself, and a `protocol` failure may already have been
+applied server-side.
+
+A request never yields `"status"`. That kind exists only for `error_for_status()`, and it is
+deliberately distinct from `"protocol"`: a 404 is perfectly valid HTTP, so folding the two together
+would make a "corrupt upstream" check fire on every opted-in 404.
 
 ```noeta check
 use std.http.client

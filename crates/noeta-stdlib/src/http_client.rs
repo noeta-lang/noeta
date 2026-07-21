@@ -125,6 +125,22 @@ impl RetryPolicy {
     }
 }
 
+/// Whether `target` is an **absolute** URL — i.e. begins with a real scheme.
+///
+/// Deliberately not `target.contains("://")`: a *relative* path may legitimately carry a URL in
+/// its query string (`/oauth/callback?redirect=https://app.example.com`), and treating that as
+/// absolute drops the base URL and produces a bare relative string the host rejects. So the text
+/// before `://` must itself be a valid RFC 3986 scheme — alphabetic first character, then
+/// alphanumerics / `+` / `-` / `.` — which a path or query string never is.
+fn has_scheme(target: &str) -> bool {
+    let Some(scheme) = target.split_once("://").map(|(s, _)| s) else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// Parse a `Retry-After` value as delay-seconds (RFC 9110 §10.2.3).
 ///
 /// Only the delay-seconds form is honored; the HTTP-date form needs a wall-clock comparison and a
@@ -186,7 +202,7 @@ impl HttpClient {
     /// is joined to the base with exactly one `/` between them. With no base configured, the
     /// target is used as given (so a `Client` with no base behaves like the free verbs).
     pub fn resolve(&self, target: &str) -> String {
-        if target.contains("://") || self.base_url.is_empty() {
+        if has_scheme(target) || self.base_url.is_empty() {
             return target.to_string();
         }
         format!("{}/{}", self.base_url, target.trim_start_matches('/'))
@@ -240,14 +256,19 @@ impl HttpClient {
         }
         let mut retry = 0;
         loop {
+            // The budget is checked BEFORE the attempt so the last one can consume the request
+            // rather than clone it — a retrying client must not double-allocate a large body on
+            // the common path where no retry actually happens.
+            if retry >= policy.max_retries {
+                return host.net_fetch(request);
+            }
             let outcome = host.net_fetch(request.clone());
-            let exhausted = retry >= policy.max_retries;
             let delay = match &outcome {
                 // A transient transport failure: worth another attempt. A deterministic one
                 // (tls, invalid_url) or an ambiguous one (protocol, other) is returned as-is.
-                Err(error) if error.kind.retryable() && !exhausted => policy.delay_for(retry, None),
+                Err(error) if error.kind.retryable() => policy.delay_for(retry, None),
                 // A status the caller nominated. The server's own `Retry-After` wins if present.
-                Ok(response) if policy.on_status.contains(&response.status) && !exhausted => {
+                Ok(response) if policy.on_status.contains(&response.status) => {
                     policy.delay_for(retry, Some(response))
                 }
                 _ => return outcome,
@@ -391,6 +412,42 @@ mod tests {
             client.resolve("https://other.example.com/page/2"),
             "https://other.example.com/page/2"
         );
+    }
+
+    #[test]
+    fn a_url_in_the_query_string_does_not_make_a_path_absolute() {
+        // The regression: `contains("://")` treated these as absolute, dropped the base, and
+        // produced a bare relative string the host rejects. Redirect/callback/webhook parameters
+        // carrying a URL are ordinary.
+        let client = HttpClient::new("https://api.example.com");
+        for path in [
+            "/oauth/callback?redirect=https://app.example.com",
+            "/proxy?url=http://internal/health",
+            "/search?q=how%20to%20write%20a://b",
+        ] {
+            assert_eq!(
+                client.resolve(path),
+                format!("https://api.example.com{path}"),
+                "path={path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scheme_is_recognised_by_shape_not_by_substring() {
+        assert!(has_scheme("https://x.example"));
+        assert!(
+            has_scheme("HTTP://x.example"),
+            "schemes are case-insensitive"
+        );
+        assert!(
+            has_scheme("x-custom.v2+json://host"),
+            "RFC 3986 scheme chars"
+        );
+        assert!(!has_scheme("/a?u=https://x"), "a path is not a scheme");
+        assert!(!has_scheme("://nohost"), "empty scheme");
+        assert!(!has_scheme("1http://x"), "a scheme starts with a letter");
+        assert!(!has_scheme("/plain/path"));
     }
 
     #[test]

@@ -1832,7 +1832,7 @@ fn client_method_dispatch(
             let inner = client.build(&verb, &target, body, want_headers(method, args, 3)?);
             return Ok(NativeOut::Extern(crate::ExternBox::new(
                 crate::net::Request {
-                    conn: 0, // outbound: there is no connection to reply on
+                    conn: None, // outbound: there is no connection to reply on
                     inner,
                 },
             )));
@@ -1937,9 +1937,10 @@ const HTTP_ERROR_DOCS: &[(&str, &str)] = &[
     ),
     (
         "kind",
-        "What class of transport failure this is: `\"timeout\"`, `\"dns\"`, `\"connect\"`, \
-         `\"tls\"`, `\"protocol\"`, `\"invalid_url\"`, or `\"other\"`. An HTTP error *status* is \
-         never one of these — a 404 is an ordinary `Response`, checked with `ok()`.",
+        "What went wrong: `\"timeout\"`, `\"dns\"`, `\"connect\"`, `\"tls\"`, `\"protocol\"` (the \
+         response was unreadable), `\"invalid_url\"`, or `\"other\"`. A request never yields \
+         `\"status\"` — an HTTP error status is an ordinary `Response`, checked with `ok()`; that \
+         kind appears only when you opt in with `error_for_status()`.",
     ),
     ("url", "The request URL that failed."),
     (
@@ -2132,9 +2133,10 @@ fn response_method_dispatch(
         }
         "error_for_status" => {
             want_arity(method, args, 0)?;
-            // The status class is not a transport failure, so the synthesized error is `Protocol`
-            // with the status in the detail — `kind()` stays honest about what actually happened,
-            // and `retryable()` is false (a 404 will not become a 200 on its own).
+            // A status is not a transport failure, so it gets its OWN kind rather than borrowing
+            // `Protocol` (which means "the response could not be read as HTTP" — a 404 is
+            // perfectly valid HTTP). Sharing them would make `kind() == "protocol"` fire for every
+            // opted-in 404, defeating the point of classifying at all.
             Ok(if (200..=299).contains(&resp.status) {
                 NativeOut::Ok(Box::new(NativeOut::Extern(crate::ExternBox::new(
                     resp.clone(),
@@ -2142,7 +2144,7 @@ fn response_method_dispatch(
             } else {
                 NativeOut::Err(Box::new(NativeOut::Extern(crate::ExternBox::new(
                     crate::NetError::new(
-                        crate::net::NetErrorKind::Protocol,
+                        crate::net::NetErrorKind::Status,
                         resp.url.clone(),
                         format!("the server answered with status {}", resp.status),
                     ),
@@ -4987,7 +4989,7 @@ mod tests {
     #[test]
     fn request_accessors_read_the_inbound_request() {
         let mut req = crate::net::Request {
-            conn: 0,
+            conn: Some(0),
             inner: crate::NetRequest {
                 method: "POST".to_string(),
                 url: "/users/42?active=true".to_string(),
