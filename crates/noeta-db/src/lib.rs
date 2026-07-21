@@ -595,9 +595,12 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
     }
 
     let entry_source = source_of(db, entry);
+    let broken = broken_modules(db, ws);
     // Read each other member's `ast_in` (this is what makes the link a dependent of every module).
     // Only a cleanly-parsed module contributes; `link_parsed` keeps just the ones declaring a
-    // namespace.
+    // namespace. Broken siblings come from [`broken_modules`] — kept, not dropped, so a `use` of a
+    // namespace one of them declares reports that file's parse error instead of the misleading
+    // "no module" cascade (see `noeta_loader::BrokenModule`).
     let mut module_programs: Vec<&Program> = Vec::new();
     for &m in ws.members(db) {
         if m == entry {
@@ -619,7 +622,14 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         let src = dm.src(db);
         let toks = tokens_in(db, ws, src);
         let parsed = ast_in(db, ws, src);
-        if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
+        let diagnostics: Vec<Diagnostic> = toks
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter())
+            .cloned()
+            .collect();
+        if diagnostics.is_empty() {
             let mut program = parsed.0.program.clone();
             noeta_loader::reroot_program(
                 &mut program,
@@ -630,11 +640,32 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
             dep_programs.push(program);
         }
     }
+    // A dependency module that does not parse is a hard error, exactly as in the CLI's
+    // `link_with_deps`. Unlike a workspace member it is not a file the editor checks in its own
+    // right, so nothing else would ever report it — dropping it left the consumer with only the
+    // "no module" cascade at its `use`.
+    if !broken.deps.is_empty() {
+        return LinkedProgram(Err(broken
+            .deps
+            .iter()
+            .flat_map(|m| m.diagnostics.iter().cloned())
+            .collect()));
+    }
 
     // No dependencies → the exact single-package path (byte-for-byte unchanged); otherwise the
     // deps-aware linker with the re-rooted dep programs as candidates and import drivers.
+    let broken_refs: Vec<&noeta_loader::BrokenModule> = broken
+        .members
+        .iter()
+        .filter(|m| m.source.id() != SourceId(entry.id(db)))
+        .collect();
     let result = if dep_programs.is_empty() {
-        noeta_loader::link_parsed(&entry_source, &entry_ast.0.program, &module_programs)
+        noeta_loader::link_parsed(
+            &entry_source,
+            &entry_ast.0.program,
+            &module_programs,
+            &broken_refs,
+        )
     } else {
         let dep_refs: Vec<&Program> = dep_programs.iter().collect();
         // The IDE query links from re-rooted dep *sources* but does not carry the resolved native
@@ -645,12 +676,101 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
             &entry_ast.0.program,
             &module_programs,
             &dep_refs,
+            &broken_refs,
             None,
         )
     };
     match result {
         Ok(program) => LinkedProgram(Ok(program)),
         Err(load) => LinkedProgram(Err(load.into_iter().map(|d| d.diagnostic).collect())),
+    }
+}
+
+/// Every source in a workspace that fails to lex/parse, and so is **missing from the link pool**.
+///
+/// Split by role, because the two are treated differently and by different consumers:
+/// - `members` are the workspace's own `.noe` files. Each is checked in its own right (the editor
+///   publishes its parse error against it directly), so a broken member is not the *entry's* error —
+///   it only re-attributes an unresolved `use`.
+/// - `deps` are dependency-package modules. Those are never anyone's entry, so nothing else will
+///   ever report them and [`linked_from`] makes them a hard error.
+///
+/// Entry-independent, so one memo serves every entry in the directory — and it is the seam the IDE
+/// reads to explain a `use` at the *consumer's* span (see `noeta_ide`), which is not something the
+/// linked program's diagnostics can express: their spans belong to the broken file, and a
+/// per-document diagnostics view must filter to its own source.
+#[derive(Debug, Clone, Default)]
+pub struct BrokenModules {
+    pub members: Vec<noeta_loader::BrokenModule>,
+    pub deps: Vec<noeta_loader::BrokenModule>,
+}
+
+replace_update!(BrokenModules);
+
+impl BrokenModules {
+    /// Whether nothing in the workspace is broken — the overwhelmingly common case, and the cheap
+    /// early-out for consumers that would otherwise walk a document's `use` statements.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty() && self.deps.is_empty()
+    }
+
+    /// The broken module a `use <path>.<name>` names, whichever role it plays — the single
+    /// matching rule, borrowed from the linker so the IDE's explanation and the linker's
+    /// attribution can never disagree about which file a `use` is about.
+    pub fn for_use(&self, path: &[String], name: &str) -> Option<&noeta_loader::BrokenModule> {
+        noeta_loader::broken_module_for(self.members.iter().chain(&self.deps), path, name)
+    }
+}
+
+/// [`BrokenModules`] for `ws`: every member and dependency module whose lex/parse failed, with the
+/// namespace it declares recovered from its tokens (`noeta_loader::namespace_from_tokens`).
+#[salsa::tracked(returns(ref))]
+pub fn broken_modules(db: &dyn salsa::Database, ws: Workspace) -> BrokenModules {
+    let collect = |src: SourceProgram| -> Option<noeta_loader::BrokenModule> {
+        // Note: a broken module's namespace comes from its TOKENS — it has no usable AST.
+        let toks = tokens_in(db, ws, src);
+        let parsed = ast_in(db, ws, src);
+        let diagnostics: Vec<Diagnostic> = toks
+            .0
+            .diagnostics
+            .iter()
+            .chain(parsed.0.diagnostics.iter())
+            .cloned()
+            .collect();
+        if diagnostics.is_empty() {
+            return None;
+        }
+        let source = source_of(db, src);
+        let namespace = noeta_loader::namespace_from_tokens(&source, &toks.0.tokens);
+        Some(noeta_loader::BrokenModule {
+            source,
+            namespace,
+            diagnostics,
+        })
+    };
+    BrokenModules {
+        members: ws.members(db).iter().filter_map(|&m| collect(m)).collect(),
+        deps: ws
+            .dep_modules(db)
+            .iter()
+            .filter_map(|&dm| {
+                let mut module = collect(dm.src(db))?;
+                // A dependency's modules are addressed by the CONSUMER's dependency key, not the
+                // package's own root (`namespace greet.hello` is imported as `use hi.hello.…`), so
+                // the recovered namespace is re-rooted exactly as `reroot_program` re-roots a
+                // parsed one. Without this a broken dependency module could never match the `use`
+                // that names it.
+                if let Some(ns) = module.namespace.as_mut() {
+                    noeta_loader::reroot_path(
+                        ns,
+                        dm.root(db),
+                        dm.key(db),
+                        &reroot_map(dm.renames(db)),
+                    );
+                }
+                Some(module)
+            })
+            .collect(),
     }
 }
 
