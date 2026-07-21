@@ -63,8 +63,8 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
     // generated code N times would misrepresent how much code the program actually generates. The
     // text is part of the key so two genuinely different expansions that happen to share a name are
     // both shown rather than one silently winning. Ordered, so the output is diffable.
-    let mut expansions: std::collections::BTreeMap<(String, String), ()> =
-        std::collections::BTreeMap::new();
+    let mut expansions: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
     // Diagnostics dedup exactly as `check`'s do — by the file, span, and code they render against,
     // never by `SourceId` (ids restart at 0 per directory) — so a module shared by several entries
     // reports its fault once.
@@ -150,8 +150,7 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
                 // loader rather than by guessing at a source's name here.
                 Ok(linked) => {
                     for source in &linked.expansions {
-                        expansions
-                            .insert((source.name().to_string(), source.text().to_string()), ());
+                        expansions.insert((source.name().to_string(), source.text().to_string()));
                     }
                 }
             }
@@ -192,7 +191,7 @@ pub(crate) fn cmd_expand(path: &std::path::Path) -> ExitCode {
     // The header is the loader's own name for the expansion — target, directive, and arguments —
     // because that is what someone who did not write the generator needs in order to find it.
     let mut stdout = io::stdout();
-    for (name, text) in expansions.keys() {
+    for (name, text) in &expansions {
         let _ = writeln!(stdout, "// {name}");
         let _ = stdout.write_all(text.as_bytes());
         if !text.ends_with('\n') {
