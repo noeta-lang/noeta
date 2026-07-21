@@ -8,6 +8,8 @@
 
 namespace para.db.sql
 
+use para.db.Connection
+
 // A typed SQL statement: the text (with positional `?` placeholders) and its bound parameters.
 pub struct Sql {
     text: string
@@ -34,13 +36,12 @@ pub fn sql(statics: List<string>, holes: List<() -> dyn>): Sql {
     return Sql { text: text, params: params }
 }
 
-// Run a `@sql` statement as a query, returning its rows (`List<Map<string, dyn>>`). `conn` is a
-// `para.db.Connection` (typed `dyn` — see the F5 follow-up; dispatch still reaches the native query).
-pub fn query(conn: dyn, stmt: Sql): List<Map<string, dyn>> {
-    return conn.query(stmt.text, stmt.params).as<List<Map<string, dyn>>>() ?? []
+// Run a `@sql` statement as a query, returning its rows (`List<Map<string, dyn>>`).
+pub fn query(conn: Connection, stmt: Sql): List<Map<string, dyn>> {
+    return conn.query(stmt.text, stmt.params)
 }
 
 // Run a `@sql` statement as a non-query (INSERT/UPDATE/DELETE/DDL), returning rows affected.
-pub fn execute(conn: dyn, stmt: Sql): int {
-    return conn.execute(stmt.text, stmt.params).as<int>() ?? 0
+pub fn execute(conn: Connection, stmt: Sql): int {
+    return conn.execute(stmt.text, stmt.params)
 }

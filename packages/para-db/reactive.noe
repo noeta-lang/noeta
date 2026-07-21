@@ -20,6 +20,7 @@
 namespace para.db.reactive
 
 use para.db
+use para.db.{Connection, Watch}
 use para.db.repo.Repository
 use std.reactive.computed
 
@@ -27,13 +28,13 @@ use std.reactive.computed
 // `Repository`. Reads become reactive queries; writes stage through the same unit-of-work and notify.
 pub class LiveRepository {
     repo: Repository
-    conn: dyn // a para.db.Connection (typed `dyn` — F5)
-    watch: dyn // a para.db.Watch over the table's NOTIFY channel
+    conn: Connection
+    watch: Watch // over the table's NOTIFY channel
     channel: string // the NOTIFY channel (the table name)
 
     // Construct over the model's runtime type name, its table, its primary-key column, and a
     // connection. The NOTIFY channel is the table name; the watch listens on it immediately.
-    fn new(model: string, tbl: string, pk: string, conn: dyn): LiveRepository {
+    fn new(model: string, tbl: string, pk: string, conn: Connection): LiveRepository {
         return LiveRepository {
             repo: Repository.new(model, tbl, pk),
             conn: conn,
@@ -80,7 +81,6 @@ pub class LiveRepository {
     // Pump the watch — deliver pending change notifications and wake the reactive queries if any
     // fired. Call it from the app's loop (the serve loop drives it alongside background tasks).
     fn pump(): bool {
-        // `watch` is typed `dyn` (F5), so narrow its native `bool` result.
-        return self.watch.pump().as<bool>() ?? false
+        return self.watch.pump()
     }
 }
