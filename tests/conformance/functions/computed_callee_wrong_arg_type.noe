@@ -1,0 +1,8 @@
+// A call through a **computed callee** — a function value reached by indexing rather than by name
+// — is argument-checked against the function type it carries, exactly as a call through a name is.
+// Binding first (`f = handlers["x"]; f("nope")`) already reported this, which is what localized the
+// hole: where a function value came from cannot be what decides whether its call is checked.
+// expect: error E0007 at 8:6
+// expect: exit 1
+handlers: Map<string, (int) -> int> = { "x": fn(v: int): int => v }
+echo handlers["x"]("nope")
