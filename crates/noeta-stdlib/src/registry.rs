@@ -189,6 +189,17 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: REQUEST_DOCS,
         ..ExtType::DEFAULTS
     },
+    // `Cookie` (cookie arc C1) — a validated `Set-Cookie`. Pure, content-equal, immutable data
+    // like `Response`; every builder returns a new one.
+    ExtType {
+        name: crate::cookie::COOKIE_TYPE_NAME,
+        namespace: "std.http",
+        methods: COOKIE_METHODS,
+        dispatch: cookie_method_dispatch,
+        key_capable: false, // a cookie is not a map key
+        docs: COOKIE_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // `Client` (http arc H7) — the configured client: base URL, headers, auth, deadline. Pure,
     // content-equal config; immutable, so every builder method returns a new one.
     ExtType {
@@ -1328,6 +1339,7 @@ fn crypto_dispatch(
 use crate::serve::REQUEST_SIG;
 
 const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
+const COOKIE_SIG: SigType = SigType::Named(crate::cookie::COOKIE_TYPE_NAME);
 const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME);
 
 /// What every client verb returns (http arc H6): `Result<Response, HttpError>`.
@@ -1439,11 +1451,20 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
 /// The server-side functions of `std.http.server`: the pure `response` builder (status + optional
 /// body/headers). `serve` (the inbound accept loop, a higher-order orchestrator) is the module's
 /// ctx function. None of these pull reqwest — a `use std.http.server` program links no client ring.
-const HTTP_SERVER_FNS: &[ExtFn] = &[ExtFn {
-    name: "response",
-    params: &[Int, OPT_BODY, OPT_HEADERS],
-    ret: Concrete(RESPONSE_SIG),
-}];
+const HTTP_SERVER_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "response",
+        params: &[Int, OPT_BODY, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    // The `Set-Cookie` builder (cookie arc C1). Server-side: a client sends cookies back through
+    // the `Cookie:` header, which `Request.cookies()` reads, so only the reply side builds one.
+    ExtFn {
+        name: "cookie",
+        params: &[Str, Str],
+        ret: Concrete(COOKIE_SIG),
+    },
+];
 
 /// Read the optional `headers: Map<string, string>` argument at `index`, or an empty list if the
 /// call omitted it (http arc H5). The `http` module is `deep_marshal`, so the map arrives as a
@@ -1508,6 +1529,16 @@ fn http_dispatch(
                 body,
                 url: String::new(), // a server-built reply has no originating URL
             },
+        )));
+    }
+    // The cookie constructor (cookie arc C1) — pure, and validating: an invalid name or value is
+    // refused here so `Cookie.to_header` is total and no reply can be split by a crafted value.
+    if func == "cookie" {
+        want_arity(func, args, 2)?;
+        let name = want_str(func, args, 0)?;
+        let value = want_str(func, args, 1)?;
+        return Ok(NativeOut::Extern(crate::ExternBox::new(
+            crate::cookie::Cookie::new(name, value)?,
         )));
     }
     // The configured-client constructor (http arc H7) — pure, no request performed.
@@ -2009,6 +2040,37 @@ const RESPONSE_METHODS: &[ExtFn] = &[
         params: &[Str, Str],
         ret: Concrete(RESPONSE_SIG),
     },
+    // The **append** twin of `with_header` (cookie arc C1). Separate rather than a mode flag,
+    // because the two are genuinely different operations and the choice is never incidental:
+    // `with_header` states "this is the value", `with_added_header` states "this is *a* value".
+    //
+    // It exists because some headers are legitimately repeatable and cannot be expressed any other
+    // way — `Set-Cookie` above all, which has no comma-joined form at all (a cookie's `Expires`
+    // attribute contains a comma), so two cookies *must* be two headers. `Vary`, `Link`, and
+    // `WWW-Authenticate` are the others. Replacing `with_header`'s semantics to cover this was the
+    // rejected alternative: para/api's `Header` middleware documents its dependence on
+    // last-writer-wins, and silently turning that into accumulation would have every layered
+    // header quietly duplicate.
+    ExtFn {
+        name: "with_added_header",
+        params: &[Str, Str],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    // The read twin: `header` answers with the *first* match, which is a lossy question to ask of
+    // a repeatable header. Empty when absent, so a caller can iterate without testing first.
+    ExtFn {
+        name: "headers_all",
+        params: &[Str],
+        ret: Concrete(SigType::List(&Str)),
+    },
+    // Attach a cookie — `with_added_header("Set-Cookie", c.to_header())`, named. The convenience
+    // spelling is the point: it is the one that is correct by default, so nobody reaches for
+    // `with_header` and loses the cookie they set a moment earlier.
+    ExtFn {
+        name: "with_cookie",
+        params: &[COOKIE_SIG],
+        ret: Concrete(RESPONSE_SIG),
+    },
     // The opt-in status-as-error door (http arc H6): `resp.error_for_status()?` turns a non-2xx
     // into the `Err` arm, for callers who want a 404 to short-circuit like a transport failure.
     // Kept explicit rather than folded into the verbs, so `?` on a request keeps one meaning.
@@ -2119,6 +2181,34 @@ fn response_method_dispatch(
             next.headers.push((name, value));
             Ok(NativeOut::Extern(crate::ExternBox::new(next)))
         }
+        "with_added_header" => {
+            want_arity(method, args, 2)?;
+            let name = want_str(method, args, 0)?.to_string();
+            let value = want_str(method, args, 1)?.to_string();
+            // The `with_header` body without the `retain` — that one line is the whole difference.
+            let mut next = resp.clone();
+            next.headers.push((name, value));
+            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
+        }
+        "headers_all" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            Ok(NativeOut::List(
+                resp.headers
+                    .iter()
+                    .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| NativeOut::Str(v.clone()))
+                    .collect(),
+            ))
+        }
+        "with_cookie" => {
+            want_arity(method, args, 1)?;
+            let cookie = want_cookie(method, args, 0)?;
+            let mut next = resp.clone();
+            next.headers
+                .push(("set-cookie".to_string(), cookie.to_header()));
+            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
+        }
         "url" => {
             want_arity(method, args, 0)?;
             Ok(NativeOut::Str(resp.url.clone()))
@@ -2157,6 +2247,161 @@ fn response_method_dispatch(
         }
         _ => Err(crate::no_method_error(
             crate::net::RESPONSE_TYPE_NAME,
+            method,
+        )),
+    }
+}
+
+/// The `Cookie` instance methods (cookie arc C1): accessors plus copy-modify builders, the
+/// `Response.with_header` shape. Every builder that can be given an invalid component returns a
+/// new `Cookie` only after validating it, so an unserializable cookie is unrepresentable.
+const COOKIE_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "name",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "value",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "with_value",
+        params: &[Str],
+        ret: Concrete(COOKIE_SIG),
+    },
+    ExtFn {
+        name: "with_path",
+        params: &[Str],
+        ret: Concrete(COOKIE_SIG),
+    },
+    ExtFn {
+        name: "with_domain",
+        params: &[Str],
+        ret: Concrete(COOKIE_SIG),
+    },
+    ExtFn {
+        name: "with_max_age",
+        params: &[Int],
+        ret: Concrete(COOKIE_SIG),
+    },
+    ExtFn {
+        name: "with_http_only",
+        params: &[SigType::Bool],
+        ret: Concrete(COOKIE_SIG),
+    },
+    ExtFn {
+        name: "with_secure",
+        params: &[SigType::Bool],
+        ret: Concrete(COOKIE_SIG),
+    },
+    ExtFn {
+        name: "with_same_site",
+        params: &[Str],
+        ret: Concrete(COOKIE_SIG),
+    },
+    ExtFn {
+        name: "expired",
+        params: &[],
+        ret: Concrete(COOKIE_SIG),
+    },
+    ExtFn {
+        name: "to_header",
+        params: &[],
+        ret: Concrete(Str),
+    },
+];
+
+/// Read a `bool` argument. The checker has already typed it, so a mismatch here is a backend bug
+/// rather than user error — but it reports as an arg-type error like every other `want_*`.
+fn want_bool(func: &str, args: &[NativeValue], index: usize) -> Result<bool, StdError> {
+    match args.get(index) {
+        Some(NativeValue::Scalar(Scalar::Bool(b))) => Ok(*b),
+        _ => Err(type_error(func, "bool")),
+    }
+}
+
+/// Read a `Cookie` argument, downcast from its extern box (the `Client.send` pattern).
+fn want_cookie<'a>(
+    func: &str,
+    args: &'a [NativeValue],
+    index: usize,
+) -> Result<&'a crate::cookie::Cookie, StdError> {
+    let Some(NativeValue::Extern(value)) = args.get(index) else {
+        return Err(type_error(func, crate::cookie::COOKIE_TYPE_NAME));
+    };
+    value
+        .as_any()
+        .downcast_ref::<crate::cookie::Cookie>()
+        .ok_or_else(|| type_error(func, crate::cookie::COOKIE_TYPE_NAME))
+}
+
+fn cookie_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let cookie = recv
+        .as_any()
+        .downcast_ref::<crate::cookie::Cookie>()
+        .expect("a Cookie receiver wraps a Cookie");
+    let rebuilt = |next: crate::cookie::Cookie| Ok(NativeOut::Extern(crate::ExternBox::new(next)));
+    match method {
+        "name" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(cookie.name.clone()))
+        }
+        "value" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(cookie.value.clone()))
+        }
+        "with_value" => {
+            want_arity(method, args, 1)?;
+            rebuilt(cookie.with_value(want_str(method, args, 0)?)?)
+        }
+        "with_path" => {
+            want_arity(method, args, 1)?;
+            rebuilt(cookie.with_path(want_str(method, args, 0)?)?)
+        }
+        "with_domain" => {
+            want_arity(method, args, 1)?;
+            rebuilt(cookie.with_domain(want_str(method, args, 0)?)?)
+        }
+        "with_max_age" => {
+            want_arity(method, args, 1)?;
+            rebuilt(crate::cookie::Cookie {
+                max_age: Some(want_int(method, args, 0)?),
+                ..cookie.clone()
+            })
+        }
+        "with_http_only" => {
+            want_arity(method, args, 1)?;
+            rebuilt(crate::cookie::Cookie {
+                http_only: want_bool(method, args, 0)?,
+                ..cookie.clone()
+            })
+        }
+        "with_secure" => {
+            want_arity(method, args, 1)?;
+            rebuilt(cookie.with_secure(want_bool(method, args, 0)?)?)
+        }
+        "with_same_site" => {
+            want_arity(method, args, 1)?;
+            let same_site = crate::cookie::SameSite::parse(want_str(method, args, 0)?)?;
+            rebuilt(cookie.with_same_site(same_site))
+        }
+        "expired" => {
+            want_arity(method, args, 0)?;
+            rebuilt(cookie.expired())
+        }
+        "to_header" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(cookie.to_header()))
+        }
+        _ => Err(crate::no_method_error(
+            crate::cookie::COOKIE_TYPE_NAME,
             method,
         )),
     }
@@ -2210,6 +2455,23 @@ const REQUEST_METHODS: &[ExtFn] = &[
         name: "with_url",
         params: &[Str],
         ret: Concrete(REQUEST_SIG),
+    },
+    // The inbound read side of cookies (cookie arc C1). Every cookie the client sent, by name.
+    //
+    // A `Map` rather than a `List<Cookie>` because a request cookie *is* only a name/value pair —
+    // attributes are write-only, never echoed back — so a `Cookie` here would carry six fields the
+    // client never sent, each a plausible-looking lie. Empty when the header is absent.
+    ExtFn {
+        name: "cookies",
+        params: &[],
+        ret: Concrete(SigType::Map(&Str, &Str)),
+    },
+    // One cookie by name — `cookies()[name]` without materializing the map, and the spelling that
+    // matches `header`/`query` for the overwhelmingly common single lookup.
+    ExtFn {
+        name: "cookie",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
     },
 ];
 
@@ -2280,6 +2542,32 @@ fn request_method_dispatch(
             let mut next = request.clone();
             next.inner.url = want_str(method, args, 0)?.to_string();
             Ok(NativeOut::Extern(crate::ExternBox::new(next)))
+        }
+        "cookies" => {
+            want_arity(method, args, 0)?;
+            let header = crate::net::request_header(&request.inner, "cookie").unwrap_or_default();
+            Ok(NativeOut::Map(
+                crate::cookie::parse_cookie_header(header)
+                    .into_iter()
+                    .map(|(name, value)| (name, NativeOut::Str(value)))
+                    .collect(),
+            ))
+        }
+        "cookie" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            let header = crate::net::request_header(&request.inner, "cookie").unwrap_or_default();
+            Ok(
+                match crate::cookie::parse_cookie_header(header)
+                    .into_iter()
+                    .find(|(k, _)| k == name)
+                {
+                    // Cookie names are case-SENSITIVE (unlike header names) — RFC 6265 — so this
+                    // compares exactly where `header` compares case-insensitively.
+                    Some((_, value)) => NativeOut::Some(Box::new(NativeOut::Str(value))),
+                    None => NativeOut::None,
+                },
+            )
         }
         _ => Err(crate::no_method_error(
             crate::net::REQUEST_TYPE_NAME,
@@ -3612,6 +3900,12 @@ const HTTP_SERVER_DOCS: &[(&str, &str)] = &[
          a `serve` handler returns.",
     ),
     (
+        "cookie",
+        "Build a `Cookie` named `name` with `value`, to attach with `Response.with_cookie`. The \
+         defaults are the safe ones — `Path=/`, `HttpOnly`, `SameSite=Lax`. An invalid name or \
+         value is refused here, so a crafted value can never split the response.",
+    ),
+    (
         "websocket",
         "Upgrade the current request to a WebSocket, driving the connection with `handler(socket)`.",
     ),
@@ -3814,6 +4108,70 @@ const REQUEST_DOCS: &[(&str, &str)] = &[
     ),
     ("body", "The request body as a string."),
     ("body_bytes", "The request body as raw `bytes`."),
+    (
+        "cookies",
+        "Every cookie the client sent, by name. Empty when the request carries no `Cookie` \
+         header. Values arrive exactly as they were sent — decoding is yours, since only you \
+         know how you encoded them.",
+    ),
+    (
+        "cookie",
+        "The value of the cookie named `name`, or none. Cookie names are case-sensitive, unlike \
+         header names.",
+    ),
+];
+const COOKIE_DOCS: &[(&str, &str)] = &[
+    ("name", "The cookie's name."),
+    ("value", "The cookie's value."),
+    (
+        "with_value",
+        "A copy with a new value. Rejects whitespace, `\"`, `,`, `;`, `\\`, and control characters \
+         — encode (base64url) anything else first.",
+    ),
+    (
+        "with_path",
+        "A copy with `Path` set. Defaults to `/`. A browser only sends the cookie back to paths \
+         under this one — and only *deletes* it when the deleting cookie's path matches.",
+    ),
+    (
+        "with_domain",
+        "A copy with `Domain` set, which widens the cookie to subdomains. Omitted by default, \
+         which is the narrower and safer host-only behaviour.",
+    ),
+    (
+        "with_max_age",
+        "A copy with `Max-Age` set, in seconds. Omitted by default, making it a session cookie \
+         the browser drops when it closes. `0` expires it immediately — see `expired`.",
+    ),
+    (
+        "with_http_only",
+        "A copy with `HttpOnly` set. On by default: it hides the cookie from JavaScript, so an \
+         XSS bug cannot read a session out of `document.cookie`. Turn it off only for a cookie \
+         the page's own scripts must read.",
+    ),
+    (
+        "with_secure",
+        "A copy with `Secure` set, restricting the cookie to https. Off by default so a \
+         plain-http localhost server works; turn it on in production. Cannot be turned off on a \
+         `SameSite=None` cookie, which a browser would then discard.",
+    ),
+    (
+        "with_same_site",
+        "A copy with `SameSite` set: `\"strict\"`, `\"lax\"` (the default), or `\"none\"`. This is \
+         the cross-site request defence — `lax` sends the cookie on top-level navigations but not \
+         on cross-site form posts or subresource requests. `\"none\"` implies `Secure` and sets it.",
+    ),
+    (
+        "expired",
+        "The deletion form of this cookie: same name, path, and domain, empty value, `Max-Age=0`. \
+         Deleting means overwriting, and a browser only matches the overwrite when path and domain \
+         match — which is why this is a method on the original rather than a free function.",
+    ),
+    (
+        "to_header",
+        "The `Set-Cookie` header value. Prefer `Response.with_cookie`, which attaches it \
+         correctly; reach for this only when building the header yourself.",
+    ),
 ];
 const RESPONSE_DOCS: &[(&str, &str)] = &[
     ("status", "The HTTP status code."),
@@ -3827,6 +4185,22 @@ const RESPONSE_DOCS: &[(&str, &str)] = &[
     (
         "with_header",
         "A copy of the response with header `name: value` set.",
+    ),
+    (
+        "with_added_header",
+        "A copy of the response with `name: value` **appended**, keeping any existing header of \
+         the same name. For repeatable headers — `Set-Cookie` above all, which has no \
+         comma-joined form, so two cookies must be two headers — plus `Vary` and `Link`.",
+    ),
+    (
+        "headers_all",
+        "Every value of response header `name`, in order, or empty if absent. The multi-value \
+         read `header` cannot express, since it answers with the first match only.",
+    ),
+    (
+        "with_cookie",
+        "A copy of the response with a `Set-Cookie` header for `cookie` appended. The correct \
+         default: it accumulates, so setting a second cookie never discards the first.",
     ),
     (
         "url",

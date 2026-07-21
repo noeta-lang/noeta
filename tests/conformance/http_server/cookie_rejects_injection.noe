@@ -1,0 +1,10 @@
+// A cookie value carrying CRLF is refused at construction (cookie arc C1).
+//
+// This is response splitting: were the value concatenated into the header unchecked, everything
+// after the `\r\n` would be read by the client as headers of the caller's choosing — and cookie
+// values are derived from user input more reliably than any other header. Refusing at the
+// constructor is what lets `Cookie.to_header` be total.
+// expect: error E0007 at 10:6
+use std.http.server
+
+echo server.cookie("sid", "abc\r\nX-Injected: 1").to_header()

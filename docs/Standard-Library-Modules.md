@@ -649,7 +649,52 @@ all on Noeta's own async runtime. A handler that errors becomes a `500`; the ser
 | `server.serve` | `serve(port: int, handler: (Request) -> Response, host?: string) -> void` | Binds `host:port` (`host` defaults to `0.0.0.0`); serves until the process stops (Ctrl-C drains gracefully). |
 | `server.response` | `response(status: int, body?: string\|bytes, headers?: Map<string, string>) -> Response` | The reply builder a handler uses. |
 | `Request` methods | `method() -> string`, `path() -> string`, `query(name) -> string?`, `header(name) -> string?` (case-insensitive), `body() -> string`, `body_bytes() -> bytes` | Read the inbound request. |
-| `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). |
+| `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). **Replaces** any existing header of that name. |
+| `Response.with_added_header` | `with_added_header(name, value) -> Response` | The **append** twin, for repeatable headers (`Set-Cookie`, `Vary`, `Link`). |
+| `Response.headers_all` | `headers_all(name) -> List<string>` | Every value of a repeatable header, in order. `header` sees only the first. |
+
+#### Cookies
+
+`server.cookie(name, value)` builds a `Cookie`; `Response.with_cookie` attaches it. The defaults are
+the safe ones — `Path=/`, `HttpOnly`, `SameSite=Lax` — so the shortest spelling is also the one you
+want for a session.
+
+Two properties are worth knowing, because both are places cookie code usually goes wrong:
+
+**Setting two cookies works.** `Set-Cookie` has no comma-joined form (a cookie's `Expires` attribute
+contains a comma), so two cookies must be two headers. `with_cookie` appends; had it been built on
+`with_header`, the second cookie would silently discard the first.
+
+**An invalid cookie cannot be built.** `server.cookie` validates the name and value and *errors*
+rather than escaping. A cookie value is derived from user input more reliably than any other header,
+and a `\r\n` in an unchecked value lets the caller append headers of their choosing (response
+splitting) while a stray `;` forges attributes the author never wrote. Because construction
+validates, `to_header()` is total. Encode anything richer than an RFC 6265 token — arbitrary bytes,
+UTF-8 text — before it goes in; base64url is the usual choice.
+
+| Type / function | Signature | Notes |
+|---|---|---|
+| `server.cookie` | `cookie(name: string, value: string) -> Cookie` | Errors on a name or value outside RFC 6265. |
+| `Response.with_cookie` | `with_cookie(cookie: Cookie) -> Response` | Appends a `Set-Cookie` header — accumulates, never replaces. |
+| `Request.cookies` | `cookies() -> Map<string, string>` | Every cookie the client sent. Empty when the header is absent. |
+| `Request.cookie` | `cookie(name) -> string?` | One cookie by name. Cookie names are case-**sensitive**, unlike header names. |
+| `Cookie` builders | `with_value(v)`, `with_path(p)`, `with_domain(d)`, `with_max_age(secs: int)`, `with_http_only(b)`, `with_secure(b)`, `with_same_site("strict"\|"lax"\|"none")` | Copy-modify, like `Response.with_header`. |
+| `Cookie.expired` | `expired() -> Cookie` | The deletion form: same name/path/domain, empty value, `Max-Age=0`. |
+| `Cookie.to_header` | `to_header() -> string` | The raw header value. Prefer `Response.with_cookie`. |
+
+`SameSite=None` implies `Secure` and sets it, and `with_secure(false)` on such a cookie is an error —
+a browser discards the combination, which is the hardest cookie bug to diagnose because the response
+looks correct on the wire.
+
+Deleting a cookie means *overwriting* it with an expired one, and a browser only matches the
+overwrite when `Path` and `Domain` match the original. That is why `expired()` is a method on the
+cookie you set rather than a free `delete(name)` that could not know them:
+
+```noeta ignore
+sid = server.cookie("sid", token).with_path("/app").with_secure(true)
+// …later, to log out — the path must match, so derive it from the original:
+reply = server.response(303, "").with_cookie(sid.expired())
+```
 
 ```noeta check
 use std.http.server

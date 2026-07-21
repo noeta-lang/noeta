@@ -95,6 +95,8 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 |---|---|
 | Crypto: blake3; argon2/scrypt (needs the algorithm-tagged verify design); AEAD encryption (AES-GCM / chacha20-poly1305 — only WITH a key-management story) | crypto arc scope cuts |
 | HTTP client: per-request timeout; streaming bodies (rides the `ReadSource` model); cookie jar / redirect / retry config; HMAC request-signing helpers | http arc scope cuts |
+| **`std.session`** — the stateless signed-cookie codec (S2) and the `Session` request/response pair (S3), designed in `plans/http-sessions/` | cookie arc S1 tail. *(active)* — S1 shipped the `Cookie` surface it builds on |
+| Manifest `optional` / `[suggests]` dependencies — a package declaring a dependency an app opts into. Rings are the wrong layer (native-payload DCE, unknown to `noeta-pm`); `Dependency::Scope` covers the `para/aether` + `para/db` case today, and the diagnostic is the better discoverability surface | http-sessions S4 design question. Trigger: a second use case that `Scope` does not cover |
 | Raw TCP/UDP (`std.net`) for non-HTTP protocols — needs a scripted-peer deterministic sandbox model (harder than the HTTP responder) | http-server design question. YAGNI until a concrete protocol |
 | CRDTs: last-write-wins register; add/remove OR-Set | p2p arc |
 | Kernel bundles: `IVec2`/`IVec3`, `f64` vectors, `Transform` (TRS), `Color` | kernel-methods deferred |
