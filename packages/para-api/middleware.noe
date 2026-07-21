@@ -1,0 +1,114 @@
+// `para.api.middleware` — the standard layers.
+//
+// Every one of these is an ordinary Noeta value implementing `para.api.Middleware`; none of them is
+// privileged by the framework, and each is a worked example of the shape you would write yourself.
+// They divide into the two things an onion can do:
+//
+//   * **pass through** — rewrite the request, call `next`, inspect the response (`Header`, `Logging`)
+//   * **short-circuit** — answer without calling `next` at all (`Mock`)
+//
+// The second is why middleware must take a callable `next` rather than a before/after hook pair: a
+// hook pair cannot express "answer without performing the request", which is exactly what a mock
+// (and a cache) is.
+namespace para.api.middleware
+
+use std.http.{Request, Response, HttpError}
+use std.http.server
+use std.log
+use para.api.{Middleware, Next}
+
+// Add a header to every outbound request. The simplest possible pass-through layer, and the one to
+// copy when writing your own: rewrite on the way in, delegate, return untouched.
+//
+// A per-request header set by an inner layer wins, because `with_header` replaces case-insensitively
+// and inner layers run later.
+pub struct Header {
+    name: string
+    value: string
+
+    fn new(name: string, value: string): Header {
+        return Header { name: name, value: value }
+    }
+}
+
+impl Middleware for Header {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
+        return next.run(req.with_header(self.name, self.value))
+    }
+}
+
+// Log every request and what it answered, through `std.log`.
+//
+// It logs rather than echoes deliberately: a log record is a write-only side effect, never program
+// output, so wrapping a chain in this can never perturb what a program prints (or what a test
+// asserts). A transport failure is logged at `error` with its classified `kind`, which is the reason
+// `HttpError.kind()` exists — never match on message text.
+pub struct Logging {
+    fn new(): Logging {
+        return Logging {}
+    }
+}
+
+impl Middleware for Logging {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
+        log.info("-> ${req.method()} ${req.url()}")
+        outcome: Result<Response, HttpError> = next.run(req)
+        // Each arm binds before it logs: a block arm whose body is a single *call* is currently
+        // ambiguous with a map literal and fails to parse, so the binding is load-bearing, not style.
+        match outcome {
+            Ok(resp) => {
+                status = resp.status()
+                log.info("<- ${status} ${req.url()}")
+            },
+            Err(e) => {
+                kind = e.kind()
+                log.error("<- ${kind} ${req.url()}: ${e}")
+            },
+        }
+        return outcome
+    }
+}
+
+// Answer from a canned table instead of the network — the layer that makes everything above it
+// testable without a socket.
+//
+// Routes are keyed `"METHOD /path"` (the method upper-cased, the path as `Request.path()` reports
+// it) — an exact match, not a pattern. That is on purpose: a fuzzy matcher in a mock turns a wrong
+// test into a passing one, and the failure mode of an exact key is a loud unmatched route rather
+// than a silently wrong reply.
+//
+// An unmatched request does NOT fall through to the network — it answers `fallback` (404 by
+// default). A mock that silently reached the real API would make a test suite depend on the
+// internet exactly when someone forgot a route, which is the bug you most want to see.
+pub struct Mock {
+    routes: Map<string, Response>
+    fallback: int
+
+    fn new(fallback: int = 404): Mock {
+        return Mock { routes: {}, fallback: fallback }
+    }
+
+    // Register a canned reply. Returns a NEW `Mock`, so a base mock can be shared and specialized.
+    fn route(method: string, path: string, status: int, body: string = "", headers: Map<string, string> = {}): Mock {
+        reply = server.response(status, body, headers)
+        return Mock { routes: self.routes.set(Mock.key(method, path), reply), fallback: self.fallback }
+    }
+
+    // The table key for a method/path pair. One function so registration and lookup can never
+    // disagree about spelling.
+    fn key(method: string, path: string): string {
+        return method.upper() ~ " " ~ path
+    }
+}
+
+impl Middleware for Mock {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
+        k = Mock.key(req.method(), req.path())
+        if self.routes.has(k) {
+            // Indexing, not `get`: `get` answers `?Response`, and `Ok(optional)` would build a
+            // `Result<?Response, …>` whose `Ok(resp)` binds an *optional* — one wrapper too many.
+            return Ok(self.routes[k])
+        }
+        return Ok(server.response(self.fallback, "no mock route for ${k}"))
+    }
+}
