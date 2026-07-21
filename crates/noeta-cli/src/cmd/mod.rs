@@ -5,6 +5,7 @@ pub(crate) mod bench;
 pub(crate) mod build;
 pub(crate) mod check;
 pub(crate) mod doc;
+pub(crate) mod expand;
 pub(crate) mod fmt;
 pub(crate) mod grammar;
 pub(crate) mod init;

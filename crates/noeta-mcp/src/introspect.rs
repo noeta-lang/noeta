@@ -154,7 +154,7 @@ pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
     let linked = noeta_db::linked(&p.db, p.ws);
     let mut roles_by_source: std::collections::HashMap<u32, Vec<ModuleRole>> =
         std::collections::HashMap::new();
-    if let Ok(program) = &linked.0 {
+    if let Ok(program) = &linked.program {
         for r in &noeta_ast::reflect::build(program).roles {
             roles_by_source
                 .entry(r.target_span.source.0)
@@ -259,7 +259,7 @@ pub fn reflect(p: &Prepared, role: Option<&str>) -> ReflectOutput {
     // queries are `returns(ref)`, so borrow rather than move the `Program`.
     let linked = noeta_db::linked(&p.db, p.ws);
     let entry = noeta_db::ast(&p.db, analyze::entry_program(p));
-    let program: &Program = match &linked.0 {
+    let program: &Program = match &linked.program {
         Ok(prog) => prog,
         Err(_) => &entry.0.program,
     };

@@ -17,13 +17,16 @@ noeta-types = { workspace = true }
 # deliberately does NOT link noeta-stdlib, so a stdlib method-body edit no longer rebuilds the
 # checker (audit-6 F2).
 noeta-ext-abi = { workspace = true }
+# `noeta_parser::directives` only: the rules deciding where an `@`-directive may attach and what
+# arguments it may take. The checker and the loader both need those answers, so they live in the
+# crate both already depend on rather than being written twice here and there.
+noeta-parser = { workspace = true }
 
 [dev-dependencies]
 # Tests and the corpus bench are their own assembling driver: they seed the process-default
 # registry with the std units (a dev-dep never re-enters the library build graph).
 noeta-stdlib = { workspace = true }
 noeta-lexer = { workspace = true }
-noeta-parser = { workspace = true }
 insta = { workspace = true }
 criterion = { workspace = true }
 

@@ -8,6 +8,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
 | [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
+| [`noeta expand`](#noeta-expand) | Print the source that compile-time `@`-directive expansions generated. |
 | [`noeta serve`](#noeta-serve) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
@@ -195,6 +196,31 @@ noeta check [PATH]
 ```
 
 Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
+
+## `noeta expand`
+
+```text
+noeta expand [PATH]
+```
+
+Prints the Noeta source that **compile-time `@`-directive expansions** produced — the members an extension's `expand` hook generated and the linker spliced into the declaration it decorates (see *directives that generate code* in [Native Extensions](Native-Extensions)). An expansion is code you never wrote; without this, the only way to see any of it is to make it fail.
+
+`PATH` resolves exactly as [`noeta check`](#noeta-check)'s does, and the link is the same one — so what prints is what the compiler saw, never a second rendering of it. Each expansion is printed under a Noeta comment naming its cause (the declaration it grew and the directive that grew it, with its arguments):
+
+```text
+$ noeta expand petstore.noe
+// PetStore ⟨@openapi "petstore.yaml"⟩
+struct PetStore {
+fn list_pets(): List<Pet> { … }
+fn get_pet(id: int): Pet { … }
+}
+
+expanded 1 declaration
+```
+
+The generated source goes to stdout and the summary to stderr, so `noeta expand > expanded.noe` yields a file to check in and diff — a change to the spec then shows up in review as a delta in the code it generates, instead of silently changing what the program means. A program with no expanding directive prints `no directive expansions` and exits 0.
+
+Exit codes match `check`: **0** on success, **1** if any expansion failed (a hook that returned `Err`, or generated code that does not parse — reported as **E0062**, blamed on the directive) or the sources otherwise failed to load, **2** if a file could not be read at all.
 
 ## `noeta migrate`
 

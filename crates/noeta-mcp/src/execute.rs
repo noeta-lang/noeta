@@ -329,7 +329,7 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool) -> TestOutput {
     // The whole-workspace linked program is where `@test` blocks live; a link/parse failure is a
     // compile error for the suite.
     let linked = noeta_db::linked(&p.db, p.ws);
-    let program = match &linked.0 {
+    let program = match &linked.program {
         Ok(program) => program,
         Err(diags) => return empty(map_diagnostics(&source_map, diags)),
     };

@@ -286,6 +286,14 @@ pub enum DiagnosticCode {
     /// The call-site twin of the `#[...]` attribute's field checks, which validated exactly these
     /// things while a call validated none of them — the label never reached the AST.
     InvalidArgument,
+    /// An extension's `@`-directive **expansion hook** failed: it returned an error, or it returned
+    /// code that does not parse.
+    ///
+    /// Always blamed on the directive, never on the generated line — the author of `@openapi(…)`
+    /// wrote one line and cannot edit the hundred it produced, so the actionable fact is which
+    /// directive misbehaved. The position inside the generated source goes in the message, because
+    /// that source is real and openable rather than a fiction the compiler made up.
+    DirectiveExpansionFailed,
 }
 
 impl DiagnosticCode {
@@ -353,6 +361,7 @@ impl DiagnosticCode {
         DiagnosticCode::ShadowedBinding,
         DiagnosticCode::ValidatedConstruction,
         DiagnosticCode::InvalidArgument,
+        DiagnosticCode::DirectiveExpansionFailed,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -420,6 +429,7 @@ impl DiagnosticCode {
             DiagnosticCode::ShadowedBinding => "E0059",
             DiagnosticCode::ValidatedConstruction => "E0060",
             DiagnosticCode::InvalidArgument => "E0061",
+            DiagnosticCode::DirectiveExpansionFailed => "E0062",
         }
     }
 

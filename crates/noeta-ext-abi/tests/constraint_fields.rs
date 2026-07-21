@@ -1,0 +1,760 @@
+//! **The declared-constraint gate**: every field of an extension-facing ABI declaration type is
+//! classified here, and the classification is checked against the tree.
+//!
+//! ## The bug class
+//!
+//! Three times a field of one of these types shipped *declaring a constraint* that nothing
+//! enforced:
+//!
+//! 1. [`ExtTier::sites`](noeta_ext_abi::registry::ExtTier::sites) — "which declarations this tier
+//!    may attach to", read by no one.
+//! 2. [`ExtDirective::max_args`](noeta_ext_abi::registry::ExtDirective::max_args) and
+//!    `named_keys` — the same failure, in code written *during the arc that fixed the first one*.
+//! 3. The argument-contract diagnostics that closed (2) then had no test, because the conformance
+//!    corpus structurally cannot reach them: the corpus runs programs against **std**, and no std
+//!    declaration sets those fields. "The corpus is green" was silent about that code.
+//!
+//! A declared-but-unenforced constraint is worse than no constraint — it tells an extension author
+//! the compiler checks their contract when nothing does. Patching each instance as it is discovered
+//! guarantees a fourth, so this file makes the property structural rather than remembered.
+//!
+//! ## What the gate does
+//!
+//! [`TABLE`] classifies **every** `pub` field of every ABI declaration type as one of:
+//!
+//! - [`Verdict::Constraint`] — the field states a RULE. It must name a live **enforcer** (the
+//!   function that acts on it) *and* a live **exerciser** (the test or corpus case that watches the
+//!   rule fire). This is the class that has failed three times.
+//! - [`Verdict::Data`] — the field is material the compiler consumes to build, type, or dispatch
+//!   something. Wrong data yields a wrong program, not a false promise, and the ordinary tests
+//!   notice. It must still name a reader: a field nothing reads at all is a bug whatever its kind.
+//! - [`Verdict::Prose`] — human-facing text (hover docs, help strings). Nothing can enforce it; the
+//!   reason is recorded so "no enforcement" is a decision rather than an omission.
+//!
+//! Two properties are then checked:
+//!
+//! - **Completeness** — the type list is parsed out of the ABI sources and every `pub` field must
+//!   appear in `TABLE` exactly once. Adding a field to `ExtDirective` fails this test until it is
+//!   classified. This is the half that would have caught all three historical instances *at the
+//!   commit that introduced them*, which is the whole point: it fires on the ADD, not on the
+//!   eventual discovery. (The trick is borrowed from `noeta_diagnostics`'s `all_list_guard`, which
+//!   keeps its hand-maintained `ALL` honest by counting variants out of its own source.)
+//! - **Liveness** — each named enforcer/reader/exerciser anchor must still exist: the file must be
+//!   present, must contain the anchor's needle, and (for enforcers and readers) must mention the
+//!   field name. Deleting the reader, or renaming the function around it, fails here.
+//!
+//! ## What it deliberately does not do
+//!
+//! It does not try to *infer* whether a field is read, by grepping for `.field` across the
+//! workspace. Field names like `name`, `params`, `fields` and `sites` collide with unrelated
+//! structs in every crate, so an inferring gate would answer "yes, read" for a field nothing reads
+//! — a false negative on exactly the case it exists to catch. Naming the enforcing site is more
+//! work per field and vastly more precise, and it makes the audit itself machine-checked instead of
+//! prose in a commit message.
+//!
+//! The cost is honest: this gate reads source text, so renaming an anchored function fails it and
+//! someone must re-point the anchor. That is a deliberate trade — the failure is loud, local, and
+//! forces a human to re-confirm the constraint is still enforced, which is the property at stake.
+
+use std::path::{Path, PathBuf};
+
+/// A named site in the tree that must still exist: `needle` is a substring stable across ordinary
+/// edits (a function signature, a test name, a corpus expectation), not a line number.
+struct Anchor(&'static str, &'static str);
+
+impl Anchor {
+    /// The workspace-relative source file this anchor points into.
+    fn file(&self) -> &'static str {
+        self.0
+    }
+    /// A substring that must still be present there.
+    fn needle(&self) -> &'static str {
+        self.1
+    }
+}
+
+enum Verdict {
+    /// The field states a rule about programs or about the declaring extension. Needs an enforcer
+    /// and an exerciser.
+    Constraint(Anchor, Anchor),
+    /// The field is material the compiler consumes. Needs a reader.
+    Data(Anchor),
+    /// Human-facing text: the string records why nothing enforces it.
+    Prose(&'static str),
+}
+
+struct Row(&'static str, &'static str, Verdict);
+
+impl Row {
+    /// The declaring ABI type.
+    fn ty(&self) -> &'static str {
+        self.0
+    }
+    /// The field on it.
+    fn field(&self) -> &'static str {
+        self.1
+    }
+    fn verdict(&self) -> &Verdict {
+        &self.2
+    }
+}
+
+const CHECK_DIRECTIVES: &str = "crates/noeta-check/src/directives.rs";
+const CHECK_STDLIB: &str = "crates/noeta-check/src/stdlib.rs";
+const CHECK_TRAITS: &str = "crates/noeta-check/src/traits.rs";
+const CHECK_TIERS: &str = "crates/noeta-check/src/tiers.rs";
+const REGISTRY: &str = "crates/noeta-ext-abi/src/registry.rs";
+const VM_NATIVE_CTX: &str = "crates/noeta-vm/src/native_ctx.rs";
+const CLI_SERVE: &str = "crates/noeta-cli/src/cmd/serve.rs";
+const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforcement.rs";
+const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
+const LOADER_EXPAND: &str = "crates/noeta-loader/src/expand.rs";
+
+use Verdict::{Constraint, Data, Prose};
+
+/// The classification. One row per `pub` field of every ABI declaration type; the completeness
+/// check below keeps it exhaustive.
+const TABLE: &[Row] = &[
+    // --- ExtFn: one native function's static signature -------------------------------------------
+    Row(
+        "ExtFn",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn find_function(")),
+    ),
+    // Arity and argument types are a rule about every call site: a `SigType::Optional` marks
+    // where the required run stops, and calling with fewer is E0009.
+    Row(
+        "ExtFn",
+        "params",
+        Constraint(
+            Anchor(CHECK_STDLIB, "fn module_required("),
+            Anchor(
+                "tests/conformance/diagnostics/optional_param_arity.noe",
+                "expect: error E0007",
+            ),
+        ),
+    ),
+    Row(
+        "ExtFn",
+        "ret",
+        Data(Anchor(CHECK_STDLIB, "fn module_return(")),
+    ),
+    // --- ExtModule ------------------------------------------------------------------------------
+    Row(
+        "ExtModule",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn find_module(")),
+    ),
+    Row(
+        "ExtModule",
+        "functions",
+        Data(Anchor(REGISTRY, "pub fn find_function(")),
+    ),
+    Row(
+        "ExtModule",
+        "dispatch",
+        Data(Anchor(REGISTRY, "pub fn dispatch(")),
+    ),
+    Row(
+        "ExtModule",
+        "deep_marshal",
+        Data(Anchor("crates/noeta-eval/src/ir.rs", "deep_marshal")),
+    ),
+    Row(
+        "ExtModule",
+        "ctx_functions",
+        Data(Anchor(REGISTRY, "pub fn dispatch_ctx(")),
+    ),
+    Row(
+        "ExtModule",
+        "ctx_dispatch",
+        Data(Anchor(REGISTRY, "pub fn dispatch_ctx(")),
+    ),
+    Row(
+        "ExtModule",
+        "ring",
+        Data(Anchor(REGISTRY, "pub fn ring_of(")),
+    ),
+    Row(
+        "ExtModule",
+        "bundles",
+        Data(Anchor(REGISTRY, "pub fn find_bundle(")),
+    ),
+    Row(
+        "ExtModule",
+        "docs",
+        Prose("per-function markdown for the docs browser; rendered, never checked"),
+    ),
+    Row(
+        "ExtModule",
+        "typed_functions",
+        Data(Anchor(REGISTRY, "fn find_typed_function")),
+    ),
+    Row(
+        "ExtModule",
+        "typed_dispatch",
+        Data(Anchor(REGISTRY, "typed_dispatch")),
+    ),
+    // --- ExtType --------------------------------------------------------------------------------
+    Row(
+        "ExtType",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn qualified(")),
+    ),
+    Row(
+        "ExtType",
+        "namespace",
+        Data(Anchor(REGISTRY, "pub fn qualified(")),
+    ),
+    Row(
+        "ExtType",
+        "methods",
+        Data(Anchor(REGISTRY, "pub fn dispatch_method(")),
+    ),
+    Row(
+        "ExtType",
+        "dispatch",
+        Data(Anchor(REGISTRY, "pub fn dispatch_method(")),
+    ),
+    // "May values of this type key a Map / member a Set" — a rule the checker applies to every
+    // `Map<T, _>` annotation, and a promise the ABI's own debug verifier holds the author to.
+    Row(
+        "ExtType",
+        "key_capable",
+        Constraint(
+            Anchor("crates/noeta-check/src/decls.rs", "fn named_key_capable("),
+            Anchor("tests/conformance/types/map_key_not_capable.noe", "expect:"),
+        ),
+    ),
+    Row(
+        "ExtType",
+        "ctx_methods",
+        Data(Anchor(REGISTRY, "pub fn dispatch_ctx_method(")),
+    ),
+    Row(
+        "ExtType",
+        "ctx_dispatch",
+        Data(Anchor(REGISTRY, "pub fn dispatch_ctx_method(")),
+    ),
+    Row(
+        "ExtType",
+        "arena_getter",
+        Data(Anchor("crates/noeta-vm/src/methods.rs", "arena_getter")),
+    ),
+    // The built-in traits this type claims: what makes a `T: Mergeable` / `T: Error` bound
+    // accept it. A bound is a rule, and the claim is what satisfies it.
+    Row(
+        "ExtType",
+        "traits",
+        Constraint(
+            Anchor(
+                "crates/noeta-check/src/prelude.rs",
+                "fn seed_extern_type_traits(",
+            ),
+            Anchor("crates/noeta-check/src/tests.rs", "Mergeable"),
+        ),
+    ),
+    Row(
+        "ExtType",
+        "deep_marshal",
+        Data(Anchor("crates/noeta-eval/src/lib.rs", "deep_marshal")),
+    ),
+    Row(
+        "ExtType",
+        "typed_methods",
+        Data(Anchor(CHECK_STDLIB, "fn typed_type_method(")),
+    ),
+    Row(
+        "ExtType",
+        "typed_dispatch",
+        Data(Anchor(REGISTRY, "pub fn dispatch_typed_method(")),
+    ),
+    Row(
+        "ExtType",
+        "docs",
+        Prose("per-method markdown for the docs browser; rendered, never checked"),
+    ),
+    // --- Method bundles -------------------------------------------------------------------------
+    // What a type binding to the bundle must look like, validated at the `impl` site.
+    Row(
+        "PackedConstraint",
+        "fields",
+        Constraint(
+            Anchor("crates/noeta-check/src/subst.rs", "fn constraint_mismatch("),
+            Anchor("tests/conformance/bundles/bind_errors.noe", "expect:"),
+        ),
+    ),
+    // Row/Column: no SHIPPED bundle declares either (both are `Any`), so the corpus cannot
+    // reach the rejecting arms. Covered by a fixture extension instead.
+    Row(
+        "PackedConstraint",
+        "layout",
+        Constraint(
+            Anchor("crates/noeta-check/src/subst.rs", "fn constraint_mismatch("),
+            Anchor(
+                EMBED_CONSTRAINTS,
+                "fn a_bundle_layout_constraint_is_enforced_at_the_impl_site(",
+            ),
+        ),
+    ),
+    Row("BundleFn", "sig", Data(Anchor(REGISTRY, "pub fn method("))),
+    // Element vs Bulk: which receiver may call the method. Calling a `Bulk` method on an
+    // element (or the reverse) is not resolved, so the set is a rule about call sites.
+    Row(
+        "BundleFn",
+        "receiver",
+        Constraint(
+            Anchor(
+                "crates/noeta-check/src/expr/member.rs",
+                "fn bundle_method_call(",
+            ),
+            Anchor("tests/conformance/bundles/kernels_methods.noe", "expect:"),
+        ),
+    ),
+    Row(
+        "ExtBundle",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn find_bundle(")),
+    ),
+    Row(
+        "ExtBundle",
+        "constraint",
+        Constraint(
+            Anchor(CHECK_TRAITS, "fn check_bundle_impl("),
+            Anchor("tests/conformance/bundles/bind_errors.noe", "expect:"),
+        ),
+    ),
+    Row(
+        "ExtBundle",
+        "methods",
+        Data(Anchor(REGISTRY, "pub fn method(")),
+    ),
+    Row(
+        "ExtBundle",
+        "ctx_dispatch",
+        Data(Anchor(REGISTRY, "pub fn dispatch_bundle_method(")),
+    ),
+    // --- Extension-declared prelude attributes ---------------------------------------------------
+    Row(
+        "ExtAttrField",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn find_ext_attribute(")),
+    ),
+    // The field's declared literal type: constructing the attribute with a mismatched literal
+    // is a static error, exactly as for a program-declared `@attribute` struct.
+    Row(
+        "ExtAttrField",
+        "ty",
+        Constraint(
+            Anchor("crates/noeta-check/src/subst.rs", "fn attr_field_type("),
+            Anchor("tests/conformance/tiers/test_attrs_strip.noe", "expect:"),
+        ),
+    ),
+    // Present ⇒ optional at construction. Absent ⇒ mandatory, and omitting it is an error.
+    Row(
+        "ExtAttrField",
+        "default",
+        Constraint(
+            Anchor(CHECK_TIERS, "AttrFieldDefault::"),
+            Anchor("tests/conformance/tiers/test_attrs_strip.noe", "expect:"),
+        ),
+    ),
+    Row(
+        "ExtAttribute",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn find_ext_attribute(")),
+    ),
+    Row(
+        "ExtAttribute",
+        "fields",
+        Data(Anchor(CHECK_TIERS, "ext_attributes()")),
+    ),
+    // --- ExtTier: the original instance of this bug class -----------------------------------------
+    Row(
+        "ExtTier",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn find_ext_tier(")),
+    ),
+    // THE original: declared for every std tier, enforced for none, for as long as it existed.
+    // Std has no tier that attaches to methods but not to functions, so the gate has only ever
+    // been observed saying "yes" against std — a fixture extension is what watches it say "no".
+    Row(
+        "ExtTier",
+        "sites",
+        Constraint(
+            Anchor(CHECK_DIRECTIVES, "fn check_declared_sites("),
+            Anchor(
+                EMBED_CONSTRAINTS,
+                "fn an_extension_tier_site_restriction_is_enforced(",
+            ),
+        ),
+    ),
+    Row(
+        "ExtTier",
+        "config",
+        Data(Anchor(CHECK_TIERS, "pub fn config_attribute_for(")),
+    ),
+    Row(
+        "ExtTier",
+        "text",
+        Data(Anchor(CHECK_TIERS, "pub fn text_lang(")),
+    ),
+    Row(
+        "ExtTier",
+        "expr",
+        Data(Anchor(CHECK_TIERS, "pub fn expr_type(")),
+    ),
+    Row(
+        "ExtTier",
+        "handler",
+        Data(Anchor(CHECK_TIERS, "pub fn expr_tier_handler(")),
+    ),
+    // --- ExtDirective: the second instance --------------------------------------------------------
+    Row(
+        "ExtDirective",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn find_ext_directive(")),
+    ),
+    Row(
+        "ExtDirective",
+        "sites",
+        Constraint(
+            Anchor(CHECK_DIRECTIVES, "fn check_declared_sites("),
+            Anchor(EMBED_INSTANCE, "openapi"),
+        ),
+    ),
+    // The second instance: shipped unread, in code written during the arc that fixed
+    // `ExtTier.sites`. Unreachable from the corpus — no std declaration sets it — so the
+    // exerciser has to be a fixture extension.
+    Row(
+        "ExtDirective",
+        "max_args",
+        Constraint(
+            Anchor(CHECK_DIRECTIVES, "fn check_declared_args("),
+            Anchor(
+                EMBED_INSTANCE,
+                "fn an_extension_directive_arg_contract_is_enforced(",
+            ),
+        ),
+    ),
+    Row(
+        "ExtDirective",
+        "named_keys",
+        Constraint(
+            Anchor(CHECK_DIRECTIVES, "fn check_declared_args("),
+            Anchor(
+                EMBED_INSTANCE,
+                "fn an_extension_directive_arg_contract_is_enforced(",
+            ),
+        ),
+    ),
+    Row(
+        "ExtDirective",
+        "detail",
+        Prose("the one-line usage shown beside the name in completion"),
+    ),
+    Row("ExtDirective", "doc", Prose("hover prose")),
+    Row(
+        "ExtDirective",
+        "params",
+        Prose("signature-help parameter LABELS; `max_args`/`named_keys` are the checked contract"),
+    ),
+    // `Data`, not `Constraint`: the compiler CALLS this hook rather than checking a rule with it.
+    // The constraints around it belong to other fields — `sites` and `max_args`/`named_keys` decide
+    // whether the hook runs at all, which is why a hook may assume it only ever sees a legal
+    // invocation. What the hook itself owes in return (declare every file you read) is a promise the
+    // compiler cannot check: an under-reporting hook is indistinguishable from an honest one until
+    // its output goes stale. That asymmetry is documented on `Expansion::reads` rather than gated
+    // here, because gating it would mean claiming an enforcement that does not exist.
+    Row(
+        "ExtDirective",
+        "expand",
+        Data(Anchor(LOADER_EXPAND, "plan.directive.expand")),
+    ),
+    // --- ExtDerive ---------------------------------------------------------------------------
+    Row(
+        "ExtDerive",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn find_ext_derive(")),
+    ),
+    Row(
+        "ExtDerive",
+        "methods",
+        Data(Anchor("crates/noeta-ir/src/lower.rs", "fn native_recipe(")),
+    ),
+    // std's only derive (`Inspect`) passes `None`, so nothing in the tree had ever called a
+    // validator — the enforcement existed and had never run. A fixture derive supplies one.
+    Row(
+        "ExtDerive",
+        "validate",
+        Constraint(
+            Anchor(CHECK_TRAITS, "fn check_derives("),
+            Anchor(
+                EMBED_CONSTRAINTS,
+                "fn an_extension_derive_validator_gates_the_declaration(",
+            ),
+        ),
+    ),
+    Row(
+        "ExtDeriveMethod",
+        "name",
+        Data(Anchor("crates/noeta-ir/src/lower.rs", "fn native_recipe(")),
+    ),
+    Row(
+        "ExtDeriveMethod",
+        "arity",
+        Data(Anchor("crates/noeta-ir/src/lower.rs", "fn native_recipe(")),
+    ),
+    Row(
+        "ExtDeriveMethod",
+        "handler",
+        Data(Anchor("crates/noeta-ir/src/lower.rs", "fn native_recipe(")),
+    ),
+    // --- ExtCapability -----------------------------------------------------------------------
+    Row(
+        "ExtCapability",
+        "id",
+        Data(Anchor(REGISTRY, ".find(|c| (c.id)() == id)")),
+    ),
+    Row(
+        "ExtCapability",
+        "state_key",
+        Data(Anchor(
+            VM_NATIVE_CTX,
+            "self.state(decl.state_key, decl.init)",
+        )),
+    ),
+    Row(
+        "ExtCapability",
+        "init",
+        Data(Anchor(
+            VM_NATIVE_CTX,
+            "self.state(decl.state_key, decl.init)",
+        )),
+    ),
+    Row(
+        "ExtCapability",
+        "build",
+        Data(Anchor(VM_NATIVE_CTX, "(decl.build)(state)")),
+    ),
+    // --- ExtCommand (command.rs) ------------------------------------------------------------------
+    Row(
+        "ExtCommand",
+        "name",
+        Data(Anchor(CLI_SERVE, "clap::Command::new(ext.name)")),
+    ),
+    Row(
+        "ExtCommand",
+        "about",
+        Prose("the one-line help shown in `noeta --help`"),
+    ),
+    // The declared argument set IS the CLI parser: an undeclared flag is rejected, a declared
+    // one is validated and defaulted, before `run` ever sees it.
+    Row(
+        "ExtCommand",
+        "args",
+        Constraint(
+            Anchor(CLI_SERVE, "clap::Arg::new(spec.name)"),
+            Anchor("crates/noeta-cli/tests/cli/pm_native.rs", "fx-info"),
+        ),
+    ),
+    Row("ExtCommand", "run", Data(Anchor(CLI_SERVE, "(ext.run)("))),
+    Row(
+        "ArgSpec",
+        "name",
+        Data(Anchor(CLI_SERVE, "clap::Arg::new(spec.name)")),
+    ),
+    Row("ArgSpec", "help", Prose("the argument's help text")),
+    Row(
+        "ArgSpec",
+        "kind",
+        Constraint(
+            Anchor(CLI_SERVE, "ArgKind::Path =>"),
+            Anchor("crates/noeta-cli/tests/cli/pm_native.rs", "fx-info"),
+        ),
+    ),
+];
+
+/// The ABI declaration types whose fields `TABLE` must cover, by source file.
+const SCANNED: &[(&str, &[&str])] = &[
+    (
+        "crates/noeta-ext-abi/src/registry.rs",
+        &[
+            "ExtFn",
+            "ExtModule",
+            "ExtType",
+            "PackedConstraint",
+            "BundleFn",
+            "ExtBundle",
+            "ExtAttrField",
+            "ExtAttribute",
+            "ExtTier",
+            "ExtDirective",
+            "ExtDerive",
+            "ExtDeriveMethod",
+            "ExtCapability",
+        ],
+    ),
+    (
+        "crates/noeta-ext-abi/src/command.rs",
+        &["ExtCommand", "ArgSpec"],
+    ),
+];
+
+fn workspace_root() -> PathBuf {
+    // crates/noeta-ext-abi → crates → workspace root.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("the workspace root is reachable from CARGO_MANIFEST_DIR");
+    assert!(
+        root.join("Cargo.toml").is_file() && root.join("crates").is_dir(),
+        "expected a workspace root at {}; this gate reads the tree's sources",
+        root.display()
+    );
+    root
+}
+
+fn read(rel: &str) -> String {
+    let path = workspace_root().join(rel);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("anchor file {} is unreadable: {e}", path.display()))
+}
+
+/// The `pub` field names of `struct <ty>` in `src`, in declaration order.
+fn pub_fields(src: &str, ty: &str) -> Vec<String> {
+    let head = format!("pub struct {ty} {{");
+    let start = src
+        .find(&head)
+        .unwrap_or_else(|| panic!("`{head}` not found — did the type move or get renamed?"))
+        + head.len();
+    let body = &src[start..];
+    let end = body
+        .find("\n}")
+        .unwrap_or_else(|| panic!("no closing brace for `{ty}`"));
+    body[..end]
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("pub "))
+        .filter_map(|l| l.split(':').next())
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+/// Adding a field to an ABI declaration type must not be possible without classifying it. This is
+/// the half that fires at the commit which introduces an unread constraint, rather than whenever
+/// someone next reads the file.
+#[test]
+fn every_abi_field_is_classified() {
+    let mut declared: Vec<(String, String)> = Vec::new();
+    for (file, types) in SCANNED {
+        let src = read(file);
+        for ty in *types {
+            for field in pub_fields(&src, ty) {
+                declared.push(((*ty).to_string(), field));
+            }
+        }
+    }
+
+    let classified: Vec<(String, String)> = TABLE
+        .iter()
+        .map(|r| (r.ty().to_string(), r.field().to_string()))
+        .collect();
+
+    let missing: Vec<_> = declared
+        .iter()
+        .filter(|d| !classified.contains(d))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these ABI fields are not classified in TABLE: {missing:?}\n\
+         A field on one of these types is part of an extension author's contract. Classify it:\n\
+           - Constraint — it states a rule. Name the enforcer AND the test that watches it fire.\n\
+             If nothing enforces it yet, that is the bug this gate exists to catch: enforce it.\n\
+           - Data       — the compiler consumes it. Name the reader.\n\
+           - Prose      — human-facing text. Say why nothing can enforce it."
+    );
+
+    let stale: Vec<_> = classified
+        .iter()
+        .filter(|c| !declared.contains(c))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "TABLE classifies fields that no longer exist (renamed or removed?): {stale:?}"
+    );
+
+    let mut seen = classified.clone();
+    seen.sort();
+    let before = seen.len();
+    seen.dedup();
+    assert_eq!(before, seen.len(), "TABLE classifies a field twice");
+}
+
+/// Every classified field must still have the reader/enforcer the table names. A field whose reader
+/// was deleted is back to lying to extension authors, which is the state this whole gate is about.
+#[test]
+fn every_classified_field_has_a_live_reader() {
+    for row in TABLE {
+        let anchor = match row.verdict() {
+            Verdict::Constraint(enforcer, _) => enforcer,
+            Verdict::Data(reader) => reader,
+            // Nothing in the tree to anchor. The one requirement is that the exemption was
+            // *stated*: an empty reason is an omission wearing a verdict's clothes.
+            Verdict::Prose(why) => {
+                assert!(
+                    !why.is_empty(),
+                    "{}.{}: a Prose verdict must say why nothing enforces the field",
+                    row.ty(),
+                    row.field()
+                );
+                continue;
+            }
+        };
+        let src = read(anchor.file());
+        assert!(
+            src.contains(anchor.needle()),
+            "{}.{}: its reader anchor {:?} is gone from {} — re-point the anchor after confirming \
+             the field is still read, or fix the field's enforcement",
+            row.ty(),
+            row.field(),
+            anchor.needle(),
+            anchor.file()
+        );
+        assert!(
+            src.contains(row.field()),
+            "{}.{}: {} no longer mentions `{}` — the reader this table names does not read the \
+             field any more",
+            row.ty(),
+            row.field(),
+            anchor.file(),
+            row.field()
+        );
+    }
+}
+
+/// Every field classified as a **constraint** must have a test that watches the rule fire.
+///
+/// This is the third instance of the bug class, structurally: the argument-contract diagnostics had
+/// an enforcer and no exerciser, and nothing noticed, because the conformance corpus cannot reach
+/// code that only runs for a declaration std does not make.
+#[test]
+fn every_constraint_field_has_a_live_exerciser() {
+    for row in TABLE {
+        let Verdict::Constraint(_, exerciser) = row.verdict() else {
+            continue;
+        };
+        let src = read(exerciser.file());
+        assert!(
+            src.contains(exerciser.needle()),
+            "{}.{}: its exerciser anchor {:?} is gone from {} — the constraint is enforced but \
+             nothing watches the enforcement fire",
+            row.ty(),
+            row.field(),
+            exerciser.needle(),
+            exerciser.file()
+        );
+    }
+}

@@ -354,7 +354,15 @@ fn compile_to_mc(
     // pass-1 (`register_types`) and the IR pass-2 (`compile_methods`) agree on the method set. The
     // helper is idempotent, so the lowering below re-hoisting is a no-op; rebinds only when such an
     // impl exists.
-    let hoisted = noeta_ir::hoist_standalone_impl_methods(program);
+    //
+    // Against **this compile's** registry, not the process default: a native derive recipe
+    // (`ExtDerive`, derive layer 4) is what the hoist materializes, and an embed session's own
+    // extensions live only in its assembled registry. Resolving against the default instead meant
+    // the checker accepted `@derive(<session recipe>)` — it reads the session registry — while the
+    // hoist synthesized nothing, and `compile_methods` then panicked on the missing prototype
+    // ("no entry found for key"). The registry-threaded entry point existed for exactly this and
+    // had no caller.
+    let hoisted = noeta_ir::hoist_impl_methods_with_registry(program, Some(registry));
     let program: &Program = hoisted.as_ref().unwrap_or(program);
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
@@ -554,7 +562,9 @@ impl SessionCompiler {
     ) -> Result<Module, Unsupported> {
         // Hoist standalone-`impl` methods onto their target type (L1 user traits, UT2) so surface
         // registration and IR compilation agree; idempotent, so lowering re-hoisting is a no-op.
-        let hoisted = noeta_ir::hoist_standalone_impl_methods(entry);
+        // Against the session's own registry — see the note in `compile_module`; a hot-swapped
+        // edit must materialize the same native derive recipes the initial compile did.
+        let hoisted = noeta_ir::hoist_impl_methods_with_registry(entry, Some(self.mc.registry));
         let entry: &Program = hoisted.as_ref().unwrap_or(entry);
         // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
         // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The

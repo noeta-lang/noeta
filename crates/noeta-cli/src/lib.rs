@@ -52,6 +52,7 @@ use cmd::bench::cmd_bench;
 use cmd::build::{cmd_build, cmd_dump};
 use cmd::check::cmd_check;
 use cmd::doc::cmd_doc;
+use cmd::expand::cmd_expand;
 use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
 use cmd::init::cmd_init;
@@ -316,6 +317,17 @@ enum Command {
         /// single machine-readable report on stdout for tools (CI, editors, the MCP server).
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
+    },
+    /// Print the Noeta source that compile-time `@`-directive expansions produced — the code an
+    /// extension's `expand` hook generated and spliced into the declaration it decorates. Links
+    /// through the same pipeline as `check`, so what prints is exactly what the compiler saw. For
+    /// debugging a hook, and for diffing in CI so a spec change surfaces as a reviewable delta.
+    /// Exits non-zero if any expansion failed (the same 0/1/2 codes as `check`).
+    Expand {
+        /// File or directory to expand (default: the current directory, walked recursively for
+        /// `.noe` files) — the same resolution `noeta check` uses.
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// Start an interactive REPL. Entries type-check before running (an entry with a type error
     /// prints its `E0xxx` diagnostics and is skipped) — the default since session-checker C2/C5.
@@ -995,6 +1007,7 @@ pub fn run_cli(
             target,
             format,
         } => cmd_check(&path, &tier, &target, format),
+        Command::Expand { path } => cmd_expand(&path),
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),

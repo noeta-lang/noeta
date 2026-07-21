@@ -17,6 +17,9 @@ noeta-ast = { workspace = true }
 noeta-lexer = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-db = { workspace = true }
+# `ExpandedSource` — the generated sources a link produced, which the addressing layer resolves spans
+# through and the diagnostics view re-blames on the directive that produced them.
+noeta-loader = { workspace = true }
 # Dependency resolution (package-manager P2.1c): the editor resolves the same dependency packages the
 # CLI does, so cross-package `use <dep-key>.…` resolves in hover/goto/completion.
 # `fmt-config` so the formatter reads its `[fmt]` table through pm's one manifest-discovery walk
@@ -39,6 +42,11 @@ salsa = { workspace = true }
 # browser serves the guides with no repo beside the binary — the one canonical loader both `noeta
 # lsp` and `noeta mcp` read (the MCP `docs_*` tools delegate here).
 include_dir = { workspace = true }
+
+[dev-dependencies]
+# `tests/expansion.rs` installs a fixture extension whose directive expands, to prove the editor's
+# link runs compile-time expansion exactly as the compiler's does.
+noeta-ext-abi = { workspace = true }
 
 [lints]
 workspace = true

@@ -18,6 +18,7 @@
 //! is tagged at parse time with its [`SourceId`], so the caller resolves it through the [`Linked`]
 //! [`SourceMap`] rather than against the entry (slice F4).
 
+pub mod expand;
 mod qualify;
 
 use std::collections::HashSet;
@@ -27,6 +28,8 @@ use std::path::Path;
 use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::{Source, SourceId, SourceMap};
+
+pub use expand::ExpandedSource;
 
 /// A loaded, linked program ready to type-check and run.
 #[derive(Debug)]
@@ -47,6 +50,15 @@ pub struct Linked {
     /// edition. The checker consults this per declaration (via a span's `SourceId`) so a merged
     /// program applies each package's own edition rules — the editions compiler arc's whole point.
     pub editions: noeta_lexer::EditionMap,
+    /// Every **non-Noeta file** a compile-time directive expansion read (an OpenAPI spec and the
+    /// documents it `$ref`s, say), as the hooks reported them.
+    ///
+    /// These are inputs to the program exactly as its `.noe` files are — the difference is only
+    /// that the compiler cannot discover them by parsing, so a hook has to say. A consumer that
+    /// caches or watches (the salsa layer, `--watch`) registers these alongside the sources;
+    /// editing one must re-run the expansion, or the program is built from a spec that no longer
+    /// exists in that form.
+    pub reads: Vec<String>,
 }
 
 /// A diagnostic produced while loading, paired with the source it renders against.
@@ -452,13 +464,103 @@ pub fn link(
 
     let refs: Vec<&Program> = module_programs.iter().collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
-    let program = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs)?;
+    let mut program = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs)?;
+    let reads = expand_into(
+        &mut program,
+        &mut sources,
+        &mut editions,
+        root_edition,
+        &text_tiers,
+    )?;
     Ok(Linked {
         program,
         entry,
         sources: SourceMap::new(sources),
         editions,
+        reads,
     })
+}
+
+/// Run compile-time directive expansion over the linked program, appending each expansion's source
+/// to `sources` and its edition to `editions` in lock-step.
+///
+/// The one place expansion happens, called from every link path so the CLI and the IDE cannot end
+/// up with different ideas of what a decorated type's members are. Generated code takes the root
+/// package's edition: it was written by the extension the *root* installed, for this program.
+///
+/// Expansion sources continue the id numbering, so a diagnostic inside generated code resolves
+/// through the same [`SourceMap`] as one in a hand-written file.
+fn expand_into(
+    program: &mut Program,
+    sources: &mut Vec<Source>,
+    editions: &mut noeta_lexer::EditionMap,
+    root_edition: noeta_lexer::Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Result<Vec<String>, Vec<LoadDiagnostic>> {
+    let next_id = sources.len() as u32;
+    let (expansions, reads) = run_expansion(
+        program,
+        || sources.clone(),
+        next_id,
+        root_edition,
+        text_tiers,
+    )?;
+    for expansion in expansions {
+        editions.set(expansion.source.id(), root_edition);
+        sources.push(expansion.source);
+    }
+    Ok(reads)
+}
+
+/// Decide whether to expand, and run it — the **one** place either happens.
+///
+/// Split from [`expand_into`] because the other callers cannot append to a shared source list at
+/// all: [`ParsedDir::link_entry`] links from `&self` over an immutable directory parse, and
+/// `noeta_db::linked_from` is a salsa query over inputs it may not mutate. Both hand their caller
+/// the expansion sources to render against instead ([`EntryLink::expansions`]). Every path must
+/// nonetheless agree on when a directive expands and what its output is — otherwise the editor and
+/// the compiler disagree about a decorated type's members, which is the whole reason this function
+/// is one function — so the decision lives here and the callers differ only in what they do with the
+/// sources that come back.
+///
+/// `next_id` is the first unused [`SourceId`], and `sources` is a **provider**: the caller's sources
+/// in id order, materialized only if there is something to expand. The provider exists for
+/// `noeta_db::linked_from`, whose sources live in salsa inputs and cost a text clone each to
+/// reconstruct — a price no program without an expanding directive (nearly all of them) should pay
+/// per keystroke. Callers that already hold a slice pass a cheap clone of it.
+///
+/// Returns the expansion sources (already id'd, each with the directive that produced it) and every
+/// file the hooks reported reading.
+pub fn run_expansion(
+    program: &mut Program,
+    sources: impl FnOnce() -> Vec<Source>,
+    next_id: u32,
+    root_edition: noeta_lexer::Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Result<(Vec<ExpandedSource>, Vec<String>), Vec<LoadDiagnostic>> {
+    let registry = noeta_ext_abi::registry::single_registry_process();
+    if !expand::has_expansions(program, registry) {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    // Expansion ids continue past the sources this link already has. That numbering is **per
+    // render**, deliberately: in the directory mode two different entries of the same directory can
+    // each expand and each start at the same next id, because an entry's expansions are only ever
+    // resolved through that entry's own map ([`ParsedDir::source_map_with`]). Do not "fix" this into
+    // a directory-global counter — the ids would then be gapped and meaningless in every map that
+    // holds only one entry's expansions.
+    let sources = sources();
+    let expanded = expand::expand_program(
+        program,
+        &sources,
+        next_id,
+        root_edition,
+        text_tiers,
+        registry,
+    );
+    if !expanded.diagnostics.is_empty() {
+        return Err(expanded.diagnostics);
+    }
+    Ok((expanded.sources, expanded.reads))
 }
 
 /// Link the entry against its sibling modules **and its dependency packages** (package-manager P2.1).
@@ -559,7 +661,7 @@ pub fn link_with_deps(
     let dep_refs: Vec<&Program> = dep_programs.iter().collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let native_roots = native_dep_roots(deps);
-    let program = link_parsed_with_deps(
+    let mut program = link_parsed_with_deps(
         &entry,
         &entry_parsed.program,
         &sibling_refs,
@@ -567,11 +669,19 @@ pub fn link_with_deps(
         &broken_refs,
         Some(&native_roots),
     )?;
+    let reads = expand_into(
+        &mut program,
+        &mut sources,
+        &mut editions,
+        root_edition,
+        &text_tiers,
+    )?;
     Ok(Linked {
         program,
         entry,
         sources: SourceMap::new(sources),
         editions,
+        reads,
     })
 }
 
@@ -643,6 +753,33 @@ pub struct ParsedDir {
     /// however many entries the directory holds.
     broken_deps: Vec<BrokenModule>,
     native_roots: Vec<String>,
+    /// The union of text tiers declared anywhere in the directory (or its dependencies), from the
+    /// one program-wide lex — kept because an expansion's generated source is lexed and parsed with
+    /// the same tier set as the files around it, or a `@tier { … }` body in generated code would
+    /// tokenize differently than the identical body written by hand.
+    text_tiers: noeta_lexer::TextTiers,
+    /// The root package's edition, which every directory module was parsed under and which generated
+    /// code takes too (it is written by the extension the *root* installed).
+    root_edition: noeta_lexer::Edition,
+}
+
+/// What linking one directory entry produced — [`ParsedDir::link_entry`]'s result.
+///
+/// More than a `Program` because expansion appends sources, and a [`ParsedDir`] is shared, immutable
+/// and read by every entry: an entry that expanded cannot push into the directory's source list, so
+/// it hands its own sources back for the caller to render against
+/// ([`ParsedDir::source_map_with`] / [`ParsedDir::editions_with`]).
+#[derive(Debug)]
+pub struct EntryLink {
+    /// The linked program, with any generated members already spliced in.
+    pub program: Program,
+    /// Sources produced by compile-time expansion, ids continuing past every directory and
+    /// dependency source, each paired with the directive that produced it. **Empty** for the
+    /// overwhelmingly common case of a program with no expanding directive — the caller then reuses
+    /// the shared map untouched.
+    pub expansions: Vec<ExpandedSource>,
+    /// Every file an expansion hook reported reading, in expansion order (a rebuild trigger).
+    pub reads: Vec<String>,
 }
 
 /// Lex + parse a directory's `modules` (from [`read_dir_modules`]) and its dependency packages
@@ -698,6 +835,8 @@ pub fn parse_dir(
         dep_programs,
         broken_deps,
         native_roots,
+        text_tiers,
+        root_edition,
     }
 }
 
@@ -720,11 +859,41 @@ impl ParsedDir {
         &self.editions
     }
 
+    /// The shared sources **plus** one entry's expansions ([`EntryLink::expansions`]), so a
+    /// generated member's span resolves to the source it was generated into.
+    ///
+    /// Only an entry that expanded needs this; with an empty `expansions` it is exactly
+    /// [`Self::source_map`].
+    pub fn source_map_with(&self, expansions: &[ExpandedSource]) -> SourceMap {
+        let mut sources = Vec::with_capacity(self.sources.len() + expansions.len());
+        sources.extend(self.sources.iter().cloned());
+        sources.extend(expansions.iter().map(|e| e.source.clone()));
+        SourceMap::new(sources)
+    }
+
+    /// [`Self::editions`] extended with one entry's expansions, each at the root package's edition —
+    /// generated code was written by the extension the *root* installed, for this program. With an
+    /// empty `expansions` it is a clone of [`Self::editions`].
+    pub fn editions_with(&self, expansions: &[ExpandedSource]) -> noeta_lexer::EditionMap {
+        let mut editions = self.editions.clone();
+        for expansion in expansions {
+            editions.set(expansion.source.id(), self.root_edition);
+        }
+        editions
+    }
+
     /// Link the directory module at `index` as the entry, against every *other* cleanly-parsed
     /// module (the sibling pool) and the dependency programs — [`load_with_deps`]'s per-entry
     /// semantics over the shared parse. An entry with lex/parse diagnostics returns them, as the
     /// per-entry load did; their spans resolve against [`Self::source_map`].
-    pub fn link_entry(&self, index: usize) -> Result<Program, Vec<LoadDiagnostic>> {
+    ///
+    /// Compile-time directive expansion runs here too, through the same [`run_expansion`] the
+    /// whole-program link paths use — without it `noeta check` would disagree with `noeta run` about
+    /// a program using an expanding directive (a generated method would be "unknown method" under
+    /// one and fine under the other). A failed expansion comes back as `Err`, exactly as in
+    /// [`link`]/[`link_with_deps`]; the sources it produced come back in
+    /// [`EntryLink::expansions`], for [`Self::source_map_with`] to render against.
+    pub fn link_entry(&self, index: usize) -> Result<EntryLink, Vec<LoadDiagnostic>> {
         let entry_source = &self.sources[index];
         let entry = match &self.modules[index] {
             Ok(program) => program,
@@ -756,14 +925,26 @@ impl ParsedDir {
             .filter_map(|(_, m)| m.as_ref().err().map(Box::as_ref))
             .collect();
         let dep_refs: Vec<&Program> = self.dep_programs.iter().collect();
-        link_parsed_with_deps(
+        let mut program = link_parsed_with_deps(
             entry_source,
             entry,
             &siblings,
             &dep_refs,
             &broken,
             Some(&self.native_roots),
-        )
+        )?;
+        let (expansions, reads) = run_expansion(
+            &mut program,
+            || self.sources.clone(),
+            self.sources.len() as u32,
+            self.root_edition,
+            &self.text_tiers,
+        )?;
+        Ok(EntryLink {
+            program,
+            expansions,
+            reads,
+        })
     }
 }
 
