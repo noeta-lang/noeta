@@ -350,6 +350,43 @@ impl Stmt {
     }
 }
 
+impl Stmt {
+    /// The attachment site this statement *is*, for a directive written before it.
+    ///
+    /// Broader than [`decorated`](Self::decorated): a `fn` is a site (`Sites::FN`) even though it
+    /// carries tier annotations rather than a [`Decorators`]. `Sites::NONE` is a statement nothing
+    /// can decorate.
+    ///
+    /// Exhaustive for the same reason `decorated` is — and it exists so the three places that gate
+    /// a directive's site (decorator position, the adjacency form, a `fn` annotation) share one
+    /// vocabulary instead of each mapping the statement kind their own way.
+    pub fn attachment_site(&self) -> Sites {
+        match self {
+            Stmt::Struct(_) => Sites::STRUCT,
+            Stmt::Class(_) => Sites::CLASS,
+            Stmt::Enum(_) => Sites::ENUM,
+            Stmt::Trait(_) => Sites::TRAIT,
+            Stmt::Fn(_) => Sites::FN,
+            Stmt::Impl(_)
+            | Stmt::TierBlock { .. }
+            | Stmt::Echo { .. }
+            | Stmt::Binding { .. }
+            | Stmt::Destructure { .. }
+            | Stmt::Namespace { .. }
+            | Stmt::Use { .. }
+            | Stmt::Return { .. }
+            | Stmt::Yield { .. }
+            | Stmt::Concurrent { .. }
+            | Stmt::If { .. }
+            | Stmt::For { .. }
+            | Stmt::While { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Expr { .. } => Sites::NONE,
+        }
+    }
+}
+
 /// One `@name(args)` written in decorator position whose name the parser does not resolve.
 ///
 /// Kept as written — name, arguments, spans — so the checker can resolve it against the full
@@ -477,6 +514,12 @@ impl Sites {
     pub const TRAIT: Sites = Sites(1 << 3);
     pub const FN: Sites = Sites(1 << 4);
     pub const METHOD: Sites = Sites(1 << 5);
+    /// A struct/class field. Not a directive site today, but a `#[...]` attribute target — carried
+    /// so this vocabulary is complete over every place a decoration can be written, and no caller
+    /// has to invent an "unrepresentable site" case.
+    pub const FIELD: Sites = Sites(1 << 6);
+    /// An enum variant. As [`FIELD`](Self::FIELD).
+    pub const VARIANT: Sites = Sites(1 << 7);
     /// Every type declaration — struct, class, enum. (Deliberately excludes `trait`: a trait is a
     /// contract, not a data type, and every type directive on one is `E0054`.)
     pub const TYPE: Sites = Sites(Self::STRUCT.0 | Self::CLASS.0 | Self::ENUM.0);
@@ -511,6 +554,8 @@ impl Sites {
             (Sites::TRAIT, "a trait"),
             (Sites::FN, "a function"),
             (Sites::METHOD, "a method"),
+            (Sites::FIELD, "a field"),
+            (Sites::VARIANT, "an enum variant"),
         ] {
             if self.contains(bit) {
                 parts.push(name);

@@ -241,24 +241,13 @@ impl Checker {
             match registry.lookup(&f.name) {
                 // An extension directive: legal here unless it restricts its sites.
                 Some(DirectiveKind::ExtDirective(d)) => {
-                    let allowed = sites_of(d.sites);
-                    if !allowed.is_empty() && !allowed.contains(at.site) {
-                        self.error(
-                            DiagnosticCode::InvalidDirectiveSite,
-                            f.name_span,
-                            format!(
-                                "`@{}` does not apply to {} `{}`",
-                                f.name,
-                                at.site.label(),
-                                at.name
-                            ),
-                        )
-                        .help(format!(
-                            "`@{}` applies to {}",
-                            f.name,
-                            allowed.label()
-                        ));
-                    }
+                    self.check_declared_sites(
+                        &f.name,
+                        d.sites,
+                        at.site,
+                        Some(at.name),
+                        f.name_span,
+                    );
                 }
                 // `@tier` decorates the `fn` that runs a tier, never a type.
                 Some(DirectiveKind::Builtin(BuiltinDirective::Tier)) => {
@@ -320,6 +309,44 @@ impl Checker {
                 }
             }
         }
+    }
+}
+
+impl Checker {
+    /// The one site gate for anything whose legal sites are declared as `&[TierSite]` — an
+    /// extension's `@`-directive and an extension's tier alike.
+    ///
+    /// There were three of these: one for decorator position, one for the adjacency form
+    /// (`@name` before a top-level declaration), and one for a `fn`/method annotation. Each mapped
+    /// the statement kind its own way, compared `TierSite`s its own way, and worded the diagnostic
+    /// its own way — they agreed only because they were written together, which is the condition
+    /// that precedes drift rather than a defence against it.
+    ///
+    /// Empty `declared` is **unrestricted**, matching every other site gate in the language. A
+    /// `Sites::NONE` `at` is a place nothing can be attached, so a restricted directive is rejected
+    /// there. `subject` names the declaration when the caller has one, for the richer message.
+    pub(crate) fn check_declared_sites(
+        &mut self,
+        name: &str,
+        declared: &[noeta_ext_abi::registry::TierSite],
+        at: Sites,
+        subject: Option<&str>,
+        span: Span,
+    ) {
+        let allowed = sites_of(declared);
+        if allowed.is_empty() || (!at.is_empty() && allowed.contains(at)) {
+            return;
+        }
+        let where_ = match subject {
+            Some(s) => format!("{} `{s}`", at.label()),
+            None => at.label(),
+        };
+        self.error(
+            DiagnosticCode::InvalidDirectiveSite,
+            span,
+            format!("`@{name}` does not apply to {where_}"),
+        )
+        .help(format!("`@{name}` applies to {}", allowed.label()));
     }
 }
 

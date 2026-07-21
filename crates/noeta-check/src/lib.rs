@@ -718,33 +718,16 @@ impl TargetKind {
 
 /// The tier attachment site of a declaration `TargetKind` — the registry's site vocabulary. A
 /// `struct`/`class`/`enum` all map to `Type`; a field or variant is never a tier site (`None`).
-fn target_site(target: TargetKind) -> Option<noeta_ext_abi::registry::TierSite> {
-    use noeta_ext_abi::registry::TierSite;
-    Some(match target {
-        TargetKind::Function => TierSite::Function,
-        TargetKind::Method => TierSite::Method,
-        TargetKind::Struct | TargetKind::Class | TargetKind::Enum => TierSite::Type,
-        TargetKind::Field | TargetKind::Variant => return None,
-    })
-}
-
-/// A human-readable list of a tier's permitted sites for the E0054 help line — "a function, a
-/// method, or a type".
-fn sites_label(sites: &[noeta_ext_abi::registry::TierSite]) -> String {
-    use noeta_ext_abi::registry::TierSite;
-    let words: Vec<&str> = sites
-        .iter()
-        .map(|s| match s {
-            TierSite::Function => "a function",
-            TierSite::Method => "a method",
-            TierSite::Type => "a type",
-        })
-        .collect();
-    match words.as_slice() {
-        [] => "nothing".to_string(),
-        [one] => (*one).to_string(),
-        [a, b] => format!("{a} or {b}"),
-        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+fn target_sites(target: TargetKind) -> noeta_ast::Sites {
+    use noeta_ast::Sites;
+    match target {
+        TargetKind::Function => Sites::FN,
+        TargetKind::Method => Sites::METHOD,
+        TargetKind::Struct => Sites::STRUCT,
+        TargetKind::Class => Sites::CLASS,
+        TargetKind::Enum => Sites::ENUM,
+        TargetKind::Field => Sites::FIELD,
+        TargetKind::Variant => Sites::VARIANT,
     }
 }
 
@@ -1996,40 +1979,22 @@ impl Checker {
     /// Site-check an extension `@`-directive written in the **adjacency** form — `@name(…)`
     /// immediately before a declaration, which the parser wraps in a one-item `TierBlock`.
     ///
-    /// Empty `sites` is unrestricted, matching every other site gate in the language.
+    /// The statement kind maps to a site through `Stmt::attachment_site`, the same vocabulary the
+    /// decorator and annotation positions use, and the gate itself is shared.
     fn check_ext_directive_block(
         &mut self,
         directive: &'static noeta_ext_abi::registry::ExtDirective,
         items: &[Stmt],
         span: Span,
     ) {
-        if directive.sites.is_empty() {
-            return;
-        }
         for item in items {
-            let (here, label) = match item {
-                Stmt::Fn(_) => (
-                    Some(noeta_ext_abi::registry::TierSite::Function),
-                    "function",
-                ),
-                Stmt::Struct(_) => (Some(noeta_ext_abi::registry::TierSite::Type), "struct"),
-                Stmt::Class(_) => (Some(noeta_ext_abi::registry::TierSite::Type), "class"),
-                Stmt::Enum(_) => (Some(noeta_ext_abi::registry::TierSite::Type), "enum"),
-                Stmt::Trait(_) => (None, "trait"),
-                _ => (None, "statement"),
-            };
-            if here.is_none_or(|s| !directive.sites.contains(&s)) {
-                self.error(
-                    DiagnosticCode::InvalidDirectiveSite,
-                    span,
-                    format!("`@{}` cannot attach to a {label}", directive.name),
-                )
-                .help(format!(
-                    "`@{}` may attach to {}",
-                    directive.name,
-                    sites_label(directive.sites)
-                ));
-            }
+            self.check_declared_sites(
+                directive.name,
+                directive.sites,
+                item.attachment_site(),
+                None,
+                span,
+            );
         }
     }
 
@@ -2054,22 +2019,9 @@ impl Checker {
                 Some(d) => d.sites,
                 None => self.symbols.tier_registry.sites(&dir.name),
             };
-            let here = target_site(target);
-            if !sites.is_empty() && here.is_none_or(|s| !sites.contains(&s)) {
-                self.error(
-                    DiagnosticCode::InvalidDirectiveSite,
-                    dir.name_span,
-                    format!(
-                        "`@{}` cannot attach to a {}",
-                        dir.name,
-                        target.label().to_lowercase()
-                    ),
-                )
-                .help(format!(
-                    "`@{}` may attach to {}",
-                    dir.name,
-                    sites_label(sites)
-                ));
+            let before = self.diags.len();
+            self.check_declared_sites(&dir.name, sites, target_sites(target), None, dir.name_span);
+            if self.diags.len() != before {
                 continue;
             }
             // A `@test`/`@bench` method is invoked with no receiver, so it must not read `self`.

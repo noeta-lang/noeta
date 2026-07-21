@@ -339,6 +339,45 @@ fn an_extension_directive_on_a_function_resolves_as_a_directive() {
     }
 }
 
+/// The three positions a directive can be written in — decorator, adjacency (before a top-level
+/// declaration), and a method annotation — go through ONE site gate, so they agree.
+///
+/// They used to be three gates: each mapped the statement kind its own way, compared sites its own
+/// way, and worded the diagnostic its own way. They agreed only because they were written in one
+/// sitting. `@openapi` declares `TierSite::Type`, so every non-type position must reject it, and
+/// say the same thing when it does.
+#[test]
+fn every_position_shares_one_site_gate() {
+    let reject = |src: &str| -> Vec<String> {
+        match Session::builder().with_extensions(vec![&PLUGIN]).load(src) {
+            Err(Error::Check(diags)) => diags,
+            other => panic!("expected `@openapi` to be rejected here, got {other:?}"),
+        }
+    };
+    // Decorator position, adjacency position, method-annotation position.
+    for src in [
+        "@openapi(\"s.yaml\")\ntrait T { fn area(): int }\necho 1\n",
+        "@openapi(\"s.yaml\")\nfn f(): int { return 1 }\necho f()\n",
+        "struct S {\n  x: int\n  @openapi(\"s.yaml\")\n  fn m(): int { return 1 }\n}\necho 1\n",
+    ] {
+        let diags = reject(src);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("`@openapi` does not apply to")),
+            "every position words it the same way, got {diags:?} for: {src}"
+        );
+    }
+
+    // And the position it does declare still checks clean.
+    assert!(
+        Session::builder()
+            .with_extensions(vec![&PLUGIN])
+            .load(USES_OPENAPI_DIRECTIVE)
+            .is_ok()
+    );
+}
+
 #[test]
 fn the_checker_scopes_the_tier_namespace_to_the_session_registry() {
     // The plugin session's registry declares `@audit`, so the block checks clean.
