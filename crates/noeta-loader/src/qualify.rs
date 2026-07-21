@@ -525,6 +525,9 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
             }
+            for spec in &mut decl.decorators.derives {
+                q_derive(spec, visit);
+            }
             for f in &mut decl.fields {
                 q_field(f, visit);
             }
@@ -544,6 +547,9 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
             }
+            for spec in &mut decl.decorators.derives {
+                q_derive(spec, visit);
+            }
             for f in &mut decl.fields {
                 q_field(f, visit);
             }
@@ -559,6 +565,9 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             q_type_params(&mut decl.type_params, visit);
             for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
+            }
+            for spec in &mut decl.decorators.derives {
+                q_derive(spec, visit);
             }
             q_opt_typeref(&mut decl.backing, visit);
             for variant in &mut decl.variants {
@@ -665,6 +674,27 @@ fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
     visit(&mut decl.target, NameKind::Type, None);
     for m in &mut decl.methods {
         q_fn(m, visit);
+    }
+}
+
+/// Walk a `@derive(Trait, …)`: the trait it names is a type reference like any other, and so are
+/// its generic arguments (`Serialize<Json>`).
+///
+/// This walk did not exist. A declaration's `#[...]` data attributes qualified, its `impl` blocks
+/// qualified, a trait declaration's own name qualified — but a `@derive`'s payload never did, so
+/// deriving an **imported** user trait was impossible: after linking, the trait was registered
+/// under its qualified name while the derive still said the short one, and the derive failed with
+/// "unknown trait". The qualified spelling was no escape either, since the grammar takes a bare
+/// trait name. A directive's arguments were simply not wired into the machinery every other name
+/// goes through.
+///
+/// The bindings (`value: amount`) and `via:` field are **member** names on the deriving type, not
+/// types, so they are deliberately left alone. A built-in trait name (`Comparable`) is not in the
+/// map and passes through untouched, exactly as it does for `impl Comparable`.
+fn q_derive(spec: &mut noeta_ast::DeriveSpec, visit: &mut NameVisitor) {
+    visit(&mut spec.name, NameKind::Type, None);
+    for arg in &mut spec.args {
+        q_typeref(arg, visit);
     }
 }
 

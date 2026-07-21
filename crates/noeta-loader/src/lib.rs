@@ -1976,6 +1976,52 @@ mod tests {
         );
     }
 
+    /// A `@derive(<ImportedTrait>)` names a type, so the linker must qualify it like any other
+    /// type reference. It did not: a declaration's `#[...]` attributes qualified, its `impl` blocks
+    /// qualified, a `trait` declaration's own name qualified — but a directive's payload was never
+    /// walked. The trait therefore registered under `App.Shapes.Describable` while the derive still
+    /// said `Describable`, so deriving an imported trait failed with "unknown trait". Writing the
+    /// qualified name instead was no escape: `@derive` takes a bare trait name.
+    #[test]
+    fn qualifies_the_trait_named_by_an_imported_derive() {
+        let shapes = module(
+            "shapes.noe",
+            "namespace App.Shapes;\npub trait Describable {\n  fn describe(): string { return \"a thing\" }\n}\n",
+        );
+        let entry = "namespace App.Main;\nuse App.Shapes.Describable;\n@derive(Describable)\nstruct Point { x: int }\n";
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&shapes),
+        )
+        .unwrap();
+        let derived: Vec<&str> = linked
+            .program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Struct(d) => Some(d),
+                _ => None,
+            })
+            .flat_map(|d| d.decorators.derives.iter())
+            .map(|spec| spec.name.as_str())
+            .collect();
+        assert_eq!(
+            derived,
+            vec!["App.Shapes.Describable"],
+            "the derive must name the trait's qualified identity, as the merged declaration does"
+        );
+        assert!(
+            linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Trait(t) if t.name == "App.Shapes.Describable")),
+            "and that identity is what the trait declaration merged under"
+        );
+    }
+
     #[test]
     fn links_a_used_module_declaration() {
         let models = module(
