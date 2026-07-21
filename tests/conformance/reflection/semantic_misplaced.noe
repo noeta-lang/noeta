@@ -1,5 +1,5 @@
-// `@semantic` marks an *enum* role-eligible; placing it on a struct is a checker error (E0031).
-// expect: error E0031 at 4:2
+// `@semantic` marks an *enum* role-eligible; placing it on a struct is a misplacement (E0054).
+// expect: error E0054 at 4:2
 // expect: exit 1
 @semantic
 struct Route { path: string }

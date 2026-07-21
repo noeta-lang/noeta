@@ -522,8 +522,11 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Class(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.attrs {
+            for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
+            }
+            for spec in &mut decl.decorators.derives {
+                q_derive(spec, visit);
             }
             for f in &mut decl.fields {
                 q_field(f, visit);
@@ -541,8 +544,11 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Struct(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.attrs {
+            for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
+            }
+            for spec in &mut decl.decorators.derives {
+                q_derive(spec, visit);
             }
             for f in &mut decl.fields {
                 q_field(f, visit);
@@ -557,8 +563,11 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
         Stmt::Enum(decl) => {
             visit(&mut decl.name, NameKind::Type, None);
             q_type_params(&mut decl.type_params, visit);
-            for a in &mut decl.attrs {
+            for a in &mut decl.decorators.attrs {
                 q_attr(a, visit);
+            }
+            for spec in &mut decl.decorators.derives {
+                q_derive(spec, visit);
             }
             q_opt_typeref(&mut decl.backing, visit);
             for variant in &mut decl.variants {
@@ -668,6 +677,27 @@ fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
     }
 }
 
+/// Walk a `@derive(Trait, …)`: the trait it names is a type reference like any other, and so are
+/// its generic arguments (`Serialize<Json>`).
+///
+/// This walk did not exist. A declaration's `#[...]` data attributes qualified, its `impl` blocks
+/// qualified, a trait declaration's own name qualified — but a `@derive`'s payload never did, so
+/// deriving an **imported** user trait was impossible: after linking, the trait was registered
+/// under its qualified name while the derive still said the short one, and the derive failed with
+/// "unknown trait". The qualified spelling was no escape either, since the grammar takes a bare
+/// trait name. A directive's arguments were simply not wired into the machinery every other name
+/// goes through.
+///
+/// The bindings (`value: amount`) and `via:` field are **member** names on the deriving type, not
+/// types, so they are deliberately left alone. A built-in trait name (`Comparable`) is not in the
+/// map and passes through untouched, exactly as it does for `impl Comparable`.
+fn q_derive(spec: &mut noeta_ast::DeriveSpec, visit: &mut NameVisitor) {
+    visit(&mut spec.name, NameKind::Type, None);
+    for arg in &mut spec.args {
+        q_typeref(arg, visit);
+    }
+}
+
 /// Walk a `#[Attr(...)]` data attribute: its name is a `@attribute` struct, and its literal
 /// arguments may themselves name nominal types (a struct/enum/type-ref literal).
 fn q_attr(a: &mut Attribute, visit: &mut NameVisitor) {
@@ -697,8 +727,13 @@ fn q_attr_value(av: &mut AttrValue, visit: &mut NameVisitor) {
                 .iter_mut()
                 .for_each(|(_, val)| q_attr_value(val, visit));
         }
-        AttrValue::TypeRef(name) => {
+        AttrValue::TypeRef { name, args } => {
             visit(name, NameKind::Type, None);
+            // A generic argument is itself a type reference and must be qualified too, or
+            // `@derive(Serialize<Json>)` would resolve `Serialize` but leave `Json` bare.
+            for arg in args {
+                q_typeref(arg, visit);
+            }
         }
         AttrValue::Str(_) | AttrValue::Int(_) | AttrValue::Float(_) | AttrValue::Bool(_) => {}
     }

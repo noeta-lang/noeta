@@ -96,31 +96,55 @@ pub fn directive_signature(
                 .join(" | ");
             Some(one(&format!("@packed({variants})"), &variants))
         }
-        Some(BuiltinDirective::Semantic) => None, // takes no arguments
-        // `@validated` takes no arguments; it previously reached the tier-annotation fallthrough,
-        // which returns `None` for a name that is not a registered tier — identical, now explicit.
-        Some(BuiltinDirective::Validated) => None,
-        Some(BuiltinDirective::Tier) => {
-            let parameters = vec![
-                "name".to_string(),
-                "config: Type | text: \"<lang>\" | expr: Type".to_string(),
-            ];
+        // Directives whose signature is fully described by the metadata table: the parameter names
+        // are static, so there is nothing to compute. A directive that takes no arguments has an
+        // empty `params` and correctly yields no signature.
+        //
+        // The arms above stay hand-written because their labels interpolate a *vocabulary* that
+        // this table deliberately does not own — the derivable traits come from `noeta-types`, the
+        // `Layout` variants and semantic-enum variants from `reflect`. The table says `@packed`
+        // takes one argument; it does not say which layouts exist.
+        Some(directive) => {
+            let info = directive.info();
+            if info.params.is_empty() {
+                return None;
+            }
+            let parameters: Vec<String> = info.params.iter().map(|p| p.to_string()).collect();
             Some(SignatureData {
-                label: format!("@tier({})", parameters.join(", ")),
+                label: format!("@{directive}({})", parameters.join(", ")),
                 active_param: ctxt.active.min(parameters.len() - 1),
                 parameters,
             })
         }
         // Not a built-in directive — a tier annotation: its signature is the config attribute's
-        // field list.
+        // field list. Both halves of the tier name-space resolve through the one registry lookup,
+        // so the dispatch is total over `DirectiveKind` (a future kind must state its signature
+        // here) rather than a pair of `or_else`d probes ending in an implicit "must be unknown".
         None => {
+            use noeta_check::directives::{DirectiveKind, DirectiveRegistry};
             let tier = ctxt.directive.as_str();
             let reg = noeta_stdlib::registry::single_registry_process();
-            let tiers = noeta_check::tiers::TierRegistry::collect_with_registry(program, reg);
-            let config = reg
-                .find_ext_tier(tier)
-                .and_then(|t| t.config.map(String::from))
-                .or_else(|| tiers.declared(tier).and_then(|d| d.config.clone()))?;
+            let directives = DirectiveRegistry::collect_with_registry(program, reg);
+            let config = match directives.lookup(tier)? {
+                DirectiveKind::ExtTier(t) => t.config.map(String::from)?,
+                DirectiveKind::DeclaredTier(d) => d.config.clone()?,
+                // An extension's own directive carries its parameter names in its declaration —
+                // no config attribute to go and read.
+                DirectiveKind::ExtDirective(d) => {
+                    if d.params.is_empty() {
+                        return None;
+                    }
+                    let parameters: Vec<String> =
+                        d.params.iter().map(|p| (*p).to_string()).collect();
+                    return Some(SignatureData {
+                        label: format!("@{}({}) — {}", d.name, parameters.join(", "), d.detail),
+                        active_param: ctxt.active.min(parameters.len() - 1),
+                        parameters,
+                    });
+                }
+                // `from_name` already returned `None`, so the lookup cannot answer `Builtin`.
+                DirectiveKind::Builtin(_) => return None,
+            };
             let parameters: Vec<String> =
                 if let Some(attr) = noeta_stdlib::registry::find_ext_attribute(&config) {
                     attr.fields

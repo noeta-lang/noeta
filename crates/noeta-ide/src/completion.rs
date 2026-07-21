@@ -193,25 +193,6 @@ pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// The short usage detail shown beside a built-in decorator directive — the closed set the
-/// statement grammar dispatches on ([`noeta_ast::BuiltinDirective`]). Exhaustive on the enum so a new
-/// directive can't be offered without a detail string.
-fn decorator_detail(directive: BuiltinDirective) -> &'static str {
-    match directive {
-        BuiltinDirective::Derive => "@derive(Trait, …) — derive implementations for a type",
-        BuiltinDirective::Attribute => "@attribute(…) — declare this struct as a data attribute",
-        BuiltinDirective::Role => {
-            "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles"
-        }
-        BuiltinDirective::Semantic => "@semantic — mark an enum's variants as role names",
-        BuiltinDirective::Packed => "@packed(Layout.Row|Layout.Column) — flat value-struct layout",
-        BuiltinDirective::Validated => {
-            "@validated — literal construction only through the type's own constructor functions"
-        }
-        BuiltinDirective::Tier => "@tier(name, …) — declare a dev-tier and its runner",
-    }
-}
-
 /// The directive candidates offered right after an `@` (**directive completion**, C4): the built-in
 /// decorator directives (the parser's closed set, so completion and the grammar can never drift)
 /// followed by the **tier name-space** — the installed extensions' tiers (`test`/`bench`/`doc`/
@@ -221,47 +202,19 @@ fn decorator_detail(directive: BuiltinDirective) -> &'static str {
 /// offered. De-duplicated by label (a program re-declaration of an extension tier — a second
 /// *provider* — is still one name).
 pub fn directives(program: &Program) -> Vec<Candidate> {
-    let mut candidates = Vec::new();
-    for directive in BuiltinDirective::ALL {
-        candidates.push(Candidate {
-            label: directive.as_str().to_string(),
-            kind: CandidateKind::Directive,
-            detail: Some(decorator_detail(directive).to_string()),
-        });
-    }
-    // The registry-scoped tier name-space (LSP/IDE run single-registry: the seeded process global).
+    // The registry-scoped name-space (LSP/IDE run single-registry: the seeded process global).
+    // Enumeration, de-duplication and how a tier renders all live in the registry now — this used to
+    // be three inline loops with two near-identical copies of the tier detail string.
     let reg = noeta_stdlib::registry::single_registry_process();
-    let tiers = noeta_check::tiers::TierRegistry::collect_with_registry(program, reg);
-    for tier in tiers.extension_tiers() {
-        let detail = match (tier.expr, tier.text) {
-            (Some(ty), _) => format!("expression tier — @{} {{ … }} : {ty}", tier.name),
-            (None, Some(lang)) => format!("text tier ({lang})"),
-            (None, None) => "dev-tier".to_string(),
-        };
-        candidates.push(Candidate {
-            label: tier.name.to_string(),
+    noeta_check::directives::DirectiveRegistry::collect_with_registry(program, reg)
+        .all()
+        .into_iter()
+        .map(|entry| Candidate {
+            label: entry.name,
             kind: CandidateKind::Directive,
-            detail: Some(detail),
-        });
-    }
-    for tier in tiers.declared_tiers() {
-        let provider = if tier.root.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", tier.root)
-        };
-        let detail = match (&tier.expr, &tier.text) {
-            (Some(ty), _) => format!("expression tier — @{} {{ … }} : {ty}{provider}", tier.name),
-            (None, Some(lang)) => format!("text tier ({lang}){provider}"),
-            (None, None) => format!("dev-tier{provider}"),
-        };
-        candidates.push(Candidate {
-            label: tier.name.clone(),
-            kind: CandidateKind::Directive,
-            detail: Some(detail),
-        });
-    }
-    dedupe_by_label(candidates)
+            detail: Some(entry.detail),
+        })
+        .collect()
 }
 
 /// The directive-argument position the cursor is in: inside the parens of `@<directive>(…)`,
@@ -479,7 +432,9 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
                 .stmts
                 .iter()
                 .find_map(|stmt| match stmt {
-                    Stmt::Enum(decl) if decl.name == *head && decl.semantic.is_some() => {
+                    Stmt::Enum(decl)
+                        if decl.name == *head && decl.decorators.semantic.is_some() =>
+                    {
                         Some(decl.variants.iter().map(|v| v.name.clone()).collect())
                     }
                     _ => None,
@@ -502,7 +457,7 @@ fn role_candidates(ctxt: &DirectiveArgContext, program: &Program) -> Vec<Candida
     }];
     for stmt in &program.stmts {
         if let Stmt::Enum(decl) = stmt
-            && decl.semantic.is_some()
+            && decl.decorators.semantic.is_some()
         {
             candidates.push(Candidate {
                 label: decl.name.clone(),
@@ -622,11 +577,19 @@ pub fn is_directive_position(text: &str, offset: u32) -> bool {
 }
 
 /// The member candidates of the type named `type_name` in `program`: its fields, enum variants, and
-/// methods, each with a signature/type detail — for member completion after `.`, once the receiver's
-/// type is known. Empty if no such type is declared (or it declares no members). The `program`
-/// should be the merged workspace program so a type imported from a sibling resolves.
+/// methods — declared **and derive-synthesized** — each with a signature/type detail, for member
+/// completion after `.` once the receiver's type is known. Empty if no such type is declared (or it
+/// declares no members). The `program` should be the merged workspace program so a type imported
+/// from a sibling resolves.
+///
+/// The synthesized half was missing: a `@derive(Inspect)` type's `inspect()`, a `@derive(Error)`
+/// type's `message()`, a derived user trait's adopted defaults all ran fine but were never offered,
+/// because this walked the AST's declared methods and a derive's methods exist nowhere in the AST.
+/// It runs the same `plan_derive` cascade the checker and the backends run, so completion offers
+/// exactly what will resolve.
 pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
     let mut members = Vec::new();
+    let derive_ctx = IdeDeriveContext::new(program);
     for stmt in &program.stmts {
         match stmt {
             Stmt::Struct(decl) if decl.name == type_name => {
@@ -638,6 +601,14 @@ pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
                     });
                 }
                 push_methods(&mut members, &decl.methods);
+                push_derived(
+                    &mut members,
+                    &derive_ctx,
+                    &decl.decorators.derives,
+                    type_name,
+                    &decl.fields,
+                    &decl.methods,
+                );
             }
             Stmt::Class(decl) if decl.name == type_name => {
                 for field in &decl.fields {
@@ -648,6 +619,14 @@ pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
                     });
                 }
                 push_methods(&mut members, &decl.methods);
+                push_derived(
+                    &mut members,
+                    &derive_ctx,
+                    &decl.decorators.derives,
+                    type_name,
+                    &decl.fields,
+                    &decl.methods,
+                );
             }
             Stmt::Enum(decl) if decl.name == type_name => {
                 for variant in &decl.variants {
@@ -658,11 +637,77 @@ pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
                     });
                 }
                 push_methods(&mut members, &decl.methods);
+                // An enum has no fields to bridge from; a derived trait's defaults still apply.
+                push_derived(
+                    &mut members,
+                    &derive_ctx,
+                    &decl.decorators.derives,
+                    type_name,
+                    &[],
+                    &decl.methods,
+                );
             }
             _ => {}
         }
     }
     dedupe_by_label(members)
+}
+
+/// The IDE's answers for the shared derive cascade: user traits from the merged program, native
+/// recipes from the process-global extension registry (the single-registry LSP/IDE path).
+struct IdeDeriveContext {
+    traits: std::collections::HashMap<String, noeta_ast::TraitDecl>,
+}
+
+impl IdeDeriveContext {
+    fn new(program: &Program) -> IdeDeriveContext {
+        IdeDeriveContext {
+            traits: program
+                .stmts
+                .iter()
+                .filter_map(|s| match s {
+                    Stmt::Trait(t) => Some((t.name.clone(), t.clone())),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl noeta_ast::derive::DeriveContext for IdeDeriveContext {
+    fn user_trait(&self, name: &str) -> Option<noeta_ast::TraitDecl> {
+        self.traits.get(name).cloned()
+    }
+
+    fn native_recipe(&self, name: &str) -> Option<Vec<(String, usize, String)>> {
+        let d = noeta_stdlib::registry::single_registry_process().find_ext_derive(name)?;
+        Some(
+            d.methods
+                .iter()
+                .map(|m| (m.name.to_string(), m.arity, m.handler.to_string()))
+                .collect(),
+        )
+    }
+}
+
+/// Append the methods a declaration's `@derive(...)` directives synthesize. A derive whose plan
+/// fails contributes nothing — the checker reports it, and offering members of a broken derive
+/// would be worse than offering none.
+fn push_derived(
+    members: &mut Vec<Candidate>,
+    ctx: &IdeDeriveContext,
+    derives: &[noeta_ast::DeriveSpec],
+    type_name: &str,
+    fields: &[noeta_ast::FieldDecl],
+    methods: &[noeta_ast::FnDecl],
+) {
+    for spec in derives {
+        if let Some(Ok(planned)) =
+            noeta_ast::derive::plan_derive(ctx, spec, type_name, fields, methods)
+        {
+            push_methods(members, &planned);
+        }
+    }
 }
 
 /// Append each method as a `Method` candidate carrying its signature.
@@ -1014,6 +1059,40 @@ mod tests {
         let lexed = lex(&source);
         let program = parse(&source, &lexed.tokens).program;
         members_of(&program, type_name)
+    }
+
+    /// A derive's methods exist nowhere in the AST, so walking the declared methods missed them
+    /// entirely: `@derive(Error)`'s `message()` and a derived user trait's adopted defaults ran
+    /// fine but were never offered. Completion runs the shared `plan_derive` cascade now, so what
+    /// it offers is what will resolve.
+    #[test]
+    fn members_include_what_a_derive_synthesizes() {
+        let src = "trait Describable {\n  fn label(): string { return \"thing\" }\n  fn describe(): string { return self.label() }\n}\n@derive(Describable)\nstruct Point { x: int }\n";
+        let ms = members(src, "Point");
+        let labels: Vec<&str> = ms.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"x"), "declared field: {labels:?}");
+        assert!(
+            labels.contains(&"describe") && labels.contains(&"label"),
+            "the derived trait's adopted defaults: {labels:?}"
+        );
+        assert_eq!(
+            ms.iter().find(|c| c.label == "describe").map(|c| c.kind),
+            Some(CandidateKind::Method)
+        );
+    }
+
+    /// A method the type declares itself wins over the derive's — the same precedence the hoist
+    /// applies (a provided method is never overwritten), so completion shows one entry with the
+    /// real signature.
+    #[test]
+    fn a_declared_method_wins_over_a_derived_one() {
+        let src = "trait Describable {\n  fn describe(): string { return \"default\" }\n}\n@derive(Describable)\nstruct Point {\n  x: int\n  fn describe(): string { return \"mine\" }\n}\n";
+        let ms = members(src, "Point");
+        assert_eq!(
+            ms.iter().filter(|c| c.label == "describe").count(),
+            1,
+            "one entry, not two"
+        );
     }
 
     #[test]

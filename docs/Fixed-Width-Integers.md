@@ -104,7 +104,7 @@ echo acc.len()                          // 3
 
 Rules:
 
-- `@packed` marks a **struct** only. On a class it is E0038 (a class has identity; a packed value type is a value).
+- `@packed` marks a **struct** only. On a class it is E0054, a misplaced directive (a class has identity; a packed value type is a value). E0038 is reserved for a packed struct's *field* constraints.
 - Fields must be packable — fixed-width ints, `int`, `f32`, `bool`, or a nested `@packed` struct. A non-primitive field is rejected.
 - Every list operation (index, field read, iteration, `set`, `~`/concat, `slice`/`reverse`/`filter`/`map`) yields exactly what the boxed layout would.
 

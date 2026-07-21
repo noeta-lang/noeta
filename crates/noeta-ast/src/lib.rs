@@ -209,37 +209,196 @@ pub struct StructDecl {
     /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in
     /// `methods`; these entries let the checker validate each trait and its required signatures.
     pub impls: Vec<ImplBlock>,
+    /// Every `@`-decorator and `#[...]` attribute written on this declaration. See [`Decorators`].
+    pub decorators: Decorators,
+    pub span: Span,
+}
+
+/// Every built-in decorator a declaration can carry, in one place.
+///
+/// Each of [`StructDecl`], [`ClassDecl`], [`EnumDecl`] and [`TraitDecl`] holds exactly one of these,
+/// so **every declaration kind has a slot for every directive** — including the ones that are errors
+/// where they sit. That uniformity is the point, and it is the rule the individual fields already
+/// stated one at a time: a misplaced `@attribute` on a class is "kept so the checker can point at the
+/// mistake rather than silently dropping it".
+///
+/// Before this struct existed, that rule held only where someone had remembered to add the field.
+/// `EnumDecl` had no `attribute`/`role`/`validated` and `TraitDecl` had no `validated`, so the parser
+/// discarded those directives outright — no AST record, therefore no diagnostic, therefore a program
+/// whose `@validated` an enum author wrote and the compiler never saw. Adding a directive is now one
+/// field here rather than a decision repeated four times and forgotten twice.
+///
+/// Which placements are *legal* is not encoded here — it is the checker's call (`E0054` for every
+/// misplacement). This type's only job is that nothing written in source goes unrecorded.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Decorators {
     /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
-    /// across all directive lines. Validated by the checker; drives compiler codegen.
+    /// across all directive lines. Validated by the checker; drives compiler codegen. On a trait
+    /// this is always a checker error (a trait is not a data type), carried to report at the site.
     pub derives: Vec<DeriveSpec>,
-    /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; collected
-    /// into the compiler-built manifest, and gated by the checker (each must name a struct marked
+    /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; collected into
+    /// the compiler-built manifest, and gated by the checker (each must name a struct marked
     /// `@attribute`, and its arguments must construct it).
     pub attrs: Vec<Attribute>,
-    /// The `@attribute` opt-in directive (P2.5): `None` ⇒ an ordinary struct; `Some(kinds)` ⇒ this
-    /// struct is usable as an attribute. The `kinds` are the placement restriction from
+    /// The `@attribute` opt-in directive (P2.5): `None` ⇒ an ordinary declaration; `Some(kinds)` ⇒
+    /// usable as a `#[Name(…)]` attribute. The `kinds` are the placement restriction from
     /// `@attribute(Method, Function, …)` — empty (bare `@attribute`) ⇒ attaches anywhere. Attributes
-    /// are **structs only**; the same directive on a class/enum is a checker error.
+    /// are **structs only**; the same directive on a class/enum/trait is a checker error.
     pub attribute: Option<Vec<(String, Span)>>,
     /// The `@role(Enum.Variant)` semantic-role tags: `None` ⇒ no role; `Some(tags)` ⇒ this attribute
     /// confers each named architectural role on every declaration it annotates. Multiple roles are
-    /// allowed (a thing may be both an `EntryPoint` and a `TrustBoundary`). The checker validates each
-    /// (a fieldless variant of a `@semantic` enum, on a struct that is also `@attribute`) — `E0031`.
+    /// allowed (a thing may be both an `EntryPoint` and a `TrustBoundary`). The checker validates
+    /// each (a fieldless variant of a `@semantic` enum, on a struct that is also `@attribute`) —
+    /// `E0031`. On a class/enum this is a misplacement (`E0054`), carried so the checker can
+    /// report it.
     pub role: Option<Vec<RoleTag>>,
-    /// The `@semantic` directive (a misplacement here — it marks *enums* role-eligible). `Some(span)`
-    /// on a struct is always a checker error (`E0031`), carried so the checker can point at it.
+    /// The `@semantic` directive: `Some(span)` marks an **enum** role-eligible, so its fieldless
+    /// variants may be referenced by `@role(Enum.Variant)`. The built-in `Semantic` enum is
+    /// implicitly semantic. `Some` on a struct/class/trait is always a misplacement (`E0054`),
+    /// carried so the checker can point at it.
     pub semantic: Option<Span>,
-    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
-    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
-    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
-    /// an ordinary declaration.
+    /// The `@packed` layout directive (P-PACK): `Some` marks a value `struct` for an unboxed,
+    /// contiguous flat layout. A misplacement on a class/enum/trait is `E0054`; on a struct, every
+    /// field must be a primitive or another packed struct (`E0038`, a distinct fault).
     pub packed: Option<PackedDirective>,
     /// The `@validated` directive (validation arc): `Some(span)` marks this type so that literal
     /// construction (`T { ... }`, incl. a record-update spread) from OUTSIDE its own `impl`/methods
-    /// is a compile error (`E0060`), forcing construction through a validating constructor. `None`
-    /// for an ordinary declaration. Construction inside the type's own methods stays legal, and the
-    /// recipe doors are exempt (they auto-validate).
+    /// is a compile error (`E0060`), forcing construction through a validating constructor.
+    /// Construction inside the type's own methods stays legal, and the recipe doors are exempt (they
+    /// auto-validate). On an enum/trait it is a misplacement the checker reports.
     pub validated: Option<Span>,
+    /// Directives in decorator position that the **decorator grammar does not own**: an
+    /// extension-declared `@`-directive, a misplaced `@tier`, or a typo.
+    ///
+    /// The parser records them verbatim rather than judging them, because the directive name-space
+    /// includes an extension set the parser cannot see — `noeta-parser` depends on the lexer and
+    /// the AST, not on the registry. Resolution is the checker's, which is also what folds the
+    /// old parser-level "unknown directive" into the one placement check.
+    pub foreign: Vec<ForeignDirective>,
+}
+
+/// A declaration that bears `@`-directives, as the placement check wants it: its decorators, the
+/// site they sit on, and the name to blame in a diagnostic.
+#[derive(Debug, Clone, Copy)]
+pub struct Decorated<'a> {
+    pub decorators: &'a Decorators,
+    /// The site as a single set bit — `Sites::ENUM` for an enum, and so on. The diagnostic's noun
+    /// ("an enum") comes from [`Sites::label`], not from a second hand-written string: those two
+    /// drifted, and a misplaced directive on a struct said "a record" while its own help said
+    /// "a struct".
+    pub site: Sites,
+    pub name: &'a str,
+    pub name_span: Span,
+}
+
+impl Stmt {
+    /// This statement as a decorated declaration, or `None` if it cannot bear `@`-directives.
+    ///
+    /// The one place that answers "which declarations carry directives, and what site is each" —
+    /// and it is **exhaustive over every `Stmt` variant on purpose**. The checker's walk used to
+    /// match three kinds and end in `_ => {}`, so a new declaration kind would have been silently
+    /// unchecked: the rule would exist, be declarative, and simply never run on it. That is the
+    /// same class of hole the placement check was written to close, one level up.
+    pub fn decorated(&self) -> Option<Decorated<'_>> {
+        match self {
+            Stmt::Struct(d) => Some(Decorated {
+                decorators: &d.decorators,
+                site: Sites::STRUCT,
+                name: &d.name,
+                name_span: d.name_span,
+            }),
+            Stmt::Class(d) => Some(Decorated {
+                decorators: &d.decorators,
+                site: Sites::CLASS,
+                name: &d.name,
+                name_span: d.name_span,
+            }),
+            Stmt::Enum(d) => Some(Decorated {
+                decorators: &d.decorators,
+                site: Sites::ENUM,
+                name: &d.name,
+                name_span: d.name_span,
+            }),
+            Stmt::Trait(d) => Some(Decorated {
+                decorators: &d.decorators,
+                site: Sites::TRAIT,
+                name: &d.name,
+                name_span: d.name_span,
+            }),
+            // A `fn`'s directives are tier annotations on `FnDecl::tier`/`::directives`, not a
+            // `Decorators` — a different carrier with its own gate (`check_directives`).
+            Stmt::Fn(_)
+            // An `impl` block decorates nothing; its methods are `FnDecl`s.
+            | Stmt::Impl(_)
+            // A tier block's own `@name` is the tier, not a decorator on it.
+            | Stmt::TierBlock { .. }
+            | Stmt::Echo { .. }
+            | Stmt::Binding { .. }
+            | Stmt::Destructure { .. }
+            | Stmt::Namespace { .. }
+            | Stmt::Use { .. }
+            | Stmt::Return { .. }
+            | Stmt::Yield { .. }
+            | Stmt::Concurrent { .. }
+            | Stmt::If { .. }
+            | Stmt::For { .. }
+            | Stmt::While { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Expr { .. } => None,
+        }
+    }
+}
+
+impl Stmt {
+    /// The attachment site this statement *is*, for a directive written before it.
+    ///
+    /// Broader than [`decorated`](Self::decorated): a `fn` is a site (`Sites::FN`) even though it
+    /// carries tier annotations rather than a [`Decorators`]. `Sites::NONE` is a statement nothing
+    /// can decorate.
+    ///
+    /// Exhaustive for the same reason `decorated` is — and it exists so the three places that gate
+    /// a directive's site (decorator position, the adjacency form, a `fn` annotation) share one
+    /// vocabulary instead of each mapping the statement kind their own way.
+    pub fn attachment_site(&self) -> Sites {
+        match self {
+            Stmt::Struct(_) => Sites::STRUCT,
+            Stmt::Class(_) => Sites::CLASS,
+            Stmt::Enum(_) => Sites::ENUM,
+            Stmt::Trait(_) => Sites::TRAIT,
+            Stmt::Fn(_) => Sites::FN,
+            Stmt::Impl(_)
+            | Stmt::TierBlock { .. }
+            | Stmt::Echo { .. }
+            | Stmt::Binding { .. }
+            | Stmt::Destructure { .. }
+            | Stmt::Namespace { .. }
+            | Stmt::Use { .. }
+            | Stmt::Return { .. }
+            | Stmt::Yield { .. }
+            | Stmt::Concurrent { .. }
+            | Stmt::If { .. }
+            | Stmt::For { .. }
+            | Stmt::While { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Expr { .. } => Sites::NONE,
+        }
+    }
+}
+
+/// One `@name(args)` written in decorator position whose name the parser does not resolve.
+///
+/// Kept as written — name, arguments, spans — so the checker can resolve it against the full
+/// name-space and the formatter can round-trip it. An extension directive's *meaning* is read back
+/// by the extension's own code, exactly as a `#[...]` data attribute's is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignDirective {
+    pub name: String,
+    /// The name token alone, for a diagnostic that blames the name rather than the whole directive.
+    pub name_span: Span,
+    pub args: Vec<AttrArg>,
+    /// The whole `@name(args)`.
     pub span: Span,
 }
 
@@ -305,6 +464,239 @@ impl BuiltinDirective {
         BuiltinDirective::ALL
             .into_iter()
             .find(|d| d.as_str() == name)
+    }
+
+    /// Every directive legal in **decorator position** — written before a `struct`/`class`/`enum`/
+    /// `trait` declaration. `@tier` is excluded because it decorates a `fn` (its sites are
+    /// `Sites::FN`), which is exactly what the metadata table already records.
+    pub fn decorators() -> impl Iterator<Item = BuiltinDirective> {
+        BuiltinDirective::ALL
+            .into_iter()
+            .filter(|d| d.info().sites.intersects(Sites::TYPE.union(Sites::TRAIT)))
+    }
+
+    /// The decorator directives rendered for the parser's "unknown directive" help, each with the
+    /// argument list it accepts: `` `@derive(…)`, `@semantic`, … ``.
+    ///
+    /// Generated rather than written out. The literal this replaces had drifted from the truth in
+    /// two ways at once: it showed `@packed` as taking no arguments (it takes a `Layout`), and
+    /// nothing tied it to the directive set, so adding a directive left the help silently listing
+    /// the old one.
+    pub fn decorator_list() -> String {
+        let rendered: Vec<String> = BuiltinDirective::decorators()
+            .map(|d| match d.info().max_args {
+                Some(0) => format!("`@{d}`"),
+                _ => format!("`@{d}(…)`"),
+            })
+            .collect();
+        match rendered.split_last() {
+            None => String::new(),
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{}, and {last}", rest.join(", ")),
+        }
+    }
+}
+
+/// The declaration kinds a directive may sit on, as a set.
+///
+/// A set rather than the tier ABI's `TierSite` (`Function | Method | Type`), because the checker
+/// already draws distinctions `TierSite` cannot express: `@packed` is struct-only, `@validated` is
+/// struct-or-class, `@semantic` is enum-only, and all five type directives are rejected on a trait.
+/// Collapsing those into one `Type` variant loses exactly the information the diagnostics need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sites(u16);
+
+impl Sites {
+    pub const NONE: Sites = Sites(0);
+    pub const STRUCT: Sites = Sites(1 << 0);
+    pub const CLASS: Sites = Sites(1 << 1);
+    pub const ENUM: Sites = Sites(1 << 2);
+    pub const TRAIT: Sites = Sites(1 << 3);
+    pub const FN: Sites = Sites(1 << 4);
+    pub const METHOD: Sites = Sites(1 << 5);
+    /// A struct/class field. Not a directive site today, but a `#[...]` attribute target — carried
+    /// so this vocabulary is complete over every place a decoration can be written, and no caller
+    /// has to invent an "unrepresentable site" case.
+    pub const FIELD: Sites = Sites(1 << 6);
+    /// An enum variant. As [`FIELD`](Self::FIELD).
+    pub const VARIANT: Sites = Sites(1 << 7);
+    /// Every type declaration — struct, class, enum. (Deliberately excludes `trait`: a trait is a
+    /// contract, not a data type, and every type directive on one is `E0054`.)
+    pub const TYPE: Sites = Sites(Self::STRUCT.0 | Self::CLASS.0 | Self::ENUM.0);
+
+    pub const fn union(self, other: Sites) -> Sites {
+        Sites(self.0 | other.0)
+    }
+
+    /// Whether every site in `other` is permitted here. `Sites::NONE` is contained in everything,
+    /// so a directive with no legal site rejects every placement.
+    pub const fn contains(self, other: Sites) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether the two sets overlap at all — "is this directive legal at *any* of these sites",
+    /// as against [`contains`](Self::contains)'s "at *all* of them".
+    pub const fn intersects(self, other: Sites) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// A human phrase for a diagnostic — "a struct", "a struct or a class".
+    pub fn label(self) -> String {
+        let mut parts = Vec::new();
+        for (bit, name) in [
+            (Sites::STRUCT, "a struct"),
+            (Sites::CLASS, "a class"),
+            (Sites::ENUM, "an enum"),
+            (Sites::TRAIT, "a trait"),
+            (Sites::FN, "a function"),
+            (Sites::METHOD, "a method"),
+            (Sites::FIELD, "a field"),
+            (Sites::VARIANT, "an enum variant"),
+        ] {
+            if self.contains(bit) {
+                parts.push(name);
+            }
+        }
+        match parts.len() {
+            0 => "nothing".to_string(),
+            1 => parts[0].to_string(),
+            _ => {
+                let last = parts.pop().expect("non-empty");
+                format!("{} or {last}", parts.join(", "))
+            }
+        }
+    }
+}
+
+/// Everything about a built-in directive that was previously decided by matching on its name.
+///
+/// One table, indexed by the directive, replacing per-directive knowledge that had drifted apart
+/// across the parser, checker, formatter and IDE — legal sites lived in four checker files, the
+/// completion detail in `noeta-ide`, the hover prose somewhere else again, and two directives had
+/// simply been forgotten in the hover match.
+///
+/// Only *static* facts live here. A vocabulary that depends on the program or on another crate —
+/// the set of derivable traits, the `Layout` variants — stays with its owner; this table says a
+/// directive takes one argument named `Trait`, not which traits exist.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectiveInfo {
+    /// Where the directive may legally appear. The checker reports anything else.
+    pub sites: Sites,
+    /// Maximum positional arguments; `None` is variadic, `Some(0)` takes none.
+    pub max_args: Option<usize>,
+    /// Named-argument keys the directive understands (`via:` on `@derive`, `config:`/`text:`/
+    /// `expr:` on `@tier`). Empty means named arguments are not accepted at all.
+    pub named_keys: &'static [&'static str],
+    /// Whether repeating the directive accumulates (`@derive`, `@role`) or the last wins.
+    pub accumulates: bool,
+    /// The one-line usage shown beside the name in completion.
+    pub detail: &'static str,
+    /// Prose shown on hover.
+    pub doc: &'static str,
+    /// Signature-help parameter names, in order.
+    pub params: &'static [&'static str],
+}
+
+impl BuiltinDirective {
+    /// This directive's metadata. The exhaustive match is the compile-time lock: a new variant must
+    /// state its sites, arity and prose here before it can be added.
+    ///
+    /// Returned by value rather than as a `&'static` into a table: an array indexed by the
+    /// directive would need an enum→index mapping that could silently disagree with the array's
+    /// order, which is the class of drift this table exists to end.
+    pub const fn info(self) -> DirectiveInfo {
+        match self {
+            BuiltinDirective::Derive => DirectiveInfo {
+                sites: Sites::TYPE,
+                max_args: None,
+                named_keys: &["via"],
+                accumulates: true,
+                detail: "@derive(Trait, …) — derive implementations for a type",
+                doc: "codegen directive `@derive(Trait, …)` — generates built-in trait \
+                      implementations (`Equatable`, `Comparable`, `Printable`, `Serialize<…>`, …) \
+                      for this type",
+                params: &["Trait"],
+            },
+            BuiltinDirective::Attribute => DirectiveInfo {
+                sites: Sites::STRUCT,
+                max_args: None,
+                named_keys: &[],
+                accumulates: false,
+                detail: "@attribute(…) — declare this struct as a data attribute",
+                doc: "declares this struct as a **metadata attribute**: instances attach to \
+                      declarations as `#[Name(args)]` and are read back with \
+                      `attributes_of::<Name>()`. An optional site argument (`@attribute(Function)`) \
+                      restricts what it may annotate",
+                params: &["Kind"],
+            },
+            BuiltinDirective::Role => DirectiveInfo {
+                sites: Sites::STRUCT,
+                max_args: None,
+                named_keys: &[],
+                accumulates: true,
+                detail: "@role(Enum.Variant, …) — tag an attribute/trait with architectural roles",
+                doc: "architectural-role directive: every declaration this attribute annotates is \
+                      bound to the named role (`@role(Enum.Variant)` — a variant of a `@semantic` \
+                      enum). The compile-time role index powers `roles_of()`, the Architecture \
+                      view, and `noeta trace`",
+                params: &["Enum.Variant"],
+            },
+            BuiltinDirective::Semantic => DirectiveInfo {
+                sites: Sites::ENUM,
+                max_args: Some(0),
+                named_keys: &[],
+                accumulates: false,
+                detail: "@semantic — mark an enum's variants as role names",
+                doc: "marks this enum as **role-eligible**: its variants can be conferred on \
+                      declarations as architectural roles, via `@role(ThisEnum.Variant)` on an \
+                      attribute",
+                params: &[],
+            },
+            BuiltinDirective::Packed => DirectiveInfo {
+                sites: Sites::STRUCT,
+                max_args: Some(1),
+                named_keys: &[],
+                accumulates: false,
+                detail: "@packed(Layout.Row|Layout.Column) — flat value-struct layout",
+                doc: "storage directive: a **packed value struct** — fields lay out flat (no \
+                      boxing), and a `List` of a packed struct is one contiguous buffer",
+                params: &["Layout.Row|Layout.Column"],
+            },
+            BuiltinDirective::Validated => DirectiveInfo {
+                sites: Sites::STRUCT.union(Sites::CLASS),
+                max_args: Some(0),
+                named_keys: &[],
+                accumulates: false,
+                detail: "@validated — literal construction only through the type's own constructor \
+                         functions",
+                // This directive had no hover at all before the table existed — it was one of the
+                // two the hover match had simply forgotten.
+                doc: "construction directive: bars literal construction (`T { … }`, including a \
+                      record-update spread) from **outside** the type's own `impl`, so every value \
+                      is built through a constructor that can validate it. Construction inside the \
+                      type's own methods stays legal, and the `from_bytes` recipe door auto-validates",
+                params: &[],
+            },
+            BuiltinDirective::Tier => DirectiveInfo {
+                sites: Sites::FN,
+                max_args: Some(1),
+                named_keys: &["config", "text", "expr"],
+                accumulates: false,
+                detail: "@tier(name, …) — declare a dev-tier and its runner",
+                // Also previously absent from hover: the match returned `None` on the claim that
+                // `@tier` "hovers instead through `hover_tier`", but that path only walks tier
+                // *blocks* and method directives, never a `@tier` declaration.
+                doc: "declares a **dev-tier** and marks the decorated `fn` as its runner. \
+                      `config:` names the tier's knob attribute, `text: \"<lang>\"` makes its \
+                      blocks capture a verbatim body in that language, and `expr: Type` makes it \
+                      usable as an expression tier producing that type",
+                params: &["name", "config: Type | text: \"<lang>\" | expr: Type"],
+            },
+        }
     }
 }
 
@@ -432,9 +824,17 @@ pub enum AttrValue {
         type_name: String,
         fields: Vec<(String, AttrValue)>,
     },
-    /// A bare type name used as a value (`JsonConverter`) — a type reference, materialized as the
+    /// A type name used as a value (`JsonConverter`) — a type reference, materialized as the
     /// reflection `Type` ADT (`Type.Named("JsonConverter", [])`). C# `typeof(Foo)` / Java `Class<?>`.
-    TypeRef(String),
+    ///
+    /// `args` carries a generic application's arguments (`Json` in `@derive(Serialize<Json>)`) and
+    /// is empty for a plain name. It exists so this one value type can represent every directive
+    /// argument form: the `@`-directives previously had a separate identifiers-only grammar whose
+    /// sole capability beyond `#[...]`'s was generic type arguments.
+    TypeRef {
+        name: String,
+        args: Vec<TypeRef>,
+    },
 }
 
 /// One `@derive(...)` entry: the trait name plus any **generic type arguments** it carries
@@ -478,7 +878,7 @@ pub fn derives_trait(derives: &[DeriveSpec], trait_name: &str) -> bool {
 /// tuple, union, function) — and `None` for a non-packed declaration. Used by both backends and
 /// the checker so all agree on which packed structs may key a `Map` / member a `Set`.
 pub fn packed_named_fields(decl: &StructDecl) -> Option<Vec<Option<String>>> {
-    decl.packed.as_ref()?;
+    decl.decorators.packed.as_ref()?;
     Some(
         decl.fields
             .iter()
@@ -583,20 +983,13 @@ pub struct TraitDecl {
     pub type_params: Vec<TypeParam>,
     /// The trait's method contract, in source order.
     pub methods: Vec<TraitMethod>,
-    /// Leading `#[...]` data attributes on the trait (L1 UT6) — reflected via `attributes_of`
-    /// keyed by the trait name, like a type's.
-    pub attrs: Vec<Attribute>,
-    /// `@role(Enum.Variant, …)` tags on the trait (UT6) — surfaced via `roles_of`.
-    pub role: Option<Vec<RoleTag>>,
-    /// A `@derive(...)` on a trait — always a checker error (a trait is not a data type); carried
-    /// so the error can be reported at the site.
-    pub derives: Vec<DeriveSpec>,
-    /// A misplaced `@attribute` directive on a trait (attributes are structs only); checker error.
-    pub attribute: Option<Vec<(String, Span)>>,
-    /// A misplaced `@semantic` directive on a trait (marks enums); checker error.
-    pub semantic: Option<Span>,
-    /// A misplaced `@packed` directive on a trait (marks structs); checker error.
-    pub packed: Option<PackedDirective>,
+    /// Every `@`-decorator and `#[...]` attribute written on this trait. See [`Decorators`].
+    ///
+    /// Most are misplacements the checker reports (`E0053`) — a trait is not a data type — but
+    /// `attrs` and `role` are meaningful (L1 UT6: reflected via `attributes_of`/`roles_of` keyed by
+    /// the trait name, like a type's). `validated` previously had no field here at all and was
+    /// therefore discarded by the parser without a diagnostic.
+    pub decorators: Decorators,
     pub span: Span,
 }
 
@@ -649,31 +1042,8 @@ pub struct ClassDecl {
     /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in
     /// `methods`; these entries let the checker validate each trait and its required signatures.
     pub impls: Vec<ImplBlock>,
-    /// Leading `@derive(...)` codegen directives on the class (e.g. `@derive(Comparable)`),
-    /// flattened across all directive lines.
-    pub derives: Vec<DeriveSpec>,
-    /// Leading `#[...]` data attributes on the class.
-    pub attrs: Vec<Attribute>,
-    /// A misplaced `@attribute` directive (attributes are structs only); see
-    /// [`StructDecl::attribute`]. `Some` here is always a checker error — kept so the checker can
-    /// point at the mistake rather than silently dropping it.
-    pub attribute: Option<Vec<(String, Span)>>,
-    /// A misplaced `@role(...)` tag (attributes — and thus roles — are records only); see
-    /// [`StructDecl::role`]. `Some` here is always a checker error, kept so the checker can report it.
-    pub role: Option<Vec<RoleTag>>,
-    /// A misplaced `@semantic` directive (it marks enums; a class is never role-eligible); see
-    /// [`StructDecl::semantic`]. `Some` is always a checker error, kept so the checker can report it.
-    pub semantic: Option<Span>,
-    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
-    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
-    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
-    /// an ordinary declaration.
-    pub packed: Option<PackedDirective>,
-    /// The `@validated` directive (validation arc): `Some(span)` marks this class so that literal
-    /// construction (`T { ... }`, incl. a record-update spread) from OUTSIDE its own `impl`/methods
-    /// is a compile error (`E0060`), forcing construction through a validating constructor. `None`
-    /// for an ordinary declaration. See [`StructDecl::validated`].
-    pub validated: Option<Span>,
+    /// Every `@`-decorator and `#[...]` attribute written on this class. See [`Decorators`].
+    pub decorators: Decorators,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.
@@ -733,19 +1103,12 @@ pub struct EnumDecl {
     /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in `methods`;
     /// these entries let the checker validate each trait and its required signatures.
     pub impls: Vec<ImplBlock>,
-    /// Leading `@derive(...)` codegen directives on the enum, flattened across all directive lines.
-    pub derives: Vec<DeriveSpec>,
-    /// Leading `#[...]` data attributes on the enum.
-    pub attrs: Vec<Attribute>,
-    /// The `@semantic` directive: `Some(span)` marks this enum **role-eligible**, so its fieldless
-    /// variants may be referenced by `@role(Enum.Variant)`. `None` for an ordinary enum. The built-in
-    /// `Semantic` enum is implicitly semantic.
-    pub semantic: Option<Span>,
-    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
-    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
-    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
-    /// an ordinary declaration.
-    pub packed: Option<PackedDirective>,
+    /// Every `@`-decorator and `#[...]` attribute written on this enum. See [`Decorators`].
+    ///
+    /// `attribute`, `role` and `validated` previously had no fields here, so the parser discarded
+    /// those directives on an enum with no diagnostic at all. They are now recorded (and reported
+    /// as misplacements) like every other declaration kind's.
+    pub decorators: Decorators,
     pub span: Span,
 }
 
@@ -896,7 +1259,12 @@ pub struct Param {
 
 /// A type reference in source (e.g. `int`, `List<Item>`, `Result<Order, OrderError>`,
 /// `?User`). Parsed and retained for M1's type checker; M0 does not interpret it.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializable because [`AttrValue::TypeRef`] embeds one: a directive argument may be a generic
+/// type application (`@derive(Serialize<Json>)`), and attribute values travel into the serialized
+/// reflection manifest. Every field is a `String`, a nested `TypeRef`, or a `Span` (itself serde),
+/// so this costs nothing beyond the derive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeRef {
     /// A named type with optional generic arguments.
     Named {
@@ -1973,5 +2341,23 @@ mod builtin_directive_tests {
         // A non-directive name is not misread as one.
         assert_eq!(BuiltinDirective::from_name("bench"), None);
         assert!(BuiltinDirective::from_str("nope").is_err());
+    }
+
+    /// The parser's "unknown directive" help is generated from the directive set, so it cannot go
+    /// stale: every decorator directive appears, and `@tier` — which decorates a `fn`, not a type —
+    /// does not. The literal this replaced also mis-stated `@packed` as argument-less.
+    #[test]
+    fn the_decorator_help_lists_exactly_the_decorator_directives() {
+        let list = BuiltinDirective::decorator_list();
+        for d in BuiltinDirective::ALL {
+            let mentioned = list.contains(&format!("`@{d}`")) || list.contains(&format!("`@{d}("));
+            assert_eq!(
+                mentioned,
+                d != BuiltinDirective::Tier,
+                "`@{d}` mentioned={mentioned} in: {list}"
+            );
+        }
+        assert!(list.contains("`@packed(…)`"), "arity is shown: {list}");
+        assert!(list.contains("`@semantic`"), "no parens when none: {list}");
     }
 }

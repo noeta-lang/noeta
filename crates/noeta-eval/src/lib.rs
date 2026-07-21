@@ -5041,7 +5041,7 @@ fn attr_value_to_eval(
             let slots: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::Object(Rc::new(ObjectValue::new(def, slots)))
         }
-        A::TypeRef(name) => build_type_value(&reflection.type_ref_repr(name)),
+        A::TypeRef { name, .. } => build_type_value(&reflection.type_ref_repr(name)),
     }
 }
 

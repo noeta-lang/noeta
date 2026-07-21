@@ -1,0 +1,12 @@
+// `@tier` is a known directive written at the wrong site: it decorates the `fn` that runs a tier,
+// never a type. It reports E0054 (`InvalidDirectiveSite`) through the one placement check, like
+// every other misplaced directive.
+//
+// It used to be an E0003 `UnexpectedToken` from the parser reading "unknown directive `@tier`" —
+// a lie about a name the compiler knows, which sent the author hunting for a misspelling instead
+// of moving the directive onto a function.
+// expect: error E0054 at 10:2
+// expect: exit 1
+@tier(audit)
+struct Report { lines: int }
+echo "unreached"

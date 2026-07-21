@@ -345,14 +345,7 @@ impl Pretty for EnumDecl {
             .collect();
         out.push_str(&format!(
             "({kind} {}{}{}{} [{}] {}",
-            decorators_str(
-                &self.derives,
-                &self.attrs,
-                None,
-                None,
-                self.semantic.is_some(),
-                self.packed.as_ref(),
-            ),
+            decorators_str(&self.decorators),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -370,77 +363,108 @@ impl Pretty for EnumDecl {
     }
 }
 
-/// The leading decorators of a type declaration, rendered into the structural snapshot — the fmt
-/// safety gate compares this output, so a formatter dropping a decorator (a whole `@derive`, one
-/// of its `member: target` bindings or `via:`, a `@packed` layout, an `@attribute`/`@role` tag, a
-/// `#[...]` data attribute) is a DETECTED program change, not a silent one. Empty when the
-/// declaration is undecorated, so existing snapshots are untouched.
-fn decorators_str(
-    derives: &[crate::DeriveSpec],
-    attrs: &[crate::Attribute],
-    attribute: Option<&[(String, noeta_span::Span)]>,
-    role: Option<&[crate::RoleTag]>,
-    semantic: bool,
-    packed: Option<&crate::PackedDirective>,
-) -> String {
+/// The leading decorators of a declaration, rendered into the structural snapshot — the fmt safety
+/// gate compares this output, so a formatter dropping a decorator (a whole `@derive`, one of its
+/// `member: target` bindings or `via:`, a `@packed` layout, an `@attribute`/`@role` tag, a
+/// `@validated` marker, a `#[...]` data attribute) is a DETECTED program change, not a silent one.
+/// Empty when the declaration is undecorated, so undecorated snapshots are untouched.
+///
+/// Emission order is [`BuiltinDirective::ALL`](crate::BuiltinDirective::ALL) order, with the
+/// `#[...]` data attributes last. Driving the loop off `ALL` — rather than a hand-written sequence
+/// of `if let`s — is what makes a newly added directive a compile error here instead of a silently
+/// unrendered (and therefore ungated) decorator. The other half of that lock is [`Decorators`]
+/// itself: one struct shared by every declaration kind, so a directive cannot be rendered for a
+/// struct but forgotten for an enum, which is precisely how `@validated` came to be ungated.
+fn decorators_str(d: &crate::Decorators) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for d in derives {
-        let mut s = d.name.clone();
-        if !d.args.is_empty() {
-            s.push_str(&format!(
-                "<{}>",
-                d.args
-                    .iter()
-                    .map(type_ref_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+    for directive in crate::BuiltinDirective::ALL {
+        match directive {
+            crate::BuiltinDirective::Derive => {
+                for spec in &d.derives {
+                    let mut s = spec.name.clone();
+                    if !spec.args.is_empty() {
+                        s.push_str(&format!(
+                            "<{}>",
+                            spec.args
+                                .iter()
+                                .map(type_ref_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    if let Some((via, _)) = &spec.via {
+                        s.push_str(&format!(", via: {via}"));
+                    }
+                    for b in &spec.bindings {
+                        s.push_str(&format!(", {}: {}", b.member, b.target));
+                    }
+                    parts.push(format!("@derive({s})"));
+                }
+            }
+            crate::BuiltinDirective::Attribute => {
+                if let Some(kinds) = d.attribute.as_deref() {
+                    if kinds.is_empty() {
+                        parts.push("@attribute".to_string());
+                    } else {
+                        parts.push(format!(
+                            "@attribute({})",
+                            kinds
+                                .iter()
+                                .map(|(k, _)| k.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
+            }
+            crate::BuiltinDirective::Role => {
+                if let Some(tags) = d.role.as_deref() {
+                    parts.push(format!(
+                        "@role({})",
+                        tags.iter()
+                            .map(|t| if t.enum_name.is_empty() {
+                                t.variant.clone()
+                            } else {
+                                format!("{}.{}", t.enum_name, t.variant)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+            crate::BuiltinDirective::Semantic => {
+                if d.semantic.is_some() {
+                    parts.push("@semantic".to_string());
+                }
+            }
+            crate::BuiltinDirective::Packed => {
+                if let Some(p) = d.packed {
+                    parts.push(match p.layout {
+                        crate::PackedLayout::Row => "@packed".to_string(),
+                        crate::PackedLayout::Column => "@packed(Layout.Column)".to_string(),
+                    });
+                }
+            }
+            crate::BuiltinDirective::Validated => {
+                if d.validated.is_some() {
+                    parts.push("@validated".to_string());
+                }
+            }
+            // `@tier(...)` decorates a `fn`, not a type declaration, and is carried in
+            // `FnDecl::tier` rather than in any of the fields above — it is rendered by the `fn`
+            // printer. Listing it here (instead of a `_ =>` catch-all) is what keeps this match
+            // exhaustive, so a future directive cannot slip through unrendered.
+            crate::BuiltinDirective::Tier => {}
         }
-        if let Some((via, _)) = &d.via {
-            s.push_str(&format!(", via: {via}"));
-        }
-        for b in &d.bindings {
-            s.push_str(&format!(", {}: {}", b.member, b.target));
-        }
-        parts.push(format!("@derive({s})"));
     }
-    if let Some(kinds) = attribute {
-        if kinds.is_empty() {
-            parts.push("@attribute".to_string());
-        } else {
-            parts.push(format!(
-                "@attribute({})",
-                kinds
-                    .iter()
-                    .map(|(k, _)| k.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
+    // Directives the decorator grammar does not own (an extension's, a misplaced `@tier`, a typo).
+    // They MUST appear in the gate: the formatter has to round-trip them, and a decorator the gate
+    // cannot see is a decorator the formatter may silently delete — exactly how `@validated` went
+    // unnoticed before it was rendered here.
+    for f in &d.foreign {
+        parts.push(format!("@{}{}", f.name, attr_args_str(&f.args)));
     }
-    if let Some(tags) = role {
-        parts.push(format!(
-            "@role({})",
-            tags.iter()
-                .map(|t| if t.enum_name.is_empty() {
-                    t.variant.clone()
-                } else {
-                    format!("{}.{}", t.enum_name, t.variant)
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    if semantic {
-        parts.push("@semantic".to_string());
-    }
-    if let Some(p) = packed {
-        parts.push(match p.layout {
-            crate::PackedLayout::Row => "@packed".to_string(),
-            crate::PackedLayout::Column => "@packed(Layout.Column)".to_string(),
-        });
-    }
-    for a in attrs {
+    for a in &d.attrs {
         parts.push(format!("#[{}{}]", a.name, attr_args_str(&a.args)));
     }
     if parts.is_empty() {
@@ -545,7 +569,13 @@ fn attr_value_str(value: &AttrValue) -> String {
             enum_name, variant, ..
         } => format!("{enum_name}.{variant}"),
         AttrValue::Struct { type_name, .. } => format!("{type_name} {{…}}"),
-        AttrValue::TypeRef(name) => name.clone(),
+        // Rendered WITH its generic arguments: the fmt safety gate compares this output, so a
+        // formatter dropping the `<Json>` from `@derive(Serialize<Json>)` must be detectable.
+        AttrValue::TypeRef { name, args } if args.is_empty() => name.clone(),
+        AttrValue::TypeRef { name, args } => format!(
+            "{name}<{}>",
+            args.iter().map(type_ref_str).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 
@@ -555,14 +585,7 @@ impl Pretty for StructDecl {
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
             "(struct {}{}{}{} [{}] {}",
-            decorators_str(
-                &self.derives,
-                &self.attrs,
-                self.attribute.as_deref(),
-                self.role.as_deref(),
-                self.semantic.is_some(),
-                self.packed.as_ref(),
-            ),
+            decorators_str(&self.decorators),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -585,14 +608,7 @@ impl Pretty for ClassDecl {
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
             "(class {}{}{}{} [{}] {}",
-            decorators_str(
-                &self.derives,
-                &self.attrs,
-                self.attribute.as_deref(),
-                self.role.as_deref(),
-                self.semantic.is_some(),
-                self.packed.as_ref(),
-            ),
+            decorators_str(&self.decorators),
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -639,7 +655,17 @@ impl Pretty for ImplDecl {
 impl Pretty for TraitDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
-        out.push_str(&format!("(trait {} {}", self.name, span(self.span)));
+        // A trait's decorators were previously not rendered at all, which left every `@derive`/
+        // `@role`/`@attribute`/`@semantic`/`@packed` on a trait outside the fmt safety gate — the
+        // formatter could drop one without the gate noticing. They are misplaced directives (the
+        // checker reports E0054), but "the checker rejects it" is not a reason for the *formatter*
+        // to be free to silently rewrite the program: fmt runs on code that does not yet check.
+        out.push_str(&format!(
+            "(trait {}{} {}",
+            decorators_str(&self.decorators),
+            self.name,
+            span(self.span)
+        ));
         for method in &self.methods {
             out.push('\n');
             method.sig.pretty(out, level + 1);

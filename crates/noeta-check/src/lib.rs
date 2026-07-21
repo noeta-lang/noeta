@@ -67,8 +67,8 @@ use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl, FnDecl,
-    ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, PackedDirective, Param, Pattern,
-    Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
+    ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, Param, Pattern, Program, Stmt,
+    StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::{Edition, EditionMap};
@@ -78,6 +78,7 @@ use noeta_types::{BuiltinTrait, Type};
 mod attributes;
 mod collect;
 mod decls;
+pub mod directives;
 mod effects;
 mod env;
 mod expr;
@@ -280,8 +281,12 @@ fn check_all_impl(
     // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
     // relevance is recorded inline during `check_program`, and needs the reachable set ready).
     checker.compute_relevance(program);
-    checker.check_semantic_roles(program);
+    // Tier declarations FIRST: they build the tier registry, and the directive placement check
+    // resolves a declaration's unrecognized `@name` against the whole name-space (which includes
+    // the tiers). Running the placement check first resolved every foreign directive against an
+    // empty registry, so an extension's directive read as unknown.
     checker.check_tier_decls(program);
+    checker.check_semantic_roles(program);
     checker.check_program(program, cancel);
     checker.into_checked()
 }
@@ -333,8 +338,12 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     checker.symbols.forwarding = fwd.map;
     checker.symbols.forwarding_poisoned = fwd.poisoned;
     checker.compute_relevance(program);
-    checker.check_semantic_roles(program);
+    // Tier declarations FIRST: they build the tier registry, and the directive placement check
+    // resolves a declaration's unrecognized `@name` against the whole name-space (which includes
+    // the tiers). Running the placement check first resolved every foreign directive against an
+    // empty registry, so an extension's directive read as unknown.
     checker.check_tier_decls(program);
+    checker.check_semantic_roles(program);
     let mut env: Env = vec![HashMap::new()];
     checker.check_program_in(program, &mut env);
     let checked = Checked {
@@ -463,8 +472,9 @@ impl SessionChecker {
         // `destruct` class can make an earlier entry's type reachable), and record this entry's
         // parameter relevance.
         self.checker.compute_relevance(entry);
-        self.checker.check_semantic_roles(entry);
+        // Tier declarations first — see the note in `check_program`.
         self.checker.check_tier_decls(entry);
+        self.checker.check_semantic_roles(entry);
         self.checker.check_program_in(entry, &mut self.env);
         let diagnostics = self.checker.diags.split_off(diag_mark);
         if diagnostics
@@ -708,33 +718,16 @@ impl TargetKind {
 
 /// The tier attachment site of a declaration `TargetKind` — the registry's site vocabulary. A
 /// `struct`/`class`/`enum` all map to `Type`; a field or variant is never a tier site (`None`).
-fn target_site(target: TargetKind) -> Option<noeta_ext_abi::registry::TierSite> {
-    use noeta_ext_abi::registry::TierSite;
-    Some(match target {
-        TargetKind::Function => TierSite::Function,
-        TargetKind::Method => TierSite::Method,
-        TargetKind::Struct | TargetKind::Class | TargetKind::Enum => TierSite::Type,
-        TargetKind::Field | TargetKind::Variant => return None,
-    })
-}
-
-/// A human-readable list of a tier's permitted sites for the E0054 help line — "a function, a
-/// method, or a type".
-fn sites_label(sites: &[noeta_ext_abi::registry::TierSite]) -> String {
-    use noeta_ext_abi::registry::TierSite;
-    let words: Vec<&str> = sites
-        .iter()
-        .map(|s| match s {
-            TierSite::Function => "a function",
-            TierSite::Method => "a method",
-            TierSite::Type => "a type",
-        })
-        .collect();
-    match words.as_slice() {
-        [] => "nothing".to_string(),
-        [one] => (*one).to_string(),
-        [a, b] => format!("{a} or {b}"),
-        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+fn target_sites(target: TargetKind) -> noeta_ast::Sites {
+    use noeta_ast::Sites;
+    match target {
+        TargetKind::Function => Sites::FN,
+        TargetKind::Method => Sites::METHOD,
+        TargetKind::Struct => Sites::STRUCT,
+        TargetKind::Class => Sites::CLASS,
+        TargetKind::Enum => Sites::ENUM,
+        TargetKind::Field => Sites::FIELD,
+        TargetKind::Variant => Sites::VARIANT,
     }
 }
 
@@ -1934,9 +1927,16 @@ impl Checker {
                 tier,
                 tier_span,
                 args,
+                items,
                 ..
             } => {
-                if !self.symbols.tier_registry.is_known(tier) {
+                // A top-level declaration's leading `@name` is parsed as a one-item `TierBlock`
+                // (the adjacency form), so an extension's own `@`-directive arrives here too. It
+                // is not a tier: resolve it as a directive and site-check it against what it wraps,
+                // rather than reporting "unknown dev-tier" about a name the registry knows.
+                if let Some(d) = self.reg().find_ext_directive(tier) {
+                    self.check_ext_directive_block(d, items, *tier_span);
+                } else if !self.symbols.tier_registry.is_known(tier) {
                     self.diags
                         .push(tiers::unknown_tier_diagnostic(self.reg(), tier, *tier_span));
                 } else if self.symbols.tier_registry.is_expr_tier(tier) {
@@ -1976,6 +1976,28 @@ impl Checker {
     /// tier with no declared sites is unrestricted (the gate never fires). `@test`/`@bench` on a
     /// method carry the extra rule that the method must be an **associated function** (never reads
     /// `self`), so the runner can call it with no receiver.
+    /// Site-check an extension `@`-directive written in the **adjacency** form — `@name(…)`
+    /// immediately before a declaration, which the parser wraps in a one-item `TierBlock`.
+    ///
+    /// The statement kind maps to a site through `Stmt::attachment_site`, the same vocabulary the
+    /// decorator and annotation positions use, and the gate itself is shared.
+    fn check_ext_directive_block(
+        &mut self,
+        directive: &'static noeta_ext_abi::registry::ExtDirective,
+        items: &[Stmt],
+        span: Span,
+    ) {
+        for item in items {
+            self.check_declared_sites(
+                directive.name,
+                directive.sites,
+                item.attachment_site(),
+                None,
+                span,
+            );
+        }
+    }
+
     fn check_directives(
         &mut self,
         directives: &[MethodDirective],
@@ -1983,28 +2005,23 @@ impl Checker {
         decl: &FnDecl,
     ) {
         for dir in directives {
-            if !self.symbols.tier_registry.is_known(&dir.name) {
+            // An extension's own `@`-directive may be declared for `Function`/`Method` sites, and
+            // then it is legal here — it is not a tier, so "unknown dev-tier" would be the wrong
+            // complaint about a name the registry knows perfectly well. Its sites gate exactly as a
+            // tier's do below.
+            let ext_directive = self.reg().find_ext_directive(&dir.name);
+            if ext_directive.is_none() && !self.symbols.tier_registry.is_known(&dir.name) {
                 let d = tiers::unknown_tier_diagnostic(self.reg(), &dir.name, dir.name_span);
                 self.diags.push(d);
                 continue;
             }
-            let sites = self.symbols.tier_registry.sites(&dir.name);
-            let here = target_site(target);
-            if !sites.is_empty() && here.is_none_or(|s| !sites.contains(&s)) {
-                self.error(
-                    DiagnosticCode::InvalidDirectiveSite,
-                    dir.name_span,
-                    format!(
-                        "`@{}` cannot attach to a {}",
-                        dir.name,
-                        target.label().to_lowercase()
-                    ),
-                )
-                .help(format!(
-                    "`@{}` may attach to {}",
-                    dir.name,
-                    sites_label(sites)
-                ));
+            let sites = match ext_directive {
+                Some(d) => d.sites,
+                None => self.symbols.tier_registry.sites(&dir.name),
+            };
+            let before = self.diags.len();
+            self.check_declared_sites(&dir.name, sites, target_sites(target), None, dir.name_span);
+            if self.diags.len() != before {
                 continue;
             }
             // A `@test`/`@bench` method is invoked with no receiver, so it must not read `self`.

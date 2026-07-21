@@ -731,10 +731,85 @@ mod tests {
                 "@derive(T, value: y)\nstruct P { x: int; y: int }",
             ),
             ("#[Entity]\nstruct P { x: int }", "struct P { x: int }"),
+            // Below this line: cases the gate was BLIND to before the decorator rendering was made
+            // exhaustive. `@validated` had no slot in the renderer at all, and a trait's decorators
+            // were not rendered on any path, so the formatter could drop either without detection.
+            // Each of these pairs compared EQUAL until this slice.
+            ("@validated struct P { x: int }", "struct P { x: int }"),
+            ("@validated class C { x: int }", "class C { x: int }"),
+            (
+                "@derive(Clone)\ntrait T { fn f(): int }",
+                "trait T { fn f(): int }",
+            ),
+            (
+                "@role(Kind.Service)\ntrait T { fn f(): int }",
+                "trait T { fn f(): int }",
+            ),
+            (
+                "@attribute\ntrait T { fn f(): int }",
+                "trait T { fn f(): int }",
+            ),
+            (
+                "@semantic\ntrait T { fn f(): int }",
+                "trait T { fn f(): int }",
+            ),
+            (
+                "#[Entity]\ntrait T { fn f(): int }",
+                "trait T { fn f(): int }",
+            ),
+            // A directive the decorator grammar does not own — an extension's, or a name not yet
+            // registered. The formatter runs on code that does not check, so it will see these;
+            // dropping one, or losing its arguments, must be a detected program change.
+            (
+                "@openapi(\"petstore.yaml\")\nstruct P { x: int }",
+                "struct P { x: int }",
+            ),
+            (
+                "@openapi(\"petstore.yaml\")\nstruct P { x: int }",
+                "@openapi(\"other.yaml\")\nstruct P { x: int }",
+            ),
+            (
+                "@openapi(\"a.yaml\")\nstruct P { x: int }",
+                "@openapi\nstruct P { x: int }",
+            ),
         ] {
             assert!(
                 !gate(a, b),
                 "gate blind to the decorator difference:\n{a}\nvs\n{b}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_type_decorating_directive_is_rendered_into_the_gate() {
+        // The structural guarantee behind `safety_gate_distinguishes_decorators`: it is not enough
+        // that the pairs above happen to be covered — every directive that can decorate a type must
+        // reach the gate's comparison, or a future directive silently reopens the hole `@validated`
+        // sat in. `BuiltinDirective::ALL` is the closed set, so iterate it and assert each one's
+        // presence changes the rendered form. `Tier` is excluded: it decorates a `fn`, not a type.
+        let parse = |src: &str| {
+            let source = noeta_span::Source::new(SourceId::FIRST, "t.noe", src);
+            let lexed = noeta_lexer::lex(&source);
+            noeta_parser::parse(&source, &lexed.tokens).program
+        };
+        let bare = "struct P { x: f32 }";
+        for directive in noeta_ast::BuiltinDirective::ALL {
+            let decorated = match directive {
+                noeta_ast::BuiltinDirective::Derive => "@derive(Clone)\nstruct P { x: f32 }",
+                noeta_ast::BuiltinDirective::Attribute => "@attribute\nstruct P { x: f32 }",
+                noeta_ast::BuiltinDirective::Role => "@role(Kind.Service)\nstruct P { x: f32 }",
+                noeta_ast::BuiltinDirective::Semantic => "@semantic\nstruct P { x: f32 }",
+                noeta_ast::BuiltinDirective::Packed => "@packed\nstruct P { x: f32 }",
+                noeta_ast::BuiltinDirective::Validated => "@validated\nstruct P { x: f32 }",
+                // `@tier(name, …)` decorates the runner `fn` it precedes and is carried in
+                // `FnDecl::tier`; it never appears on a type declaration, so there is nothing to
+                // compare here. Named explicitly (not `_`) so a new variant must be classified.
+                noeta_ast::BuiltinDirective::Tier => continue,
+            };
+            assert!(
+                !safety::ast_equal_modulo_spans(&parse(bare), &parse(decorated)),
+                "@{directive} is not rendered into the safety gate — the formatter could drop it \
+                 silently. Add it to `Decorators`/`decorators_str` in noeta-ast/src/pretty.rs."
             );
         }
     }

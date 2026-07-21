@@ -16,8 +16,8 @@
 
 use noeta_embed::{Error, Session, Value};
 use noeta_ext_abi::registry::{
-    ExtFn, ExtModule, ExtTier, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
-    TypeArgWrap, TypeRecipe,
+    ExtDirective, ExtFn, ExtModule, ExtTier, Extension, NativeOut, NativeValue, RetTy, Scalar,
+    SigType, TierSite, TypeArgWrap, TypeRecipe,
 };
 use noeta_ext_abi::{ErrorKind, Host, StdError};
 
@@ -86,6 +86,21 @@ impl Extension for PluginExtension {
             ..ExtModule::DEFAULTS
         }]
     }
+    /// A custom `@`-directive the plugin contributes. `@openapi("spec.yaml")` on a struct is a
+    /// *syntax error* for any session whose registry lacks this extension, and a checked, hoverable
+    /// directive for one that has it — the whole point of opening the name-space.
+    fn directives(&self) -> &'static [ExtDirective] {
+        &[ExtDirective {
+            name: "openapi",
+            sites: &[TierSite::Type],
+            max_args: Some(1),
+            named_keys: &[],
+            detail: "@openapi(\"spec.yaml\") — bind this type to an OpenAPI schema",
+            doc: "binds the decorated type to a schema in the named OpenAPI document",
+            params: &["spec"],
+        }]
+    }
+
     /// A custom dev-tier the plugin contributes (instance-registry IR4). A consumer's `@audit { … }`
     /// block is a known tier only for a session whose registry holds this extension.
     fn tiers(&self) -> &'static [ExtTier] {
@@ -247,6 +262,120 @@ fn hot_swap_checks_against_the_session_registry() {
         Ok(_) => {} // Swapped/NeedsRestart both prove the check ran under the session's registry.
         Err(e) => panic!("hot_swap must check under the session's registry, got {e:?}"),
     }
+}
+
+/// The source a session accepts only when its registry declares `@openapi`.
+const USES_OPENAPI_DIRECTIVE: &str =
+    "@openapi(\"petstore.yaml\")\nstruct Pet { name: string }\necho \"ok\"\n";
+
+/// An extension can add a name to the **decorator** name-space, not just the tier name-space.
+///
+/// Before this, `@openapi(…)` was rejected by the PARSER, so no extension could ever make it legal
+/// — the closed built-in set was the whole world, and the only way to add a directive was to edit
+/// the grammar. The parser now records an unresolved directive verbatim and the checker resolves
+/// it against the registry, which is what makes the name-space extensible at all.
+#[test]
+fn an_extension_can_declare_a_directive() {
+    let loaded = Session::builder()
+        .with_extensions(vec![&PLUGIN])
+        .load(USES_OPENAPI_DIRECTIVE);
+    assert!(
+        loaded.is_ok(),
+        "the plugin session must accept its own `@openapi` directive: {:?}",
+        loaded.err()
+    );
+
+    // The default session (std only) declares no such directive — an unknown name, not a syntax
+    // error, and it names the directive rather than blaming the argument.
+    match Session::new(USES_OPENAPI_DIRECTIVE) {
+        Err(Error::Check(diags)) => assert!(
+            diags.iter().any(|d| d.contains("openapi")),
+            "expected an unknown-directive error mentioning `openapi`, got {diags:?}"
+        ),
+        other => panic!("the default session must reject `@openapi`, got {other:?}"),
+    }
+}
+
+/// A declared directive still has to sit where it says it does. `@openapi` declares `TierSite::Type`,
+/// so the checker widens that to struct/class/enum and rejects it on a `trait` — through the same
+/// placement check the built-in directives go through, not a second mechanism.
+#[test]
+fn an_extension_directive_is_site_checked() {
+    let on_a_trait = "@openapi(\"petstore.yaml\")\ntrait Shape { fn area(): int }\necho \"ok\"\n";
+    match Session::builder()
+        .with_extensions(vec![&PLUGIN])
+        .load(on_a_trait)
+    {
+        Err(Error::Check(diags)) => assert!(
+            diags.iter().any(|d| d.contains("openapi")),
+            "expected a placement error mentioning `openapi`, got {diags:?}"
+        ),
+        other => panic!("`@openapi` must not attach to a trait, got {other:?}"),
+    }
+}
+
+/// A directive declared for `TierSite::Type` is rejected on a `fn` — through the *fn* directive
+/// gate, which resolves the same registry. Before, a non-tier `@name` on a `fn` could only ever be
+/// an "unknown dev-tier", which is the wrong complaint about a name the registry knows: an
+/// extension directive declared for `Function` would have been unusable there.
+#[test]
+fn an_extension_directive_on_a_function_resolves_as_a_directive() {
+    let on_a_fn = "@openapi(\"petstore.yaml\")\nfn f(): int { return 1 }\necho f()\n";
+    match Session::builder()
+        .with_extensions(vec![&PLUGIN])
+        .load(on_a_fn)
+    {
+        Err(Error::Check(diags)) => {
+            assert!(
+                diags.iter().any(|d| d.contains("openapi")),
+                "expected a site error naming `openapi`, got {diags:?}"
+            );
+            assert!(
+                !diags.iter().any(|d| d.contains("dev-tier")),
+                "`@openapi` is a directive, not a tier — it must not be called one: {diags:?}"
+            );
+        }
+        other => panic!("`@openapi` declares Type sites, so a fn must be rejected: {other:?}"),
+    }
+}
+
+/// The three positions a directive can be written in — decorator, adjacency (before a top-level
+/// declaration), and a method annotation — go through ONE site gate, so they agree.
+///
+/// They used to be three gates: each mapped the statement kind its own way, compared sites its own
+/// way, and worded the diagnostic its own way. They agreed only because they were written in one
+/// sitting. `@openapi` declares `TierSite::Type`, so every non-type position must reject it, and
+/// say the same thing when it does.
+#[test]
+fn every_position_shares_one_site_gate() {
+    let reject = |src: &str| -> Vec<String> {
+        match Session::builder().with_extensions(vec![&PLUGIN]).load(src) {
+            Err(Error::Check(diags)) => diags,
+            other => panic!("expected `@openapi` to be rejected here, got {other:?}"),
+        }
+    };
+    // Decorator position, adjacency position, method-annotation position.
+    for src in [
+        "@openapi(\"s.yaml\")\ntrait T { fn area(): int }\necho 1\n",
+        "@openapi(\"s.yaml\")\nfn f(): int { return 1 }\necho f()\n",
+        "struct S {\n  x: int\n  @openapi(\"s.yaml\")\n  fn m(): int { return 1 }\n}\necho 1\n",
+    ] {
+        let diags = reject(src);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("`@openapi` does not apply to")),
+            "every position words it the same way, got {diags:?} for: {src}"
+        );
+    }
+
+    // And the position it does declare still checks clean.
+    assert!(
+        Session::builder()
+            .with_extensions(vec![&PLUGIN])
+            .load(USES_OPENAPI_DIRECTIVE)
+            .is_ok()
+    );
 }
 
 #[test]

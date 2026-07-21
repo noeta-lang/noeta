@@ -49,6 +49,56 @@ impl DerivePlanError {
     }
 }
 
+/// The trait name a plain `@derive(Error)` recognises (error-ergonomics).
+///
+/// A literal because this crate deliberately does not depend on `noeta-types`, where
+/// `BuiltinTrait` lives. `noeta-check` holds a test asserting `BuiltinTrait::Error.name()` equals
+/// this — the two spellings drifted apart once already, when the checker's cascade used the enum
+/// and lowering's used a bare `"Error"`.
+pub const ERROR_TRAIT: &str = "Error";
+
+/// How a caller resolves the names a `@derive` can refer to.
+///
+/// The checker answers from its symbol table, lowering from a scan of the linked program. *Which*
+/// questions get asked, and in what order, is [`plan_derive`]'s business and not either caller's —
+/// which is the whole point: the cascade existed twice, in `noeta-check` and `noeta-ir`, as two
+/// structurally identical `if let … else if let …` chains that nothing forced to agree.
+pub trait DeriveContext {
+    /// The user trait declared under `name`, if any. Owned because the two callers hold their
+    /// declarations differently (a symbol-table clone vs. a borrow of the program).
+    fn user_trait(&self, name: &str) -> Option<TraitDecl>;
+    /// A native derive recipe (layer 4) registered under `name`, projected onto plain
+    /// `(method, arity, handler)` tuples so this crate stays free of the extension ABI.
+    fn native_recipe(&self, name: &str) -> Option<Vec<(String, usize, String)>>;
+}
+
+/// The methods `spec` contributes to the type it decorates, or `None` when no derive planner
+/// applies — a derivable *built-in* trait (whose codegen lives in the backends) or a name nobody
+/// registered (`check_derives` reports that one).
+///
+/// The one cascade. Its order is load-bearing and was previously restated at each call site: a
+/// user trait first, then `via:` delegation over a built-in, then the plain `@derive(Error)`
+/// synthesis, then a native recipe.
+pub fn plan_derive(
+    ctx: &dyn DeriveContext,
+    spec: &DeriveSpec,
+    type_name: &str,
+    fields: &[FieldDecl],
+    existing: &[FnDecl],
+) -> Option<Result<Vec<FnDecl>, DerivePlanError>> {
+    if let Some(tr) = ctx.user_trait(&spec.name) {
+        return Some(plan_user_trait_derive(&tr, fields, existing, spec));
+    }
+    if spec.via.is_some() {
+        return Some(plan_builtin_via(&spec.name, type_name, fields, spec));
+    }
+    if spec.name == ERROR_TRAIT {
+        return Some(Ok(plan_error_derive(spec.span)));
+    }
+    ctx.native_recipe(&spec.name)
+        .map(|methods| Ok(plan_native_derive(&methods, spec.span)))
+}
+
 /// Structural [`TypeRef`] equality modulo spans, via the canonical surface rendering.
 fn type_ref_compatible(a: &TypeRef, b: &TypeRef) -> bool {
     type_ref_str(a) == type_ref_str(b)

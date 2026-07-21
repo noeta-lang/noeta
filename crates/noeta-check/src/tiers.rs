@@ -152,6 +152,12 @@ impl TierRegistry {
 
     /// The extension registry this name-space's extension tiers resolve against — the threaded one,
     /// or the process-global default (instance-registry IR4).
+    /// The extension registry this name-space resolves against — public so the directive registry
+    /// composed over this one can reach the extension-declared `@`-directives.
+    pub fn registry(&self) -> &'static noeta_ext_abi::registry::Registry {
+        self.reg()
+    }
+
     fn reg(&self) -> &'static noeta_ext_abi::registry::Registry {
         self.registry
             .unwrap_or_else(noeta_ext_abi::registry::single_registry_process)
@@ -469,28 +475,40 @@ pub fn expr_tier_statement_diagnostic(tier: &str, span: Span) -> Diagnostic {
     ))
 }
 
-/// The `E0036 UnknownTier` diagnostic for a `@<tier>` whose name no extension declares and the
-/// program does not declare. Shared by [`activate_tiers`] and the checker's in-place `TierBlock`
-/// arm so the two never diverge. The help lists the tiers of `reg` (instance-registry IR4) — the
-/// session's registry, or the process-global default — so the suggestion matches what *this*
-/// name-space actually knows.
+/// The `E0036` diagnostic for an `@name` that resolves to nothing. Shared by [`activate_tiers`]
+/// and the checker's in-place `TierBlock` arm so the two never diverge.
+///
+/// It used to say "unknown dev-tier", which was only ever right in the block position — an
+/// extension's `@`-directive written before a `fn` arrives here too, and calling it a dev-tier
+/// named the wrong thing entirely. The offer spans the whole name-space of `reg`
+/// (instance-registry IR4 — the session's registry, or the process-global default), with a
+/// did-you-mean when the name is close to a real one.
 pub fn unknown_tier_diagnostic(
     reg: &noeta_ext_abi::registry::Registry,
     tier: &str,
     span: Span,
 ) -> Diagnostic {
-    Diagnostic::error(
-        DiagnosticCode::UnknownTier,
+    let known: Vec<String> = reg
+        .ext_tiers()
+        .map(|t| t.name.to_string())
+        .chain(reg.ext_directives().map(|d| d.name.to_string()))
+        .collect();
+    let d = Diagnostic::error(
+        DiagnosticCode::UnknownDirective,
         span,
-        format!("unknown dev-tier `@{tier}`"),
-    )
-    .with_help(format!(
-        "the available tiers are {} — or declare one with `@tier`",
-        reg.ext_tiers()
-            .map(|t| format!("`@{}`", t.name))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
+        format!("unknown directive `@{tier}`"),
+    );
+    match noeta_diagnostics::closest(tier, known.iter().map(String::as_str)) {
+        Some(s) => d.with_help(format!("did you mean `@{s}`?")),
+        None => d.with_help(format!(
+            "the available ones are {} — or declare a tier with `@tier`",
+            known
+                .iter()
+                .map(|n| format!("`@{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 /// A code-tier `fn` surfaced by activation — a root the matching runner invokes by name (a `@test`
@@ -722,9 +740,9 @@ pub fn activate_tiers_with(
         for stmt in &mut stmts {
             let (name_span, attrs) = match stmt {
                 Stmt::Fn(d) => (d.name_span, &mut d.attrs),
-                Stmt::Struct(d) => (d.name_span, &mut d.attrs),
-                Stmt::Class(d) => (d.name_span, &mut d.attrs),
-                Stmt::Enum(d) => (d.name_span, &mut d.attrs),
+                Stmt::Struct(d) => (d.name_span, &mut d.decorators.attrs),
+                Stmt::Class(d) => (d.name_span, &mut d.decorators.attrs),
+                Stmt::Enum(d) => (d.name_span, &mut d.decorators.attrs),
                 _ => continue,
             };
             if let Some(text) = doc_stamps.get(&name_span)
@@ -1187,33 +1205,24 @@ impl Checker {
 
     pub(crate) fn check_semantic_roles(&mut self, program: &Program) {
         for stmt in &program.stmts {
-            match stmt {
-                Stmt::Struct(r) => {
-                    self.check_misplaced_semantic(r.semantic, &r.name, "record");
-                    self.check_role_tags(r.name_span, r.role.as_deref(), r.attribute.is_some());
-                    self.check_packed_struct(r);
-                }
-                Stmt::Class(c) => {
-                    self.check_misplaced_semantic(c.semantic, &c.name, "class");
-                    self.check_misplaced_packed(c.packed, &c.name, "class");
-                    // A role tags an attribute, and attributes are structs only, so `@role` on a
-                    // class is an error (E0031).
-                    if c.role.is_some() {
-                        self.error(
-                            DiagnosticCode::InvalidRole,
-                            c.name_span,
-                            format!(
-                                "a class cannot carry a role: `{}` must be a record attribute",
-                                c.name
-                            ),
-                        )
-                        .help("declare it as an `@attribute type` and tag that with `@role`");
-                    }
-                }
-                Stmt::Enum(e) => {
-                    self.check_misplaced_packed(e.packed, &e.name, "enum");
-                }
-                _ => {}
+            // Placement — which directive may sit on which declaration — is one check for every
+            // kind, over every decorated declaration the AST reports. The walk used to name three
+            // kinds and end in `_ => {}`, each hand-passing its own site and noun; `Stmt::decorated`
+            // is exhaustive over the statement kinds instead, so a new decorated declaration cannot
+            // be silently left unchecked, and the diagnostic's noun is derived from the site rather
+            // than written out a second time.
+            if let Some(at) = stmt.decorated() {
+                self.check_directive_placement(&at);
+            }
+            // The per-directive work placement does not cover: a `@role`'s tags must name variants
+            // of a `@semantic` enum, and a `@packed` struct's fields must all be packable.
+            if let Stmt::Struct(r) = stmt {
+                self.check_role_tags(
+                    r.name_span,
+                    r.decorators.role.as_deref(),
+                    r.decorators.attribute.is_some(),
+                );
+                self.check_packed_struct(r);
             }
         }
     }
@@ -1284,24 +1293,6 @@ impl Checker {
             }
             _ => return None,
         })
-    }
-
-    /// Flag a `@semantic` directive on a non-enum declaration (`E0031`): it marks enums role-eligible
-    /// and has no meaning on a struct or class.
-    pub(crate) fn check_misplaced_semantic(
-        &mut self,
-        semantic: Option<Span>,
-        name: &str,
-        kind: &str,
-    ) {
-        if let Some(span) = semantic {
-            self.error(
-                DiagnosticCode::InvalidRole,
-                span,
-                format!("`@semantic` may only mark an enum, not the {kind} `{name}`"),
-            )
-            .help("`@semantic` makes an enum's variants usable as `@role(Enum.Variant)`");
-        }
     }
 
     /// Validate a struct's `@role(Enum.Variant)` tags. Each must name a **fieldless** variant of a
@@ -1762,7 +1753,7 @@ mod tests {
         let program = parse_program("@tset { fn x() { echo \"hi\"; } }\n");
         let out = activate_tiers(&program, &["test"]);
         assert_eq!(out.diagnostics.len(), 1);
-        assert_eq!(out.diagnostics[0].code, DiagnosticCode::UnknownTier);
+        assert_eq!(out.diagnostics[0].code, DiagnosticCode::UnknownDirective);
         assert!(out.tests.is_empty());
         assert!(out.program.stmts.is_empty());
     }

@@ -195,7 +195,7 @@ impl Checker {
             // A bare name in attribute position is a type reference — a value of the reflection
             // `Type` enum. It must name a real type (else E0013); a `Type` value is then assignable
             // to a `Type`-typed (or `dyn`) field.
-            AttrValue::TypeRef(name) => {
+            AttrValue::TypeRef { name, .. } => {
                 if !Type::is_builtin_name(name)
                     && !PRELUDE_TYPES.contains(&name.as_str())
                     && !self.symbols.types.contains(name)

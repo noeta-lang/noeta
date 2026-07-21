@@ -381,32 +381,10 @@ impl Checker {
                 format!("trait `{}` is declared more than once", decl.name),
             );
         }
-        // A trait accepts `#[...]` data attributes only; the `@`-directives are type-only and do not
-        // apply to a trait (UT6). Report the first offender.
-        let bad_directive = if !decl.derives.is_empty() {
-            Some("@derive")
-        } else if decl.attribute.is_some() {
-            Some("@attribute")
-        } else if decl.role.is_some() {
-            Some("@role")
-        } else if decl.semantic.is_some() {
-            Some("@semantic")
-        } else if decl.packed.is_some() {
-            Some("@packed")
-        } else {
-            None
-        };
-        if let Some(directive) = bad_directive {
-            self.error(
-                DiagnosticCode::InvalidTraitDeclaration,
-                decl.name_span,
-                format!("`{directive}` does not apply to a trait `{}`", decl.name),
-            )
-            .help(
-                "a trait accepts only `#[...]` data attributes; `@derive`/`@attribute`/`@role`/\
-                 `@semantic`/`@packed` are for data types",
-            );
-        }
+        // A trait accepts `#[...]` data attributes only; the `@`-directives are type-only and do
+        // not apply to a trait (UT6). That is checked by the shared placement walk, which reaches
+        // a trait through `Stmt::decorated` like every other decorated declaration — this used to
+        // call it a second time, which would now report each misplacement twice.
         // Duplicate method signatures within the trait body.
         let mut seen: HashSet<&str> = HashSet::new();
         for m in &decl.methods {

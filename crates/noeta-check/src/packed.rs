@@ -291,7 +291,7 @@ impl Checker {
     /// ordinary (non-packed) struct. Runs after `collect`, so a field naming a packed struct declared
     /// later resolves.
     pub(crate) fn check_packed_struct(&mut self, r: &StructDecl) {
-        if r.packed.is_none() {
+        if r.decorators.packed.is_none() {
             return;
         }
         for f in &r.fields {
@@ -309,25 +309,6 @@ impl Checker {
                         "a `@packed` struct's fields must be primitives (`int`, `float`, `bool`) or other packed structs",
                     );
             }
-        }
-    }
-
-    /// Flag a `@packed` directive on a non-struct declaration (`E0038`): it is a value-`struct` layout
-    /// marker and has no meaning on a class or enum.
-    pub(crate) fn check_misplaced_packed(
-        &mut self,
-        packed: Option<PackedDirective>,
-        name: &str,
-        kind: &str,
-    ) {
-        if let Some(directive) = packed {
-            let span = directive.span;
-            self.error(
-                DiagnosticCode::InvalidPackedType,
-                span,
-                format!("`@packed` may only mark a struct, not the {kind} `{name}`"),
-            )
-            .help("`@packed` gives a value `struct` of primitives an unboxed flat layout");
         }
     }
 }

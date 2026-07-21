@@ -899,6 +899,38 @@ pub struct ExtTier {
     pub handler: Option<&'static str>,
 }
 
+/// An extension-declared **`@`-directive** — a name an extension adds to the decorator
+/// name-space, so `@openapi("petstore.yaml")` on a declaration is a directive the compiler knows
+/// rather than a syntax error.
+///
+/// The built-in directives stay a closed enum: they have *semantics* in the checker and the
+/// backends, which an extension cannot contribute. What an extension contributes is a **declared,
+/// validated annotation** — the name, where it may sit, what arguments it takes, and the prose the
+/// editor shows. Its meaning is read back by the extension's own code through the reflection
+/// surface, exactly as a `#[...]` data attribute's is.
+///
+/// Sites use [`TierSite`], the vocabulary this ABI already owns; the checker widens it into its
+/// own finer-grained site model (which distinguishes `struct` from `class` from `enum` in ways a
+/// three-variant enum cannot). **Empty ⇒ unrestricted**, matching [`ExtTier::sites`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtDirective {
+    /// The name programs write after `@`. Resolved *after* the built-in directives and the tier
+    /// name-space, so an extension can never shadow either.
+    pub name: &'static str,
+    /// Which declaration sites it may attach to. Empty ⇒ unrestricted.
+    pub sites: &'static [TierSite],
+    /// Maximum positional arguments; `None` is variadic, `Some(0)` takes none.
+    pub max_args: Option<usize>,
+    /// Named-argument keys it understands (`version:`). Empty ⇒ named arguments are rejected.
+    pub named_keys: &'static [&'static str],
+    /// The one-line usage shown beside the name in completion.
+    pub detail: &'static str,
+    /// Prose shown on hover.
+    pub doc: &'static str,
+    /// Signature-help parameter names, in order.
+    pub params: &'static [&'static str],
+}
+
 /// An extension-declared **derive recipe** (derive layer 4) — the native counterpart of deriving
 /// a fully-defaulted user trait: `@derive(<Name>)` on a type synthesizes, for each declared
 /// method, a forward into the extension's registered module function —
@@ -985,6 +1017,11 @@ pub trait Extension: Sync {
     fn attributes(&self) -> &'static [ExtAttribute] {
         &[]
     }
+    /// The extension's declared **`@`-directives** (see [`ExtDirective`]). Default empty.
+    fn directives(&self) -> &'static [ExtDirective] {
+        &[]
+    }
+
     /// The extension's declared **derive recipes** (derive layer 4 — see [`ExtDerive`]). Default
     /// empty; a defaulted trait method keeps every existing extension source-compatible.
     fn derives(&self) -> &'static [ExtDerive] {
@@ -1514,6 +1551,16 @@ impl Registry {
     /// The installed derive recipe named `name`, if any.
     pub fn find_ext_derive(&self, name: &str) -> Option<&'static ExtDerive> {
         self.ext_derives().find(|d| d.name == name)
+    }
+
+    /// Every installed extension's declared `@`-directives, in install order.
+    pub fn ext_directives(&self) -> impl Iterator<Item = &'static ExtDirective> + '_ {
+        self.units.iter().flat_map(|e| e.directives().iter())
+    }
+
+    /// The installed extension directive named `name`, if any.
+    pub fn find_ext_directive(&self, name: &str) -> Option<&'static ExtDirective> {
+        self.ext_directives().find(|d| d.name == name)
     }
 
     /// Every installed extension's tier-body formatters `(language, fn)`, in install order.

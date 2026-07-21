@@ -426,7 +426,7 @@ pub(crate) fn attr_value_to_vm(
             let values: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::object(shape, values)
         }
-        A::TypeRef(name) => build_type_value(&reflection.type_ref_repr(name)),
+        A::TypeRef { name, .. } => build_type_value(&reflection.type_ref_repr(name)),
     }
 }
 

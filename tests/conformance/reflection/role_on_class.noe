@@ -1,6 +1,6 @@
 // Attributes — and therefore roles — are records only, so `@role(...)` on a class is a checker
-// error (E0031), mirroring `@attribute` on a class (E0029).
-// expect: error E0031 at 6:7
+// misplacement (E0054), the one code every misplaced directive reports.
+// expect: error E0054 at 6:7
 // expect: exit 1
 @role(Semantic.EntryPoint)
 class Service {

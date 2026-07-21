@@ -1,0 +1,7 @@
+// `@validated` on a trait is a misplacement (E0054). Previously silent
+// for the same reason as `validated_on_enum`: `TraitDecl` had no field to record it in.
+// expect: error E0054 at 5:2
+// expect: exit 1
+@validated
+trait Shape { fn area(): int }
+echo "unreached"

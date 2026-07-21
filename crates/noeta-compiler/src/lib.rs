@@ -952,14 +952,14 @@ impl ModuleCompiler {
                     }
                     // A hand-written `compare`/`to_json` (via an `impl` block) takes precedence over
                     // the derived version — same rule as a class.
-                    if noeta_ast::derives_trait(&decl.derives, "Comparable")
+                    if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
                         self.comparable_derives.push(decl.name.clone());
                     }
                     // `@derive(Serialize<Json>)` synthesizes the structural JSON serializer (`Json`
                     // is the only format today, so it maps to the existing `to_json` codegen).
-                    if noeta_ast::derives_trait(&decl.derives, "Serialize")
+                    if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
                         self.tojson_derives.push(decl.name.clone());
@@ -984,20 +984,20 @@ impl ModuleCompiler {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
                     // A reference `class` compares structurally only if it is `Equatable` — derives
                     // it or hand-`impl`s `eq`; otherwise `==` falls back to reference identity.
-                    if noeta_ast::derives_trait(&decl.derives, "Equatable")
+                    if noeta_ast::derives_trait(&decl.decorators.derives, "Equatable")
                         || decl.methods.iter().any(|m| m.name == "eq")
                     {
                         self.structural_eq_types.insert(decl.name.clone());
                     }
                     // A hand-written `compare` (via `impl Comparable`) takes precedence over the
                     // derived structural ordering.
-                    if noeta_ast::derives_trait(&decl.derives, "Comparable")
+                    if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
                         self.comparable_derives.push(decl.name.clone());
                     }
                     // A hand-written `to_json` takes precedence over the derived serializer.
-                    if noeta_ast::derives_trait(&decl.derives, "Serialize")
+                    if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
                         self.tojson_derives.push(decl.name.clone());
@@ -1041,12 +1041,12 @@ impl ModuleCompiler {
                     // `compare`/`to_json` (via an `impl` block) beats the derived version. Ordering
                     // is variant declaration index, then payload fields (the shape carries the
                     // index — see `Shape::variant_index`).
-                    if noeta_ast::derives_trait(&decl.derives, "Comparable")
+                    if noeta_ast::derives_trait(&decl.decorators.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
                         self.comparable_derives.push(decl.name.clone());
                     }
-                    if noeta_ast::derives_trait(&decl.derives, "Serialize")
+                    if noeta_ast::derives_trait(&decl.decorators.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
                         self.tojson_derives.push(decl.name.clone());

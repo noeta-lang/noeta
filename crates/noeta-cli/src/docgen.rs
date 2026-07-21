@@ -452,7 +452,7 @@ fn fields_block(fields: &[noeta_ast::FieldDecl]) -> String {
 
 fn struct_docs(s: &StructDecl, docs: &std::collections::HashMap<String, String>) -> DeclDocs {
     let mut sig = String::new();
-    if s.attribute.is_some() {
+    if s.decorators.attribute.is_some() {
         sig.push_str("@attribute\n");
     }
     if s.is_public {
@@ -516,7 +516,7 @@ fn enum_docs(e: &EnumDecl, docs: &std::collections::HashMap<String, String>) -> 
 
 fn trait_docs(t: &TraitDecl, docs: &std::collections::HashMap<String, String>) -> DeclDocs {
     let mut sig = String::new();
-    for a in &t.attrs {
+    for a in &t.decorators.attrs {
         sig.push_str(&format!("#[{}]\n", a.name));
     }
     if t.is_public {

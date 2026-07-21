@@ -667,10 +667,11 @@ fn standalone_impl_with_methods_is_unsupported() {
 
 #[test]
 fn attribute_on_a_class_is_rejected() {
-    // Attributes are structs only — `@attribute` on a class is E0029 (the arguments have no
-    // unambiguous constructor to map to).
+    // Attributes are structs only — `@attribute` on a class is a misplaced directive, E0054. (It
+    // reported E0029 until the codes were unified; E0029 is about *using* a non-attribute struct as
+    // an attribute, a different fault.)
     let src = "@attribute\nclass Route {\n  path: string\n}\n";
-    assert_eq!(codes(src), ["E0029"]);
+    assert_eq!(codes(src), ["E0054"]);
 }
 
 #[test]
@@ -701,15 +702,16 @@ fn packed_struct_non_primitive_field_is_e0038() {
 }
 
 #[test]
-fn packed_on_a_non_struct_is_e0038() {
-    // `@packed` is a struct-only layout marker; on a class or enum it is a misplacement (E0038).
+fn packed_on_a_non_struct_is_misplaced() {
+    // `@packed` is a struct-only layout marker; on a class or enum it is a misplacement, E0054 —
+    // not E0038, which is reserved for a packed struct's own field constraints.
     assert!(
-        codes("@packed class Boxed { v: int }\n").contains(&"E0038".to_string()),
+        codes("@packed class Boxed { v: int }\n").contains(&"E0054".to_string()),
         "{:?}",
         codes("@packed class Boxed { v: int }\n")
     );
     assert!(
-        codes("@packed enum E { A }\n").contains(&"E0038".to_string()),
+        codes("@packed enum E { A }\n").contains(&"E0054".to_string()),
         "{:?}",
         codes("@packed enum E { A }\n")
     );
@@ -829,10 +831,11 @@ fn role_variant_must_be_fieldless() {
 }
 
 #[test]
-fn semantic_on_a_record_is_misplaced() {
-    // `@semantic` marks enums; on a struct it is a misplacement (E0031).
+fn semantic_on_a_struct_is_misplaced() {
+    // `@semantic` marks enums; on a struct it is a misplacement, E0054. E0031 stays the code for a
+    // malformed *role* — the subject it actually names.
     let src = "@semantic\nstruct Route { path: string }\n";
-    assert_eq!(codes(src), ["E0031"]);
+    assert_eq!(codes(src), ["E0054"]);
 }
 
 #[test]
@@ -2500,4 +2503,60 @@ fn coalesce_seeds_from_fallback_type() {
     // is precisely typed (`.id` on the result checks; a bogus member would not).
     let src = "struct Order { id: int }\nfn wrap<T>(v: T): Result<T, string> { return Ok(v) }\no = Order { id: 1 }\npicked = wrap(o) ?? o\necho picked.id\n";
     assert_eq!(codes(src), Vec::<String>::new());
+}
+
+/// The plain `@derive(Error)` trait name is spelled in two crates: `BuiltinTrait::Error` in
+/// `noeta-types`, and `noeta_ast::derive::ERROR_TRAIT` in the shared cascade (which cannot depend
+/// on `noeta-types`). They drifted once already — the checker's cascade tested the enum's `name()`
+/// while lowering's tested a bare `"Error"` — so pin them together.
+#[test]
+fn the_error_derive_name_agrees_across_crates() {
+    assert_eq!(
+        noeta_types::BuiltinTrait::Error.name(),
+        noeta_ast::derive::ERROR_TRAIT
+    );
+}
+
+/// Placement is checked for every declaration kind that can bear a directive — not for the three
+/// somebody remembered. The walk is driven by `Stmt::decorated`, which is exhaustive over the
+/// statement kinds, so this is a property of the code rather than of this list; the list is here to
+/// notice if the wiring is ever cut.
+#[test]
+fn every_decorated_declaration_kind_is_placement_checked() {
+    for src in [
+        "@semantic\nstruct S { x: int }\n",
+        "@semantic\nclass C { x: int }\n",
+        "@packed\nenum E { A }\n",
+        "@validated\ntrait T { fn f(): int }\n",
+    ] {
+        assert_eq!(codes(src), ["E0054"], "unchecked placement in: {src}");
+    }
+}
+
+/// The diagnostic's noun comes from the site, not from a second hand-written string beside it.
+/// Those two drifted: a misplaced directive on a struct said "a record" while its own help line,
+/// computed from the same site, said "a struct".
+#[test]
+fn the_misplacement_noun_is_derived_from_the_site() {
+    for (src, noun) in [
+        ("@semantic\nstruct S { x: int }\n", "a struct"),
+        ("@semantic\nclass C { x: int }\n", "a class"),
+        ("@packed\nenum E { A }\n", "an enum"),
+        ("@validated\ntrait T { fn f(): int }\n", "a trait"),
+    ] {
+        let msgs: Vec<String> = {
+            seed_std();
+            let source = Source::new(SourceId::FIRST, "test.noe", src);
+            let lexed = lex(&source);
+            let parsed = parse(&source, &lexed.tokens);
+            check(&parsed.program)
+                .iter()
+                .map(|d| d.message.clone())
+                .collect()
+        };
+        assert!(
+            msgs.iter().any(|m| m.contains(noun)),
+            "expected {noun:?} in {msgs:?}"
+        );
+    }
 }

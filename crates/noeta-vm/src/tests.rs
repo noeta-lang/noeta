@@ -2221,8 +2221,14 @@ fn attribute_manifest_records_decorations() {
     assert_eq!(
         arg_values,
         vec![
-            noeta_ast::AttrValue::TypeRef("login".to_string()),
-            noeta_ast::AttrValue::TypeRef("post".to_string()),
+            noeta_ast::AttrValue::TypeRef {
+                name: "login".to_string(),
+                args: Vec::new()
+            },
+            noeta_ast::AttrValue::TypeRef {
+                name: "post".to_string(),
+                args: Vec::new()
+            },
         ]
     );
     // A type with no attributes has no manifest entries.
