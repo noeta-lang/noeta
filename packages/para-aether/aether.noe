@@ -135,6 +135,17 @@ fn run_before(pipeline: List<dyn Middleware>, req: Request): ?Response {
     return none
 }
 
+// Inject the live request for a handler's `Request` parameter. It is absent on the string-testable
+// path (`dispatch_request` threads `none`): a handler that reads the request — a header, a cookie —
+// is exercised through `serve`, where the real request exists. Panicking rather than fabricating an
+// empty request keeps the string path honest about what it can and cannot cover.
+fn request_arg(req: ?Request): dyn {
+    return match req {
+        some(r) => r,
+        none => panic("400 a `Request` parameter is only available on the server path, not the string-testable `dispatch_request`"),
+    }
+}
+
 // --- Configuration registry. ------------------------------------------------------------------
 //
 // An app-wide key/value store (`std.cell`-style shared state via the class's reference identity):
@@ -289,14 +300,22 @@ pub class App {
 
     // The testable dispatch core: resolve a route (matching `{param}` patterns and capturing the id),
     // inject its handler's parameters by reflected type, invoke, and return the response body. `body`
-    // is the raw request body (JSON).
+    // is the raw request body (JSON). The string-testable entry point — no live request to inject,
+    // so a handler that declares a `Request` parameter is exercised through `serve`, not this call.
     fn handle(method: string, path: string, body: string): string {
+        return self.resolve(method, path, body, none)
+    }
+
+    // The route-matching core shared by the string path (`handle`, an absent request) and the server
+    // path (`serve_request`, the live request). A matched route dispatches with the optional request
+    // in scope, so a handler parameter typed `Request` can be injected when one is available.
+    fn resolve(method: string, path: string, body: string, req: ?Request): string {
         for r in self.routes {
             if r.method == method {
                 m = path_match(r.path, path)
                 if m != none {
                     id = m ?? ""
-                    return self.dispatch(r, id, body)
+                    return self.dispatch(r, id, body, req)
                 }
             }
         }
@@ -304,18 +323,18 @@ pub class App {
     }
 
     // Dispatch a matched route: look up its controller instance and invoke the action with the
-    // captured route id in scope (for route-model binding).
-    fn dispatch(r: Route, id: string, body: string): string {
+    // captured route id in scope (for route-model binding) and the optional live request (for DI).
+    fn dispatch(r: Route, id: string, body: string, req: ?Request): string {
         if self.controllers.has(r.controller) {
-            return self.invoke_action(self.controllers[r.controller], r, id, body)
+            return self.invoke_action(self.controllers[r.controller], r, id, body, req)
         }
         return "500 no controller ${r.controller}"
     }
 
     // Invoke a controller action with its injected arguments; render the string result.
-    fn invoke_action(ctrl: dyn, r: Route, id: string, body: string): string {
+    fn invoke_action(ctrl: dyn, r: Route, id: string, body: string, req: ?Request): string {
         target = "${r.controller}.${r.action}"
-        args = self.build_args(target, id, body)
+        args = self.build_args(target, id, body, req)
         return match invoke(ctrl, r.action, args) {
             Ok(result) => result.as<string>() ?? "200 OK",
             Err(e) => "500 ${e}",
@@ -324,23 +343,28 @@ pub class App {
 
     // Build the handler's argument list by reflecting its parameters (`params_of`) and injecting each
     // one by its declared type — a for-loop, not `.map`, because the injection reads `self`.
-    fn build_args(target: string, id: string, body: string): List<dyn> {
+    fn build_args(target: string, id: string, body: string, req: ?Request): List<dyn> {
         mut args: List<dyn> = []
         for p in params_of(target) {
-            args = args ~ [self.arg_for(p, id, body)]
+            args = args ~ [self.arg_for(p, id, body, req)]
         }
         return args
     }
 
     // Inject one parameter by its reflected type:
     //   - `dyn Trait`  → the registered store service (service injection by interface),
+    //   - `Request`    → the live HTTP request (server path only; see `request_arg`),
     //   - a nominal type → route-model binding (if `bind_model`'d) else request-body decode.
-    fn arg_for(p: ParamInfo, id: string, body: string): dyn {
+    //
+    // `Request` reflects as `Named("Request", [])` — the extern type's short name — so it is caught
+    // inside the `Named` arm ahead of the body-decode fallback that would otherwise swallow it into a
+    // JSON panic. A user body struct must not be named `Request`, which is the extern type's name.
+    fn arg_for(p: ParamInfo, id: string, body: string, req: ?Request): dyn {
         return match p.type {
             DynTrait(_) => self.store,
             Struct(n, _) => self.materialize(n, id, body),
             Class(n, _) => self.materialize(n, id, body),
-            Named(n, _) => self.materialize(n, id, body),
+            Named(n, _) => if n == "Request" then request_arg(req) else self.materialize(n, id, body),
             _ => panic("400 cannot inject a parameter of this type"),
         }
     }
@@ -376,9 +400,14 @@ pub class App {
         return out
     }
 
-    // Dispatch one live HTTP request to its handler, then commit the unit-of-work.
+    // Dispatch one live HTTP request to its handler, then commit the unit-of-work. Unlike the
+    // string-testable `dispatch_request`, this threads the live `Request` down to `arg_for`, so a
+    // handler that declares a `Request` parameter is injected with the real one. The route → flush
+    // sequence is otherwise identical to `dispatch_request`'s, so the string path stays a faithful
+    // rehearsal of the server path.
     fn serve_request(req: Request): Response {
-        body = self.dispatch_request(req.method(), req.path(), req.body())
+        body = self.resolve(req.method(), req.path(), req.body(), some(req))
+        self.store.flush()
         return server.response(200, body)
     }
 
