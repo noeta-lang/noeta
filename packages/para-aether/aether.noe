@@ -146,6 +146,17 @@ fn request_arg(req: ?Request): dyn {
     }
 }
 
+// Coerce a handler's return value into a `Response`. A handler may return a `Response` verbatim — its
+// status and headers survive to the reply — or a bare `string`, which becomes a `200 text/plain`
+// body. The runtime value is inspected (`as<Response>`) rather than the handler's declared return, so
+// a method typed `Response`, `string`, or `dyn` all resolve at the one point the value exists.
+fn coerce_response(result: dyn): Response {
+    return match result.as<Response>() {
+        some(resp) => resp,
+        none => server.response(200, result.as<string>() ?? "200 OK", {"content-type": "text/plain"}),
+    }
+}
+
 // --- Configuration registry. ------------------------------------------------------------------
 //
 // An app-wide key/value store (`std.cell`-style shared state via the class's reference identity):
@@ -298,18 +309,23 @@ pub class App {
         self.routes = table
     }
 
-    // The testable dispatch core: resolve a route (matching `{param}` patterns and capturing the id),
-    // inject its handler's parameters by reflected type, invoke, and return the response body. `body`
-    // is the raw request body (JSON). The string-testable entry point — no live request to inject,
+    // The string-testable entry point: resolve + dispatch, then hand back the response *body* as a
+    // plain string. It exists so an app can drive its whole DI + route-model-binding path with no
+    // server (`app.handle("POST", "/users", body)`); the reply's status and headers are the server
+    // path's concern (`serve_request`), so extracting `.body()` here is exactly the projection that
+    // keeps this call byte-for-byte what it always returned — including "404 Not Found" and the
+    // "500 …" strings, which are now the bodies of a 404/500 `Response`. No live request to inject,
     // so a handler that declares a `Request` parameter is exercised through `serve`, not this call.
     fn handle(method: string, path: string, body: string): string {
-        return self.resolve(method, path, body, none)
+        return self.resolve(method, path, body, none).body()
     }
 
     // The route-matching core shared by the string path (`handle`, an absent request) and the server
     // path (`serve_request`, the live request). A matched route dispatches with the optional request
-    // in scope, so a handler parameter typed `Request` can be injected when one is available.
-    fn resolve(method: string, path: string, body: string, req: ?Request): string {
+    // in scope, so a handler parameter typed `Request` can be injected when one is available. Returns
+    // a full `Response` — status and headers included — so the server path carries them verbatim and
+    // the string path projects out the body.
+    fn resolve(method: string, path: string, body: string, req: ?Request): Response {
         for r in self.routes {
             if r.method == method {
                 m = path_match(r.path, path)
@@ -319,25 +335,28 @@ pub class App {
                 }
             }
         }
-        return "404 Not Found"
+        return server.response(404, "404 Not Found")
     }
 
     // Dispatch a matched route: look up its controller instance and invoke the action with the
     // captured route id in scope (for route-model binding) and the optional live request (for DI).
-    fn dispatch(r: Route, id: string, body: string, req: ?Request): string {
+    fn dispatch(r: Route, id: string, body: string, req: ?Request): Response {
         if self.controllers.has(r.controller) {
             return self.invoke_action(self.controllers[r.controller], r, id, body, req)
         }
-        return "500 no controller ${r.controller}"
+        return server.response(500, "500 no controller ${r.controller}")
     }
 
-    // Invoke a controller action with its injected arguments; render the string result.
-    fn invoke_action(ctrl: dyn, r: Route, id: string, body: string, req: ?Request): string {
+    // Invoke a controller action with its injected arguments and coerce the result into a `Response`:
+    // a handler may return a `Response` verbatim (status + headers survive) or a bare `string`
+    // (a `200 text/plain` reply). An invocation error is a `500` whose body is the error — the same
+    // "500 …" string `handle` used to return, now carried as a response body.
+    fn invoke_action(ctrl: dyn, r: Route, id: string, body: string, req: ?Request): Response {
         target = "${r.controller}.${r.action}"
         args = self.build_args(target, id, body, req)
         return match invoke(ctrl, r.action, args) {
-            Ok(result) => result.as<string>() ?? "200 OK",
-            Err(e) => "500 ${e}",
+            Ok(result) => coerce_response(result),
+            Err(e) => server.response(500, "500 ${e}"),
         }
     }
 
@@ -401,14 +420,15 @@ pub class App {
     }
 
     // Dispatch one live HTTP request to its handler, then commit the unit-of-work. Unlike the
-    // string-testable `dispatch_request`, this threads the live `Request` down to `arg_for`, so a
-    // handler that declares a `Request` parameter is injected with the real one. The route → flush
-    // sequence is otherwise identical to `dispatch_request`'s, so the string path stays a faithful
-    // rehearsal of the server path.
+    // string-testable `dispatch_request`, this threads the live `Request` down to `arg_for` (so a
+    // `Request` parameter is injected with the real one) AND returns the handler's `Response`
+    // verbatim — its status and headers reach the client, where `dispatch_request` projected only the
+    // body to a string. The route → flush sequence is otherwise identical, so the string path stays a
+    // faithful rehearsal of the server path.
     fn serve_request(req: Request): Response {
-        body = self.resolve(req.method(), req.path(), req.body(), some(req))
+        resp = self.resolve(req.method(), req.path(), req.body(), some(req))
         self.store.flush()
-        return server.response(200, body)
+        return resp
     }
 
     // Run the app on `port`, dispatching each request through the router.
