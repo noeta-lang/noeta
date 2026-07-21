@@ -28,6 +28,24 @@ impl Checker {
                 // member-function-miss diagnostic); slice 2 tightens it to a hard E0019.
                 match self.reg().classify_use(path, &name.name) {
                     UseKind::Module(qualified) => {
+                        // Expose the module's own extern types under the bound name, exactly as the
+                        // namespace arm below does for a group. Without this, `use para.db` +
+                        // `db.Connection` left the annotation as a bare `Type::Named("db.Connection")`
+                        // that never unified with the `para.db.Connection` a native returns — E0007
+                        // "`Connection` is not assignable to `Connection`", two identities behind one
+                        // short name.
+                        //
+                        // The divergence was invisible for a long time because it depends on whether
+                        // the `use` target is a namespace group or a leaf module: `std.http` is a
+                        // group (parent of `.client`/`.server`) and took the arm below, while
+                        // `para.db` is a concrete module and took this one. Same spelling, different
+                        // answer — so a package-provided extern type behaved unlike a std one for a
+                        // reason no user could see.
+                        for (rel, qualified_ty) in self.reg().namespace_types(&qualified) {
+                            self.imports
+                                .extern_types
+                                .insert(format!("{local}.{rel}"), qualified_ty);
+                        }
                         self.imports.modules.insert(local, qualified);
                     }
                     UseKind::Namespace(prefix) => {

@@ -1,0 +1,46 @@
+// `std.session` — the signed-token codec (session arc S2).
+//
+// Pins the four properties the module exists to guarantee, each of which fails silently if it
+// regresses: a round trip preserves data, a tampered payload is refused, an unknown key is refused,
+// and a rotated keyring still accepts sessions signed by the key it replaced.
+// expect: stdout "42"
+// expect: stdout "admin"
+// expect: stdout "true"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "true"
+// expect: exit 0
+use std.session
+
+keys = session.keyring(["0123456789abcdef0123456789abcdef"])
+
+token = session.encode({"user": "42", "role": "admin"}, keys, 3600)
+back = session.decode(token, keys) ?? {}
+echo back["user"]
+echo back["role"]
+
+// The token is opaque — the payload is base64, so the value is not sitting in it in the clear for
+// a casual reader, though it IS readable by anyone who decodes it. Signing proves integrity, not
+// confidentiality: never put a secret in a session.
+echo token.contains(".")
+
+// A different key must not verify. This is the whole point of the signature.
+other = session.keyring(["ffffffffffffffffffffffffffffffff"])
+echo match session.decode(token, other) {
+    some(_) => "ACCEPTED",
+    none => "none",
+}
+
+// A tampered token must not verify either.
+echo match session.decode(token ~ "x", keys) {
+    some(_) => "ACCEPTED",
+    none => "none",
+}
+
+// Rotation: sign with the new key, still accept the old. Without this, rotating a secret logs out
+// every user at once — so nobody ever rotates.
+rotated = session.keyring(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0123456789abcdef0123456789abcdef"])
+echo match session.decode(token, rotated) {
+    some(_) => "true",
+    none => "REJECTED",
+}

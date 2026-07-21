@@ -15,6 +15,7 @@
 
 namespace para.db.repo
 
+use para.db.Connection
 use para.db.query.{table, run, exec, Query}
 use std.json
 
@@ -52,7 +53,7 @@ pub class Repository {
     }
 
     // Find one row by primary key, mapped to the model; `none` if there is no such row.
-    fn find(conn: dyn, id: dyn): ?dyn {
+    fn find(conn: Connection, id: dyn): ?dyn {
         q = table(self.tbl).filter(self.pk, "=", id).limit(1).select("*")
         rows = run(conn, q)
         if rows.len() == 0 {
@@ -62,7 +63,7 @@ pub class Repository {
     }
 
     // Every row in the table, mapped to the model.
-    fn all(conn: dyn): List<dyn> {
+    fn all(conn: Connection): List<dyn> {
         q = table(self.tbl).select("*")
         rows = run(conn, q)
         mut out: List<dyn> = []
@@ -73,7 +74,7 @@ pub class Repository {
     }
 
     // Rows matching `col <op> value`, mapped to the model (reuses the DB1 builder's `filter`).
-    fn where(conn: dyn, col: string, op: string, value: dyn): List<dyn> {
+    fn where(conn: Connection, col: string, op: string, value: dyn): List<dyn> {
         q = table(self.tbl).filter(col, op, value).select("*")
         rows = run(conn, q)
         mut out: List<dyn> = []
@@ -133,7 +134,7 @@ pub class Repository {
     // Error handling is structured with `if`/early-return in statement position (match arms are
     // expression-only): the driver surfaces a failed statement as a native error, so the happy path
     // runs BEGIN … COMMIT; a partial batch is undone by the transaction if COMMIT is never reached.
-    fn flush(conn: dyn): int {
+    fn flush(conn: Connection): int {
         mut count = 0
         conn.execute("BEGIN", [])
         for entity in self.pending_new {

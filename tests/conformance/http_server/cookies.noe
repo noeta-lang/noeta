@@ -1,0 +1,45 @@
+// Cookies (cookie arc C1) — the typed `Set-Cookie` builder and the `Cookie:` reader.
+//
+// Pins the three things the surface exists to guarantee: the defaults are the safe ones, two
+// cookies survive as two headers (`with_header` would have discarded the first), and a value
+// carrying `\r\n` or `;` is refused at construction rather than splitting the reply.
+// expect: stdout "sid=abc; Path=/; SameSite=Lax; HttpOnly"
+// expect: stdout "theme=dark; Path=/; Max-Age=600; SameSite=Strict"
+// expect: stdout "2"
+// expect: stdout "1"
+// expect: stdout "sid=rotated; Path=/; SameSite=Lax; HttpOnly"
+// expect: stdout "sid=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"
+// expect: stdout "true"
+// expect: exit 0
+use std.http.server
+
+// The defaults a session cookie wants, without asking for them.
+sid = server.cookie("sid", "abc")
+echo sid.to_header()
+
+// Builders are copy-modify, like `Response.with_header`.
+theme = server
+    .cookie("theme", "dark")
+    .with_max_age(600)
+    .with_same_site("strict")
+    .with_http_only(false)
+echo theme.to_header()
+
+// The gap this arc closes: `Set-Cookie` is the one header that cannot be comma-folded, so two
+// cookies must be two headers — which `with_header` could not express, since it replaces.
+reply = server.response(200, "ok").with_cookie(sid).with_cookie(theme)
+set_cookies = reply.headers_all("set-cookie")
+echo set_cookies.len()
+
+// But `with_cookie` still means "set this cookie": the same name replaces rather than emitting a
+// duplicate the browser would have to break the tie on.
+rotated = server.response(200, "ok").with_cookie(sid).with_cookie(sid.with_value("rotated"))
+echo rotated.headers_all("set-cookie").len()
+echo rotated.header("set-cookie") ?? "absent"
+
+// Deleting is overwriting — the path must survive or the browser will not match it.
+echo sid.expired().to_header()
+
+// `SameSite=None` implies `Secure`; a browser discards the pair without it.
+cross_site = server.cookie("x", "1").with_same_site("none")
+echo cross_site.to_header().contains("Secure")

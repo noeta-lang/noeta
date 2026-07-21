@@ -1,0 +1,57 @@
+// `session.open` / `session.attach` over a real request/response pair (session arc S3).
+//
+// The behaviours pinned are the ones a handler depends on and cannot see going wrong: an unchanged
+// session emits NO header (so it never silently extends its own expiry), a changed one emits
+// exactly one Secure cookie, a token round-trips back through the `Cookie` header, and clearing
+// emits an EXPIRED cookie rather than a valid token carrying nothing — the difference between
+// logging out and only appearing to.
+// expect: stdout "empty"
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "true"
+// expect: stdout "42"
+// expect: stdout "true"
+// expect: stdout "served"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+use std.session
+
+keys = session.keyring(["0123456789abcdef0123456789abcdef"])
+
+fn handle(req: Request) use (keys): Response {
+    if req.path() != "/" {
+        return server.response(200, "ok")
+    }
+
+    // No cookie on the request: an empty session, never an error — a caller has the same correct
+    // response to "absent", "forged", and "expired".
+    s = session.open(req, keys)
+    echo s.get("user") ?? "empty"
+
+    // An untouched session writes nothing back.
+    untouched = session.attach(server.response(200, "ok"), s, keys, 3600, true)
+    echo untouched.headers_all("set-cookie").len()
+
+    // A changed one writes exactly one cookie, Secure because this call asked for it.
+    logged_in = s.set("user", "42")
+    reply = session.attach(server.response(200, "ok"), logged_in, keys, 3600, true)
+    emitted = reply.headers_all("set-cookie")
+    echo emitted.len()
+    echo emitted[0].contains("Secure")
+
+    // The return trip a browser performs: the token comes back in a `Cookie` header, under the
+    // name `attach` wrote it under.
+    token = session.encode(logged_in.data(), keys, 3600)
+    returning = req.with_header("cookie", "session=" ~ token)
+    echo session.open(returning, keys).get("user") ?? "missing"
+
+    // Clearing is a logout: an expired cookie, not a valid token for empty data.
+    out = session.attach(server.response(200, "bye"), logged_in.clear(), keys, 3600, true)
+    echo out.headers_all("set-cookie")[0].contains("Max-Age=0")
+
+    return reply
+}
+
+server.serve(8080, handle)
+echo "served"

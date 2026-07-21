@@ -649,7 +649,61 @@ all on Noeta's own async runtime. A handler that errors becomes a `500`; the ser
 | `server.serve` | `serve(port: int, handler: (Request) -> Response, host?: string) -> void` | Binds `host:port` (`host` defaults to `0.0.0.0`); serves until the process stops (Ctrl-C drains gracefully). |
 | `server.response` | `response(status: int, body?: string\|bytes, headers?: Map<string, string>) -> Response` | The reply builder a handler uses. |
 | `Request` methods | `method() -> string`, `path() -> string`, `query(name) -> string?`, `header(name) -> string?` (case-insensitive), `body() -> string`, `body_bytes() -> bytes` | Read the inbound request. |
-| `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). |
+| `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). **Replaces** any existing header of that name. |
+| `Response.headers_all` | `headers_all(name) -> List<string>` | Every value of a repeated header, in order. `header` sees only the first. |
+
+#### Cookies
+
+`server.cookie(name, value)` builds a `Cookie`; `Response.with_cookie` attaches it. The defaults are
+the safe ones — `Path=/`, `HttpOnly`, `SameSite=Lax` — so the shortest spelling is also the one you
+want for a session.
+
+Two properties are worth knowing, because both are places cookie code usually goes wrong:
+
+**Setting two cookies works.** `Set-Cookie` is the one header RFC 7230 exempts from comma-folding — a
+cookie's `Expires` attribute contains a comma, so the fold would be ambiguous — which means two
+cookies must be two headers. `with_header` could not express that, since it replaces.
+
+`with_cookie` replaces per **cookie name**, not per header: two different cookies both survive, and
+setting the same one twice does what you meant rather than emitting a duplicate the browser has to
+break a tie on. So the one rule `with_X` sets `X` holds across the whole type, and the multi-header
+shape stays an implementation detail.
+
+There is deliberately **no generic multi-value write** to match `headers_all`'s multi-value read. The
+asymmetry tracks who controls the bytes: a peer may repeat any header it likes and you must be able
+to see all of them, whereas everything *you* emit can be comma-joined — except `Set-Cookie`, which
+has its own door.
+
+**An invalid cookie cannot be built.** `server.cookie` validates the name and value and *errors*
+rather than escaping. A cookie value is derived from user input more reliably than any other header,
+and a `\r\n` in an unchecked value lets the caller append headers of their choosing (response
+splitting) while a stray `;` forges attributes the author never wrote. Because construction
+validates, `to_header()` is total. Encode anything richer than an RFC 6265 token — arbitrary bytes,
+UTF-8 text — before it goes in; base64url is the usual choice.
+
+| Type / function | Signature | Notes |
+|---|---|---|
+| `server.cookie` | `cookie(name: string, value: string) -> Cookie` | Errors on a name or value outside RFC 6265. |
+| `Response.with_cookie` | `with_cookie(cookie: Cookie) -> Response` | Sets a cookie. Replaces one of the same name; otherwise adds. |
+| `Request.cookies` | `cookies() -> Map<string, string>` | Every cookie the client sent. Empty when the header is absent. |
+| `Request.cookie` | `cookie(name) -> string?` | One cookie by name. Cookie names are case-**sensitive**, unlike header names. |
+| `Cookie` builders | `with_value(v)`, `with_path(p)`, `with_domain(d)`, `with_max_age(secs: int)`, `with_http_only(b)`, `with_secure(b)`, `with_same_site("strict"\|"lax"\|"none")` | Copy-modify, like `Response.with_header`. |
+| `Cookie.expired` | `expired() -> Cookie` | The deletion form: same name/path/domain, empty value, `Max-Age=0`. |
+| `Cookie.to_header` | `to_header() -> string` | The raw header value. Prefer `Response.with_cookie`. |
+
+`SameSite=None` implies `Secure` and sets it, and `with_secure(false)` on such a cookie is an error —
+a browser discards the combination, which is the hardest cookie bug to diagnose because the response
+looks correct on the wire.
+
+Deleting a cookie means *overwriting* it with an expired one, and a browser only matches the
+overwrite when `Path` and `Domain` match the original. That is why `expired()` is a method on the
+cookie you set rather than a free `delete(name)` that could not know them:
+
+```noeta ignore
+sid = server.cookie("sid", token).with_path("/app").with_secure(true)
+// …later, to log out — the path must match, so derive it from the original:
+reply = server.response(303, "").with_cookie(sid.expired())
+```
 
 ```noeta check
 use std.http.server
@@ -679,6 +733,75 @@ needed; you compose them into the single handler you serve.
 deterministic sandbox (tests) `server.serve` instead drives a fixed, documented **request script**
 through the handler and returns — so a served program is reproducible and terminates in-oracle,
 the inbound mirror of the client's pure responder.
+
+## `session`
+
+`use std.session` binds `session`: signed, stateless sessions carried in a cookie. The state rides
+on the request, not in the server.
+
+That is not a stylistic choice. `noeta serve --parallel N` gives every worker its own host and its
+own retained arena, so the obvious in-memory implementation — a `Cell<Map<…>>` the handler captures
+— is correct at `--parallel 1` and **silently fragments** above it: a session written on worker 2 is
+invisible to the others while requests bounce between them. The bug appears only under the flag you
+reach for in production, and presents as random logouts. A signed cookie has no such failure mode,
+and it needs no framework hook, so it composes with a bare `server.serve` handler and any router
+built on it.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `session.keyring` | `keyring(secrets: List<string>) -> Keyring` | Signing keys, newest first. Each at least 16 bytes. |
+| `session.open` | `open(req: Request, keys: Keyring) -> Session` | Never fails — absent, forged, and expired all give an empty session. |
+| `session.attach` | `attach(resp: Response, s: Session, keys: Keyring, max_age: int, secure: bool) -> Response` | Writes the cookie back, but only if the session changed. |
+| `session.encode` | `encode(data: Map<string,string>, keys: Keyring, max_age: int) -> string` | The raw codec, for a non-cookie carrier or a different name. |
+| `session.decode` | `decode(token: string, keys: Keyring) -> Map<string,string>?` | Verify and decode, or none. |
+| `Session` methods | `get(name) -> string?`, `set(name, value) -> Session`, `remove(name) -> Session`, `clear() -> Session`, `dirty() -> bool`, `data() -> Map<string,string>` | Copy-modify, like `Response` and `Cookie`. |
+
+```noeta ignore
+use std.http.server
+use std.http.{Request, Response}
+use std.{session, env}
+
+keys = session.keyring([env.get("SESSION_SECRET")])
+
+fn handle(req: Request) use (keys): Response {
+    s = session.open(req, keys)
+    if req.path() == "/login" {
+        s = s.set("user", "42")
+    }
+    body = s.get("user") ?? "anonymous"
+    return session.attach(server.response(200, body), s, keys, 86400, true)
+}
+
+server.serve(8080, handle)
+```
+
+**The token** is `base64url(payload) "." base64url(hmac_sha256(key, base64url(payload)))`, where the
+payload is `{"d": {…}, "exp": <unix seconds>}`. Three properties are load-bearing:
+
+- **The MAC is verified before the payload is parsed**, so attacker-controlled bytes never reach the
+  JSON parser unauthenticated.
+- **`exp` is mandatory.** With no store there is nothing to revoke against, so an unbounded token
+  would be valid forever and a stolen one stolen for good. It is a parameter, not an option.
+- **Signing uses the first key; verification accepts any.** Rotating a secret would otherwise log
+  every user out at once — which is why, in practice, nobody rotates.
+
+**A session is signed, not encrypted.** Anyone holding the cookie can read its contents; the
+signature proves only that they did not change them. Never put a secret in a session — store an
+identifier and look the rest up.
+
+**`secure` has no default, deliberately.** Defaulting it on breaks every plain-http localhost server
+with a cookie the browser silently refuses to store; defaulting it off ships session credentials over
+cleartext. Both failures are quiet, so the choice is stated out loud at the call: `true` in
+production, `false` only for local development.
+
+**There is a 4096-byte ceiling**, and exceeding it is an error rather than a truncation — browsers
+drop an oversized cookie silently. Hitting it is the signal to move to a server-side store keyed by
+a small id, which is what `para/db` offers on top.
+
+Removing a key that was not there, or clearing an already-empty session, leaves it **not** dirty — so
+a speculative `remove` on every request does not re-emit the cookie and quietly extend its own
+expiry. Clearing a non-empty session emits an *expired* cookie rather than a valid token for empty
+data, which is the difference between logging out and appearing to.
 
 ### WebSockets
 

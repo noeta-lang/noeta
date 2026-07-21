@@ -52,6 +52,7 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 | Item | Source / trigger |
 | --- | --- |
 | **Per-dialect migration overrides** — v1 runs each migration body verbatim in the target dialect's native SQL (write portable SQL). A `migrations/postgres/` (or `sqlite/`) sub-directory shadowing a base file for a divergent backend (e.g. `SERIAL` vs `AUTOINCREMENT`), selected by the connected driver's dialect. `load_dir` already ignores sub-directories, leaving room for this | migration engine (aether DB6, 2026-07-19). Trigger: a project genuinely needing to target both SQLite and Postgres from one migration set |
+| **A package's own `.noe` cannot be checked standalone** — `noeta check packages/para-db/**` fails at `use para.db` (E0019), because `crates/noeta-pm/src/graph.rs:254-256` walks only `root_deps`, so a *root* manifest's own `native = "native"` never becomes a `NativeCrate` and `compose::maybe_delegate` never composes for it. A package with a native half is checkable only as somebody's dependency. This is why para-db's `dyn` workarounds rotted unnoticed for two arcs after the language stopped needing them — CI structurally could not see them | surfaced fixing F5 (2026-07-21). *(active)* — it is the reason the next such rot will also go unseen |
 | **Out-of-order migration detection** — the runner applies pending files in filename-sort order and gates history integrity via checksum + deleted-file checks; it does not warn when a *newly added* migration sorts before an already-applied one (a rebase inserting an earlier prefix). Timestamps make this rare; a warning (not a hard error, to keep legitimate merges unblocked) could flag it | migration engine (aether DB6, 2026-07-19). Trigger: an out-of-order incident in practice |
 
 ## Packages, registry & distribution
@@ -95,6 +96,8 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 |---|---|
 | Crypto: blake3; argon2/scrypt (needs the algorithm-tagged verify design); AEAD encryption (AES-GCM / chacha20-poly1305 — only WITH a key-management story) | crypto arc scope cuts |
 | HTTP client: per-request timeout; streaming bodies (rides the `ReadSource` model); cookie jar / redirect / retry config; HMAC request-signing helpers | http arc scope cuts |
+| ~~**`std.session`** — the stateless signed-cookie codec + `Session` request/response pair~~ ✅ DONE — shipped as S2/S3 of the cookie arc: `keyring`/`encode`/`decode` + `open`/`attach`, verify-before-parse, mandatory `exp`, rotation keyring, 4096-byte hard error, required `secure` argument | cookie arc S1 tail |
+| Manifest `optional` / `[suggests]` dependencies — a package declaring a dependency an app opts into. Rings are the wrong layer (native-payload DCE, unknown to `noeta-pm`); `Dependency::Scope` covers the `para/aether` + `para/db` case today, and the diagnostic is the better discoverability surface | http-sessions S4 design question. Trigger: a second use case that `Scope` does not cover |
 | Raw TCP/UDP (`std.net`) for non-HTTP protocols — needs a scripted-peer deterministic sandbox model (harder than the HTTP responder) | http-server design question. YAGNI until a concrete protocol |
 | CRDTs: last-write-wins register; add/remove OR-Set | p2p arc |
 | Kernel bundles: `IVec2`/`IVec3`, `f64` vectors, `Transform` (TRS), `Color` | kernel-methods deferred |
