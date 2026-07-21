@@ -259,11 +259,13 @@ pub enum DiagnosticCode {
     /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
     /// error type, or align the function's declared error type.
     TryErrorMismatch,
-    /// An explicit turbofish instantiation (`f::<T, ...>(args)`) that cannot apply: the callee is
-    /// not a generic function (or not a function at all), or the number of type arguments does not
-    /// match the function's declared type parameters. Type arguments bind to the declaration's
-    /// parameters in order; supply exactly one per parameter, or drop the turbofish and let the
-    /// arguments infer them.
+    /// A generic application carrying the wrong type arguments. Two sites report it: an explicit
+    /// turbofish instantiation (`f::<T, ...>(args)`) that cannot apply — the callee is not a generic
+    /// function (or not a function at all), or the count does not match the declared type parameters
+    /// — and a **built-in type constructor** applied at the wrong arity in a type reference
+    /// (`List<int, string>`, `Map<int>`). In both cases type arguments bind to the constructor's
+    /// parameters in order; supply exactly one per parameter, or omit `<…>` entirely and let them
+    /// infer.
     InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,

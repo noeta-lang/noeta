@@ -1,0 +1,11 @@
+// A type reference's **generic arguments** are type references too, so an unknown name nested inside
+// one is the same E0013 an unknown head name is. The checker used to validate only the head and never
+// look at the arguments, so `List<Ghost>` in attribute position passed silently while a bare `Ghost`
+// was rejected.
+// expect: error E0013 at 10:23
+// expect: exit 1
+@attribute
+struct Builds { target: Type }
+
+#[Builds(target: List<Ghost>)]
+struct Payload { id: int }

@@ -2762,8 +2762,12 @@ impl<'m> Vm<'m> {
                         // reflection `Type` ADT — the one representation of "a type as a value", shared
                         // with `type_of` and stored type-refs. `Op::Invoke` resolves it back to the
                         // named type via `reflection_type_name`.
-                        let value =
-                            build_type_value(&module.reflection.type_ref_repr(module.name(*name)));
+                        // No type arguments: the op carries a single name index because the surface
+                        // form it lowers from is a bare identifier in receiver position
+                        // (`invoke(Foo, …)`), which cannot spell a generic application.
+                        let value = build_type_value(
+                            &module.reflection.type_ref_repr(module.name(*name), &[]),
+                        );
                         set_reg(regs, fbase, *dst, value);
                         pc += 1;
                     }

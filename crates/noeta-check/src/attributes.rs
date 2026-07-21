@@ -192,10 +192,16 @@ impl Checker {
                 "Result" => Type::Result(Box::new(Type::Dyn), Box::new(Type::Dyn)),
                 _ => Type::Named(enum_name.clone(), Vec::new()),
             },
-            // A bare name in attribute position is a type reference — a value of the reflection
-            // `Type` enum. It must name a real type (else E0013); a `Type` value is then assignable
-            // to a `Type`-typed (or `dyn`) field.
-            AttrValue::TypeRef { name, .. } => {
+            // A name in attribute position is a type reference — a value of the reflection `Type`
+            // enum. It must name a real type (else E0013); a `Type` value is then assignable to a
+            // `Type`-typed (or `dyn`) field.
+            AttrValue::TypeRef { name, args } => {
+                // The generic arguments are a type reference each, and get the same validation any
+                // annotation's arguments get: an unresolvable nested name is E0013 and a built-in
+                // constructor at the wrong arity is E0058. They were previously unchecked, so
+                // `List<int, string, bogus>` in attribute position passed silently — the head name
+                // was validated and the arguments simply were not looked at.
+                self.check_type_args(name, args, span);
                 if !Type::is_builtin_name(name)
                     && !PRELUDE_TYPES.contains(&name.as_str())
                     && !self.symbols.types.contains(name)
