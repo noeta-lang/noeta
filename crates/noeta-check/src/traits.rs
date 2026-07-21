@@ -207,7 +207,7 @@ impl Checker {
     /// carry method bodies (hoisted onto the target), but a built-in trait's must stay an
     /// empty-body marker (E0015). Coherence is enforced together with the target's
     /// `@derive`s/in-body impls in [`Self::check_coherence`].
-    pub(crate) fn check_standalone_impl(&mut self, decl: &ImplDecl) {
+    pub(crate) fn check_standalone_impl(&mut self, decl: &ImplDecl, env: &mut Env) {
         // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
         // validation — bundle resolution, packed-target + constraint checks, conflict rules. But a
         // cross-package **user trait** is *also* dotted once qualified (`para.aether.Store`), so a
@@ -255,6 +255,50 @@ impl Checker {
             decl.trait_span,
             &decl.methods,
         );
+        self.check_standalone_impl_bodies(decl, env);
+    }
+
+    /// Type-check a standalone `impl Trait for T { … }`'s method **bodies**.
+    ///
+    /// Until this existed they were never checked at all. [`Self::check_trait_impl`] validates the
+    /// *contract* — that the impl provides the trait's methods with matching arity and annotated
+    /// types (E0015) — and the hoist that grafts the methods onto the target so they can be
+    /// dispatched lives in the backends (`noeta_ir::hoist_standalone_impl_methods`). Nothing on the
+    /// checking path walked the statements in between, so a body could be arbitrarily wrong
+    /// (`return "not an int"` from a `fn f(): int`) and check clean, failing only at run time. The
+    /// same body written in an *in-body* `impl Trait { }` block WAS checked, because those methods
+    /// are flattened into the type's own `methods` — so the two spellings disagreed about whether
+    /// your code was checked at all.
+    ///
+    /// A body is checked in exactly the context its in-body twin gets: the target's generic
+    /// parameters in scope, `self` bound to the target type, and `current_type` set so the type's
+    /// own private fields are visible (the type-scoped privacy rule).
+    fn check_standalone_impl_bodies(&mut self, decl: &ImplDecl, env: &mut Env) {
+        if decl.methods.is_empty() {
+            return;
+        }
+        // Only for a type this module declares. A target that is not a known record/enum already
+        // produced E0013 above; checking bodies against a type we know nothing about would pile
+        // cascading noise on top of that one real error.
+        if !self.symbols.records.contains_key(&decl.target)
+            && !self.symbols.enums.contains_key(&decl.target)
+        {
+            return;
+        }
+        let type_params = self
+            .symbols
+            .type_params
+            .get(&decl.target)
+            .cloned()
+            .unwrap_or_default();
+        let saved_params = self.enter_type_params(&type_params);
+        let bindings = vec![("self".to_string(), self_type(&decl.target, &type_params))];
+        let saved_type = self.coloring.current_type.replace(decl.target.clone());
+        for method in &decl.methods {
+            self.check_fn(method, env, &bindings, TargetKind::Method);
+        }
+        self.coloring.current_type = saved_type;
+        self.coloring.type_params = saved_params;
     }
 
     /// Validate that an `impl` of a user trait provides its contract (L1, UT2): every **required**
@@ -343,7 +387,7 @@ impl Checker {
     /// pass 1; here we reject a name that collides with a built-in trait, a declared type, or an
     /// earlier `trait` of the same name, plus duplicated method signatures within the body. Default
     /// method bodies are accepted syntactically but not yet type-checked (UT5).
-    pub(crate) fn check_trait_decl(&mut self, decl: &noeta_ast::TraitDecl) {
+    pub(crate) fn check_trait_decl(&mut self, decl: &noeta_ast::TraitDecl, env: &mut Env) {
         // A user trait may not shadow a built-in trait name — an `impl`/bound naming it would be
         // ambiguous against the closed built-in set.
         if BuiltinTrait::from_name(&decl.name).is_some() {
@@ -419,6 +463,33 @@ impl Checker {
                 );
             }
         }
+        self.check_trait_default_bodies(decl, env);
+    }
+
+    /// Type-check a trait's **default method bodies** — the second hole the body-coverage ledger
+    /// found, and unchecked for the same reason as the first: nothing walked them.
+    ///
+    /// A default body is ordinary user code that really runs (every implementor that omits the
+    /// method inherits it), so leaving it unchecked meant a trait could ship a body that fails only
+    /// once somebody declines to override it.
+    ///
+    /// It is checked **once, against the trait's own contract**, not once per implementor: `self` is
+    /// bound to `dyn <Trait>`, so the body may rely on exactly what every implementor is guaranteed
+    /// to provide — the trait's own methods — and nothing more. That is the honest scope. Checking
+    /// per implementor instead would re-report one authoring mistake at every `impl` in the program
+    /// and still not check a trait nobody has implemented yet.
+    fn check_trait_default_bodies(&mut self, decl: &noeta_ast::TraitDecl, env: &mut Env) {
+        let defaults: Vec<&noeta_ast::TraitMethod> =
+            decl.methods.iter().filter(|m| m.has_default).collect();
+        if defaults.is_empty() {
+            return;
+        }
+        let saved_params = self.enter_type_params(&decl.type_params);
+        let bindings = vec![("self".to_string(), Type::DynTrait(decl.name.clone()))];
+        for m in defaults {
+            self.check_fn(&m.sig, env, &bindings, TargetKind::Method);
+        }
+        self.coloring.type_params = saved_params;
     }
 
     /// Validate a method-bundle binding `impl <module>.<Bundle> for T {}` (kernel-methods K1).

@@ -233,6 +233,10 @@ impl Checker {
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
+                    self.symbols
+                        .type_params
+                        .insert(r.name.clone(), r.type_params.clone());
                     // Record each struct method's signature + instance classification, exactly as
                     // for a class (this closed a long-standing gap: struct associated calls —
                     // `B.new(1)` — previously typed as a hole because struct methods were never
@@ -337,6 +341,10 @@ impl Checker {
                         c.name.clone(),
                         c.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
+                    self.symbols
+                        .type_params
+                        .insert(c.name.clone(), c.type_params.clone());
                     let methods: Vec<&FnDecl> = c
                         .methods
                         .iter()
@@ -393,6 +401,10 @@ impl Checker {
                         e.name.clone(),
                         e.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // The same parameters WITH bounds, for checking a standalone `impl`'s bodies.
+                    self.symbols
+                        .type_params
+                        .insert(e.name.clone(), e.type_params.clone());
                     // Record each enum method's signature (inherent + impl-block, the unified body —
                     // object-model slice 3) under `(Enum, method)`, exactly like a class's, so an
                     // instance call `status.label()` and an associated call `Status.parse(s)` resolve
