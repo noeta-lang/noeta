@@ -248,6 +248,7 @@ impl Checker {
                         Some(at.name),
                         f.name_span,
                     );
+                    self.check_declared_args(d, &f.args, f.name_span);
                 }
                 // `@tier` decorates the `fn` that runs a tier, never a type.
                 Some(DirectiveKind::Builtin(BuiltinDirective::Tier)) => {
@@ -354,6 +355,62 @@ impl Checker {
             ));
         } else {
             d.help(format!("`@{name}` applies to {}", allowed.label()));
+        }
+    }
+}
+
+impl Checker {
+    /// Validate an extension directive's arguments against what it declared: how many positional
+    /// arguments it takes, and which `name:` keys it understands.
+    ///
+    /// `max_args` and `named_keys` shipped in the ABI with no reader — the same failure as
+    /// `ExtTier.sites`, repeated in code written during the arc that fixed it. A declared
+    /// constraint nothing enforces is worse than none: it tells an extension author their
+    /// contract is checked when nothing checks it.
+    ///
+    /// Deliberately mirrors what a `#[...]` data attribute already gets (E0005 for an unknown
+    /// key, E0009 for the wrong count), because an extension directive's arguments are the same
+    /// kind of thing — compile-time values named against a declared shape.
+    pub(crate) fn check_declared_args(
+        &mut self,
+        directive: &'static noeta_ext_abi::registry::ExtDirective,
+        args: &[noeta_ast::AttrArg],
+        span: Span,
+    ) {
+        let name = directive.name;
+        let positional = args.iter().filter(|a| a.name.is_none()).count();
+        if let Some(max) = directive.max_args
+            && positional > max
+        {
+            let plural = if max == 1 { "" } else { "s" };
+            self.error(
+                DiagnosticCode::InvalidDirectiveArgument,
+                span,
+                format!(
+                    "`@{name}` takes at most {max} argument{plural}, but {positional} were given"
+                ),
+            );
+        }
+        for arg in args {
+            let Some(key) = &arg.name else { continue };
+            if directive.named_keys.contains(&key.as_str()) {
+                continue;
+            }
+            let d = self.error(
+                DiagnosticCode::UnknownName,
+                arg.span,
+                format!("`@{name}` has no argument `{key}`"),
+            );
+            if directive.named_keys.is_empty() {
+                d.help(format!("`@{name}` takes positional arguments only"));
+            } else {
+                let keys: Vec<String> = directive
+                    .named_keys
+                    .iter()
+                    .map(|k| format!("`{k}:`"))
+                    .collect();
+                d.help(format!("it understands {}", keys.join(", ")));
+            }
         }
     }
 }

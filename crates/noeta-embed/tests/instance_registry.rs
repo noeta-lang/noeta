@@ -378,6 +378,39 @@ fn every_position_shares_one_site_gate() {
     );
 }
 
+/// An extension directive's declared argument contract is enforced, not merely documented.
+///
+/// `max_args` and `named_keys` shipped in the ABI with no reader at all — the same failure as
+/// `ExtTier.sites`, in code written during the arc that fixed `ExtTier.sites`. `@openapi` declares
+/// one positional argument and no named keys, so both violations are caught.
+#[test]
+fn an_extension_directive_arg_contract_is_enforced() {
+    let reject =
+        |src: &str, needle: &str| match Session::builder().with_extensions(vec![&PLUGIN]).load(src)
+        {
+            Err(Error::Check(diags)) => assert!(
+                diags.iter().any(|d| d.contains(needle)),
+                "expected {needle:?}, got {diags:?}"
+            ),
+            other => panic!("expected a rejection for: {src} — got {other:?}"),
+        };
+    reject(
+        "@openapi(\"a.yaml\", \"b.yaml\")\nstruct P { x: int }\necho 1\n",
+        "takes at most 1 argument",
+    );
+    reject(
+        "@openapi(version: \"3\")\nstruct P { x: int }\necho 1\n",
+        "has no argument `version`",
+    );
+    // The declared shape still checks clean.
+    assert!(
+        Session::builder()
+            .with_extensions(vec![&PLUGIN])
+            .load(USES_OPENAPI_DIRECTIVE)
+            .is_ok()
+    );
+}
+
 #[test]
 fn the_checker_scopes_the_tier_namespace_to_the_session_registry() {
     // The plugin session's registry declares `@audit`, so the block checks clean.
