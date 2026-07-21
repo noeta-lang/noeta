@@ -47,13 +47,23 @@ payoff. So `x is i32` on a scalar stays false, handled by a **checker warning** 
 
 ## Slices
 
-| # | Slice | Depends on | Notes |
-|---|---|---|---|
-| 1 | Packed storage for all widths | — | `PackedKind::IntN{bits,signed}` + `F64`; `byte_width`; `packed_layout` gate (stop sending `IntN`→`None`); `KindKey`; `from_bytes`/`to_bytes`; the reflect path so `List<iN>`/`List<f64>` element widths are distinct; `.noeb` FORMAT_VERSION |
-| 2 | f32 scalar narrowing fix + erased-width warning | — | `f32 is f32`/`is float` wrongly false (reified but no `NarrowTarget` head) → add head + `F32 <: float`. Warn on scalar `is iN`/`is f64` (statically always-false; "erases to int/float — did you mean `is int`?"). `is f32` and `is List<iN>` do NOT warn. Runs parallel to slice 1 (narrowing machinery vs packed layout — disjoint files) |
-| 3 | SIMD/kernel acceleration where it pays | slice 1 | Only widths with a real kernel; scalar fallback otherwise |
+Slices 1 and 2 are **done and merged** (arc `c822c181`, combined gate 7/7 including
+`differential_backends_agree`). Slice 3 is optional and deferred — see below.
 
-Slices 1 and 2 are independent and run in parallel. Slice 3 follows slice 1.
+| # | Slice | State | Notes |
+|---|---|---|---|
+| 1 | Packed storage for all widths | ✅ done | `PackedKind::IntN{bits,signed}` + `F64`; natural `byte_width`; `packed_layout` gate; `from_bytes`/`to_bytes` with sign/zero extension; reflect path so `List<iN>`/`List<f64>` are distinct (via construction tag). **39 B/element vs 73** on a 10-field mixed struct. FORMAT_VERSION → 5. Reifies width **only in container-element position** (a top-level scalar `i32`/`f64` still erases, preserving `params_of`/`type_of` agreement). |
+| 2 | f32 scalar narrowing + erased-width warning | ✅ done | `NarrowTarget::F32` + `F32 <: float` in both matchers; `.as<T>()` honors the edge. **E0063** warns on scalar `is iN`/`is f64`; `is f32`/`is int`/`is List<iN>` do not. |
+| 3 | SIMD/kernel acceleration where it pays | ⏸ deferred | Optional. Slice 1 delivers storage + reflection — the reasons the width exists. Slice 3 only vectorizes *ops* on the new-width buffers, and only where a kernel exists (today f32/vector-shaped). No correctness or fidelity gap without it; everything runs scalar-ly. Scope against a concrete workload rather than speculatively. |
+
+### Deferred as a separate arc (not a loose end here)
+
+**Bare-scalar-list compaction** — `List<i32>` as a *raw* 4-byte buffer, versus `List<@packed struct>`.
+No primitive has this today, not even `f32` (`packed_layout` requires the element to be a declared
+`@packed` struct). So it is a distinct capability for *all* primitives, needing a scalar-element
+materialization mode in both value backends — genuinely its own arc. The reflection distinctness it
+would enable is already delivered here via the construction tag; only the compact *storage* of a
+bare scalar list is outstanding.
 
 This arc branches off `arc-cli-foundations` (unmerged) because slice 2 uses the `BuiltinTy` enum
 that arc introduced — doing the f32 narrowing anywhere else would add a scattered case `BuiltinTy`
