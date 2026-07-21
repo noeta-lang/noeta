@@ -166,6 +166,103 @@ echo first
         assert(rec.calls() == ["GET /repos"], "take(1) must perform exactly one request")
     }
 
+    // --- The alternate constructors --------------------------------------------------------------
+    //
+    // Every configurable spelling gets a case. An unexercised constructor is where a shipped package
+    // rots quietly: it type-checks forever while naming the wrong parameter.
+
+    // `next` is not the only useful relation — `prev` walks backwards from a deep page.
+    fn link_can_follow_any_relation(): void {
+        mock = Mock.new()
+            .route("get", "/r?page=9", 200, "nine",
+                {"link": "<https://api.example.com/r?page=8>; rel=\"prev\""})
+            .route("get", "/r?page=8", 200, "eight")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        assert(walk(api, api.prepare("get", "/r?page=9"), Link.rel("prev")) == ["nine", "eight"])
+    }
+
+    // The offset convention under other spellings — `skip`/`take`, `start`/`count`, `from`/`size`.
+    fn offset_parameters_can_be_renamed(): void {
+        mock = Mock.new()
+            .route("get", "/o?skip=0&take=2", 200, "1,2")
+            .route("get", "/o?skip=2&take=2", 200, "3")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        strategy = Offset.named("skip", "take", 2, fn(r) => r.body().split(",").len() < 2)
+        assert(walk(api, api.prepare("get", "/o?skip=0&take=2"), strategy) == ["1,2", "3"])
+    }
+
+    // The world disagrees about whether pages are 1-based or 0-based, and `start` is consulted only
+    // when the request carries no page parameter at all.
+    fn page_numbering_can_start_at_zero(): void {
+        mock = Mock.new()
+            .route("get", "/p", 200, "zero")
+            .route("get", "/p?p=1", 200, "")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        strategy = Page.named("p", 0, fn(r) => r.body() == "")
+        assert(walk(api, api.prepare("get", "/p"), strategy) == ["zero", ""])
+    }
+
+    // Slack spells the cursor parameter `cursor`, Notion spells it `start_cursor`.
+    fn the_cursor_parameter_can_be_renamed(): void {
+        mock = Mock.new()
+            .route("get", "/c", 200, "{\"next_cursor\": \"C1\", \"has_more\": true}")
+            .route("get", "/c?start_cursor=C1", 200, "{\"next_cursor\": \"\", \"has_more\": false}")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        assert(walk(api, api.prepare("get", "/c"), Cursor.new("start_cursor")).len() == 2)
+    }
+
+    // `Retry.on` names the retryable statuses. 500 is absent from the default set on purpose, so
+    // naming it is what proves the list is really consulted.
+    fn retry_can_name_its_own_statuses(): void {
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com").retry(0))
+            .with(Retry.on(2, 10, [500]))
+            .with(inner)
+            .with(Mock.new().route("get", "/f", 500, "boom"))
+        one = api.get("/f")
+        assert(inner.calls().len() == 3, "500 was named, so it must be retried")
+    }
+
+    // An empty list retries transport failures only — no status is transient.
+    fn an_empty_status_list_retries_nothing_by_status(): void {
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com").retry(0))
+            .with(Retry.on(3, 10, []))
+            .with(inner)
+            .with(Mock.new().route("get", "/f", 503, "down"))
+        one = api.get("/f")
+        assert(inner.calls().len() == 1)
+    }
+
+    // A replay's fallback covers the recording's blind spot: a request the session never made.
+    fn a_replay_fallback_is_configurable(): void {
+        rec = Record.new()
+        live = Api.new(client.new("https://api.example.com")).with(rec).with(repos_api())
+        one = live.get("/repos")
+        replay = Api.new(client.new("https://api.example.com")).with(rec.to_mock(418))
+        match replay.get("/never-recorded") {
+            Ok(resp) => {
+                assert(resp.status() == 418)
+            },
+            Err(_) => {
+                assert(false, "a mock never performs a request")
+            },
+        }
+    }
+
+    // A non-default `Mock` fallback is what turns "I forgot a route" into a status you can spot.
+    fn a_mock_fallback_is_configurable(): void {
+        api = Api.new(client.new("https://api.example.com")).with(Mock.new(599))
+        match api.get("/nope") {
+            Ok(resp) => {
+                assert(resp.status() == 599)
+            },
+            Err(_) => {
+                assert(false, "a mock never performs a request")
+            },
+        }
+    }
+
     // --- URL arithmetic ------------------------------------------------------------------------
 
     fn relative_targets_resolve_by_rfc_3986_shape(): void {
