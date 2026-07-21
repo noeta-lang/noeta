@@ -640,7 +640,7 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
     // filtered out of the base feature set here — applying it to the base would be an unknown-feature
     // error. (Shedding p2panda from a para-*depending* but non-*importing* `--native` binary is a
     // future refinement — it would toggle the entry crate's own `ring-p2p` from the footprint scan.)
-    const AOT_BASE_RINGS: &[&str] = &["ring-http-client", "ring-datetime"];
+    const AOT_BASE_RINGS: &[&str] = &["ring-http-client", "ring-datetime", "ring-regex"];
     let ring_list = rings
         .iter()
         .filter(|r| AOT_BASE_RINGS.contains(&r.as_str()))

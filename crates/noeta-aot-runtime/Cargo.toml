@@ -54,7 +54,7 @@ noeta-diagnostics = { workspace = true }
 # scan builds this crate with `--no-default-features --features entry,<used rings>` to shed the rest,
 # and the linker then drops each unreferenced ring's native dep tree. The `aot` runtime support (on
 # `noeta-vm`) is a hard dep feature above, so it survives `--no-default-features`.
-default = ["entry", "ring-http-client", "ring-datetime"]
+default = ["entry", "ring-http-client", "ring-datetime", "ring-regex"]
 # Export the C-ABI `main` entry (dev-deps). Default-on so a plain `--native` links a working entry;
 # a *composed* AOT runtime for a native-dependency app depends on this crate with this feature OFF and
 # supplies its own `main` (which installs the app's extensions), avoiding a duplicate-`main` link error.
@@ -72,6 +72,11 @@ ring-http-client = ["noeta-host-real/ring-http-client"]
 # per the footprint scan) forwards the ring back on. The toolchain and differential are separate
 # builds where noeta-cli / noeta-eval keep noeta-stdlib default-on.
 ring-datetime = ["noeta-stdlib/ring-datetime"]
+# The `std.regex` ring — forwards to the regex engine + its Unicode tables in noeta-stdlib. Same
+# pure-dep shape as `ring-datetime` above (not a host dep like the http client), so it rides the
+# same `default-features = false` discipline across this crate's noeta-stdlib pullers: a program
+# that never imports `std.regex` links no engine and none of the Unicode tables.
+ring-regex = ["noeta-stdlib/ring-regex"]
 
 # This crate is the one place the whole AOT scheme's `unsafe` lives: a C-ABI `main`, the reference to
 # the linker-defined `noeta_aot_dispatch` data symbol, and the `run_module_aot` binding call. Relax

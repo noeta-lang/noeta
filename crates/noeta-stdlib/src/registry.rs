@@ -482,6 +482,10 @@ pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
     // compiled in, so a footprint-tailored build that sheds jiff also sheds the module + types.
     #[cfg(feature = "ring-datetime")]
     units.push(&crate::datetime::DateTimeExtension);
+    // The `std.regex` engine unit (Ring 3) — same shape: present only when its default-on ring is
+    // compiled in, so shedding the engine also sheds the module and both its types.
+    #[cfg(feature = "ring-regex")]
+    units.push(&crate::regex::RegexExtension);
     units
 }
 
@@ -5233,6 +5237,10 @@ mod tests {
         let expected = [
             ("Uuid", "std.id.Uuid"),
             ("Hasher", "std.crypto.Hasher"),
+            #[cfg(feature = "ring-regex")]
+            ("Pattern", "std.regex.Pattern"),
+            #[cfg(feature = "ring-regex")]
+            ("Match", "std.regex.Match"),
             ("Response", "std.http.Response"),
             ("Request", "std.http.Request"),
             ("FileHandle", "std.fs.FileHandle"),
