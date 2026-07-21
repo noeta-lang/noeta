@@ -464,9 +464,13 @@ pub fn link(
 
     let refs: Vec<&Program> = module_programs.iter().collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
-    let mut program = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs)?;
+    let Linkage {
+        mut program,
+        source_maps,
+    } = link_parsed(&entry, &entry_parsed.program, &refs, &broken_refs)?;
     let reads = expand_into(
         &mut program,
+        &source_maps,
         &mut sources,
         &mut editions,
         root_edition,
@@ -492,6 +496,7 @@ pub fn link(
 /// through the same [`SourceMap`] as one in a hand-written file.
 fn expand_into(
     program: &mut Program,
+    source_maps: &std::collections::HashMap<SourceId, qualify::QMap>,
     sources: &mut Vec<Source>,
     editions: &mut noeta_lexer::EditionMap,
     root_edition: noeta_lexer::Edition,
@@ -500,6 +505,7 @@ fn expand_into(
     let next_id = sources.len() as u32;
     let (expansions, reads) = run_expansion(
         program,
+        source_maps,
         || sources.clone(),
         next_id,
         root_edition,
@@ -533,6 +539,7 @@ fn expand_into(
 /// file the hooks reported reading.
 pub fn run_expansion(
     program: &mut Program,
+    source_maps: &std::collections::HashMap<SourceId, qualify::QMap>,
     sources: impl FnOnce() -> Vec<Source>,
     next_id: u32,
     root_edition: noeta_lexer::Edition,
@@ -551,6 +558,7 @@ pub fn run_expansion(
     let sources = sources();
     let expanded = expand::expand_program(
         program,
+        source_maps,
         &sources,
         next_id,
         root_edition,
@@ -661,7 +669,10 @@ pub fn link_with_deps(
     let dep_refs: Vec<&Program> = dep_programs.iter().collect();
     let broken_refs: Vec<&BrokenModule> = broken.iter().collect();
     let native_roots = native_dep_roots(deps);
-    let mut program = link_parsed_with_deps(
+    let Linkage {
+        mut program,
+        source_maps,
+    } = link_parsed_with_deps(
         &entry,
         &entry_parsed.program,
         &sibling_refs,
@@ -671,6 +682,7 @@ pub fn link_with_deps(
     )?;
     let reads = expand_into(
         &mut program,
+        &source_maps,
         &mut sources,
         &mut editions,
         root_edition,
@@ -925,7 +937,10 @@ impl ParsedDir {
             .filter_map(|(_, m)| m.as_ref().err().map(Box::as_ref))
             .collect();
         let dep_refs: Vec<&Program> = self.dep_programs.iter().collect();
-        let mut program = link_parsed_with_deps(
+        let Linkage {
+            mut program,
+            source_maps,
+        } = link_parsed_with_deps(
             entry_source,
             entry,
             &siblings,
@@ -935,6 +950,7 @@ impl ParsedDir {
         )?;
         let (expansions, reads) = run_expansion(
             &mut program,
+            &source_maps,
             || self.sources.clone(),
             self.sources.len() as u32,
             self.root_edition,
@@ -1056,7 +1072,7 @@ pub fn link_parsed(
     entry_program: &Program,
     modules: &[&Program],
     broken: &[&BrokenModule],
-) -> Result<Program, Vec<LoadDiagnostic>> {
+) -> Result<Linkage, Vec<LoadDiagnostic>> {
     // Sibling-only linking has no resolved dependency graph, so it is lenient: it can flag a missing
     // intra-project module but must not adjudicate foreign roots (see [`RetainPolicy`]).
     link_core(
@@ -1091,7 +1107,7 @@ pub fn link_parsed_with_deps(
     dep_modules: &[&Program],
     broken: &[&BrokenModule],
     native_roots: Option<&[String]>,
-) -> Result<Program, Vec<LoadDiagnostic>> {
+) -> Result<Linkage, Vec<LoadDiagnostic>> {
     // Dependency modules join the resolution pool; only they (not siblings) also drive imports.
     let pool: Vec<&Program> = siblings.iter().chain(dep_modules).copied().collect();
     let native: HashSet<String> = native_roots.unwrap_or_default().iter().cloned().collect();
@@ -1126,7 +1142,7 @@ fn link_core(
     dep_drivers: &[&Program],
     broken: &[&BrokenModule],
     retain: RetainPolicy,
-) -> Result<Program, Vec<LoadDiagnostic>> {
+) -> Result<Linkage, Vec<LoadDiagnostic>> {
     // For the complete policy: the always-retained roots are the installed extensions. The loader
     // is already global-registry-coupled (verbatim-tier names below), so the process default —
     // seeded by the assembling driver (audit-6 F2) — is the lens.
@@ -1494,6 +1510,30 @@ fn link_core(
                 && seen_impls.insert((decl.target.clone(), decl.trait_name.clone()))
             {
                 imported.push(cloned);
+                // The impl's method bodies may reference same-module free declarations — an internal
+                // helper `fn`, a module-local type — that no `use` names and that the target type's
+                // own closure never reached (they are the impl's dependencies, not the type's). They
+                // must travel with the impl or the checker fails E0005 on a body it cannot see, and
+                // *only across the package boundary*: inside the module every declaration is present,
+                // so this hole is invisible until a consumer imports the type. Seed the same closure
+                // the `use`-driven merge runs, from the impl's own (pre-qualification, short-named)
+                // references.
+                let refs = qualify::referenced_names(stmt);
+                let mut work = Vec::new();
+                for name in refs {
+                    if merge_one_dep(&name, mv, &mv.namespace, &module_maps, &mut merged_q, &mut imported)
+                    {
+                        work.push(name);
+                    }
+                }
+                expand_module_refs(
+                    work,
+                    mv,
+                    &mv.namespace,
+                    &module_maps,
+                    &mut merged_q,
+                    &mut imported,
+                );
             }
         }
     }
@@ -1502,14 +1542,48 @@ fn link_core(
         return Err(errors);
     }
 
+    // The qualification map of every file that has one, keyed by the source it belongs to, so a
+    // later pass can rewrite names *as that file would have*. Directive expansion is the one such
+    // pass: its generated members are written against the imports of the file the directive sits
+    // in, but they are parsed after this function has already qualified everything, so they would
+    // otherwise reach the checker with bare names that resolve to nothing.
+    let mut source_maps: std::collections::HashMap<SourceId, qualify::QMap> =
+        std::collections::HashMap::new();
+    source_maps.insert(entry.id(), entry_map);
+    for mv in &module_views {
+        // A module's source is its first statement's — every module has at least the `namespace`
+        // declaration that got it into `module_views` at all.
+        if let (Some(first), Some(map)) = (mv.stmts.first(), module_maps.get(&mv.namespace)) {
+            source_maps.insert(first.span().source, map.clone());
+        }
+    }
+
     // Merged declarations, then dependency std-imports, then the entry's own statements.
     let mut stmts = imported;
     stmts.append(&mut dep_retained);
     stmts.append(&mut entry_stmts);
-    Ok(Program {
-        stmts,
-        span: entry_program.span,
+    Ok(Linkage {
+        program: Program {
+            stmts,
+            span: entry_program.span,
+        },
+        source_maps,
     })
+}
+
+/// A linked program, plus the per-file qualification maps that produced it.
+///
+/// The maps travel with the program because linking is the **only** pass that still knows each
+/// file's namespace and its own `use`s — after this, a `User` from module `App.A` and a `User` in
+/// the entry are indistinguishable. Anything that has to introduce *new* code written in some
+/// file's terms therefore has to borrow that file's map, and this is where it comes from.
+#[derive(Debug)]
+pub struct Linkage {
+    pub program: Program,
+    /// Keyed by the [`SourceId`] of the file the map belongs to. A file with no `namespace` and no
+    /// imports has an empty map, which makes qualification a no-op — the correct answer, not a
+    /// missing one.
+    pub source_maps: std::collections::HashMap<SourceId, qualify::QMap>,
 }
 
 /// Filter `names` down to those not yet retained under `path`, recording the fresh ones — so a
@@ -1585,40 +1659,68 @@ fn merge_module_closure(
     let Some(module) = module_views.iter().find(|m| m.namespace == path) else {
         return;
     };
-    // The module's own top-level declaration names — the only targets an intra-module reference can
-    // resolve to (everything else — params, builtins, externs, other modules — is left to its own
-    // resolution path).
-    let own_names: HashSet<&str> = module
+    // The root is already merged (under its local name); record its qualified identity so it is not
+    // merged again, then expand its references to a fixpoint.
+    merged_q.insert(format!("{}.{root}", path.join(".")));
+    expand_module_refs(vec![root.to_string()], module, path, module_maps, merged_q, imported);
+}
+
+/// Merge one same-module declaration `name` and report whether it was **freshly** merged.
+///
+/// Merges only when `name` is a top-level declaration of `module` (not a param, builtin, extern, or
+/// another module's export — those resolve elsewhere) and is not already merged (deduped through
+/// `merged_q` on the qualified identity, so a declaration reached two ways lands once). The boolean
+/// tells the caller whether to expand this declaration's own references in turn.
+fn merge_one_dep(
+    name: &str,
+    module: &ModuleView,
+    path: &[String],
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    merged_q: &mut HashSet<String>,
+    imported: &mut Vec<Stmt>,
+) -> bool {
+    let Some(decl) = module
         .stmts
         .iter()
-        .filter_map(qualifiable_decl_name)
-        .collect();
-    let qualified = |name: &str| format!("{}.{}", path.join("."), name);
-    let find = |name: &str| {
-        module
+        .find(|s| qualifiable_decl_name(s) == Some(name))
+    else {
+        return false;
+    };
+    if !merged_q.insert(format!("{}.{name}", path.join("."))) {
+        return false;
+    }
+    let mut decl = decl.clone();
+    if let Some(map) = module_maps.get(path) {
+        qualify::qualify_stmt(&mut decl, map);
+    }
+    imported.push(decl);
+    true
+}
+
+/// Drive the reachability worklist to a fixpoint: pop an already-merged declaration, merge every
+/// fresh same-module declaration it references, and enqueue each for its own expansion. `merged_q`
+/// membership makes cycles terminate. Shared by the two things that introduce a same-module
+/// reference into the merged program — an imported declaration (seeded with its own name) and a
+/// standalone `impl` block (seeded with its body's references).
+fn expand_module_refs(
+    mut work: Vec<String>,
+    module: &ModuleView,
+    path: &[String],
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    merged_q: &mut HashSet<String>,
+    imported: &mut Vec<Stmt>,
+) {
+    while let Some(name) = work.pop() {
+        let Some(decl) = module
             .stmts
             .iter()
-            .find(|s| qualifiable_decl_name(s) == Some(name))
-    };
-
-    // The root is already merged (under its local name); record its qualified identity so it is not
-    // merged again, and expand its references. A worklist iterated to a fixpoint; `merged_q`
-    // membership makes cycles terminate.
-    merged_q.insert(qualified(root));
-    let mut work: Vec<String> = vec![root.to_string()];
-    while let Some(name) = work.pop() {
-        let Some(decl) = find(&name) else { continue };
+            .find(|s| qualifiable_decl_name(s) == Some(&name))
+        else {
+            continue;
+        };
         for referenced in qualify::referenced_names(decl) {
-            if own_names.contains(referenced.as_str()) && merged_q.insert(qualified(&referenced)) {
-                // A fresh same-module declaration: merge it under its qualified identity and expand.
-                if let Some(dep) = find(&referenced) {
-                    let mut dep = dep.clone();
-                    if let Some(map) = module_maps.get(path) {
-                        qualify::qualify_stmt(&mut dep, map);
-                    }
-                    imported.push(dep);
-                    work.push(referenced);
-                }
+            if merge_one_dep(&referenced, module, path, module_maps, merged_q, imported) {
+                work.push(referenced);
             }
         }
     }
@@ -3060,6 +3162,46 @@ mod tests {
         assert!(
             has_struct(&linked, "Inner"),
             "two hops away (a type the helper references) must be pulled too"
+        );
+    }
+
+    /// D: a **standalone `impl`** that travels with its target type drags in what its method
+    /// bodies reference. A standalone impl has no import name, so it is merged by the coherence
+    /// pass (it must accompany its type), not by a `use` — and that pass, unlike the `use`-driven
+    /// merge, once forgot to walk the impl's bodies. So an internal helper called only from inside
+    /// `impl Trait for T { … }` was left out of the merged program, and every consumer of `T`
+    /// failed E0005 on a body the package itself compiled cleanly — a hole invisible until the
+    /// package boundary was crossed.
+    #[test]
+    fn a_standalone_impl_drags_in_what_its_bodies_reference() {
+        let dep = DepPackage {
+            key: "svc".to_string(),
+            root: "svc".to_string(),
+            modules: vec![module(
+                "lib.noe",
+                "namespace svc.lib;\n\
+                 fn helper(): string { return \"H\"; }\n\
+                 pub trait Shape { fn go(): string }\n\
+                 pub struct S {\n  tag: string\n  fn new(): S { return S { tag: \"s\" }; }\n}\n\
+                 impl Shape for S {\n  fn go(): string { return helper() ~ self.tag; }\n}\n",
+            )],
+            dep_renames: Default::default(),
+            native: false,
+            edition: noeta_lexer::Edition::DEFAULT,
+        };
+        let entry = "use svc.lib.{Shape, S};\necho S.new().go();\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
+        assert!(has_struct(&linked, "S"), "the imported type is merged");
+        assert!(
+            has_fn(&linked, "helper"),
+            "the helper called only from the standalone impl's body must travel with it"
         );
     }
 

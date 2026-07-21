@@ -87,6 +87,7 @@ pub struct Expanded {
 /// contract — an `expand` hook only ever sees an invocation that was legal.
 pub fn expand_program(
     program: &mut Program,
+    source_maps: &std::collections::HashMap<SourceId, crate::qualify::QMap>,
     sources: &[Source],
     next_id: u32,
     edition: noeta_lexer::Edition,
@@ -103,7 +104,10 @@ pub fn expand_program(
         // decorators while intending to add to its members, and the same shape as `plan_derive`.
         for plan in plan_for(&program.stmts[index], sources, registry) {
             let id = SourceId(next_id + out.sources.len() as u32);
-            match run_one(&plan, id, edition, text_tiers, sources) {
+            // The map of the file the directive was written in: generated members are written
+            // against *that* file's imports, so they qualify as its own statements did.
+            let map = source_maps.get(&plan.span.source);
+            match run_one(&plan, id, edition, text_tiers, sources, map) {
                 Ok(done) => {
                     splice(&mut program.stmts[index], done.members);
                     out.sources.push(ExpandedSource {
@@ -240,6 +244,7 @@ fn run_one(
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
     sources: &[Source],
+    map: Option<&crate::qualify::QMap>,
 ) -> Result<Done, Box<LoadDiagnostic>> {
     // Boxed: a `LoadDiagnostic` carries a whole `Source`, so an unboxed `Err` would make every
     // successful expansion pay for the failure case.
@@ -284,6 +289,19 @@ fn run_one(
             "`@{name}` produced code that does not parse: {} (in the expansion at {}:{})",
             first.message, at.line, at.col
         )));
+    }
+    // Qualify before lifting the members out, while the expansion is still one statement — the
+    // same rewrite the linker already applied to everything the author wrote in this file.
+    //
+    // Without this, generated code can only name built-ins: `Api` in a generated field would reach
+    // the checker bare and resolve to nothing, and a hard-coded `para.api.Api` would be no better,
+    // because the qualified identity depends on what the *consumer* called the dependency. Borrowing
+    // the file's own map is the only spelling that is right in both cases.
+    let mut parsed = parsed;
+    if let Some(map) = map {
+        for stmt in &mut parsed.program.stmts {
+            crate::qualify::qualify_stmt(stmt, map);
+        }
     }
     let members = members_of(parsed.program).ok_or_else(|| {
         blame(format!(

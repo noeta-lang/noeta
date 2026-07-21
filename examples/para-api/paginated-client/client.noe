@@ -1,0 +1,450 @@
+// Talking to a paginated API with `para.api` — middleware, mocking, and pagination strategies.
+//
+// `std.http` stops at the transport; everything here is the layer above it, where a chain is
+// composed from ordinary Noeta values. Two things this example is built to show:
+//
+//   * **Pagination is a strategy you name.** There is no default, because a paginator that guesses
+//     reads page one of an offset API and reports it as the whole result set — a wrong answer that
+//     looks like a right one. `Link`, `Offset`, `Page` and `Cursor` are the four conventions in the
+//     wild; you say which one you are talking to.
+//   * **A `Mock` layer makes all of it testable without a socket.** The `@test` block at the bottom
+//     is the point of this file as much as the code above it: every assertion below runs against a
+//     canned table, so the suite is hermetic and cannot fail because GitHub is slow.
+//
+//     noeta run   examples/para-api/paginated-client/client.noe    # the demo
+//     noeta test  examples/para-api/paginated-client/client.noe    # the assertions
+namespace noeta.paginated_client
+
+use std.http.client
+use std.http.{Request, Response, HttpError}
+use std.time
+use para.api.{Api, Middleware, Next}
+use para.api.middleware.{Header, Logging, Mock, Cache, Record, Retry}
+use para.api.pagination
+use para.api.pagination.{pages, PageStrategy, Link, Offset, Page, Cursor}
+
+// A stand-in for a `Link`-paginated API (the GitHub/GitLab/Shopify convention): two pages, the
+// first pointing at the second through an RFC 8288 `Link` header, the second pointing nowhere.
+// Omitting the relation is exactly how the standard spells "last page", so this mock needs no
+// end-of-sequence flag of its own.
+fn repos_api(): Mock {
+    return Mock.new()
+        .route("get", "/repos", 200, "[\"a\", \"b\"]",
+            {"link": "<https://api.example.com/repos?page=2>; rel=\"next\""})
+        // A route may name a query string, and lookup prefers it over a bare path — without that,
+        // every page of the walk would match `/repos` and the sequence would never end.
+        .route("get", "/repos?page=2", 200, "[\"c\"]")
+}
+
+// The client under test. `retry(0)` is deliberate and load-bearing: the `Retry` layer below re-runs
+// the whole chain, and std's own retry sits *inside* `send`, beneath every layer. Leaving both on
+// multiplies the attempts (3 outer × 3 inner = 9 requests for one call).
+fn configured(mock: Mock): Api {
+    return Api.new(client.new("https://api.example.com").retry(0))
+        .with(Retry.new(2, 10))          // outermost: re-runs everything below it
+        .with(Logging.new())
+        .with(Header.new("accept", "application/json"))
+        .with(mock)                      // innermost: answers without touching the network
+}
+
+// Walk every page and collect the bodies. `pages` hands back an `Iterator`, so this loop performs
+// one request per turn rather than fetching everything up front.
+fn walk(api: Api, req: Request, strategy: dyn PageStrategy): List<string> {
+    mut bodies: List<string> = []
+    for page in pages(api, req, strategy) {
+        match page {
+            // A transport failure is one element of the sequence, not an abort — the pages already
+            // in hand survive it.
+            Ok(resp) => {
+                bodies = bodies ~ [resp.body()]
+            },
+            Err(e) => {
+                bodies = bodies ~ ["<${e.kind()}>"]
+            },
+        }
+    }
+    return bodies
+}
+
+api = configured(repos_api())
+echo walk(api, api.prepare("get", "/repos"), Link.new())
+
+// Laziness is not incidental — `take(1)` performs exactly one request, so a `pages` walk over a
+// thousand-page API costs only what you consume of it.
+mut first: List<int> = []
+for page in pages(api, api.prepare("get", "/repos"), Link.new()).take(1) {
+    match page {
+        Ok(resp) => {
+            first = first ~ [resp.status()]
+        },
+        Err(_) => {},
+    }
+}
+echo first
+
+@test {
+    // --- Pagination strategies -----------------------------------------------------------------
+
+    // The `Link` walk stops when the relation disappears, with no help from the caller.
+    fn link_follows_until_the_relation_is_absent(): void {
+        api = configured(repos_api())
+        assert(walk(api, api.prepare("get", "/repos"), Link.new()) == ["[\"a\", \"b\"]", "[\"c\"]"])
+    }
+
+    // A relative `Link` target resolves against the response's own URL, not the request's — that is
+    // why `Response.url()` reports the *final* URL after redirects.
+    fn link_targets_may_be_relative(): void {
+        mock = Mock.new()
+            .route("get", "/v1/items", 200, "one", {"link": "<items?page=2>; rel=\"next\""})
+            .route("get", "/v1/items?page=2", 200, "two")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        assert(walk(api, api.prepare("get", "/v1/items"), Link.new()) == ["one", "two"])
+    }
+
+    // An offset API sends no end-of-sequence signal at all, so the caller supplies the stop rule.
+    // Here "a page holding fewer than two items is the last one".
+    fn offset_advances_by_its_window(): void {
+        mock = Mock.new()
+            .route("get", "/o?offset=0&limit=2", 200, "1,2")
+            .route("get", "/o?offset=2&limit=2", 200, "3")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        strategy = Offset.new(2, fn(r) => r.body().split(",").len() < 2)
+        assert(walk(api, api.prepare("get", "/o?offset=0&limit=2"), strategy) == ["1,2", "3"])
+    }
+
+    // The stop rule an offset API really wants is "this page was shorter than the limit", which
+    // means counting *decoded* items. Spelled out here because it is what `Offset`'s own
+    // documentation recommends, and a recommendation that does not compile is worse than none.
+    fn offset_stops_on_a_short_page_after_a_typed_decode(): void {
+        mock = Mock.new()
+            .route("get", "/o?offset=0&limit=2", 200, "[1, 2]")
+            .route("get", "/o?offset=2&limit=2", 200, "[3]")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        strategy = Offset.new(2, fn(r) => match r.json::<List<int>>() {
+            Ok(items) => items.len() < 2,
+            // A body that will not decode cannot be counted, so stop rather than page forever.
+            Err(_) => true,
+        })
+        assert(walk(api, api.prepare("get", "/o?offset=0&limit=2"), strategy) == ["[1, 2]", "[3]"])
+    }
+
+    // The page number increments by one, and the caller's predicate ends it.
+    fn page_increments_the_page_parameter(): void {
+        mock = Mock.new()
+            .route("get", "/p", 200, "a")
+            .route("get", "/p?page=2", 200, "b")
+            .route("get", "/p?page=3", 200, "")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        assert(walk(api, api.prepare("get", "/p"), Page.new(fn(r) => r.body() == "")) == ["a", "b", ""])
+    }
+
+    // The fourth convention — an opaque cursor in the body — needs no predicate, because a cursor
+    // API states termination in the body itself. This is the shape a user `impl PageStrategy`
+    // takes; `Cursor` ships as the worked example of it.
+    fn cursor_reads_the_stop_flag_out_of_the_body(): void {
+        mock = Mock.new()
+            .route("get", "/c", 200, "{\"next_cursor\": \"C1\", \"has_more\": true}")
+            .route("get", "/c?cursor=C1", 200, "{\"next_cursor\": \"\", \"has_more\": false}")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        assert(walk(api, api.prepare("get", "/c"), Cursor.new()).len() == 2)
+    }
+
+    // A body that will not decode ends the walk rather than aborting the program holding the pages
+    // already fetched.
+    fn cursor_stops_on_an_undecodable_body(): void {
+        mock = Mock.new().route("get", "/c", 200, "not json at all")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        assert(walk(api, api.prepare("get", "/c"), Cursor.new()).len() == 1)
+    }
+
+    // The generator is lazy: consuming one element performs one request. A `Record` layer counts
+    // the requests that actually happened, which is the only honest way to assert this.
+    fn pages_are_fetched_lazily(): void {
+        rec = Record.new()
+        api = Api.new(client.new("https://api.example.com")).with(rec).with(repos_api())
+        for page in pages(api, api.prepare("get", "/repos"), Link.new()).take(1) {}
+        assert(rec.calls() == ["GET /repos"], "take(1) must perform exactly one request")
+    }
+
+    // --- The alternate constructors --------------------------------------------------------------
+    //
+    // Every configurable spelling gets a case. An unexercised constructor is where a shipped package
+    // rots quietly: it type-checks forever while naming the wrong parameter.
+
+    // `next` is not the only useful relation — `prev` walks backwards from a deep page.
+    fn link_can_follow_any_relation(): void {
+        mock = Mock.new()
+            .route("get", "/r?page=9", 200, "nine",
+                {"link": "<https://api.example.com/r?page=8>; rel=\"prev\""})
+            .route("get", "/r?page=8", 200, "eight")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        assert(walk(api, api.prepare("get", "/r?page=9"), Link.rel("prev")) == ["nine", "eight"])
+    }
+
+    // The offset convention under other spellings — `skip`/`take`, `start`/`count`, `from`/`size`.
+    fn offset_parameters_can_be_renamed(): void {
+        mock = Mock.new()
+            .route("get", "/o?skip=0&take=2", 200, "1,2")
+            .route("get", "/o?skip=2&take=2", 200, "3")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        strategy = Offset.named("skip", "take", 2, fn(r) => r.body().split(",").len() < 2)
+        assert(walk(api, api.prepare("get", "/o?skip=0&take=2"), strategy) == ["1,2", "3"])
+    }
+
+    // The world disagrees about whether pages are 1-based or 0-based, and `start` is consulted only
+    // when the request carries no page parameter at all.
+    fn page_numbering_can_start_at_zero(): void {
+        mock = Mock.new()
+            .route("get", "/p", 200, "zero")
+            .route("get", "/p?p=1", 200, "")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        strategy = Page.named("p", 0, fn(r) => r.body() == "")
+        assert(walk(api, api.prepare("get", "/p"), strategy) == ["zero", ""])
+    }
+
+    // Slack spells the cursor parameter `cursor`, Notion spells it `start_cursor`.
+    fn the_cursor_parameter_can_be_renamed(): void {
+        mock = Mock.new()
+            .route("get", "/c", 200, "{\"next_cursor\": \"C1\", \"has_more\": true}")
+            .route("get", "/c?start_cursor=C1", 200, "{\"next_cursor\": \"\", \"has_more\": false}")
+        api = Api.new(client.new("https://api.example.com")).with(mock)
+        assert(walk(api, api.prepare("get", "/c"), Cursor.new("start_cursor")).len() == 2)
+    }
+
+    // `Retry.on` names the retryable statuses. 500 is absent from the default set on purpose, so
+    // naming it is what proves the list is really consulted.
+    fn retry_can_name_its_own_statuses(): void {
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com").retry(0))
+            .with(Retry.on(2, 10, [500]))
+            .with(inner)
+            .with(Mock.new().route("get", "/f", 500, "boom"))
+        one = api.get("/f")
+        assert(inner.calls().len() == 3, "500 was named, so it must be retried")
+    }
+
+    // An empty list retries transport failures only — no status is transient.
+    fn an_empty_status_list_retries_nothing_by_status(): void {
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com").retry(0))
+            .with(Retry.on(3, 10, []))
+            .with(inner)
+            .with(Mock.new().route("get", "/f", 503, "down"))
+        one = api.get("/f")
+        assert(inner.calls().len() == 1)
+    }
+
+    // A replay's fallback covers the recording's blind spot: a request the session never made.
+    fn a_replay_fallback_is_configurable(): void {
+        rec = Record.new()
+        live = Api.new(client.new("https://api.example.com")).with(rec).with(repos_api())
+        one = live.get("/repos")
+        replay = Api.new(client.new("https://api.example.com")).with(rec.to_mock(418))
+        match replay.get("/never-recorded") {
+            Ok(resp) => {
+                assert(resp.status() == 418)
+            },
+            Err(_) => {
+                assert(false, "a mock never performs a request")
+            },
+        }
+    }
+
+    // A non-default `Mock` fallback is what turns "I forgot a route" into a status you can spot.
+    fn a_mock_fallback_is_configurable(): void {
+        api = Api.new(client.new("https://api.example.com")).with(Mock.new(599))
+        match api.get("/nope") {
+            Ok(resp) => {
+                assert(resp.status() == 599)
+            },
+            Err(_) => {
+                assert(false, "a mock never performs a request")
+            },
+        }
+    }
+
+    // --- URL arithmetic ------------------------------------------------------------------------
+
+    fn relative_targets_resolve_by_rfc_3986_shape(): void {
+        base = "https://api.example.com/v1/repos?page=1"
+        assert(pagination.resolve_url(base, "https://other.example/x") == "https://other.example/x")
+        assert(pagination.resolve_url(base, "//cdn.example/x") == "https://cdn.example/x")
+        assert(pagination.resolve_url(base, "/v2/x") == "https://api.example.com/v2/x")
+        assert(pagination.resolve_url(base, "more") == "https://api.example.com/v1/more")
+        // A response synthesized in-process has no originating URL, so a relative target is left
+        // for the client's own base-URL resolution to handle.
+        assert(pagination.resolve_url("", "more") == "more")
+    }
+
+    fn setting_a_query_parameter_replaces_rather_than_appends(): void {
+        assert(pagination.set_query("https://e.example/x", "page", "2") == "https://e.example/x?page=2")
+        assert(pagination.set_query("https://e.example/x?page=1&a=b", "page", "3") == "https://e.example/x?page=3&a=b")
+        // A duplicated parameter collapses to one — leaving both would let the server pick, and
+        // different servers pick differently.
+        assert(pagination.set_query("https://e.example/x?page=1&page=9", "page", "5") == "https://e.example/x?page=5")
+        // The fragment survives, and is split off before the query is parsed (a `#` may legally
+        // contain `?` and `&`).
+        assert(pagination.set_query("https://e.example/x?a=b#f", "page", "9") == "https://e.example/x?a=b&page=9#f")
+    }
+
+    // --- Middleware ----------------------------------------------------------------------------
+
+    // The first layer registered is the outermost, so a header added by an outer layer is visible
+    // to the mock inside it.
+    fn the_first_registered_layer_is_the_outermost(): void {
+        rec = Record.new()
+        api = Api.new(client.new("https://api.example.com"))
+            .with(Header.new("x-trace", "abc"))
+            .with(rec)
+            .with(Mock.new().route("get", "/x", 200, "ok"))
+        match api.get("/x") {
+            Ok(resp) => {
+                assert(resp.body() == "ok")
+            },
+            Err(_) => {
+                assert(false, "the mock answers without a network")
+            },
+        }
+        assert(rec.calls() == ["GET /x"])
+    }
+
+    // A cache hit never calls `next`, so nothing inside the layer runs — the inner recorder is the
+    // proof, because a hit that still performed the request would show up as a second call.
+    fn a_cache_hit_short_circuits_the_rest_of_the_chain(): void {
+        cache = Cache.new(1_000)
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com"))
+            .with(cache)
+            .with(inner)
+            .with(Mock.new().route("get", "/x", 200, "v1"))
+        one = api.get("/x")
+        two = api.get("/x")
+        assert(cache.hits() == 1, "the second call must be answered from the cache")
+        assert(inner.calls().len() == 1, "a hit must not reach the layers inside the cache")
+    }
+
+    // An entry expires. The clock is `std.time`'s logical monotonic one, so a test sleeps past a
+    // TTL without waiting.
+    fn a_cached_entry_expires(): void {
+        cache = Cache.new(100)
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com"))
+            .with(cache)
+            .with(inner)
+            .with(Mock.new().route("get", "/x", 200, "v1"))
+        one = api.get("/x")
+        time.sleep(500)
+        two = api.get("/x")
+        assert(cache.hits() == 0, "the entry was stale, so this must be a miss")
+        assert(inner.calls().len() == 2)
+    }
+
+    // A POST is never served from cache: one side effect must not stand in for a second.
+    fn only_safe_methods_are_cached(): void {
+        cache = Cache.new(1_000)
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com"))
+            .with(cache)
+            .with(inner)
+            .with(Mock.new().route("post", "/x", 200, "created"))
+        one = api.post("/x", "{}")
+        two = api.post("/x", "{}")
+        assert(cache.hits() == 0)
+        assert(inner.calls().len() == 2, "both posts must reach the server")
+    }
+
+    // A non-2xx is a statement about *now*; replaying it would turn a transient outage into a
+    // permanent one.
+    fn error_responses_are_not_cached(): void {
+        cache = Cache.new(1_000)
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com"))
+            .with(cache)
+            .with(inner)
+            .with(Mock.new().route("get", "/x", 503, "down"))
+        one = api.get("/x")
+        two = api.get("/x")
+        assert(cache.hits() == 0)
+        assert(inner.calls().len() == 2)
+    }
+
+    // `Record` and `Mock` are two halves of one loop: record a session, replay it forever. The
+    // replay is verbatim — including the `Link` header, which is what makes a *paginated* walk
+    // replayable at all.
+    fn a_recording_replays_through_a_mock(): void {
+        rec = Record.new()
+        live = Api.new(client.new("https://api.example.com")).with(rec).with(repos_api())
+        recorded = walk(live, live.prepare("get", "/repos"), Link.new())
+        assert(rec.calls() == ["GET /repos", "GET /repos?page=2"])
+
+        replay = Api.new(client.new("https://api.example.com")).with(rec.to_mock())
+        assert(walk(replay, replay.prepare("get", "/repos"), Link.new()) == recorded)
+    }
+
+    // An unmatched request answers the fallback rather than reaching the network — a mock that
+    // silently hit the real API would make a suite depend on the internet exactly when someone
+    // forgot a route.
+    fn an_unmatched_route_does_not_fall_through_to_the_network(): void {
+        api = Api.new(client.new("https://api.example.com")).with(Mock.new())
+        match api.get("/nope") {
+            Ok(resp) => {
+                assert(resp.status() == 404)
+            },
+            Err(_) => {
+                assert(false, "a mock never performs a request")
+            },
+        }
+    }
+
+    // The outer `Retry` re-runs the whole chain, so every attempt re-enters the layers inside it —
+    // which is the whole difference from std's retry, and what the inner recorder measures.
+    fn retry_re_runs_the_whole_chain(): void {
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com").retry(0))
+            .with(Retry.new(2, 10))
+            .with(inner)
+            .with(Mock.new().route("get", "/f", 503, "down"))
+        match api.get("/f") {
+            // The last attempt returns what it got, rather than a synthesized "retries exhausted"
+            // error that would hide the real answer.
+            Ok(resp) => {
+                assert(resp.status() == 503)
+            },
+            Err(_) => {
+                assert(false, "a status is not a transport error")
+            },
+        }
+        assert(inner.calls().len() == 3, "one attempt plus two retries")
+    }
+
+    // A status outside the retryable set is an answer, not a transient failure — retrying a 404
+    // helps nobody.
+    fn a_non_retryable_status_is_returned_immediately(): void {
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com").retry(0))
+            .with(Retry.new(3, 10))
+            .with(inner)
+            .with(Mock.new().route("get", "/f", 404, "gone"))
+        one = api.get("/f")
+        assert(inner.calls().len() == 1)
+    }
+
+    // A success on the first attempt costs exactly one request.
+    fn a_successful_call_is_not_retried(): void {
+        inner = Record.new()
+        api = Api.new(client.new("https://api.example.com").retry(0))
+            .with(Retry.new(3, 10))
+            .with(inner)
+            .with(Mock.new().route("get", "/f", 200, "fine"))
+        one = api.get("/f")
+        assert(inner.calls().len() == 1)
+    }
+
+    // Backoff doubles and is capped, so a long retry budget cannot park a program for minutes.
+    fn backoff_doubles_and_caps(): void {
+        assert(Retry.backoff(250, 0) == 250)
+        assert(Retry.backoff(250, 1) == 500)
+        assert(Retry.backoff(250, 2) == 1_000)
+        assert(Retry.backoff(250, 20) == 30_000)
+    }
+}

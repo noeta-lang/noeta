@@ -147,6 +147,19 @@ jobs:
       # real-socket/real-network ones.
       - name: Shipped package examples still compile
         run: cargo test -p noeta-cli --locked --test examples -- --ignored
+      # Checking a package proves only that it parses. Nothing in CI ever *ran* a line of a shipped
+      # `packages/` module until this gate: the conformance corpus covers the language, not the
+      # packages built on it, so a package whose whole surface is composition (an onion's layer
+      # order, a cache that never hits, a paginator that stops a page early) could type-check
+      # perfectly and be wrong in every behaviour it claimed. `para.api.middleware.Mock` makes
+      # running them hermetic — no socket, no fixture server, no network.
+      #
+      # Named separately from the suite above even though `cargo test -p noeta-cli` also picks it
+      # up, because a behavioural gate over shipped packages should be legible as one in the log.
+      # It is deliberately NOT `--ignored`: it skips examples depending on a native package, which
+      # is the only thing that made the check step above expensive, so it costs under a second.
+      - name: Shipped package examples' tests pass
+        run: cargo test -p noeta-cli --locked --test package_tests
 
   clippy:
     name: Clippy (deny warnings)
