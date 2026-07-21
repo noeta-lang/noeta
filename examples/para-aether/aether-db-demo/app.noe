@@ -14,6 +14,7 @@
 
 use para.aether.{App, Get, Post, Store}
 use para.db
+use para.db.Connection
 use para.db.repo.Repository
 use std.json
 
@@ -38,10 +39,10 @@ struct CreateUser {
 // driver to aether's database-agnostic `Store` interface. This is the ONE place the framework and the
 // database meet — everything above it is driver-agnostic.
 class SqlStore {
-    conn: dyn // a para.db.Connection (typed `dyn` — F5 native cross-package identity)
+    conn: Connection
     repo: Repository
 
-    fn new(conn: dyn): SqlStore {
+    fn new(conn: Connection): SqlStore {
         return SqlStore { conn: conn, repo: Repository.new("User", "users", "id") }
     }
 

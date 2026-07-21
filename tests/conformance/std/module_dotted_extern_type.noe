@@ -1,0 +1,32 @@
+// A dotted annotation over a LEAF module resolves to that module's extern type, and unifies by
+// identity with the value the module's own functions return.
+//
+// The regression this pins: only the *namespace-group* import arm projected a unit's extern types
+// under the bound name, so `use std.http` + `http.Response` worked while `use std.id` + `id.Uuid`
+// did not — `std.http` is a group (parent of `.client`/`.server`), `std.id` is a concrete module.
+// Same spelling, opposite answer, for a reason no reader of the program could see. The annotation
+// stayed a bare `Type::Named("id.Uuid")` and failed to unify with the `std.id.Uuid` a native
+// returns, giving the memorable "argument of type `Uuid` is not assignable to `Uuid`" — two
+// identities wearing one short name.
+//
+// It bit packages hardest (`para.db` is a leaf module, so `db.Connection` was unusable and the
+// package typed those parameters `dyn`), but it was never package-specific: std reproduces it.
+// expect: stdout "true"
+// expect: stdout "36"
+// expect: exit 0
+use std.id
+
+// The dotted form, in both a parameter and a return position.
+fn round_trip(u: id.Uuid): id.Uuid {
+    return u
+}
+
+fn render(u: id.Uuid): string {
+    return u.to_string()
+}
+
+// The value comes from the module's own function, so this only checks if the annotation's identity
+// and the native's return identity are the same.
+made = id.uuid_v7()
+echo round_trip(made) == made
+echo render(made).len()
