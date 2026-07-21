@@ -111,28 +111,40 @@ pub async fn every(ms: int, action: () -> void): void {
     }
 }
 
-// --- Middleware. -------------------------------------------------------------------------------
+// --- Middleware (the onion). -------------------------------------------------------------------
 //
-// A middleware runs before the route handler and may short-circuit the request. `before` returns
-// `some(response)` to stop the pipeline and reply immediately (auth reject, cached hit, CORS
-// preflight), or `none` to let the request continue to the next middleware / the handler. This is
-// the L1 `dyn Trait` machinery: middlewares are `dyn Middleware` in a pipeline, dispatched
-// dynamically on their concrete type.
-
+// A middleware is a LAYER of an onion, not a before/after hook pair: `handle` receives the request
+// AND `next` — the rest of the pipeline, with the routed handler at the bottom. So a layer may
+// rewrite the request before continuing (`next.run(rewritten)`), inspect or replace the response on
+// the way out, or answer WITHOUT ever calling `next` — an auth reject, a cache hit, a CORS preflight.
+// A before/after pair cannot express "answer without dispatching", which is exactly what a
+// short-circuit is; this is the same shape para/api's client-side onion uses, bottoming out in the
+// app's `serve_request` rather than a client's `send`. Middlewares are `dyn Middleware` (L1),
+// dispatched dynamically on their concrete type.
 pub trait Middleware {
-    fn before(req: Request): ?Response
+    fn handle(req: Request, next: Next): Response
 }
 
-// Run the before-pipeline: the first middleware that returns a response short-circuits; otherwise
-// `none` lets the request proceed to the route handler.
-fn run_before(pipeline: List<dyn Middleware>, req: Request): ?Response {
-    for mw in pipeline {
-        short = mw.before(req)
-        if short != none {
-            return short
+// The rest of the pipeline, as a value. `next.run(req)` continues inward; the innermost `run` bottoms
+// out in the app's `serve_request`, where the route is dispatched and the unit-of-work flushed.
+//
+// A cursor (stack + index), not a closure captured per layer: the stack is shared by every `Next` in
+// a pipeline and only the index advances, so entering a layer allocates one small struct rather than
+// capturing an environment.
+pub struct Next {
+    stack: List<dyn Middleware>
+    index: int
+    app: App
+
+    // Continue inward. Calling this is what makes a layer transparent; NOT calling it is what makes a
+    // layer answer on its own (an auth reject, a cache hit, a short-circuit reply).
+    fn run(req: Request): Response {
+        if self.index >= self.stack.len() {
+            return self.app.serve_request(req)
         }
+        rest = Next { stack: self.stack, index: self.index + 1, app: self.app }
+        return self.stack[self.index].handle(req, rest)
     }
-    return none
 }
 
 // Inject the live request for a handler's `Request` parameter. It is absent on the string-testable
@@ -400,13 +412,12 @@ pub class App {
         }
     }
 
-    // The HTTP adapter: run the middleware pipeline (short-circuit if any responds), otherwise
-    // dispatch to the routed handler and reply — flushing the request's unit-of-work afterwards.
+    // The HTTP adapter: enter the middleware onion at its outermost layer. Each layer may rewrite the
+    // request, inspect or replace the response, or short-circuit; `Next.run` bottoms out in
+    // `serve_request`, which dispatches the route and flushes the unit-of-work. The first middleware
+    // registered is the outermost — it sees the request first and the response last.
     fn route(req: Request): Response {
-        return match run_before(self.middleware, req) {
-            some(resp) => resp,
-            none => self.serve_request(req),
-        }
+        return Next { stack: self.middleware, index: 0, app: self }.run(req)
     }
 
     // The string-testable request cycle: dispatch to the routed handler, then commit the request's
@@ -424,7 +435,8 @@ pub class App {
     // `Request` parameter is injected with the real one) AND returns the handler's `Response`
     // verbatim — its status and headers reach the client, where `dispatch_request` projected only the
     // body to a string. The route → flush sequence is otherwise identical, so the string path stays a
-    // faithful rehearsal of the server path.
+    // faithful rehearsal of the server path. It is the onion's terminal — `Next.run` calls it once
+    // the pipeline is exhausted.
     fn serve_request(req: Request): Response {
         resp = self.resolve(req.method(), req.path(), req.body(), some(req))
         self.store.flush()
