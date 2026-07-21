@@ -2040,9 +2040,13 @@ where
                         // so desugar it to its string key plus a reference to the same-named
                         // variable.
                         None => match key {
-                            Expr::Ident { name, span } => {
-                                (Expr::Str { value: name.clone(), span }, Expr::Ident { name, span })
-                            }
+                            Expr::Ident { name, span } => (
+                                Expr::Str {
+                                    value: name.clone(),
+                                    span,
+                                },
+                                Expr::Ident { name, span },
+                            ),
                             other => unreachable!(
                                 "map shorthand is grammatically a bare identifier, got {other:?}"
                             ),
