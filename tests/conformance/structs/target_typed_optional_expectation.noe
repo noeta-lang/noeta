@@ -1,0 +1,8 @@
+// An `?T` expectation does NOT peel to `T` for `.{ … }`: no literal form in this language implicitly
+// lifts a `T` into `?T` (`a: ?int = 5` is likewise rejected), so `.{ … }` stays consistent with the
+// list/map literals and the explicit spelling is `some(.{ … })`.
+// expect: error E0023 at 8:11
+// expect: exit 1
+struct A { a: int }
+fn take(x: ?A): int { return 1 }
+echo take(.{ a: 1 });

@@ -26,6 +26,14 @@ pub struct Sites {
     /// records `List(Dyn)`. Populated only for concretely-typed sites (a hole/`dyn` top is omitted →
     /// the value stays untagged, i.e. the pre-track head-only runtime behavior).
     pub construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// The nominal type each **target-typed** object literal `.{ … }` resolved to, keyed by the
+    /// literal's span. The source elides the name and the checker recovers it from the expected
+    /// type; lowering reads this to fill `Rvalue::Object.type_name`, so every backend keeps seeing
+    /// an ordinary named construction and none of them needs to know the form exists. Distinct from
+    /// [`Sites::construction_sites`], which is the *reflection* hint and drops non-generic nominals
+    /// — the name here must be present for every `.{ … }`, generic or not. A pure function of the
+    /// program.
+    pub inferred_object_types: HashMap<Span, String>,
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// `from_bytes::<T>` spans whose packed element type `T` implements `Validate` (validation arc):
@@ -176,6 +184,8 @@ pub(crate) struct SiteMaps {
     /// maps: a `dyn`/union/un-inferred result is omitted (hover simply shows nothing there).
     pub(crate) expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     pub(crate) construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// See [`Sites::inferred_object_types`].
+    pub(crate) inferred_object_types: HashMap<Span, String>,
     /// List-construction sites whose element type is a `@packed` struct (P-PACK Phase 2), keyed by the
     /// constructing expression's span → the element's flat [`PackedLayout`]. Both backends consult this
     /// via [`resolve_packed_list_sites`] to lay out a `List<packed>` as one contiguous raw-primitive
@@ -273,6 +283,7 @@ impl SiteMaps {
         Sites {
             type_of_sites: self.type_of_sites,
             construction_sites: self.construction_sites,
+            inferred_object_types: self.inferred_object_types,
             packed_list_sites: self.packed_list_sites,
             from_bytes_validated: self.from_bytes_validated,
             typed_module_call_sites: self.typed_module_call_sites,

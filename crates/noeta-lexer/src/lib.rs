@@ -229,6 +229,15 @@ pub enum TokenKind {
     DotDotEq,
     #[token("..")]
     DotDot,
+    // `.{` (target-typed struct literal) is one token, not `Dot` + `LBrace`. Two reasons, both
+    // load-bearing: it keeps the *statement-continuation* rule honest (a leading `.` joins the
+    // previous line — see `is_leading_continuation` — and `.{` deliberately does **not**, so a
+    // literal opening a line starts a statement instead of silently becoming a method chain), and
+    // it makes the form unambiguous after a control-flow head, where a bare `{` would be the block.
+    // Logos resolves the `...`/`..=`/`..`/`.{`/`.` overlap by longest match, so `...{a: 1}` still
+    // lexes as spread-then-map.
+    #[token(".{")]
+    DotLBrace,
     #[token(".")]
     Dot,
     // `::` must precede `:`; logos resolves the overlap by longest match.
@@ -416,6 +425,7 @@ impl TokenKind {
             TokenKind::DotDotDot => "DotDotDot",
             TokenKind::DotDotEq => "DotDotEq",
             TokenKind::DotDot => "DotDot",
+            TokenKind::DotLBrace => "DotLBrace",
             TokenKind::Dot => "Dot",
             TokenKind::Colon => "Colon",
             TokenKind::QuestionQuestionEq => "QuestionQuestionEq",
@@ -524,6 +534,7 @@ impl TokenKind {
             TokenKind::DotDotDot => "`...`",
             TokenKind::DotDotEq => "`..=`",
             TokenKind::DotDot => "`..`",
+            TokenKind::DotLBrace => "`.{`",
             TokenKind::Dot => "`.`",
             TokenKind::Colon => "`:`",
             TokenKind::QuestionQuestionEq => "`??=`",
@@ -1126,7 +1137,11 @@ pub fn newline_boundaries(source: &Source, tokens: &[Token]) -> Vec<NewlineBound
         match tok.kind {
             TokenKind::LParen | TokenKind::LBracket => depth += 1,
             TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
-            TokenKind::LBrace => {
+            // `.{` opens a brace exactly as `{` does — it is the same delimiter with the type name
+            // elided — so it saves/resets the bracket depth and its `}` restores it. Omitting it
+            // here would leave a multi-line `.{ … }` inside a call with the enclosing argument
+            // list's depth, suppressing the newline boundaries its fields need.
+            TokenKind::LBrace | TokenKind::DotLBrace => {
                 saved.push(depth);
                 depth = 0;
             }
@@ -1539,6 +1554,66 @@ mod tests {
                 TokenKind::DotDotDot,
                 TokenKind::Ident
             ]
+        );
+    }
+
+    #[test]
+    fn lexes_dot_brace_as_one_token_without_disturbing_the_other_dot_forms() {
+        // `.{` is one token by longest match, and the `...`/`..`/`.` forms it overlaps with are
+        // unaffected — `...{` stays spread-then-brace, `..` stays a range, and a member access
+        // followed by a block (`a.b {`) still lexes as `.` + ident.
+        let (_source, lexed) = lex_str(".{ ...{ 0..1 a.b {");
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::DotLBrace,
+                TokenKind::DotDotDot,
+                TokenKind::LBrace,
+                TokenKind::IntLit,
+                TokenKind::DotDot,
+                TokenKind::IntLit,
+                TokenKind::Ident,
+                TokenKind::Dot,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+            ]
+        );
+        // Adjacency is required: `. {` is still two tokens, exactly as before.
+        let (_source, spaced) = lex_str(". {");
+        let kinds: Vec<_> = spaced.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, vec![TokenKind::Dot, TokenKind::LBrace]);
+    }
+
+    #[test]
+    fn a_leading_dot_brace_starts_a_statement_but_a_leading_dot_continues_one() {
+        // THE ambiguity `.{` had to clear. A line starting with `.` continues the previous
+        // statement (`f()\n.to_string()` is one method chain), so if `.{` were `Dot` + `LBrace` a
+        // literal opening a line would silently glue itself onto the line above. As its own token it
+        // is NOT a leading continuation, so it begins a new statement — and there is no `expr.{…}`
+        // form for it to be mistaken for either way.
+        assert!(token_continues_line(TokenKind::Dot));
+        assert!(!token_continues_line(TokenKind::DotLBrace));
+
+        let source = Source::new(SourceId::FIRST, "t", "x = f()\n.{ a: 1 }\n");
+        let lexed = lex(&source);
+        let bounds = newline_boundaries(&source, &lexed.tokens);
+        // A boundary lands exactly at the `.{`, splitting the two statements.
+        let at = source.text().find(".{").unwrap() as u32;
+        assert!(
+            bounds.iter().any(|b| b.offset == at && b.hard),
+            "expected a hard boundary before `.{{`: {bounds:?}"
+        );
+
+        // The chaining case is untouched: a leading `.` still joins the lines.
+        let source = Source::new(SourceId::FIRST, "t", "x = f()\n.to_string()\n");
+        let lexed = lex(&source);
+        let bounds = newline_boundaries(&source, &lexed.tokens);
+        let at = source.text().find(".to_string").unwrap() as u32;
+        assert!(
+            !bounds.iter().any(|b| b.offset == at),
+            "a leading `.` must not break the chain: {bounds:?}"
         );
     }
 

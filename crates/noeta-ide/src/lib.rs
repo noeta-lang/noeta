@@ -3686,6 +3686,34 @@ mod tests {
     }
 
     #[test]
+    fn inlay_hints_name_the_type_a_target_typed_literal_inferred() {
+        let mut store = test_store();
+        // `.{ … }` elides the type name, so unlike an ordinary inferred binding the name is not
+        // recoverable from the text at all — the hint restores it in front of the `.{`, rendering
+        // `configure(⟨ServerOpts⟩.{ port: 8080 })`. The named form shows nothing: it is already
+        // on screen.
+        store.open(
+            "file:///dotbrace.noe",
+            "struct ServerOpts { port: int }\n\
+             fn configure(o: ServerOpts): int { return o.port }\n\
+             echo configure(.{ port: 8080 })\n\
+             echo configure(ServerOpts { port: 1 })\n"
+                .to_string(),
+        );
+        let hints = hints_of(&store, "file:///dotbrace.noe");
+        assert!(
+            hints.contains(&(2, "ServerOpts".to_string())),
+            "target-typed literal must name its inferred type: {hints:?}"
+        );
+        assert!(
+            !hints
+                .iter()
+                .any(|(line, label)| *line == 3 && label == "ServerOpts"),
+            "a literal that already names its type must not be hinted: {hints:?}"
+        );
+    }
+
+    #[test]
     fn inlay_hints_skip_the_field_assignment_desugar() {
         let mut store = test_store();
         // `self.n = …` desugars to a `Stmt::Binding` for the receiver `self` carrying an

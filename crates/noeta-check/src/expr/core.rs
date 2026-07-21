@@ -5,7 +5,7 @@
 //! left this file are only the delegated siblings (`ops`/`calls`/`member`/`patterns`).
 
 use crate::*;
-use noeta_ast::CallArg;
+use noeta_ast::{CallArg, ObjectLit};
 
 impl Checker {
     // ----- bidirectional judgments -----
@@ -36,6 +36,76 @@ impl Checker {
 
     pub(crate) fn check_inner(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
         match expr {
+            // A target-typed `.{ … }` absorbs the expected type's **name**: the one thing the source
+            // elided. This is the only absorbing arm that changes an expression's *nominal identity*
+            // rather than refining its element types, so it is deliberately narrow — the expectation
+            // must be a concrete named record type. Everything else is E0023 rather than a guess:
+            //   * a union (`Foo | Bar`) names no single type to adopt;
+            //   * `Unknown`/`Dyn` is an open position with nothing to read (arms 8/9/10 guard the
+            //     same way);
+            //   * `?Foo` is **not** peeled. No literal form in this language implicitly lifts `T`
+            //     into `?T` — `a: ?int = 5` is E0007 and `a: ?List<int> = [1,2,3]` likewise — so
+            //     `.{ … }` stays consistent with `[…]` and the spelling is `some(.{ … })`.
+            // A type name that is not a record (an enum, a class-only name, an extern type) also
+            // falls through: `symbols.records` is exactly the set a field-initializer list can build.
+            Expr::Object(lit) if lit.type_name.is_none() => {
+                let name = match expected {
+                    Type::Named(n, _) if self.symbols.records.contains_key(n) => n.clone(),
+                    _ => {
+                        // `Unknown`/`Dyn` is an *open* position, not a wrong one — it reached `check`
+                        // only because some caller passes the top type through. Saying "the expected
+                        // type `?` is not a struct" would be misleading, so it gets the same wording
+                        // as the synthesis path: there is simply nothing here to infer from.
+                        if matches!(expected, Type::Unknown | Type::Dyn) {
+                            self.error(
+                                DiagnosticCode::CannotInfer,
+                                lit.type_name_span,
+                                "cannot infer the type of `.{ … }` here: this position has no \
+                                 expected type"
+                                    .to_string(),
+                            )
+                            .help(
+                                "name the type at the literal (`x = TypeName { … }`) or annotate \
+                                 the position it flows into (`x: TypeName = .{ … }`)",
+                            );
+                        } else {
+                            self.error(
+                                DiagnosticCode::CannotInfer,
+                                lit.type_name_span,
+                                format!(
+                                    "cannot infer the type of `.{{ … }}` here: the expected type \
+                                     `{expected}` is not a single named struct type"
+                                ),
+                            )
+                            .help(
+                                "name the type at the literal (`TypeName { … }`); for an optional \
+                                 expectation wrap it explicitly (`some(.{ … })`)",
+                            );
+                        }
+                        for f in &lit.fields {
+                            self.synth(&f.value, env);
+                        }
+                        if let Some(spread) = &lit.spread {
+                            self.synth(spread, env);
+                        }
+                        return Type::Unknown;
+                    }
+                };
+                let ty = self.synth_object_named(lit, &name, env);
+                // The resolved name is the whole output of this arm, and it cannot be written back
+                // into the AST (checking holds it by shared reference), so it travels to lowering
+                // through a span-keyed side table — the same shape the other checker→IR hints use.
+                // It gets its own map rather than riding `construction_sites`: that map is the
+                // *reflection* hint and deliberately drops non-generic nominals
+                // (`is_nongeneric_nominal`), so a plain `.{ … }` for a non-generic struct would
+                // never be recorded there.
+                self.sites.inferred_object_types.insert(lit.span, name);
+                // Annotation-driven, exactly like the list/map arms: record the *expected* type as
+                // the construction's reflected type so a generic instantiation the fields left
+                // unconstrained still tags precisely.
+                self.note_construction(expected, lit.span);
+                ty
+            }
             // A list literal absorbs an expected `List<T>`: check each element against `T`.
             Expr::List { items, span } if matches!(expected, Type::List(_)) => {
                 let Type::List(elem) = expected else {
@@ -911,119 +981,30 @@ impl Checker {
                 // false instead).
             } => self.synth_match(scrutinee, arms, *span, env, true),
             Expr::Object(lit) => {
-                // `@validated` (validation arc): a `@validated` type may only be built from OUTSIDE
-                // its own `impl`/methods through a validating constructor. A bare literal or a
-                // record-update spread outside the type would bypass the invariant, so it is E0060.
-                // Construction inside the type's own methods (`current_type`) stays legal; the recipe
-                // doors never reach here (they materialize directly), so they remain exempt and
-                // auto-validate — that is the whole point.
-                if self.symbols.validated_types.contains(&lit.type_name)
-                    && self.coloring.current_type.as_deref() != Some(lit.type_name.as_str())
-                {
-                    let kind = if lit.spread.is_some() {
-                        "a record-update"
-                    } else {
-                        "literal construction"
-                    };
+                // A target-typed `.{ … }` reaching *synthesis* is one in a position with no expected
+                // type — nothing to adopt a name from. (The check path below intercepts every
+                // position that does have one.)
+                let Some(type_name) = lit.type_name.clone() else {
                     self.error(
-                        DiagnosticCode::ValidatedConstruction,
+                        DiagnosticCode::CannotInfer,
                         lit.type_name_span,
-                        format!(
-                            "`{}` is `@validated`: {kind} outside its own `impl` is not allowed",
-                            lit.type_name
-                        ),
+                        "cannot infer the type of `.{ … }` here: this position has no expected type"
+                            .to_string(),
                     )
-                    .help(format!(
-                        "build `{0}` through one of its constructor functions (which runs \
-                         `validate()` and returns `Result<{0}, E>`)",
-                        lit.type_name
-                    ));
-                }
-                if let Some(spread) = &lit.spread {
-                    self.synth(spread, env);
-                }
-                // Infer the type's arguments from the field values: match each field's declared
-                // type (which may be a type parameter) against the value's type, then read the
-                // parameters off in declaration order. `Box { value: 1 }` → `Box<int>`. With no
-                // generic parameters the result is the bare name; if nothing constrained any
-                // parameter the arguments stay empty (a wildcard, compatible with any instantiation).
-                let params = self
-                    .symbols
-                    .generic_types
-                    .get(&lit.type_name)
-                    .cloned()
-                    .unwrap_or_default();
-                let decls = self
-                    .symbols
-                    .records
-                    .get(&lit.type_name)
-                    .cloned()
-                    .unwrap_or_default();
-                let pset: HashSet<String> = params.iter().cloned().collect();
-                let mut subst: HashMap<String, Type> = HashMap::new();
-                for f in &lit.fields {
-                    // A polymorphic named function assigned to a **concretely `Fn`-typed field**
-                    // instantiates against the field's declared type (F1, poly-values) — the field
-                    // analogue of the parameter/binding absorption — so `Ops { op: double_generic }`
-                    // checks precisely. Any other value synthesizes exactly as before.
-                    let field_fn_expectation =
-                        decls
-                            .iter()
-                            .find(|(n, _)| n == &f.name)
-                            .and_then(|(_, declared)| {
-                                (matches!(declared, Type::Fn { .. })
-                                    && !mentions_param(declared, &params)
-                                    && self.is_deferred_arg(&f.value, env)
-                                    && matches!(f.value, Expr::Ident { .. }))
-                                .then(|| declared.clone())
-                            });
-                    let vty = match &field_fn_expectation {
-                        Some(expected) => self.check(&f.value, expected, env),
-                        None => self.synth(&f.value, env),
-                    };
-                    // A literal that sets a private field is only valid inside the declaring type's
-                    // own methods (slice 2d) — a `class` with private fields is built externally
-                    // through an associated `fn`/constructor, not a bare literal.
-                    if !self.field_visible(&lit.type_name, &f.name) {
-                        self.report_private_field(
-                            &lit.type_name,
-                            &f.name,
-                            FieldAccess::Set,
-                            f.name_span,
-                        );
+                    .help(
+                        "name the type at the literal (`x = TypeName { … }`) or annotate the \
+                         position it flows into (`x: TypeName = .{ … }`)",
+                    );
+                    // Still walk the field values so their own errors surface.
+                    for f in &lit.fields {
+                        self.synth(&f.value, env);
                     }
-                    if let Some((_, declared)) = decls.iter().find(|(n, _)| n == &f.name) {
-                        if !pset.is_empty() {
-                            bind_type_params(declared, &vty, &pset, &mut subst);
-                        }
-                        // The field value must be assignable to the declared field type (`E0007`),
-                        // mirroring the field-default check. The type's own parameters are erased to
-                        // `dyn` (they are inferred from this very value above), so a generic field
-                        // accepts any value while a concrete field type is enforced.
-                        let expected = erase_type_params(declared.clone(), &pset);
-                        if !self.arg_assignable(&vty, &expected) {
-                            self.error(
-                                DiagnosticCode::TypeMismatch,
-                                f.value.span(),
-                                format!(
-                                    "field `{}` expects type `{expected}`, found `{vty}`",
-                                    f.name
-                                ),
-                            );
-                        }
+                    if let Some(spread) = &lit.spread {
+                        self.synth(spread, env);
                     }
-                }
-                let args = if subst.is_empty() {
-                    Vec::new()
-                } else {
-                    params
-                        .iter()
-                        .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
-                        .collect()
+                    return Type::Unknown;
                 };
-                let ty = Type::Named(lit.type_name.clone(), args);
-                self.note_construction(&ty, lit.span);
-                ty
+                self.synth_object_named(lit, &type_name, env)
             }
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
@@ -1605,5 +1586,134 @@ impl Checker {
                 ..
             } => self.synth_field_set(receiver, field, *field_span, value, env),
         }
+    }
+
+    /// Check/synthesize an object literal whose nominal type is already **known** — either spelled at
+    /// the literal (`Name { … }`) or adopted from the expected type by the target-typed `.{ … }`
+    /// form. Extracted so both entry points share one body: the two forms differ only in where the
+    /// name comes from, and every rule below (`@validated`, private fields, generic-argument
+    /// inference, per-field `E0007`) must apply identically to each.
+    pub(crate) fn synth_object_named(
+        &mut self,
+        lit: &ObjectLit,
+        type_name: &str,
+        env: &mut Env,
+    ) -> Type {
+        // `@validated` (validation arc): a `@validated` type may only be built from OUTSIDE
+        // its own `impl`/methods through a validating constructor. A bare literal or a
+        // record-update spread outside the type would bypass the invariant, so it is E0060.
+        // Construction inside the type's own methods (`current_type`) stays legal; the recipe
+        // doors never reach here (they materialize directly), so they remain exempt and
+        // auto-validate — that is the whole point.
+        if self.symbols.validated_types.contains(type_name)
+            && self.coloring.current_type.as_deref() != Some(type_name)
+        {
+            let kind = if lit.spread.is_some() {
+                "a record-update"
+            } else {
+                "literal construction"
+            };
+            self.error(
+                DiagnosticCode::ValidatedConstruction,
+                lit.type_name_span,
+                format!(
+                    "`{}` is `@validated`: {kind} outside its own `impl` is not allowed",
+                    type_name
+                ),
+            )
+            .help(format!(
+                "build `{0}` through one of its constructor functions (which runs \
+                 `validate()` and returns `Result<{0}, E>`)",
+                type_name
+            ));
+        }
+        if let Some(spread) = &lit.spread {
+            self.synth(spread, env);
+        }
+        // Infer the type's arguments from the field values: match each field's declared
+        // type (which may be a type parameter) against the value's type, then read the
+        // parameters off in declaration order. `Box { value: 1 }` → `Box<int>`. With no
+        // generic parameters the result is the bare name; if nothing constrained any
+        // parameter the arguments stay empty (a wildcard, compatible with any instantiation).
+        let params = self
+            .symbols
+            .generic_types
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+        let decls = self
+            .symbols
+            .records
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+        let pset: HashSet<String> = params.iter().cloned().collect();
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        for f in &lit.fields {
+            // A polymorphic named function assigned to a **concretely `Fn`-typed field**
+            // instantiates against the field's declared type (F1, poly-values) — the field
+            // analogue of the parameter/binding absorption — so `Ops { op: double_generic }`
+            // checks precisely. Any other value synthesizes exactly as before.
+            let declared_field = decls.iter().find(|(n, _)| n == &f.name);
+            let field_fn_expectation = declared_field
+                .and_then(|(_, declared)| {
+                    (matches!(declared, Type::Fn { .. })
+                        && !mentions_param(declared, &params)
+                        && self.is_deferred_arg(&f.value, env)
+                        && matches!(f.value, Expr::Ident { .. }))
+                    .then(|| declared.clone())
+                })
+                // A nested target-typed `.{ … }` takes the **field's declared type** as its
+                // expectation, so `Wrapper { inner: .{ … }, … }` names `inner`'s type. The type's
+                // own parameters are erased first, exactly as the assignability check below does:
+                // they are inferred *from* this value, so they cannot also constrain it.
+                .or_else(|| match (&f.value, declared_field) {
+                    (Expr::Object(l), Some((_, declared))) if l.type_name.is_none() => {
+                        Some(erase_type_params(declared.clone(), &pset))
+                    }
+                    _ => None,
+                });
+            let vty = match &field_fn_expectation {
+                Some(expected) => self.check(&f.value, expected, env),
+                None => self.synth(&f.value, env),
+            };
+            // A literal that sets a private field is only valid inside the declaring type's
+            // own methods (slice 2d) — a `class` with private fields is built externally
+            // through an associated `fn`/constructor, not a bare literal.
+            if !self.field_visible(type_name, &f.name) {
+                self.report_private_field(type_name, &f.name, FieldAccess::Set, f.name_span);
+            }
+            if let Some((_, declared)) = decls.iter().find(|(n, _)| n == &f.name) {
+                if !pset.is_empty() {
+                    bind_type_params(declared, &vty, &pset, &mut subst);
+                }
+                // The field value must be assignable to the declared field type (`E0007`),
+                // mirroring the field-default check. The type's own parameters are erased to
+                // `dyn` (they are inferred from this very value above), so a generic field
+                // accepts any value while a concrete field type is enforced.
+                let expected = erase_type_params(declared.clone(), &pset);
+                if !self.arg_assignable(&vty, &expected) {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        f.value.span(),
+                        format!(
+                            "field `{}` expects type `{expected}`, found `{vty}`",
+                            f.name
+                        ),
+                    );
+                }
+            }
+        }
+        let args = if subst.is_empty() {
+            Vec::new()
+        } else {
+            params
+                .iter()
+                .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
+                .collect()
+        };
+        let ty = Type::Named(type_name.to_string(), args);
+        self.note_construction(&ty, lit.span);
+        ty
     }
 }

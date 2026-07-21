@@ -2805,8 +2805,14 @@ impl Printer<'_> {
         if let Some(spread) = &obj.spread {
             ds.push(Doc::concat([Doc::text("..."), self.expr(spread)?]));
         }
+        // The head is either `Name ` (name, space, then the brace) or the target-typed `.` that
+        // fuses straight into the brace — `.{` is one token, so a space would not round-trip.
+        let head = match &obj.type_name {
+            Some(name) => format!("{name} "),
+            None => ".".to_string(),
+        };
         if ds.is_empty() {
-            return Ok(Doc::text(format!("{} {{}}", obj.type_name)));
+            return Ok(Doc::text(format!("{head}{{}}")));
         }
         // The `{` sits just after the type name; a break before the first field (or spread) means the
         // author wrote the literal across lines, so keep it broken.
@@ -2817,7 +2823,7 @@ impl Printer<'_> {
             .or_else(|| obj.spread.as_ref().map(|s| s.span().start));
         let broke = first.is_some_and(|f| self.seq_broke(obj.type_name_span.end, f));
         Ok(Doc::concat([
-            Doc::text(format!("{} ", obj.type_name)),
+            Doc::text(head),
             self.delimited("{", ds, "}", true, broke),
         ]))
     }

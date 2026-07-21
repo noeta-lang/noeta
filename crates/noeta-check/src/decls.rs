@@ -34,20 +34,31 @@ impl Checker {
         let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
         for p in params {
             let Some(default) = &p.default else { continue };
-            let actual = self.synth(default, env);
+            // The parameter's declared type is the default's expected type, so a target-typed
+            // `.{ … }` default adopts it (`fn retry(r: Retry = .{ attempts: 3 })`). Only that form
+            // routes through `check`; every other default keeps synthesizing exactly as before, so
+            // no existing inference changes.
+            let declared =
+                p.ty.is_some()
+                    .then(|| erase_type_params(param_type(p, &self.imports.extern_types), &tps));
+            let actual = match (&declared, default) {
+                (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
+                    self.check(default, expected, env)
+                }
+                _ => self.synth(default, env),
+            };
             // Skip the type check when the parameter has no annotation (already an `E0022`) or its
             // type is generic/`dyn` (erases to `dyn`, which accepts any default).
-            if p.ty.is_some() {
-                let expected = erase_type_params(param_type(p, &self.imports.extern_types), &tps);
-                if !self.arg_assignable(&actual, &expected) {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        default.span(),
-                        format!(
-                            "default value of type `{actual}` is not assignable to parameter type `{expected}`"
-                        ),
-                    );
-                }
+            if let Some(expected) = declared
+                && !self.arg_assignable(&actual, &expected)
+            {
+                self.error(
+                    DiagnosticCode::TypeMismatch,
+                    default.span(),
+                    format!(
+                        "default value of type `{actual}` is not assignable to parameter type `{expected}`"
+                    ),
+                );
             }
         }
     }
@@ -63,21 +74,30 @@ impl Checker {
         let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
         for f in fields {
             let Some(default) = &f.default else { continue };
-            let actual = self.synth(default, env);
+            // The field's declared type is the default's expected type — the field analogue of the
+            // parameter rule above, so `r: Retry = .{ attempts: 3 }` names its type.
+            let declared = f
+                .ty
+                .is_some()
+                .then(|| erase_type_params(field_type(&f.ty, &self.imports.extern_types), &tps));
+            let actual = match (&declared, default) {
+                (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
+                    self.check(default, expected, env)
+                }
+                _ => self.synth(default, env),
+            };
             // Skip the type check when the field has no annotation (every field requires one, so an
             // un-annotated field is already reported) or its type erases to `dyn` (accepts any).
-            if f.ty.is_some() {
-                let expected =
-                    erase_type_params(field_type(&f.ty, &self.imports.extern_types), &tps);
-                if !self.arg_assignable(&actual, &expected) {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        default.span(),
-                        format!(
-                            "default value of type `{actual}` is not assignable to field type `{expected}`"
-                        ),
-                    );
-                }
+            if let Some(expected) = declared
+                && !self.arg_assignable(&actual, &expected)
+            {
+                self.error(
+                    DiagnosticCode::TypeMismatch,
+                    default.span(),
+                    format!(
+                        "default value of type `{actual}` is not assignable to field type `{expected}`"
+                    ),
+                );
             }
         }
     }

@@ -1,0 +1,8 @@
+// A union expectation names no single type for `.{ … }` to adopt — `E0023` rather than a guess at
+// which arm was meant. The named form (`A { … }`) disambiguates.
+// expect: error E0023 at 8:11
+// expect: exit 1
+struct A { a: int }
+struct B { b: int }
+fn take(x: A | B): int { return 1 }
+echo take(.{ a: 1 });

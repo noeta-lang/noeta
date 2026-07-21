@@ -696,7 +696,10 @@ impl Pretty for ObjectLit {
     fn pretty(&self, out: &mut String, level: usize) {
         // The header line is already indented by the caller (`Expr::pretty` emits the
         // leading indent before delegating here), so we start the text directly.
-        out.push_str(&format!("(object {} {}", self.type_name, span(self.span)));
+        // A target-typed `.{ … }` dumps its head as `.{` — the name is not in the source, and the
+        // dump is a faithful view of the AST, not of what the checker will later infer.
+        let head = self.type_name.as_deref().unwrap_or(".{");
+        out.push_str(&format!("(object {} {}", head, span(self.span)));
         for field in &self.fields {
             out.push('\n');
             indent(out, level + 1);

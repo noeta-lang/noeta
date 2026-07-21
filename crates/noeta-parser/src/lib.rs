@@ -385,15 +385,23 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
             }
         }
         // A struct literal `Name { field: value }` (no spread — every field is given explicitly).
+        // The target-typed `.{ … }` is *not* accepted here: an attribute argument is a self-describing
+        // compile-time constant read back by reflection, and this conversion runs in the parser, long
+        // before any expectation exists to adopt a name from. Spelling the type is required.
         Expr::Object(lit) if lit.spread.is_none() => {
+            let Some(type_name) = lit.type_name.clone() else {
+                return Err((
+                    "an attribute argument must name its type — write `TypeName { … }` instead of \
+                     `.{ … }`"
+                        .to_string(),
+                    lit.type_name_span,
+                ));
+            };
             let mut fields = Vec::with_capacity(lit.fields.len());
             for field in &lit.fields {
                 fields.push((field.name.clone(), expr_to_attr_value(&field.value)?));
             }
-            Ok(AttrValue::Struct {
-                type_name: lit.type_name.clone(),
-                fields,
-            })
+            Ok(AttrValue::Struct { type_name, fields })
         }
         // A bare name: `none` is the nullary `Option` constructor; anything else is a type reference.
         Expr::Ident { name, .. } => {
@@ -1844,12 +1852,47 @@ where
         // An object literal body. `at_least(0)` allows the **empty** literal `T {}` (a fully-defaulted
         // type, object-model slice 5/7b) — unambiguous now that a control-flow head forbids a bare
         // struct literal, so `if cond {}` is always the empty *block*, never `cond{}`.
-        let object_body = choice((obj_spread, obj_field))
+        let object_items = choice((obj_spread, obj_field))
             .separated_by(just(T::Comma))
             .allow_trailing()
             .at_least(0)
             .collect::<Vec<_>>()
+            .boxed();
+        let object_body = object_items
+            .clone()
             .delimited_by(just(T::LBrace), just(T::RBrace));
+        // The **target-typed** literal `.{ … }` — the same body with the type name elided, adopted
+        // from the expected type at the literal's position (the checker resolves it; a position with
+        // no concrete named record type is E0023). It needs no `allow_struct` gate: `.{` is a single
+        // token that can never continue an expression, so `if .{ … } { … }` reads the literal and
+        // then the block with no ambiguity — the very ambiguity that forces the bare-`{` form to be
+        // suppressed in a control-flow head cannot arise here.
+        let inferred_object = object_items
+            .delimited_by(just(T::DotLBrace), just(T::RBrace))
+            .map_with(move |items, e| {
+                let span = ctx.to_span(e.span());
+                let mut fields = Vec::new();
+                let mut spread = None;
+                for item in items {
+                    match item {
+                        ObjItem::Field(field) => fields.push(field),
+                        ObjItem::Spread(value) => spread = Some(value),
+                    }
+                }
+                Expr::Object(ObjectLit {
+                    type_name: None,
+                    // The `.{` token itself stands in for the absent name — it is where a
+                    // diagnostic points and where the IDE hangs the inferred-name inlay hint.
+                    type_name_span: Span {
+                        end: span.start + 2,
+                        ..span
+                    },
+                    fields,
+                    spread,
+                    span,
+                })
+            })
+            .boxed();
         // A **qualified** struct literal: `vec.Vec2 { … }` / `geometry.vec.Vec2 { … }` — a dotted
         // type head (module-qualified reference, resolved to its FQN by the linker) directly
         // followed by an object body. The body is *mandatory* here: without it the whole atom
@@ -1882,7 +1925,7 @@ where
                     }
                 }
                 Expr::Object(ObjectLit {
-                    type_name,
+                    type_name: Some(type_name),
                     type_name_span,
                     fields,
                     spread,
@@ -1909,7 +1952,7 @@ where
                         }
                     }
                     Expr::Object(ObjectLit {
-                        type_name: name,
+                        type_name: Some(name),
                         type_name_span: name_span,
                         fields,
                         spread,
@@ -2342,7 +2385,9 @@ where
             // form (`f::<T>(args)`).
             typed_module_call.or(typed_fn_call),
             list,
-            map,
+            // The tuple is at its arity cap, so the two brace-opened literals share a slot. They
+            // are distinguished by their first token (`.{` vs `{`), so the order is immaterial.
+            inferred_object.or(map),
             set,
             obj_or_ident,
             paren,
@@ -3629,7 +3674,7 @@ where
         // `use App.Models.User;` (single) or `use App.Billing.{Invoice, Receipt};` (grouped).
         // Each grouped name may carry an `as <alias>` rename (`{Counter as Metric, Gauge}`).
         let as_alias = just(T::AsKw).ignore_then(id.clone()).or_not();
-        let use_group = id
+        let use_names = id
             .clone()
             .then(as_alias.clone())
             .map(|((name, span), alias)| UseName {
@@ -3641,12 +3686,26 @@ where
             .allow_trailing()
             .at_least(1)
             .collect::<Vec<_>>()
-            .delimited_by(just(T::LBrace), just(T::RBrace));
+            .boxed();
         // Each `.`-led tail is either the trailing `{ group }` (matched first) or a path id.
-        let use_tail = just(T::Dot).ignore_then(choice((
-            use_group.map(UseTail::Group),
-            id.clone().map(|(name, span)| UseTail::Seg(name, span)),
-        )));
+        //
+        // The import group's `.{` is written without a space essentially always, and the lexer fuses
+        // that into a single `DotLBrace` token (the target-typed struct literal `.{ … }`). This is
+        // the one place in the grammar where a `.` is legitimately followed by a `{`, so the group
+        // opener is matched as that fused token here. A spaced `use std. { fs }` keeps working
+        // through the second branch — the two spellings stayed equivalent, as they were before.
+        let use_tail = choice((
+            use_names
+                .clone()
+                .delimited_by(just(T::DotLBrace), just(T::RBrace))
+                .map(UseTail::Group),
+            just(T::Dot).ignore_then(choice((
+                use_names
+                    .delimited_by(just(T::LBrace), just(T::RBrace))
+                    .map(UseTail::Group),
+                id.clone().map(|(name, span)| UseTail::Seg(name, span)),
+            ))),
+        ));
         let use_decl = just(T::UseKw)
             .ignore_then(id.clone())
             .then(use_tail.repeated().collect::<Vec<_>>())
@@ -4331,6 +4390,42 @@ mod tests {
     use noeta_ast::Pretty;
     use noeta_lexer::lex;
     use noeta_span::SourceId;
+
+    #[test]
+    fn target_typed_literal_parses_without_disturbing_use_groups_or_chains() {
+        // `.{ … }` is an object literal with no type name — the checker supplies it from the
+        // expected type.
+        let dump = pretty("x: P = .{ a: 1 }\n");
+        assert!(dump.contains("(object .{"), "{dump}");
+
+        // The import group `use std.{fs}` shares the `.{` spelling — the lexer fuses it into one
+        // token, so the `use` grammar matches that token as the group opener. Both the fused and the
+        // spaced form must still parse, and a dotted single import must be untouched.
+        for src in [
+            "use std.{fs}\n",
+            "use std. {fs}\n",
+            "use std.fs.FileHandle\n",
+            "use App.Billing.{Invoice, Receipt as R}\n",
+        ] {
+            let parsed = parse_str(src);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{src:?}: {:?}",
+                parsed.diagnostics
+            );
+        }
+
+        // A `.{` opening a line does NOT continue the previous statement the way a leading `.`
+        // does — the two lines stay two statements, so no previously valid chain is reinterpreted.
+        let parsed = parse_str("x = f()\n.{ a: 1 }\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert_eq!(parsed.program.stmts.len(), 2, "{:?}", parsed.program.stmts);
+
+        // …while a leading `.` still chains into one statement.
+        let parsed = parse_str("x = f()\n.to_string()\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert_eq!(parsed.program.stmts.len(), 1, "{:?}", parsed.program.stmts);
+    }
 
     #[test]
     fn deferred_arg_diagnostics_are_reported_once() {

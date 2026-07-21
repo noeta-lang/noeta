@@ -1681,7 +1681,14 @@ pub enum Expr {
 /// explicitly, so the full-initialization guarantee still holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectLit {
-    pub type_name: String,
+    /// The nominal type being built, or `None` for the **target-typed** form `.{ … }`, whose name
+    /// comes from the expected type at the literal's position rather than from the source. The
+    /// checker resolves it and records the answer in `Sites::inferred_object_types` (keyed by
+    /// [`Self::span`]) for lowering to read — the name is never written back here, because checking
+    /// sees the AST by shared reference. `Option` rather than an empty-string sentinel so every
+    /// reader is forced to say what it does with an un-named literal.
+    pub type_name: Option<String>,
+    /// The span of the type name, or of the `.{` token itself for the target-typed form.
     pub type_name_span: Span,
     pub fields: Vec<FieldInit>,
     pub spread: Option<Box<Expr>>,

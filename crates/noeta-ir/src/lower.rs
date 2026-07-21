@@ -109,6 +109,9 @@ pub struct LoweringSites<'a> {
     /// Collection-construction sites → the resolved element [`noeta_ast::reflect::TypeRepr`] baked onto
     /// [`Rvalue::List`] so `type_of` recovers it after a `dyn` launder (R1 reflection).
     pub construction_sites: &'a HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// The nominal type each target-typed `.{ … }` literal resolved to (see
+    /// `noeta_check::Sites::inferred_object_types`) → the name baked into [`Rvalue::Object`].
+    pub inferred_object_types: &'a HashMap<Span, String>,
     /// Unbound method-handle sites (`Type.method` in value position) → the resolved
     /// `(ty, method, associated)`, emitted as an [`Rvalue::MethodHandle`] instead of a field load.
     pub handle_sites: &'a HashMap<Span, (String, String, bool)>,
@@ -189,6 +192,7 @@ impl LoweringSites<'static> {
             for_stream_sites: SPANS.get_or_init(HashSet::new),
             width_sites: WIDTHS.get_or_init(HashMap::new),
             construction_sites: REPRS.get_or_init(HashMap::new),
+            inferred_object_types: NAMES.get_or_init(HashMap::new),
             handle_sites: HANDLES.get_or_init(HashMap::new),
             bound_handle_sites: SPANS.get_or_init(HashSet::new),
             field_call_sites: SPANS.get_or_init(HashSet::new),
@@ -229,6 +233,7 @@ macro_rules! lowering_sites {
             for_stream_sites: &$s.for_stream_sites,
             width_sites: &$s.width_sites,
             construction_sites: &$s.construction_sites,
+            inferred_object_types: &$s.inferred_object_types,
             handle_sites: &$s.handle_sites,
             bound_handle_sites: &$s.bound_handle_sites,
             field_call_sites: &$s.field_call_sites,
@@ -2501,10 +2506,21 @@ impl Lowerer<'_> {
                         value,
                     });
                 }
+                // A target-typed `.{ … }` carries no name in the AST; the checker resolved it from
+                // the expected type and left it here. Reading it back at this one point is what
+                // keeps `Rvalue::Object` a plain named construction, so every backend below IR is
+                // untouched by the form's existence. An absent entry means the checker rejected the
+                // literal (E0023) and already reported — lowering only ever runs on a checked
+                // program, so the empty name cannot reach a backend.
+                let type_name = lit
+                    .type_name
+                    .clone()
+                    .or_else(|| self.sites.inferred_object_types.get(&lit.span).cloned())
+                    .unwrap_or_default();
                 Ok(self.emit(
                     out,
                     Rvalue::Object {
-                        type_name: lit.type_name.clone(),
+                        type_name,
                         type_name_span: lit.type_name_span,
                         fields,
                         spread,
