@@ -35,14 +35,31 @@ own slices, so `para/cli` is built on ground that holds.
 
 | # | Slice | Branch | State |
 |---|---|---|---|
-| 1 | `BuiltinTy` enum — collapse ~17 stringly-typed name→kind/arity tables to one | `slice-builtinty` | in flight |
+| 0 | Computed-callee calls type-checked (soundness) | `slice-callee-soundness` | done |
+| 1 | `BuiltinTy` enum — collapse ~17 stringly-typed name→kind/arity tables to one | `slice-builtinty` | done |
 | 2 | `.{ }` target-typed struct literals + inlay hint | `slice-dot-brace` | in flight |
 | 3 | Free-function `invoke("name", args)` | — | queued |
 | 4 | `env.get -> ?string` | `slice-env-get` | done |
-| 5 | `optional` on `ParamSig` | — | queued |
+| 5 | `optional` on `ParamSig` | `slice-param-optional` | in flight |
 | 6 | Parameter attributes (`#[Arg(...)]` on a parameter) | — | queued |
 | 7 | std/host: stderr, stdin, TTY detection | — | queued |
 | 8 | `para/cli` itself | — | queued |
+| — | Attribute type-ref generic args preserved + validated | `slice-attr-typeref-args` | done |
+
+### Open, awaiting a decision
+
+- **`f32` is invisible to narrowing.** `f32` is *reified* (`type_of` reports `Type.F32`), yet
+  `x is f32`, `x is float`, `v.as<f32>()` and `v.as<float>()` all fail — so an `f32` placed in a
+  `dyn` cannot be recovered, while `int` and `float` round-trip fine. Distinct from `i32`/`f64`,
+  which *erase* to `int`/`float` by design and correctly answer `is int` / `is float`; for those,
+  `is i32` being false is the honest answer and a checker warning ("`i32` erases to `int`; did you
+  mean `is int`?") would fit better than a narrowing head. Adding a head for `f32` is a language
+  change — a new `NarrowTarget` variant, both backends' tables, and a decision on whether `f32`
+  should answer `is float` given the static types do not widen implicitly.
+- **The `AttrValue -> Value` recursion is textually duplicated** between `noeta-eval/src/lib.rs`
+  and `noeta-vm/src/values.rs`. That duplication is what produced the type-ref erasure, and
+  collapsing it would subsume the whole defect class rather than the two call sites patched in
+  that slice. Same lesson as `BuiltinTy`, one layer over.
 
 ### 1. `BuiltinTy` — the drift fix
 
