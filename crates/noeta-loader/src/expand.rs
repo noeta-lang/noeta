@@ -7,12 +7,18 @@
 //! until now an extension could only *declare* one — the name resolved, the arguments were checked,
 //! and then nothing happened. A hook turns the declaration into the code it implies.
 //!
-//! ## Why it runs here
+//! ## Why it runs at link
 //!
-//! Linking is the one place both consumers pass through: the CLI reaches a program through
-//! [`crate::load`], the IDE through `noeta_db::linked_from` (itself a memoized salsa query). Running
-//! expansion once, here, is what makes the editor and the compiler agree about what a type's members
-//! are — they read the same spliced AST rather than each re-deriving it.
+//! Expansion belongs to linking: it is the step that turns parsed files into the one program every
+//! later pass reads, and generated members have to be in that program before anything checks it.
+//!
+//! There are several link *entry points* — [`crate::link`], [`crate::link_with_deps`],
+//! `ParsedDir::link_entry` for `noeta check`'s directory mode, and `noeta_db::linked_from` for the
+//! IDE — because each owns its own `SourceId` numbering and must append expansion sources to its
+//! own map. They all call [`expand_program`]: several call sites, one implementation, the same
+//! shape as the shared calling-convention rules. What must not happen is a *second* decision about
+//! what a directive expands to, because then the editor and the compiler would disagree about a
+//! type's members.
 //!
 //! That is deliberately *unlike* `plan_derive`, which is a pure function every consumer re-runs.
 //! Derive cannot run this early because it needs checked information (the program's user traits).

@@ -322,6 +322,45 @@ One subtlety worth knowing if you are debugging this path: a turbofish method ca
 - [Standard-Library Modules](Standard-Library-Modules) — the modules registered through this seam.
 - [Concurrency Internals](Concurrency-Internals) — the `Host` capability's role in the deterministic/real split.
 
+## Directives that generate code (`ExtDirective::expand`)
+
+An extension can register **`@`-directives**: `Extension::directives()` returns `ExtDirective` entries, which add a name to the decorator name-space. Resolution runs after the built-in directives and after the tier name-space, so an extension can never shadow either. Each entry declares where it may attach (`sites`), what arguments it takes (`max_args`, `named_keys`), and the prose the editor shows on hover and in completion.
+
+A directive with an `expand` hook does not merely mark a declaration — it **generates its members**. The hook receives the invocation and returns Noeta source:
+
+```rust
+fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+    let spec_path = std::path::Path::new(&ctx.source_dir).join(&ctx.args[0]);
+    let spec = std::fs::read_to_string(&spec_path).map_err(|e| e.to_string())?;
+    Ok(Expansion {
+        source: methods_for(&spec)?,             // e.g. "fn list_pets(): List<Pet> { … }"
+        reads: vec![spec_path.display().to_string()],
+    })
+}
+```
+
+```noeta ignore
+@openapi("petstore.yaml")
+struct PetStore {
+    base_url: string
+    // `list_pets`, `get_pet`, … are generated from the spec
+}
+```
+
+Five things are worth knowing before writing one.
+
+**It is compile-time only, by design.** `@` is the language's codegen half and `#[…]` is the runtime-readable half (see [Attributes and Reflection](Attributes-and-Reflection)). A directive is *not* visible to `attributes_of::<T>()`, and that is deliberate rather than an omission — an extension that wants runtime-visible metadata declares an attribute, and one that wants to consume a resource *dynamically* returns an invocable value instead of reaching for a directive.
+
+**The output is source, not AST.** It goes through the real grammar, so generated code earns the same diagnostics as hand-written code, the ABI stays free of an AST dependency, and the result stays inspectable rather than opaque. What you may emit follows from where the directive attached: members of the decorated declaration, exactly as `@derive` synthesizes methods onto a type. There is no separate notion of output scope — `sites` already answers it.
+
+**Each expansion becomes a real source file.** It is registered in the program's source map under a name that says what caused it — `PetStore ⟨@openapi "petstore.yaml"⟩` — so generated members have true spans. A fault inside a generated method points at that method rather than at the one-line directive that produced a hundred of them.
+
+**You must declare every file you read.** `Expansion::reads` is the hook's incrementality contract. The compiler cannot discover these by parsing, and it does not simply hand you the file named in your arguments, because a spec routinely pulls in others (an OpenAPI `$ref` into a sibling document) and only the hook knows which. Report every file opened — *including ones that turned out to be missing*, since their appearing later is a change too. A hook that under-reports will serve stale members until something unrelated invalidates it.
+
+**A hook only ever sees a legal invocation.** Placement and the declared argument contract are checked before it runs, so it need not defend against a directive that sat somewhere it does not belong or was called with arguments it never declared. Reading the filesystem is authorized by the package's `[trust]` grant; beyond that, a hook must be a pure function of its `DirectiveCtx` and the files it reports.
+
+Failures are reported as **E0062**, always blamed on the directive rather than on a generated line — the author wrote one line and cannot edit the hundred it produced — with the position inside the generated source carried in the message.
+
 ## Derive recipes (`ExtDerive`)
 
 An extension can register **derive recipes**: `Extension::derives()` returns `ExtDerive { name, methods, validate }` entries, and `@derive(<Name>)` on a type synthesizes each declared method as a forward into the extension's registered module function — `fn <name>(a1: dyn, …): dyn { return <handler>(self, a1, …) }`, resolved like an expression tier's native handler (no user import). The handler does its real work natively (typically reflecting over the value); the optional `validate` hook can reject unsuitable type shapes at check time (E0050). std's own `Inspect` (`inspect()` → `json.stringify(self)`) is the dogfood. Names resolve after built-in traits and the program's user traits, so a recipe can never shadow either.
