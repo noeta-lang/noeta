@@ -321,6 +321,29 @@ pub fn hoist_standalone_impl_methods(program: &AstProgram) -> Option<AstProgram>
 /// As [`hoist_standalone_impl_methods`], against an explicit extension registry — the
 /// instance-registry seam: native derive recipes (`ExtDerive`, derive layer 4) resolve against
 /// `registry`, so an embed session's own extensions' derives materialize.
+/// The hoist's answers for the shared derive cascade: user traits from a scan of the (linked)
+/// program, native recipes from this lowering's extension registry.
+struct HoistDeriveContext<'a> {
+    traits: &'a StdHashMap<&'a str, &'a noeta_ast::TraitDecl>,
+    registry: Option<&'static noeta_ext_abi::registry::Registry>,
+}
+
+impl noeta_ast::derive::DeriveContext for HoistDeriveContext<'_> {
+    fn user_trait(&self, name: &str) -> Option<noeta_ast::TraitDecl> {
+        self.traits.get(name).map(|t| (*t).clone())
+    }
+
+    fn native_recipe(&self, name: &str) -> Option<Vec<(String, usize, String)>> {
+        let d = self.registry?.find_ext_derive(name)?;
+        Some(
+            d.methods
+                .iter()
+                .map(|m| (m.name.to_string(), m.arity, m.handler.to_string()))
+                .collect(),
+        )
+    }
+}
+
 pub fn hoist_impl_methods_with_registry(
     program: &AstProgram,
     registry: Option<&'static noeta_ext_abi::registry::Registry>,
@@ -447,27 +470,18 @@ pub fn hoist_impl_methods_with_registry(
                 methods,
             ));
         }
+        // The ONE cascade (`noeta_ast::derive::plan_derive`), the same call the checker makes when
+        // it registers these methods' signatures — so what the checker types and what runs cannot
+        // disagree about which planner a derive resolves to. A plan error is dropped here; the
+        // checker reports it and the program does not run.
+        let ctx = HoistDeriveContext {
+            traits: &traits,
+            registry,
+        };
         for spec in derives {
-            let planned = if let Some(t) = traits.get(spec.name.as_str()) {
-                noeta_ast::derive::plan_user_trait_derive(t, fields, methods, spec)
-            } else if spec.via.is_some() {
-                noeta_ast::derive::plan_builtin_via(&spec.name, name, fields, spec)
-            } else if spec.name == "Error" {
-                // A plain `@derive(Error)` (error-ergonomics): synthesize the checker-validated
-                // `fn message(): string { return "${self}" }` — the type's display story.
-                Ok(noeta_ast::derive::plan_error_derive(spec.span))
-            } else if let Some(d) = registry.and_then(|r| r.find_ext_derive(&spec.name)) {
-                // A native derive recipe (layer 4): forwards into the extension's handlers.
-                let methods: Vec<(String, usize, String)> = d
-                    .methods
-                    .iter()
-                    .map(|m| (m.name.to_string(), m.arity, m.handler.to_string()))
-                    .collect();
-                Ok(noeta_ast::derive::plan_native_derive(&methods, spec.span))
-            } else {
-                continue;
-            };
-            if let Ok(planned) = planned {
+            if let Some(Ok(planned)) =
+                noeta_ast::derive::plan_derive(&ctx, spec, name, fields, methods)
+            {
                 synthesized.extend(planned);
             }
         }

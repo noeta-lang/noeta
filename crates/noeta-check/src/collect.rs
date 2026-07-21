@@ -562,35 +562,25 @@ impl Checker {
                 Stmt::Enum(d) => (&d.name, &[], &d.methods, &d.decorators.derives),
                 _ => continue,
             };
-            for spec in derives {
-                let planned = if let Some(tr) = self.symbols.user_traits.get(&spec.name).cloned() {
-                    noeta_ast::derive::plan_user_trait_derive(&tr, fields, methods, spec)
-                } else if spec.via.is_some() {
-                    noeta_ast::derive::plan_builtin_via(&spec.name, type_name, fields, spec)
-                } else if spec.name == BuiltinTrait::Error.name() {
-                    // A plain `@derive(Error)` (error-ergonomics) synthesizes
-                    // `fn message(): string` — register it so `e.message()` types precisely.
-                    Ok(noeta_ast::derive::plan_error_derive(spec.span))
-                } else if let Some(ext) = self.reg().find_ext_derive(&spec.name) {
-                    // A native derive recipe (layer 4): register its handler-forward signatures.
-                    let ext_methods: Vec<(String, usize, String)> = ext
-                        .methods
-                        .iter()
-                        .map(|m| (m.name.to_string(), m.arity, m.handler.to_string()))
-                        .collect();
-                    Ok(noeta_ast::derive::plan_native_derive(
-                        &ext_methods,
-                        spec.span,
-                    ))
-                } else {
-                    continue;
-                };
-                if let Ok(planned) = planned {
-                    let type_name = type_name.to_string();
-                    for m in &planned {
-                        self.register_synth_method(&type_name, m);
-                    }
-                }
+            // The ONE cascade (`noeta_ast::derive::plan_derive`), which the backends' hoist also
+            // runs. It used to be restated here and in `noeta_ir::lower` as two structurally
+            // identical chains that nothing forced to agree — and they had already drifted, one
+            // testing `BuiltinTrait::Error.name()` and the other a bare `"Error"`.
+            let ctx = CheckerDeriveContext {
+                user_traits: &self.symbols.user_traits,
+                registry: self.reg(),
+            };
+            let plans: Vec<Vec<noeta_ast::FnDecl>> = derives
+                .iter()
+                .filter_map(|spec| {
+                    noeta_ast::derive::plan_derive(&ctx, spec, type_name, fields, methods)
+                })
+                // A plan error is ignored here; `check_derives` reports it.
+                .filter_map(|planned| planned.ok())
+                .collect();
+            let type_name = type_name.to_string();
+            for m in plans.iter().flatten() {
+                self.register_synth_method(&type_name, m);
             }
         }
         // GENERIC-trait impls (in-body and standalone) register their INSTANTIATED omitted
@@ -1075,5 +1065,29 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::F64 { .. }
         | Expr::IntN { .. }
         | Expr::Bool { .. } => {}
+    }
+}
+
+/// The checker's answers for the shared derive cascade: user traits from the symbol table (which
+/// pass 1 filled from every `trait` in the linked program), native recipes from this check's
+/// extension registry.
+struct CheckerDeriveContext<'a> {
+    user_traits: &'a HashMap<String, noeta_ast::TraitDecl>,
+    registry: &'static noeta_ext_abi::registry::Registry,
+}
+
+impl noeta_ast::derive::DeriveContext for CheckerDeriveContext<'_> {
+    fn user_trait(&self, name: &str) -> Option<noeta_ast::TraitDecl> {
+        self.user_traits.get(name).cloned()
+    }
+
+    fn native_recipe(&self, name: &str) -> Option<Vec<(String, usize, String)>> {
+        let ext = self.registry.find_ext_derive(name)?;
+        Some(
+            ext.methods
+                .iter()
+                .map(|m| (m.name.to_string(), m.arity, m.handler.to_string()))
+                .collect(),
+        )
     }
 }

@@ -2501,3 +2501,15 @@ fn coalesce_seeds_from_fallback_type() {
     let src = "struct Order { id: int }\nfn wrap<T>(v: T): Result<T, string> { return Ok(v) }\no = Order { id: 1 }\npicked = wrap(o) ?? o\necho picked.id\n";
     assert_eq!(codes(src), Vec::<String>::new());
 }
+
+/// The plain `@derive(Error)` trait name is spelled in two crates: `BuiltinTrait::Error` in
+/// `noeta-types`, and `noeta_ast::derive::ERROR_TRAIT` in the shared cascade (which cannot depend
+/// on `noeta-types`). They drifted once already — the checker's cascade tested the enum's `name()`
+/// while lowering's tested a bare `"Error"` — so pin them together.
+#[test]
+fn the_error_derive_name_agrees_across_crates() {
+    assert_eq!(
+        noeta_types::BuiltinTrait::Error.name(),
+        noeta_ast::derive::ERROR_TRAIT
+    );
+}
