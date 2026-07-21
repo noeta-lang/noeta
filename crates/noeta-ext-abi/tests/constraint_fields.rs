@@ -101,6 +101,8 @@ impl Row {
 
 const CHECK_DIRECTIVES: &str = "crates/noeta-check/src/directives.rs";
 const CHECK_STDLIB: &str = "crates/noeta-check/src/stdlib.rs";
+const CHECK_PRELUDE: &str = "crates/noeta-check/src/prelude.rs";
+const EVAL_LIB: &str = "crates/noeta-eval/src/lib.rs";
 const CHECK_TRAITS: &str = "crates/noeta-check/src/traits.rs";
 const CHECK_TIERS: &str = "crates/noeta-check/src/tiers.rs";
 const REGISTRY: &str = "crates/noeta-ext-abi/src/registry.rs";
@@ -273,6 +275,52 @@ const TABLE: &[Row] = &[
         "ExtType",
         "docs",
         Prose("per-method markdown for the docs browser; rendered, never checked"),
+    ),
+    // --- ExtEnum / ExtVariant (native-extensibility S1) ------------------------------------------
+    Row(
+        "ExtEnum",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn qualified(")),
+    ),
+    Row(
+        "ExtEnum",
+        "namespace",
+        Data(Anchor(REGISTRY, "pub fn qualified(")),
+    ),
+    Row(
+        "ExtEnum",
+        "variants",
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_enums(")),
+    ),
+    // The backing states the RULE the checker enforces on the `.value()` accessor's type: a backed
+    // enum's `.value()` is its scalar, a non-backed enum has none. No SHIPPED extension declares a
+    // backed enum, so the corpus cannot reach the typing — a fixture extension is the exerciser.
+    Row(
+        "ExtEnum",
+        "backing",
+        Constraint(
+            Anchor(CHECK_STDLIB, "fn native_enum_backing_type("),
+            Anchor(
+                EMBED_CONSTRAINTS,
+                "fn a_backed_ext_enum_value_type_is_enforced(",
+            ),
+        ),
+    ),
+    Row(
+        "ExtVariant",
+        "name",
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_enums(")),
+    ),
+    Row(
+        "ExtVariant",
+        "fields",
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_enums(")),
+    ),
+    // The backing constant `.value()` returns at runtime, read by both backends' accessor.
+    Row(
+        "ExtVariant",
+        "value",
+        Data(Anchor(EVAL_LIB, "resolve_enum(&e.enum_name)")),
     ),
     // --- Method bundles -------------------------------------------------------------------------
     // What a type binding to the bundle must look like, validated at the `impl` site.
@@ -583,6 +631,8 @@ const SCANNED: &[(&str, &[&str])] = &[
             "ExtFn",
             "ExtModule",
             "ExtType",
+            "ExtEnum",
+            "ExtVariant",
             "PackedConstraint",
             "BundleFn",
             "ExtBundle",

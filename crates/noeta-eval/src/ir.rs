@@ -1972,6 +1972,10 @@ impl Interpreter {
             // `Result.Err(JsonError)`) carries a path-rich extern; a recipe decode of `T` itself
             // never yields one, only a wrapper's `Err` does.
             NativeOut::Extern(e) => MatOut::Value(Value::Extern(Rc::new(RefCell::new(e)))),
+            // A native enum value (native-extensibility S1) — a call-site-typed door does not
+            // decode one from a JSON recipe, but a native `Result`/`Option` wrapper may carry one,
+            // so materialize it through the ordinary (non-recipe) path.
+            out @ NativeOut::Variant { .. } => MatOut::Value(crate::materialize_native(out)),
             // A `TypeRecipe` names only JSON shapes; async work and bulk scalar vectors (a packed
             // reduction's result, N3.4) can never decode from one.
             NativeOut::Spawn(_) | NativeOut::Scalars(_) => {

@@ -2449,6 +2449,21 @@ impl Interpreter {
         {
             return self.call_enum_method(receiver.clone(), &Rc::clone(method), args, span);
         }
+        // `color.value()` on a native **backed** enum (native-extensibility S1): a native enum has
+        // no `EnumType` in scope, so its backing constant is resolved from the registry by the
+        // value's (short) enum name + variant. The checker types this as the backing scalar.
+        if let Value::Enum(e) = &receiver
+            && name == "value"
+            && args.is_empty()
+            && let Some(en) = self.reg().resolve_enum(&e.enum_name)
+            && let Some((_, variant)) = en.variant(&e.variant)
+        {
+            return Ok(match variant.value {
+                noeta_stdlib::VariantValue::Str(s) => Value::Str(s.to_string()),
+                noeta_stdlib::VariantValue::Int(n) => Value::Int(n),
+                noeta_stdlib::VariantValue::None => Value::Unit,
+            });
+        }
         // `e.to_json()` on an enum that `@derive(Serialize<Json>)`s (so has no hand-written
         // `to_json`): the variant rendering `json.stringify` produces — the enum twin of the
         // object arm below (and of the VM's enum method-dispatch gate).
@@ -5298,6 +5313,15 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
                 None => NativeValue::Opaque(value.type_name()),
             }
         }
+        // A native enum value crossing INTO a dispatch (native-extensibility S1): the full variant
+        // (name + case + declaration index + payload), so a native fn receives a real variant, not
+        // the lossy `Opaque` the fallback would give. Mirrors the VM's projection.
+        Value::Enum(e) => NativeValue::Variant {
+            enum_name: e.enum_name.clone(),
+            variant: e.variant.clone(),
+            variant_index: e.variant_index as u32,
+            fields: e.data.iter().map(marshal_native_arg).collect(),
+        },
         other => NativeValue::Opaque(other.type_name()),
     }
 }
@@ -5352,7 +5376,7 @@ fn materialize_ext(
 }
 
 /// Lift a native-extension [`noeta_stdlib::NativeOut`] result back into a tree-walker `Value`.
-fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
+pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
     use noeta_stdlib::{NativeOut, Scalar};
     match out {
         NativeOut::Scalar(Scalar::Int(n)) => Value::Int(n),
@@ -5393,6 +5417,22 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Some(inner) => builtin_enum("Option", "some", vec![materialize_native(*inner)]),
         NativeOut::Ok(inner) => builtin_enum("Result", "Ok", vec![materialize_native(*inner)]),
         NativeOut::Err(inner) => builtin_enum("Result", "Err", vec![materialize_native(*inner)]),
+        // A native-declared enum value (native-extensibility S1): a REAL `EnumValue` carrying the
+        // enum's short name + variant + declaration index, so a `match` over it is exhaustive and it
+        // is differential-identical to the VM's interned enum shape. The payload materializes
+        // recursively (a payload-carrying variant nests).
+        NativeOut::Variant {
+            enum_name,
+            variant,
+            variant_index,
+            fields,
+        } => Value::Enum(Rc::new(EnumValue {
+            enum_name,
+            variant,
+            data: fields.into_iter().map(materialize_native).collect(),
+            variant_index: variant_index as usize,
+            reflect: None,
+        })),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
         // work is ticketed at the dispatch return (extern-types X5), never materialized.

@@ -40,8 +40,26 @@ pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIV
 /// conflated with a same-short-named user type; runtime values carry the same qualified identity
 /// (`ExternValue::type_identity`), so the two sides key dispatch and `is`/`as` identically.
 pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
-    reg.resolve_type(n)
-        .map_or_else(|| n.to_string(), registry::ExtType::qualified)
+    if let Some(ty) = reg.resolve_type(n) {
+        return ty.qualified();
+    }
+    // A native enum (native-extensibility S1) is qualified the same way, so a signature naming an
+    // enum by its short name (`SigType::Named("SameSite")`) resolves to the qualified identity the
+    // checker keys `symbols.enums`/`Type::Named` on — otherwise a native fn returning the enum would
+    // type as an unqualified `Named` that never unifies with the seeded qualified enum.
+    if let Some(en) = reg.resolve_enum(n) {
+        return en.qualified();
+    }
+    n.to_string()
+}
+
+/// Map a [`registry::SigType`] onto a checker [`Type`] with **no** call-site variable bindings —
+/// the prelude-time form used when seeding native declarations (native-extensibility S1: an
+/// [`registry::ExtEnum`] variant's payload types), where there is no call to bind type variables
+/// against. A bare `Var(n)` therefore resolves to a gradual hole, which is correct for a
+/// declaration position.
+pub(crate) fn sig_to_type(reg: &registry::Registry, sig: &registry::SigType) -> Type {
+    sig_to_type_bound(reg, sig, &[])
 }
 
 /// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
@@ -291,7 +309,26 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
                 _ => Type::Dyn,
             })
         }
+        // A native **backed** enum's `.value()` accessor (native-extensibility S1): the constraint
+        // `ExtEnum.backing` states the accessor's type — a `String`-backed enum's `.value()` is
+        // `string`, an `Int`-backed one's is `int`. A non-backed enum has NO `.value()` (returns
+        // `None` here, so a `.value()` call on it is an unknown method). This is the live enforcer
+        // the ABI coverage gate names for `ExtEnum.backing`.
+        Type::Named(n, _) if name == "value" => native_enum_backing_type(reg, n),
         _ => None,
+    }
+}
+
+/// The type of a native backed enum's `.value()` accessor (native-extensibility S1), read straight
+/// off its [`registry::ExtEnum::backing`] declaration — the live enforcer of the `ExtEnum.backing`
+/// constraint. `String` backing ⇒ `string`, `Int` backing ⇒ `int`; a non-backed enum (or a name
+/// that is not a native enum at all) has no `.value()` and yields `None`.
+fn native_enum_backing_type(reg: &registry::Registry, n: &str) -> Option<Type> {
+    use registry::EnumBacking;
+    match reg.resolve_enum(n)?.backing {
+        EnumBacking::Str => Some(Type::String),
+        EnumBacking::Int => Some(Type::Int),
+        EnumBacking::None => None,
     }
 }
 

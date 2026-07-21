@@ -37,6 +37,19 @@ pub fn stringify(value: &NativeValue) -> String {
         // An extern-type value serializes as its display form, quoted — a `Uuid` is its
         // canonical string in JSON, the same form `echo` prints.
         NativeValue::Extern(e) => json_string(&e.display_string()),
+        // A native enum value (native-extensibility S1): a fieldless/backed variant renders as its
+        // case name (the same string an enum already stringified to via the `Str` projection), a
+        // payload-carrying one as `{"Variant": [fields]}`.
+        NativeValue::Variant {
+            variant, fields, ..
+        } => {
+            if fields.is_empty() {
+                json_string(variant)
+            } else {
+                let parts: Vec<String> = fields.iter().map(stringify).collect();
+                format!("{{{}:[{}]}}", json_string(variant), parts.join(","))
+            }
+        }
         // The shallow-marshal-only variants never reach the serializer: `json` is always deeply
         // marshalled (the only producer of a `stringify` argument).
         NativeValue::Bytes(_) | NativeValue::Object { .. } | NativeValue::Opaque(_) => {

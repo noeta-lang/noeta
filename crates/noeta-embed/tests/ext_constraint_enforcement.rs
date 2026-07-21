@@ -21,19 +21,27 @@
 
 use noeta_embed::{Error, Session};
 use noeta_ext_abi::registry::{
-    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, ExtBundle, ExtDerive,
-    ExtDeriveMethod, ExtFn, ExtModule, ExtTier, ExtType, Extension, NativeOut, NativeValue,
-    PackedConstraint, RetTy, Scalar, SigType, TierSite,
+    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, EnumBacking, ExtBundle, ExtDerive,
+    ExtDeriveMethod, ExtEnum, ExtFn, ExtModule, ExtTier, ExtType, ExtVariant, Extension, NativeOut,
+    NativeValue, PackedConstraint, RetTy, Scalar, SigType, TierSite, VariantValue,
 };
 use noeta_ext_abi::{CtxError, CtxOut, ErrorKind, Host, Slot, StdError};
 
 // --- The fixture extension -----------------------------------------------------------------------
 
-const KERN_FNS: &[ExtFn] = &[ExtFn {
-    name: "noop",
-    params: &[],
-    ret: RetTy::Concrete(SigType::Int),
-}];
+const KERN_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "noop",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+    // Returns a value of the backed enum below, so a program has something to call `.value()` on.
+    ExtFn {
+        name: "tone",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Named("Tone")),
+    },
+];
 
 fn kern_dispatch(
     func: &str,
@@ -42,12 +50,39 @@ fn kern_dispatch(
 ) -> Result<NativeOut, StdError> {
     match func {
         "noop" => Ok(NativeOut::Scalar(Scalar::Int(0))),
+        "tone" => Ok(NativeOut::Variant {
+            enum_name: "Tone".to_string(),
+            variant: "Warm".to_string(),
+            variant_index: 0,
+            fields: vec![],
+        }),
         _ => Err(StdError {
             kind: ErrorKind::UnknownName,
             message: format!("no function `{func}`"),
         }),
     }
 }
+
+/// A **string-backed** native enum — the `ExtEnum.backing` constraint under test. No shipped
+/// extension declares a backed enum, so the checker's `.value()`-typing arm (a `String`-backed
+/// enum's `.value()` is `string`) has never run against the corpus; this fixture is its exerciser.
+const FX_ENUMS: &[ExtEnum] = &[ExtEnum {
+    name: "Tone",
+    namespace: "fx",
+    variants: &[
+        ExtVariant {
+            name: "Warm",
+            fields: &[],
+            value: VariantValue::Str("warm"),
+        },
+        ExtVariant {
+            name: "Cool",
+            fields: &[],
+            value: VariantValue::Str("cool"),
+        },
+    ],
+    backing: EnumBacking::Str,
+}];
 
 /// A bundle requiring **column** layout — the [`ConstraintLayout`] arm no shipped bundle declares
 /// (`vec.Kernels` and the package-manager fixture's `fx.Pixels` are both `Any`), so the checker's
@@ -142,6 +177,9 @@ impl Extension for FxExtension {
     fn derives(&self) -> &'static [ExtDerive] {
         FX_DERIVES
     }
+    fn enums(&self) -> &'static [ExtEnum] {
+        FX_ENUMS
+    }
 }
 
 static FX: FxExtension = FxExtension;
@@ -200,6 +238,24 @@ fn an_extension_derive_validator_gates_the_declaration() {
     rejects(
         "@derive(Checked)\nstruct Row { label: string }\necho 1\n",
         "the recipe needs an `id` field",
+    );
+}
+
+// --- ExtEnum.backing (native-extensibility S1) ---------------------------------------------------
+
+/// `ExtEnum.backing` states the RULE the checker enforces on a backed enum's `.value()` accessor:
+/// a `String`-backed enum's `.value()` is `string`. No shipped extension declares a backed enum, so
+/// the corpus cannot reach the typing — a fixture is the only exerciser. Both directions matter: the
+/// backing type is *accepted* where it fits, and *rejected* (E0007) where it does not.
+#[test]
+fn a_backed_ext_enum_value_type_is_enforced() {
+    // `.value()` on the `String`-backed `Tone` types as `string`, assignable to a `string` binding.
+    accepts("use fx.{kern}\ns: string = kern.tone().value()\necho s\n");
+    // The same `.value()` is NOT an `int`: assigning it to an `int` binding is a type mismatch,
+    // exactly as it would be for a `.noe` backed enum's declared scalar.
+    rejects(
+        "use fx.{kern}\nn: int = kern.tone().value()\necho n\n",
+        "expected `int`, found `string`",
     );
 }
 

@@ -907,6 +907,8 @@ fn native_type_name(value: &NativeValue) -> &str {
         NativeValue::Map(_) => "map",
         NativeValue::Object { type_name, .. } | NativeValue::Opaque(type_name) => type_name,
         NativeValue::Extern(e) => e.type_display_name(),
+        // A native enum value (native-extensibility S1): its enum name is the surface type.
+        NativeValue::Variant { enum_name, .. } => enum_name,
     }
 }
 
@@ -926,7 +928,8 @@ fn to_arg(value: &NativeValue) -> Arg<'_> {
         | NativeValue::Map(_)
         | NativeValue::Object { .. }
         | NativeValue::Opaque(_)
-        | NativeValue::Extern(_) => Arg::Other,
+        | NativeValue::Extern(_)
+        | NativeValue::Variant { .. } => Arg::Other,
     }
 }
 
