@@ -2,14 +2,16 @@
 //
 // Every one of these is an ordinary Noeta value implementing `para.api.Middleware`; none of them is
 // privileged by the framework, and each is a worked example of the shape you would write yourself.
-// They divide into the two things an onion can do:
+// They divide into the three things an onion can do:
 //
-//   * **pass through** — rewrite the request, call `next`, inspect the response (`Header`, `Logging`)
-//   * **short-circuit** — answer without calling `next` at all (`Mock`)
+//   * **pass through** — rewrite the request, call `next`, inspect the response (`Header`,
+//     `Logging`, `Record`)
+//   * **short-circuit** — answer without calling `next` at all (`Mock`, `Cache` on a hit)
+//   * **call `next` more than once** — re-run everything inside (`Retry`)
 //
-// The second is why middleware must take a callable `next` rather than a before/after hook pair: a
-// hook pair cannot express "answer without performing the request", which is exactly what a mock
-// (and a cache) is.
+// The last two are why middleware must take a callable `next` rather than a before/after hook pair.
+// A hook pair cannot express "answer without performing the request", which is exactly what a mock
+// and a cache hit are; and it cannot express "do that again", which is what an outer retry is.
 namespace para.api.middleware
 
 use std.http.{Request, Response, HttpError}
@@ -68,8 +70,12 @@ impl Middleware for Logging {
         log.info("-> ${req.method()} ${req.url()}")
         outcome: Result<Response, HttpError> = next.run(req)
         match outcome {
-            Ok(resp) => { log.info("<- ${resp.status()} ${req.url()}") },
-            Err(e) => { log.error("<- ${e.kind()} ${req.url()}: ${e}") },
+            Ok(resp) => {
+                log.info("<- ${resp.status()} ${req.url()}")
+            },
+            Err(e) => {
+                log.error("<- ${e.kind()} ${req.url()}: ${e}")
+            },
         }
         return outcome
     }
@@ -113,8 +119,10 @@ pub struct Mock {
         return Mock { routes: self.routes.set(Mock.key(method, path), resp), fallback: self.fallback }
     }
 
-    // The table key for a method/path pair. One function so registration and lookup can never
-    // disagree about spelling.
+    // The table key for a method/path pair, and the one spelling of **request identity** shared by
+    // every keyed layer in this file — `Mock` routes on it, `Record` records under it, `Cache`
+    // caches by it. One function, so registration and lookup can never disagree, and so a recording
+    // can be handed straight to a mock without a translation step.
     fn key(method: string, path: string): string {
         return method.upper() ~ " " ~ path
     }
@@ -212,7 +220,9 @@ pub class Record {
         self.calls = self.calls ~ [k]
         outcome = next.run(req)
         match outcome {
-            Ok(resp) => { self.captured = self.captured.set(k, resp) },
+            Ok(resp) => {
+                self.captured = self.captured.set(k, resp)
+            },
             Err(_) => {},
         }
         return outcome
@@ -266,8 +276,9 @@ pub class Cache {
             return next.run(req)
         }
         k = Mock.key(req.method(), target(req))
-        // Reading the clock once per call rather than per branch keeps a store and the hit test
-        // that follows it on the same instant.
+        // Read once per call, not per branch. `time.monotonic()` *advances* a tick on every read,
+        // so two reads inside one call would place a store and the hit test that follows it at
+        // different instants — and the difference would grow with traffic.
         now = time.monotonic()
         if self.entries.has(k) && now - self.stored_at.get_or(k, 0) < self.ttl_ms {
             self.hits = self.hits + 1
@@ -333,7 +344,9 @@ pub struct Retry {
         mut i = 0
         while i < attempt {
             ms = ms * 2
-            if ms >= 30_000 { return 30_000 }
+            if ms >= 30000 {
+                return 30000
+            }
             i = i + 1
         }
         return ms
@@ -348,7 +361,7 @@ pub struct Retry {
         if secs < 0 {
             return fallback_ms
         }
-        return if secs * 1000 > 30_000 then 30_000 else secs * 1000
+        return if secs * 1000 > 30000 then 30000 else secs * 1000
     }
 
     fn attempt_until(req: Request, next: Next): Result<Response, HttpError> {
@@ -363,9 +376,7 @@ pub struct Retry {
             wait = match outcome {
                 // Classified, never stringly-typed. A non-retryable kind returns immediately.
                 Err(e) => if e.retryable() then Retry.backoff(self.base_ms, attempt) else -1,
-                Ok(resp) => if self.statuses.contains(resp.status())
-                    then Retry.delay_for(resp, Retry.backoff(self.base_ms, attempt))
-                    else -1,
+                Ok(resp) => if self.statuses.contains(resp.status()) then Retry.delay_for(resp, Retry.backoff(self.base_ms, attempt)) else -1,
             }
             if wait < 0 {
                 return outcome

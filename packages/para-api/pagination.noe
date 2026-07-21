@@ -4,9 +4,10 @@
 // cursor lives (header, query string, body), what ends the sequence (a missing link, a short page,
 // an explicit flag), and whether the next location is a URL or a number. So the extension point
 // here is a **strategy** — `next_page(req, resp) -> ?Request` — and `Link`, `Offset` and `Page` are
-// merely the three that ship in the box. A body cursor (Slack's `next_cursor`, Notion's
-// `has_more`) or a fully-qualified body URL (Stripe's `next`) is an ordinary user `impl`; see the
-// worked example at the bottom of this file.
+// merely the three that ship as built-ins. The fourth convention, an opaque body cursor (Slack's
+// and Notion's `next_cursor`), is an ordinary user `impl` — `Cursor`, at the bottom of this file,
+// is written as one on purpose, to demonstrate that the trait is enough. A fully-qualified body URL
+// (Stripe's `next`) is the same code with `with_url` in place of `set_query`.
 //
 // **There is deliberately NO default strategy.** `pages` demands one by parameter, because a
 // paginator that guesses is worse than one that asks: guessing `Link` against an offset API reads
@@ -147,7 +148,9 @@ pub fn set_query(url: string, name: string, value: string): string {
     mut replaced = false
     if query != "" {
         for pair in query.split("&") {
-            if pair == "" { continue }
+            if pair == "" {
+                continue
+            }
             eq = pair.index_of("=") ?? -1
             key = if eq < 0 then pair else pair.slice(0, eq)
             if key == name {
@@ -181,7 +184,9 @@ fn last_index_of(s: string, sep: string): int {
     mut from = 0
     while true {
         at = s.index_of(sep, from) ?? -1
-        if at < 0 { break }
+        if at < 0 {
+            break
+        }
         found = at
         from = at + 1
     }
@@ -217,8 +222,17 @@ pub struct Link {
         if target == "" {
             return none
         }
-        // Targets may be relative, and are relative to where the response actually came from.
-        return some(req.with_url(resolve_url(resp.url(), target)))
+        // Targets may be relative, and are relative to where the response actually came from —
+        // which is why `Response.url()` reports the FINAL URL after redirects, and why it is
+        // preferred over the request's.
+        //
+        // It falls back to the request's URL when the response has none. A `Response` synthesized
+        // in-process (a `Mock` reply, a `server.response`) reports an empty URL, and the request
+        // that produced it is the best base available — without this, a relative `Link` is
+        // unresolvable under a mock, which would make exactly this path the one part of pagination
+        // a hermetic test could not cover.
+        base = if resp.url() == "" then req.url() else resp.url()
+        return some(req.with_url(resolve_url(base, target)))
     }
 }
 
@@ -238,7 +252,11 @@ impl PageStrategy for Link {
 //
 // `is_last` is usually "this page was shorter than the limit", which after a typed decode reads:
 //
-//     Offset.new(100, fn(r) => (r.json::<List<Item>>() ?? []).len() < 100)
+//     Offset.new(100, fn(r) => match r.json::<List<Item>>() {
+//         Ok(items) => items.len() < 100,
+//         // A body that will not decode cannot be counted, so stop rather than page forever.
+//         Err(_) => true,
+//     })
 //
 // A non-2xx also ends the sequence, unconditionally: an offset API cannot express "next" through
 // an error status, so continuing past one can only mean hammering a broken endpoint.
@@ -261,7 +279,7 @@ pub struct Offset {
         if !resp.ok() {
             return none
         }
-        if (self.is_last)(resp) {
+        if self.is_last(resp) {
             return none
         }
         // Read the window back off the request rather than tracking it in the strategy: a strategy
@@ -309,7 +327,7 @@ pub struct Page {
         if !resp.ok() {
             return none
         }
-        if (self.is_last)(resp) {
+        if self.is_last(resp) {
             return none
         }
         cur = (req.query(self.param) ?? "").to_int() ?? self.start
