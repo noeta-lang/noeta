@@ -491,7 +491,72 @@ impl DocumentStore {
                 ),
             );
         }
+        diags.extend(self.broken_import_diagnostics(cache, doc, source));
         Some((diags, doc.text(db).clone()))
+    }
+
+    /// Explain, **at this document's own `use` statements**, every import that names a module which
+    /// failed to parse — the editor half of the "no module" wart.
+    ///
+    /// The linker reports a broken module's parse error against the *broken file*, which is right:
+    /// that is where the fault is and where a reader must go to fix it. But [`Self::diagnostics`]
+    /// is a per-document view and must filter to `d.span.source == source` (a foreign span would
+    /// otherwise render at a nonsense offset in the wrong file), so from the consumer's document
+    /// that error is invisible — a file importing a broken module showed **nothing at all**.
+    /// Silence is worse than the misleading error it replaced: an editor that shows a file as clean
+    /// is making a claim, and the claim was false.
+    ///
+    /// So the import is flagged where the reader is looking, at the `use`'s own span, naming the
+    /// module and the file to open. The underlying parse error is *referenced*, not copied: the
+    /// broken file owns it and publishes it itself when open, and duplicating it here would put one
+    /// error on two files when only one of them can fix it.
+    fn broken_import_diagnostics(
+        &self,
+        cache: &WorkspaceCache,
+        doc: SourceProgram,
+        source: SourceId,
+    ) -> Vec<noeta_diagnostics::Diagnostic> {
+        let db = &self.db;
+        let broken = noeta_db::broken_modules(db, cache.workspace);
+        // The overwhelmingly common case: nothing is broken, so no document walk at all.
+        if broken.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for stmt in &noeta_db::ast(db, doc).0.program.stmts {
+            let noeta_ast::Stmt::Use { path, names, .. } = stmt else {
+                continue;
+            };
+            for name in names {
+                let Some(module) = broken.for_use(path, &name.name) else {
+                    continue;
+                };
+                // A document does not explain itself: if THIS file is the broken one, its own parse
+                // errors already passed the filter above and are on screen.
+                if module.source.id() == source {
+                    continue;
+                }
+                let namespace = module
+                    .namespace
+                    .as_ref()
+                    .map(|ns| ns.join("."))
+                    .unwrap_or_else(|| path.join("."));
+                let file = file_label(module.source.name());
+                let mut diagnostic = noeta_diagnostics::Diagnostic::error(
+                    noeta_diagnostics::DiagnosticCode::UnresolvedImport,
+                    name.span,
+                    format!("module `{namespace}` was not loaded: `{file}` failed to parse"),
+                );
+                if let Some(first) = module.diagnostics.first() {
+                    diagnostic.help(format!(
+                        "`{file}` reports: {} — this import resolves once that file parses",
+                        first.message
+                    ));
+                }
+                out.push(diagnostic);
+            }
+        }
+        out
     }
 
     /// Inlay **type hints** for the visible `range` of `uri`: the inferred type of every
@@ -3029,6 +3094,14 @@ fn receiver_type_at(text: &str, offset: u32, receiver_span: Span) -> Option<Stri
     Some(type_name.to_string())
 }
 
+/// The readable name of a source for a diagnostic *message* (as opposed to a span target). IDE
+/// sources are named by URI (`file:///long/path/models.noe`), which is what the editor needs for
+/// navigation and exactly what a reader does not want inside a sentence — so a message says
+/// `models.noe`, the name on the tab they must open.
+fn file_label(name: &str) -> &str {
+    name.rsplit('/').find(|seg| !seg.is_empty()).unwrap_or(name)
+}
+
 /// Whether `name` is a syntactically valid identifier — a non-empty run starting with a letter or
 /// `_`, then letters, digits, or `_`. Guards rename from writing a new name that would not lex as an
 /// identifier (an operator, a number, whitespace), which would corrupt the source.
@@ -4517,6 +4590,169 @@ mod tests {
             )
             .expect("cross-package type resolves to its dependency source");
         assert_eq!(target_uri, hello_uri);
+    }
+
+    /// A workspace whose sibling `models.noe` declares `App.Models` but does not parse.
+    fn broken_sibling_workspace(name: &str) -> PathBuf {
+        temp_workspace(
+            name,
+            &[(
+                "models.noe",
+                "namespace App.Models;\npub struct User { let ] = ; }\n",
+            )],
+        )
+    }
+
+    #[test]
+    fn a_broken_sibling_is_explained_at_the_importing_use() {
+        // The editor half of the "no module" wart. The parse error itself belongs to `models.noe`
+        // and is correctly filtered out of this document's diagnostics — which left the importing
+        // file showing NOTHING at all: an editor claiming a file is clean while its import is dead.
+        // The `use` is now flagged where the reader is looking, naming the module and the file.
+        let dir = broken_sibling_workspace("broken_sibling_use");
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = test_store();
+        store.open(
+            &entry_uri,
+            "namespace App.Orders;\nuse App.Models.User;\nu = User { id: 1 }\n".to_string(),
+        );
+
+        let (diags, text) = store.diagnostics(&entry_uri).unwrap();
+        let broken = diags
+            .iter()
+            .find(|d| d.message.contains("failed to parse"))
+            .unwrap_or_else(|| panic!("the broken import must be explained; got {diags:?}"));
+        assert_eq!(
+            broken.code,
+            noeta_diagnostics::DiagnosticCode::UnresolvedImport
+        );
+        // It names the module AND the file to open — the two facts the reader needs.
+        assert!(
+            broken.message.contains("App.Models") && broken.message.contains("models.noe"),
+            "must name the module and the file: {}",
+            broken.message
+        );
+        // The underlying parse error is referenced, not copied (the broken file owns it).
+        assert!(
+            broken
+                .help
+                .as_deref()
+                .is_some_and(|h| h.contains("models.noe")),
+            "the help should point at the file: {:?}",
+            broken.help
+        );
+        // Pointed at the `use` statement itself (line 1), not the top of the file.
+        let range = LineIndex::new(&text).range(broken.span, Encoding::Utf8);
+        assert_eq!(range.start.line, 1, "the diagnostic sits on the `use` line");
+        // The wart's wording must not come back: the whole point is naming the actual cause.
+        assert!(
+            !diags.iter().any(|d| d.message.contains("no module")),
+            "the misleading `no module` wording must not return: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_broken_dependency_module_is_explained_at_the_importing_use() {
+        // The same, for a dependency package — where it matters most, since the broken file is not
+        // one the editor checks in its own right and nothing else would ever mention it. The
+        // module is named by the CONSUMER's dependency key (`hi.hello`, not the package's own
+        // `greet.hello`), which is how the `use` spells it.
+        let base = std::env::temp_dir().join("noeta_lsp_broken_dep");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let lib = base.join("greetlib");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nhi = { path = \"../greetlib\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            lib.join("hello.noe"),
+            "namespace greet.hello;\npub struct Greeter { let ] = ; }\n",
+        )
+        .unwrap();
+
+        let entry_uri = path_to_uri(&app.join("main.noe"));
+        let mut store = test_store();
+        store.open(
+            &entry_uri,
+            "use hi.hello.Greeter;\ng = Greeter { n: 1 }\n".to_string(),
+        );
+
+        let (diags, text) = store.diagnostics(&entry_uri).unwrap();
+        let broken = diags
+            .iter()
+            .find(|d| d.message.contains("failed to parse"))
+            .unwrap_or_else(|| panic!("the broken dependency must be explained; got {diags:?}"));
+        assert!(
+            broken.message.contains("hi.hello") && broken.message.contains("hello.noe"),
+            "must name the module as imported and the dependency file: {}",
+            broken.message
+        );
+        let range = LineIndex::new(&text).range(broken.span, Encoding::Utf8);
+        assert_eq!(range.start.line, 0, "the diagnostic sits on the `use` line");
+        assert!(
+            !diags.iter().any(|d| d.message.contains("no module")),
+            "the misleading `no module` wording must not return: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn the_broken_file_keeps_its_own_parse_error_and_gains_no_explanation() {
+        // The other side of the split: the broken module's document reports the REAL parse error
+        // (that is where the fix goes), and does not also get the consumer-facing explanation —
+        // a file does not explain itself.
+        let dir = broken_sibling_workspace("broken_sibling_owner");
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let broken_uri = path_to_uri(&dir.join("models.noe"));
+        let mut store = test_store();
+        store.open(
+            &entry_uri,
+            "namespace App.Orders;\nuse App.Models.User;\n".to_string(),
+        );
+        store.open(
+            &broken_uri,
+            "namespace App.Models;\npub struct User { let ] = ; }\n".to_string(),
+        );
+
+        let (diags, _) = store.diagnostics(&broken_uri).unwrap();
+        assert!(
+            !diags.is_empty(),
+            "the broken file must report its own parse error"
+        );
+        assert!(
+            !diags.iter().any(|d| d.message.contains("failed to parse")),
+            "the broken file must not be told about itself: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_clean_workspace_gains_no_broken_import_diagnostic() {
+        // The guard on the walk above: a workspace with nothing broken is untouched, so this
+        // cannot start manufacturing diagnostics for healthy imports.
+        let dir = temp_workspace(
+            "broken_none",
+            &[(
+                "models.noe",
+                "namespace App.Models;\npub struct User { id: int }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = test_store();
+        store.open(
+            &entry_uri,
+            "namespace App.Orders;\nuse App.Models.User;\nu = User { id: 1 }\n".to_string(),
+        );
+        let (diags, _) = store.diagnostics(&entry_uri).unwrap();
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
     }
 
     #[test]

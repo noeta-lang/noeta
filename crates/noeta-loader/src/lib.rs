@@ -248,7 +248,11 @@ pub struct DepPackage {
 /// package's global `key`; otherwise, if it is one of the package's local dependency keys, it becomes
 /// that dependency's global segment (`renames`). A path leading with anything else — `std`, or a
 /// malformed package path — is left untouched.
-fn reroot_path(
+/// Public so a caller holding a namespace **outside** a [`Program`] can address it the same way
+/// [`reroot_program`] addresses a parsed one — the salsa layer recovers a broken dependency module's
+/// namespace from its tokens (it has no usable AST), and that namespace must be re-rooted to the
+/// consumer's key or it will never match the `use` that names it.
+pub fn reroot_path(
     path: &mut [String],
     root: &str,
     key: &str,
@@ -1021,14 +1025,6 @@ fn link_core(
     let mut dep_retained: Vec<Stmt> = Vec::new();
     let mut entry_stmts: Vec<Stmt> = Vec::with_capacity(entry_program.stmts.len());
 
-    // The namespaces the **broken** modules declare — what an unresolved `use` is checked against
-    // *before* it may become an E0019 "no module". A namespace that IS declared, by a file that
-    // simply failed to parse, is not a missing module: it is a syntax error the consumer was never
-    // shown. See [`BrokenModule`].
-    let broken_views: Vec<(&[String], &BrokenModule)> = broken
-        .iter()
-        .filter_map(|m| m.namespace.as_deref().map(|ns| (ns, *m)))
-        .collect();
     // Every broken file names itself once however many `use`s cascade off it.
     let mut reported_broken: HashSet<String> = HashSet::new();
     // Broken files whose namespace could *not* be read (the syntax error precedes the `namespace`
@@ -1140,7 +1136,10 @@ fn link_core(
                     };
                     if retained {
                         unresolved.push(name.clone());
-                    } else if let Some(module) = broken_module_for(&broken_views, path, &name.name)
+                    // A namespace that IS declared, by a file that simply failed to parse, is not a
+                    // missing module: it is a syntax error the consumer was never shown.
+                    } else if let Some(module) =
+                        broken_module_for(broken.iter().copied(), path, &name.name)
                     {
                         // The namespace *is* declared — by a file that failed to parse, which is
                         // the only reason it is missing from the pool. Report that file's parse
@@ -1652,24 +1651,29 @@ fn unknown_module_error(
     }
 }
 
-/// The broken module that declares the namespace an unresolved `use` names — either exactly (`path`,
-/// an item import) or as `path` + `name` (a whole-module import), mirroring [`resolve`] and
+/// The broken module that declares the namespace a `use <path>.<name>` names — either exactly
+/// (`path`, an item import) or as `path` + `name` (a whole-module import), mirroring [`resolve`] and
 /// [`module_with_namespace`]. `None` when no broken module accounts for the import, which is when
 /// "no module" is the honest answer.
-fn broken_module_for<'b>(
-    broken: &[(&[String], &'b BrokenModule)],
+///
+/// **THE** matching rule, public and iterator-shaped because two layers ask the same question and
+/// must not answer it differently: the linker, deciding whether to report a parse error in place of
+/// an E0019, and the IDE (`noeta_ide`), explaining an import at the *consumer's* own span. A module
+/// whose namespace could not be recovered (`namespace: None`) matches nothing — it cannot be shown
+/// to be the module in question.
+pub fn broken_module_for<'b>(
+    broken: impl IntoIterator<Item = &'b BrokenModule>,
     path: &[String],
     name: &str,
 ) -> Option<&'b BrokenModule> {
-    broken
-        .iter()
-        .find(|(ns, _)| {
-            *ns == path
+    broken.into_iter().find(|m| {
+        m.namespace.as_deref().is_some_and(|ns| {
+            ns == path
                 || (ns.len() == path.len() + 1
                     && ns[..path.len()] == *path
                     && ns.last().is_some_and(|last| last == name))
         })
-        .map(|(_, m)| *m)
+    })
 }
 
 /// Build the `E0020` diagnostic for an import whose name collides with another top-level name in
