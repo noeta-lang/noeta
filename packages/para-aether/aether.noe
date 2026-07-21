@@ -14,6 +14,8 @@ namespace para.aether
 use std.http.server
 use std.http.{Request, Response}
 use std.json
+use std.session
+use std.session.{Session, Keyring}
 use std.task.sleep
 
 // --- Route attributes: users tag controller methods with these. -------------------------------
@@ -233,6 +235,56 @@ impl Store for NullStore {
     fn stage(model: string, data: string): void {}
 
     fn flush(): void {}
+}
+
+// --- The session-store seam. -------------------------------------------------------------------
+//
+// aether offers sessions behind ONE interface, so a handler reads and writes a session the same way
+// regardless of where the state actually lives:
+//   - the **stateless** default (`CookieSessions`) carries the whole session in a signed, HMAC'd
+//     cookie via `std.session` — no server state, nothing to configure, and correct under
+//     `serve --parallel` (every worker reads a cookie none of them had to write, where an in-memory
+//     map would silently fragment).
+//   - a **stored** upgrade keeps only a small session id in the cookie and the data server-side, for
+//     sessions too large for a browser's ~4 KB cookie or that must be revocable. Per the
+//     http-sessions design that impl belongs in **para/db** — it owns the connection and the
+//     migrations — and aether reaches it through the `para` scope, not a hard dependency.
+//
+// A handler obtains its session with `store.open(req)` and persists it with `store.attach(resp, s)`.
+// `Session` is `std.session`'s own type, so the two backends are interchangeable at the call site: a
+// handler written against `CookieSessions` moves to the stored backend without a line changing.
+pub trait SessionStore {
+    // The session carried by this request — an empty one when the request has no valid session (the
+    // caller has the same correct response to "absent", "forged", and "expired").
+    fn open(req: Request): Session
+    // Persist `session` onto `resp` and return the reply to send: a `Set-Cookie` for the stateless
+    // default, a row write plus a small id cookie for a stored backend. An unchanged session costs
+    // no header, so calling this unconditionally is safe.
+    fn attach(resp: Response, session: Session): Response
+}
+
+// The stateless default: the whole session rides in a signed cookie (`std.session`). Wire it once and
+// hand it to handlers. `secure` should be true behind https — it makes the cookie https-only; leave
+// it false only for a plain-http localhost. `max_age` (seconds) bounds a stolen token's lifetime,
+// which matters precisely because a stateless session has nothing to revoke against.
+pub class CookieSessions {
+    keys: Keyring
+    max_age: int
+    secure: bool
+
+    fn new(keys: Keyring, max_age: int, secure: bool): CookieSessions {
+        return CookieSessions { keys: keys, max_age: max_age, secure: secure }
+    }
+
+    impl SessionStore {
+        fn open(req: Request): Session {
+            return session.open(req, self.keys)
+        }
+
+        fn attach(resp: Response, s: Session): Response {
+            return session.attach(resp, s, self.keys, self.max_age, self.secure)
+        }
+    }
 }
 
 // --- Service providers. -----------------------------------------------------------------------
