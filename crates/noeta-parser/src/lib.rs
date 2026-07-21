@@ -1120,11 +1120,65 @@ fn parse_inner(
 
     // Convert structural errors to owned diagnostics first: this releases the borrow of
     // `diags` (held via `ctx` through the `Rich` errors' lifetime) before `into_inner`.
-    let structural: Vec<Diagnostic> = errs.into_iter().map(|err| rich_to_diag(ctx, err)).collect();
-    let mut diagnostics = diags.into_inner();
+    //
+    // Each is tagged GENERIC or SPECIFIC on the way through, for the cascade rule below. A
+    // structural error is specific exactly when its reason declares its own catalog entry
+    // ([`custom_reason`]) — a rule that matched the construct and rejected it on its own terms.
+    // Everything else chumsky produces is an expected-vs-found report about whatever token the
+    // parse happened to die on, which is generic by construction.
+    let structural: Vec<(Diagnostic, bool)> = errs
+        .into_iter()
+        .map(|err| {
+            let diag = rich_to_diag(ctx, err);
+            let specific = custom_reason(&diag.message).is_some();
+            (diag, specific)
+        })
+        .collect();
+    // Side-channel diagnostics are all specific: a grammar closure only pushes there when it has
+    // recognized a construct and named an actual fault in it ("attribute arguments must be
+    // literal"), never to report a token surprise. They are the other half of "report the specific
+    // fault" and suppress cascade in their region just as a custom reason does. The known hazard —
+    // a push surviving its alternative's backtrack (see the dedup note below) — cannot make this
+    // rule *lose* a fault it would otherwise report: a spurious push lands in a region whose
+    // statement then parsed fine through another alternative, and a region that parsed has no
+    // structural error to suppress.
+    let mut diagnostics: Vec<(Diagnostic, bool)> =
+        diags.into_inner().into_iter().map(|d| (d, true)).collect();
     diagnostics.extend(structural);
     // Deterministic ordering regardless of which channel produced each diagnostic.
-    diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
+    diagnostics.sort_by_key(|(d, _)| (d.span.start, d.span.end));
+
+    // Cascade suppression: within one statement region, a specific fault silences the GENERIC
+    // structural errors in that region. Once a rule has said what is actually wrong, chumsky's
+    // report about the token the parse then choked on is wreckage, not a second fault — `x = {"a"}`
+    // should say the map entry needs a value, not also that a `}` turned up somewhere unexpected.
+    //
+    // The region is the statement extent the parser already computes: split at every statement
+    // terminator, which is a newline boundary ([`noeta_lexer::newline_boundaries`], hard or soft)
+    // or an explicit `;`. Using both keeps regions as FINE as the language's own statement
+    // structure — the conservative direction, since a narrower region suppresses less.
+    //
+    // Two specific faults in one region both survive; only the generic ones are cascade. A region
+    // with no specific fault keeps its generic errors untouched, which is the common case and the
+    // one that must not regress. Faults in different regions never interact, so genuinely
+    // independent errors are all still reported. This is a parser-stage rule and runs before any
+    // checker diagnostic exists, so checking is unaffected.
+    let mut region_ends: Vec<u32> = boundaries.iter().map(|b| b.offset).collect();
+    region_ends.extend(
+        tokens
+            .iter()
+            .filter(|t| t.kind == T::Semicolon)
+            .map(|t| t.span.end),
+    );
+    region_ends.sort_unstable();
+    let region_of = |d: &Diagnostic| region_ends.partition_point(|&o| o <= d.span.start);
+    let suppressing: HashSet<usize> = diagnostics
+        .iter()
+        .filter(|(_, specific)| *specific)
+        .map(|(d, _)| region_of(d))
+        .collect();
+    diagnostics.retain(|(d, specific)| *specific || !suppressing.contains(&region_of(d)));
+    let mut diagnostics: Vec<Diagnostic> = diagnostics.into_iter().map(|(d, _)| d).collect();
     // One diagnostic per distinct (span, code, message).
     //
     // The side channel is not transactional: a `push` from a grammar closure survives its
@@ -1192,15 +1246,34 @@ fn weave_hard_semicolons(
     out
 }
 
-/// Map a chumsky [`Rich`] structural error onto the central diagnostic catalog. A
-/// missing `found` token means the parser hit end-of-input.
+/// The reason carried by a map entry that has no `: value` and is not a bare field name. Named
+/// because [`custom_reason`] keys the rest of the diagnostic off it: a [`Rich::custom`] reason is
+/// only a string, so message, code and help are declared together here rather than reconstructed
+/// from message text at the rendering site.
+const MAP_ENTRY_NEEDS_VALUE: &str =
+    "a map entry needs `: value`, or a bare field name for the shorthand";
+
+/// The catalog entry a parser-stage [`Rich::custom`] reason declares for itself, if it is one this
+/// module raises deliberately. A rule that matched a token and then rejected it on its own terms
+/// knows better than the generic expected-vs-found classifier what it is complaining about, so it
+/// names its own code and help. Reasons not listed here (chumsky's own, and the
+/// end-of-input-reachable "expected a statement terminator") keep the generic classification.
+fn custom_reason(reason: &str) -> Option<(DiagnosticCode, Option<&'static str>)> {
+    match reason {
+        MAP_ENTRY_NEEDS_VALUE => Some((
+            DiagnosticCode::UnexpectedToken,
+            Some(
+                "write `{\"key\": value}` for an explicit entry, or `{name}` to pun a variable \
+                 into the key of the same name",
+            ),
+        )),
+        _ => None,
+    }
+}
+
+/// Map a chumsky [`Rich`] structural error onto the central diagnostic catalog.
 fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     let span = ctx.to_span(*err.span());
-    let code = if err.found().is_none() {
-        DiagnosticCode::UnexpectedEndOfInput
-    } else {
-        DiagnosticCode::UnexpectedToken
-    };
     // Render `found`/`expected` via the human-facing token descriptions. The expected set is
     // rebuilt by hand with a SORTED alternative list: chumsky's own Display iterates its
     // internal set in an order that is not stable across builds, which made every pinned
@@ -1209,31 +1282,41 @@ fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
     // Display impl: `describe()` already delimits tokens (backticks), and going through Display
     // would stack chumsky's own quoting on top (twice, in 1.0.0-alpha.8).
     let err = err.map_token(|t| t.describe());
-    let message = {
-        let mut expected: Vec<String> = err.expected().map(pattern_text).collect();
-        if expected.is_empty() {
-            // Labelled/custom reasons (e.g. "expected a statement terminator") carry no
-            // alternative set — chumsky's own rendering is already deterministic there.
-            err.to_string()
-        } else {
-            expected.sort_unstable();
-            expected.dedup();
-            let found = match err.found() {
-                Some(d) => format!("found {d} "),
-                None => "found end of input ".to_string(),
-            };
-            let list = match expected.len() {
-                1 => expected[0].clone(),
-                _ => format!(
-                    "{}, or {}",
-                    expected[..expected.len() - 1].join(", "),
-                    expected[expected.len() - 1]
-                ),
-            };
-            format!("{found}expected {list}")
-        }
+    let mut expected: Vec<String> = err.expected().map(pattern_text).collect();
+    // An empty alternative set means a labelled/custom reason rather than chumsky's own
+    // expected-vs-found.
+    let message = if expected.is_empty() {
+        // chumsky's own rendering is already deterministic for these.
+        err.to_string()
+    } else {
+        expected.sort_unstable();
+        expected.dedup();
+        let found = match err.found() {
+            Some(d) => format!("found {d} "),
+            None => "found end of input ".to_string(),
+        };
+        let list = match expected.len() {
+            1 => expected[0].clone(),
+            _ => format!(
+                "{}, or {}",
+                expected[..expected.len() - 1].join(", "),
+                expected[expected.len() - 1]
+            ),
+        };
+        format!("{found}expected {list}")
     };
-    Diagnostic::error(code, span, message)
+    // A custom reason declares its own catalog entry; everything else is classified by whether
+    // there was a token to be surprised by.
+    let (code, help) = match custom_reason(&message) {
+        Some(declared) => declared,
+        None if err.found().is_none() => (DiagnosticCode::UnexpectedEndOfInput, None),
+        None => (DiagnosticCode::UnexpectedToken, None),
+    };
+    let mut diag = Diagnostic::error(code, span, message);
+    if let Some(help) = help {
+        diag.help(help);
+    }
+    diag
 }
 
 /// Render one expected-set alternative. Token descriptions come from
@@ -1873,7 +1956,10 @@ where
         // `match scrutinee { pattern => body, ... }`. An arm body is a value EXPRESSION first —
         // so `=> {}` / `=> {"k": v}` keep their map/set-literal meaning — and only a brace body
         // that is not an expression parses as a statement BLOCK (aether F1: side-effectful arms,
-        // value `unit`; `return` inside returns from the enclosing function).
+        // value `unit`; `return` inside returns from the enclosing function). The fallback only
+        // fires when the expression parse FAILS, so it depends on every brace-taking expression
+        // refusing the braces it does not mean — see the map-entry grammar below, which is why
+        // `=> { f(x) }` is a block rather than a one-entry map that errors after the fact.
         let arm_body = sub
             .clone()
             .map(|e| noeta_ast::ClosureBody::Expr(Box::new(e)))
@@ -1917,12 +2003,29 @@ where
             .map_with(move |elems, e| desugar_list_literal(elems, ctx.to_span(e.span())));
         // A map entry is `key: value`, or **shorthand `name`** ≡ `"name": name` — punning a bare
         // identifier to the string key of the same name with the in-scope variable as its value
-        // (`{ host, port }`). The colon form is unchanged; an omitted value is the shorthand, valid
-        // only when the key is a bare identifier (anything else without a value is a parse error,
-        // reported when the entries are assembled).
+        // (`{ host, port }`). The colon form is unchanged; an omitted value is the shorthand.
+        //
+        // The shorthand is restricted to a bare identifier by REJECTING anything else, not by
+        // accepting it and reporting a diagnostic afterwards. That distinction is load-bearing
+        // wherever `{ … }` is ambiguous between a map literal and a statement block (a match arm's
+        // body, aether F1): those sites try the value EXPRESSION first and fall back to the block
+        // only when the expression parse *fails*. A rule that accepts `{ f(x) }` as a one-entry map
+        // and then complains has already consumed the braces — the block alternative is never
+        // reached, and `1 => { log.info("hi") }` dies on a map-shorthand error.
+        //
+        // So the rejection goes through `try_map`, which FAILS the parse (the braces stay
+        // unconsumed and `or` backtracks normally) while carrying a pointed reason. Where a block
+        // is a legal alternative it wins and this error is dropped with the branch; where only a
+        // value is legal — `x = { "a" }` — nothing else can succeed, and the reason surfaces
+        // instead of the raw expected-set wall. Failing with a good message is not the same as
+        // accepting with a bad one, and only the latter breaks backtracking.
         let entry = expr
             .clone()
-            .then(just(T::Colon).ignore_then(sub.clone()).or_not());
+            .then(just(T::Colon).ignore_then(sub.clone()).or_not())
+            .try_map(|(key, value), span| match (&value, &key) {
+                (Some(_), _) | (None, Expr::Ident { .. }) => Ok((key, value)),
+                (None, _) => Err(Rich::custom(span, MAP_ENTRY_NEEDS_VALUE)),
+            });
         let map = entry
             .separated_by(just(T::Comma))
             .allow_trailing()
@@ -1933,20 +2036,16 @@ where
                     .into_iter()
                     .map(|(key, value)| match value {
                         Some(value) => (key, value),
-                        // Shorthand `{ name }`: the key must be a bare identifier; desugar it to its
-                        // string key plus a reference to the same-named variable.
+                        // Shorthand `{ name }`: the entry rule rejected every non-identifier key,
+                        // so desugar it to its string key plus a reference to the same-named
+                        // variable.
                         None => match key {
                             Expr::Ident { name, span } => {
                                 (Expr::Str { value: name.clone(), span }, Expr::Ident { name, span })
                             }
-                            other => {
-                                ctx.diags.borrow_mut().push(Diagnostic::error(
-                                    DiagnosticCode::UnexpectedToken,
-                                    other.span(),
-                                    "a map entry without `: value` must be a bare field name (shorthand)",
-                                ));
-                                (other.clone(), other)
-                            }
+                            other => unreachable!(
+                                "map shorthand is grammatically a bare identifier, got {other:?}"
+                            ),
                         },
                     })
                     .collect();
@@ -2573,25 +2672,60 @@ where
 // --- Statements -------------------------------------------------------------------
 
 /// Wrap a statement parser so a failed statement is recovered by skipping to the next
-/// statement boundary (a `;`, consumed) without crossing a block's closing `}`. A
-/// recovered statement contributes nothing to the list; the failure is still reported.
-/// Mirrors the original hand-written `synchronize` behaviour.
+/// statement boundary (a `;`, consumed) without crossing the enclosing block's closing `}` — a
+/// balanced `{ … }` group inside the abandoned statement is skipped whole rather than treated as
+/// that boundary. A recovered statement contributes nothing to the list; the failure is still
+/// reported. Mirrors the original hand-written `synchronize` behaviour.
 fn recovering_list<'src, I, P>(stmt: P) -> impl Parser<'src, I, Vec<Stmt>, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
     P: Parser<'src, I, Stmt, Extra<'src>> + Clone,
 {
-    // Skip ≥1 token that is neither `;` nor `}`, then an optional `;`; or a lone `;`.
-    // Requiring progress (`at_least(1)` / a `;`) lets the surrounding `repeated()`
-    // terminate at `}`/EOF instead of looping.
-    let skip = any()
-        .and_is(just(T::Semicolon).not())
-        .and_is(just(T::RBrace).not())
-        .repeated()
-        .at_least(1)
-        .then_ignore(just(T::Semicolon).or_not())
-        .ignored()
-        .or(just(T::Semicolon).ignored());
+    // A BALANCED `{ … }` group, skipped as one unit. Everything inside belongs to the statement
+    // being abandoned — nested groups and `;` alike — so none of it is a resync point.
+    //
+    // Skipping the group whole is what keeps `}` meaning "the enclosing block ends here". Stopping
+    // at the first `}` regardless of nesting instead parks recovery on a brace the failed statement
+    // itself opened: the next iteration then has a statement that cannot start and a skip that
+    // cannot make progress, `repeated()` terminates, and every following statement's faults are
+    // lost. That is invisible while a malformed brace group still *parses* — which is why it only
+    // surfaced once the map-entry rule started failing for real, and why `x = (1 + ;` never showed
+    // it (no guard token, so recovery walks to the `;` as intended).
+    let group = recursive(|group| {
+        let inner = choice((
+            group,
+            any()
+                .and_is(just(T::LBrace).not())
+                .and_is(just(T::RBrace).not())
+                .ignored(),
+        ));
+        just(T::LBrace)
+            .ignore_then(inner.repeated())
+            .then_ignore(just(T::RBrace))
+            .ignored()
+    });
+    // Skip ≥1 unit, then an optional `;`; or a lone `;`. A closing `}` is the one token never
+    // skipped — that is the enclosing block's boundary, and leaving it lets `repeated()` terminate
+    // there instead of looping.
+    //
+    // An unmatched OPENING `{` is skipped as a plain token by the last alternative, reached only
+    // after `group` has failed to balance it. Without that, unbalanced input (`x = { "a" ;`) parks
+    // recovery on the `{` and swallows the rest of the file — the same fault as parking on `}`,
+    // just one token over.
+    let skip = choice((
+        group,
+        any()
+            .and_is(just(T::Semicolon).not())
+            .and_is(just(T::LBrace).not())
+            .and_is(just(T::RBrace).not())
+            .ignored(),
+        just(T::LBrace).ignored(),
+    ))
+    .repeated()
+    .at_least(1)
+    .then_ignore(just(T::Semicolon).or_not())
+    .ignored()
+    .or(just(T::Semicolon).ignored());
 
     // An empty statement — a lone `;` — produces no statement. With optional line-end semicolons
     // (object-model slice 7) the parse input carries a woven zero-width `;` after a block-bodied
@@ -5219,6 +5353,151 @@ mod tests {
             parsed.diagnostics[0].code,
             DiagnosticCode::UnexpectedEndOfInput
         );
+    }
+
+    #[test]
+    fn a_valueless_non_ident_map_entry_is_pointed_where_only_a_value_is_legal() {
+        // In value position nothing else can succeed, so the entry rule's own reason surfaces
+        // instead of the raw expected-set wall — with the help that spells both valid forms.
+        for src in [
+            "x = { \"a\" };",
+            "x = { foo.bar };",
+            "x = { f() };",
+            "xs = [{ f() }];",
+        ] {
+            let parsed = parse_str(src);
+            let pointed = parsed
+                .diagnostics
+                .iter()
+                .find(|d| d.message == MAP_ENTRY_NEEDS_VALUE)
+                .unwrap_or_else(|| panic!("no pointed map-entry diagnostic for `{src}`"));
+            assert_eq!(pointed.code, DiagnosticCode::UnexpectedToken, "{src}");
+            assert!(
+                pointed
+                    .help
+                    .as_deref()
+                    .is_some_and(|h| h.contains("\"key\": value") && h.contains("{name}")),
+                "help missing or unhelpful for `{src}`: {:?}",
+                pointed.help
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_arm_body_never_leaks_the_map_entry_reason() {
+        // The same brace body that is pointed at in value position is a legal statement BLOCK
+        // here. The entry rule FAILS rather than accepting, so the block alternative wins and its
+        // discarded reason must not reach the diagnostics — that leak is what a permissive rule
+        // would have caused, and it is the regression this pairs with.
+        for src in [
+            "match n { 1 => { f(x) }, _ => {} }",
+            "match n { 1 => { a.b }, _ => {} }",
+            "c = fn(): void { f(x) };",
+        ] {
+            let parsed = parse_str(src);
+            assert!(
+                !parsed
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message == MAP_ENTRY_NEEDS_VALUE),
+                "map-entry reason leaked out of a block body in `{src}`: {:?}",
+                parsed.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_resyncs_past_a_failed_statements_brace_group() {
+        // A statement that fails INSIDE a `{ … }` group must still resync at the next statement
+        // boundary, exactly as a failure inside `( … )` does. Skipping only to the group's closing
+        // `}` parks recovery on a token nothing can consume and drops the rest of the file.
+        for (src, want) in [
+            ("x = { \"a\" };\necho ;\n", 2),
+            ("x = (1 + ;\necho ;\n", 2),
+            ("x = {\"k\": { \"a\" }};\necho ;\n", 2),
+            ("x = [{ \"a\" }];\necho ;\n", 2),
+            ("x = {\"a\": {\"b\": {\"c\": { \"z\" }}}};\necho ;\n", 2),
+            // Unmatched braces resync too — the `{` is skipped as a plain token once it cannot be
+            // balanced, so the following statement is still reached.
+            ("x = { \"a\" ;\necho ;\n", 2),
+            // A bad statement inside a block does NOT run past the block: the block's own `}` is
+            // still the boundary, so the statement after it is parsed (and faulted) separately.
+            ("fn f(): void {\n  echo ;\n}\necho ;\n", 2),
+        ] {
+            let parsed = parse_str(src);
+            assert_eq!(
+                parsed.diagnostics.len(),
+                want,
+                "recovery lost a fault in `{src}`: {:?}",
+                parsed.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn a_specific_fault_suppresses_generic_cascade_in_its_region() {
+        // The entry rule says what is wrong; chumsky's report about the `}` the parse then choked
+        // on is wreckage from that same fault, not a second one.
+        let parsed = parse_str("x = { \"a\" };");
+        assert_eq!(
+            parsed.diagnostics.len(),
+            1,
+            "cascade not suppressed: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.diagnostics[0].message, MAP_ENTRY_NEEDS_VALUE);
+    }
+
+    #[test]
+    fn a_region_with_no_specific_fault_keeps_its_generic_errors() {
+        // The common case, and the one that must not regress: nothing specific was found, so the
+        // expected-vs-found reports are all there is to say.
+        let parsed = parse_str("echo ;\necho ;\n");
+        assert_eq!(
+            parsed.diagnostics.len(),
+            2,
+            "a generic-only region lost an error: {:?}",
+            parsed.diagnostics
+        );
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .all(|d| custom_reason(&d.message).is_none())
+        );
+    }
+
+    #[test]
+    fn suppression_does_not_reach_across_statement_regions() {
+        // A specific fault silences cascade in ITS region only — an unrelated statement's generic
+        // error is a genuinely independent fault and still stands.
+        let parsed = parse_str("echo ;\nx = { \"a\" };");
+        assert_eq!(
+            parsed.diagnostics.len(),
+            2,
+            "an independent fault was suppressed across regions: {:?}",
+            parsed.diagnostics
+        );
+        assert!(custom_reason(&parsed.diagnostics[0].message).is_none());
+        assert_eq!(parsed.diagnostics[1].message, MAP_ENTRY_NEEDS_VALUE);
+    }
+
+    #[test]
+    fn map_literals_and_shorthand_survive_the_strict_entry_rule() {
+        for src in [
+            "m = {\"a\": 1};",
+            "m = {host, port};",
+            "m = {host, \"k\": 2};",
+            "m = {};",
+            "m = {\"in\": {\"x\": 1}};",
+        ] {
+            let parsed = parse_str(src);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "`{src}` should parse cleanly: {:?}",
+                parsed.diagnostics
+            );
+        }
     }
 
     #[test]

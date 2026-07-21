@@ -176,6 +176,9 @@ impl Checker {
             self.check_fn(method, env, &fields, TargetKind::Method);
         }
         if let Some(destructor) = &c.destructor {
+            // A destructor is a body without being a method, so it records its own ledger entry
+            // (keyed, like the walker's, on the declaring class's name span).
+            self.visited_bodies.insert(c.name_span);
             env.push(HashMap::new());
             for (name, ty) in &fields {
                 bind(env, name, ty.clone());

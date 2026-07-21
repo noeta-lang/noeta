@@ -2560,3 +2560,86 @@ fn the_misplacement_noun_is_derived_from_the_site() {
         );
     }
 }
+
+// ----- the body-coverage ledger (body-coverage arc) -----
+
+/// A program exercising **one of every** [`BodyKind`], so the two tests below are talking about a
+/// program that actually contains all six.
+const EVERY_BODY_KIND: &str = r#"
+trait Greeter {
+    fn name(): string
+    fn greet(): string { return "hi" }
+}
+
+class Person {
+    tag: int
+    fn new(tag: int): Person { return Person { tag: tag } }
+    fn nested(): int {
+        fn inner(): int { return 1 }
+        return inner()
+    }
+    impl Display {
+        fn to_string(): string { return "person" }
+    }
+    destruct { echo "gone" }
+}
+
+impl Greeter for Person {
+    fn name(): string { return "person" }
+}
+
+fn free(): int { return 2 }
+"#;
+
+/// The walker sees every kind of body a program can declare.
+///
+/// This is the compile-time half of the guarantee's runtime companion: [`noeta_ast::bodies`]
+/// matches `Stmt` exhaustively, so a new statement kind cannot be added without deciding whether it
+/// owns bodies — and this pins that the decisions already made are actually wired up.
+#[test]
+fn the_ledger_enumerates_every_body_kind() {
+    use noeta_ast::bodies::{BodyKind, body_sites};
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", EVERY_BODY_KIND);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "the sample program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    let kinds: std::collections::HashSet<BodyKind> =
+        body_sites(&parsed.program).iter().map(|s| s.kind).collect();
+    for want in [
+        BodyKind::Function,
+        BodyKind::Method,
+        BodyKind::StandaloneImplMethod,
+        BodyKind::Destructor,
+        BodyKind::TraitDefault,
+    ] {
+        assert!(
+            kinds.contains(&want),
+            "the ledger missed {want:?}; found {kinds:?}"
+        );
+    }
+}
+
+/// **The gate itself**: checking that program leaves no body unvisited.
+///
+/// The `debug_assert` in `verify_body_coverage` already fires on every checked program in every
+/// debug build — including the whole conformance corpus — so this test's job is to state the
+/// property explicitly and to fail with a readable message naming the missed sites, rather than
+/// leaving the guarantee implicit in a panic somewhere else.
+#[test]
+fn the_checker_visits_every_body_it_is_given() {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", EVERY_BODY_KIND);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let missed = super::unchecked_bodies_for(&parsed.program);
+    assert!(
+        missed.is_empty(),
+        "the checker never visited these bodies: {:?}",
+        missed.iter().map(|s| s.describe()).collect::<Vec<_>>()
+    );
+}

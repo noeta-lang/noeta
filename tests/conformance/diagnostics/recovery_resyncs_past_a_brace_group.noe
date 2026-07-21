@@ -1,0 +1,12 @@
+// Statement recovery resynchronizes past a `{ … }` group the failed statement itself opened, so a
+// later statement's fault is still found. Recovery skips a BALANCED group whole; stopping at its
+// closing `}` instead parks on a brace nothing can consume, and every following statement is
+// silently swallowed. `}` still means "the enclosing block ends here" — that is what keeps a bad
+// statement inside a block from running past the block.
+// expect: error E0003 at 10:7
+// expect: error E0003 at 11:6
+// expect: error E0003 at 12:8
+// expect: exit 1
+x = { "a" };
+echo ;
+y = [{ f() }];

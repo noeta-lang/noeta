@@ -1,0 +1,25 @@
+// A trait's DEFAULT method body is type-checked (body-coverage arc).
+//
+// The second hole the body-coverage ledger found, unchecked for the same reason as the first:
+// nothing walked it. A default body is ordinary code that really runs — every implementor that
+// omits the method inherits it — so an unchecked one could ship a fault that only fires for the
+// implementors who declined to override.
+//
+// It is checked ONCE, against the trait's own contract: `self` is `dyn <Trait>`, so a default body
+// may rely on exactly what every implementor guarantees — the trait's own methods — and no more.
+// Checking it once per implementor instead would re-report one authoring mistake at every `impl`,
+// and would still not check a trait nobody has implemented yet.
+// expect: error E0007 at 17:16
+// expect: exit 1
+trait Greeter {
+    fn name(): string
+    fn greet(): string {
+        return 42
+    }
+}
+class En {
+    fn new(): En { return En {} }
+}
+impl Greeter for En {
+    fn name(): string { return "en" }
+}
