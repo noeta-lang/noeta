@@ -1,0 +1,112 @@
+// `para.api` — the composition layer over `std.http`. The api module of the first-party
+// (non-default) `para` namespace.
+//
+// The split is deliberate and load-bearing: **`std.http` never invokes user code; `para.api` does.**
+// std owns transport, client configuration, error classification and the RFC 8288 `Link` primitive,
+// and stops at `prepare` / `send`. Everything that has to *call back into a program* — middleware,
+// mocking, pagination — lives here, where a chain is composed from ordinary Noeta values under
+// ordinary GC. Composing it natively was tried first and was unsound: a native client holding user
+// closures as arena ids smuggles GC references into a `Clone + PartialEq` value type, and it leaked.
+//
+//     use para.api.Api
+//     use std.http.client
+//
+//     api = Api.new(client.new("https://api.example.com")).with(Logging.new())
+//     resp = api.get("/users/1")?
+//
+// A middleware is an ONION, not a before/after hook pair: each layer receives the request AND the
+// rest of the chain, so a layer that never calls `next` answers on its own. That is not a nicety —
+// a cache hit and a mock are exactly that shape, and they are the two middlewares people reach for.
+namespace para.api
+
+use std.http.client
+use std.http.{Client, Request, Response, HttpError}
+
+// One layer of the onion. `handle` receives the request on its way in and `next` — the rest of the
+// chain — so a layer may rewrite the request before continuing, inspect the response on the way out,
+// or answer without ever calling `next`.
+pub trait Middleware {
+    fn handle(req: Request, next: Next): Result<Response, HttpError>
+}
+
+// The rest of the chain, as a value. `next.run(req)` continues inward; the innermost `run` bottoms
+// out in `client.send`, which is where std's own retry and transport live.
+//
+// This is a cursor (stack + index), not a closure built per layer: the stack is shared by every
+// `Next` in a chain and only the index moves, so entering a layer allocates one small value rather
+// than capturing an environment.
+pub struct Next {
+    stack: List<dyn Middleware>
+    index: int
+    client: Client
+
+    // Continue inward. Calling this is what makes a layer transparent; NOT calling it is what makes
+    // a layer answer on its own (a cache hit, a mock, a circuit breaker).
+    fn run(req: Request): Result<Response, HttpError> {
+        if self.index >= self.stack.len() {
+            return self.client.send(req)
+        }
+        rest = Next { stack: self.stack, index: self.index + 1, client: self.client }
+        return self.stack[self.index].handle(req, rest)
+    }
+}
+
+// A configured client plus its middleware stack. Immutable, exactly like `std.http.Client`: `with`
+// returns a NEW `Api`, so a derived one can never disturb the one it came from and sharing is safe.
+pub struct Api {
+    client: Client
+    stack: List<dyn Middleware>
+
+    fn new(client: Client): Api {
+        return Api { client: client, stack: [] }
+    }
+
+    // Add a layer. **The first layer registered is the outermost** — it sees the request first and
+    // the response last — which is the order every onion (PSR-15, Tower, Rack) uses, and the order
+    // that makes reading a chain top-to-bottom match the order things happen.
+    fn with(mw: dyn Middleware): Api {
+        return Api { client: self.client, stack: self.stack ~ [mw] }
+    }
+
+    // Perform a request through the whole chain. Everything below funnels here.
+    fn send(req: Request): Result<Response, HttpError> {
+        return Next { stack: self.stack, index: 0, client: self.client }.run(req)
+    }
+
+    // Build a request the way the chain's outermost layer should see it — path resolved against the
+    // client's base URL, client headers applied — without performing it.
+    fn prepare(method: string, path: string, body: string = "", headers: Map<string, string> = {}): Request {
+        return self.client.prepare(method, path, body, headers)
+    }
+
+    // --- Verbs -----------------------------------------------------------------------------------
+    //
+    // These mirror `std.http.Client`'s verbs exactly (same names, same optional trailing headers,
+    // same `Result<Response, HttpError>`), differing only in that they run the chain. A `?` here
+    // still means precisely "the network broke" — an HTTP error *status* is an answer, and arrives
+    // as an ordinary `Ok(Response)` for you to inspect.
+
+    fn request(method: string, path: string, body: string = "", headers: Map<string, string> = {}): Result<Response, HttpError> {
+        return self.send(self.prepare(method, path, body, headers))
+    }
+
+    fn get(path: string, headers: Map<string, string> = {}): Result<Response, HttpError> {
+        return self.request("get", path, "", headers)
+    }
+
+    fn delete(path: string, headers: Map<string, string> = {}): Result<Response, HttpError> {
+        return self.request("delete", path, "", headers)
+    }
+
+    fn post(path: string, body: string = "", headers: Map<string, string> = {}): Result<Response, HttpError> {
+        return self.request("post", path, body, headers)
+    }
+
+    fn put(path: string, body: string = "", headers: Map<string, string> = {}): Result<Response, HttpError> {
+        return self.request("put", path, body, headers)
+    }
+
+    fn patch(path: string, body: string = "", headers: Map<string, string> = {}): Result<Response, HttpError> {
+        return self.request("patch", path, body, headers)
+    }
+}
