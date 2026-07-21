@@ -667,10 +667,11 @@ fn standalone_impl_with_methods_is_unsupported() {
 
 #[test]
 fn attribute_on_a_class_is_rejected() {
-    // Attributes are structs only — `@attribute` on a class is E0029 (the arguments have no
-    // unambiguous constructor to map to).
+    // Attributes are structs only — `@attribute` on a class is a misplaced directive, E0054. (It
+    // reported E0029 until the codes were unified; E0029 is about *using* a non-attribute struct as
+    // an attribute, a different fault.)
     let src = "@attribute\nclass Route {\n  path: string\n}\n";
-    assert_eq!(codes(src), ["E0029"]);
+    assert_eq!(codes(src), ["E0054"]);
 }
 
 #[test]
@@ -701,15 +702,16 @@ fn packed_struct_non_primitive_field_is_e0038() {
 }
 
 #[test]
-fn packed_on_a_non_struct_is_e0038() {
-    // `@packed` is a struct-only layout marker; on a class or enum it is a misplacement (E0038).
+fn packed_on_a_non_struct_is_misplaced() {
+    // `@packed` is a struct-only layout marker; on a class or enum it is a misplacement, E0054 —
+    // not E0038, which is reserved for a packed struct's own field constraints.
     assert!(
-        codes("@packed class Boxed { v: int }\n").contains(&"E0038".to_string()),
+        codes("@packed class Boxed { v: int }\n").contains(&"E0054".to_string()),
         "{:?}",
         codes("@packed class Boxed { v: int }\n")
     );
     assert!(
-        codes("@packed enum E { A }\n").contains(&"E0038".to_string()),
+        codes("@packed enum E { A }\n").contains(&"E0054".to_string()),
         "{:?}",
         codes("@packed enum E { A }\n")
     );
@@ -829,10 +831,11 @@ fn role_variant_must_be_fieldless() {
 }
 
 #[test]
-fn semantic_on_a_record_is_misplaced() {
-    // `@semantic` marks enums; on a struct it is a misplacement (E0031).
+fn semantic_on_a_struct_is_misplaced() {
+    // `@semantic` marks enums; on a struct it is a misplacement, E0054. E0031 stays the code for a
+    // malformed *role* — the subject it actually names.
     let src = "@semantic\nstruct Route { path: string }\n";
-    assert_eq!(codes(src), ["E0031"]);
+    assert_eq!(codes(src), ["E0054"]);
 }
 
 #[test]

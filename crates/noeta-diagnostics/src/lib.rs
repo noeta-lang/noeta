@@ -140,10 +140,18 @@ pub enum DiagnosticCode {
     /// through a method/constructor. (A value `struct`'s fields are always public, so this never
     /// fires for a struct.)
     PrivateField,
-    /// A **dev-tier block** `@<tier> { … }` names a tier that is not declared/active (object-model
-    /// slice 6): a typo (`@tset { }`) or a tier not provided by the build target. Surfaced rather
-    /// than silently ignored so a misspelled tier's content is not invisibly dropped.
-    UnknownTier,
+    /// An `@name` resolves to nothing in the directive name-space: not a built-in directive, not a
+    /// tier (extension-declared or program-declared), and not a directive any installed extension
+    /// declares. A typo (`@tset { }`), or a tier the build target does not provide.
+    ///
+    /// One code for the whole name-space, because the author's question is the same in every
+    /// position — block, adjacency, or decorator — and so is the fix: the name is wrong, here is
+    /// the nearest one that is not. It was previously `UnknownTier`, which could only be right in
+    /// the block position and mislabelled an extension's directive as a "dev-tier" everywhere else.
+    ///
+    /// Surfaced rather than silently ignored, so a misspelled tier's content is not invisibly
+    /// dropped.
+    UnknownDirective,
     /// A directive argument is invalid: a tier directive's argument names an unknown parameter, is
     /// the wrong type, is positionally out of range, or is set twice (`@bench(iteratons: 5)`,
     /// `@bench(true)`); or a directive that takes no arguments was given some (`@semantic(foo)`).
@@ -270,12 +278,6 @@ pub enum DiagnosticCode {
     /// Construction inside the type's own methods stays legal, and the recipe doors (`json.parse`,
     /// `from_bytes`, …) are exempt because they auto-validate.
     ValidatedConstruction,
-    /// An `@name` in decorator position resolves to nothing: not a built-in directive, not a tier
-    /// (extension-declared or program-declared), and not a directive any installed extension
-    /// declares. Reported by the checker rather than the parser, because the name-space includes an
-    /// extension set the parser has no dependency on — which is also what lets an extension make a
-    /// previously unknown name legal.
-    UnknownDirective,
 }
 
 impl DiagnosticCode {
@@ -318,7 +320,7 @@ impl DiagnosticCode {
         DiagnosticCode::ImmutableField,
         DiagnosticCode::InvalidIdentityCompare,
         DiagnosticCode::PrivateField,
-        DiagnosticCode::UnknownTier,
+        DiagnosticCode::UnknownDirective,
         DiagnosticCode::InvalidDirectiveArgument,
         DiagnosticCode::InvalidPackedType,
         DiagnosticCode::GeneratorMisuse,
@@ -342,7 +344,6 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidTypeArguments,
         DiagnosticCode::ShadowedBinding,
         DiagnosticCode::ValidatedConstruction,
-        DiagnosticCode::UnknownDirective,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -384,7 +385,7 @@ impl DiagnosticCode {
             DiagnosticCode::ImmutableField => "E0033",
             DiagnosticCode::InvalidIdentityCompare => "E0034",
             DiagnosticCode::PrivateField => "E0035",
-            DiagnosticCode::UnknownTier => "E0036",
+            DiagnosticCode::UnknownDirective => "E0036",
             DiagnosticCode::InvalidDirectiveArgument => "E0037",
             DiagnosticCode::InvalidPackedType => "E0038",
             DiagnosticCode::GeneratorMisuse => "E0039",
@@ -409,7 +410,6 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidTypeArguments => "E0058",
             DiagnosticCode::ShadowedBinding => "E0059",
             DiagnosticCode::ValidatedConstruction => "E0060",
-            DiagnosticCode::UnknownDirective => "E0061",
         }
     }
 

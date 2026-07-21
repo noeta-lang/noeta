@@ -7,7 +7,7 @@
 // Its argument is not a syntax error either: the directive grammar was unified with `#[...]`'s,
 // so `@openapi("petstore.yaml")` parses as a directive with one string argument. An extension that
 // declares `openapi` makes this exact program legal with no front-end change.
-// expect: error E0061 at 12:2
+// expect: error E0036 at 12:2
 // expect: exit 1
 @openapi("petstore.yaml")
 struct Pet { name: string }

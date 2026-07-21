@@ -153,7 +153,7 @@ A tier directive can take arguments — `@bench(iterations: 1000)` (or positiona
 
 | Code | Meaning |
 |---|---|
-| **E0036** UnknownTier | `@<name>` names a tier that is not built-in (e.g. `@tset`). Raised whether or not it would be active — a typo must never silently vanish. |
+| **E0036** UnknownDirective | `@<name>` resolves to nothing in the directive name-space — not a built-in directive, not a tier, and not one any installed extension declares (e.g. `@tset`). Raised whether or not it would be active, so a typo never silently vanishes, and it offers the nearest real name. |
 | **E0037** InvalidDirectiveArgument | Arguments on a tier with no config attribute (`@test(x)` — `test` takes no arguments). |
 
 ---

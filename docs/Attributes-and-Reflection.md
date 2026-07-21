@@ -29,7 +29,8 @@ fn admin_handler(): void { /* handle the request */ }
 
 - Attributes are **structs, not classes** (a struct has one canonical all-fields construction).
 - Arguments map to fields — positional in declaration order, or named. A field with a default is optional.
-- Using an unmarked struct (or a class/enum) as an attribute is E0029.
+- Using an unmarked struct as an attribute is E0029. Writing `@attribute` itself on a class or
+  enum is a misplaced directive, E0054.
 - Placement can be constrained by listing target kinds — `@attribute(Method, Function)` — and a misplaced attribute is E0030. The kinds are `Struct`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`.
 - Arguments are a **constant literal tree** — scalars, lists, maps, sets, enum values, nested struct literals, and a bare type name (which becomes a reflection `Type` value). A non-literal argument (e.g. `1 + 2`) is E0003.
 
@@ -53,7 +54,8 @@ Marks an **enum** (only) as a source of role variants. The language ships a buil
 @semantic enum WebRole { Controller; Middleware; ErrorHandler }
 ```
 
-Applying `@role`/`@semantic` to the wrong declaration kind is E0031.
+Applying `@role`/`@semantic` to the wrong declaration kind is E0054 — the one code every
+misplaced directive reports, whichever directive it is.
 
 ### Other `@` directives
 

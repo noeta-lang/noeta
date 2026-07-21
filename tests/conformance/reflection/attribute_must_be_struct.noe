@@ -1,7 +1,7 @@
 // Attributes are records only: their `#[...]` arguments map to fields, the one unambiguous
 // construction a struct has (a class has only convention-named constructors). Marking a class
-// `@attribute` is therefore an error (E0029) at the class.
-// expect: error E0029 at 7:7
+// `@attribute` is therefore a misplacement (E0054) at the class.
+// expect: error E0054 at 7:7
 // expect: exit 1
 @attribute
 class Route {

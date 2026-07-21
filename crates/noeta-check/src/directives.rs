@@ -27,16 +27,17 @@
 //!
 //! ## Diagnostic codes
 //!
-//! Existing codes are preserved exactly, because they are the language's public error surface and a
-//! conformance case names each one: a misplaced `@packed` stays `E0038`, `@semantic`/`@role` stay
-//! `E0031`, and anything on a `trait` stays `E0053` regardless of directive. The cases that had no
-//! code because they had no check report `E0054` (`InvalidDirectiveSite`) — which already means
-//! precisely "this directive cannot attach here", and was until now used only by the tier
-//! attachment gate.
+//! One fault, one code: every misplacement is **`E0054`** (`InvalidDirectiveSite`), whichever
+//! directive it is and whatever it sits on.
 //!
-//! That leaves the codes inconsistent: three different codes for one class of fault, depending on
-//! which directive it is. Unifying them is a visible change to every affected program's error
-//! output, so it is a separate decision rather than a side effect of this refactor.
+//! It used to be four, inherited from wherever each check happened to live — a misplaced `@packed`
+//! was `E0038` (the code for a packed type's *field* constraints), `@semantic`/`@role` were `E0031`
+//! (the code for a malformed *role*), `@attribute` was `E0029` (for a non-attribute struct), and
+//! anything on a `trait` was `E0053` (for a malformed *trait declaration*). Each said something
+//! about a different subject than the actual error, so `E0038` covered two unrelated faults and a
+//! reader could not tell from the code what had gone wrong.
+//!
+//! Those codes keep their other, real meanings; only the placement use moved.
 
 use noeta_ast::{BuiltinDirective, Decorators, Program, Sites};
 use noeta_diagnostics::DiagnosticCode;
@@ -218,7 +219,7 @@ impl Checker {
             // underlining the declaration. Carrying every directive's keyword span on `Decorators`
             // would let this be uniform; that is a change to the AST, not to this check.
             let span = keyword_span(decorators, directive).unwrap_or(at.name_span);
-            let code = misplacement_code(directive, at.site);
+            let code = DiagnosticCode::InvalidDirectiveSite;
             let message = if at.site == Sites::TRAIT {
                 format!("`@{directive}` does not apply to a trait `{}`", at.name)
             } else {
@@ -374,27 +375,6 @@ fn is_present(decorators: &Decorators, directive: BuiltinDirective) -> bool {
         // can never be present here. Named rather than folded into a `_` arm so a new directive
         // must state how to detect it.
         BuiltinDirective::Tier => false,
-    }
-}
-
-/// The code for "this directive does not belong here".
-///
-/// Preserves the codes that already existed — they are the public error surface, and conformance
-/// cases name them. `E0054` covers the placements that previously had no check at all.
-fn misplacement_code(directive: BuiltinDirective, at: Sites) -> DiagnosticCode {
-    // A trait rejects every type directive under one code, whichever directive it is.
-    if at == Sites::TRAIT {
-        return DiagnosticCode::InvalidTraitDeclaration;
-    }
-    match directive {
-        BuiltinDirective::Packed => DiagnosticCode::InvalidPackedType,
-        BuiltinDirective::Semantic | BuiltinDirective::Role => DiagnosticCode::InvalidRole,
-        BuiltinDirective::Attribute => DiagnosticCode::NotAnAttribute,
-        // `@validated` and `@derive` had no placement check outside a trait, so there is no code to
-        // preserve; `E0054` already means "this directive cannot attach here".
-        BuiltinDirective::Derive | BuiltinDirective::Validated | BuiltinDirective::Tier => {
-            DiagnosticCode::InvalidDirectiveSite
-        }
     }
 }
 

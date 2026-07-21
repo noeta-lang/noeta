@@ -1,7 +1,7 @@
 // Attributes are structs only (their `#[...]` arguments map to fields), so `@attribute` on an enum
-// is a misplacement (E0029). Checked for a class but forgotten for an enum until the placement
+// is a misplacement (E0054). Checked for a class but forgotten for an enum until the placement
 // check became one loop over every directive and every declaration kind.
-// expect: error E0029 at 7:6
+// expect: error E0054 at 7:6
 // expect: exit 1
 @attribute
 enum Kind { A; B }

@@ -658,7 +658,7 @@ impl Pretty for TraitDecl {
         // A trait's decorators were previously not rendered at all, which left every `@derive`/
         // `@role`/`@attribute`/`@semantic`/`@packed` on a trait outside the fmt safety gate — the
         // formatter could drop one without the gate noticing. They are misplaced directives (the
-        // checker reports E0053), but "the checker rejects it" is not a reason for the *formatter*
+        // checker reports E0054), but "the checker rejects it" is not a reason for the *formatter*
         // to be free to silently rewrite the program: fmt runs on code that does not yet check.
         out.push_str(&format!(
             "(trait {}{} {}",

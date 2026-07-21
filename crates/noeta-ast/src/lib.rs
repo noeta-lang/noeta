@@ -228,8 +228,8 @@ pub struct StructDecl {
 /// whose `@validated` an enum author wrote and the compiler never saw. Adding a directive is now one
 /// field here rather than a decision repeated four times and forgotten twice.
 ///
-/// Which placements are *legal* is not encoded here — it is the checker's call (`E0031`/`E0038`/
-/// `E0053`/`E0060`). This type's only job is that nothing written in source goes unrecorded.
+/// Which placements are *legal* is not encoded here — it is the checker's call (`E0054` for every
+/// misplacement). This type's only job is that nothing written in source goes unrecorded.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Decorators {
     /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
@@ -249,16 +249,17 @@ pub struct Decorators {
     /// confers each named architectural role on every declaration it annotates. Multiple roles are
     /// allowed (a thing may be both an `EntryPoint` and a `TrustBoundary`). The checker validates
     /// each (a fieldless variant of a `@semantic` enum, on a struct that is also `@attribute`) —
-    /// `E0031`. On a class/enum this is a misplacement, carried so the checker can report it.
+    /// `E0031`. On a class/enum this is a misplacement (`E0054`), carried so the checker can
+    /// report it.
     pub role: Option<Vec<RoleTag>>,
     /// The `@semantic` directive: `Some(span)` marks an **enum** role-eligible, so its fieldless
     /// variants may be referenced by `@role(Enum.Variant)`. The built-in `Semantic` enum is
-    /// implicitly semantic. `Some` on a struct/class/trait is always a checker error (`E0031`),
+    /// implicitly semantic. `Some` on a struct/class/trait is always a misplacement (`E0054`),
     /// carried so the checker can point at it.
     pub semantic: Option<Span>,
     /// The `@packed` layout directive (P-PACK): `Some` marks a value `struct` for an unboxed,
-    /// contiguous flat layout. A misplacement on a class/enum/trait is a checker error (`E0038`); on
-    /// a struct, every field must be a primitive or another packed struct (also `E0038`).
+    /// contiguous flat layout. A misplacement on a class/enum/trait is `E0054`; on a struct, every
+    /// field must be a primitive or another packed struct (`E0038`, a distinct fault).
     pub packed: Option<PackedDirective>,
     /// The `@validated` directive (validation arc): `Some(span)` marks this type so that literal
     /// construction (`T { ... }`, incl. a record-update spread) from OUTSIDE its own `impl`/methods
@@ -404,7 +405,7 @@ impl Sites {
     pub const FN: Sites = Sites(1 << 4);
     pub const METHOD: Sites = Sites(1 << 5);
     /// Every type declaration — struct, class, enum. (Deliberately excludes `trait`: a trait is a
-    /// contract, not a data type, and every type directive on one is `E0053`.)
+    /// contract, not a data type, and every type directive on one is `E0054`.)
     pub const TYPE: Sites = Sites(Self::STRUCT.0 | Self::CLASS.0 | Self::ENUM.0);
 
     pub const fn union(self, other: Sites) -> Sites {

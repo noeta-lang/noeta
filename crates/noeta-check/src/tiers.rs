@@ -475,28 +475,40 @@ pub fn expr_tier_statement_diagnostic(tier: &str, span: Span) -> Diagnostic {
     ))
 }
 
-/// The `E0036 UnknownTier` diagnostic for a `@<tier>` whose name no extension declares and the
-/// program does not declare. Shared by [`activate_tiers`] and the checker's in-place `TierBlock`
-/// arm so the two never diverge. The help lists the tiers of `reg` (instance-registry IR4) — the
-/// session's registry, or the process-global default — so the suggestion matches what *this*
-/// name-space actually knows.
+/// The `E0036` diagnostic for an `@name` that resolves to nothing. Shared by [`activate_tiers`]
+/// and the checker's in-place `TierBlock` arm so the two never diverge.
+///
+/// It used to say "unknown dev-tier", which was only ever right in the block position — an
+/// extension's `@`-directive written before a `fn` arrives here too, and calling it a dev-tier
+/// named the wrong thing entirely. The offer spans the whole name-space of `reg`
+/// (instance-registry IR4 — the session's registry, or the process-global default), with a
+/// did-you-mean when the name is close to a real one.
 pub fn unknown_tier_diagnostic(
     reg: &noeta_ext_abi::registry::Registry,
     tier: &str,
     span: Span,
 ) -> Diagnostic {
-    Diagnostic::error(
-        DiagnosticCode::UnknownTier,
+    let known: Vec<String> = reg
+        .ext_tiers()
+        .map(|t| t.name.to_string())
+        .chain(reg.ext_directives().map(|d| d.name.to_string()))
+        .collect();
+    let d = Diagnostic::error(
+        DiagnosticCode::UnknownDirective,
         span,
-        format!("unknown dev-tier `@{tier}`"),
-    )
-    .with_help(format!(
-        "the available tiers are {} — or declare one with `@tier`",
-        reg.ext_tiers()
-            .map(|t| format!("`@{}`", t.name))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
+        format!("unknown directive `@{tier}`"),
+    );
+    match noeta_diagnostics::closest(tier, known.iter().map(String::as_str)) {
+        Some(s) => d.with_help(format!("did you mean `@{s}`?")),
+        None => d.with_help(format!(
+            "the available ones are {} — or declare a tier with `@tier`",
+            known
+                .iter()
+                .map(|n| format!("`@{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 /// A code-tier `fn` surfaced by activation — a root the matching runner invokes by name (a `@test`
@@ -1769,7 +1781,7 @@ mod tests {
         let program = parse_program("@tset { fn x() { echo \"hi\"; } }\n");
         let out = activate_tiers(&program, &["test"]);
         assert_eq!(out.diagnostics.len(), 1);
-        assert_eq!(out.diagnostics[0].code, DiagnosticCode::UnknownTier);
+        assert_eq!(out.diagnostics[0].code, DiagnosticCode::UnknownDirective);
         assert!(out.tests.is_empty());
         assert!(out.program.stmts.is_empty());
     }
