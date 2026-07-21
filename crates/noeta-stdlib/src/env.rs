@@ -15,7 +15,6 @@
 //! `env.keys()` is sorted (the backing store is a `BTreeMap`), so iteration is
 //! deterministic, mirroring `fs.list()`.
 
-use crate::{ErrorKind, StdError};
 use std::collections::BTreeMap;
 
 /// The deterministic environment the sandbox presents. A small fixed fixture so
@@ -32,15 +31,6 @@ pub fn sandbox_vars() -> BTreeMap<String, String> {
 /// representative argument).
 pub fn sandbox_args() -> Vec<String> {
     vec!["noeta".to_string(), "run".to_string()]
-}
-
-/// The canonical "no such environment variable" error for `env.get` (→ `E0021`),
-/// mirroring `fs`'s missing-file error: reading absent host state is an IO failure.
-pub fn not_found_error(key: &str) -> StdError {
-    StdError {
-        kind: ErrorKind::Io,
-        message: format!("no such environment variable: `{key}`"),
-    }
 }
 
 /// The default `.env` path `env.load()` reads when the argument is omitted — the cross-ecosystem
@@ -364,11 +354,6 @@ mod tests {
         let keys: Vec<&String> = vars.keys().collect();
         assert_eq!(keys, vec!["HOME", "USER"]);
         assert_eq!(vars.get("HOME").unwrap(), "/home/sandbox");
-    }
-
-    #[test]
-    fn missing_var_is_an_io_error() {
-        assert_eq!(not_found_error("NOPE").kind, ErrorKind::Io);
     }
 
     #[test]

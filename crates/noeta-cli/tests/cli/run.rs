@@ -319,7 +319,10 @@ fn run_reads_the_real_environment() {
     // `env.get` reads the REAL process environment (RealHost), not the sandbox fixture —
     // proven by injecting a variable the child process sees. (Conformance still runs the
     // sandbox fixture; only `lang run` is on the real host.)
-    let file = temp_program("run_env", "use std.{env};\necho env.get(\"LANG_E2E_VAR\");");
+    let file = temp_program(
+        "run_env",
+        "use std.{env};\necho env.get(\"LANG_E2E_VAR\") ?? \"<unset>\";",
+    );
     lang()
         .arg("run")
         .arg(&file)
@@ -339,7 +342,7 @@ fn run_os_reports_the_real_machine_and_execs_real_processes() {
                echo os.cpus() > 0\n\
                echo os.pid() > 1\n\
                env.set(\"LANG_E2E_OVERLAY\", \"through\")\n\
-               echo env.get(\"LANG_E2E_OVERLAY\")\n\
+               echo env.get(\"LANG_E2E_OVERLAY\") ?? \"<unset>\"\n\
                r = os.exec(\"sh\", [\"-c\", \"echo $LANG_E2E_OVERLAY\"])\n\
                echo r.ok()\n\
                echo r.stdout().trim()\n";
