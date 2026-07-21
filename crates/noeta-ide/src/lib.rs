@@ -1116,6 +1116,74 @@ impl DocumentStore {
         Some((descriptor.to_string(), index.range(span, encoding)))
     }
 
+    /// The quick-fixes offered over `range` — today, the one the `@`-directive name-space can
+    /// answer for: an `@name` that resolves to nothing, rewritten to the nearest name that does.
+    ///
+    /// Sourced from the [`DirectiveRegistry`](noeta_check::directives::DirectiveRegistry), so the
+    /// suggestion spans both halves of the name-space — a misspelled `@derve` and a misspelled
+    /// `@bench` are the same fix, and a tier a dependency declares is offered like a built-in.
+    /// This is the server's first code action; before it there was no `textDocument/codeAction`
+    /// path at all, so a diagnostic that knew its own fix had nowhere to put it.
+    ///
+    /// Returns `(title, range, replacement)` per fix — wire-protocol-free, like the rest of this
+    /// crate; the LSP adapter maps them onto `CodeAction`s carrying a `WorkspaceEdit`.
+    pub fn code_actions(
+        &self,
+        uri: &str,
+        range: Range,
+        encoding: Encoding,
+    ) -> Option<Vec<(String, Range, String)>> {
+        let (cache, doc, source) = self.doc_cache(uri)?;
+        let db = &self.db;
+        let text = doc.text(db);
+        let index = LineIndex::new(text);
+        let start = index.offset(range.start, encoding);
+        let end = index.offset(range.end, encoding);
+
+        let linked = noeta_db::linked_from(db, cache.workspace, doc);
+        let entry_ast = noeta_db::ast(db, doc);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let registry = noeta_check::directives::DirectiveRegistry::collect_with_registry(
+            program,
+            noeta_stdlib::registry::single_registry_process(),
+        );
+        let known: Vec<String> = registry.all().into_iter().map(|e| e.name).collect();
+
+        let toks = noeta_db::tokens(db, doc);
+        let tokens = &toks.0.tokens;
+        let mut fixes = Vec::new();
+        for (i, tok) in tokens.iter().enumerate() {
+            if tok.kind != TokenKind::At || tok.span.source != source {
+                continue;
+            }
+            let Some(name_tok) = tokens.get(i + 1).filter(|t| t.kind == TokenKind::Ident) else {
+                continue;
+            };
+            // Only what the requested range touches.
+            if name_tok.span.end < start || end < tok.span.start {
+                continue;
+            }
+            let name = &text[name_tok.span.range()];
+            if registry.lookup(name).is_some() {
+                continue;
+            }
+            let Some(suggestion) =
+                noeta_diagnostics::closest(name, known.iter().map(String::as_str))
+            else {
+                continue;
+            };
+            fixes.push((
+                format!("Replace `@{name}` with `@{suggestion}`"),
+                index.range(name_tok.span, encoding),
+                suggestion.to_string(),
+            ));
+        }
+        Some(fixes)
+    }
+
     /// Resolve the definition of the reference at `position` for go-to-definition, as a `(URI,
     /// range)` — the target may be a **different file** (a cross-module reference). Runs over the
     /// merged workspace program, so an imported name resolves to its declaration in the sibling that
@@ -5789,5 +5857,46 @@ echo handle(1)
                 .incoming_calls("file:///nope.noe", pos, Encoding::Utf8)
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod code_action_tests {
+    use super::{DocumentStore, Encoding, Position, Range};
+
+    fn fixes(src: &str) -> Vec<(String, Range, String)> {
+        noeta_stdlib::registry::default_seeded();
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", src.to_string());
+        let whole = Range::new(Position::new(0, 0), Position::new(200, 0));
+        store
+            .code_actions("file:///a.noe", whole, Encoding::Utf16)
+            .expect("the document is open")
+    }
+
+    /// A misspelled directive gets the fix its diagnostic already implies. The suggestion comes
+    /// from the unified name-space, so this works the same for a built-in and for a tier.
+    #[test]
+    fn a_misspelled_directive_offers_the_nearest_real_one() {
+        let got = fixes("@derve(Equatable)\nstruct P { x: int }\n");
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "Replace `@derve` with `@derive`");
+        assert_eq!(got[0].2, "derive");
+
+        // A tier name resolves through the same registry — one fix, not two mechanisms.
+        let got = fixes("@benc {\n  fn b() {}\n}\n");
+        assert_eq!(
+            got.iter().map(|f| f.2.as_str()).collect::<Vec<_>>(),
+            ["bench"]
+        );
+    }
+
+    /// A directive that resolves is not "fixed", and a name too far from anything real gets no
+    /// guess — a wrong suggestion is worse than none.
+    #[test]
+    fn a_valid_or_unrecognizable_directive_offers_nothing() {
+        assert!(fixes("@derive(Equatable)\nstruct P { x: int }\n").is_empty());
+        assert!(fixes("@test {\n  fn t() {}\n}\n").is_empty());
+        assert!(fixes("@openapi(\"petstore.yaml\")\nstruct P { x: int }\n").is_empty());
     }
 }

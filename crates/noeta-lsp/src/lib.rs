@@ -1008,6 +1008,16 @@ impl LanguageServer for Backend {
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 }),
                 definition_provider: Some(OneOf::Left(true)),
+                // Quick-fixes. The only kind offered today is a misspelled `@`-directive rewritten
+                // to the nearest real one, so the client is told exactly that — an editor that
+                // filters by kind should not round-trip for anything else.
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        work_done_progress_options: WorkDoneProgressOptions::default(),
+                        resolve_provider: Some(false),
+                    },
+                )),
                 references_provider: Some(OneOf::Left(true)),
                 // `prepareProvider` lets the editor validate the cursor is on a renameable symbol
                 // and pre-select the old name before showing its rename box.
@@ -1126,6 +1136,36 @@ impl LanguageServer for Backend {
             // types don't flicker; fall back to the (empty) fresh set only if we have none cached.
             Ok(Some(cache.get(key).cloned().unwrap_or(hints)))
         }
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let fixes = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.code_actions(uri.as_str(), ide_range(params.range), self.encoding())
+        };
+        let Some(fixes) = fixes else {
+            return Ok(None);
+        };
+        let actions: CodeActionResponse = fixes
+            .into_iter()
+            .map(|(title, range, new_text)| {
+                let edit = TextEdit {
+                    range: wire_range(range),
+                    new_text,
+                };
+                CodeActionOrCommand::CodeAction(CodeAction {
+                    title,
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some([(uri.clone(), vec![edit])].into_iter().collect()),
+                        ..WorkspaceEdit::default()
+                    }),
+                    ..CodeAction::default()
+                })
+            })
+            .collect();
+        Ok((!actions.is_empty()).then_some(actions))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
