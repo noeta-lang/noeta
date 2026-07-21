@@ -53,17 +53,9 @@ impl Middleware for Logging {
     fn handle(req: Request, next: Next): Result<Response, HttpError> {
         log.info("-> ${req.method()} ${req.url()}")
         outcome: Result<Response, HttpError> = next.run(req)
-        // Each arm binds before it logs: a block arm whose body is a single *call* is currently
-        // ambiguous with a map literal and fails to parse, so the binding is load-bearing, not style.
         match outcome {
-            Ok(resp) => {
-                status = resp.status()
-                log.info("<- ${status} ${req.url()}")
-            },
-            Err(e) => {
-                kind = e.kind()
-                log.error("<- ${kind} ${req.url()}: ${e}")
-            },
+            Ok(resp) => { log.info("<- ${resp.status()} ${req.url()}") },
+            Err(e) => { log.error("<- ${e.kind()} ${req.url()}: ${e}") },
         }
         return outcome
     }
