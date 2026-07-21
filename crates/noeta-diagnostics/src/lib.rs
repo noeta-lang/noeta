@@ -278,6 +278,12 @@ pub enum DiagnosticCode {
     /// Construction inside the type's own methods stays legal, and the recipe doors (`json.parse`,
     /// `from_bytes`, …) are exempt because they auto-validate.
     ValidatedConstruction,
+    /// A call's **named argument** cannot be honoured: it names no parameter of the callee, names
+    /// one already supplied, or sits after a positional argument that has no position left to take.
+    ///
+    /// The call-site twin of the `#[...]` attribute's field checks, which validated exactly these
+    /// things while a call validated none of them — the label never reached the AST.
+    InvalidArgument,
 }
 
 impl DiagnosticCode {
@@ -344,6 +350,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidTypeArguments,
         DiagnosticCode::ShadowedBinding,
         DiagnosticCode::ValidatedConstruction,
+        DiagnosticCode::InvalidArgument,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -410,6 +417,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidTypeArguments => "E0058",
             DiagnosticCode::ShadowedBinding => "E0059",
             DiagnosticCode::ValidatedConstruction => "E0060",
+            DiagnosticCode::InvalidArgument => "E0061",
         }
     }
 

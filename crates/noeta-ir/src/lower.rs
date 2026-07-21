@@ -88,6 +88,10 @@ pub struct LoweringSites<'a> {
     /// A `list[i].field` member read whose span is here (the index receiver is a built-in `List`) fuses
     /// to a single [`Rvalue::IndexField`], reading a packed element's field without materializing it.
     pub index_field_sites: &'a HashSet<Span>,
+    /// Calls whose labelled arguments bind out of written order: parameter position → written
+    /// index. Applied in [`Lowerer::lower_args`], so the VM and the reference agree by
+    /// construction rather than by each re-deriving the binding.
+    pub arg_orders: &'a HashMap<Span, Vec<usize>>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::TypedModuleCall`].
     pub typed_module_call_sites: &'a HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// Call-site-typed extern-METHOD recipes (`resp.json::<T>`, http arc H8), baked into
@@ -173,10 +177,12 @@ impl LoweringSites<'static> {
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
         static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
+        static ORDERS: OnceLock<HashMap<Span, Vec<usize>>> = OnceLock::new();
         LoweringSites {
             packed_list_sites: PACKED.get_or_init(HashMap::new),
             from_bytes_validated: SPANS.get_or_init(HashSet::new),
             index_field_sites: SPANS.get_or_init(HashSet::new),
+            arg_orders: ORDERS.get_or_init(HashMap::new),
             typed_module_call_sites: RECIPES.get_or_init(HashMap::new),
             typed_method_call_sites: RECIPES.get_or_init(HashMap::new),
             decode_typed_sites: SPANS.get_or_init(HashSet::new),
@@ -216,6 +222,7 @@ macro_rules! lowering_sites {
             packed_list_sites: &$s.packed_list_sites,
             from_bytes_validated: &$s.from_bytes_validated,
             index_field_sites: &$s.index_field_sites,
+            arg_orders: &$s.arg_orders,
             typed_module_call_sites: &$s.typed_module_call_sites,
             typed_method_call_sites: &$s.typed_method_call_sites,
             decode_typed_sites: &$s.decode_typed_sites,
@@ -1750,7 +1757,7 @@ impl Lowerer<'_> {
                     // atoms — the receiver (the `json` module handle) is not a runtime value, so it is
                     // not lowered.
                     if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
-                        let mut arg_atoms = self.lower_args(args, out)?;
+                        let mut arg_atoms = self.lower_args(args, *span, out)?;
                         let text = arg_atoms.pop().expect("decode_typed takes 2 args");
                         let name = arg_atoms.pop().expect("decode_typed takes 2 args");
                         return Ok(self.emit(
@@ -1780,7 +1787,7 @@ impl Lowerer<'_> {
                             },
                             *span,
                         );
-                        let arg_atoms = self.lower_args(args, out)?;
+                        let arg_atoms = self.lower_args(args, *span, out)?;
                         return Ok(self.emit(
                             out,
                             Rvalue::Call {
@@ -1791,7 +1798,7 @@ impl Lowerer<'_> {
                             *span,
                         ));
                     }
-                    let arg_atoms = self.lower_args(args, out)?;
+                    let arg_atoms = self.lower_args(args, *span, out)?;
                     // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
                     // this call span in `width_sites`. Emit the width-carrying `WidthIntMethod` so both
                     // backends compute within the width via `int_method_width`, rather than the generic
@@ -1846,7 +1853,7 @@ impl Lowerer<'_> {
                     ))
                 } else {
                     let callee = self.lower_expr(callee, out)?;
-                    let mut arg_atoms = self.lower_args(args, out)?;
+                    let mut arg_atoms = self.lower_args(args, *span, out)?;
                     // A call of a FORWARDING generic (F2b): prepend its hidden type-argument
                     // atoms, mirroring the callee's prepended hidden parameters.
                     self.prepend_hidden_args(&mut arg_atoms, span);
@@ -1876,7 +1883,7 @@ impl Lowerer<'_> {
                     name: name.clone(),
                     span: *name_span,
                 };
-                let mut arg_atoms = self.lower_args(args, out)?;
+                let mut arg_atoms = self.lower_args(args, *span, out)?;
                 // A call of a FORWARDING generic (F2b): prepend its hidden type-argument atoms.
                 self.prepend_hidden_args(&mut arg_atoms, span);
                 Ok(self.emit(
@@ -2182,7 +2189,7 @@ impl Lowerer<'_> {
                     unreachable!("guarded by the match arm");
                 };
                 let callee = self.lower_expr(callee, out)?;
-                let arg_atoms = self.lower_args(args, out)?;
+                let arg_atoms = self.lower_args(args, *span, out)?;
                 Ok(self.emit(
                     out,
                     Rvalue::SpawnIsolate {
@@ -2616,11 +2623,21 @@ impl Lowerer<'_> {
     fn lower_args(
         &mut self,
         args: &[noeta_ast::CallArg],
+        call_span: Span,
         out: &mut Vec<Stmt>,
     ) -> Result<Vec<Atom>, Unsupported> {
+        // Arguments are evaluated in the order the author WROTE them — a call's side effects must
+        // not be resequenced by how its parameters happen to be declared — and then permuted into
+        // parameter order, using the binding the checker resolved.
         let mut atoms = Vec::with_capacity(args.len());
         for arg in noeta_ast::CallArg::values(args) {
             atoms.push(self.lower_expr(arg, out)?);
+        }
+        if let Some(order) = self.sites.arg_orders.get(&call_span) {
+            atoms = order
+                .iter()
+                .filter_map(|&i| atoms.get(i).cloned())
+                .collect();
         }
         Ok(atoms)
     }

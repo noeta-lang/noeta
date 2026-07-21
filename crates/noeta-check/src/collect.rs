@@ -144,6 +144,7 @@ impl Checker {
             (type_name.to_string(), m.name.clone()),
             FnSig {
                 params,
+                param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                 ret,
                 required: required_params(&m.params),
                 generic,
@@ -459,6 +460,7 @@ impl Checker {
                         f.name.clone(),
                         FnSig {
                             params,
+                            param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                             ret,
                             required: required_params(&f.params),
                             generic,
@@ -744,6 +746,7 @@ impl Checker {
             key,
             FnSig {
                 params,
+                param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                 ret,
                 required: required_params(&m.params),
                 generic: None,

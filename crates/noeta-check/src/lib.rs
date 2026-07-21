@@ -75,6 +75,7 @@ use noeta_edition::{Edition, EditionMap};
 use noeta_span::Span;
 use noeta_types::{BuiltinTrait, Type};
 
+mod args;
 mod attributes;
 mod collect;
 mod decls;

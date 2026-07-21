@@ -620,6 +620,24 @@ impl Checker {
                 }
                 if let Some(sig) = self.symbols.functions.get(name) {
                     let required = sig.required;
+                    // Named arguments bind to the parameters they name, so normalize the written
+                    // list into parameter order ONCE, here — everything downstream (generic
+                    // instantiation, closure finalization, arity and assignability) then sees a
+                    // plain positional call and needs no notion of labels at all.
+                    let permuted;
+                    let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
+                        let names = sig.param_names.clone();
+                        match self.order_arguments(arg_exprs, &names, name, args, span, call_span) {
+                            Some(v) => {
+                                permuted = v;
+                                &permuted[..]
+                            }
+                            None => return self.symbols.functions[name].ret.clone(),
+                        }
+                    } else {
+                        arg_exprs
+                    };
+                    let sig = &self.symbols.functions[name];
                     // A generic function is instantiated per call: bind its type parameters from the
                     // argument types, check arguments against the substituted parameters, enforce
                     // the bounds (E0025), and return the substituted result type.

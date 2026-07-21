@@ -61,6 +61,13 @@ pub struct Sites {
     /// packed list element's field is read without materializing the element (P-PACK 2.5+). A pure
     /// function of the program, like the other site maps; the fusion is invisible to `RunResult`.
     pub index_field_sites: HashSet<Span>,
+    /// Call spans whose arguments were written with `name:` labels that put them out of parameter
+    /// order: for each parameter position, the index of the argument in **written** order.
+    ///
+    /// The checker resolves the binding — it is the only pass that knows the callee's parameter
+    /// names — and lowering permutes the evaluated atoms, so both backends bind identically by
+    /// construction. Absent for a purely positional call, which is already in order.
+    pub arg_orders: HashMap<Span, Vec<usize>>,
     /// `for` statement spans whose iterable is statically an `Iterator<T>` (Track I.2) — the lowering
     /// sets `Stmt::For.stream` so both backends drive the iterator's `next()` instead of snapshotting.
     pub for_stream_sites: HashSet<Span>,
@@ -204,6 +211,13 @@ pub(crate) struct SiteMaps {
     /// element's field without materializing the element (P-PACK 2.5+). A pure function of the
     /// program, invisible to `RunResult`, so both backends fuse the same sites by construction.
     pub(crate) index_field_sites: HashSet<Span>,
+    /// Call spans whose arguments were written with `name:` labels that put them out of parameter
+    /// order: for each parameter position, the index of the argument in **written** order.
+    ///
+    /// The checker resolves the binding — it is the only pass that knows the callee's parameter
+    /// names — and lowering permutes the evaluated atoms, so both backends bind identically by
+    /// construction. Absent for a purely positional call, which is already in order.
+    pub(crate) arg_orders: HashMap<Span, Vec<usize>>,
     /// `for` statement spans whose iterable is statically an `Iterator<T>` — the loop streams via
     /// `next()` instead of snapshotting a list (Track I.2). Lowering reads this (via
     /// [`Checked::for_stream_sites`]) to set `Stmt::For.stream`. A pure function of the program; a
@@ -265,6 +279,7 @@ impl SiteMaps {
             decode_typed_sites: self.decode_typed_sites,
             map_packed_sites: self.map_packed_sites,
             index_field_sites: self.index_field_sites,
+            arg_orders: self.arg_orders,
             for_stream_sites: self.for_stream_sites,
             width_sites: self.width_sites,
             handle_sites: self.handle_sites,
