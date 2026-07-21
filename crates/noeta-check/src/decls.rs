@@ -412,10 +412,46 @@ impl Checker {
                          value kind (struct/enum) ordering structurally",
                     );
                 }
-                for arg in args {
-                    self.check_type_ref(arg);
-                }
+                self.check_type_args(name, args, *span);
             }
+        }
+    }
+
+    /// Validate a named type's **generic arguments**: each argument is itself a type reference that
+    /// must resolve (`List<Ghost>` flags `Ghost`, E0013), and a built-in constructor applied to the
+    /// wrong number of them is E0058.
+    ///
+    /// Arity is read from [`BuiltinTy::arity`] — the one table that knows a `List` takes one
+    /// argument and a `Map` two — so the rule is stated once rather than per use site. Two forms are
+    /// deliberately admitted: **no** arguments at all (`x: List` is an inference hole the checker
+    /// fills forward, not an error), and the bare lowercase spellings `list`/`map`/`set`, which are
+    /// *defined* as the unspecified-element form. Only a written argument list of the wrong length
+    /// is diagnosed. User generic types are not arity-checked here; instantiation owns that.
+    ///
+    /// Shared by [`check_type_ref`](Self::check_type_ref) and the attribute-argument type reference,
+    /// which reaches a `TypeRef` through [`AttrValue::TypeRef`] rather than an annotation — the
+    /// second caller is why this is a method and not inlined above. Its arguments used to be
+    /// validated by nobody at all, so `#[Builds(target: List<int, string, bogus>)]` passed silently.
+    pub(crate) fn check_type_args(&mut self, name: &str, args: &[TypeRef], span: Span) {
+        if let Some((builtin, spelling)) = BuiltinTy::from_name(name)
+            && spelling == noeta_ast::Spelling::Canonical
+            && !args.is_empty()
+            && args.len() != builtin.arity()
+        {
+            let arity = builtin.arity();
+            let msg = if arity == 0 {
+                format!("`{name}` takes no type arguments, found {}", args.len())
+            } else {
+                format!(
+                    "`{name}` takes {arity} type argument(s), found {}",
+                    args.len()
+                )
+            };
+            self.error(DiagnosticCode::InvalidTypeArguments, span, msg)
+                .help("supply exactly one type argument per parameter, or omit `<…>` entirely and let the element type infer");
+        }
+        for arg in args {
+            self.check_type_ref(arg);
         }
     }
 

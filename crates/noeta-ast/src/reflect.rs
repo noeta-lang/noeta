@@ -99,26 +99,41 @@ impl ReflectionInfo {
         self.types.iter().find(|t| t.name == name)
     }
 
-    /// The reflection [`TypeRepr`] of a **type reference** by name — a bare type name used as a value
-    /// (`#[Encode(codec: JsonCodec)]`). Reports the same precise constructor a `type_of` over a value
-    /// of that type would: a built-in scalar/collection maps to its lattice variant (`int` →
-    /// `Type.Int`, `list` → `Type.List(Dyn)`), and a declared type maps by *kind* (`Type.Struct`/
+    /// The reflection [`TypeRepr`] of a **type reference** — a type name used as a value
+    /// (`#[Encode(codec: JsonCodec)]`, `#[Builds(target: List<int>)]`), given its head `name` and
+    /// its generic `args`. Reports the same precise constructor a `type_of` over a value of that
+    /// type would: a built-in scalar/collection maps to its lattice variant (`int` → `Type.Int`,
+    /// `List<int>` → `Type.List(Type.Int)`), and a declared type maps by *kind* (`Type.Struct`/
     /// `Enum`/`Class`). Only a name with no known classification — an opaque import, or one of the
     /// abstract kind-types `Enum`/`Struct`/`Class` used directly — stays `Type.Named`, the honest
     /// unknown-kind fallback. Both backends build a type-ref through this one function, so the
     /// materialized `Type` value agrees across the differential by construction.
-    pub fn type_ref_repr(&self, name: &str) -> TypeRepr {
-        // A name-only query carries no type arguments, so every container's arguments are the top.
-        if let Some(repr) = BuiltinTy::from_name_any(name)
-            .and_then(|b| builtin_repr(b, |_| Box::new(TypeRepr::Dyn)))
-        {
-            return repr;
-        }
+    ///
+    /// The arguments are projected **recursively and kind-aware**, so `List<JsonCodec>` is
+    /// `Type.List(Type.Struct("JsonCodec", []))` rather than a head with the arguments erased. Pass
+    /// `&[]` for a genuinely argument-less reference (a bare name used as an `invoke` receiver).
+    pub fn type_ref_repr(&self, name: &str, args: &[TypeRef]) -> TypeRepr {
+        named_repr(name, args, &|n, a| self.nominal_repr(n, a))
+    }
+
+    /// The reflection [`TypeRepr`] of a surface [`TypeRef`], **kind-aware** — the structural
+    /// counterpart of [`type_ref_repr`](Self::type_ref_repr), reached for the nested arguments of a
+    /// generic type reference (`Map<string, List<int>>`) and for the forms a bare name cannot spell
+    /// (`?T`, `A | B`, `(A) -> B`). Differs from the free [`typeref_to_repr`] only in classifying a
+    /// declared nominal by its kind instead of the kind-agnostic [`TypeRepr::Named`].
+    pub fn typeref_repr(&self, ty: &TypeRef) -> TypeRepr {
+        typeref_repr_with(ty, &|n, a| self.nominal_repr(n, a))
+    }
+
+    /// Classify a **declared** nominal name by its kind, carrying `args` through. The one half of
+    /// the type-ref projection that needs the type registry — everything else is shared with
+    /// [`typeref_to_repr`] via [`named_repr`].
+    fn nominal_repr(&self, name: &str, args: Vec<TypeRepr>) -> TypeRepr {
         match self.type_named(name).map(|t| t.kind) {
-            Some(TypeKind::Struct) => TypeRepr::Struct(name.to_string(), Vec::new()),
-            Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), Vec::new()),
-            Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), Vec::new()),
-            None => TypeRepr::Named(name.to_string(), Vec::new()),
+            Some(TypeKind::Struct) => TypeRepr::Struct(name.to_string(), args),
+            Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), args),
+            Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), args),
+            None => TypeRepr::Named(name.to_string(), args),
         }
     }
 }
@@ -852,29 +867,56 @@ fn builtin_repr(builtin: BuiltinTy, arg: impl Fn(usize) -> Box<TypeRepr>) -> Opt
 }
 
 pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
-    let boxed = |t: &TypeRef| Box::new(typeref_to_repr(t));
-    let dyn_box = || Box::new(TypeRepr::Dyn);
+    typeref_repr_with(ty, &|name, args| TypeRepr::Named(name.to_string(), args))
+}
+
+/// How a projection resolves a **nominal** type name — the one axis on which the two type-ref
+/// converters differ. [`typeref_to_repr`] answers [`TypeRepr::Named`] unconditionally (the R3
+/// narrow matcher keys on the name and is deliberately kind-tolerant); [`ReflectionInfo::typeref_repr`]
+/// looks the name up in the type registry and answers `Struct`/`Class`/`Enum`.
+///
+/// It is a parameter rather than two copies of the walk because the copies drifted: the kind-aware
+/// converter used to be a name-only lookup that dropped its type arguments, so an attribute
+/// argument `List<int>` materialized as `Type.List(Type.Dyn)` while the same annotation reflected
+/// through `params_of` kept the `int`. Both are now the same walk.
+type NominalResolver<'a> = dyn Fn(&str, Vec<TypeRepr>) -> TypeRepr + 'a;
+
+/// The [`TypeRepr`] of a **named** type reference — head name plus generic arguments — resolving
+/// nominals through `nominal`. The single place surface generic application becomes a reflection
+/// type: a built-in constructor reads its arguments positionally (a missing one is the `Dyn` top,
+/// the inference hole the bare `list`/`map` spellings leave), and anything else is nominal with its
+/// arguments carried through verbatim. Shared by [`ReflectionInfo::type_ref_repr`] (which has only
+/// the name and args, never a whole [`TypeRef`]) and the [`TypeRef::Named`] arm of the walk.
+fn named_repr(name: &str, args: &[TypeRef], nominal: &NominalResolver<'_>) -> TypeRepr {
+    let arg = |i: usize| match args.get(i) {
+        Some(t) => Box::new(typeref_repr_with(t, nominal)),
+        None => Box::new(TypeRepr::Dyn),
+    };
+    BuiltinTy::from_name_any(name)
+        .and_then(|b| builtin_repr(b, arg))
+        .unwrap_or_else(|| {
+            nominal(
+                name,
+                args.iter().map(|a| typeref_repr_with(a, nominal)).collect(),
+            )
+        })
+}
+
+/// Walk a surface [`TypeRef`] into a [`TypeRepr`], resolving nominal names through `nominal`. The
+/// single converter behind both [`typeref_to_repr`] and [`ReflectionInfo::typeref_repr`].
+fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>) -> TypeRepr {
+    let recur = |t: &TypeRef| typeref_repr_with(t, nominal);
     match ty {
-        TypeRef::Union { members, .. } => {
-            TypeRepr::Union(members.iter().map(typeref_to_repr).collect())
-        }
-        TypeRef::Optional { inner, .. } => TypeRepr::Option(boxed(inner)),
+        TypeRef::Union { members, .. } => TypeRepr::Union(members.iter().map(recur).collect()),
+        TypeRef::Optional { inner, .. } => TypeRepr::Option(Box::new(recur(inner))),
         // A trait object reflects as `DynTrait(name)` — the dynamic top refined by its trait bound, so
         // reflection can recover which trait a parameter is bound to (service injection by interface).
         TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.clone()),
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
-        TypeRef::Fn { params, ret, .. } => TypeRepr::Fn(
-            params.iter().map(typeref_to_repr).collect(),
-            Box::new(typeref_to_repr(ret)),
-        ),
-        TypeRef::Named { name, args, .. } => {
-            let arg = |i: usize| args.get(i).map(boxed).unwrap_or_else(dyn_box);
-            BuiltinTy::from_name_any(name)
-                .and_then(|b| builtin_repr(b, arg))
-                .unwrap_or_else(|| {
-                    TypeRepr::Named(name.clone(), args.iter().map(typeref_to_repr).collect())
-                })
+        TypeRef::Fn { params, ret, .. } => {
+            TypeRepr::Fn(params.iter().map(recur).collect(), Box::new(recur(ret)))
         }
+        TypeRef::Named { name, args, .. } => named_repr(name, args, nominal),
     }
 }
 
@@ -1165,6 +1207,102 @@ mod tests {
         assert_eq!(
             TypeRepr::Union(vec![TypeRepr::Int, TypeRepr::Str]).to_string(),
             "int | string"
+        );
+    }
+
+    /// A named `TypeRef` with the given generic arguments, spans elided.
+    fn named(name: &str, args: Vec<TypeRef>) -> TypeRef {
+        TypeRef::Named {
+            name: name.to_string(),
+            args,
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// A registry holding one struct, so the kind-aware projection has something to classify.
+    fn one_struct(name: &str) -> ReflectionInfo {
+        ReflectionInfo {
+            types: vec![TypeInfo {
+                name: name.to_string(),
+                kind: TypeKind::Struct,
+                fields: Vec::new(),
+                field_defaults: Vec::new(),
+                variants: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A type reference's generic arguments reach the reflected type, recursively — the defect that
+    /// made `#[Builds(target: List<int>)]` materialize as `Type.List(Type.Dyn)`. Both backends call
+    /// this one method, so fixing it here fixes both; it was invisible to the differential precisely
+    /// because they were identically wrong.
+    #[test]
+    fn type_ref_arguments_are_not_erased() {
+        let info = ReflectionInfo::default();
+        assert_eq!(
+            info.type_ref_repr("List", &[named("int", vec![])]),
+            TypeRepr::List(boxed(TypeRepr::Int))
+        );
+        assert_eq!(
+            info.type_ref_repr(
+                "Map",
+                &[
+                    named("string", vec![]),
+                    named("List", vec![named("int", vec![])]),
+                ]
+            ),
+            TypeRepr::Map(
+                boxed(TypeRepr::Str),
+                boxed(TypeRepr::List(boxed(TypeRepr::Int)))
+            )
+        );
+        // No arguments still means the `Dyn` top — a bare `List` is an inference hole, not an error.
+        assert_eq!(
+            info.type_ref_repr("List", &[]),
+            TypeRepr::List(boxed(TypeRepr::Dyn))
+        );
+    }
+
+    /// Arguments and the nominal-kind classification hold *together*: a declared struct is
+    /// `Type.Struct` at the head **and** in argument position. The two properties used to live in
+    /// separate converters (`type_ref_repr` had the kind, `typeref_to_repr` had the arguments), and
+    /// neither had both.
+    #[test]
+    fn kind_classification_survives_and_reaches_arguments() {
+        let info = one_struct("Codec");
+        assert_eq!(
+            info.type_ref_repr("Codec", &[named("int", vec![])]),
+            TypeRepr::Struct("Codec".to_string(), vec![TypeRepr::Int])
+        );
+        assert_eq!(
+            info.type_ref_repr("List", &[named("Codec", vec![])]),
+            TypeRepr::List(boxed(TypeRepr::Struct("Codec".to_string(), vec![])))
+        );
+        // An undeclared name has no kind, so it stays the honest `Named` fallback — still with its
+        // arguments.
+        assert_eq!(
+            info.type_ref_repr("Opaque", &[named("int", vec![])]),
+            TypeRepr::Named("Opaque".to_string(), vec![TypeRepr::Int])
+        );
+    }
+
+    /// The two converters agree on **everything except the nominal kind** — the one axis they are
+    /// meant to differ on ([`typeref_to_repr`] feeds the deliberately kind-tolerant R3 narrow
+    /// matcher). Sharing one walk is what makes that the only difference.
+    #[test]
+    fn the_two_converters_differ_only_in_nominal_kind() {
+        let info = one_struct("Codec");
+        let ty = named("Map", vec![named("string", vec![]), named("List", vec![])]);
+        assert_eq!(info.typeref_repr(&ty), typeref_to_repr(&ty));
+        let nominal = named("Codec", vec![]);
+        assert_eq!(
+            info.typeref_repr(&nominal),
+            TypeRepr::Struct("Codec".to_string(), vec![])
+        );
+        assert_eq!(
+            typeref_to_repr(&nominal),
+            TypeRepr::Named("Codec".to_string(), vec![])
         );
     }
 

@@ -1,0 +1,15 @@
+// A built-in type constructor takes a fixed number of type arguments — `List` one, `Map` two — and
+// applying it to the wrong number is E0058, the same code an over- or under-supplied turbofish
+// reports. The arity comes from `BuiltinTy::arity`, so annotations, attribute arguments, and every
+// other type-reference position share one rule.
+//
+// Omitting the arguments entirely stays legal: `x: List` is an inference hole the checker fills
+// forward, not an error, and the bare `list`/`map`/`set` spellings *are* the unspecified-element
+// form. Only a written argument list of the wrong length is diagnosed — see the accepted cases below,
+// which must not warn.
+// expect: error E0058 at 15:11
+// expect: exit 1
+fn ok_bare(a: list, b: map, c: set): void { return }
+fn ok_full(a: List<int>, b: Map<string, int>, c: Result<int, string>): void { return }
+
+fn bad(x: Map<int>): void { return }

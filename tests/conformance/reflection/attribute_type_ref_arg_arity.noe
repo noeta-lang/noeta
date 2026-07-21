@@ -1,0 +1,12 @@
+// A built-in type constructor applied at the wrong arity is E0058, in attribute position like
+// anywhere else: `List` takes one type argument, not three. `BuiltinTy::arity` is the single table
+// that knows, so the rule holds at every use site rather than per call site. Unchecked before — the
+// attribute checker looked at the head name only, so this parsed, checked, and silently reflected as
+// a one-argument `List`.
+// expect: error E0058 at 11:10
+// expect: exit 1
+@attribute
+struct Builds { target: Type }
+
+#[Builds(target: List<int, string, bool>)]
+struct Payload { id: int }
