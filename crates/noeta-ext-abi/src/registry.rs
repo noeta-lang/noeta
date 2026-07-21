@@ -965,15 +965,38 @@ pub struct ExtDirective {
     ///
     /// Runs only after the directive has passed the shared placement gate and its declared
     /// argument contract ([`Self::max_args`] / [`Self::named_keys`]), so a hook never sees a
-    /// misplaced or malformed invocation. It may read the filesystem — the package's `[trust]`
-    /// grant is the authorization for that — and must be a **pure function of its inputs plus the
-    /// files it reads**, because the compiler memoizes it and re-runs it on invalidation.
+    /// misplaced or malformed invocation.
+    ///
+    /// It may read the filesystem — the package's `[trust]` grant is the authorization — but must
+    /// be a **pure function of [`DirectiveCtx`] plus the files it reports in [`Expansion::reads`]**.
+    /// The compiler memoizes the result and re-runs it only when one of those inputs changes, so a
+    /// hook that consults anything it does not report (the clock, the environment, a file it kept
+    /// quiet about) will serve stale members until something unrelated invalidates it.
     pub expand: Option<DirectiveExpand>,
 }
 
-/// An [`ExtDirective::expand`] hook: the decorated declaration in, Noeta source for its synthesized
-/// members out, or a message to report at the directive's span.
-pub type DirectiveExpand = fn(&DirectiveCtx) -> Result<String, String>;
+/// An [`ExtDirective::expand`] hook: the decorated declaration in, an [`Expansion`] out, or a
+/// message to report at the directive's span.
+pub type DirectiveExpand = fn(&DirectiveCtx) -> Result<Expansion, String>;
+
+/// What an expansion produced: the members, and the files it took them from.
+#[derive(Debug, Clone, Default)]
+pub struct Expansion {
+    /// **Noeta source** for the members of the decorated declaration.
+    pub source: String,
+    /// Every file the hook read, absolute or relative to [`DirectiveCtx::source_dir`].
+    ///
+    /// This is the hook's **incrementality contract**, and it is why the compiler does not simply
+    /// hand over the contents of the path in the directive's arguments: a spec routinely pulls in
+    /// further files (an OpenAPI `$ref` into a sibling document), and only the hook knows which.
+    /// The compiler tracks each path it is given, so editing any of them re-runs the expansion and
+    /// everything downstream of it.
+    ///
+    /// A hook that under-reports reads a file whose edits will not be noticed — the expansion goes
+    /// stale until something else invalidates it. Report every file opened, including ones that
+    /// turned out to be missing or empty (their *appearing* later is a change too).
+    pub reads: Vec<String>,
+}
 
 /// Two directives are equal when they **declare** the same thing. `expand` is excluded: a function
 /// pointer's address is not a meaningful identity (two identical hooks may compare unequal, and
