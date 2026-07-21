@@ -382,18 +382,9 @@ impl Checker {
             );
         }
         // A trait accepts `#[...]` data attributes only; the `@`-directives are type-only and do
-        // not apply to a trait (UT6). Placement is the shared check, so this no longer needs its
-        // own chain — which had omitted `@validated` (there was no field for it until the AST
-        // carried one) and reported only the first offender.
-        self.check_directive_placement(
-            &decl.decorators,
-            &crate::directives::Placement {
-                site: noeta_ast::Sites::TRAIT,
-                article_noun: "a trait",
-                name: &decl.name,
-                name_span: decl.name_span,
-            },
-        );
+        // not apply to a trait (UT6). That is checked by the shared placement walk, which reaches
+        // a trait through `Stmt::decorated` like every other decorated declaration — this used to
+        // call it a second time, which would now report each misplacement twice.
         // Duplicate method signatures within the trait body.
         let mut seen: HashSet<&str> = HashSet::new();
         for m in &decl.methods {

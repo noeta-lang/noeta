@@ -277,6 +277,79 @@ pub struct Decorators {
     pub foreign: Vec<ForeignDirective>,
 }
 
+/// A declaration that bears `@`-directives, as the placement check wants it: its decorators, the
+/// site they sit on, and the name to blame in a diagnostic.
+#[derive(Debug, Clone, Copy)]
+pub struct Decorated<'a> {
+    pub decorators: &'a Decorators,
+    /// The site as a single set bit — `Sites::ENUM` for an enum, and so on. The diagnostic's noun
+    /// ("an enum") comes from [`Sites::label`], not from a second hand-written string: those two
+    /// drifted, and a misplaced directive on a struct said "a record" while its own help said
+    /// "a struct".
+    pub site: Sites,
+    pub name: &'a str,
+    pub name_span: Span,
+}
+
+impl Stmt {
+    /// This statement as a decorated declaration, or `None` if it cannot bear `@`-directives.
+    ///
+    /// The one place that answers "which declarations carry directives, and what site is each" —
+    /// and it is **exhaustive over every `Stmt` variant on purpose**. The checker's walk used to
+    /// match three kinds and end in `_ => {}`, so a new declaration kind would have been silently
+    /// unchecked: the rule would exist, be declarative, and simply never run on it. That is the
+    /// same class of hole the placement check was written to close, one level up.
+    pub fn decorated(&self) -> Option<Decorated<'_>> {
+        match self {
+            Stmt::Struct(d) => Some(Decorated {
+                decorators: &d.decorators,
+                site: Sites::STRUCT,
+                name: &d.name,
+                name_span: d.name_span,
+            }),
+            Stmt::Class(d) => Some(Decorated {
+                decorators: &d.decorators,
+                site: Sites::CLASS,
+                name: &d.name,
+                name_span: d.name_span,
+            }),
+            Stmt::Enum(d) => Some(Decorated {
+                decorators: &d.decorators,
+                site: Sites::ENUM,
+                name: &d.name,
+                name_span: d.name_span,
+            }),
+            Stmt::Trait(d) => Some(Decorated {
+                decorators: &d.decorators,
+                site: Sites::TRAIT,
+                name: &d.name,
+                name_span: d.name_span,
+            }),
+            // A `fn`'s directives are tier annotations on `FnDecl::tier`/`::directives`, not a
+            // `Decorators` — a different carrier with its own gate (`check_directives`).
+            Stmt::Fn(_)
+            // An `impl` block decorates nothing; its methods are `FnDecl`s.
+            | Stmt::Impl(_)
+            // A tier block's own `@name` is the tier, not a decorator on it.
+            | Stmt::TierBlock { .. }
+            | Stmt::Echo { .. }
+            | Stmt::Binding { .. }
+            | Stmt::Destructure { .. }
+            | Stmt::Namespace { .. }
+            | Stmt::Use { .. }
+            | Stmt::Return { .. }
+            | Stmt::Yield { .. }
+            | Stmt::Concurrent { .. }
+            | Stmt::If { .. }
+            | Stmt::For { .. }
+            | Stmt::While { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Expr { .. } => None,
+        }
+    }
+}
+
 /// One `@name(args)` written in decorator position whose name the parser does not resolve.
 ///
 /// Kept as written — name, arguments, spans — so the checker can resolve it against the full

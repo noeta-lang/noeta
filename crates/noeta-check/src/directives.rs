@@ -181,26 +181,13 @@ fn tier_detail(expr: Option<&str>, text: Option<&str>, suffix: &str) -> String {
     }
 }
 
-/// The declaration a directive was written on, for the diagnostic's wording.
-pub(crate) struct Placement<'a> {
-    /// The site as a set bit — `Sites::ENUM` for an enum, and so on.
-    pub site: Sites,
-    /// The word used in the message ("an enum", "a class").
-    pub article_noun: &'a str,
-    pub name: &'a str,
-    pub name_span: Span,
-}
-
 impl Checker {
     /// Report every directive on this declaration that does not belong there.
     ///
     /// Total over [`BuiltinDirective::ALL`] and over declaration kinds: the loop asks the metadata
     /// table where each directive is legal rather than encoding the answer per call site.
-    pub(crate) fn check_directive_placement(
-        &mut self,
-        decorators: &Decorators,
-        at: &Placement<'_>,
-    ) {
+    pub(crate) fn check_directive_placement(&mut self, at: &noeta_ast::Decorated<'_>) {
+        let decorators = at.decorators;
         for directive in BuiltinDirective::ALL {
             if !is_present(decorators, directive) {
                 continue;
@@ -225,14 +212,15 @@ impl Checker {
             } else {
                 format!(
                     "`@{directive}` does not apply to {} `{}`",
-                    at.article_noun, at.name
+                    at.site.label(),
+                    at.name
                 )
             };
             let legal = directive.info().sites.label();
             self.error(code, span, message)
                 .help(format!("`@{directive}` applies to {legal}"));
         }
-        self.check_foreign_directives(decorators, at);
+        self.check_foreign_directives(at);
     }
 
     /// Resolve every directive the decorator grammar does not own against the full name-space.
@@ -242,7 +230,8 @@ impl Checker {
     /// syntax error no extension could make legal. Deciding here is what opens the name-space,
     /// and it also folds the old parser-level errors into the one placement check: `@tier` on a
     /// type is now a misplacement like any other, rather than a separate `UnexpectedToken`.
-    fn check_foreign_directives(&mut self, decorators: &Decorators, at: &Placement<'_>) {
+    fn check_foreign_directives(&mut self, at: &noeta_ast::Decorated<'_>) {
+        let decorators = at.decorators;
         if decorators.foreign.is_empty() {
             return;
         }
@@ -259,7 +248,9 @@ impl Checker {
                             f.name_span,
                             format!(
                                 "`@{}` does not apply to {} `{}`",
-                                f.name, at.article_noun, at.name
+                                f.name,
+                                at.site.label(),
+                                at.name
                             ),
                         )
                         .help(format!(
@@ -276,7 +267,8 @@ impl Checker {
                         f.name_span,
                         format!(
                             "`@tier` does not apply to {} `{}`",
-                            at.article_noun, at.name
+                            at.site.label(),
+                            at.name
                         ),
                     )
                     .help(
@@ -292,7 +284,9 @@ impl Checker {
                         f.name_span,
                         format!(
                             "`@{}` is a tier, and does not decorate {} `{}`",
-                            f.name, at.article_noun, at.name
+                            f.name,
+                            at.site.label(),
+                            at.name
                         ),
                     )
                     .help(format!(
@@ -306,7 +300,7 @@ impl Checker {
                     self.error(
                         DiagnosticCode::InvalidDirectiveSite,
                         f.name_span,
-                        format!("`@{d}` does not apply to {} `{}`", at.article_noun, at.name),
+                        format!("`@{d}` does not apply to {} `{}`", at.site.label(), at.name),
                     );
                 }
                 None => {

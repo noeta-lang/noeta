@@ -2516,3 +2516,47 @@ fn the_error_derive_name_agrees_across_crates() {
         noeta_ast::derive::ERROR_TRAIT
     );
 }
+
+/// Placement is checked for every declaration kind that can bear a directive — not for the three
+/// somebody remembered. The walk is driven by `Stmt::decorated`, which is exhaustive over the
+/// statement kinds, so this is a property of the code rather than of this list; the list is here to
+/// notice if the wiring is ever cut.
+#[test]
+fn every_decorated_declaration_kind_is_placement_checked() {
+    for src in [
+        "@semantic\nstruct S { x: int }\n",
+        "@semantic\nclass C { x: int }\n",
+        "@packed\nenum E { A }\n",
+        "@validated\ntrait T { fn f(): int }\n",
+    ] {
+        assert_eq!(codes(src), ["E0054"], "unchecked placement in: {src}");
+    }
+}
+
+/// The diagnostic's noun comes from the site, not from a second hand-written string beside it.
+/// Those two drifted: a misplaced directive on a struct said "a record" while its own help line,
+/// computed from the same site, said "a struct".
+#[test]
+fn the_misplacement_noun_is_derived_from_the_site() {
+    for (src, noun) in [
+        ("@semantic\nstruct S { x: int }\n", "a struct"),
+        ("@semantic\nclass C { x: int }\n", "a class"),
+        ("@packed\nenum E { A }\n", "an enum"),
+        ("@validated\ntrait T { fn f(): int }\n", "a trait"),
+    ] {
+        let msgs: Vec<String> = {
+            seed_std();
+            let source = Source::new(SourceId::FIRST, "test.noe", src);
+            let lexed = lex(&source);
+            let parsed = parse(&source, &lexed.tokens);
+            check(&parsed.program)
+                .iter()
+                .map(|d| d.message.clone())
+                .collect()
+        };
+        assert!(
+            msgs.iter().any(|m| m.contains(noun)),
+            "expected {noun:?} in {msgs:?}"
+        );
+    }
+}

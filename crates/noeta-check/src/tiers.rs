@@ -24,7 +24,7 @@
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
 use noeta_ast::reflect::TIER_ATTR_DOC;
-use noeta_ast::{AttrArg, Attribute, Program, Sites, Stmt};
+use noeta_ast::{AttrArg, Attribute, Program, Stmt};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
@@ -1205,52 +1205,24 @@ impl Checker {
 
     pub(crate) fn check_semantic_roles(&mut self, program: &Program) {
         for stmt in &program.stmts {
-            match stmt {
-                // Placement — which directive may sit on which declaration — is one check for
-                // every kind, driven off the metadata table (`directives.rs`). What stays here is
-                // the per-directive work that placement does not cover: a `@role`'s tags must name
-                // variants of a `@semantic` enum, and a `@packed` struct's fields must all be
-                // packable.
-                Stmt::Struct(r) => {
-                    self.check_directive_placement(
-                        &r.decorators,
-                        &crate::directives::Placement {
-                            site: Sites::STRUCT,
-                            article_noun: "a struct",
-                            name: &r.name,
-                            name_span: r.name_span,
-                        },
-                    );
-                    self.check_role_tags(
-                        r.name_span,
-                        r.decorators.role.as_deref(),
-                        r.decorators.attribute.is_some(),
-                    );
-                    self.check_packed_struct(r);
-                }
-                Stmt::Class(c) => {
-                    self.check_directive_placement(
-                        &c.decorators,
-                        &crate::directives::Placement {
-                            site: Sites::CLASS,
-                            article_noun: "a class",
-                            name: &c.name,
-                            name_span: c.name_span,
-                        },
-                    );
-                }
-                Stmt::Enum(e) => {
-                    self.check_directive_placement(
-                        &e.decorators,
-                        &crate::directives::Placement {
-                            site: Sites::ENUM,
-                            article_noun: "an enum",
-                            name: &e.name,
-                            name_span: e.name_span,
-                        },
-                    );
-                }
-                _ => {}
+            // Placement — which directive may sit on which declaration — is one check for every
+            // kind, over every decorated declaration the AST reports. The walk used to name three
+            // kinds and end in `_ => {}`, each hand-passing its own site and noun; `Stmt::decorated`
+            // is exhaustive over the statement kinds instead, so a new decorated declaration cannot
+            // be silently left unchecked, and the diagnostic's noun is derived from the site rather
+            // than written out a second time.
+            if let Some(at) = stmt.decorated() {
+                self.check_directive_placement(&at);
+            }
+            // The per-directive work placement does not cover: a `@role`'s tags must name variants
+            // of a `@semantic` enum, and a `@packed` struct's fields must all be packable.
+            if let Stmt::Struct(r) = stmt {
+                self.check_role_tags(
+                    r.name_span,
+                    r.decorators.role.as_deref(),
+                    r.decorators.attribute.is_some(),
+                );
+                self.check_packed_struct(r);
             }
         }
     }
