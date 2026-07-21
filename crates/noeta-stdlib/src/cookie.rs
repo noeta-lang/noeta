@@ -214,6 +214,14 @@ impl Cookie {
         })
     }
 
+    /// Set `Max-Age`, in seconds.
+    pub fn with_max_age(&self, max_age: i64) -> Cookie {
+        Cookie {
+            max_age: Some(max_age),
+            ..self.clone()
+        }
+    }
+
     /// Set `SameSite`.
     ///
     /// `SameSite=None` **implies `Secure`** and sets it: a browser rejects the combination

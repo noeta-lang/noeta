@@ -63,6 +63,7 @@ pub mod reactive;
 pub mod regex;
 pub mod registry;
 pub mod serve;
+pub mod session;
 pub mod task;
 pub mod template;
 pub mod tiers;

@@ -1,6 +1,6 @@
 # Arc — cookies and stateless signed sessions
 
-Status: **S1 done**, S2–S3 designed, S4 blocked
+Status: **S1–S3 done**, S4 blocked
 
 Sessions, end to end: the `Set-Cookie` surface `std.http` was missing (S1), a signed-cookie codec
 that needs no store (S2–S3), and the DB-backed variant `para/aether` offers on top (S4).
@@ -26,8 +26,8 @@ opt-in upgrade rather than the default.
 | # | Slice | Status |
 |---|---|---|
 | S1 | The cookie gap: multi-value headers, typed `Cookie`, `Request.cookies()` | **done** |
-| S2 | `std.session` — the signed-token codec | todo |
-| S3 | `Session` over a request/response pair; conformance + docs | todo |
+| S2 | `std.session` — the signed-token codec | **done** |
+| S3 | `Session` over a request/response pair; conformance + docs | **done** |
 | S4 | `para/aether` DB-backed sessions | **blocked** — see below |
 
 ---
@@ -86,7 +86,7 @@ silent:
 
 ---
 
-## S2 — `std.session`, the codec
+## S2 — `std.session`, the codec (done)
 
 A new module rather than more surface on `http.server`: it is a pure codec, testable without a
 server, and equally the right tool for any signed-token need (an unsubscribe link, a CSRF token).
@@ -125,12 +125,32 @@ reserving key names (`_exp`) means there is no reserved-name rule for a caller t
 | `session.keyring` | `keyring(secrets: List<string>) -> Keyring` |
 | `session.encode` | `encode(data: Map<string,string>, keys: Keyring, max_age: int) -> string` |
 | `session.decode` | `decode(token: string, keys: Keyring) -> Map<string,string>?` |
+| `session.open` | `open(req: Request, keys: Keyring) -> Session` |
+| `session.attach` | `attach(resp: Response, s: Session, keys: Keyring, max_age: int, secure: bool) -> Response` |
+
+**Three decisions settled during implementation, each differing from the sketch above:**
+
+* **`secure` is a required parameter, not a default.** The plan said "Secure on by default with an
+  explicit opt-out". Implementing it, both defaults turn out to fail *silently* — on breaks every
+  plain-http localhost server with a cookie the browser refuses to store; off ships credentials over
+  cleartext. A required argument is the only spelling where neither mistake is quiet.
+* **The cookie name is fixed at `session`.** Making it configurable means `open` and `attach` must
+  agree, and a mismatch presents as "the user is silently logged out" — the exact failure class this
+  module exists to remove. An app needing another name or carrier uses `encode`/`decode`.
+* **The module registers inside the `http` extension unit** so `open`/`attach` can name `Request`
+  and `Response`, while keeping the name `std.session` — a session is a concept above HTTP, and the
+  codec half contains no HTTP at all.
+
+Also: `Session` is **copy-modify** (`set` returns a new one), matching `Response`/`Cookie`. That is
+what makes `dirty` trustworthy — the flag moves exactly where a builder ran, never because an
+aliased handle mutated underneath — and it sidesteps the question of whether the backends hand a
+native a genuinely mutable reference to a stored extern value.
 
 `decode` returns `none` for *every* rejection — bad signature, expired, malformed — rather than a
 `Result` with a reason. An attacker learns nothing from the distinction, and a caller has exactly
 one correct response to all three: treat the request as unauthenticated.
 
-## S3 — the request/response pair
+## S3 — the request/response pair (done)
 
 `Session` over the codec, so a handler never touches tokens:
 

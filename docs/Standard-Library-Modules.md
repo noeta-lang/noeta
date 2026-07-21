@@ -734,6 +734,75 @@ deterministic sandbox (tests) `server.serve` instead drives a fixed, documented 
 through the handler and returns — so a served program is reproducible and terminates in-oracle,
 the inbound mirror of the client's pure responder.
 
+## `session`
+
+`use std.session` binds `session`: signed, stateless sessions carried in a cookie. The state rides
+on the request, not in the server.
+
+That is not a stylistic choice. `noeta serve --parallel N` gives every worker its own host and its
+own retained arena, so the obvious in-memory implementation — a `Cell<Map<…>>` the handler captures
+— is correct at `--parallel 1` and **silently fragments** above it: a session written on worker 2 is
+invisible to the others while requests bounce between them. The bug appears only under the flag you
+reach for in production, and presents as random logouts. A signed cookie has no such failure mode,
+and it needs no framework hook, so it composes with a bare `server.serve` handler and any router
+built on it.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `session.keyring` | `keyring(secrets: List<string>) -> Keyring` | Signing keys, newest first. Each at least 16 bytes. |
+| `session.open` | `open(req: Request, keys: Keyring) -> Session` | Never fails — absent, forged, and expired all give an empty session. |
+| `session.attach` | `attach(resp: Response, s: Session, keys: Keyring, max_age: int, secure: bool) -> Response` | Writes the cookie back, but only if the session changed. |
+| `session.encode` | `encode(data: Map<string,string>, keys: Keyring, max_age: int) -> string` | The raw codec, for a non-cookie carrier or a different name. |
+| `session.decode` | `decode(token: string, keys: Keyring) -> Map<string,string>?` | Verify and decode, or none. |
+| `Session` methods | `get(name) -> string?`, `set(name, value) -> Session`, `remove(name) -> Session`, `clear() -> Session`, `dirty() -> bool`, `data() -> Map<string,string>` | Copy-modify, like `Response` and `Cookie`. |
+
+```noeta ignore
+use std.http.server
+use std.http.{Request, Response}
+use std.{session, env}
+
+keys = session.keyring([env.get("SESSION_SECRET")])
+
+fn handle(req: Request) use (keys): Response {
+    s = session.open(req, keys)
+    if req.path() == "/login" {
+        s = s.set("user", "42")
+    }
+    body = s.get("user") ?? "anonymous"
+    return session.attach(server.response(200, body), s, keys, 86400, true)
+}
+
+server.serve(8080, handle)
+```
+
+**The token** is `base64url(payload) "." base64url(hmac_sha256(key, base64url(payload)))`, where the
+payload is `{"d": {…}, "exp": <unix seconds>}`. Three properties are load-bearing:
+
+- **The MAC is verified before the payload is parsed**, so attacker-controlled bytes never reach the
+  JSON parser unauthenticated.
+- **`exp` is mandatory.** With no store there is nothing to revoke against, so an unbounded token
+  would be valid forever and a stolen one stolen for good. It is a parameter, not an option.
+- **Signing uses the first key; verification accepts any.** Rotating a secret would otherwise log
+  every user out at once — which is why, in practice, nobody rotates.
+
+**A session is signed, not encrypted.** Anyone holding the cookie can read its contents; the
+signature proves only that they did not change them. Never put a secret in a session — store an
+identifier and look the rest up.
+
+**`secure` has no default, deliberately.** Defaulting it on breaks every plain-http localhost server
+with a cookie the browser silently refuses to store; defaulting it off ships session credentials over
+cleartext. Both failures are quiet, so the choice is stated out loud at the call: `true` in
+production, `false` only for local development.
+
+**There is a 4096-byte ceiling**, and exceeding it is an error rather than a truncation — browsers
+drop an oversized cookie silently. Hitting it is the signal to move to a server-side store keyed by
+a small id, which is what `para/db` offers on top.
+
+Removing a key that was not there, or clearing an already-empty session, leaves it **not** dirty — so
+a speculative `remove` on every request does not re-emit the cookie and quietly extend its own
+expiry. Clearing a non-empty session emits an *expired* cookie rather than a valid token for empty
+data, which is the difference between logging out and appearing to.
+
 ### WebSockets
 
 A handler upgrades a connection by returning `server.websocket(session)` — the signature stays

@@ -189,6 +189,27 @@ const HTTP_TYPES: &[ExtType] = &[
         docs: REQUEST_DOCS,
         ..ExtType::DEFAULTS
     },
+    // `Keyring` (session arc S2) — the signing secrets. Opaque on purpose: it has no methods, so
+    // there is no way to read a secret back out of one in-language.
+    ExtType {
+        name: crate::session::KEYRING_TYPE_NAME,
+        namespace: "std.session",
+        key_capable: false, // a keyring is not a map key
+        docs: KEYRING_DOCS,
+        ..ExtType::DEFAULTS
+    },
+    // `Session` (session arc S3) — the decoded data plus whether it changed.
+    ExtType {
+        name: crate::session::SESSION_TYPE_NAME,
+        namespace: "std.session",
+        methods: SESSION_METHODS,
+        dispatch: session_method_dispatch,
+        key_capable: false, // a session is not a map key
+        // `data()` hands back a `Map`, which must arrive marshalled rather than as a handle.
+        deep_marshal: true,
+        docs: SESSION_DOCS,
+        ..ExtType::DEFAULTS
+    },
     // `Cookie` (cookie arc C1) — a validated `Set-Cookie`. Pure, content-equal, immutable data
     // like `Response`; every builder returns a new one.
     ExtType {
@@ -1340,6 +1361,10 @@ use crate::serve::REQUEST_SIG;
 
 const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
 const COOKIE_SIG: SigType = SigType::Named(crate::cookie::COOKIE_TYPE_NAME);
+const KEYRING_SIG: SigType = SigType::Named(crate::session::KEYRING_TYPE_NAME);
+const SESSION_SIG: SigType = SigType::Named(crate::session::SESSION_TYPE_NAME);
+/// `Map<string, string>` — a session's data. Named so `Option<&…>` can borrow it.
+const SESSION_DATA_SIG: SigType = SigType::Map(&Str, &Str);
 const HTTP_ERROR_SIG: SigType = SigType::Named(crate::net::HTTP_ERROR_TYPE_NAME);
 
 /// What every client verb returns (http arc H6): `Result<Response, HttpError>`.
@@ -1447,6 +1472,228 @@ const HTTP_CLIENT_FNS: &[ExtFn] = &[
         ret: Concrete(SigType::Future(&RESPONSE_RESULT_SIG)),
     },
 ];
+
+/// `std.session` — the signed-cookie session surface (session arc S2/S3).
+///
+/// Two layers in one module. `keyring`/`encode`/`decode` are the pure codec: no HTTP, so they also
+/// serve any other signed-token need (a one-click unsubscribe link, a CSRF token). `open`/`attach`
+/// are the HTTP convenience over it, so a handler never touches a token or a cookie by hand.
+const SESSION_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "keyring",
+        params: &[SigType::List(&Str)],
+        ret: Concrete(KEYRING_SIG),
+    },
+    ExtFn {
+        name: "encode",
+        params: &[SESSION_DATA_SIG, KEYRING_SIG, Int],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "decode",
+        params: &[Str, KEYRING_SIG],
+        ret: Concrete(SigType::Option(&SESSION_DATA_SIG)),
+    },
+    // Read the session off a request. Never fails: an absent, forged, or expired cookie all yield
+    // an empty session, because a caller has one correct response to all three.
+    ExtFn {
+        name: "open",
+        params: &[REQUEST_SIG, KEYRING_SIG],
+        ret: Concrete(SESSION_SIG),
+    },
+    // Write it back — but only when it changed, so an unchanged session costs no header and does
+    // not silently extend its own expiry on every request.
+    //
+    // `secure` has no default deliberately. Defaulting it on breaks every plain-http localhost
+    // server with a cookie the browser silently refuses to store; defaulting it off ships session
+    // credentials over cleartext. Both failures are quiet, so the choice is the caller's to make
+    // out loud: `true` in production, `false` only for local development.
+    ExtFn {
+        name: "attach",
+        params: &[RESPONSE_SIG, SESSION_SIG, KEYRING_SIG, Int, SigType::Bool],
+        ret: Concrete(RESPONSE_SIG),
+    },
+];
+
+fn session_dispatch(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "keyring" => {
+            want_arity(func, args, 1)?;
+            let Some(NativeValue::List(items)) = args.first() else {
+                return Err(type_error(func, "List<string>"));
+            };
+            let mut secrets = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    NativeValue::Str(s) => secrets.push(s.as_bytes().to_vec()),
+                    _ => return Err(type_error(func, "List<string>")),
+                }
+            }
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::session::Keyring::new(secrets)?,
+            )))
+        }
+        "encode" => {
+            want_arity(func, args, 3)?;
+            let data = want_session_data(func, args, 0)?;
+            let keys = want_keyring(func, args, 1)?;
+            let max_age = want_int(func, args, 2)?;
+            Ok(NativeOut::Str(crate::session::encode(
+                &data,
+                keys,
+                max_age,
+                host.clock_unix_ms(),
+            )?))
+        }
+        "decode" => {
+            want_arity(func, args, 2)?;
+            let token = want_str(func, args, 0)?;
+            let keys = want_keyring(func, args, 1)?;
+            Ok(
+                match crate::session::decode(token, keys, host.clock_unix_ms()) {
+                    Some(data) => NativeOut::Some(Box::new(session_data_out(&data))),
+                    None => NativeOut::None,
+                },
+            )
+        }
+        "open" => {
+            want_arity(func, args, 2)?;
+            let request = want_request(func, args, 0)?;
+            let keys = want_keyring(func, args, 1)?;
+            let header = crate::net::request_header(&request.inner, "cookie").unwrap_or_default();
+            let token = crate::cookie::parse_cookie_header(header)
+                .into_iter()
+                .find(|(name, _)| name == crate::session::COOKIE_NAME)
+                .map(|(_, value)| value);
+            let data = token
+                .and_then(|t| crate::session::decode(&t, keys, host.clock_unix_ms()))
+                .unwrap_or_default();
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::session::Session { data, dirty: false },
+            )))
+        }
+        "attach" => {
+            want_arity(func, args, 5)?;
+            let resp = want_response(func, args, 0)?;
+            let session = want_session(func, args, 1)?;
+            let keys = want_keyring(func, args, 2)?;
+            let max_age = want_int(func, args, 3)?;
+            let secure = want_bool(func, args, 4)?;
+            if !session.dirty {
+                return Ok(NativeOut::Extern(crate::ExternBox::new(resp.clone())));
+            }
+            // An emptied session is a logout: overwrite the cookie with its expired form rather
+            // than emitting a valid token for empty data, so the browser drops it immediately.
+            let cookie = if session.data.is_empty() {
+                crate::cookie::Cookie::new(crate::session::COOKIE_NAME, "")?
+                    .with_secure(secure)?
+                    .expired()
+            } else {
+                let token =
+                    crate::session::encode(&session.data, keys, max_age, host.clock_unix_ms())?;
+                crate::cookie::Cookie::new(crate::session::COOKIE_NAME, &token)?
+                    .with_max_age(max_age)
+                    .with_secure(secure)?
+            };
+            let mut next = resp.clone();
+            next.headers.retain(|(k, v)| {
+                !k.eq_ignore_ascii_case("set-cookie")
+                    || !crate::cookie::header_sets_cookie_named(v, crate::session::COOKIE_NAME)
+            });
+            next.headers
+                .push(("set-cookie".to_string(), cookie.to_header()));
+            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
+        }
+        _ => Err(no_function_error("session", func)),
+    }
+}
+
+/// Read a `Map<string, string>` argument as session data.
+fn want_session_data(
+    func: &str,
+    args: &[NativeValue],
+    index: usize,
+) -> Result<std::collections::BTreeMap<String, String>, StdError> {
+    let Some(NativeValue::Map(entries)) = args.get(index) else {
+        return Err(type_error(func, "Map<string, string>"));
+    };
+    entries
+        .iter()
+        .map(|(k, v)| match v {
+            NativeValue::Str(s) => Ok((k.clone(), s.clone())),
+            _ => Err(type_error(func, "Map<string, string>")),
+        })
+        .collect()
+}
+
+/// Marshal session data back out as a `Map<string, string>`.
+fn session_data_out(data: &std::collections::BTreeMap<String, String>) -> NativeOut {
+    NativeOut::Map(
+        data.iter()
+            .map(|(k, v)| (k.clone(), NativeOut::Str(v.clone())))
+            .collect(),
+    )
+}
+
+fn want_keyring<'a>(
+    func: &str,
+    args: &'a [NativeValue],
+    index: usize,
+) -> Result<&'a crate::session::Keyring, StdError> {
+    let Some(NativeValue::Extern(value)) = args.get(index) else {
+        return Err(type_error(func, crate::session::KEYRING_TYPE_NAME));
+    };
+    value
+        .as_any()
+        .downcast_ref::<crate::session::Keyring>()
+        .ok_or_else(|| type_error(func, crate::session::KEYRING_TYPE_NAME))
+}
+
+fn want_session<'a>(
+    func: &str,
+    args: &'a [NativeValue],
+    index: usize,
+) -> Result<&'a crate::session::Session, StdError> {
+    let Some(NativeValue::Extern(value)) = args.get(index) else {
+        return Err(type_error(func, crate::session::SESSION_TYPE_NAME));
+    };
+    value
+        .as_any()
+        .downcast_ref::<crate::session::Session>()
+        .ok_or_else(|| type_error(func, crate::session::SESSION_TYPE_NAME))
+}
+
+fn want_request<'a>(
+    func: &str,
+    args: &'a [NativeValue],
+    index: usize,
+) -> Result<&'a crate::net::Request, StdError> {
+    let Some(NativeValue::Extern(value)) = args.get(index) else {
+        return Err(type_error(func, crate::net::REQUEST_TYPE_NAME));
+    };
+    value
+        .as_any()
+        .downcast_ref::<crate::net::Request>()
+        .ok_or_else(|| type_error(func, crate::net::REQUEST_TYPE_NAME))
+}
+
+fn want_response<'a>(
+    func: &str,
+    args: &'a [NativeValue],
+    index: usize,
+) -> Result<&'a crate::NetResponse, StdError> {
+    let Some(NativeValue::Extern(value)) = args.get(index) else {
+        return Err(type_error(func, crate::net::RESPONSE_TYPE_NAME));
+    };
+    value
+        .as_any()
+        .downcast_ref::<crate::NetResponse>()
+        .ok_or_else(|| type_error(func, crate::net::RESPONSE_TYPE_NAME))
+}
 
 /// The server-side functions of `std.http.server`: the pure `response` builder (status + optional
 /// body/headers). `serve` (the inbound accept loop, a higher-order orchestrator) is the module's
@@ -2245,6 +2492,92 @@ fn response_method_dispatch(
     }
 }
 
+/// The `Session` instance methods (session arc S3). Copy-modify like `Response` and `Cookie`, which
+/// is what makes `dirty` trustworthy: the flag moves exactly where a builder ran, never because an
+/// aliased handle mutated underneath.
+const SESSION_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "get",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "set",
+        params: &[Str, Str],
+        ret: Concrete(SESSION_SIG),
+    },
+    ExtFn {
+        name: "remove",
+        params: &[Str],
+        ret: Concrete(SESSION_SIG),
+    },
+    ExtFn {
+        name: "clear",
+        params: &[],
+        ret: Concrete(SESSION_SIG),
+    },
+    ExtFn {
+        name: "dirty",
+        params: &[],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "data",
+        params: &[],
+        ret: Concrete(SESSION_DATA_SIG),
+    },
+];
+
+fn session_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let session = recv
+        .as_any()
+        .downcast_ref::<crate::session::Session>()
+        .expect("a Session receiver wraps a Session");
+    let rebuilt =
+        |next: crate::session::Session| Ok(NativeOut::Extern(crate::ExternBox::new(next)));
+    match method {
+        "get" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            Ok(match session.data.get(name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value.clone()))),
+                None => NativeOut::None,
+            })
+        }
+        "set" => {
+            want_arity(method, args, 2)?;
+            let name = want_str(method, args, 0)?.to_string();
+            let value = want_str(method, args, 1)?;
+            rebuilt(session.with(&name, value))
+        }
+        "remove" => {
+            want_arity(method, args, 1)?;
+            rebuilt(session.without(want_str(method, args, 0)?))
+        }
+        "clear" => {
+            want_arity(method, args, 0)?;
+            rebuilt(session.cleared())
+        }
+        "dirty" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(session.dirty)))
+        }
+        "data" => {
+            want_arity(method, args, 0)?;
+            Ok(session_data_out(&session.data))
+        }
+        _ => Err(crate::no_method_error(
+            crate::session::SESSION_TYPE_NAME,
+            method,
+        )),
+    }
+}
+
 /// The `Cookie` instance methods (cookie arc C1): accessors plus copy-modify builders, the
 /// `Response.with_header` shape. Every builder that can be given an invalid component returns a
 /// new `Cookie` only after validating it, so an unserializable cookie is unrepresentable.
@@ -2364,10 +2697,7 @@ fn cookie_method_dispatch(
         }
         "with_max_age" => {
             want_arity(method, args, 1)?;
-            rebuilt(crate::cookie::Cookie {
-                max_age: Some(want_int(method, args, 0)?),
-                ..cookie.clone()
-            })
+            rebuilt(cookie.with_max_age(want_int(method, args, 0)?))
         }
         "with_http_only" => {
             want_arity(method, args, 1)?;
@@ -4113,6 +4443,63 @@ const REQUEST_DOCS: &[(&str, &str)] = &[
          header names.",
     ),
 ];
+const KEYRING_DOCS: &[(&str, &str)] = &[];
+const SESSION_DOCS: &[(&str, &str)] = &[
+    ("get", "The value stored under `name`, or none."),
+    (
+        "set",
+        "A copy with `name` set to `value`, marked dirty so `session.attach` re-emits the cookie.",
+    ),
+    (
+        "remove",
+        "A copy without `name`. Marked dirty only if something was actually removed — otherwise a \
+         speculative `remove` on every request would re-emit the cookie and keep extending its \
+         own expiry.",
+    ),
+    (
+        "clear",
+        "A copy with nothing in it — the logout. `session.attach` turns an emptied session into an \
+         expired cookie rather than a valid token for empty data, so the browser drops it at once.",
+    ),
+    (
+        "dirty",
+        "Whether this session changed since it was opened. `session.attach` consults it so an \
+         unchanged session costs no header.",
+    ),
+    ("data", "Every entry, as a map."),
+];
+const SESSION_DOCS_MODULE: &[(&str, &str)] = &[
+    (
+        "keyring",
+        "The signing secrets, newest first: signing uses the first, verification accepts any, so a \
+         key can be rotated without logging everyone out. Each must be at least 16 bytes — \
+         generate one with `crypto.random_bytes(32).to_hex()` and load it from the environment, \
+         never a literal in source.",
+    ),
+    (
+        "encode",
+        "Sign `data` into a token valid for `max_age` seconds. Errors past the 4096-byte cookie \
+         limit rather than emitting one a browser would silently drop.",
+    ),
+    (
+        "decode",
+        "Verify and decode a token, or none. A bad signature, an expired token, and a malformed \
+         one are all none: a caller has one correct response to all three, and distinguishing them \
+         would tell an attacker which guess was closer.",
+    ),
+    (
+        "open",
+        "Read the session off a request. Never fails — an absent, forged, or expired cookie all \
+         give an empty session.",
+    ),
+    (
+        "attach",
+        "Write the session back to a response, but only if it changed. `secure` restricts the \
+         cookie to https and has no default on purpose: `true` in production, `false` only for a \
+         local plain-http server. Both wrong answers fail silently, so the choice is stated out \
+         loud at the call.",
+    ),
+];
 const COOKIE_DOCS: &[(&str, &str)] = &[
     ("name", "The cookie's name."),
     ("value", "The cookie's value."),
@@ -5195,6 +5582,22 @@ const HTTP_MODULES: &[ExtModule] = &[
         // for the module→ring map the footprint scan reads.
         ring: Some("ring-http-client"),
         docs: HTTP_CLIENT_DOCS,
+        ..ExtModule::DEFAULTS
+    },
+    ExtModule {
+        // Signed-cookie sessions (session arc S2/S3). Registered in this unit rather than its own
+        // because `open`/`attach` name `Request` and `Response`; the module is still `std.session`,
+        // since a session is a concept above HTTP and the codec half has no HTTP in it at all.
+        //
+        // No ring: `crypto` and `base64` are already linked, so there is no separable native
+        // payload to gate.
+        name: "session",
+        functions: SESSION_FNS,
+        dispatch: session_dispatch,
+        // `encode`/`decode` take and return `Map<string, string>`.
+        deep_marshal: true,
+        ring: None,
+        docs: SESSION_DOCS_MODULE,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
