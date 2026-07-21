@@ -91,7 +91,7 @@ pub struct LoweringSites<'a> {
     /// Calls whose labelled arguments bind out of written order: parameter position → written
     /// index. Applied in [`Lowerer::lower_args`], so the VM and the reference agree by
     /// construction rather than by each re-deriving the binding.
-    pub arg_orders: &'a HashMap<Span, Vec<usize>>,
+    pub arg_orders: &'a HashMap<Span, Vec<Option<usize>>>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::TypedModuleCall`].
     pub typed_module_call_sites: &'a HashMap<Span, noeta_ext_abi::TypeRecipe>,
     /// Call-site-typed extern-METHOD recipes (`resp.json::<T>`, http arc H8), baked into
@@ -177,7 +177,7 @@ impl LoweringSites<'static> {
         static SLOTS: OnceLock<HashMap<Span, u32>> = OnceLock::new();
         static COUNTS: OnceLock<HashMap<String, u32>> = OnceLock::new();
         static FN_VALUES: OnceLock<HashMap<Span, (String, u32)>> = OnceLock::new();
-        static ORDERS: OnceLock<HashMap<Span, Vec<usize>>> = OnceLock::new();
+        static ORDERS: OnceLock<HashMap<Span, Vec<Option<usize>>>> = OnceLock::new();
         LoweringSites {
             packed_list_sites: PACKED.get_or_init(HashMap::new),
             from_bytes_validated: SPANS.get_or_init(HashSet::new),
@@ -1757,7 +1757,7 @@ impl Lowerer<'_> {
                     // atoms — the receiver (the `json` module handle) is not a runtime value, so it is
                     // not lowered.
                     if self.sites.decode_typed_sites.contains(span) && name == "decode_typed" {
-                        let mut arg_atoms = self.lower_args(args, *span, out)?;
+                        let (mut arg_atoms, _supplied) = self.lower_args(args, *span, out)?;
                         let text = arg_atoms.pop().expect("decode_typed takes 2 args");
                         let name = arg_atoms.pop().expect("decode_typed takes 2 args");
                         return Ok(self.emit(
@@ -1787,18 +1787,19 @@ impl Lowerer<'_> {
                             },
                             *span,
                         );
-                        let arg_atoms = self.lower_args(args, *span, out)?;
+                        let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
                         return Ok(self.emit(
                             out,
                             Rvalue::Call {
                                 callee,
                                 args: arg_atoms,
+                                supplied,
                                 span: *span,
                             },
                             *span,
                         ));
                     }
-                    let arg_atoms = self.lower_args(args, *span, out)?;
+                    let (arg_atoms, _supplied) = self.lower_args(args, *span, out)?;
                     // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
                     // this call span in `width_sites`. Emit the width-carrying `WidthIntMethod` so both
                     // backends compute within the width via `int_method_width`, rather than the generic
@@ -1853,7 +1854,7 @@ impl Lowerer<'_> {
                     ))
                 } else {
                     let callee = self.lower_expr(callee, out)?;
-                    let mut arg_atoms = self.lower_args(args, *span, out)?;
+                    let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
                     // A call of a FORWARDING generic (F2b): prepend its hidden type-argument
                     // atoms, mirroring the callee's prepended hidden parameters.
                     self.prepend_hidden_args(&mut arg_atoms, span);
@@ -1862,6 +1863,7 @@ impl Lowerer<'_> {
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
+                            supplied,
                             span: *span,
                         },
                         *span,
@@ -1883,7 +1885,7 @@ impl Lowerer<'_> {
                     name: name.clone(),
                     span: *name_span,
                 };
-                let mut arg_atoms = self.lower_args(args, *span, out)?;
+                let (mut arg_atoms, supplied) = self.lower_args(args, *span, out)?;
                 // A call of a FORWARDING generic (F2b): prepend its hidden type-argument atoms.
                 self.prepend_hidden_args(&mut arg_atoms, span);
                 Ok(self.emit(
@@ -1891,6 +1893,13 @@ impl Lowerer<'_> {
                     Rvalue::Call {
                         callee,
                         args: arg_atoms,
+                        // Hidden type-argument atoms are prepended above, shifting every parameter
+                        // position, so a binding recorded for the surface call does not apply.
+                        supplied: if self.sites.hidden_arg_sites.contains_key(span) {
+                            None
+                        } else {
+                            supplied
+                        },
                         span: *span,
                     },
                     *span,
@@ -2189,7 +2198,7 @@ impl Lowerer<'_> {
                     unreachable!("guarded by the match arm");
                 };
                 let callee = self.lower_expr(callee, out)?;
-                let arg_atoms = self.lower_args(args, *span, out)?;
+                let (arg_atoms, _supplied) = self.lower_args(args, *span, out)?;
                 Ok(self.emit(
                     out,
                     Rvalue::SpawnIsolate {
@@ -2571,6 +2580,10 @@ impl Lowerer<'_> {
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
+                            // A pipeline prepends its left operand, so the parameter positions are
+                            // shifted by one and the checker's binding does not describe this list.
+                            // Labels through a pipeline are rejected at the call site instead.
+                            supplied: None,
                             span: *span,
                         },
                         *span,
@@ -2607,6 +2620,7 @@ impl Lowerer<'_> {
                     Rvalue::Call {
                         callee,
                         args: vec![left_atom],
+                        supplied: None,
                         span,
                     },
                     span,
@@ -2625,7 +2639,7 @@ impl Lowerer<'_> {
         args: &[noeta_ast::CallArg],
         call_span: Span,
         out: &mut Vec<Stmt>,
-    ) -> Result<Vec<Atom>, Unsupported> {
+    ) -> Result<(Vec<Atom>, Option<u64>), Unsupported> {
         // Arguments are evaluated in the order the author WROTE them — a call's side effects must
         // not be resequenced by how its parameters happen to be declared — and then permuted into
         // parameter order, using the binding the checker resolved.
@@ -2633,13 +2647,24 @@ impl Lowerer<'_> {
         for arg in noeta_ast::CallArg::values(args) {
             atoms.push(self.lower_expr(arg, out)?);
         }
-        if let Some(order) = self.sites.arg_orders.get(&call_span) {
-            atoms = order
-                .iter()
-                .filter_map(|&i| atoms.get(i).cloned())
-                .collect();
+        let Some(binding) = self.sites.arg_orders.get(&call_span) else {
+            return Ok((atoms, None));
+        };
+        // Permute into parameter order, and say which parameters were supplied. A skipped one
+        // contributes no atom — the callee fills its default, over its own upvalues, exactly as it
+        // does for an argument list that simply stopped early.
+        let permuted: Vec<Atom> = binding
+            .iter()
+            .flatten()
+            .filter_map(|&i| atoms.get(i).cloned())
+            .collect();
+        let mut mask: u64 = 0;
+        for (p, b) in binding.iter().enumerate() {
+            if b.is_some() && p < 64 {
+                mask |= 1 << p;
+            }
         }
-        Ok(atoms)
+        Ok((permuted, Some(mask)))
     }
 
     /// Lower `a && b` / `a || b` to a [`Stmt::Logical`] writing into a fresh temp, so the

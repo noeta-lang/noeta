@@ -218,6 +218,16 @@ pub enum Rvalue {
     Call {
         callee: Atom,
         args: Vec<Atom>,
+        /// Which parameters `args` supplies, when that is not simply the first `args.len()` of
+        /// them — bit `p` set means parameter `p` is supplied, and `args` holds the supplied
+        /// values in parameter order.
+        ///
+        /// `None` is the ordinary call: arguments fill parameters left to right and the callee
+        /// defaults any trailing remainder. `Some` arises from named arguments that skip a
+        /// defaulted parameter (`f(1, c: 9)`), which a count cannot express. The default is still
+        /// evaluated by the CALLEE over its own upvalues — the mask says which to run, and changes
+        /// nothing about where or when they run.
+        supplied: Option<u64>,
         span: Span,
     },
     /// A method/associated call: `receiver.name(args)`. Kept distinct from [`Rvalue::Call`]

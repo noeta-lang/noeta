@@ -1168,7 +1168,14 @@ impl Interpreter {
                 }
                 Ok(Value::Str(out))
             }
-            noeta_ir::Rvalue::Call { callee, args, span } => {
+            noeta_ir::Rvalue::Call {
+                callee,
+                args,
+                // Always `None` while a hole is rejected at check time: a pure reordering is
+                // already applied to `args` by lowering, so there is nothing left to say.
+                supplied: _,
+                span,
+            } => {
                 let callee = self.eval_ir_atom(callee, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
                 self.call(callee, values, *span)

@@ -3074,7 +3074,9 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::Call { callee, args, span } => self.lower_call(callee, args, dst, *span),
+            Rvalue::Call {
+                callee, args, span, ..
+            } => self.lower_call(callee, args, dst, *span),
             Rvalue::Method {
                 receiver,
                 name,

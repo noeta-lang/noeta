@@ -109,48 +109,75 @@ impl Checker {
     /// Doing this once, at the call boundary, is what keeps labels out of the rest of the checker:
     /// generic instantiation, closure finalization and arity checking all continue to see a plain
     /// positional call.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn order_arguments(
         &mut self,
         args: &[CallArg],
         param_names: &[String],
+        param_types: &[crate::Type],
+        required: usize,
         callee: &str,
         arg_types: &mut [crate::Type],
         span: Span,
         call_span: Span,
-    ) -> Option<Vec<CallArg>> {
+    ) -> Option<(Vec<CallArg>, Vec<crate::Type>)> {
         let binding = self.bind_arguments(args, param_names, callee)?;
 
-        // A supplied parameter after an omitted one would leave a *hole*: the callee fills
-        // defaults for a trailing suffix of its parameters, so there is no way to say "use the
-        // default for parameter 2 but here is parameter 3". Rejected precisely rather than
-        // mis-bound; supporting it is a change to where defaults are evaluated.
-        let supplied: Vec<bool> = binding.iter().map(Option::is_some).collect();
-        if let Some(hole) = supplied.iter().position(|s| !s)
-            && supplied[hole..].iter().any(|s| *s)
+        // A named argument that skips a defaulted parameter (`f(1, c: 9)`) leaves a *hole*. The
+        // chosen design is a **supplied mask** on the call — the callee still evaluates the
+        // default, over its own upvalues, and the mask tells its prologue which ones to run
+        // instead of inferring "the trailing remainder" from a count. `Rvalue::Call::supplied`
+        // carries it and lowering computes it; the two backends' prologues do not read it yet, so
+        // a hole is still diagnosed here rather than mis-bound.
+        let supplied_set: Vec<bool> = binding.iter().map(Option::is_some).collect();
+        if let Some(hole) = supplied_set.iter().position(|s| !s)
+            && supplied_set[hole..].iter().any(|s| *s)
         {
             self.error(
                 DiagnosticCode::InvalidArgument,
                 span,
                 format!(
-                    "`{callee}` would skip parameter `{}`, which named arguments cannot yet do",
+                    "`{callee}` would skip parameter `{}`, which is not supported yet",
                     param_names[hole]
                 ),
             )
-            .help("a default is filled by the callee for trailing parameters only — pass it explicitly");
+            .help("pass it explicitly for now — skipping a defaulted parameter needs the callee to be told which defaults to run");
+            return None;
+        }
+        // Every parameter without a default must be supplied — by position or by name. Reported
+        // here, where the *name* of the missing one is known, rather than as a bare arity count.
+        if let Some(p) = (0..required.min(binding.len())).find(|&p| binding[p].is_none()) {
+            self.error(
+                DiagnosticCode::InvalidArgument,
+                span,
+                format!("`{callee}` is missing a value for `{}`", param_names[p]),
+            );
             return None;
         }
 
+        // Compact to the SUPPLIED parameters, keeping arguments and their parameter types
+        // parallel — a skipped parameter must not shift the one after it onto the wrong type.
         let order: Vec<usize> = binding.iter().flatten().copied().collect();
-        let ordered: Vec<CallArg> = order.iter().map(|&i| args[i].clone()).collect();
+        let supplied_params: Vec<crate::Type> = binding
+            .iter()
+            .enumerate()
+            .filter_map(|(p, b)| b.map(|_| param_types[p].clone()))
+            .collect();
         let types: Vec<crate::Type> = order
             .iter()
             .map(|&i| arg_types.get(i).cloned().unwrap_or(crate::Type::Unknown))
             .collect();
         arg_types[..types.len()].clone_from_slice(&types);
-        // Only a genuine reordering needs recording; the identity is what lowering already does.
-        if order.iter().enumerate().any(|(p, &i)| p != i) {
-            self.sites.arg_orders.insert(call_span, order);
+        // A call whose parameters are supplied in order, with no gaps, is what lowering already
+        // emits — recording it would cost a map entry to say "unchanged".
+        let already_positional = binding
+            .iter()
+            .enumerate()
+            .all(|(p, b)| *b == Some(p) || (b.is_none() && p >= order.len()));
+        if !already_positional {
+            self.sites.arg_orders.insert(call_span, binding);
         }
-        Some(ordered)
+        let ordered: Vec<CallArg> = order.iter().map(|&i| args[i].clone()).collect();
+        Some((ordered, supplied_params))
     }
 }

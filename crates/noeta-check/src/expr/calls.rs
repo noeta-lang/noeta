@@ -624,17 +624,21 @@ impl Checker {
                     // list into parameter order ONCE, here — everything downstream (generic
                     // instantiation, closure finalization, arity and assignability) then sees a
                     // plain positional call and needs no notion of labels at all.
-                    let permuted;
+                    let (permuted, supplied_params);
                     let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
-                        let names = sig.param_names.clone();
-                        match self.order_arguments(arg_exprs, &names, name, args, span, call_span) {
-                            Some(v) => {
-                                permuted = v;
+                        let (names, types) = (sig.param_names.clone(), sig.params.clone());
+                        match self.order_arguments(
+                            arg_exprs, &names, &types, required, name, args, span, call_span,
+                        ) {
+                            Some((a, p)) => {
+                                permuted = a;
+                                supplied_params = Some(p);
                                 &permuted[..]
                             }
                             None => return self.symbols.functions[name].ret.clone(),
                         }
                     } else {
+                        supplied_params = None;
                         arg_exprs
                     };
                     let sig = &self.symbols.functions[name];
@@ -654,8 +658,17 @@ impl Checker {
                             env,
                         );
                     }
-                    let params = sig.params.clone();
                     let ret = sig.ret.clone();
+                    // With labels the supplied parameters are already compacted parallel to the
+                    // arguments, and every required one is present — so each supplied value is
+                    // checked against ITS parameter, not the one that happens to sit at its index.
+                    let (params, required) = match supplied_params {
+                        Some(p) => {
+                            let n = p.len();
+                            (p, n)
+                        }
+                        None => (sig.params.clone(), required),
+                    };
                     self.finalize_closure_args(&params, args, arg_exprs, env);
                     self.check_args(&params, required, args, arg_exprs, span, name);
                     return ret;
