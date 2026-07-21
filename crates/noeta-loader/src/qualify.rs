@@ -424,7 +424,9 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            bound_in_expr(recv, names);
+            if let Some(recv) = recv {
+                bound_in_expr(recv, names);
+            }
             bound_in_expr(name, names);
             bound_in_expr(args, names);
         }
@@ -892,7 +894,9 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            q_expr(recv, visit);
+            if let Some(recv) = recv {
+                q_expr(recv, visit);
+            }
             q_expr(name, visit);
             q_expr(args, visit);
         }

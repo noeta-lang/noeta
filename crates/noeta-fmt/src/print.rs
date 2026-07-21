@@ -2247,15 +2247,21 @@ impl Printer<'_> {
             Expr::RolesOf { ty: None, .. } => Doc::text("roles_of()"),
             Expr::Invoke {
                 recv, name, args, ..
-            } => Doc::concat([
-                Doc::text("invoke("),
-                self.expr(recv)?,
-                Doc::text(", "),
-                self.expr(name)?,
-                Doc::text(", "),
-                self.expr(args)?,
-                Doc::text(")"),
-            ]),
+            } => {
+                // The receiver, when there is one, prints as a leading operand; the free-fn form
+                // prints the two it has. Formatting never changes which form was written — the
+                // arity IS the surface distinction.
+                let mut parts = vec![Doc::text("invoke(")];
+                if let Some(recv) = recv {
+                    parts.push(self.expr(recv)?);
+                    parts.push(Doc::text(", "));
+                }
+                parts.push(self.expr(name)?);
+                parts.push(Doc::text(", "));
+                parts.push(self.expr(args)?);
+                parts.push(Doc::text(")"));
+                Doc::concat(parts)
+            }
             Expr::FieldSet {
                 receiver,
                 field,

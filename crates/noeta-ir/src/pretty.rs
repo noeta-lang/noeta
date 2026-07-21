@@ -410,8 +410,17 @@ impl Printer<'_> {
                 format!("decode_typed({}, {})", atom(name), atom(text))
             }
             Rvalue::Invoke {
-                recv, name, args, ..
+                recv: Some(recv),
+                name,
+                args,
+                ..
             } => format!("invoke({}, {}, {})", atom(recv), atom(name), atom(args)),
+            Rvalue::Invoke {
+                recv: None,
+                name,
+                args,
+                ..
+            } => format!("invoke({}, {})", atom(name), atom(args)),
             Rvalue::TypedModuleCall {
                 module, func, args, ..
             } => {

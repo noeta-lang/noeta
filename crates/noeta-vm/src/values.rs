@@ -463,6 +463,30 @@ pub(crate) fn make_attr_enum(enum_name: &str, variant: &str, data: Vec<Value>) -
     Value::enum_value(shape, data)
 }
 
+/// The message for a free-function `invoke(name, args)` that resolved to nothing callable, worded
+/// identically to the tree-walker's `free_fn_miss_message` (so the differential matches).
+///
+/// **One message for every kind of miss** — no such global, an unbound one, or one holding a
+/// non-closure — and that uniformity is load-bearing rather than lazy. The two backends index the
+/// top-level namespace with different structures: the tree-walker's global scope holds types and
+/// functions together, while this global slot table holds only value bindings (a type name is not a
+/// global here at all). Reporting *why* the lookup failed would therefore report different things
+/// in each backend for the same program. What both can always agree on is that no top-level
+/// function of this name was found.
+///
+/// The qualified-name hint needs no namespace knowledge — it is a property of the string — so it
+/// stays identical in both backends by construction.
+pub(crate) fn free_fn_miss_message(name: &str) -> String {
+    if name.contains('.') {
+        format!(
+            "no top-level function `{name}`; a qualified name dispatches through the three-argument \
+             `invoke(recv, name, args)`"
+        )
+    } else {
+        format!("no top-level function `{name}`")
+    }
+}
+
 /// The arity-mismatch message, worded identically to the tree-walker's (so the differential
 /// matches). `kind` is `"function"` or `"method"`; the range form appears only when some
 /// parameters are defaulted (`required < total`).

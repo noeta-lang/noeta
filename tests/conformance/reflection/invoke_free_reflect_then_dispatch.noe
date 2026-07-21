@@ -1,0 +1,97 @@
+// The motivating loop: reflect a free function's signature, build an argument list from it, then
+// call it — all from one name, with no receiver and no registered type anywhere.
+//
+// This is the whole point of the two-argument `invoke`. `params_of(name)` and `invoke(name, args)`
+// take the SAME string in the SAME namespace, so a framework can go from "here is a handler name"
+// to "here is its return value" without the handler having to be a method on a struct that exists
+// only to give reflection something to hold. Before, the two halves lived in different namespaces:
+// you could read `render`'s parameters and then had no way to call it.
+//
+// The bridge below is deliberately the realistic one — driving the call off `ParamInfo.name`,
+// `.type`, and `.optional` rather than a hardcoded list — because that is what a router or a CLI
+// binder actually does: required parameters must be sourced, optional ones may be dropped, and the
+// argument list is built to the arity the signature reports.
+// expect: stdout "render/params: title:Type.String message:Type.String repeat:Type.Int"
+// expect: stdout "render/required=2"
+// expect: stdout "full: [Report] all good x2"
+// expect: stdout "minimal: [Report] all good x1"
+// expect: stdout "audit: format=miss tally=3"
+// expect: exit 0
+
+fn render(title: string, message: string, repeat: int = 1): string {
+    return "[${title}] ${message} x${repeat}";
+}
+
+fn tally(a: int, b: int): int { return a + b }
+
+// A stand-in for whatever a real binder reads its values out of — a request, an environment, a
+// config table. Keyed by parameter name, which is exactly what reflection hands back.
+inputs = {
+    "title": "Report",
+    "message": "all good",
+    "repeat": "2",
+};
+
+// The signature, as reflection reports it.
+names = params_of("render").map(fn(p) => "${p.name}:${p.type}").join(" ");
+echo "render/params: ${names}";
+
+required = params_of("render").filter(fn(p) => !p.optional).len();
+echo "render/required=${required}";
+
+// Build the argument list FROM the signature: walk the declared parameters in order, look each name
+// up, and convert by the declared type. `repeat` reflects as `Type.Int`, so its string from `inputs`
+// becomes an int here rather than being passed through as text.
+fn bind(target: string, values: Map<string, string>): List<dyn> {
+    mut args: List<dyn> = [];
+    for p in params_of(target) {
+        match values.get(p.name) {
+            some(raw) => {
+                args = match p.type {
+                    Type.Int => args ~ [raw.to_int() ?? 0],
+                    _ => args ~ [raw],
+                };
+            },
+            none => {
+                // Nothing to supply. An optional parameter is simply left off — filling it is the
+                // callee's business — while a required one has no legal call, so stop building and
+                // let the arity check report it as an `Err`.
+                if !p.optional {
+                    return args;
+                }
+            },
+        }
+    }
+    return args;
+}
+
+// Everything present: the optional `repeat` is bound from the inputs.
+echo match invoke("render", bind("render", inputs)) {
+    Ok(v) => "full: ${v}",
+    Err(e) => "err=${e}",
+};
+
+// The optional parameter absent: the built list is SHORTER than the parameter list, and the callee
+// fills `repeat` from its own default. Reflection said the parameter was optional; the reflective
+// call is allowed to act on that.
+lean = { "title": "Report", "message": "all good" };
+echo match invoke("render", bind("render", lean)) {
+    Ok(v) => "minimal: ${v}",
+    Err(e) => "err=${e}",
+};
+
+// The loop closed over more than one target, driven entirely by data: names in a list, each
+// dispatched without either one appearing in call position anywhere.
+mut report: List<string> = [];
+for target in ["format", "tally"] {
+    // `format` is not a function at all — the miss is a value the loop handles, not an abort that
+    // ends the program. That is what makes reflective dispatch safe to run over names that came
+    // from outside the program.
+    outcome = match invoke(target, [1, 2]) {
+        Ok(v) => "${target}=${v}",
+        Err(_) => "${target}=miss",
+    };
+    report = report ~ [outcome];
+}
+audit = report.join(" ");
+echo "audit: ${audit}";

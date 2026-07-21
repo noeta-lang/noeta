@@ -3587,7 +3587,7 @@ impl<'m> FnCompiler<'m> {
                 name,
                 args,
                 span,
-            } => self.lower_invoke(recv, name, args, dst, *span),
+            } => self.lower_invoke(recv.as_ref(), name, args, dst, *span),
             Rvalue::TypedModuleCall {
                 module,
                 func,
@@ -4429,28 +4429,29 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `invoke(recv, name, args)` — fallible by-name dispatch. A bare type-name receiver becomes a
-    /// first-class type handle; any other receiver compiles normally. Both flow through the
-    /// runtime-dispatched `Op::Invoke`.
+    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch. A bare
+    /// type-name receiver becomes a first-class type handle; any other receiver compiles normally;
+    /// the free-fn form emits no receiver register at all. All flow through the runtime-dispatched
+    /// `Op::Invoke`.
     fn lower_invoke(
         &mut self,
-        recv: &Atom,
+        recv: Option<&Atom>,
         name: &Atom,
         args: &Atom,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let recv_reg = if let Atom::Var {
-            name: type_name, ..
-        } = recv
-            && self.module.types.contains_key(type_name)
-        {
-            let r = self.alloc_reg();
-            let name = self.module.intern_name(type_name);
-            self.code.push(Op::TypeValue { dst: r, name });
-            r
-        } else {
-            self.atom_reg(recv)?
+        let recv_reg = match recv {
+            Some(Atom::Var {
+                name: type_name, ..
+            }) if self.module.types.contains_key(type_name) => {
+                let r = self.alloc_reg();
+                let name = self.module.intern_name(type_name);
+                self.code.push(Op::TypeValue { dst: r, name });
+                Some(r)
+            }
+            Some(recv) => Some(self.atom_reg(recv)?),
+            None => None,
         };
         let name_reg = self.atom_reg(name)?;
         let args_reg = self.atom_reg(args)?;

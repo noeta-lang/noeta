@@ -2338,23 +2338,47 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // `invoke(recv, name, args)` — the fallible by-name invocation primitive. A keyword + three
-        // parenthesized, comma-separated operands (receiver, method-name string, argument list),
-        // yielding `Result<dyn, dyn>`.
+        // `invoke(...)` — the fallible by-name invocation primitive, in two arities:
+        //   `invoke(recv, name, args)` dispatches a method on a value or an associated function on a
+        //   bare type name; `invoke(name, args)` dispatches a **top-level function**. Both yield
+        //   `Result<dyn, dyn>`.
+        //
+        // The two forms are told apart by comma count alone, which is unambiguous because `invoke`
+        // is keyword-led and fixed-arity: there is no operand that could be either a receiver or a
+        // name depending on context. Parsed as one bounded operand list rather than
+        // `choice((three, two))` so the arity decision is a `len()` on already-parsed operands — no
+        // backtracking, and a 1- or 4-operand `invoke` fails at the operand list with the count in
+        // hand rather than as a mystery failure of the last alternative.
         let invoke = just(T::InvokeKw)
             .ignore_then(
                 sub.clone()
-                    .then_ignore(just(T::Comma))
-                    .then(sub.clone())
-                    .then_ignore(just(T::Comma))
-                    .then(sub.clone())
+                    .separated_by(just(T::Comma))
+                    .at_least(2)
+                    .at_most(3)
+                    .collect::<Vec<_>>()
                     .delimited_by(just(T::LParen), just(T::RParen)),
             )
-            .map_with(move |((recv, name), args), e| Expr::Invoke {
-                recv: Box::new(recv),
-                name: Box::new(name),
-                args: Box::new(args),
-                span: ctx.to_span(e.span()),
+            .map_with(move |operands, e| {
+                let span = ctx.to_span(e.span());
+                let mut it = operands.into_iter();
+                // Three operands: the leading one is the receiver. Two: none — the name resolves in
+                // the top-level function namespace.
+                let (recv, name, args) = if it.len() == 3 {
+                    let recv = it.next().expect("three operands");
+                    let name = it.next().expect("three operands");
+                    let args = it.next().expect("three operands");
+                    (Some(Box::new(recv)), name, args)
+                } else {
+                    let name = it.next().expect("two operands");
+                    let args = it.next().expect("two operands");
+                    (None, name, args)
+                };
+                Expr::Invoke {
+                    recv,
+                    name: Box::new(name),
+                    args: Box::new(args),
+                    span,
+                }
             });
 
         let atom = choice((

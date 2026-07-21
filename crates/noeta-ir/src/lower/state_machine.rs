@@ -1144,7 +1144,9 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            hoist_in_expr(recv, pre, ctr);
+            if let Some(recv) = recv {
+                hoist_in_expr(recv, pre, ctr);
+            }
             hoist_in_expr(name, pre, ctr);
             hoist_in_expr(args, pre, ctr);
         }

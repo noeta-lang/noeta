@@ -2746,14 +2746,15 @@ impl Interpreter {
         }
     }
 
-    /// `invoke(recv, name, args)` — fallible by-name dispatch (P2.6). Reuses the same name-keyed
-    /// method tables as `call_method`, but **pre-checks** name resolution and arity so a miss is a
-    /// runtime `Result.Err` rather than a recorded diagnostic. A panic *inside* the invoked body
-    /// still aborts (the `?` propagation below), so only the by-name *resolution* is caught. The
-    /// VM's `Op::Invoke` mirrors this exactly, building identical `Ok`/`Err` values.
+    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch (P2.6). Reuses
+    /// the same name-keyed method tables as `call_method` (or, receiver-less, the global scope), but
+    /// **pre-checks** name resolution and arity so a miss is a runtime `Result.Err` rather than a
+    /// recorded diagnostic. A panic *inside* the invoked body still aborts (the `?` propagation
+    /// below), so only the by-name *resolution* is caught. The VM's `Op::Invoke` mirrors this
+    /// exactly, building identical `Ok`/`Err` values.
     fn invoke_dynamic(
         &mut self,
-        receiver: Value,
+        receiver: Option<Value>,
         name_val: Value,
         args_val: Value,
         span: Span,
@@ -2771,6 +2772,28 @@ impl Interpreter {
             )));
         };
         let args: Vec<Value> = (*items.to_rc_vec()).clone();
+        // No receiver: the free-function form. `method` names a **top-level function** — the same
+        // string `params_of` takes for a free fn — so resolution is a lookup in the global scope
+        // and nowhere else. Deliberately NOT `self.scope`: the VM reads a global slot, so consulting
+        // the local chain here would let `invoke("g", …)` find a local `g` in one backend and miss
+        // it in the other. Calling through `call_closure` also means the callee gets its ordinary
+        // sealed child scope, exactly as a direct `g(...)` would.
+        let Some(receiver) = receiver else {
+            let Some(Value::Function(closure)) = self.globals.lookup(method) else {
+                return Ok(invoke_err(free_fn_miss_message(method)));
+            };
+            let required = required_count(&closure.defaults);
+            if args.len() < required || args.len() > closure.params.len() {
+                return Ok(invoke_err(arity_message(
+                    "function",
+                    required,
+                    closure.params.len(),
+                    args.len(),
+                )));
+            }
+            let result = self.call_closure(&closure, args, span)?;
+            return Ok(builtin_enum("Result", "Ok", vec![result]));
+        };
         // A reflection `Type` value (e.g. a stored attribute type-ref) dispatches like the type
         // handle it names: resolve it to the type and fall through to the `Value::Type` arm.
         let receiver = match reflection_type_name(&receiver) {
@@ -5755,6 +5778,30 @@ fn arity_message(kind: &str, required: usize, total: usize, supplied: usize) -> 
         format!(
             "this {kind} takes between {required} and {total} argument(s) but {supplied} were supplied"
         )
+    }
+}
+
+/// The message for a free-function `invoke(name, args)` that resolved to nothing callable, worded
+/// identically to the VM's `free_fn_miss_message` (so the differential matches).
+///
+/// **One message for every kind of miss** — unbound, bound to a non-function, or naming a type — and
+/// that uniformity is load-bearing rather than lazy. The two backends index the top-level namespace
+/// with different structures: the tree-walker's global scope holds types and functions together,
+/// while the VM's global slot table holds only value bindings (a type name is not a global there at
+/// all). Reporting *why* the lookup failed would therefore report different things in each backend
+/// for the same program. What both can always agree on is that no top-level function of this name
+/// was found.
+///
+/// The qualified-name hint needs no namespace knowledge — it is a property of the string — so it
+/// stays identical in both backends by construction.
+fn free_fn_miss_message(name: &str) -> String {
+    if name.contains('.') {
+        format!(
+            "no top-level function `{name}`; a qualified name dispatches through the three-argument \
+             `invoke(recv, name, args)`"
+        )
+    } else {
+        format!("no top-level function `{name}`")
     }
 }
 

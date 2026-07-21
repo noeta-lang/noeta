@@ -1635,12 +1635,24 @@ pub enum Expr {
     /// keying the attribute manifest. Built from the same compiler-built parameter index both
     /// backends read; surfaces a controller method's declared parameter types for dependency injection.
     ParamsOf { target: Box<Expr>, span: Span },
-    /// The reflection invocation `invoke(recv, name, args)` — fallible by-name dispatch. `recv` is a
-    /// value (→ instance method) or a bare type name (→ associated function); `name` is a runtime
-    /// `string`; `args` is a runtime `List`. Evaluates to `Result<dyn, dyn>` — `Ok(retval)` on a
-    /// hit, `Err(msg)` when the name is unknown or the arity is wrong (P2.6).
+    /// The reflection invocation `invoke(recv, name, args)` / `invoke(name, args)` — fallible
+    /// by-name dispatch. `name` is a runtime `string`; `args` is a runtime `List`. Evaluates to
+    /// `Result<dyn, dyn>` — `Ok(retval)` on a hit, `Err(msg)` when the name is unknown or the arity
+    /// is wrong (P2.6).
+    ///
+    /// `recv` distinguishes the two surface forms, and it is an `Option` rather than a sentinel
+    /// receiver expression *deliberately*: the two forms resolve `name` in **different namespaces**
+    /// (a type's method table vs. the top-level function namespace), so every reader of this node
+    /// has to decide which one it is. A synthesized "unit receiver" would let a reader fall through
+    /// to the method path and silently look up a free function among a type's methods.
+    ///
+    /// - `Some(recv)` — the three-argument form. `recv` is a value (→ instance method) or a bare
+    ///   type name (→ associated function).
+    /// - `None` — the two-argument form `invoke(name, args)`. `name` names a **top-level function**,
+    ///   the same string that keys [`Expr::ParamsOf`] for a free fn, so reflecting a signature and
+    ///   then calling it round-trips on one name.
     Invoke {
-        recv: Box<Expr>,
+        recv: Option<Box<Expr>>,
         name: Box<Expr>,
         args: Box<Expr>,
         span: Span,
@@ -2069,7 +2081,11 @@ impl Expr {
                 name: n,
                 args,
                 ..
-            } => recv.mentions(name) || n.mentions(name) || args.mentions(name),
+            } => {
+                recv.as_ref().is_some_and(|r| r.mentions(name))
+                    || n.mentions(name)
+                    || args.mentions(name)
+            }
             Expr::TypedModuleCall { recv, args, .. } => recv.mentions(name) || any_args(args),
             // The callee is a top-level fn name, never a local binding, so only the arguments count.
             Expr::TypedCall { args, .. } => any_args(args),
@@ -2162,7 +2178,11 @@ impl Expr {
             Expr::Channel { capacity, .. } => capacity.has_await(),
             Expr::Invoke {
                 recv, name, args, ..
-            } => recv.has_await() || name.has_await() || args.has_await(),
+            } => {
+                recv.as_ref().is_some_and(|r| r.has_await())
+                    || name.has_await()
+                    || args.has_await()
+            }
             Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any_args(args),
             Expr::TypedCall { args, .. } => any_args(args),
             Expr::TypedMethodCall { recv, args, .. } => recv.has_await() || any_args(args),
