@@ -1,0 +1,81 @@
+// A match arm whose block body is a SINGLE call statement: `1 => { note("hi") }`. This used to
+// die on `[E0003] a map entry without ": value" must be a bare field name` — the map grammar
+// accepted `{ f(x) }` as a one-entry map and only *then* complained, so the braces were already
+// consumed and the statement-block alternative was never tried. A valueless map entry is now
+// restricted to a bare identifier IN THE GRAMMAR, so `{ f(x) }` is not a map at all and falls
+// through to the block. Map literals, `{ name }` shorthand and `{}` are untouched.
+// expect: stdout "hi"
+// expect: stdout "bye"
+// expect: stdout "call"
+// expect: stdout "method"
+// expect: stdout "inner"
+// expect: stdout "closure"
+// expect: stdout "1"
+// expect: stdout "0"
+// expect: stdout "localhost"
+// expect: stdout "7"
+// expect: exit 0
+fn note(s: string): void {
+    echo s
+}
+
+// The wart itself: one call, nothing else, in every arm.
+outcome = 1
+match outcome {
+    1 => { note("hi") },
+    _ => { note("nope") },
+}
+match 2 {
+    1 => { note("nope") },
+    _ => { note("bye") },
+}
+
+// A bare-fn call and a METHOD call are both impossible as map entries, so both are blocks.
+match 1 {
+    1 => { note("call") },
+    _ => {},
+}
+class Sink {
+    pub mut got: string = ""
+    fn take(s: string): void {
+        self.got = s
+    }
+}
+sink = Sink {}
+match 1 {
+    1 => { sink.take("method") },
+    _ => {},
+}
+echo sink.got
+
+// Nested: a single-call block arm inside a single-statement block arm.
+match 1 {
+    1 => {
+        match 2 {
+            2 => { note("inner") },
+            _ => {},
+        }
+    },
+    _ => {},
+}
+
+// A closure body is the same shape, resolved by the same expression-first rule.
+c = fn(): void { note("closure") }
+c()
+
+// Back-compat, all still expressions: explicit entries, `{ name }` shorthand, and the empty map.
+fn tbl(n: int): Map<string, int> {
+    return match n {
+        1 => {"a": 1},
+        _ => {},
+    }
+}
+echo tbl(1)["a"]
+echo tbl(9).len()
+
+host = "localhost"
+port = 7
+cfg = {host, "port": "x"}
+echo cfg["host"]
+nested = {"in": {"n": port}}
+echo nested["in"]["n"]

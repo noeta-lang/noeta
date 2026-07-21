@@ -1874,7 +1874,10 @@ where
         // `match scrutinee { pattern => body, ... }`. An arm body is a value EXPRESSION first —
         // so `=> {}` / `=> {"k": v}` keep their map/set-literal meaning — and only a brace body
         // that is not an expression parses as a statement BLOCK (aether F1: side-effectful arms,
-        // value `unit`; `return` inside returns from the enclosing function).
+        // value `unit`; `return` inside returns from the enclosing function). The fallback only
+        // fires when the expression parse FAILS, so it depends on every brace-taking expression
+        // refusing the braces it does not mean — see the map-entry grammar below, which is why
+        // `=> { f(x) }` is a block rather than a one-entry map that errors after the fact.
         let arm_body = sub
             .clone()
             .map(|e| noeta_ast::ClosureBody::Expr(Box::new(e)))
@@ -1918,12 +1921,27 @@ where
             .map_with(move |elems, e| desugar_list_literal(elems, ctx.to_span(e.span())));
         // A map entry is `key: value`, or **shorthand `name`** ≡ `"name": name` — punning a bare
         // identifier to the string key of the same name with the in-scope variable as its value
-        // (`{ host, port }`). The colon form is unchanged; an omitted value is the shorthand, valid
-        // only when the key is a bare identifier (anything else without a value is a parse error,
-        // reported when the entries are assembled).
-        let entry = expr
+        // (`{ host, port }`). The colon form is unchanged; an omitted value is the shorthand.
+        //
+        // The shorthand is restricted to a bare identifier **in the grammar**, not by a diagnostic
+        // raised after the fact. That distinction is load-bearing wherever `{ … }` is ambiguous
+        // between a map literal and a statement block (a match arm's body, aether F1): those sites
+        // try the value EXPRESSION first and fall back to the block only when the expression parse
+        // *fails*. A rule that accepts `{ f(x) }` as a one-entry map and then rejects it with an
+        // error has already consumed the braces — the block alternative is never reached, and
+        // `1 => { log.info("hi") }` dies on a map-shorthand complaint. So the map grammar must
+        // accept exactly the maps: an entry with no `: value` is a map entry only if it is a bare
+        // name, and anything else under the braces means these braces were never a map.
+        let entry_kv = expr
             .clone()
-            .then(just(T::Colon).ignore_then(sub.clone()).or_not());
+            .then(just(T::Colon).ignore_then(sub.clone()))
+            .map(|(key, value)| (key, Some(value)));
+        let entry_shorthand = id
+            .clone()
+            .map(|(name, span)| (Expr::Ident { name, span }, None));
+        // The `key: value` form is tried first: it commits only on seeing the colon, so a bare
+        // `{ host, port }` backtracks cleanly into the shorthand.
+        let entry = entry_kv.or(entry_shorthand);
         let map = entry
             .separated_by(just(T::Comma))
             .allow_trailing()
@@ -1934,20 +1952,16 @@ where
                     .into_iter()
                     .map(|(key, value)| match value {
                         Some(value) => (key, value),
-                        // Shorthand `{ name }`: the key must be a bare identifier; desugar it to its
-                        // string key plus a reference to the same-named variable.
+                        // Shorthand `{ name }`: the grammar guarantees the key is a bare
+                        // identifier, so desugar it to its string key plus a reference to the
+                        // same-named variable.
                         None => match key {
                             Expr::Ident { name, span } => {
                                 (Expr::Str { value: name.clone(), span }, Expr::Ident { name, span })
                             }
-                            other => {
-                                ctx.diags.borrow_mut().push(Diagnostic::error(
-                                    DiagnosticCode::UnexpectedToken,
-                                    other.span(),
-                                    "a map entry without `: value` must be a bare field name (shorthand)",
-                                ));
-                                (other.clone(), other)
-                            }
+                            other => unreachable!(
+                                "map shorthand is grammatically a bare identifier, got {other:?}"
+                            ),
                         },
                     })
                     .collect();
