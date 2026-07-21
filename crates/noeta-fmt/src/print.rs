@@ -12,8 +12,8 @@
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
     FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, MethodDirective, ObjectLit,
-    Param, Pattern, Program, RoleTag, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeParam,
-    TypeRef, UseName, VariantDecl,
+    Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeParam, TypeRef,
+    UseName, VariantDecl,
 };
 use std::cell::Cell;
 
@@ -1052,15 +1052,7 @@ impl Printer<'_> {
     }
 
     fn struct_decl(&self, d: &StructDecl) -> Result<Doc, FmtError> {
-        let mut parts = self.decl_directives(
-            &d.decorators.derives,
-            &d.decorators.attrs,
-            d.decorators.attribute.as_deref(),
-            d.decorators.role.as_deref(),
-            d.decorators.semantic.is_some(),
-            d.decorators.packed,
-            d.decorators.validated.is_some(),
-        )?;
+        let mut parts = self.decl_directives(&d.decorators)?;
         if d.is_public {
             parts.push(Doc::text("pub "));
         }
@@ -1073,15 +1065,7 @@ impl Printer<'_> {
     }
 
     fn class_decl(&self, d: &ClassDecl) -> Result<Doc, FmtError> {
-        let mut parts = self.decl_directives(
-            &d.decorators.derives,
-            &d.decorators.attrs,
-            d.decorators.attribute.as_deref(),
-            d.decorators.role.as_deref(),
-            d.decorators.semantic.is_some(),
-            d.decorators.packed,
-            d.decorators.validated.is_some(),
-        )?;
+        let mut parts = self.decl_directives(&d.decorators)?;
         if d.is_public {
             parts.push(Doc::text("pub "));
         }
@@ -1247,15 +1231,7 @@ impl Printer<'_> {
         // Render leading decorators (UT6) so a `#[...]`-attributed trait round-trips; a valid trait
         // carries only data attributes, but fmt must preserve whatever parsed (even a to-be-rejected
         // `@…`) so re-parsing is identical.
-        let mut parts = self.decl_directives(
-            &d.decorators.derives,
-            &d.decorators.attrs,
-            d.decorators.attribute.as_deref(),
-            d.decorators.role.as_deref(),
-            d.decorators.semantic.is_some(),
-            d.decorators.packed,
-            false,
-        )?;
+        let mut parts = self.decl_directives(&d.decorators)?;
         if d.is_public {
             parts.push(Doc::text("pub "));
         }
@@ -1308,15 +1284,7 @@ impl Printer<'_> {
     }
 
     fn enum_decl(&self, d: &EnumDecl) -> Result<Doc, FmtError> {
-        let mut parts = self.decl_directives(
-            &d.decorators.derives,
-            &d.decorators.attrs,
-            None,
-            None,
-            d.decorators.semantic.is_some(),
-            d.decorators.packed,
-            false,
-        )?;
+        let mut parts = self.decl_directives(&d.decorators)?;
         if d.is_public {
             parts.push(Doc::text("pub "));
         }
@@ -1396,65 +1364,86 @@ impl Printer<'_> {
     /// The leading directive lines of a type declaration, each on its own line: `@derive(...)`,
     /// `@attribute(...)`, `@role(...)`, `@semantic`, `@packed`, then `#[...]` attributes.
     #[allow(clippy::too_many_arguments)]
-    fn decl_directives(
-        &self,
-        derives: &[DeriveSpec],
-        attrs: &[Attribute],
-        attribute: Option<&[(String, Span)]>,
-        role: Option<&[RoleTag]>,
-        semantic: bool,
-        packed: Option<noeta_ast::PackedDirective>,
-        validated: bool,
-    ) -> Result<Vec<Doc>, FmtError> {
+    /// Emit a declaration's decorators, one per line, in `BuiltinDirective::ALL` order.
+    ///
+    /// Driven off the enum rather than a hand-written sequence, for the same reason the pretty
+    /// printer's gate is: a new directive must be handled here or this stops compiling. That
+    /// mattered — the emitter and the gate had already drifted, this one emitting `@semantic`
+    /// before `@role` while the gate rendered `@role` first. Nothing caught it, because the
+    /// pretty printer canonicalizes directive order on both sides of the comparison.
+    ///
+    /// Takes the whole [`Decorators`] rather than seven positional arguments; every call site was
+    /// already spreading exactly that struct.
+    fn decl_directives(&self, d: &noeta_ast::Decorators) -> Result<Vec<Doc>, FmtError> {
         let mut lines: Vec<Doc> = Vec::new();
-        if !derives.is_empty() {
-            let specs = derives.iter().map(|d| self.derive_spec(d));
-            let specs: Result<Vec<_>, _> = specs.collect();
-            lines.push(Doc::concat([
-                Doc::text("@derive("),
-                Doc::join(specs?, Doc::text(", ")),
-                Doc::text(")"),
-            ]));
-        }
-        if let Some(kinds) = attribute {
-            if kinds.is_empty() {
-                lines.push(Doc::text("@attribute"));
-            } else {
-                let names = kinds.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
-                lines.push(Doc::text(format!("@attribute({})", names.join(", "))));
+        for directive in noeta_ast::BuiltinDirective::ALL {
+            match directive {
+                noeta_ast::BuiltinDirective::Derive => {
+                    if !d.derives.is_empty() {
+                        let specs: Result<Vec<_>, _> =
+                            d.derives.iter().map(|s| self.derive_spec(s)).collect();
+                        lines.push(Doc::concat([
+                            Doc::text("@derive("),
+                            Doc::join(specs?, Doc::text(", ")),
+                            Doc::text(")"),
+                        ]));
+                    }
+                }
+                noeta_ast::BuiltinDirective::Attribute => {
+                    if let Some(kinds) = d.attribute.as_deref() {
+                        if kinds.is_empty() {
+                            lines.push(Doc::text("@attribute"));
+                        } else {
+                            let names = kinds.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+                            lines.push(Doc::text(format!("@attribute({})", names.join(", "))));
+                        }
+                    }
+                }
+                noeta_ast::BuiltinDirective::Role => {
+                    if let Some(tags) = d.role.as_deref() {
+                        let each = tags
+                            .iter()
+                            .map(|t| {
+                                if t.enum_name.is_empty() {
+                                    t.variant.clone()
+                                } else {
+                                    format!("{}.{}", t.enum_name, t.variant)
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        lines.push(Doc::text(format!("@role({})", each.join(", "))));
+                    }
+                }
+                noeta_ast::BuiltinDirective::Semantic => {
+                    if d.semantic.is_some() {
+                        lines.push(Doc::text("@semantic"));
+                    }
+                }
+                noeta_ast::BuiltinDirective::Packed => {
+                    if let Some(packed) = d.packed {
+                        // `Row` is the bare-`@packed` default, so an explicit `@packed(Layout.Row)`
+                        // canonicalizes to the bare form; `Column` must be emitted or fmt would
+                        // silently change the storage layout.
+                        lines.push(Doc::text(match packed.layout {
+                            noeta_ast::PackedLayout::Row => "@packed".to_string(),
+                            noeta_ast::PackedLayout::Column => "@packed(Layout.Column)".to_string(),
+                        }));
+                    }
+                }
+                noeta_ast::BuiltinDirective::Validated => {
+                    // Emit so a `@validated` type round-trips — else fmt would silently strip the
+                    // construction-channeling marker.
+                    if d.validated.is_some() {
+                        lines.push(Doc::text("@validated"));
+                    }
+                }
+                // `@tier(...)` decorates a `fn` and rides on `FnDecl::tier`, not on a type's
+                // decorators; the `fn` printer emits it. Named rather than folded into a `_` arm so
+                // a future directive cannot be silently left unemitted.
+                noeta_ast::BuiltinDirective::Tier => {}
             }
         }
-        if semantic {
-            lines.push(Doc::text("@semantic"));
-        }
-        if let Some(tags) = role {
-            let each = tags
-                .iter()
-                .map(|t| {
-                    if t.enum_name.is_empty() {
-                        t.variant.clone()
-                    } else {
-                        format!("{}.{}", t.enum_name, t.variant)
-                    }
-                })
-                .collect::<Vec<_>>();
-            lines.push(Doc::text(format!("@role({})", each.join(", "))));
-        }
-        if let Some(packed) = packed {
-            // `Row` is the bare-`@packed` default, so an explicit `@packed(Layout.Row)`
-            // canonicalizes to the bare form; `Column` must be emitted or fmt would silently
-            // change the storage layout.
-            lines.push(Doc::text(match packed.layout {
-                noeta_ast::PackedLayout::Row => "@packed".to_string(),
-                noeta_ast::PackedLayout::Column => "@packed(Layout.Column)".to_string(),
-            }));
-        }
-        // `@validated` (validation arc) — emit so a `@validated` type round-trips (else fmt would
-        // silently strip the construction-channeling marker).
-        if validated {
-            lines.push(Doc::text("@validated"));
-        }
-        for a in attrs {
+        for a in &d.attrs {
             lines.push(self.attribute(a)?);
         }
         // Each directive on its own line, then the declaration keyword follows on the next line.
