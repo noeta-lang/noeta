@@ -48,8 +48,15 @@ pub const TIERS: &[ExtTier] = &[
     // injection, LSP hover.
     ExtTier {
         name: "doc",
-        // Documentation attaches to any function, method, or type declaration.
-        sites: &[TierSite::Function, TierSite::Method, TierSite::Type],
+        // Documentation attaches to any declaration — including a `trait`, which it could not
+        // say until `TierSite::Trait` existed, so a `@doc` above a trait silently became the
+        // module doc instead of the trait's.
+        sites: &[
+            TierSite::Function,
+            TierSite::Method,
+            TierSite::Type,
+            TierSite::Trait,
+        ],
         config: None,
         text: Some("markdown"),
         expr: None,
@@ -57,7 +64,8 @@ pub const TIERS: &[ExtTier] = &[
     },
     ExtTier {
         name: "debug",
-        // A statement-position block tier — never attachment-checked, so its site set is empty.
+        // A statement-position block tier: `@debug { … }` stands alone and decorates nothing, so
+        // its site set is empty — which now *means* that, rather than "attaches to anything".
         sites: &[],
         config: None,
         text: None,
@@ -70,7 +78,7 @@ pub const TIERS: &[ExtTier] = &[
     // handler — through the same `ExtTier` surface a program `@tier(…, text/expr)` uses.
     ExtTier {
         name: "json",
-        // An expression-position block tier — never attachment-checked.
+        // An expression-position block tier: its block IS a value, so it decorates nothing.
         sites: &[],
         config: None,
         text: Some("json"),

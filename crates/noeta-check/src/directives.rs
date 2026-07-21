@@ -334,20 +334,39 @@ impl Checker {
         span: Span,
     ) {
         let allowed = sites_of(declared);
-        if allowed.is_empty() || (!at.is_empty() && allowed.contains(at)) {
+        if attaches_to(declared, at) {
             return;
         }
         let where_ = match subject {
             Some(s) => format!("{} `{s}`", at.label()),
             None => at.label(),
         };
-        self.error(
+        let d = self.error(
             DiagnosticCode::InvalidDirectiveSite,
             span,
             format!("`@{name}` does not apply to {where_}"),
-        )
-        .help(format!("`@{name}` applies to {}", allowed.label()));
+        );
+        if allowed.is_empty() {
+            // Declares no attachment at all — a pure block construct. Saying "applies to nothing"
+            // would be true and useless; say what it *is* instead.
+            d.help(format!(
+                "`@{name}` is a block — write `@{name} {{ … }}`; it does not decorate a declaration"
+            ));
+        } else {
+            d.help(format!("`@{name}` applies to {}", allowed.label()));
+        }
     }
+}
+
+/// Whether something declaring `sites` may attach to a declaration at `at` — the one predicate
+/// behind every attachment question in the language.
+///
+/// An empty `sites` attaches to **nothing** (a pure block tier: `@debug { … }`, `@json { … }`),
+/// and `Sites::NONE` is not a declaration, so both answer `false`. That the empty case used to
+/// mean "unrestricted" is why this could never be enforced: the tiers that attach to nothing were
+/// spelled identically to the tiers that attach to everything.
+pub(crate) fn attaches_to(sites: &[noeta_ext_abi::registry::TierSite], at: Sites) -> bool {
+    !at.is_empty() && sites_of(sites).contains(at)
 }
 
 /// Widen the extension ABI's three-variant [`TierSite`](noeta_ext_abi::registry::TierSite) into the
@@ -360,6 +379,7 @@ fn sites_of(sites: &[noeta_ext_abi::registry::TierSite]) -> Sites {
             TierSite::Function => Sites::FN,
             TierSite::Method => Sites::METHOD,
             TierSite::Type => Sites::TYPE,
+            TierSite::Trait => Sites::TRAIT,
         })
     })
 }

@@ -4034,6 +4034,8 @@ where
                     args: commit_attr_args(&ctx, args),
                     items,
                     doc_text,
+                    // A real block: its items came from inside the braces, so it decorates nothing.
+                    attached: false,
                     span: ctx.to_span(e.span()),
                 },
             );
@@ -4061,6 +4063,8 @@ where
                     args: commit_attr_args(&ctx, args),
                     items: vec![item],
                     doc_text: None,
+                    // An annotation: the wrapped declaration is what it decorates.
+                    attached: true,
                     span: ctx.to_span(e.span()),
                 },
             );
@@ -4096,6 +4100,8 @@ where
                     args: commit_attr_args(&ctx, args),
                     items: vec![item],
                     doc_text: None,
+                    // The attribute-carrying annotation form — still an annotation.
+                    attached: true,
                     span: ctx.to_span(e.span()),
                 }
             });

@@ -87,6 +87,15 @@ impl PartialEq for TierRegistry {
     }
 }
 
+/// Every declaration a tier can attach to — what a program-declared `@tier` (which has no site
+/// syntax) permits.
+pub(crate) const ANY_DECLARATION: &[noeta_ext_abi::registry::TierSite] = &[
+    noeta_ext_abi::registry::TierSite::Function,
+    noeta_ext_abi::registry::TierSite::Method,
+    noeta_ext_abi::registry::TierSite::Type,
+    noeta_ext_abi::registry::TierSite::Trait,
+];
+
 /// Who provides a tier under a given provider selection — the extension declaration (native
 /// runner for the built-ins) or a program/package `@tier` declaration.
 #[derive(Debug, Clone, PartialEq)]
@@ -173,10 +182,17 @@ impl TierRegistry {
     /// unknown name yield the empty slice — **unrestricted**, so the checker's site gate never fires
     /// on them.
     pub fn sites(&self, tier: &str) -> &'static [noeta_ext_abi::registry::TierSite] {
-        self.reg()
-            .find_ext_tier(tier)
-            .map(|t| t.sites)
-            .unwrap_or(&[])
+        if let Some(t) = self.reg().find_ext_tier(tier) {
+            return t.sites;
+        }
+        if self.declared.contains_key(tier) {
+            // A program `@tier` declaration has no site syntax yet, so it attaches to any
+            // declaration. Stated explicitly: an empty slice now means "attaches to nothing", so
+            // falling through to one would reject `@fuzz fn f()` for every program-declared tier.
+            return ANY_DECLARATION;
+        }
+        // An unknown tier — E0036 elsewhere. No attachment claim to make.
+        &[]
     }
 
     /// The extension-declared half of the name-space: every installed extension's [`ExtTier`]
@@ -574,8 +590,18 @@ pub fn resolve_docs(program: &Program) -> Vec<TextBlock> {
 /// text extracts from work-in-progress code. Matches on the lexer's verbatim capture
 /// (`doc_text`), which is exactly the set of blocks whose tier was a known text tier at lex time.
 pub fn resolve_texts(program: &Program) -> Vec<TextBlock> {
+    resolve_texts_with_registry(program, noeta_ext_abi::registry::single_registry_process())
+}
+
+/// As [`resolve_texts`], against an explicit extension registry (instance-registry IR4), so an
+/// embed session's own text tier resolves its attachment against *its* set.
+pub fn resolve_texts_with_registry(
+    program: &Program,
+    reg: &'static noeta_ext_abi::registry::Registry,
+) -> Vec<TextBlock> {
     // Sources that already produced a non-attached text block — the first is the module doc, the
     // rest are sections. Adjacency state is per-tier, so a module doc and a module spec coexist.
+    let registry = TierRegistry::collect_with_registry(program, reg);
     let mut module_doc_seen = std::collections::HashSet::new();
     let mut docs = Vec::new();
     for (i, stmt) in program.stmts.iter().enumerate() {
@@ -588,8 +614,18 @@ pub fn resolve_texts(program: &Program) -> Vec<TextBlock> {
         else {
             continue;
         };
+        // What this block documents, if the next statement is a declaration it may attach to.
+        //
+        // "May attach to" is the tier's own `sites` — the same question, and the same answer, that
+        // gates the annotation form. This used to be a fourth, hardcoded list of declaration kinds
+        // that agreed with nobody: it accepted `Fn`/`Struct`/`Class`/`Enum` and had no `Trait` arm,
+        // so a `@doc { … }` above a trait silently became the *module* doc rather than the trait's.
+        let sites = registry.sites(tier);
         let decl_target = program.stmts.get(i + 1).and_then(|next| {
             if next.span().source != span.source {
+                return None;
+            }
+            if !crate::directives::attaches_to(sites, next.attachment_site()) {
                 return None;
             }
             let (name, name_span) = match next {
@@ -597,6 +633,7 @@ pub fn resolve_texts(program: &Program) -> Vec<TextBlock> {
                 Stmt::Struct(d) => (&d.name, d.name_span),
                 Stmt::Class(d) => (&d.name, d.name_span),
                 Stmt::Enum(d) => (&d.name, d.name_span),
+                Stmt::Trait(d) => (&d.name, d.name_span),
                 _ => return None,
             };
             Some(DocTarget::Decl {
@@ -1590,6 +1627,43 @@ mod tests {
         let stripped = activate_tiers(&program, &[]);
         assert!(stripped.custom.is_empty());
         assert!(stripped.diagnostics.is_empty());
+    }
+
+    /// A `@doc` above a **trait** documents the trait.
+    ///
+    /// It used to become the *module* doc: the adjacency resolver carried its own list of target
+    /// kinds — `Fn`/`Struct`/`Class`/`Enum`, no `Trait` — so the block matched nothing, fell
+    /// through to the module/section fallback, and the prose silently reattached to the file. The
+    /// resolver asks the tier's own `sites` now, and `doc` says it attaches to a trait.
+    #[test]
+    fn a_doc_block_above_a_trait_documents_the_trait() {
+        noeta_stdlib::registry::default_seeded();
+        let program = parse_program(
+            "@doc { Shapes have an area. }\n             trait Shape { fn area(): int }\n",
+        );
+        let docs = resolve_docs(&program);
+        assert_eq!(docs.len(), 1);
+        assert!(
+            matches!(&docs[0].target, DocTarget::Decl { name, .. } if name == "Shape"),
+            "expected the trait, got {:?}",
+            docs[0].target
+        );
+    }
+
+    /// A tier that attaches to nothing does not swallow the declaration after it. `@json`'s block
+    /// is a value; the `struct` below it is not documented by it, and is not its target.
+    #[test]
+    fn a_block_only_tier_claims_no_adjacent_declaration() {
+        noeta_stdlib::registry::default_seeded();
+        let program = parse_program("@json { {\"a\": 1} }\n             struct P { x: int }\n");
+        let texts = resolve_texts(&program);
+        assert!(
+            texts
+                .iter()
+                .all(|t| !matches!(t.target, DocTarget::Decl { .. })),
+            "a block-only tier must claim no declaration, got {:?}",
+            texts.iter().map(|t| &t.target).collect::<Vec<_>>()
+        );
     }
 
     /// `resolve_docs` adjacency: a file-leading `@doc` is the module doc (Python-docstring rule),

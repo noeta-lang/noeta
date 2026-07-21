@@ -155,6 +155,16 @@ pub enum Stmt {
         /// re-emits the raw source (sliced from `span`), *not* this — this is unescaped, so
         /// printing it would drop `\{ \}` and unbalance the block.
         doc_text: Option<String>,
+        /// Whether this block is an **annotation** — `@test fn foo()`, which the parser desugars
+        /// into a one-item block so activation, lowering and the runner need no second machinery.
+        ///
+        /// The desugar is deliberate and stays, but it erased the one thing attachment checking
+        /// needs: an annotation *decorates* the declaration in `items`, while a real
+        /// `@test { … }` block *contains* items that came from inside its braces and decorates
+        /// nothing. Both are a `TierBlock` with items, so without this flag the checker could not
+        /// tell "`@test` attached to a struct" (a site error) from "`@test` block holding a
+        /// struct" (the documented way to write a test-only type).
+        attached: bool,
         span: Span,
     },
 }
