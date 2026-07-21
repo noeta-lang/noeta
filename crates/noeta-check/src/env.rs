@@ -101,16 +101,32 @@ pub(crate) const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "pan
 /// is not a handle-able built-in type. Built-in types carry only instance methods (no associated
 /// fns), so a handle on one is always an instance handle.
 pub(crate) fn builtin_receiver_type(name: &str) -> Option<Type> {
-    Some(match name {
-        "list" | "List" => Type::List(Box::new(Type::Dyn)),
-        "set" | "Set" => Type::Set(Box::new(Type::Dyn)),
-        "map" | "Map" => Type::Map(Box::new(Type::String), Box::new(Type::Dyn)),
-        "string" => Type::String,
-        "bytes" => Type::Bytes,
-        "int" => Type::Int,
-        "float" => Type::Float,
-        "f32" => Type::F32,
-        _ => return None,
+    use noeta_types::BuiltinTy;
+    let dyn_ = || Box::new(Type::Dyn);
+    Some(match BuiltinTy::from_name_any(name)? {
+        BuiltinTy::List => Type::List(dyn_()),
+        BuiltinTy::Set => Type::Set(dyn_()),
+        // A map handle's *key* type is `string` rather than `dyn`: the built-in map methods a
+        // handle reaches (`get`/`has`/`keys`) are the string-keyed ones, and a `dyn` key would
+        // admit calls the keyed-map rules reject.
+        BuiltinTy::Map => Type::Map(Box::new(Type::String), dyn_()),
+        BuiltinTy::Str => Type::String,
+        BuiltinTy::Bytes => Type::Bytes,
+        BuiltinTy::Int => Type::Int,
+        BuiltinTy::Float => Type::Float,
+        BuiltinTy::F32 => Type::F32,
+        // `f64` and the fixed-width integers carry no method table of their own — they are strict
+        // numerics, reached by explicit conversion — so there is no handle-able receiver for them.
+        BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+        // `bool`/`void`/`dyn` have no instance methods; `Option`/`Result` are enum *values* whose
+        // methods dispatch on the payload, not on a bare name, so neither is a handle receiver.
+        BuiltinTy::Bool
+        | BuiltinTy::Unit
+        | BuiltinTy::Dyn
+        | BuiltinTy::Option
+        | BuiltinTy::Result => return None,
+        // The abstract kind-types are static-only: no value *is* an `Enum`, so none is a receiver.
+        BuiltinTy::KindEnum | BuiltinTy::KindStruct | BuiltinTy::KindClass => return None,
     })
 }
 

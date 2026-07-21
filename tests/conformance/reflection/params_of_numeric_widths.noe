@@ -1,0 +1,43 @@
+// `params_of` and `type_of` must report the **same** reflected `Type` for the same declared type.
+// The fixed-width numerics are the case that drifted: the surface-name decoder feeding `params_of`
+// once knew `f32` but neither `f64` nor the `iN`/`uN` widths, so a `f64` parameter reflected as the
+// nominal `Type.Named(f64, [])` while a `f64` *value* reflected as `Type.Float`. Both paths now
+// route through the one `BuiltinTy` decoder, so the erasure rule is stated once: the fixed-width
+// integers erase to `Type.Int` and `f64` to `Type.Float` (both are bit-identical to their lattice
+// counterpart at runtime), while `f32` keeps its own `Type.F32` variant.
+// expect: stdout "a: Type.Int"
+// expect: stdout "b: Type.Int"
+// expect: stdout "c: Type.Int"
+// expect: stdout "d: Type.Float"
+// expect: stdout "e: Type.F32"
+// expect: stdout "f: Type.Int"
+// expect: stdout "g: Type.Float"
+// expect: stdout "v/a: Type.Int"
+// expect: stdout "v/b: Type.Int"
+// expect: stdout "v/c: Type.Int"
+// expect: stdout "v/d: Type.Float"
+// expect: stdout "v/e: Type.F32"
+// expect: stdout "v/f: Type.Int"
+// expect: stdout "v/g: Type.Float"
+// expect: exit 0
+fn widths(a: i32, b: u8, c: i64, d: f64, e: f32, f: int, g: float): void { return }
+
+for p in params_of("widths") {
+    echo "${p.name}: ${p.type}";
+}
+
+// The same seven types as *values*: `type_of` must agree with `params_of` name for name.
+a: i32 = 5
+b: u8 = 5
+c: i64 = 5
+d: f64 = 2.5
+e: f32 = 2.5f32
+f: int = 5
+g: float = 2.5
+echo "v/a: ${type_of(a)}"
+echo "v/b: ${type_of(b)}"
+echo "v/c: ${type_of(c)}"
+echo "v/d: ${type_of(d)}"
+echo "v/e: ${type_of(e)}"
+echo "v/f: ${type_of(f)}"
+echo "v/g: ${type_of(g)}"

@@ -392,23 +392,15 @@ impl Checker {
                 // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
                 // formed from an extern type requires it key-capable — a mutable handle's hash
                 // or order could go stale under a key, so `Map<FileHandle, _>` is a type error.
-                let key_position = match name.as_str() {
-                    "Map" => args.first(),
-                    "Set" => args.first(),
-                    _ => None,
-                };
-                if let Some(TypeRef::Named {
-                    name: key_name,
-                    span: key_span,
-                    ..
-                }) = key_position
-                    && self.named_key_capable(key_name, name == "Set") == Some(false)
+                let key_role = keyed_container_role(name);
+                if let Some((role, is_set)) = key_role
+                    && let Some(TypeRef::Named {
+                        name: key_name,
+                        span: key_span,
+                        ..
+                    }) = args.first()
+                    && self.named_key_capable(key_name, is_set) == Some(false)
                 {
-                    let role = if name == "Map" {
-                        "key a map"
-                    } else {
-                        "member a set"
-                    };
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         *key_span,
@@ -484,5 +476,41 @@ impl Checker {
             return Some(false);
         }
         None
+    }
+}
+
+/// Whether a built-in type name has a **key position** its first type argument occupies, and if so
+/// the role that position plays in a diagnostic (`Map<K, _>` keys a map, `Set<T>` members a set)
+/// plus whether the looser set rules apply. `None` for everything else.
+///
+/// Exhaustive over [`BuiltinTy`] on purpose: a new built-in container has to declare here whether
+/// its arguments are keys, rather than silently inheriting "not keyed". Only the canonical
+/// spellings are keyed — a bare `map`/`set` carries no arguments to gate.
+fn keyed_container_role(name: &str) -> Option<(&'static str, bool)> {
+    use noeta_types::{BuiltinTy, Spelling};
+    let (builtin, spelling) = BuiltinTy::from_name(name)?;
+    if spelling == Spelling::Bare {
+        return None;
+    }
+    match builtin {
+        BuiltinTy::Map => Some(("key a map", false)),
+        BuiltinTy::Set => Some(("member a set", true)),
+        // `List`/`Option`/`Result` arguments are ordinary element/payload positions — nothing is
+        // hashed or ordered by them, so any type may sit there.
+        BuiltinTy::List | BuiltinTy::Option | BuiltinTy::Result => None,
+        // The scalars and the abstract kind-types take no arguments at all.
+        BuiltinTy::Int
+        | BuiltinTy::Float
+        | BuiltinTy::F32
+        | BuiltinTy::F64
+        | BuiltinTy::IntN { .. }
+        | BuiltinTy::Bool
+        | BuiltinTy::Str
+        | BuiltinTy::Bytes
+        | BuiltinTy::Unit
+        | BuiltinTy::Dyn
+        | BuiltinTy::KindEnum
+        | BuiltinTy::KindStruct
+        | BuiltinTy::KindClass => None,
     }
 }

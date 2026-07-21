@@ -4,7 +4,9 @@
 //! the tree-walker and the VM **by construction** — there is no second walk to drift from the first.
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
-use crate::{AttrArg, AttrValue, Attribute, Expr, FieldDecl, Program, Stmt, TypeRef, UnaryOp};
+use crate::{
+    AttrArg, AttrValue, Attribute, BuiltinTy, Expr, FieldDecl, Program, Stmt, TypeRef, UnaryOp,
+};
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
@@ -106,22 +108,17 @@ impl ReflectionInfo {
     /// unknown-kind fallback. Both backends build a type-ref through this one function, so the
     /// materialized `Type` value agrees across the differential by construction.
     pub fn type_ref_repr(&self, name: &str) -> TypeRepr {
-        if let Some(scalar) = scalar_repr(name) {
-            return scalar;
+        // A name-only query carries no type arguments, so every container's arguments are the top.
+        if let Some(repr) = BuiltinTy::from_name_any(name)
+            .and_then(|b| builtin_repr(b, |_| Box::new(TypeRepr::Dyn)))
+        {
+            return repr;
         }
-        let dyn_box = || Box::new(TypeRepr::Dyn);
-        match name {
-            "list" | "List" => TypeRepr::List(dyn_box()),
-            "set" | "Set" => TypeRepr::Set(dyn_box()),
-            "map" | "Map" => TypeRepr::Map(dyn_box(), dyn_box()),
-            "Option" => TypeRepr::Option(dyn_box()),
-            "Result" => TypeRepr::Result(dyn_box(), dyn_box()),
-            _ => match self.type_named(name).map(|t| t.kind) {
-                Some(TypeKind::Struct) => TypeRepr::Struct(name.to_string(), Vec::new()),
-                Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), Vec::new()),
-                Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), Vec::new()),
-                None => TypeRepr::Named(name.to_string(), Vec::new()),
-            },
+        match self.type_named(name).map(|t| t.kind) {
+            Some(TypeKind::Struct) => TypeRepr::Struct(name.to_string(), Vec::new()),
+            Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), Vec::new()),
+            Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), Vec::new()),
+            None => TypeRepr::Named(name.to_string(), Vec::new()),
         }
     }
 }
@@ -616,6 +613,84 @@ impl TypeRepr {
             TypeRepr::Union(_) => "Union",
         }
     }
+
+    /// The **payload shape** of the `Type.*` variant this descriptor constructs. Paired with
+    /// [`variant_name`](Self::variant_name) it is the full declaration of one prelude-enum
+    /// variant, which is what the checker registers and what both backends materialize.
+    pub fn adt_fields(&self) -> AdtFields {
+        match self {
+            TypeRepr::Int
+            | TypeRepr::Float
+            | TypeRepr::F32
+            | TypeRepr::Bool
+            | TypeRepr::Str
+            | TypeRepr::Bytes
+            | TypeRepr::Unit
+            | TypeRepr::Dyn => AdtFields::None,
+            TypeRepr::List(_) | TypeRepr::Set(_) | TypeRepr::Option(_) => AdtFields::Types(1),
+            TypeRepr::Map(_, _) | TypeRepr::Result(_, _) => AdtFields::Types(2),
+            TypeRepr::Enum(_, _)
+            | TypeRepr::Struct(_, _)
+            | TypeRepr::Class(_, _)
+            | TypeRepr::Named(_, _) => AdtFields::NameAndArgs,
+            TypeRepr::Fn(_, _) => AdtFields::ParamsAndRet,
+            TypeRepr::Union(_) => AdtFields::TypeList,
+            TypeRepr::DynTrait(_) => AdtFields::Name,
+        }
+    }
+}
+
+/// The payload shape of one `Type.*` prelude-enum variant — the closed vocabulary of field lists
+/// the ADT uses, so the checker's registration is a projection of [`TypeRepr::adt_fields`] rather
+/// than a hand-maintained parallel table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdtFields {
+    /// No payload (the scalars).
+    None,
+    /// `n` recursive `Type` fields — a container's element / key / value types.
+    Types(usize),
+    /// `(name: string, args: List<Type>)` — the nominal variants.
+    NameAndArgs,
+    /// `(members: List<Type>)` — a union's members.
+    TypeList,
+    /// `(params: List<Type>, ret: Type)` — a function type.
+    ParamsAndRet,
+    /// `(name: string)` — a trait object's trait name.
+    Name,
+}
+
+/// One sample [`TypeRepr`] per variant. Running each through the exhaustive
+/// [`TypeRepr::variant_name`] / [`TypeRepr::adt_fields`] matches yields the prelude `Type` enum's
+/// full declaration — so the checker registers the ADT from the reflection descriptor itself
+/// instead of re-listing the variants and their arities in a table that can drift.
+///
+/// **Adding a [`TypeRepr`] variant**: both matches above will fail to compile until you handle it;
+/// add its sample here at the same time, or the prelude enum will silently lack the variant.
+pub fn type_adt_variants() -> Vec<TypeRepr> {
+    let any = || Box::new(TypeRepr::Dyn);
+    let name = || String::new();
+    vec![
+        TypeRepr::Int,
+        TypeRepr::Float,
+        TypeRepr::F32,
+        TypeRepr::Bool,
+        TypeRepr::Str,
+        TypeRepr::Bytes,
+        TypeRepr::Unit,
+        TypeRepr::Dyn,
+        TypeRepr::List(any()),
+        TypeRepr::Set(any()),
+        TypeRepr::Option(any()),
+        TypeRepr::Map(any(), any()),
+        TypeRepr::Result(any(), any()),
+        TypeRepr::Enum(name(), Vec::new()),
+        TypeRepr::Struct(name(), Vec::new()),
+        TypeRepr::Class(name(), Vec::new()),
+        TypeRepr::Named(name(), Vec::new()),
+        TypeRepr::Fn(Vec::new(), any()),
+        TypeRepr::Union(Vec::new()),
+        TypeRepr::DynTrait(name()),
+    ]
 }
 
 /// A [`TypeRepr`] displays as its **Noeta surface spelling** — the source form a developer
@@ -742,22 +817,37 @@ impl TypeRepr {
 /// (the R3 matcher keys on the name, not the kind, so `Named("Box")` matches a value tagged
 /// `Struct("Box")`). Built-in scalars/collections map to their lattice variant; a `?T` is `Option<T>`.
 /// Used to turn a narrow target (`x is List<int>`) into the shape compared against a value's tag.
-/// The [`TypeRepr`] of a built-in **scalar** type name — one with no type arguments and no nominal
-/// resolution. `None` for a container (`List`/`Map`/…), a user type, or `Any`-shaped name that the
-/// two mappers below handle differently. Shared by [`ReflectionInfo::type_ref_repr`] and
-/// [`typeref_to_repr`], which agree on the scalars but diverge on containers (bare `dyn` args vs the
-/// real `TypeRef` args) and on the fallback (nominal-kind lookup vs `TypeRepr::Named`).
-fn scalar_repr(name: &str) -> Option<TypeRepr> {
-    Some(match name {
-        "int" => TypeRepr::Int,
-        "float" => TypeRepr::Float,
-        "f32" => TypeRepr::F32,
-        "bool" => TypeRepr::Bool,
-        "string" => TypeRepr::Str,
-        "bytes" => TypeRepr::Bytes,
-        "void" | "unit" => TypeRepr::Unit,
-        "dyn" | "Any" => TypeRepr::Dyn,
-        _ => return None,
+/// The [`TypeRepr`] of a built-in type constructor, reading its type arguments through `arg`.
+/// `None` for the three abstract kind-types (`Enum`/`Struct`/`Class`), which have no reflection
+/// descriptor of their own — no *value* is an `Enum`, so each caller resolves them through its own
+/// nominal fallback (kind lookup / `TypeRepr::Named`).
+///
+/// Shared by [`ReflectionInfo::type_ref_repr`] and [`typeref_to_repr`]: they agree on the whole
+/// vocabulary and differ only in what `arg` yields — bare `dyn` for the name-only mapper, the real
+/// nested `TypeRef` reprs for the structural one.
+///
+/// Two constructors are **erased** here, matching what the runtime value can actually report:
+/// `f64` is bit-identical to `float` (P-NUM-SYM) and the fixed-width integers are erased to `int`
+/// (Tier W), so both report the lattice variant. This is the same rule the checker's
+/// `type_to_repr` states for the `Type` lattice; routing both through [`BuiltinTy`] is what keeps
+/// them from drifting — they used to disagree, so `params_of` reported `Type.Named(f64, [])` for a
+/// parameter whose `type_of` was `Type.Float`.
+fn builtin_repr(builtin: BuiltinTy, arg: impl Fn(usize) -> Box<TypeRepr>) -> Option<TypeRepr> {
+    Some(match builtin {
+        BuiltinTy::Int | BuiltinTy::IntN { .. } => TypeRepr::Int,
+        BuiltinTy::Float | BuiltinTy::F64 => TypeRepr::Float,
+        BuiltinTy::F32 => TypeRepr::F32,
+        BuiltinTy::Bool => TypeRepr::Bool,
+        BuiltinTy::Str => TypeRepr::Str,
+        BuiltinTy::Bytes => TypeRepr::Bytes,
+        BuiltinTy::Unit => TypeRepr::Unit,
+        BuiltinTy::Dyn => TypeRepr::Dyn,
+        BuiltinTy::List => TypeRepr::List(arg(0)),
+        BuiltinTy::Set => TypeRepr::Set(arg(0)),
+        BuiltinTy::Map => TypeRepr::Map(arg(0), arg(1)),
+        BuiltinTy::Option => TypeRepr::Option(arg(0)),
+        BuiltinTy::Result => TypeRepr::Result(arg(0), arg(1)),
+        BuiltinTy::KindEnum | BuiltinTy::KindStruct | BuiltinTy::KindClass => return None,
     })
 }
 
@@ -778,18 +868,12 @@ pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
             Box::new(typeref_to_repr(ret)),
         ),
         TypeRef::Named { name, args, .. } => {
-            if let Some(scalar) = scalar_repr(name) {
-                return scalar;
-            }
             let arg = |i: usize| args.get(i).map(boxed).unwrap_or_else(dyn_box);
-            match name.as_str() {
-                "List" | "list" => TypeRepr::List(arg(0)),
-                "Set" | "set" => TypeRepr::Set(arg(0)),
-                "Map" | "map" => TypeRepr::Map(arg(0), arg(1)),
-                "Option" => TypeRepr::Option(arg(0)),
-                "Result" => TypeRepr::Result(arg(0), arg(1)),
-                _ => TypeRepr::Named(name.clone(), args.iter().map(typeref_to_repr).collect()),
-            }
+            BuiltinTy::from_name_any(name)
+                .and_then(|b| builtin_repr(b, arg))
+                .unwrap_or_else(|| {
+                    TypeRepr::Named(name.clone(), args.iter().map(typeref_to_repr).collect())
+                })
         }
     }
 }
