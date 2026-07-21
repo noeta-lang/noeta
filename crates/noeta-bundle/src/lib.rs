@@ -74,7 +74,13 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// can an earlier artifact be *stale* the way a layout change makes one: a bundle written before
 /// that slice came from a compiler that could not parse an attribute in a parameter list, so its
 /// source cannot have contained one, and the rows it lacks are rows its program never had.
-pub const FORMAT_VERSION: u8 = 4;
+///
+/// Bumped to 5 when `NarrowTarget` (embedded in `Op::As`/`Op::TypeTest`, part of `Module::code`)
+/// gained an `F32` head for reified `f32` narrowing (packed-widths slice 2). The variant was
+/// inserted after `Float`, so every later variant's postcard discriminant shifted by one — a
+/// version-4 reader would decode a `Bool` head as `F32`, an `Int` mismatch cascading through the
+/// chunk. Same rule as the bumps before it: a variant added to a serialized enum is a wire break.
+pub const FORMAT_VERSION: u8 = 5;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

@@ -4778,6 +4778,9 @@ fn narrow_head(name: &str) -> Option<NarrowTarget> {
     Some(match BuiltinTy::from_name_any(name)? {
         BuiltinTy::Int => NarrowTarget::Int,
         BuiltinTy::Float => NarrowTarget::Float,
+        // `f32` is reified at runtime (distinct NaN-box tag), so it gets a head; the matcher's
+        // `F32 <: float` edge makes `(f32) is float` true while `(float) is f32` stays false.
+        BuiltinTy::F32 => NarrowTarget::F32,
         BuiltinTy::Bool => NarrowTarget::Bool,
         BuiltinTy::Str => NarrowTarget::String,
         BuiltinTy::Bytes => NarrowTarget::Bytes,
@@ -4793,11 +4796,11 @@ fn narrow_head(name: &str) -> Option<NarrowTarget> {
         // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow through
         // the nominal path like a user enum rather than needing a head of their own.
         BuiltinTy::Option | BuiltinTy::Result => return None,
-        // The strict numerics have no narrowing head today: `x is f32` / `x is i32` falls to the
-        // nominal path and so never matches (an `f32`/erased-int value carries no such shape name).
-        // Deliberately preserved rather than fixed here — giving them heads is a language change,
-        // not a refactor. Both backends agree on the current answer.
-        BuiltinTy::F32 | BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+        // The erased widths (`f64`, `i8..u64`) carry no runtime tag on a scalar, so they fall to the
+        // nominal path and never match a scalar. The checker warns on a bare-scalar `is i32`/`is f64`
+        // (statically always-false); giving them heads would need scalar reification, which the arc
+        // deliberately declines. `f32` alone is reified and handled above. Both backends agree.
+        BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
     })
 }
 

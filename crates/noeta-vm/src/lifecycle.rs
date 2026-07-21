@@ -172,7 +172,11 @@ pub(crate) fn try_classify(v: Value) -> Option<TryOutcome> {
 pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
     let kind = match target {
         NarrowTarget::Int => "int",
-        NarrowTarget::Float => "float",
+        // Subtype edge `F32 <: float`: a plain `float` OR a reified `f32` value matches `float`.
+        NarrowTarget::Float => return v.type_name() == "float" || v.is_f32(),
+        // The `f32` head matches only a reified `f32` value (a plain `float` is the base, not a
+        // subtype — `(float) is f32` is false).
+        NarrowTarget::F32 => return v.is_f32(),
         NarrowTarget::Bool => "bool",
         NarrowTarget::String => "string",
         NarrowTarget::Bytes => "bytes",

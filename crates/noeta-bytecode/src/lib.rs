@@ -170,6 +170,11 @@ pub enum StrPart {
 pub enum NarrowTarget {
     Int,
     Float,
+    /// An `f32` target (`x is f32` / `x.as<f32>()`). Unlike the other fixed widths, `f32` is
+    /// *reified* at runtime (a distinct NaN-box tag), so it has a head of its own. The subtype edge
+    /// `F32 <: float` lives in the matcher: an `f32` value matches both this target **and**
+    /// [`NarrowTarget::Float`], while a plain `float` value matches only `Float`.
+    F32,
     Bool,
     String,
     /// A `bytes` target (`x is bytes` / `x.as<bytes>()`) — P-PACK 4.4.

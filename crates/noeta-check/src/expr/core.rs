@@ -1157,6 +1157,22 @@ impl Checker {
                 // concrete value is an `E0028`. We only validate the target type names something.
                 self.synth(expr, env);
                 self.check_type_ref(ty);
+                // A bare-scalar test against an *erased* fixed width (`iN`/`f64`) is statically
+                // always false: a scalar carries no width tag, so `x is i32` can never hold (E0063,
+                // warning). `f32` is exempt (reified — a real narrowing head, Part A) and a
+                // container target (`List<i32>`) is exempt (packed element widths are distinct) —
+                // both filtered by matching only a *bare* (`args.is_empty()`) erased-width name.
+                if let TypeRef::Named { name, args, span } = ty
+                    && args.is_empty()
+                    && let Some(base) = erased_scalar_width_base(name)
+                {
+                    self.warn(
+                        DiagnosticCode::ErasedWidthNarrow,
+                        *span,
+                        format!("`{name}` erases to `{base}` at runtime; `x is {name}` is always false"),
+                    )
+                    .help(format!("did you mean `x is {base}`?"));
+                }
                 Type::Bool
             }
             Expr::AttributesOf { ty, span } => {
@@ -1732,5 +1748,18 @@ impl Checker {
         let ty = Type::Named(type_name.to_string(), args);
         self.note_construction(&ty, lit.span);
         ty
+    }
+}
+
+/// The runtime base type a scalar of an **erased** fixed width collapses to — `"int"` for any
+/// `iN`/`uN`, `"float"` for `f64` — or `None` for a name that is *not* an erased scalar width.
+/// Returns `None` for `f32` (reified at runtime, so `x is f32` is a real test) and for every
+/// non-width name. Routed through the single [`noeta_ast::BuiltinTy`] decoder rather than a parallel
+/// string match, so the erased-width vocabulary stays in one place. Drives the E0063 warning.
+fn erased_scalar_width_base(name: &str) -> Option<&'static str> {
+    match noeta_ast::BuiltinTy::from_name_any(name)? {
+        noeta_ast::BuiltinTy::IntN { .. } => Some("int"),
+        noeta_ast::BuiltinTy::F64 => Some("float"),
+        _ => None,
     }
 }

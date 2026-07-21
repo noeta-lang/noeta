@@ -1173,6 +1173,18 @@ impl Checker {
         self.diags.last_mut().expect("just pushed a diagnostic")
     }
 
+    /// Record a **warning** diagnostic (well-formed program, advisory), returning `&mut` to it so a
+    /// help line can be chained in place. The warning counterpart of [`error`](Self::error).
+    fn warn(
+        &mut self,
+        code: DiagnosticCode,
+        span: Span,
+        message: impl Into<String>,
+    ) -> &mut Diagnostic {
+        self.diags.push(Diagnostic::warning(code, span, message));
+        self.diags.last_mut().expect("just pushed a diagnostic")
+    }
+
     /// Reject a declaration that binds a **reserved prelude name** (E0046, prelude-redesign P3).
     /// The always-global prelude is deliberately tiny — `Ok`/`Err`/`some`/`none`/`panic`/`assert` —
     /// and those names cannot be bound by ANY form (binding, `mut`, param, `fn`, type, `for`/match

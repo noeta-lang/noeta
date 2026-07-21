@@ -5242,7 +5242,10 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 use noeta_ast::BuiltinTy;
                 Some(match b {
                     BuiltinTy::Int => matches!(value, Value::Int(_)),
-                    BuiltinTy::Float => matches!(value, Value::Float(_)),
+                    // Subtype edge `F32 <: float`: a plain `float` OR a reified `f32` matches `float`.
+                    BuiltinTy::Float => matches!(value, Value::Float(_) | Value::F32(_)),
+                    // The `f32` head matches only a reified `f32` — a plain `float` is not a subtype.
+                    BuiltinTy::F32 => matches!(value, Value::F32(_)),
                     BuiltinTy::Bool => matches!(value, Value::Bool(_)),
                     BuiltinTy::Str => matches!(value, Value::Str(_)),
                     BuiltinTy::Bytes => matches!(value, Value::Bytes(_)),
@@ -5260,9 +5263,10 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                     // `Option`/`Result` are enums whose shape name *is* the type name, so they fall
                     // to the nominal path like a user enum.
                     BuiltinTy::Option | BuiltinTy::Result => return None,
-                    // The strict numerics have no narrowing head today — see the VM's `narrow_head`
-                    // for why this is preserved rather than fixed here.
-                    BuiltinTy::F32 | BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+                    // The erased widths carry no runtime tag on a scalar, so they never match a
+                    // scalar (the checker warns). `f32` alone is reified, handled above. See the VM's
+                    // `narrow_head`.
+                    BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
                 })
             });
             let head_ok = match builtin_ok {
