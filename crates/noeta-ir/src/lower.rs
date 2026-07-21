@@ -1432,6 +1432,7 @@ impl Lowerer<'_> {
                 };
                 let params: Vec<Param> = (0..arity)
                     .map(|i| Param {
+                        attrs: Vec::new(),
                         name: format!("$fv{i}"),
                         name_span: *span,
                         ty: None,

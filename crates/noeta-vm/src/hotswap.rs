@@ -607,6 +607,7 @@ impl<'m> Vm<'m> {
                     params: params
                         .iter()
                         .map(|name| Param {
+                            attrs: Vec::new(),
                             name: name.clone(),
                             name_span: span,
                             ty: None,

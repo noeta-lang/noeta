@@ -66,6 +66,14 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// byte ahead of the register, so a version-3 reader would take that byte *as* the receiver
 /// register and desynchronise for the rest of the chunk. `Module::code` is part of the payload, so
 /// an op-layout change is a format break exactly as a manifest change is.
+///
+/// Parameter attributes, by contrast, did **not** bump it, and that is the same rule read the other
+/// way round: they added no field to any serialized struct. A parameter's `#[...]` attributes ride
+/// as ordinary rows in `reflection.manifest`, a `Vec<AttributeRecord>` whose element shape is
+/// untouched — a longer vector, not a different layout, and postcard length-prefixes vectors. Nor
+/// can an earlier artifact be *stale* the way a layout change makes one: a bundle written before
+/// that slice came from a compiler that could not parse an attribute in a parameter list, so its
+/// source cannot have contained one, and the rows it lacks are rows its program never had.
 pub const FORMAT_VERSION: u8 = 4;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's

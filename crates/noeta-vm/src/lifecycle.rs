@@ -922,11 +922,18 @@ impl<'m> Vm<'m> {
     }
 
     /// Materialize a callable's declared parameter list from the module's reflection info into a
-    /// `List<ParamInfo>` — each `{ name: string, type: Type, optional: bool }`. `type` is the
-    /// prelude `Type` ADT value built from the parameter's declared type (the same
-    /// `build_type_value` `type_of` uses), and `optional` reports whether the parameter declared a
-    /// default. The `ParamInfo` shape is built fresh; because shape equality is structural, it
-    /// matches the tree-walker's by construction. An unknown target yields an empty list.
+    /// `List<ParamInfo>` — each `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`.
+    /// `type` is the prelude `Type` ADT value built from the parameter's declared type (the same
+    /// `build_type_value` `type_of` uses), `optional` reports whether the parameter declared a
+    /// default, and `attrs` holds the parameter's `#[...]` attribute instances. The `ParamInfo`
+    /// shape is built fresh; because shape equality is structural, it matches the tree-walker's by
+    /// construction. An unknown target yields an empty list.
+    ///
+    /// `attrs` is **joined from the attribute manifest**, not carried in the parameter record: the
+    /// rows are exactly the ones `attributes_of::<T>()` returns for the same parameter, reached
+    /// through the shared `param_attributes_for` key. So the two query surfaces are two renderings
+    /// of one table, and a parameter attribute cannot be visible through one and missing from the
+    /// other.
     pub(crate) fn materialize_params(&self, target: &str) -> Value {
         let info_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
@@ -935,6 +942,7 @@ impl<'m> Vm<'m> {
                 "name".to_string(),
                 "type".to_string(),
                 "optional".to_string(),
+                "attrs".to_string(),
             ],
         ));
         let items: Vec<Value> = self
@@ -949,8 +957,39 @@ impl<'m> Vm<'m> {
                         Value::string(&p.name),
                         build_type_value(&p.ty),
                         Value::bool(p.optional),
+                        self.materialize_param_attrs(target, &p.name),
                     ],
                 )
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// One parameter's `#[...]` attributes, materialized into a `List<dyn>` of attribute-struct
+    /// instances. Each instance is built exactly as `materialize_attributes` builds it — same
+    /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads
+    /// off `ParamInfo.attrs` is indistinguishable from the one it would read off an `Attributed`.
+    pub(crate) fn materialize_param_attrs(&self, callable: &str, param: &str) -> Value {
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .param_attributes_for(callable, param)
+            .into_iter()
+            .map(|a| {
+                let shape = noeta_ast::reflect::attribute_shape(&a.name, &self.module.reflection);
+                let kind = if shape.is_struct {
+                    ShapeKind::Struct
+                } else {
+                    ShapeKind::Class
+                };
+                let values: Vec<Value> =
+                    noeta_ast::reflect::materialize_args(a, &shape.fields, &shape.defaults)
+                        .iter()
+                        .map(|v| attr_value_to_vm(v, &self.module.reflection))
+                        .collect();
+                let t_shape =
+                    noeta_object::intern_shape(Shape::object(kind, &a.name, shape.fields.clone()));
+                Value::object(t_shape, values)
             })
             .collect();
         Value::list(items)

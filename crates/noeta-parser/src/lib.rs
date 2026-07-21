@@ -1483,12 +1483,153 @@ where
     })
 }
 
+/// The `#[ Name ]` / `#[ Name(arg, arg) ]` **data-attribute** parser — the single definition of what
+/// an attribute looks like in annotation position, shared by every site one may be written at:
+/// type, function, method, trait method, field, enum variant, and (this slice) a callable's
+/// parameter. It is a free function rather than a local of the declaration grammar because
+/// [`params_parser`] needs it too, and `params_parser` is reached from the *expression* grammar
+/// (closure parameter lists) where the declaration grammar's locals are out of scope. Threading the
+/// expression parser in the same way `params_parser` does keeps the one grammar in one place instead
+/// of a second, drifting copy for parameters.
+///
+/// `expr` is the expression parser used for attribute *argument* values; the fold below narrows it
+/// to the constant literal tree an attribute may carry.
+fn attribute_parser<'src, I, P>(
+    ctx: Ctx<'src>,
+    expr: P,
+) -> impl Parser<'src, I, Attribute, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+    P: Parser<'src, I, Expr, Extra<'src>> + Clone + 'src,
+{
+    let id = ident_parser(ctx);
+    // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
+    // the bare [`Attribute`]. A struct instance attached as metadata, consumed via the manifest;
+    // it carries no codegen meaning (codegen is `@derive`). Arguments are literals.
+    just(T::Hash)
+        .ignore_then(just(T::LBracket))
+        .ignore_then(id)
+        .then(
+            attr_arg_parser(ctx, expr)
+                .separated_by(just(T::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(T::LParen), just(T::RParen))
+                .or_not(),
+        )
+        .then_ignore(just(T::RBracket))
+        .map_with(move |((name, name_span), args), e| Attribute {
+            name,
+            name_span,
+            args: commit_attr_args(&ctx, args.unwrap_or_default()),
+            span: ctx.to_span(e.span()),
+        })
+        // A `#[...]` is a prefix of the declaration it decorates; absorb the woven hard-boundary `;`
+        // when it sits on its own line above the declaration (slice 7).
+        .then_ignore(just(T::Semicolon).repeated())
+        .boxed()
+}
+
+/// One **argument** of a `#[...]` attribute or an `@`-directive: an optional `name:` label followed
+/// by a constant literal value. Extracted alongside [`attribute_parser`] so the attribute grammar
+/// and the directive grammar share one definition of what an argument is — they always did, as
+/// locals of the declaration parser, and this keeps that true now that attributes are also built
+/// from outside it.
+fn attr_arg_parser<'src, I, P>(
+    ctx: Ctx<'src>,
+    expr: P,
+) -> impl Parser<'src, I, DirectiveArg, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+    P: Parser<'src, I, Expr, Extra<'src>> + Clone + 'src,
+{
+    let id = ident_parser(ctx);
+    // A literal value in attribute-argument position. Attribute arguments construct the attribute
+    // struct at manifest-build time without running user code, so they are the constant
+    // literal-tree subset, not arbitrary expressions. We parse the **full expression grammar**
+    // (so list/map/set/struct/enum literals reuse one grammar — no parallel literal parser to
+    // drift) and then fold the result into an [`AttrValue`] tree, rejecting any non-literal node.
+    // The fold's failure is **deferred**, not pushed. This grammar runs inside speculative
+    // alternatives — `tier_block` and `tier_annotation` both begin `@name(args)` and differ only
+    // in what follows — so a parser that reports at fold time reports for parses that are then
+    // abandoned, and reports twice when two alternatives parse the same arguments. That was
+    // observable: `@bench(a + b)\nfn f() {}` emitted its one real error twice, because
+    // `tier_block` parsed the arguments, failed for want of a `{`, and `tier_annotation` parsed
+    // them again. The enclosing form drains these once it has committed, via
+    // [`commit_attr_args`]; an abandoned alternative drops them with the rest of its output.
+    // A **generic type application** in argument position: `Serialize<Json>`.
+    //
+    // Tried before the expression grammar, and it has to be. The expression grammar treats `<`
+    // as comparison, so `Serialize<Json>` parses there as `Serialize < Json` and then demands an
+    // operand after `>` — which is exactly why the `@`-directives grew a separate,
+    // identifiers-only argument grammar rather than reusing this one. A comparison is
+    // meaningless in argument position, so preferring the type reading is unambiguous and costs
+    // the literal grammar nothing.
+    //
+    // Speculating like this is only safe because the fallback below reports by *returning* its
+    // diagnostic rather than pushing it: an attempt that backtracks must leave no trace.
+    let generic_app = id
+        .clone()
+        .then(
+            type_parser(ctx)
+                .separated_by(just(T::Comma))
+                .allow_trailing()
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .delimited_by(just(T::Lt), just(T::Gt)),
+        )
+        .map(|((name, name_span), args)| {
+            (
+                noeta_ast::AttrValue::TypeRef { name, args },
+                ValueSpans::Name(name_span),
+                None,
+            )
+        });
+    let attr_value = generic_app.or(expr.clone().map(|e| {
+        let spans = value_spans(&e);
+        match expr_to_attr_value(&e) {
+            Ok(value) => (value, spans, None),
+            Err((message, span)) => (
+                // A non-literal never reaches a runnable program; a defensive placeholder keeps
+                // parsing going so every offending argument is reported in one pass.
+                noeta_ast::AttrValue::Bool(false),
+                spans,
+                Some(Diagnostic::error(
+                    DiagnosticCode::UnexpectedToken,
+                    span,
+                    message,
+                )),
+            ),
+        }
+    }));
+    // An attribute argument: optionally named (`ttl: 60`), then a literal value. Paired with the
+    // deferred diagnostic its value fold produced (see above).
+    id.then_ignore(just(T::Colon))
+        .or_not()
+        .then(attr_value)
+        .map_with(move |(name, (value, spans, deferred)), e| DirectiveArg {
+            name,
+            value,
+            spans,
+            span: ctx.to_span(e.span()),
+            deferred,
+        })
+        .boxed()
+}
+
 /// A parenthesised parameter list: `(name: T, name2, name3: T = default, ...)`. Trailing commas
 /// are not permitted (matching the surface grammar). `allow_defaults` controls whether a
 /// `= expr` default value is accepted — it is for named callables (free functions, associated
 /// functions, methods) but not for closure parameters or enum-variant fields, which pass `false`.
 /// `expr` is the expression parser used to parse a default's value (threaded in to avoid a
 /// parser-construction cycle, since the expression grammar itself contains parameter lists).
+///
+/// Each parameter may carry leading `#[...]` data attributes, built by the shared
+/// [`attribute_parser`] — the same grammar a field or a function's attributes use, not a parallel
+/// one. They are accepted at *every* parameter list, including a closure's, because "what an
+/// annotation looks like" is a lexical question the grammar answers once; *where* an annotation may
+/// legally appear is a placement question the checker answers once (`TargetKind::Param`, `E0030`).
+/// Splitting that judgement across the two would put the rule in two places.
 fn params_parser<'src, I, P>(
     ctx: Ctx<'src>,
     expr: P,
@@ -1499,20 +1640,26 @@ where
     P: Parser<'src, I, Expr, Extra<'src>> + Clone + 'src,
 {
     let default = if allow_defaults {
-        just(T::Eq).ignore_then(expr).or_not().boxed()
+        just(T::Eq).ignore_then(expr.clone()).or_not().boxed()
     } else {
         empty().to(None).boxed()
     };
-    let param = ident_parser(ctx)
+    let param = attribute_parser(ctx, expr)
+        .repeated()
+        .collect::<Vec<_>>()
+        .then(ident_parser(ctx))
         .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
         .then(default)
-        .map_with(move |(((name, name_span), ty), default), e| Param {
-            name,
-            name_span,
-            ty,
-            default,
-            span: ctx.to_span(e.span()),
-        });
+        .map_with(
+            move |(((attrs, (name, name_span)), ty), default), e| Param {
+                attrs,
+                name,
+                name_span,
+                ty,
+                default,
+                span: ctx.to_span(e.span()),
+            },
+        );
     param
         .separated_by(just(T::Comma))
         .allow_trailing()
@@ -3045,105 +3192,13 @@ where
             .or_not()
             .map(Option::unwrap_or_default);
 
-        // A literal value in attribute-argument position. Attribute arguments construct the attribute
-        // struct at manifest-build time without running user code, so they are the constant
-        // literal-tree subset, not arbitrary expressions. We parse the **full expression grammar**
-        // (so list/map/set/struct/enum literals reuse one grammar — no parallel literal parser to
-        // drift) and then fold the result into an [`AttrValue`] tree, rejecting any non-literal node.
-        // Defined here (above `fn_decl`) so attributes can lead a function/method declaration as well
-        // as a type declaration.
-        // The fold's failure is **deferred**, not pushed. This grammar runs inside speculative
-        // alternatives — `tier_block` and `tier_annotation` both begin `@name(args)` and differ only
-        // in what follows — so a parser that reports at fold time reports for parses that are then
-        // abandoned, and reports twice when two alternatives parse the same arguments. That was
-        // observable: `@bench(a + b)\nfn f() {}` emitted its one real error twice, because
-        // `tier_block` parsed the arguments, failed for want of a `{`, and `tier_annotation` parsed
-        // them again. The enclosing form drains these once it has committed, via
-        // [`commit_attr_args`]; an abandoned alternative drops them with the rest of its output.
-        // A **generic type application** in argument position: `Serialize<Json>`.
-        //
-        // Tried before the expression grammar, and it has to be. The expression grammar treats `<`
-        // as comparison, so `Serialize<Json>` parses there as `Serialize < Json` and then demands an
-        // operand after `>` — which is exactly why the `@`-directives grew a separate,
-        // identifiers-only argument grammar rather than reusing this one. A comparison is
-        // meaningless in argument position, so preferring the type reading is unambiguous and costs
-        // the literal grammar nothing.
-        //
-        // Speculating like this is only safe because the fallback below reports by *returning* its
-        // diagnostic rather than pushing it: an attempt that backtracks must leave no trace.
-        let generic_app = id
-            .clone()
-            .then(
-                type_parser(ctx)
-                    .separated_by(just(T::Comma))
-                    .allow_trailing()
-                    .at_least(1)
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(T::Lt), just(T::Gt)),
-            )
-            .map(|((name, name_span), args)| {
-                (
-                    noeta_ast::AttrValue::TypeRef { name, args },
-                    ValueSpans::Name(name_span),
-                    None,
-                )
-            });
-        let attr_value = generic_app.or(expr.clone().map(|e| {
-            let spans = value_spans(&e);
-            match expr_to_attr_value(&e) {
-                Ok(value) => (value, spans, None),
-                Err((message, span)) => (
-                    // A non-literal never reaches a runnable program; a defensive placeholder keeps
-                    // parsing going so every offending argument is reported in one pass.
-                    noeta_ast::AttrValue::Bool(false),
-                    spans,
-                    Some(Diagnostic::error(
-                        DiagnosticCode::UnexpectedToken,
-                        span,
-                        message,
-                    )),
-                ),
-            }
-        }));
-        // An attribute argument: optionally named (`ttl: 60`), then a literal value. Paired with the
-        // deferred diagnostic its value fold produced (see above).
-        let attr_arg = id
-            .clone()
-            .then_ignore(just(T::Colon))
-            .or_not()
-            .then(attr_value.clone())
-            .map_with(move |(name, (value, spans, deferred)), e| DirectiveArg {
-                name,
-                value,
-                spans,
-                span: ctx.to_span(e.span()),
-                deferred,
-            });
-        // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
-        // the bare [`Attribute`]. A struct instance attached as metadata, consumed via the manifest;
-        // it carries no codegen meaning (codegen is `@derive`). Arguments are literals.
-        let attr_decl = just(T::Hash)
-            .ignore_then(just(T::LBracket))
-            .ignore_then(id.clone())
-            .then(
-                attr_arg
-                    .clone()
-                    .separated_by(just(T::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(T::LParen), just(T::RParen))
-                    .or_not(),
-            )
-            .then_ignore(just(T::RBracket))
-            .map_with(move |((name, name_span), args), e| Attribute {
-                name,
-                name_span,
-                args: commit_attr_args(&ctx, args.unwrap_or_default()),
-                span: ctx.to_span(e.span()),
-            })
-            // A `#[...]` is a prefix of the declaration it decorates; absorb the woven hard-boundary `;`
-            // when it sits on its own line above the declaration (slice 7).
-            .then_ignore(just(T::Semicolon).repeated());
+        // `#[ Name ]` / `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
+        // the bare [`Attribute`]. Built by the shared [`attribute_parser`] so that this grammar and
+        // the one a parameter list uses are the same grammar, not two that agree today.
+        let attr_decl = attribute_parser(ctx, expr.clone());
+        // The shared argument grammar, which the `@`-directive forms below also parse their
+        // arguments with — same constant literal tree, one definition.
+        let attr_arg = attr_arg_parser(ctx, expr.clone());
 
         // `fn f(params) use (a, b): Ret { … }` — the optional **capture clause** on a named
         // function or method. A named fn is SEALED (its body sees params + statics only); each

@@ -1909,11 +1909,18 @@ impl Interpreter {
     }
 
     /// Materialize a callable's declared parameter list from the reflection info into a
-    /// `List<ParamInfo>` — each `{ name: string, type: Type, optional: bool }`. `type` is the
-    /// prelude `Type` ADT value built from the parameter's declared type (the same
-    /// `build_type_value` `type_of` uses), and `optional` reports whether the parameter declared a
-    /// default. Builds a fresh `TypeDef`; the VM builds the matching shape the same way, so the
-    /// values agree by construction. An unknown target yields an empty list.
+    /// `List<ParamInfo>` — each `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`.
+    /// `type` is the prelude `Type` ADT value built from the parameter's declared type (the same
+    /// `build_type_value` `type_of` uses), `optional` reports whether the parameter declared a
+    /// default, and `attrs` holds the parameter's `#[...]` attribute instances. Builds a fresh
+    /// `TypeDef`; the VM builds the matching shape the same way, so the values agree by
+    /// construction. An unknown target yields an empty list.
+    ///
+    /// `attrs` is **joined from the attribute manifest**, not carried in the parameter record: the
+    /// rows are exactly the ones `attributes_of::<T>()` returns for the same parameter, reached
+    /// through the shared `param_attributes_for` key. So the two query surfaces are two renderings
+    /// of one table, and a parameter attribute cannot be visible through one and missing from the
+    /// other.
     fn materialize_params(&self, target: &str) -> Value {
         let info_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::PARAM_INFO,
@@ -1921,6 +1928,7 @@ impl Interpreter {
                 "name".to_string(),
                 "type".to_string(),
                 "optional".to_string(),
+                "attrs".to_string(),
             ],
             true,
         ));
@@ -1929,13 +1937,37 @@ impl Interpreter {
             .params_for(target)
             .iter()
             .map(|p| {
-                // `info_def` is `{ name, type, optional }` — build the slots in that order.
+                // `info_def` is `{ name, type, optional, attrs }` — build the slots in that order.
                 let slots = vec![
                     Value::Str(p.name.clone()),
                     build_type_value(&p.ty),
                     Value::Bool(p.optional),
+                    self.materialize_param_attrs(target, &p.name),
                 ];
                 Value::Object(Rc::new(ObjectValue::new(info_def.clone(), slots)))
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// One parameter's `#[...]` attributes, materialized into a `List<dyn>` of attribute-struct
+    /// instances. Each instance is built exactly as `attributes_of` builds it — same
+    /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads
+    /// off `ParamInfo.attrs` is indistinguishable from the one it would read off an `Attributed`.
+    fn materialize_param_attrs(&self, callable: &str, param: &str) -> Value {
+        let items: Vec<Value> = self
+            .reflection
+            .param_attributes_for(callable, param)
+            .into_iter()
+            .map(|a| {
+                let shape = noeta_ast::reflect::attribute_shape(&a.name, &self.reflection);
+                let slots: Vec<Value> =
+                    noeta_ast::reflect::materialize_args(a, &shape.fields, &shape.defaults)
+                        .iter()
+                        .map(|v| attr_value_to_eval(v, &self.reflection))
+                        .collect();
+                let def = Rc::new(fresh_type_def(&a.name, &shape.fields, shape.is_struct));
+                Value::Object(Rc::new(ObjectValue::new(def, slots)))
             })
             .collect();
         Value::list(items)

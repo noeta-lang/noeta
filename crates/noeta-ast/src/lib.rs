@@ -540,6 +540,14 @@ impl Sites {
     pub const FIELD: Sites = Sites(1 << 6);
     /// An enum variant. As [`FIELD`](Self::FIELD).
     pub const VARIANT: Sites = Sites(1 << 7);
+    /// A callable's declared parameter. As [`FIELD`](Self::FIELD): not a directive site — no
+    /// built-in or registered tier attaches to a parameter — but a `#[...]` attribute target, so a
+    /// signature-driven consumer can hang per-argument metadata (`#[Arg(help: "…")]`) on the
+    /// parameter it describes rather than on a parallel list that desynchronises the moment someone
+    /// reorders the signature. Carried here for the same reason the two before it are: this
+    /// vocabulary names *every* place a decoration can be written, so no caller has to invent an
+    /// "unrepresentable site" case.
+    pub const PARAM: Sites = Sites(1 << 8);
     /// Every type declaration — struct, class, enum. (Deliberately excludes `trait`: a trait is a
     /// contract, not a data type, and every type directive on one is `E0054`.)
     pub const TYPE: Sites = Sites(Self::STRUCT.0 | Self::CLASS.0 | Self::ENUM.0);
@@ -576,6 +584,7 @@ impl Sites {
             (Sites::METHOD, "a method"),
             (Sites::FIELD, "a field"),
             (Sites::VARIANT, "an enum variant"),
+            (Sites::PARAM, "a parameter"),
         ] {
             if self.contains(bit) {
                 parts.push(name);
@@ -1331,6 +1340,13 @@ pub struct TierDecl {
 /// functions, methods) — never for closure parameters or enum-variant fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
+    /// The parameter's leading `#[...]` data attributes, in source order. Same annotation form and
+    /// same constant-literal argument rules as a field's or a function's — a parameter is simply
+    /// one more attachment site ([`Sites::PARAM`]). They exist so per-argument metadata can live on
+    /// the argument: a CLI framework's `#[Arg(short: "r", help: "…")]` describes exactly one
+    /// parameter, and hanging it off the fn-level attribute as a positional side-list would silently
+    /// mean something else the first time a parameter moved.
+    pub attrs: Vec<Attribute>,
     pub name: String,
     pub name_span: Span,
     pub ty: Option<TypeRef>,

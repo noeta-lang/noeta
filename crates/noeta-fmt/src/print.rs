@@ -1004,7 +1004,18 @@ impl Printer<'_> {
     }
 
     fn param(&self, param: &Param) -> Result<Doc, FmtError> {
-        let mut parts = vec![Doc::text(param.name.clone())];
+        let mut parts = Vec::new();
+        // A parameter's `#[...]` attributes lead it on the same line, space-separated — unlike a
+        // declaration's, which get a hardline each. A parameter is an inline element of a
+        // comma-separated list, so a hardline here would break the list from inside a single item
+        // and leave the closing `)` stranded. Whether the *list* breaks stays the source-directed
+        // decision `params` already makes, which is the behaviour an attributed signature wants:
+        // author it across lines and it stays across lines.
+        for a in &param.attrs {
+            parts.push(self.attribute(a)?);
+            parts.push(Doc::text(" "));
+        }
+        parts.push(Doc::text(param.name.clone()));
         if let Some(ty) = &param.ty {
             parts.push(Doc::text(": "));
             parts.push(self.type_ref(ty)?);

@@ -153,6 +153,7 @@ pub(super) fn desugar_state_machine(
 
     let step = Expr::Closure {
         params: vec![Param {
+            attrs: Vec::new(),
             name: RESUME_PARAM.to_string(),
             name_span: span,
             ty: None,

@@ -506,6 +506,7 @@ impl SessionChecker {
         let params = params
             .iter()
             .map(|name| Param {
+                attrs: Vec::new(),
                 name: name.clone(),
                 name_span: span,
                 ty: None,
@@ -705,6 +706,11 @@ enum TargetKind {
     Method,
     Field,
     Variant,
+    /// A callable's declared parameter. Lets an attribute declare itself parameter-only
+    /// (`@attribute(Param)`), which is what per-argument metadata wants: `#[Arg(help: "…")]` is
+    /// meaningless on a type, and saying so at the attribute's declaration is better than every
+    /// consumer defending against it.
+    Param,
 }
 
 impl TargetKind {
@@ -718,6 +724,7 @@ impl TargetKind {
             "Method" => TargetKind::Method,
             "Field" => TargetKind::Field,
             "Variant" => TargetKind::Variant,
+            "Param" => TargetKind::Param,
             _ => return None,
         })
     }
@@ -731,6 +738,7 @@ impl TargetKind {
             TargetKind::Method => "Method",
             TargetKind::Field => "Field",
             TargetKind::Variant => "Variant",
+            TargetKind::Param => "Param",
         }
     }
 }
@@ -747,6 +755,7 @@ fn target_sites(target: TargetKind) -> noeta_ast::Sites {
         TargetKind::Enum => Sites::ENUM,
         TargetKind::Field => Sites::FIELD,
         TargetKind::Variant => Sites::VARIANT,
+        TargetKind::Param => Sites::PARAM,
     }
 }
 
@@ -2159,6 +2168,11 @@ impl Checker {
         // `Attribute` capability (E0029) and constructs it from its literal args (E0009/E0007/E0005).
         // `target` distinguishes a top-level `Function` from a `Method` for placement checks (P2.5).
         self.check_attrs(&decl.attrs, target);
+        // Each parameter's own `#[...]` attributes, validated by exactly the same rules — an
+        // attribute struct (E0029), constructed from its literal arguments, and permitted at
+        // `Param` (E0030). The parameter is a target kind like any other, so a `@attribute(Field)`
+        // written on a parameter is rejected the same way one written on a method is.
+        self.check_param_attrs(&decl.params);
         // A method's leading `@<tier>` directives (`@test`/`@doc`/…): each names a known tier and
         // attaches at a site the tier permits (E0054, the directive attachment-site model).
         self.check_directives(&decl.directives, target, decl);
