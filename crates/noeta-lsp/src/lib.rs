@@ -1172,112 +1172,21 @@ impl LanguageServer for Backend {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
         let position = ide_position(position_params.position);
-        let (found, doc, tier, directive, use_stmt, namespace, signature, type_def) = {
+        // The whole composition — precedence over the eight `hover_*` primitives and the Markdown
+        // assembly — lives in one place, `DocumentStore::hover_markdown`, so this server and the
+        // web playground render byte-identical hovers and cannot drift. The inner range is `None`
+        // only for the doc-only fallback, which the wire form reports as `range: None`.
+        let composed = {
             let store = self.store.lock().expect("document store poisoned");
-            (
-                store.hover_type(uri.as_str(), position, self.encoding()),
-                store.hover_doc(uri.as_str(), position, self.encoding()),
-                store.hover_tier(uri.as_str(), position, self.encoding()),
-                store.hover_directive(uri.as_str(), position, self.encoding()),
-                store.hover_use(uri.as_str(), position, self.encoding()),
-                store.hover_namespace(uri.as_str(), position, self.encoding()),
-                store.hover_signature(uri.as_str(), position, self.encoding()),
-                store.hover_type_definition(uri.as_str(), position, self.encoding()),
-            )
+            store.hover_markdown(uri.as_str(), position, self.encoding())
         };
-        let markdown = |value: String| {
-            HoverContents::Markup(MarkupContent {
+        Ok(composed.map(|(value, range)| Hover {
+            contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value,
-            })
-        };
-        // Hovering an embedded-language block's tier name (`@sql { … }`) describes its body — the
-        // declared language and, for an expression tier, its value type — read from the tier
-        // registry (program + extension declarations alike). Takes precedence over the type hover
-        // because the cursor is on the tier name, not a typed sub-expression.
-        if let Some((descriptor, range)) = tier {
-            return Ok(Some(Hover {
-                contents: markdown(descriptor),
-                range: Some(wire_range(range)),
-            }));
-        }
-        // A decorator directive (`@attribute`, `@role`, `@semantic`, `@packed`, `@derive`) —
-        // described in place; the tier directives are the tier hover's.
-        if let Some((value, range)) = directive {
-            return Ok(Some(Hover {
-                contents: markdown(value),
-                range: Some(wire_range(range)),
-            }));
-        }
-        // Any element of a `use` statement — imported items (with their signature/definition and
-        // doc prose) and module path segments. No other hover fires inside a `use`.
-        if let Some((value, range)) = use_stmt {
-            return Ok(Some(Hover {
-                contents: markdown(value),
-                range: Some(wire_range(range)),
-            }));
-        }
-        // A namespace-group name (`http` from `use std.http`) has no typed expression, so describe
-        // the group and its members here (module-namespaces).
-        if let Some((descriptor, range)) = namespace {
-            return Ok(Some(Hover {
-                contents: markdown(descriptor),
-                range: Some(wire_range(range)),
-            }));
-        }
-        // Hovering a callable's *name* shows its declaration (`fn manhattan(): int`) plus any doc —
-        // ahead of the type hover, whose tightest span at a call is the result type alone (`int`).
-        if let Some((sig, range)) = signature {
-            let mut value = format!("```noeta\n{sig}\n```");
-            if let Some(doc) = doc {
-                value.push_str("\n\n---\n\n");
-                value.push_str(&doc);
-            }
-            return Ok(Some(Hover {
-                contents: markdown(value),
-                range: Some(wire_range(range)),
-            }));
-        }
-        // Hovering a type name (`Point`) shows its declaration — fields/variants and method
-        // signatures — ahead of the type hover, which would otherwise report just the nominal name.
-        if let Some((def, range)) = type_def {
-            let mut value = format!("```noeta\n{def}\n```");
-            if let Some(doc) = doc {
-                value.push_str("\n\n---\n\n");
-                value.push_str(&doc);
-            }
-            return Ok(Some(Hover {
-                contents: markdown(value),
-                range: Some(wire_range(range)),
-            }));
-        }
-        Ok(match (found, doc) {
-            // `TypeRepr` displays as its Noeta surface spelling (`impl Display` in
-            // `noeta_ast::reflect`) — the same rendering the debugger's Variables view uses.
-            // A non-default storage fact (`@packed` / flat list) follows as a plain line, and
-            // the declaration's attached `@doc` prose (already Markdown) follows after a rule.
-            (Some((repr, note, range)), doc) => {
-                let mut value = match note {
-                    Some(note) => format!("```noeta\n{repr}\n```\n{note}"),
-                    None => format!("```noeta\n{repr}\n```"),
-                };
-                if let Some(doc) = doc {
-                    value.push_str("\n\n---\n\n");
-                    value.push_str(&doc);
-                }
-                Some(Hover {
-                    contents: markdown(value),
-                    range: Some(wire_range(range)),
-                })
-            }
-            // No typed expression under the cursor (e.g. the declaration's own name), but the
-            // symbol has attached `@doc` prose — a doc-only hover.
-            (None, Some(doc)) => Some(Hover {
-                contents: markdown(doc),
-                range: None,
             }),
-            (None, None) => None,
-        })
+            range: range.map(wire_range),
+        }))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
