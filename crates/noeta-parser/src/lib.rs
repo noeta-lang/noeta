@@ -1121,11 +1121,65 @@ fn parse_inner(
 
     // Convert structural errors to owned diagnostics first: this releases the borrow of
     // `diags` (held via `ctx` through the `Rich` errors' lifetime) before `into_inner`.
-    let structural: Vec<Diagnostic> = errs.into_iter().map(|err| rich_to_diag(ctx, err)).collect();
-    let mut diagnostics = diags.into_inner();
+    //
+    // Each is tagged GENERIC or SPECIFIC on the way through, for the cascade rule below. A
+    // structural error is specific exactly when its reason declares its own catalog entry
+    // ([`custom_reason`]) — a rule that matched the construct and rejected it on its own terms.
+    // Everything else chumsky produces is an expected-vs-found report about whatever token the
+    // parse happened to die on, which is generic by construction.
+    let structural: Vec<(Diagnostic, bool)> = errs
+        .into_iter()
+        .map(|err| {
+            let diag = rich_to_diag(ctx, err);
+            let specific = custom_reason(&diag.message).is_some();
+            (diag, specific)
+        })
+        .collect();
+    // Side-channel diagnostics are all specific: a grammar closure only pushes there when it has
+    // recognized a construct and named an actual fault in it ("attribute arguments must be
+    // literal"), never to report a token surprise. They are the other half of "report the specific
+    // fault" and suppress cascade in their region just as a custom reason does. The known hazard —
+    // a push surviving its alternative's backtrack (see the dedup note below) — cannot make this
+    // rule *lose* a fault it would otherwise report: a spurious push lands in a region whose
+    // statement then parsed fine through another alternative, and a region that parsed has no
+    // structural error to suppress.
+    let mut diagnostics: Vec<(Diagnostic, bool)> =
+        diags.into_inner().into_iter().map(|d| (d, true)).collect();
     diagnostics.extend(structural);
     // Deterministic ordering regardless of which channel produced each diagnostic.
-    diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
+    diagnostics.sort_by_key(|(d, _)| (d.span.start, d.span.end));
+
+    // Cascade suppression: within one statement region, a specific fault silences the GENERIC
+    // structural errors in that region. Once a rule has said what is actually wrong, chumsky's
+    // report about the token the parse then choked on is wreckage, not a second fault — `x = {"a"}`
+    // should say the map entry needs a value, not also that a `}` turned up somewhere unexpected.
+    //
+    // The region is the statement extent the parser already computes: split at every statement
+    // terminator, which is a newline boundary ([`noeta_lexer::newline_boundaries`], hard or soft)
+    // or an explicit `;`. Using both keeps regions as FINE as the language's own statement
+    // structure — the conservative direction, since a narrower region suppresses less.
+    //
+    // Two specific faults in one region both survive; only the generic ones are cascade. A region
+    // with no specific fault keeps its generic errors untouched, which is the common case and the
+    // one that must not regress. Faults in different regions never interact, so genuinely
+    // independent errors are all still reported. This is a parser-stage rule and runs before any
+    // checker diagnostic exists, so checking is unaffected.
+    let mut region_ends: Vec<u32> = boundaries.iter().map(|b| b.offset).collect();
+    region_ends.extend(
+        tokens
+            .iter()
+            .filter(|t| t.kind == T::Semicolon)
+            .map(|t| t.span.end),
+    );
+    region_ends.sort_unstable();
+    let region_of = |d: &Diagnostic| region_ends.partition_point(|&o| o <= d.span.start);
+    let suppressing: HashSet<usize> = diagnostics
+        .iter()
+        .filter(|(_, specific)| *specific)
+        .map(|(d, _)| region_of(d))
+        .collect();
+    diagnostics.retain(|(d, specific)| *specific || !suppressing.contains(&region_of(d)));
+    let mut diagnostics: Vec<Diagnostic> = diagnostics.into_iter().map(|(d, _)| d).collect();
     // One diagnostic per distinct (span, code, message).
     //
     // The side channel is not transactional: a `push` from a grammar closure survives its
@@ -5298,6 +5352,54 @@ mod tests {
                 parsed.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn a_specific_fault_suppresses_generic_cascade_in_its_region() {
+        // The entry rule says what is wrong; chumsky's report about the `}` the parse then choked
+        // on is wreckage from that same fault, not a second one.
+        let parsed = parse_str("x = { \"a\" };");
+        assert_eq!(
+            parsed.diagnostics.len(),
+            1,
+            "cascade not suppressed: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.diagnostics[0].message, MAP_ENTRY_NEEDS_VALUE);
+    }
+
+    #[test]
+    fn a_region_with_no_specific_fault_keeps_its_generic_errors() {
+        // The common case, and the one that must not regress: nothing specific was found, so the
+        // expected-vs-found reports are all there is to say.
+        let parsed = parse_str("echo ;\necho ;\n");
+        assert_eq!(
+            parsed.diagnostics.len(),
+            2,
+            "a generic-only region lost an error: {:?}",
+            parsed.diagnostics
+        );
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .all(|d| custom_reason(&d.message).is_none())
+        );
+    }
+
+    #[test]
+    fn suppression_does_not_reach_across_statement_regions() {
+        // A specific fault silences cascade in ITS region only — an unrelated statement's generic
+        // error is a genuinely independent fault and still stands.
+        let parsed = parse_str("echo ;\nx = { \"a\" };");
+        assert_eq!(
+            parsed.diagnostics.len(),
+            2,
+            "an independent fault was suppressed across regions: {:?}",
+            parsed.diagnostics
+        );
+        assert!(custom_reason(&parsed.diagnostics[0].message).is_none());
+        assert_eq!(parsed.diagnostics[1].message, MAP_ENTRY_NEEDS_VALUE);
     }
 
     #[test]

@@ -1,0 +1,9 @@
+// Cascade suppression is scoped to ONE statement region. The map-entry fault on the second line
+// silences the vague follow-on error inside its own statement (see `map_entry_needs_value.noe`),
+// but it says nothing about the unrelated `echo ;` on the first — that is a genuinely independent
+// fault in another region and is still reported. Both stand.
+// expect: error E0003 at 8:6
+// expect: error E0003 at 9:7
+// expect: exit 1
+echo ;
+x = { "a" };
