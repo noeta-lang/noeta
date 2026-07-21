@@ -3929,19 +3929,37 @@ where
                             }
                             // `@tier` is a built-in directive, but its only valid form is the tier
                             // *declaration* `@tier(...) fn runner` (parsed by `tier_decl_fn`); as a
-                            // leading decorator on a *type* it is not accepted, so it falls through to
-                            // the same unknown-directive error as any non-directive `@foo`. Grouped
-                            // with `None` (a genuinely unknown name) rather than a `_` wildcard so a
-                            // newly added `BuiltinDirective` variant forces a decision here.
-                            Some(BuiltinDirective::Tier) | None => {
-                                ctx.diags.borrow_mut().push(Diagnostic::error(
+                            // leading decorator on a *type* it is not accepted. Grouped with `None`
+                            // (a genuinely unknown name) rather than a `_` wildcard so a newly added
+                            // `BuiltinDirective` variant forces a decision here — but the two get
+                            // different prose, because "unknown directive `@tier`" is a lie: the
+                            // name is known, the *site* is wrong, and saying so is the difference
+                            // between the author moving the directive and hunting for a typo.
+                            Some(BuiltinDirective::Tier) => {
+                                ctx.diags.borrow_mut().push(
+                                    Diagnostic::error(
+                                        DiagnosticCode::UnexpectedToken,
+                                        name_span,
+                                        "`@tier` decorates a function, not a type declaration"
+                                            .to_string(),
+                                    )
+                                    .with_help(
+                                        "a tier is declared by decorating its runner: \
+                                         `@tier(name) fn run(…)`",
+                                    ),
+                                )
+                            }
+                            None => ctx.diags.borrow_mut().push(
+                                Diagnostic::error(
                                     DiagnosticCode::UnexpectedToken,
                                     name_span,
-                                    format!(
-                                        "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`, `@packed`, and `@validated`"
-                                    ),
-                                ))
-                            }
+                                    format!("unknown directive `@{name}`"),
+                                )
+                                .with_help(format!(
+                                    "the directives that decorate a declaration are {}",
+                                    BuiltinDirective::decorator_list()
+                                )),
+                            ),
                         },
                         Decorator::Attr(attr) => attrs.push(attr),
                     }

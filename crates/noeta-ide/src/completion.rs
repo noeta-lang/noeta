@@ -193,15 +193,6 @@ pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// The short usage detail shown beside a built-in decorator directive.
-///
-/// Reads the one metadata table rather than carrying its own copy: the detail string used to live
-/// here, the hover prose in `noeta-ide/src/lib.rs`, and the legal sites across four checker files,
-/// each free to drift from the others.
-fn decorator_detail(directive: BuiltinDirective) -> &'static str {
-    directive.info().detail
-}
-
 /// The directive candidates offered right after an `@` (**directive completion**, C4): the built-in
 /// decorator directives (the parser's closed set, so completion and the grammar can never drift)
 /// followed by the **tier name-space** — the installed extensions' tiers (`test`/`bench`/`doc`/
@@ -211,47 +202,19 @@ fn decorator_detail(directive: BuiltinDirective) -> &'static str {
 /// offered. De-duplicated by label (a program re-declaration of an extension tier — a second
 /// *provider* — is still one name).
 pub fn directives(program: &Program) -> Vec<Candidate> {
-    let mut candidates = Vec::new();
-    for directive in BuiltinDirective::ALL {
-        candidates.push(Candidate {
-            label: directive.as_str().to_string(),
-            kind: CandidateKind::Directive,
-            detail: Some(decorator_detail(directive).to_string()),
-        });
-    }
-    // The registry-scoped tier name-space (LSP/IDE run single-registry: the seeded process global).
+    // The registry-scoped name-space (LSP/IDE run single-registry: the seeded process global).
+    // Enumeration, de-duplication and how a tier renders all live in the registry now — this used to
+    // be three inline loops with two near-identical copies of the tier detail string.
     let reg = noeta_stdlib::registry::single_registry_process();
-    let tiers = noeta_check::tiers::TierRegistry::collect_with_registry(program, reg);
-    for tier in tiers.extension_tiers() {
-        let detail = match (tier.expr, tier.text) {
-            (Some(ty), _) => format!("expression tier — @{} {{ … }} : {ty}", tier.name),
-            (None, Some(lang)) => format!("text tier ({lang})"),
-            (None, None) => "dev-tier".to_string(),
-        };
-        candidates.push(Candidate {
-            label: tier.name.to_string(),
+    noeta_check::directives::DirectiveRegistry::collect_with_registry(program, reg)
+        .all()
+        .into_iter()
+        .map(|entry| Candidate {
+            label: entry.name,
             kind: CandidateKind::Directive,
-            detail: Some(detail),
-        });
-    }
-    for tier in tiers.declared_tiers() {
-        let provider = if tier.root.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", tier.root)
-        };
-        let detail = match (&tier.expr, &tier.text) {
-            (Some(ty), _) => format!("expression tier — @{} {{ … }} : {ty}{provider}", tier.name),
-            (None, Some(lang)) => format!("text tier ({lang}){provider}"),
-            (None, None) => format!("dev-tier{provider}"),
-        };
-        candidates.push(Candidate {
-            label: tier.name.clone(),
-            kind: CandidateKind::Directive,
-            detail: Some(detail),
-        });
-    }
-    dedupe_by_label(candidates)
+            detail: Some(entry.detail),
+        })
+        .collect()
 }
 
 /// The directive-argument position the cursor is in: inside the parens of `@<directive>(…)`,

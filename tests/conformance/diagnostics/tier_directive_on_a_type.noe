@@ -1,0 +1,9 @@
+// `@tier` is a known directive written at the wrong site: it decorates the `fn` that runs a tier,
+// never a type. It used to fall into the same "unknown directive `@tier`" message as a typo, which
+// is a lie about a name the compiler knows — the author would hunt for a misspelling instead of
+// moving the directive onto a function.
+// expect: error E0003 at 7:2
+// expect: exit 1
+@tier(audit)
+struct Report { lines: int }
+echo "unreached"

@@ -78,7 +78,7 @@ use noeta_types::{BuiltinTrait, Type};
 mod attributes;
 mod collect;
 mod decls;
-mod directives;
+pub mod directives;
 mod effects;
 mod env;
 mod expr;

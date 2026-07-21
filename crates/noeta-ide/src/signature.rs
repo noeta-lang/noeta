@@ -117,15 +117,20 @@ pub fn directive_signature(
             })
         }
         // Not a built-in directive — a tier annotation: its signature is the config attribute's
-        // field list.
+        // field list. Both halves of the tier name-space resolve through the one registry lookup,
+        // so the dispatch is total over `DirectiveKind` (a future kind must state its signature
+        // here) rather than a pair of `or_else`d probes ending in an implicit "must be unknown".
         None => {
+            use noeta_check::directives::{DirectiveKind, DirectiveRegistry};
             let tier = ctxt.directive.as_str();
             let reg = noeta_stdlib::registry::single_registry_process();
-            let tiers = noeta_check::tiers::TierRegistry::collect_with_registry(program, reg);
-            let config = reg
-                .find_ext_tier(tier)
-                .and_then(|t| t.config.map(String::from))
-                .or_else(|| tiers.declared(tier).and_then(|d| d.config.clone()))?;
+            let directives = DirectiveRegistry::collect_with_registry(program, reg);
+            let config = match directives.lookup(tier)? {
+                DirectiveKind::ExtTier(t) => t.config.map(String::from)?,
+                DirectiveKind::DeclaredTier(d) => d.config.clone()?,
+                // `from_name` already returned `None`, so the lookup cannot answer `Builtin`.
+                DirectiveKind::Builtin(_) => return None,
+            };
             let parameters: Vec<String> =
                 if let Some(attr) = noeta_stdlib::registry::find_ext_attribute(&config) {
                     attr.fields

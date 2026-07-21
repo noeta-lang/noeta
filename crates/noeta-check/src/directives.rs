@@ -1,4 +1,12 @@
-//! The one placement check for the built-in `@`-directives.
+//! The `@`-directive name-space: what `@name` resolves to, and where it may be written.
+//!
+//! Two things that used to be scattered, kept together because they answer the same question from
+//! opposite ends. [`DirectiveRegistry`] is the one lookup over the whole name-space — the closed
+//! built-in set plus the open tier set — replacing the "`from_name`, else go build a `TierRegistry`
+//! and probe both halves" that each IDE surface had open-coded. [`check_directive_placement`] is
+//! the one placement check.
+//!
+//! ## Placement
 //!
 //! Which declarations a directive may sit on used to be decided in four files and several shapes: a
 //! hand-written `else if` chain for traits (`traits.rs`), `check_misplaced_semantic` and
@@ -30,11 +38,129 @@
 //! which directive it is. Unifying them is a visible change to every affected program's error
 //! output, so it is a separate decision rather than a side effect of this refactor.
 
-use noeta_ast::{BuiltinDirective, Decorators, Sites};
+use noeta_ast::{BuiltinDirective, Decorators, Program, Sites};
 use noeta_diagnostics::DiagnosticCode;
 use noeta_span::Span;
 
 use crate::Checker;
+use crate::tiers::{DeclaredTier, TierRegistry};
+
+/// What an `@name` resolves to across the whole directive name-space.
+///
+/// The name-space is deliberately half-closed and half-open: the built-in decorator directives are
+/// a fixed enum the grammar knows, while tiers are an open set contributed by extensions and by any
+/// package's own `@tier` declaration. Keeping both in one lookup — rather than "try `from_name`,
+/// else go ask the tier registry" open-coded at each call site — is what lets a consumer handle the
+/// name-space totally instead of remembering both halves.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DirectiveKind<'a> {
+    /// A built-in decorator directive. The closed set the parser's grammar recognises.
+    Builtin(BuiltinDirective),
+    /// A tier declared by an installed extension (`test`/`bench`/`doc`/`debug`, plus any native
+    /// package's).
+    ExtTier(&'static noeta_ext_abi::registry::ExtTier),
+    /// A tier declared in the (linked) program by `@tier(name) fn runner(…)`.
+    DeclaredTier(&'a DeclaredTier),
+}
+
+/// One offerable `@name`, as completion and hover want it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectiveEntry {
+    pub name: String,
+    /// The one-line usage shown beside the name.
+    pub detail: String,
+}
+
+/// The whole `@name` name-space a program sees: the built-in directives ∪ the tier name-space.
+///
+/// Three IDE surfaces — completion after `@`, signature help inside `@name(…)`, and hover — each
+/// used to union these halves themselves, with their own copy of how a tier renders and their own
+/// `from_name`-else-tier dispatch. They resolve through here instead, so a name that completes is a
+/// name that hovers.
+#[derive(Debug, Clone)]
+pub struct DirectiveRegistry {
+    tiers: TierRegistry,
+}
+
+impl DirectiveRegistry {
+    /// Collect the name-space visible to `program`, resolving tiers against the process-global
+    /// extension registry (the single-registry CLI/IDE path).
+    pub fn collect(program: &Program) -> DirectiveRegistry {
+        DirectiveRegistry {
+            tiers: TierRegistry::collect(program),
+        }
+    }
+
+    /// As [`collect`](Self::collect), but resolving the extension half against an explicit registry
+    /// (instance-registry IR4 — an embed session's own extension set).
+    pub fn collect_with_registry(
+        program: &Program,
+        registry: &'static noeta_ext_abi::registry::Registry,
+    ) -> DirectiveRegistry {
+        DirectiveRegistry {
+            tiers: TierRegistry::collect_with_registry(program, registry),
+        }
+    }
+
+    /// The tier half on its own, for the consumers that genuinely want tiers rather than directives
+    /// (activation, runner dispatch).
+    pub fn tiers(&self) -> &TierRegistry {
+        &self.tiers
+    }
+
+    /// Resolve `@name`. A built-in directive wins over a tier of the same name — the grammar
+    /// already commits to reading the built-in spelling, so any other answer would let completion
+    /// describe something the parser will not produce.
+    pub fn lookup(&self, name: &str) -> Option<DirectiveKind<'_>> {
+        if let Some(d) = BuiltinDirective::from_name(name) {
+            return Some(DirectiveKind::Builtin(d));
+        }
+        if let Some(t) = self.tiers.extension_tiers().find(|t| t.name == name) {
+            return Some(DirectiveKind::ExtTier(t));
+        }
+        self.tiers.declared(name).map(DirectiveKind::DeclaredTier)
+    }
+
+    /// Every offerable `@name`: the built-ins in declaration order, then the extension tiers, then
+    /// the program-declared ones. De-duplicated by name, first occurrence winning — a program that
+    /// re-declares an extension tier is a second *provider* of one name, not a second name.
+    pub fn all(&self) -> Vec<DirectiveEntry> {
+        let mut out: Vec<DirectiveEntry> = Vec::new();
+        let mut push = |name: String, detail: String| {
+            if !out.iter().any(|e| e.name == name) {
+                out.push(DirectiveEntry { name, detail });
+            }
+        };
+        for d in BuiltinDirective::ALL {
+            push(d.as_str().to_string(), d.info().detail.to_string());
+        }
+        for t in self.tiers.extension_tiers() {
+            push(t.name.to_string(), tier_detail(t.expr, t.text, ""));
+        }
+        for t in self.tiers.declared_tiers() {
+            let provider = if t.root.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", t.root)
+            };
+            push(
+                t.name.clone(),
+                tier_detail(t.expr.as_deref(), t.text.as_deref(), &provider),
+            );
+        }
+        out
+    }
+}
+
+/// How a tier describes itself in completion — one renderer for both halves of the tier
+/// name-space, which previously had two near-identical copies inline in `noeta-ide`.
+fn tier_detail(expr: Option<&str>, text: Option<&str>, suffix: &str) -> String {
+    match (expr, text) {
+        (Some(ty), _) => format!("expression tier — a block is a value of {ty}{suffix}"),
+        (None, Some(lang)) => format!("text tier ({lang}){suffix}"),
+        (None, None) => format!("dev-tier{suffix}"),
+    }
+}
 
 /// The declaration a directive was written on, for the diagnostic's wording.
 pub(crate) struct Placement<'a> {
@@ -143,5 +269,95 @@ fn misplacement_code(directive: BuiltinDirective, at: Sites) -> DiagnosticCode {
         BuiltinDirective::Derive | BuiltinDirective::Validated | BuiltinDirective::Tier => {
             DiagnosticCode::InvalidDirectiveSite
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use noeta_lexer::lex;
+    use noeta_parser::parse;
+    use noeta_span::{Source, SourceId};
+
+    fn parse_program(text: &str) -> Program {
+        let source = Source::new(SourceId::FIRST, "test.noe", text.to_string());
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+            "fixture must parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        parsed.program
+    }
+
+    /// One lookup answers for both halves of the name-space — the closed built-in set and the open
+    /// tier set — and says `None` exactly once for a name in neither. Consumers used to ask
+    /// `from_name` and, on `None`, go and build a `TierRegistry` themselves.
+    #[test]
+    fn one_lookup_spans_the_whole_directive_name_space() {
+        let program = parse_program("@tier(audit) fn run_audit(roots: List<string>) {}\n");
+        let registry = DirectiveRegistry::collect(&program);
+
+        assert_eq!(
+            registry.lookup("derive"),
+            Some(DirectiveKind::Builtin(BuiltinDirective::Derive)),
+        );
+        assert!(
+            matches!(registry.lookup("test"), Some(DirectiveKind::ExtTier(_))),
+            "a std tier resolves through the same lookup",
+        );
+        assert!(
+            matches!(
+                registry.lookup("audit"),
+                Some(DirectiveKind::DeclaredTier(d)) if d.runner == "run_audit",
+            ),
+            "the program's own `@tier` declaration resolves too",
+        );
+        assert_eq!(registry.lookup("openapi"), None);
+    }
+
+    /// Enumeration covers everything the lookup accepts — the property completion relies on, and
+    /// the one that the hand-rolled unions could break by forgetting a half.
+    #[test]
+    fn everything_enumerated_resolves_and_everything_resolvable_is_enumerated() {
+        let program = parse_program("@tier(audit) fn run_audit(roots: List<string>) {}\n");
+        let registry = DirectiveRegistry::collect(&program);
+        let all = registry.all();
+
+        for entry in &all {
+            assert!(
+                registry.lookup(&entry.name).is_some(),
+                "offered `@{}` does not resolve",
+                entry.name
+            );
+            assert!(!entry.detail.is_empty(), "`@{}` has no detail", entry.name);
+        }
+        for d in BuiltinDirective::ALL {
+            assert!(all.iter().any(|e| e.name == d.as_str()), "missing `@{d}`");
+        }
+        assert!(all.iter().any(|e| e.name == "audit"));
+
+        let mut names: Vec<&str> = all.iter().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "a name is offered once: {names:?}");
+    }
+
+    /// A program that re-declares an extension tier is a second *provider* of one name, not a
+    /// second name — and the built-in spelling wins the lookup, because the grammar commits to it.
+    #[test]
+    fn a_redeclared_tier_is_one_name_and_builtins_win() {
+        let program = parse_program("@tier(test) fn run_test(roots: List<string>) {}\n");
+        let registry = DirectiveRegistry::collect(&program);
+        assert_eq!(
+            registry.all().iter().filter(|e| e.name == "test").count(),
+            1,
+        );
+        assert!(matches!(
+            registry.lookup("test"),
+            Some(DirectiveKind::ExtTier(_))
+        ));
     }
 }

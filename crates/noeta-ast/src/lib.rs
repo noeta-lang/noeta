@@ -331,6 +331,36 @@ impl BuiltinDirective {
             .into_iter()
             .find(|d| d.as_str() == name)
     }
+
+    /// Every directive legal in **decorator position** — written before a `struct`/`class`/`enum`/
+    /// `trait` declaration. `@tier` is excluded because it decorates a `fn` (its sites are
+    /// `Sites::FN`), which is exactly what the metadata table already records.
+    pub fn decorators() -> impl Iterator<Item = BuiltinDirective> {
+        BuiltinDirective::ALL
+            .into_iter()
+            .filter(|d| d.info().sites.intersects(Sites::TYPE.union(Sites::TRAIT)))
+    }
+
+    /// The decorator directives rendered for the parser's "unknown directive" help, each with the
+    /// argument list it accepts: `` `@derive(…)`, `@semantic`, … ``.
+    ///
+    /// Generated rather than written out. The literal this replaces had drifted from the truth in
+    /// two ways at once: it showed `@packed` as taking no arguments (it takes a `Layout`), and
+    /// nothing tied it to the directive set, so adding a directive left the help silently listing
+    /// the old one.
+    pub fn decorator_list() -> String {
+        let rendered: Vec<String> = BuiltinDirective::decorators()
+            .map(|d| match d.info().max_args {
+                Some(0) => format!("`@{d}`"),
+                _ => format!("`@{d}(…)`"),
+            })
+            .collect();
+        match rendered.split_last() {
+            None => String::new(),
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{}, and {last}", rest.join(", ")),
+        }
+    }
 }
 
 /// The declaration kinds a directive may sit on, as a set.
@@ -362,6 +392,12 @@ impl Sites {
     /// so a directive with no legal site rejects every placement.
     pub const fn contains(self, other: Sites) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    /// Whether the two sets overlap at all — "is this directive legal at *any* of these sites",
+    /// as against [`contains`](Self::contains)'s "at *all* of them".
+    pub const fn intersects(self, other: Sites) -> bool {
+        self.0 & other.0 != 0
     }
 
     pub const fn is_empty(self) -> bool {
@@ -2163,5 +2199,23 @@ mod builtin_directive_tests {
         // A non-directive name is not misread as one.
         assert_eq!(BuiltinDirective::from_name("bench"), None);
         assert!(BuiltinDirective::from_str("nope").is_err());
+    }
+
+    /// The parser's "unknown directive" help is generated from the directive set, so it cannot go
+    /// stale: every decorator directive appears, and `@tier` — which decorates a `fn`, not a type —
+    /// does not. The literal this replaced also mis-stated `@packed` as argument-less.
+    #[test]
+    fn the_decorator_help_lists_exactly_the_decorator_directives() {
+        let list = BuiltinDirective::decorator_list();
+        for d in BuiltinDirective::ALL {
+            let mentioned = list.contains(&format!("`@{d}`")) || list.contains(&format!("`@{d}("));
+            assert_eq!(
+                mentioned,
+                d != BuiltinDirective::Tier,
+                "`@{d}` mentioned={mentioned} in: {list}"
+            );
+        }
+        assert!(list.contains("`@packed(…)`"), "arity is shown: {list}");
+        assert!(list.contains("`@semantic`"), "no parens when none: {list}");
     }
 }
