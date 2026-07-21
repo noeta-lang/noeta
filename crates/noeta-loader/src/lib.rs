@@ -2194,8 +2194,17 @@ mod tests {
 
     #[test]
     fn namespace_is_recovered_from_tokens_when_the_ast_is_not() {
-        // The mechanism the attribution rests on: a hard parse failure yields NO ast (chumsky
-        // produces no output), so the namespace must come off the token stream instead.
+        // The mechanism the attribution rests on: the namespace comes off the TOKEN stream, never
+        // the ast.
+        //
+        // This originally asserted the ast could name nothing, because a hard parse failure
+        // produced no output at all. That premise stopped holding when statement recovery learned
+        // to resync past a failed statement's own brace group — this fixture now recovers far
+        // enough to salvage its `namespace` statement. The token path is not thereby redundant:
+        // recovery is best-effort and salvages nothing when the fault PRECEDES the `namespace`
+        // line (see `attribution_survives_an_error_before_the_namespace`), so attribution must
+        // never depend on how much of the ast happened to survive. What is pinned here is the
+        // token path's answer, which is the one attribution actually uses.
         let text = "namespace App.Models.Deep;\npub struct User { let ] = ; }\n";
         let source = Source::new(SourceId(0), "models.noe", text);
         let lexed = noeta_lexer::lex_in(
@@ -2210,10 +2219,6 @@ mod tests {
             &noeta_lexer::TextTiers::default(),
         );
         assert!(!parsed.diagnostics.is_empty(), "the fixture must not parse");
-        assert!(
-            module_namespace(&parsed.program).is_none(),
-            "the ast cannot name a module that failed to parse — which is why tokens are used"
-        );
         assert_eq!(
             namespace_from_tokens(&source, &lexed.tokens),
             Some(vec![
