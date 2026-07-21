@@ -1182,6 +1182,8 @@ impl<'m> Vm<'m> {
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
+                                // A fixed-arity protocol call — no labels reach it.
+                                None,
                             )?;
                             continue 'reload;
                         }
@@ -1307,6 +1309,8 @@ impl<'m> Vm<'m> {
                                     *dst,
                                     RetTransform::None,
                                     pc + 1,
+                                    // A fixed-arity protocol call — no labels reach it.
+                                    None,
                                 )?;
                                 continue 'reload;
                             }
@@ -1328,6 +1332,7 @@ impl<'m> Vm<'m> {
                         cache,
                         reuse,
                         consume_key,
+                        supplied,
                     } => {
                         // Resolve the interned method name once; every path below wants the `&str`.
                         let method = module.name(*method);
@@ -1585,6 +1590,7 @@ impl<'m> Vm<'m> {
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
+                                *supplied,
                             )?;
                             continue 'reload;
                         }
@@ -1647,6 +1653,7 @@ impl<'m> Vm<'m> {
                                     *dst,
                                     RetTransform::None,
                                     pc + 1,
+                                    *supplied,
                                 )?;
                                 continue 'reload;
                             }
@@ -1709,6 +1716,8 @@ impl<'m> Vm<'m> {
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
+                                // A fixed-arity protocol call — no labels reach it.
+                                None,
                             )?;
                             continue 'reload;
                         }
@@ -2857,6 +2866,8 @@ impl<'m> Vm<'m> {
                                     *dst,
                                     RetTransform::WrapOk(ok),
                                     pc + 1,
+                                    // Reflective invocation builds its argument list positionally.
+                                    None,
                                 )?;
                                 // Release the temporary boxed args list before transferring (its
                                 // elements were already retained into the call frame above); `take`
@@ -3036,6 +3047,8 @@ impl<'m> Vm<'m> {
                                 *dst,
                                 transform,
                                 pc + 1,
+                                // An operator/protocol dispatch of fixed arity — no labels reach it.
+                                None,
                             )?;
                             continue 'reload;
                         }
@@ -3234,6 +3247,8 @@ impl<'m> Vm<'m> {
                                 *dst,
                                 RetTransform::None,
                                 pc + 1,
+                                // An operator/protocol dispatch of fixed arity — no labels reach it.
+                                None,
                             )?;
                             continue 'reload;
                         }
@@ -3420,6 +3435,7 @@ impl<'m> Vm<'m> {
         ret_dst: u16,
         ret_transform: RetTransform,
         resume_pc: usize,
+        supplied: Option<u64>,
     ) -> Result<(), Abort> {
         let module = self.module;
         let callee_chunk = &module.protos[proto as usize];
@@ -3428,18 +3444,18 @@ impl<'m> Vm<'m> {
             retain(r);
             regs[new_base] = r;
         }
+        // Register 0 holds the receiver, so an argument lands one past the parameter it fills.
         for (i, &a) in args.iter().enumerate() {
             retain(a);
-            regs[new_base + i + 1] = a;
+            regs[new_base + noeta_bytecode::param_of_arg(i + 1, supplied)] = a;
         }
-        // Fill any omitted trailing parameters from their default thunks. The receiver slot and
-        // supplied args occupy registers `0..=args.len()`, so a default register at or beyond
-        // that was not supplied.
+        // Fill every parameter the call left out from its default thunk — the trailing ones under
+        // the ordinary prefix rule, plus any the mask says was skipped.
         if !callee_chunk.defaults.is_empty() {
             let defaults = callee_chunk.defaults.clone();
-            let filled = args.len() + 1;
+            let n_args = args.len() + 1;
             for (reg, dproto) in &defaults {
-                if *reg as usize >= filled {
+                if !noeta_bytecode::is_param_filled(*reg as usize, n_args, supplied) {
                     let value = self.run_thunk(*dproto, &[])?;
                     regs[new_base + *reg as usize] = value;
                 }

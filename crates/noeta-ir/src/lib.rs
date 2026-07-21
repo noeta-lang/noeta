@@ -254,6 +254,12 @@ pub enum Rvalue {
         /// type arguments after a `dyn` launder. `None` for an ordinary method call (the common case)
         /// and for a non-generic enum. Invisible to value semantics.
         reflect: Option<noeta_ast::reflect::TypeRepr>,
+        /// The [`Rvalue::Call::supplied`] twin. Indexed over the method's **declared** parameters,
+        /// parallel to `args` — the receiver travels separately, so it takes no bit. A backend
+        /// whose register layout places the receiver in parameter slot 0 (the VM's does) shifts
+        /// the mask by one on the way in; one whose method scope holds only the declared
+        /// parameters (the reference interpreter's) uses it as-is.
+        supplied: Option<u64>,
         span: Span,
     },
     /// A **method-bundle** method call (kernel-methods K2): `receiver.name(args)` where the

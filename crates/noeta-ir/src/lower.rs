@@ -1799,7 +1799,21 @@ impl Lowerer<'_> {
                             *span,
                         ));
                     }
-                    let (arg_atoms, _supplied) = self.lower_args(args, *span, out)?;
+                    let (arg_atoms, supplied) = self.lower_args(args, *span, out)?;
+                    // The receiver's dedicated forms below — `WidthIntMethod`, `BundleMethod`,
+                    // `DecodeTyped` — carry no mask, because the intrinsics and bundle methods they
+                    // route to declare no defaulted parameters, so no call of one can leave a hole.
+                    // Asserted rather than assumed: if that ever stops holding, a dropped mask would
+                    // place arguments on the wrong parameters silently, which is precisely the class
+                    // of failure this whole change exists to remove.
+                    debug_assert!(
+                        supplied.is_none()
+                            || !(self.sites.width_sites.contains_key(span)
+                                || self.sites.bundle_call_sites.contains_key(span)
+                                || self.sites.decode_typed_sites.contains(span)),
+                        "a call with a skipped parameter lowered to a form that cannot carry its \
+                         supplied-mask"
+                    );
                     // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
                     // this call span in `width_sites`. Emit the width-carrying `WidthIntMethod` so both
                     // backends compute within the width via `int_method_width`, rather than the generic
@@ -1848,6 +1862,7 @@ impl Lowerer<'_> {
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
                             reflect: self.sites.construction_sites.get(span).cloned(),
+                            supplied,
                             span: *span,
                         },
                         *span,
@@ -2565,6 +2580,8 @@ impl Lowerer<'_> {
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
                             reflect: self.sites.construction_sites.get(span).cloned(),
+                            // A `|>` desugar builds its argument list positionally.
+                            supplied: None,
                             span: *span,
                         },
                         *span,
@@ -2607,6 +2624,8 @@ impl Lowerer<'_> {
                         args: vec![left_atom],
                         reuse: false,
                         reflect: self.sites.construction_sites.get(span).cloned(),
+                        // A `|>` desugar builds its argument list positionally.
+                        supplied: None,
                         span: *span,
                     },
                     *span,

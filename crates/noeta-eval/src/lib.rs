@@ -2332,6 +2332,46 @@ impl Interpreter {
 
     /// Dispatch a built-in method (`.count()`, `.enumerate()`) on a receiver value, or
     /// construct an enum variant (`OrderError.NegativePrice(2)`).
+    /// Call a method whose arguments may skip a defaulted parameter, per the mask lowering carried
+    /// on the call. Only a user method or associated function can be masked; the built-in and
+    /// native paths declare no defaults, so a mask never reaches them.
+    fn call_method_masked(
+        &mut self,
+        receiver: Value,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+        supplied: Option<u64>,
+    ) -> Eval<Value> {
+        if supplied.is_some() {
+            if let Value::Object(object) = &receiver
+                && let Some(method) = object.def.methods.get(name)
+            {
+                let (object, method) = (Rc::clone(object), Rc::clone(method));
+                return self.call_method_on_masked(&object, &method, args, span, supplied);
+            }
+            if let Value::Type(def) = &receiver
+                && let Some(method) = def.methods.get(name)
+            {
+                return self.call_closure_masked(&Rc::clone(method), args, span, supplied);
+            }
+            if let Value::EnumType(def) = &receiver
+                && def.variant(name).is_none()
+                && let Some(method) = def.method(name)
+            {
+                return self.call_closure_masked(&Rc::clone(method), args, span, supplied);
+            }
+            if let Value::Enum(e) = &receiver
+                && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
+                && let Some(method) = def.method(name)
+            {
+                let method = Rc::clone(method);
+                return self.call_enum_method_masked(receiver, &method, args, span, supplied);
+            }
+        }
+        self.call_method(receiver, name, args, span)
+    }
+
     fn call_method(
         &mut self,
         receiver: Value,
@@ -3613,6 +3653,36 @@ impl Interpreter {
         }
     }
 
+    /// Bind a call's arguments, and every parameter it left out, into `call_scope`.
+    ///
+    /// The one statement of the argument→parameter rule on this backend: an argument binds the
+    /// parameter it was bound to at check time (its own position without a mask, the `i`-th
+    /// supplied parameter with one), and every parameter the call did not fill takes its default,
+    /// evaluated in the callee's captured (definition/global) scope — never seeing the call's other
+    /// arguments. `supplied` is indexed over the callee's DECLARED parameters; a receiver, where
+    /// there is one, binds as `self` and takes no parameter slot.
+    fn bind_call_scope(
+        &mut self,
+        callee: &Rc<Closure>,
+        args: Vec<Value>,
+        supplied: Option<u64>,
+        call_scope: &Scope,
+    ) -> Eval<()> {
+        let n_args = args.len();
+        for (i, arg) in args.into_iter().enumerate() {
+            let p = noeta_bytecode::param_of_arg(i, supplied);
+            call_scope.declare(callee.params[p].clone(), arg, false);
+        }
+        for i in 0..callee.params.len() {
+            if noeta_bytecode::is_param_filled(i, n_args, supplied) {
+                continue;
+            }
+            let value = self.eval_default(callee, i)?;
+            call_scope.declare(callee.params[i].clone(), value, false);
+        }
+        Ok(())
+    }
+
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
         self.call_closure_masked(closure, args, span, None)
     }
@@ -3635,28 +3705,11 @@ impl Interpreter {
         // Safepoint-GC poll at the call boundary (memory-management 6.x) — with the loop
         // polls, this bounds a recursion-driven cycle builder too.
         cycles::poll_safepoint();
-        let n_args = args.len();
         let call_scope = match &closure.body.captures {
             Some(allow) => Scope::sealed_child(&closure.captured, allow),
             None => Scope::child(&closure.captured),
         };
-        // Each argument binds the parameter it was bound to at check time — its own position
-        // without a mask, the i-th supplied parameter with one.
-        for (i, arg) in args.into_iter().enumerate() {
-            let p = noeta_bytecode::param_of_arg(i, supplied);
-            call_scope.declare(closure.params[p].clone(), arg, false);
-        }
-        // Fill every parameter the caller left out from its default, each evaluated in the closure's
-        // captured (definition/global) scope — never seeing the call's other arguments. Without a
-        // mask these are exactly the trailing parameters; with one, a skipped middle parameter is
-        // filled here too.
-        for i in 0..closure.params.len() {
-            if noeta_bytecode::is_param_filled(i, n_args, supplied) {
-                continue;
-            }
-            let value = self.eval_default(closure, i)?;
-            call_scope.declare(closure.params[i].clone(), value, false);
-        }
+        self.bind_call_scope(closure, args, supplied, &call_scope)?;
         // Shadow the call for the abort traceback: (callee name, call-site span). Popped on every
         // exit — an abort's trace is snapshotted deeper, at the diagnostic (see `record_abort_trace`).
         self.call_sites.push((closure.name.clone(), span));
@@ -3676,6 +3729,17 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
+        self.call_method_on_masked(object, method, args, span, None)
+    }
+
+    fn call_method_on_masked(
+        &mut self,
+        object: &Rc<ObjectValue>,
+        method: &Rc<Closure>,
+        args: Vec<Value>,
+        span: Span,
+        supplied: Option<u64>,
+    ) -> Eval<Value> {
         let required = required_count(&method.defaults);
         if args.len() < required || args.len() > method.params.len() {
             return Err(self.runtime_error(
@@ -3686,7 +3750,6 @@ impl Interpreter {
         }
         // Safepoint-GC poll at the call boundary — see `call_closure`.
         cycles::poll_safepoint();
-        let supplied = args.len();
         let call_scope = match &method.body.captures {
             Some(allow) => Scope::sealed_child(&method.captured, allow),
             None => Scope::child(&method.captured),
@@ -3697,15 +3760,7 @@ impl Interpreter {
         // — is observed by a later bare read. A bare *write* `n = v` therefore declares a local (the
         // name is not in scope); mutating a field is the explicit `self.f = v`.
         call_scope.declare("self".to_string(), Value::Object(Rc::clone(object)), false);
-        for (param, arg) in method.params.iter().zip(args) {
-            call_scope.declare(param.clone(), arg, false);
-        }
-        // Omitted trailing parameters take their defaults, evaluated in the method's captured
-        // (definition/global) scope — not against the receiver's fields, `self`, or other arguments.
-        for i in supplied..method.params.len() {
-            let value = self.eval_default(method, i)?;
-            call_scope.declare(method.params[i].clone(), value, false);
-        }
+        self.bind_call_scope(method, args, supplied, &call_scope)?;
         // Shadowed for the abort traceback, exactly as `call_closure` (popped on every exit).
         self.call_sites.push((method.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);
@@ -3726,6 +3781,17 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
+        self.call_enum_method_masked(receiver, method, args, span, None)
+    }
+
+    fn call_enum_method_masked(
+        &mut self,
+        receiver: Value,
+        method: &Rc<Closure>,
+        args: Vec<Value>,
+        span: Span,
+        supplied: Option<u64>,
+    ) -> Eval<Value> {
         let required = required_count(&method.defaults);
         if args.len() < required || args.len() > method.params.len() {
             return Err(self.runtime_error(
@@ -3734,19 +3800,12 @@ impl Interpreter {
                 arity_message("method", required, method.params.len(), args.len()),
             ));
         }
-        let supplied = args.len();
         let call_scope = match &method.body.captures {
             Some(allow) => Scope::sealed_child(&method.captured, allow),
             None => Scope::child(&method.captured),
         };
         call_scope.declare("self".to_string(), receiver, false);
-        for (param, arg) in method.params.iter().zip(args) {
-            call_scope.declare(param.clone(), arg, false);
-        }
-        for i in supplied..method.params.len() {
-            let value = self.eval_default(method, i)?;
-            call_scope.declare(method.params[i].clone(), value, false);
-        }
+        self.bind_call_scope(method, args, supplied, &call_scope)?;
         // Shadowed for the abort traceback, exactly as `call_closure` (popped on every exit).
         self.call_sites.push((method.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);

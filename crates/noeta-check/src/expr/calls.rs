@@ -1189,6 +1189,41 @@ impl Checker {
         call_span: Option<Span>,
         env: &mut Env,
     ) -> Type {
+        // Named arguments on a METHOD, normalized into parameter order here for the same reason as
+        // on a free function: everything downstream — generic seeding, closure finalization, arity
+        // and assignability — then sees a plain positional call. Lowering keys the permutation off
+        // the call span, so a call with no span to key (a synthesized or forwarded one) keeps its
+        // written order and its labels are refused rather than silently ignored.
+        let permuted;
+        let arg_exprs = if noeta_ast::CallArg::any_named(arg_exprs) {
+            let Some(call_span) = call_span else {
+                self.error(
+                    DiagnosticCode::InvalidArgument,
+                    span,
+                    format!("`{name}` cannot take named arguments at this call site"),
+                );
+                return sig.ret.clone();
+            };
+            let (names, types) = (sig.param_names.clone(), sig.params.clone());
+            match self.order_arguments(
+                arg_exprs,
+                &names,
+                &types,
+                sig.required,
+                name,
+                args,
+                span,
+                call_span,
+            ) {
+                Some((a, _)) => {
+                    permuted = a;
+                    &permuted[..]
+                }
+                None => return sig.ret.clone(),
+            }
+        } else {
+            arg_exprs
+        };
         if let Some(generic) = &sig.generic {
             // Return-position seeding for a generic METHOD (D3): when this exact call sits in a
             // checked position, check-mode armed the expectation under the call's span — bind the

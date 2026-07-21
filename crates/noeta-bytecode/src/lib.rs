@@ -479,6 +479,11 @@ pub enum Op {
         /// `HashMap<String, _>` instead of cloning it. Only honored when the runtime receiver really
         /// is a map and the key is a sole-owned string (checked in the VM); `false` otherwise.
         consume_key: bool,
+        /// The [`Op::Call::supplied`] twin for a method, in the callee's REGISTER space: the
+        /// receiver occupies register 0, so bit 0 is always set and bit `p + 1` names the method's
+        /// `p`-th declared parameter. (The IR's `Rvalue::Method::supplied` counts the declared
+        /// parameters only; the shift happens where the receiver becomes a register.)
+        supplied: Option<u64>,
     },
     /// `dst = recv[index]` — index access (the `Index` trait / list element access), mirroring
     /// the tree-walker's `eval_index`. On an object it dispatches to the `get` method (pushing a
