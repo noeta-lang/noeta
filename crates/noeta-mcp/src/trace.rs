@@ -76,7 +76,7 @@ pub struct BoundaryHit {
 pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> TraceOutput {
     let linked = noeta_db::linked(&p.db, p.ws);
     let entry = noeta_db::ast(&p.db, analyze::entry_program(p));
-    let program: &Program = match &linked.0 {
+    let program: &Program = match &linked.program {
         Ok(prog) => prog,
         Err(_) => &entry.0.program,
     };

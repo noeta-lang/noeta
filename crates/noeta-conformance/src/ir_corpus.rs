@@ -124,7 +124,7 @@ fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) 
     let db = LangDatabase::default();
     let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
-    let program = match &noeta_db::linked(&db, ws).0 {
+    let program = match &noeta_db::linked(&db, ws).program {
         Ok(program) => program,
         Err(_) => {
             report.not_run.link_failed += 1;

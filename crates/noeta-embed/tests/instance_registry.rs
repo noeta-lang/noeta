@@ -98,6 +98,8 @@ impl Extension for PluginExtension {
             detail: "@openapi(\"spec.yaml\") — bind this type to an OpenAPI schema",
             doc: "binds the decorated type to a schema in the named OpenAPI document",
             params: &["spec"],
+            // A marker-only directive: it declares and validates, and synthesizes nothing.
+            expand: None,
         }]
     }
 

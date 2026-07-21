@@ -51,6 +51,18 @@ fn composed_project(name: &str) -> PathBuf {
     )
     .unwrap();
 
+    // The code-GENERATING directive and the spec it generates from (see `expand_fx_spec`), for
+    // `noeta expand`. Its own entry rather than a decoration on `main.noe`, so every other test's
+    // expectations of the app's output are untouched; it declares no namespace, so it is nobody's
+    // imported module either.
+    std::fs::write(app.join("pets.yaml"), "list_pets\nget_pet\n").unwrap();
+    std::fs::write(
+        app.join("spec.noe"),
+        "use imgfx.{fx}\n\n@fx_spec(\"pets.yaml\")\nstruct PetStore { base_url: string }\n\
+         echo PetStore.list_pets();\n",
+    )
+    .unwrap();
+
     std::fs::write(
         dep.join("noeta.toml"),
         "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
@@ -91,8 +103,9 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrd};
 
 use noeta_ext_abi::registry::{
-    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, ExtBundle, ExtFn, ExtModule,
-    ExtType, Extension, NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, SigType,
+    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, DirectiveCtx, ExtBundle,
+    ExtDirective, ExtFn, ExtModule, ExtType, Expansion, Extension, NativeOut, NativeValue,
+    PackedConstraint, RetTy, Scalar, SigType, TierSite,
 };
 use noeta_ext_abi::{
     no_function_error, no_method_error, CommandCtx, CtxError, CtxOut, ErrorKind, ExtCommand,
@@ -385,6 +398,24 @@ fn pixels_bundle_dispatch(
     }
 }
 
+/// A code-GENERATING directive (`ExtDirective::expand`): one accessor per name listed in the spec
+/// file the invocation points at. Deliberately reads a real file relative to `ctx.source_dir` and
+/// reports it in `reads` — that is the shape a spec-driven generator has, and it is what makes
+/// `noeta expand`'s output a function of the spec rather than of the directive's one line.
+fn expand_fx_spec(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+    let arg = ctx.args.first().ok_or("no spec given")?;
+    let path = std::path::Path::new(&ctx.source_dir).join(arg);
+    let spec = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut source = String::new();
+    for name in spec.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        source.push_str(&format!("fn {name}(): int {{ return fx.double(21); }}\n"));
+    }
+    Ok(Expansion {
+        source,
+        reads: vec![path.display().to_string()],
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ImgfxExtension;
 
@@ -416,6 +447,18 @@ impl Extension for ImgfxExtension {
     }
     fn commands(&self) -> &'static [ExtCommand] {
         &[FX_INFO]
+    }
+    fn directives(&self) -> &'static [ExtDirective] {
+        &[ExtDirective {
+            name: "fx_spec",
+            sites: &[TierSite::Type],
+            max_args: Some(1),
+            named_keys: &[],
+            detail: "@fx_spec(\"<file>\")",
+            doc: "Generate one accessor per name in the given spec file.",
+            params: &["spec"],
+            expand: Some(expand_fx_spec),
+        }]
     }
     // dev-deps D5: a DEV-only capability — a tier-body formatter — gated behind the `fmt` feature.
     // The runtime capabilities above (module/type/command) always compile; this one, and the marker
@@ -724,6 +767,46 @@ fn composed_toolchain_end_to_end() {
         .assert()
         .success()
         .stdout(predicate::str::contains("imgfx: native extension ok"));
+
+    // 5. `noeta expand` prints the source the extension's `expand` hook generated. This is the only
+    //    place the command can be proven end to end: no SHIPPED extension declares an `expand` hook,
+    //    so the stock binary has no expanding directive to reach at all — the composed toolchain
+    //    linking `imgfx` does.
+    let expanded = composed_env(&mut lang())
+        .arg("expand")
+        .arg(app.join("spec.noe"))
+        .assert()
+        .success()
+        // The header names the CAUSE — the declaration that grew the members and the directive
+        // that grew them, with its arguments — and the body is the whole synthetic declaration…
+        .stdout(
+            predicate::str::contains(r#"// PetStore ⟨@fx_spec "pets.yaml"⟩"#)
+                .and(predicate::str::contains("struct PetStore {"))
+                // …one accessor per line of the spec, so the printed source is a function of the
+                // spec file: this is the CI diff that makes a spec change reviewable.
+                .and(predicate::str::contains("fn list_pets(): int"))
+                .and(predicate::str::contains("fn get_pet(): int")),
+        )
+        .stderr(predicate::str::contains("expanded 1 declaration"))
+        .get_output()
+        .stdout
+        .clone();
+    // The hand-written field is NOT printed: what prints is the expansion, not the declaration it
+    // was spliced into.
+    assert!(
+        !String::from_utf8_lossy(&expanded).contains("base_url"),
+        "expand printed the hand-written members too: {}",
+        String::from_utf8_lossy(&expanded)
+    );
+
+    // 6. A generated member is real code: running the same file calls one and gets the native
+    //    handler's answer. `expand` showed the source; this proves that source is what runs.
+    composed_env(&mut lang())
+        .arg("run")
+        .arg(app.join("spec.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
 }
 
 #[test]

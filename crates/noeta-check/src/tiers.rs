@@ -625,7 +625,7 @@ pub fn resolve_texts_with_registry(
             if next.span().source != span.source {
                 return None;
             }
-            if !crate::directives::attaches_to(sites, next.attachment_site()) {
+            if !noeta_parser::directives::attaches_to(sites, next.attachment_site()) {
                 return None;
             }
             let (name, name_span) = match next {
