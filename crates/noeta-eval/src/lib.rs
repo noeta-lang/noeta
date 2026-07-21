@@ -2166,6 +2166,11 @@ impl Interpreter {
                 PackedKind::Int => SlotKind::Int,
                 PackedKind::Float => SlotKind::Float,
                 PackedKind::F32 => SlotKind::F32,
+                PackedKind::F64 => SlotKind::F64,
+                PackedKind::IntN { bits, signed } => SlotKind::IntN {
+                    bits: *bits,
+                    signed: *signed,
+                },
                 PackedKind::Bool => SlotKind::Bool,
                 PackedKind::Struct(inner) => SlotKind::Struct(self.resolve_packed_schema(inner)?),
             };
@@ -5080,11 +5085,16 @@ fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         TypeRepr::Int
         | TypeRepr::Float
         | TypeRepr::F32
+        | TypeRepr::F64
         | TypeRepr::Bool
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
         | TypeRepr::Dyn => Vec::new(),
+        // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
+        TypeRepr::IntN { signed, bits } => {
+            vec![Value::Int(i64::from(*bits)), Value::Bool(*signed)]
+        }
         TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => {
             vec![build_type_value(t)]
         }
@@ -5287,7 +5297,7 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
             if head_ok && !args.is_empty() {
                 let target: Vec<noeta_ast::reflect::TypeRepr> = args
                     .iter()
-                    .map(noeta_ast::reflect::typeref_to_repr)
+                    .map(noeta_ast::reflect::typeref_to_repr_arg)
                     .collect();
                 noeta_ast::reflect::narrow_args_match(&target, &eval_type_repr(value))
             } else {

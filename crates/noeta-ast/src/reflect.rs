@@ -144,7 +144,7 @@ impl ReflectionInfo {
     /// `Type.List(Type.Struct("JsonCodec", []))` rather than a head with the arguments erased. Pass
     /// `&[]` for a genuinely argument-less reference (a bare name used as an `invoke` receiver).
     pub fn type_ref_repr(&self, name: &str, args: &[TypeRef]) -> TypeRepr {
-        named_repr(name, args, &|n, a| self.nominal_repr(n, a))
+        named_repr(name, args, &|n, a| self.nominal_repr(n, a), true)
     }
 
     /// The reflection [`TypeRepr`] of a surface [`TypeRef`], **kind-aware** — the structural
@@ -153,7 +153,7 @@ impl ReflectionInfo {
     /// (`?T`, `A | B`, `(A) -> B`). Differs from the free [`typeref_to_repr`] only in classifying a
     /// declared nominal by its kind instead of the kind-agnostic [`TypeRepr::Named`].
     pub fn typeref_repr(&self, ty: &TypeRef) -> TypeRepr {
-        typeref_repr_with(ty, &|n, a| self.nominal_repr(n, a))
+        typeref_repr_with(ty, &|n, a| self.nominal_repr(n, a), true)
     }
 
     /// Classify a **declared** nominal name by its kind, carrying `args` through. The one half of
@@ -645,6 +645,21 @@ pub enum TypeRepr {
     Float,
     /// The 32-bit float scalar `f32` (P-PACK Phase 3; variant name `F32`).
     F32,
+    /// The explicit 64-bit float `f64` (packed-widths arc; variant name `F64`). A runtime *scalar*
+    /// `f64` is bit-identical to `float` and reflects as `Float`; this variant appears where the
+    /// width is physically reified — a packed list element or a declared-type reflection — so
+    /// `List<f64>` is distinguishable from `List<float>` while their equal elements stay `==`.
+    F64,
+    /// A fixed-width integer `i8..i64`/`u8..u64` (packed-widths arc; variant name `IntN`). Like
+    /// [`TypeRepr::F64`], a runtime *scalar* is erased to `Int` (Tier W) and reflects as `Int`; this
+    /// variant carries the width where it is reified — a packed list element or a declared type — so
+    /// `List<i32>` is distinguishable from `List<int>` while equal elements stay `==`.
+    IntN {
+        /// `true` for the `iN` family, `false` for `uN`.
+        signed: bool,
+        /// One of 8, 16, 32, 64.
+        bits: u8,
+    },
     Bool,
     /// The `string` scalar (variant name `String`, mirroring the lattice).
     Str,
@@ -716,6 +731,8 @@ impl TypeRepr {
             TypeRepr::Int => "Int",
             TypeRepr::Float => "Float",
             TypeRepr::F32 => "F32",
+            TypeRepr::F64 => "F64",
+            TypeRepr::IntN { .. } => "IntN",
             TypeRepr::Bool => "Bool",
             TypeRepr::Str => "String",
             TypeRepr::Bytes => "Bytes",
@@ -744,11 +761,15 @@ impl TypeRepr {
             TypeRepr::Int
             | TypeRepr::Float
             | TypeRepr::F32
+            | TypeRepr::F64
             | TypeRepr::Bool
             | TypeRepr::Str
             | TypeRepr::Bytes
             | TypeRepr::Unit
             | TypeRepr::Dyn => AdtFields::None,
+            // The fixed-width integer carries its `(bits, signed)` so a reflected `Type.IntN`
+            // reports exactly which width it is (matched structurally by narrowing regardless).
+            TypeRepr::IntN { .. } => AdtFields::IntWidth,
             TypeRepr::List(_) | TypeRepr::Set(_) | TypeRepr::Option(_) => AdtFields::Types(1),
             TypeRepr::Map(_, _) | TypeRepr::Result(_, _) => AdtFields::Types(2),
             TypeRepr::Enum(_, _)
@@ -779,6 +800,8 @@ pub enum AdtFields {
     ParamsAndRet,
     /// `(name: string)` — a trait object's trait name.
     Name,
+    /// `(bits: int, signed: bool)` — a fixed-width integer's width descriptor (packed-widths arc).
+    IntWidth,
 }
 
 /// One sample [`TypeRepr`] per variant. Running each through the exhaustive
@@ -795,6 +818,11 @@ pub fn type_adt_variants() -> Vec<TypeRepr> {
         TypeRepr::Int,
         TypeRepr::Float,
         TypeRepr::F32,
+        TypeRepr::F64,
+        TypeRepr::IntN {
+            signed: true,
+            bits: 32,
+        },
         TypeRepr::Bool,
         TypeRepr::Str,
         TypeRepr::Bytes,
@@ -869,6 +897,10 @@ impl TypeRepr {
             TypeRepr::Int => f.write_str("int"),
             TypeRepr::Float => f.write_str("float"),
             TypeRepr::F32 => f.write_str("f32"),
+            TypeRepr::F64 => f.write_str("f64"),
+            TypeRepr::IntN { signed, bits } => {
+                write!(f, "{}{bits}", if *signed { 'i' } else { 'u' })
+            }
             TypeRepr::Bool => f.write_str("bool"),
             TypeRepr::Str => f.write_str("string"),
             TypeRepr::Bytes => f.write_str("bytes"),
@@ -948,16 +980,41 @@ impl TypeRepr {
 /// vocabulary and differ only in what `arg` yields — bare `dyn` for the name-only mapper, the real
 /// nested `TypeRef` reprs for the structural one.
 ///
-/// Two constructors are **erased** here, matching what the runtime value can actually report:
-/// `f64` is bit-identical to `float` (P-NUM-SYM) and the fixed-width integers are erased to `int`
-/// (Tier W), so both report the lattice variant. This is the same rule the checker's
-/// `type_to_repr` states for the `Type` lattice; routing both through [`BuiltinTy`] is what keeps
-/// them from drifting — they used to disagree, so `params_of` reported `Type.Named(f64, [])` for a
-/// parameter whose `type_of` was `Type.Float`.
-fn builtin_repr(builtin: BuiltinTy, arg: impl Fn(usize) -> Box<TypeRepr>) -> Option<TypeRepr> {
+/// A **declared** `f64`/`iN`/`uN` keeps its width here (`TypeRepr::F64`/`TypeRepr::IntN`), the
+/// physically-meaningful reflection for a type annotation and a narrow target (packed-widths arc).
+/// A runtime *scalar value* of one of these still erases to `Float`/`Int` (no boxing site to stamp
+/// a width tag on), so `type_of` of a scalar reports the lattice variant — the deliberate split
+/// between declared-type reflection (width-carrying) and value reflection (width-erased). Both
+/// declared-type surfaces (`params_of` and the narrow matcher) route through [`BuiltinTy`] here, so
+/// they cannot drift from each other.
+fn builtin_repr(
+    builtin: BuiltinTy,
+    arg: impl Fn(usize) -> Box<TypeRepr>,
+    top: bool,
+) -> Option<TypeRepr> {
     Some(match builtin {
-        BuiltinTy::Int | BuiltinTy::IntN { .. } => TypeRepr::Int,
-        BuiltinTy::Float | BuiltinTy::F64 => TypeRepr::Float,
+        BuiltinTy::Int => TypeRepr::Int,
+        // A fixed width reifies only in **container-element position**, never as a top-level scalar
+        // (packed-widths arc). At the top a declared `i32`/`u8`/`f64` erases to `Int`/`Float` — the
+        // rule `params_of` and `type_of` agree on, since a scalar value carries no width tag. As a
+        // list/map/option *element* it keeps its width, so `List<i32>` is distinguishable from
+        // `List<int>` (the element is a physically distinct storage slot). `arg(_)` recurses in
+        // element position, so the width survives at every depth below the top scalar.
+        BuiltinTy::IntN { signed, bits } => {
+            if top {
+                TypeRepr::Int
+            } else {
+                TypeRepr::IntN { signed, bits }
+            }
+        }
+        BuiltinTy::Float => TypeRepr::Float,
+        BuiltinTy::F64 => {
+            if top {
+                TypeRepr::Float
+            } else {
+                TypeRepr::F64
+            }
+        }
         BuiltinTy::F32 => TypeRepr::F32,
         BuiltinTy::Bool => TypeRepr::Bool,
         BuiltinTy::Str => TypeRepr::Str,
@@ -973,8 +1030,18 @@ fn builtin_repr(builtin: BuiltinTy, arg: impl Fn(usize) -> Box<TypeRepr>) -> Opt
     })
 }
 
+/// The **top-level** reflection of a surface type: a bare scalar `i32`/`f64` erases to `Int`/`Float`
+/// (declared-scalar erasure), while container elements keep their width. Used for a parameter's or
+/// attribute's declared type, and kind-agnostic for nominals (the R3 matcher keys on the name).
 pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
-    typeref_repr_with(ty, &|name, args| TypeRepr::Named(name.to_string(), args))
+    typeref_repr_with(ty, &|name, args| TypeRepr::Named(name.to_string(), args), true)
+}
+
+/// The reflection of a surface type already in **element position** — a narrow target's type
+/// argument, e.g. the `i32` of `x is List<i32>` (packed-widths arc). A fixed width keeps its width so
+/// the target matches a value's width-carrying tag; nominals stay kind-agnostic.
+pub fn typeref_to_repr_arg(ty: &TypeRef) -> TypeRepr {
+    typeref_repr_with(ty, &|name, args| TypeRepr::Named(name.to_string(), args), false)
 }
 
 /// How a projection resolves a **nominal** type name — the one axis on which the two type-ref
@@ -994,25 +1061,30 @@ type NominalResolver<'a> = dyn Fn(&str, Vec<TypeRepr>) -> TypeRepr + 'a;
 /// the inference hole the bare `list`/`map` spellings leave), and anything else is nominal with its
 /// arguments carried through verbatim. Shared by [`ReflectionInfo::type_ref_repr`] (which has only
 /// the name and args, never a whole [`TypeRef`]) and the [`TypeRef::Named`] arm of the walk.
-fn named_repr(name: &str, args: &[TypeRef], nominal: &NominalResolver<'_>) -> TypeRepr {
+fn named_repr(name: &str, args: &[TypeRef], nominal: &NominalResolver<'_>, top: bool) -> TypeRepr {
+    // A type argument is always in element position (`top = false`), so a width inside it survives.
     let arg = |i: usize| match args.get(i) {
-        Some(t) => Box::new(typeref_repr_with(t, nominal)),
+        Some(t) => Box::new(typeref_repr_with(t, nominal, false)),
         None => Box::new(TypeRepr::Dyn),
     };
     BuiltinTy::from_name_any(name)
-        .and_then(|b| builtin_repr(b, arg))
+        .and_then(|b| builtin_repr(b, arg, top))
         .unwrap_or_else(|| {
             nominal(
                 name,
-                args.iter().map(|a| typeref_repr_with(a, nominal)).collect(),
+                args.iter()
+                    .map(|a| typeref_repr_with(a, nominal, false))
+                    .collect(),
             )
         })
 }
 
 /// Walk a surface [`TypeRef`] into a [`TypeRepr`], resolving nominal names through `nominal`. The
-/// single converter behind both [`typeref_to_repr`] and [`ReflectionInfo::typeref_repr`].
-fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>) -> TypeRepr {
-    let recur = |t: &TypeRef| typeref_repr_with(t, nominal);
+/// single converter behind both [`typeref_to_repr`] and [`ReflectionInfo::typeref_repr`]. `top`
+/// distinguishes a bare scalar (declared width erases) from an element (width kept) — see
+/// [`builtin_repr`]; every recursive position is an element, so `recur` passes `false`.
+fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> TypeRepr {
+    let recur = |t: &TypeRef| typeref_repr_with(t, nominal, false);
     match ty {
         TypeRef::Union { members, .. } => TypeRepr::Union(members.iter().map(recur).collect()),
         TypeRef::Optional { inner, .. } => TypeRepr::Option(Box::new(recur(inner))),
@@ -1023,7 +1095,7 @@ fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>) -> TypeRepr {
         TypeRef::Fn { params, ret, .. } => {
             TypeRepr::Fn(params.iter().map(recur).collect(), Box::new(recur(ret)))
         }
-        TypeRef::Named { name, args, .. } => named_repr(name, args, nominal),
+        TypeRef::Named { name, args, .. } => named_repr(name, args, nominal, top),
     }
 }
 
@@ -1045,10 +1117,14 @@ pub fn arg_matches(expected: &TypeRepr, actual: &TypeRepr) -> bool {
         (Int, Int)
         | (Float, Float)
         | (F32, F32)
+        | (F64, F64)
         | (Bool, Bool)
         | (Str, Str)
         | (Bytes, Bytes)
         | (Unit, Unit) => true,
+        // Two fixed-width integers match iff they are the same width and signedness — this is what
+        // makes `List<i32>` distinct from `List<i16>` and from `List<int>` (which is `Int`).
+        (IntN { signed: es, bits: eb }, IntN { signed: as_, bits: ab }) => es == as_ && eb == ab,
         (DynTrait(e), DynTrait(a)) => e == a,
         (Union(es), a) => es.iter().any(|e| arg_matches(e, a)),
         (e, Union(as_)) => as_.iter().any(|a| arg_matches(e, a)),
@@ -1234,6 +1310,18 @@ pub enum PackedKind {
     /// A 32-bit float field (P-PACK Phase 3). One word like the other primitives in slice 3.2a; slice
     /// 3.2b narrows it to a 4-byte slot.
     F32,
+    /// An explicit 64-bit float field `f64` (packed-widths arc) — 8 bytes, storage-identical to
+    /// `Float` but a distinct kind so packed reflection reports `f64`.
+    F64,
+    /// A fixed-width integer field (packed-widths arc): `bits/8` bytes, `signed` deciding read-back
+    /// extension. The compiled/runtime counterparts (`noeta_bytecode::PackedFieldDef::IntN`,
+    /// `noeta_object::PackedKind::IntN`) carry the same pair.
+    IntN {
+        /// One of 8, 16, 32, 64.
+        bits: u8,
+        /// `true` for the `iN` family, `false` for `uN`.
+        signed: bool,
+    },
     Bool,
     /// A nested `@packed` struct, laid out contiguously in the parent's buffer.
     Struct(Box<PackedLayout>),
@@ -1247,7 +1335,12 @@ impl PackedLayout {
         self.fields
             .iter()
             .map(|f| match &f.kind {
-                PackedKind::Int | PackedKind::Float | PackedKind::F32 | PackedKind::Bool => 1,
+                PackedKind::Int
+                | PackedKind::Float
+                | PackedKind::F32
+                | PackedKind::F64
+                | PackedKind::IntN { .. }
+                | PackedKind::Bool => 1,
                 PackedKind::Struct(inner) => inner.word_count(),
             })
             .sum()
@@ -1263,7 +1356,8 @@ impl PackedLayout {
             .map(|f| match &f.kind {
                 PackedKind::Bool => 1,
                 PackedKind::F32 => 4,
-                PackedKind::Int | PackedKind::Float => 8,
+                PackedKind::Int | PackedKind::Float | PackedKind::F64 => 8,
+                PackedKind::IntN { bits, .. } => (*bits as usize) / 8,
                 PackedKind::Struct(inner) => inner.byte_size(),
             })
             .sum()

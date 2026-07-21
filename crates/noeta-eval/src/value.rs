@@ -352,6 +352,11 @@ fn seam_field(kind: &SlotKind) -> noeta_stdlib::PackedField {
         SlotKind::Int => PackedField::Int,
         SlotKind::Float => PackedField::Float,
         SlotKind::F32 => PackedField::F32,
+        SlotKind::F64 => PackedField::F64,
+        SlotKind::IntN { bits, signed } => PackedField::IntN {
+            bits: *bits,
+            signed: *signed,
+        },
         SlotKind::Bool => PackedField::Bool,
         SlotKind::Struct(inner) => {
             PackedField::Struct(inner.fields.iter().map(|f| seam_field(&f.kind)).collect())
@@ -366,6 +371,12 @@ pub(crate) enum SlotKind {
     Float,
     /// A 32-bit float field (P-PACK Phase 3).
     F32,
+    /// An explicit 64-bit float field `f64` (packed-widths arc) — 8 bytes, storage-identical to
+    /// `Float`.
+    F64,
+    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc): `bits/8` bytes, `signed`
+    /// deciding read-back extension.
+    IntN { bits: u8, signed: bool },
     Bool,
     Struct(Rc<PackedSchema>),
 }
@@ -516,7 +527,8 @@ impl SlotKind {
         match self {
             SlotKind::Bool => 1,
             SlotKind::F32 => 4,
-            SlotKind::Int | SlotKind::Float => 8,
+            SlotKind::Int | SlotKind::Float | SlotKind::F64 => 8,
+            SlotKind::IntN { bits, .. } => (*bits as usize) / 8,
             SlotKind::Struct(inner) => inner.byte_size,
         }
     }
@@ -532,6 +544,36 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+/// Read a fixed-width integer slot (`bits/8` little-endian bytes at `offset`) back into the runtime's
+/// 8-byte `int` (packed-widths arc). A **signed** slot sign-extends its top bit (a stored `-1i8`
+/// reads back `-1`); an **unsigned** slot zero-extends (`255u8` reads back `255`). The runtime scalar
+/// is width-erased, so the result is a plain `i64` regardless of the stored width.
+fn read_intn(bytes: &[u8], offset: usize, bits: u8, signed: bool) -> i64 {
+    let n = (bits as usize) / 8;
+    let mut raw: u64 = 0;
+    for i in 0..n {
+        raw |= (bytes[offset + i] as u64) << (8 * i);
+    }
+    if signed && bits < 64 {
+        let sign_bit = 1u64 << (bits - 1);
+        if raw & sign_bit != 0 {
+            raw |= !((1u64 << bits) - 1);
+        }
+    }
+    raw as i64
+}
+
+/// Append a fixed-width integer's low `bits/8` little-endian bytes to `out` (packed-widths arc). The
+/// runtime carries the value as an 8-byte `int`; only its low bytes are stored, so the checker's
+/// range rules are what keep a value inside the slot (a raw `from_bytes` buffer is trusted as-is).
+fn write_intn(out: &mut Vec<u8>, value: i64, bits: u8) {
+    let n = (bits as usize) / 8;
+    let raw = value as u64;
+    for i in 0..n {
+        out.push((raw >> (8 * i)) as u8);
+    }
+}
+
 /// Decode one field at byte `offset` into a boxed [`Value`] — the per-field counterpart of
 /// [`unpack_object`], used by [`PackedList::field`] to read a single field without materializing the
 /// whole element.
@@ -540,6 +582,8 @@ fn decode_slot(kind: &SlotKind, bytes: &[u8], offset: usize) -> Value {
         SlotKind::Int => Value::Int(read_u64(bytes, offset) as i64),
         SlotKind::Float => Value::Float(f64::from_bits(read_u64(bytes, offset))),
         SlotKind::F32 => Value::F32(f32::from_bits(read_u32(bytes, offset))),
+        SlotKind::F64 => Value::Float(f64::from_bits(read_u64(bytes, offset))),
+        SlotKind::IntN { bits, signed } => Value::Int(read_intn(bytes, offset, *bits, *signed)),
         SlotKind::Bool => Value::Bool(bytes[offset] != 0),
         SlotKind::Struct(inner) => unpack_object(inner, bytes, offset).0,
     }
@@ -561,6 +605,10 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u8>) -> Optio
             (SlotKind::Int, Value::Int(i)) => out.extend_from_slice(&(*i as u64).to_le_bytes()),
             (SlotKind::Float, Value::Float(x)) => out.extend_from_slice(&x.to_bits().to_le_bytes()),
             (SlotKind::F32, Value::F32(f)) => out.extend_from_slice(&f.to_bits().to_le_bytes()),
+            // `f64`/`iN`/`uN` fields carry width-erased scalars at runtime (a `Float`/`Int`); only
+            // the buffer slot is narrowed (packed-widths arc).
+            (SlotKind::F64, Value::Float(x)) => out.extend_from_slice(&x.to_bits().to_le_bytes()),
+            (SlotKind::IntN { bits, .. }, Value::Int(i)) => write_intn(out, *i, *bits),
             (SlotKind::Bool, Value::Bool(b)) => out.push(u8::from(*b)),
             (SlotKind::Struct(inner), nested) => pack_object(nested, inner, out)?,
             _ => return None,
@@ -605,6 +653,14 @@ fn unpack_object(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value, 
             SlotKind::F32 => {
                 slots.push(Value::F32(f32::from_bits(read_u32(bytes, at))));
                 at += 4;
+            }
+            SlotKind::F64 => {
+                slots.push(Value::Float(f64::from_bits(read_u64(bytes, at))));
+                at += 8;
+            }
+            SlotKind::IntN { bits, signed } => {
+                slots.push(Value::Int(read_intn(bytes, at, *bits, *signed)));
+                at += (*bits as usize) / 8;
             }
             SlotKind::Bool => {
                 slots.push(Value::Bool(bytes[at] != 0));

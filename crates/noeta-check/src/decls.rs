@@ -493,8 +493,8 @@ impl Checker {
         fn layout_key_capable(layout: &noeta_ast::reflect::PackedLayout) -> bool {
             use noeta_ast::reflect::PackedKind;
             layout.fields.iter().all(|f| match &f.kind {
-                PackedKind::Int | PackedKind::Bool => true,
-                PackedKind::Float | PackedKind::F32 => false,
+                PackedKind::Int | PackedKind::IntN { .. } | PackedKind::Bool => true,
+                PackedKind::Float | PackedKind::F32 | PackedKind::F64 => false,
                 PackedKind::Struct(inner) => layout_key_capable(inner),
             })
         }

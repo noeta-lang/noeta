@@ -74,7 +74,15 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// can an earlier artifact be *stale* the way a layout change makes one: a bundle written before
 /// that slice came from a compiler that could not parse an attribute in a parameter list, so its
 /// source cannot have contained one, and the rows it lacks are rows its program never had.
-pub const FORMAT_VERSION: u8 = 4;
+///
+/// Bumped to 5 by the packed-widths arc, which changed two serialized shapes in the postcard
+/// payload. `PackedFieldDef` (in `Module::packed_schemas`) gained `F64` and `IntN { bits, signed }`
+/// variants, and `reflect::TypeRepr` (baked into `Op` narrow targets and construction-site tags)
+/// gained `F64` and `IntN { signed, bits }` — both non-self-describing enums whose new variants
+/// shift every discriminant after them. A version-4 bundle decoded by a version-5 reader would map
+/// the old `Bool`/`Struct` discriminants onto the wrong variants and desynchronise. Same rule as the
+/// bumps before it: any change to a serialized enum's variant set is a wire break.
+pub const FORMAT_VERSION: u8 = 5;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

@@ -250,6 +250,13 @@ impl<'m> Vm<'m> {
                     noeta_bytecode::PackedFieldDef::Int => noeta_object::PackedKind::Int,
                     noeta_bytecode::PackedFieldDef::Float => noeta_object::PackedKind::Float,
                     noeta_bytecode::PackedFieldDef::F32 => noeta_object::PackedKind::F32,
+                    noeta_bytecode::PackedFieldDef::F64 => noeta_object::PackedKind::F64,
+                    noeta_bytecode::PackedFieldDef::IntN { bits, signed } => {
+                        noeta_object::PackedKind::IntN {
+                            bits: *bits,
+                            signed: *signed,
+                        }
+                    }
                     noeta_bytecode::PackedFieldDef::Bool => noeta_object::PackedKind::Bool,
                     noeta_bytecode::PackedFieldDef::Struct(idx) => {
                         noeta_object::PackedKind::Struct(packed_schemas[*idx as usize])

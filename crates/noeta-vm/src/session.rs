@@ -80,6 +80,11 @@ impl SessionState {
                     PackedFieldDef::Int => PackedKind::Int,
                     PackedFieldDef::Float => PackedKind::Float,
                     PackedFieldDef::F32 => PackedKind::F32,
+                    PackedFieldDef::F64 => PackedKind::F64,
+                    PackedFieldDef::IntN { bits, signed } => PackedKind::IntN {
+                        bits: *bits,
+                        signed: *signed,
+                    },
                     PackedFieldDef::Bool => PackedKind::Bool,
                     PackedFieldDef::Struct(idx) => {
                         PackedKind::Struct(self.packed_schemas[*idx as usize])

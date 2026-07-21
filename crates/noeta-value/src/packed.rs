@@ -46,6 +46,15 @@ impl Value {
                             .as_f32()
                             .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
                             .is_some(),
+                        // `f64`/`iN`/`uN` fields carry width-erased scalars at runtime (a
+                        // `float`/`int`); only the buffer slot is narrowed (packed-widths arc).
+                        PackedKind::F64 => slot
+                            .as_float()
+                            .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
+                            .is_some(),
+                        PackedKind::IntN { bits, .. } => {
+                            slot.as_int().map(|i| write_intn(out, i, *bits)).is_some()
+                        }
                         PackedKind::Bool => slot.as_bool().map(|b| out.push(u8::from(b))).is_some(),
                         PackedKind::Struct(inner) => slot.pack_element(inner, out),
                     };
@@ -394,6 +403,33 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+/// Read a fixed-width integer slot (`bits/8` little-endian bytes at `offset`) back into the runtime's
+/// 8-byte `int` (packed-widths arc). A **signed** slot sign-extends its top bit (a stored `-1i8`
+/// reads back `-1`); an **unsigned** slot zero-extends (`255u8` reads back `255`).
+fn read_intn(bytes: &[u8], offset: usize, bits: u8, signed: bool) -> i64 {
+    let n = (bits as usize) / 8;
+    let mut raw: u64 = 0;
+    for i in 0..n {
+        raw |= (bytes[offset + i] as u64) << (8 * i);
+    }
+    if signed && bits < 64 {
+        let sign_bit = 1u64 << (bits - 1);
+        if raw & sign_bit != 0 {
+            raw |= !((1u64 << bits) - 1);
+        }
+    }
+    raw as i64
+}
+
+/// Append a fixed-width integer's low `bits/8` little-endian bytes to `out` (packed-widths arc).
+fn write_intn(out: &mut Vec<u8>, value: i64, bits: u8) {
+    let n = (bits as usize) / 8;
+    let raw = value as u64;
+    for i in 0..n {
+        out.push((raw >> (8 * i)) as u8);
+    }
+}
+
 /// Decode one packed field at byte `offset` into an owned [`Value`] — the per-field counterpart of
 /// [`unpack_element`], used by [`Value::packed_field`] to read a single field without materializing
 /// the whole element (P-PACK 3.2b byte-addressed).
@@ -402,6 +438,8 @@ fn decode_packed_field(kind: &PackedKind, bytes: &[u8], offset: usize) -> Value 
         PackedKind::Int => Value::int(read_u64(bytes, offset) as i64),
         PackedKind::Float => Value::float(f64::from_bits(read_u64(bytes, offset))),
         PackedKind::F32 => Value::f32(f32::from_bits(read_u32(bytes, offset))),
+        PackedKind::F64 => Value::float(f64::from_bits(read_u64(bytes, offset))),
+        PackedKind::IntN { bits, signed } => Value::int(read_intn(bytes, offset, *bits, *signed)),
         PackedKind::Bool => Value::bool(bytes[offset] != 0),
         PackedKind::Struct(inner) => unpack_element(inner, bytes, offset).0,
     }
@@ -423,6 +461,14 @@ fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value,
             PackedKind::F32 => {
                 slots.push(Value::f32(f32::from_bits(read_u32(bytes, at))));
                 at += 4;
+            }
+            PackedKind::F64 => {
+                slots.push(Value::float(f64::from_bits(read_u64(bytes, at))));
+                at += 8;
+            }
+            PackedKind::IntN { bits, signed } => {
+                slots.push(Value::int(read_intn(bytes, at, *bits, *signed)));
+                at += (*bits as usize) / 8;
             }
             PackedKind::Bool => {
                 slots.push(Value::bool(bytes[at] != 0));

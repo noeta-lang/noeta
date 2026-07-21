@@ -47,6 +47,11 @@ fn packed_field(kind: &noeta_object::PackedKind) -> PackedField {
         PackedKind::Int => PackedField::Int,
         PackedKind::Float => PackedField::Float,
         PackedKind::F32 => PackedField::F32,
+        PackedKind::F64 => PackedField::F64,
+        PackedKind::IntN { bits, signed } => PackedField::IntN {
+            bits: *bits,
+            signed: *signed,
+        },
         PackedKind::Bool => PackedField::Bool,
         PackedKind::Struct(inner) => {
             PackedField::Struct(inner.fields.iter().map(packed_field).collect())

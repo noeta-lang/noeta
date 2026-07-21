@@ -638,7 +638,7 @@ fn type_to_repr_top(
         // An abstract kind-type (`Enum`/`Struct`/`Class`) has no precise static head — the runtime
         // value is a concrete enum/struct/class — so it defers to the runtime `type_of` path.
         Type::Dyn | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
-        concrete => Some(type_to_repr(concrete, kinds)),
+        concrete => Some(type_to_repr(concrete, kinds, true)),
     }
 }
 
@@ -650,21 +650,30 @@ fn type_to_repr_top(
 fn type_to_repr(
     ty: &Type,
     kinds: &HashMap<String, noeta_types::TypeKind>,
+    top: bool,
 ) -> noeta_ast::reflect::TypeRepr {
     use noeta_ast::reflect::TypeRepr;
-    let rec = |t: &Type| type_to_repr(t, kinds);
+    // Every nested position is an element, where a fixed width is reified (packed-widths arc).
+    let rec = |t: &Type| type_to_repr(t, kinds, false);
     match ty {
         // A trait object reflects as the dynamic top — the value carries its own concrete type.
         Type::DynTrait(_) => TypeRepr::Dyn,
         Type::Int => TypeRepr::Int,
         Type::Float => TypeRepr::Float,
         Type::F32 => TypeRepr::F32,
-        // `f64` is bit-identical to `float` at runtime (P-NUM-SYM), so reflection reports `Float` —
-        // consistent with the shared value, just as the fixed-width integers report `Int`.
-        Type::F64 => TypeRepr::Float,
-        // Fixed-width integers are **erased to `int`** at runtime (Tier W), so runtime reflection
-        // (`type_of`) cannot recover the width — it reports `Int`, consistent with the erased value.
-        Type::IntN { .. } => TypeRepr::Int,
+        // `f64` and the fixed-width integers keep their width in a *type-derived* reflection when they
+        // sit in **element position** — a `List<f64>`/`List<i32>` construction tag — so those lists
+        // are distinguishable from `List<float>`/`List<int>` (packed-widths arc). At the **top** they
+        // erase to `Float`/`Int`, matching a scalar *value*, whose storage carries no width tag; so
+        // `type_of` of a scalar reports `Float`/`Int`, and equal elements of the two list types stay
+        // `==` (the width is storage/identity, never equality).
+        Type::F64 if top => TypeRepr::Float,
+        Type::IntN { .. } if top => TypeRepr::Int,
+        Type::F64 => TypeRepr::F64,
+        Type::IntN { signed, bits } => TypeRepr::IntN {
+            signed: *signed,
+            bits: *bits,
+        },
         Type::Bool => TypeRepr::Bool,
         Type::String => TypeRepr::Str,
         Type::Bytes => TypeRepr::Bytes,

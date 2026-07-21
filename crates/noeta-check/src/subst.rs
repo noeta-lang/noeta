@@ -701,9 +701,10 @@ pub(crate) fn constraint_mismatch(
             PackedKind::Float => Some(ConstraintField::Float),
             PackedKind::F32 => Some(ConstraintField::F32),
             PackedKind::Bool => Some(ConstraintField::Bool),
-            // Constraints cover primitive fields only (a bundle over nested packed structs is a
-            // later, additive extension).
-            PackedKind::Struct(_) => None,
+            // Constraints cover the `int`/`float`/`f32`/`bool` kernel vocabulary only (kernel bundles
+            // are f32/word-shaped); a narrower fixed width (`i32`/`u8`/`f64`) or a nested packed
+            // struct is not constraint-coverable — treated as a mismatch, an additive extension later.
+            PackedKind::F64 | PackedKind::IntN { .. } | PackedKind::Struct(_) => None,
         })
         .collect();
     let Some(kinds) = kinds else {

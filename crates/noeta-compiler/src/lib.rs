@@ -1430,6 +1430,11 @@ impl ModuleCompiler {
                 PackedKind::Int => noeta_bytecode::PackedFieldDef::Int,
                 PackedKind::Float => noeta_bytecode::PackedFieldDef::Float,
                 PackedKind::F32 => noeta_bytecode::PackedFieldDef::F32,
+                PackedKind::F64 => noeta_bytecode::PackedFieldDef::F64,
+                PackedKind::IntN { bits, signed } => noeta_bytecode::PackedFieldDef::IntN {
+                    bits: *bits,
+                    signed: *signed,
+                },
                 PackedKind::Bool => noeta_bytecode::PackedFieldDef::Bool,
                 PackedKind::Struct(inner) => {
                     noeta_bytecode::PackedFieldDef::Struct(self.intern_packed_schema(inner))
@@ -4831,7 +4836,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
                     head: Box::new(head),
                     args: args
                         .iter()
-                        .map(noeta_ast::reflect::typeref_to_repr)
+                        .map(noeta_ast::reflect::typeref_to_repr_arg)
                         .collect(),
                 }
             }
