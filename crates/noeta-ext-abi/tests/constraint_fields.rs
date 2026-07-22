@@ -392,6 +392,14 @@ const TABLE: &[Row] = &[
         "dispatch",
         Data(Anchor(EVAL_LIB, "fn call_native_class_method(")),
     ),
+    // `traits` (native-extensibility S3 / Pass 2b): the traits this class advertises. Read by
+    // `seed_ext_traits`, which records `user_trait_impls[class_qualified][trait]` so a native class
+    // value coerces to `dyn Trait` (the ExtType.traits twin for a class receiver).
+    Row(
+        "ExtClass",
+        "traits",
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_traits(")),
+    ),
     // --- ExtTrait / ExtTraitMethod (native-extensibility S3) ------------------------------------
     Row(
         "ExtTrait",

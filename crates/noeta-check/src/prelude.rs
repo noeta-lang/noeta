@@ -160,21 +160,29 @@ impl Checker {
                 let reg = self.reg();
                 let tr = reg.find_trait_qualified(qualified)?;
                 let decl = synth_trait_decl(reg, tr, local);
-                // Native types advertising this trait — a non-built-in name in `ExtType.traits`
-                // that matches the trait (by short or qualified spelling). `record_trait_impls`
-                // drops non-built-in names (they can't satisfy a built-in bound), so this is the
-                // one channel that records a native type's native-trait impl.
-                let impls: Vec<String> = reg
+                // Native declarations advertising this trait — a non-built-in name in `ExtType.traits`
+                // (Pass 1) OR `ExtClass.traits` (Pass 2b) matching the trait (short or qualified
+                // spelling). `record_trait_impls` drops non-built-in names (they can't satisfy a
+                // built-in bound), so this is the one channel that records a native declaration's
+                // native-trait impl. Written over both kinds so an ExtType and an ExtClass advertiser
+                // seed the same `user_trait_impls[qualified][trait]` uniformly — the coercion channel
+                // is representation-agnostic (its receiver is an extern value OR a class object).
+                let advertises = |traits: &[&str]| {
+                    traits.iter().any(|t| *t == tr.name || tr.is_qualified(t))
+                };
+                let type_impls = reg
                     .extensions()
                     .iter()
                     .flat_map(|ext| ext.types())
-                    .filter(|ty| {
-                        ty.traits
-                            .iter()
-                            .any(|t| *t == tr.name || tr.is_qualified(t))
-                    })
-                    .map(|ty| ty.qualified())
-                    .collect();
+                    .filter(|ty| advertises(ty.traits))
+                    .map(|ty| ty.qualified());
+                let class_impls = reg
+                    .extensions()
+                    .iter()
+                    .flat_map(|ext| ext.classes())
+                    .filter(|cl| advertises(cl.traits))
+                    .map(|cl| cl.qualified());
+                let impls: Vec<String> = type_impls.chain(class_impls).collect();
                 Some(TraitSeed {
                     local: local.clone(),
                     decl,

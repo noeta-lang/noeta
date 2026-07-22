@@ -27,8 +27,8 @@ use std::any::Any;
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
 use noeta_stdlib::registry::{
-    ExtFn, ExtModule, ExtTrait, ExtTraitMethod, ExtType, Extension, NativeOut, NativeValue, RetTy,
-    SigType,
+    ExtClass, ExtField, ExtFn, ExtModule, ExtTrait, ExtTraitMethod, ExtType, Extension, NativeOut,
+    NativeValue, RetTy, SigType,
 };
 use noeta_stdlib::{ExternBox, ExternValue, Host, StdError};
 use noeta_vm::VmBackend;
@@ -132,13 +132,75 @@ const WIDGET: ExtTrait = ExtTrait {
     }],
 };
 
-// --- The module that constructs a native value ----------------------------------------------------
+// --- The OTHER native value kind: a native CLASS that implements the trait (Pass 2b) --------------
 
-const KIT_FNS: &[ExtFn] = &[ExtFn {
-    name: "make",
-    params: &[SigType::String],
-    ret: RetTy::Concrete(SigType::Named("Button")),
-}];
+/// A native **class** `Panel` — a real class-kind `Object`, the second native value kind behind a
+/// `dyn Widget` (Pass 2b). It advertises `Widget` via `traits` (seeded into `user_trait_impls`) and
+/// implements the trait method `describe()` as a native class method (dispatched through the Pass-2a
+/// Object-arm branch). Proves `dyn Widget` dispatch is representation-agnostic: an ExtType (`Button`)
+/// and an ExtClass (`Panel`) both dispatch their trait method to native code behind one `dyn`.
+const PANEL: ExtClass = ExtClass {
+    name: "Panel",
+    namespace: "fx",
+    fields: &[ExtField {
+        name: "label",
+        ty: SigType::String,
+        is_public: true,
+        is_mut: false,
+    }],
+    methods: &[ExtFn {
+        name: "describe",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    }],
+    dispatch: panel_dispatch,
+    traits: &["Widget"],
+};
+
+/// `Panel`'s native method dispatch — the native implementation of `Widget.describe()` for a class
+/// receiver. Reads the instance's `label` field off the marshalled `NativeValue::Instance`.
+fn panel_dispatch(
+    recv: &NativeValue,
+    method: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match method {
+        "describe" => {
+            let label = match recv {
+                NativeValue::Instance { fields, .. } => fields
+                    .iter()
+                    .find(|(k, _)| k == "label")
+                    .and_then(|(_, v)| match v {
+                        NativeValue::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            Ok(NativeOut::Str(format!("panel:{label}")))
+        }
+        _ => Err(StdError {
+            kind: noeta_stdlib::ErrorKind::UnknownName,
+            message: format!("no method `{method}`"),
+        }),
+    }
+}
+
+// --- The module that constructs the native values -------------------------------------------------
+
+const KIT_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "make",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named("Button")),
+    },
+    ExtFn {
+        name: "panel",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named("Panel")),
+    },
+];
 
 fn kit_dispatch(
     func: &str,
@@ -152,6 +214,17 @@ fn kit_dispatch(
                 _ => String::new(),
             };
             Ok(NativeOut::Extern(ExternBox::new(ButtonBox { label })))
+        }
+        "panel" => {
+            let label = match args.first() {
+                Some(NativeValue::Str(s)) => s.clone(),
+                _ => String::new(),
+            };
+            // A real native class instance (class-kind object), field in declared slot order.
+            Ok(NativeOut::Instance {
+                class: "Panel".to_string(),
+                fields: vec![("label".to_string(), NativeOut::Str(label))],
+            })
         }
         _ => Err(StdError {
             kind: noeta_stdlib::ErrorKind::UnknownName,
@@ -176,6 +249,9 @@ impl Extension for FxExtension {
     }
     fn types(&self) -> &'static [ExtType] {
         &[BUTTON]
+    }
+    fn classes(&self) -> &'static [ExtClass] {
+        &[PANEL]
     }
     fn traits(&self) -> &'static [ExtTrait] {
         &[WIDGET]
@@ -295,19 +371,31 @@ c = Card { title: "hi" }
 echo announce(c)
 echo render(c)
 
-// 3b: a NATIVE value (an extern `Button`) laundered through `dyn Widget` dispatches `describe()`
-// to the native method — the load-bearing case.
+// 3b (ExtType receiver): a NATIVE extern `Button` laundered through `dyn Widget` dispatches
+// `describe()` to the native method — the load-bearing case, Pass 1.
 b = kit.make("go")
 echo render(b)
 
 // Directly-typed native method call, for parity with the `dyn` dispatch above.
 echo b.describe()
+
+// 3b (ExtClass receiver, Pass 2b): a NATIVE class `Panel` — the OTHER native value kind — behind
+// the SAME `dyn Widget` dispatches `describe()` to its native class method. Proves the `dyn`
+// dispatch is representation-agnostic: an extern value and a class object both reach native code.
+p = kit.panel("cls")
+echo render(p)
+
+// Directly-typed native class method call, for parity.
+echo p.describe()
 "#;
 
 #[test]
 fn native_trait_contract_and_dynamic_dispatch_agree_on_both_backends() {
     let stdout = run_both_agree(PROGRAM);
-    assert_eq!(stdout, "card:hi\ncard:hi\nbutton:go\nbutton:go\n");
+    assert_eq!(
+        stdout,
+        "card:hi\ncard:hi\nbutton:go\nbutton:go\npanel:cls\npanel:cls\n"
+    );
 }
 
 /// **3a — an incomplete `impl` is E0015.** A user type implementing the native `Widget` must define

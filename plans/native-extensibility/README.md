@@ -216,6 +216,8 @@ plumbing — treat it as its own sub-slice with its own differential conformance
 - [x] 3a: `impl NativeTrait for UserType` + `T: NativeTrait` bound (satisfied / E0015 / E0025)
 - [x] 3b: `dyn NativeTrait` over a native receiver dispatches to native methods, both backends, differential
 - [x] namespace projection + gate + docs + conformance
+- [x] **Pass 2a:** ExtClass native instance methods (`ExtClass.methods`/`dispatch`), Object-arm dispatch both backends
+- [x] **Pass 2b:** `dyn NativeTrait` over an ExtClass receiver (the second native value kind), differential
 
 ### S3 — landed notes (native-extensibility S3)
 
@@ -265,6 +267,41 @@ plumbing — treat it as its own sub-slice with its own differential conformance
   gate-verified (mutate expect → fail → revert). Gates green: corpus 7/7, `noeta-check`/`noeta-vm`/
   `noeta-eval` `--lib`, `noeta-ext-abi` `--lib`, `constraint_fields` + `ext_constraint_enforcement`,
   workspace clippy `-D warnings`.
+
+### S3 — landed notes (Pass 2: ExtClass a complete class + `dyn` over native classes)
+
+- **Pass 2a — ExtClass native methods.** The merged fields-only `ExtClass` gained a `methods:
+  &[ExtFn]` + `dispatch: ClassDispatch` surface (the `ExtType` twin). A native class value is a real
+  language `Object`, **not** an `ExternValue`, so `ClassDispatch(recv: &NativeValue, method, host,
+  args)` receives the instance **marshalled to a `NativeValue::Instance`** (the same shape a class
+  value takes arg-IN, via the existing `marshal_native_arg`) — the method reads its fields by name
+  and gets the same `&mut dyn Host` seam an `ExtType` method does (the Host-availability question
+  answered: yes). Receiver is a value snapshot; in-place mutation of the instance is a later additive
+  extension (arg-IN is likewise a snapshot).
+- **Object-arm recovery of the dispatch fn from the shape.** Both backends' `CallMethod` Object arm
+  (`crates/noeta-eval/src/lib.rs` `call_method`, `crates/noeta-vm/src/dispatch.rs` `Op::CallMethod`)
+  gained a branch on the **hoisted-proto miss**: the class-kind object carries its **short** shape
+  name, so `reg.resolve_class(shape.name)` + `find_class_method(name, method)` recovers the
+  registration and its `dispatch` — no new marker on the value/shape was needed (the shape name is
+  sufficient). A user class always resolves through the proto table first, so only a genuine native
+  class reaches the branch; the field-call fallback and E0005 stay unchanged after it.
+  `call_native_class_method` (vm/eval) marshals the receiver + args, calls `(class.dispatch)(...)`,
+  materializes the result — mirroring `call_extern_method` so the two backends agree by construction.
+- **Checker typing.** Native-class method calls type through the registry-driven
+  `method_return`/`method_params`/`method_required` (new arms keyed off `find_class_method`), like
+  extern-type methods — a native class is not generic, so no receiver type-variable bindings.
+- **Pass 2b — `dyn NativeTrait` over an ExtClass.** `ExtClass` gained a `traits: &[&str]` field (the
+  `ExtType.traits` twin); `seed_ext_traits`'s advertiser loop now iterates **both** `ext.types()` and
+  `ext.classes()`, seeding `user_trait_impls[qualified][trait]` uniformly — the coercion channel is
+  representation-agnostic (receiver is an extern value OR a class object). So a `dyn Widget` holding a
+  native **class** coerces and dispatches its trait method to the class's native method through the
+  Pass-2a Object-arm branch, with **zero** new runtime plumbing beyond 2a.
+- **ABI gate:** `ExtClass.methods`/`dispatch`/`traits` classified Data with live readers
+  (`find_class_method`, `call_native_class_method`, `seed_ext_traits`).
+- **Conformance:** `ext_class_seam.rs` gains a native `Handle.describe()` (reads `label`) dispatching
+  identically on both backends (2a); `ext_trait_seam.rs`'s differential now proves `dyn Widget`
+  dispatches over **both** an ExtType receiver (`Button`) **and** an ExtClass receiver (`Panel`) —
+  same trait, both native value kinds, both backends, leak-oracle zero (2b). Every case gate-verified.
 
 ## Definition of done
 All three declaration kinds usable from a consuming project with correct namespace identity; enums exhaustive;

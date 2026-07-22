@@ -935,6 +935,12 @@ pub struct ExtClass {
     /// method call here (their `CallMethod` Object arm, on a native-class shape). A fields-only
     /// class never reaches it, so the default reports an unregistered-method misuse.
     pub dispatch: ClassDispatch,
+    /// The **traits this class declares** (native-extensibility S3 / Pass 2b) — the [`ExtClass`]
+    /// twin of [`ExtType::traits`]. A name matching a native [`ExtTrait`] makes the class satisfy
+    /// that trait: `seed_ext_traits` records it into `user_trait_impls[class_qualified][trait]`, so
+    /// a native class value coerces to `dyn Trait` and its trait-method call dispatches to the
+    /// class's native method (the Pass-2a Object-arm branch). Default empty.
+    pub traits: &'static [&'static str],
 }
 
 /// One field of an [`ExtClass`]: its name, type, and the two access rules (visibility, mutability)
@@ -971,6 +977,7 @@ impl ExtClass {
                 message: format!("internal: no class-method dispatch registered (method `{method}`)"),
             })
         },
+        traits: &[],
     };
 
     /// The class's **qualified identity** (`res.Handle`) — `namespace.name`, the string the checker
