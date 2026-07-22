@@ -503,16 +503,27 @@ impl<'m> Vm<'m> {
             };
             return Ok(value);
         }
+        // Buffer-direct list reductions (packed-reductions arc): `sum`/`product`/`min`/`max` on a
+        // numeric list, `any`/`all`/`count` on a `List<bool>`. A packed scalar list folds its raw byte
+        // buffer through the shared `noeta-stdlib` kernel; a boxed list folds element-wise — one body,
+        // so both representations and both backends agree. `sum` intercepts here (superseding the old
+        // materializing `Builtin::Sum`) so the packed fast path and width-wrapping result apply.
+        if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+            && args.is_empty()
+            && (noeta_stdlib::NumReduce::from_name(method).is_some()
+                || noeta_stdlib::BoolReduce::from_name(method).is_some())
+        {
+            return self.call_list_reduction(v, method, 0, span);
+        }
         // Eager collection methods reusing the prelude builtin impls (prelude-redesign
-        // P1): `xs.map(f)` / `xs.filter(f)` / `xs.sum()` on a list, routed through
-        // `call_builtin` with the receiver as the first argument so the method and
-        // (legacy) free-function forms share one impl. A user object's own method wins
-        // (dispatched earlier); a list receiver is never an object.
+        // P1): `xs.map(f)` / `xs.filter(f)` on a list, routed through `call_builtin` with the
+        // receiver as the first argument so the method and (legacy) free-function forms share one
+        // impl. A user object's own method wins (dispatched earlier); a list receiver is never an
+        // object.
         if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
             && let Some(builtin) = match method {
                 "map" if args.len() == 1 => Some(Builtin::Map),
                 "filter" if args.len() == 1 => Some(Builtin::Filter),
-                "sum" if args.is_empty() => Some(Builtin::Sum),
                 _ => None,
             }
         {
@@ -578,6 +589,96 @@ impl<'m> Vm<'m> {
                 format!("no method `{method}` on {}", v.type_name()),
             )),
         }
+    }
+
+    /// Buffer-direct list reductions (packed-reductions arc): `sum`/`product`/`min`/`max` (numeric)
+    /// and `any`/`all`/`count` (`List<bool>`), over the elements at or after `from`. A packed scalar
+    /// list folds its raw byte buffer through the shared `noeta-stdlib` kernel; a boxed (or
+    /// packed-struct) list folds its scalar elements — one body, so packed/boxed and both backends
+    /// agree. `sum`/`product` width-wrap; `min`/`max` return `?T` (`none` for empty). The receiver
+    /// `v` is borrowed, not consumed.
+    pub(crate) fn call_list_reduction(
+        &mut self,
+        v: Value,
+        method: &str,
+        from: usize,
+        span: Span,
+    ) -> Result<Value, Abort> {
+        if let Some(op) = noeta_stdlib::NumReduce::from_name(method) {
+            let folded = match v.packed_parts() {
+                // Packed scalar fast path: a single-field packed element is a contiguous native-width
+                // buffer, so `[from..]` is a byte sub-slice.
+                Some((schema, bytes)) if schema.shape.is_none() && schema.fields.len() == 1 => {
+                    let field = crate::native_ctx::packed_field(&schema.fields[0]);
+                    noeta_stdlib::reduce_num_packed(op, &field, &bytes[from * schema.byte_size..])
+                }
+                _ => {
+                    let scalars = self.list_reduction_scalars(v, method, from, span)?;
+                    noeta_stdlib::reduce_num_scalars(op, scalars.into_iter())
+                }
+            };
+            let folded =
+                folded.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+            return Ok(match op {
+                noeta_stdlib::NumReduce::Min | noeta_stdlib::NumReduce::Max => match folded {
+                    Some(rn) => make_some(rednum_to_value(rn)),
+                    None => make_none(),
+                },
+                _ => rednum_to_value(folded.expect("sum/product fold to a value")),
+            });
+        }
+        let op = noeta_stdlib::BoolReduce::from_name(method)
+            .expect("the caller gates this to a reduction method name");
+        let folded = match v.packed_parts() {
+            Some((schema, bytes)) if schema.shape.is_none() && schema.fields.len() == 1 => {
+                noeta_stdlib::reduce_bool_packed(op, &bytes[from * schema.byte_size..])
+            }
+            _ => {
+                let scalars = self.list_reduction_scalars(v, method, from, span)?;
+                noeta_stdlib::reduce_bool_scalars(op, scalars.into_iter())
+                    .map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?
+            }
+        };
+        Ok(match folded {
+            noeta_stdlib::RedBool::Bool(b) => Value::bool(b),
+            noeta_stdlib::RedBool::Int(i) => Value::int(i),
+        })
+    }
+
+    /// Materialize a list's elements at or after `from` as primitive scalars for the boxed reduction
+    /// fallback, erroring on a non-scalar element (a struct-packed/heterogeneous list). A packed list
+    /// is demoted to a temporary boxed one and released, mirroring the old `Builtin::Sum`.
+    fn list_reduction_scalars(
+        &mut self,
+        v: Value,
+        method: &str,
+        from: usize,
+        span: Span,
+    ) -> Result<Vec<noeta_stdlib::Scalar>, Abort> {
+        let list = v.realize_list();
+        let items = list.list_items().expect("list receiver");
+        let mut scalars = Vec::with_capacity(items.len().saturating_sub(from));
+        let mut bad: Option<&'static str> = None;
+        for &element in items.iter().skip(from) {
+            match crate::values::value_to_scalar(element) {
+                Some(s) => scalars.push(s),
+                None => {
+                    bad = Some(element.type_name());
+                    break;
+                }
+            }
+        }
+        list.release();
+        if let Some(type_name) = bad {
+            return Err(self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`{method}` expects a list of numbers, found an element of type {type_name}"
+                ),
+            ));
+        }
+        Ok(scalars)
     }
 
     /// Run an unbound method handle (`Type.method`) applied to `args` on a fresh frame stack,
