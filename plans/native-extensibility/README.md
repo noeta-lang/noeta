@@ -1,6 +1,6 @@
 # Arc — native extensibility: ExtEnum, ExtClass, ExtTrait
 
-Status: **in progress** — S1 (ExtEnum) + S2 (ExtClass) complete; S3 pending
+Status: **complete** — S1 (ExtEnum) + S2 (ExtClass) + S3 (ExtTrait) all landed
 
 Complete the native extension ABI so a Rust extension can declare real language **enums**, **classes**,
 and **traits** — not only opaque extern types (`ExtType`) and modules. Today none of `ExtEnum` /
@@ -213,9 +213,58 @@ bridge from the user-trait dynamic-dispatch site to the native dispatch seam in 
 (`crates/noeta-eval/src/lib.rs:5037`, `crates/noeta-vm/src/values.rs:370`). This is genuine new runtime
 plumbing — treat it as its own sub-slice with its own differential conformance.
 
-- [ ] 3a: `impl NativeTrait for UserType` + `T: NativeTrait` bound (satisfied / E0015 / E0025)
-- [ ] 3b: `dyn NativeTrait` over a native receiver dispatches to native methods, both backends, differential
-- [ ] namespace projection + gate + docs + conformance
+- [x] 3a: `impl NativeTrait for UserType` + `T: NativeTrait` bound (satisfied / E0015 / E0025)
+- [x] 3b: `dyn NativeTrait` over a native receiver dispatches to native methods, both backends, differential
+- [x] namespace projection + gate + docs + conformance
+
+### S3 — landed notes (native-extensibility S3)
+
+- **Keyed by short name, gated by the `use`** (deliberately *unlike* S1/S2's qualified keying). The
+  user-trait machinery is short-name-keyed everywhere from source — `impl Widget for T`, `T: Widget`,
+  `dyn Widget` all name the trait by the imported spelling (exactly like a `.noe` trait and the
+  built-in traits). So a native trait seeds `symbols.user_traits` under the **imported short** name;
+  the `use fx.Widget` alias in `imports.extern_types` gates it (bare `impl Widget` without the `use`
+  resolves nothing). `ExtEnum`/`ExtClass` key by *qualified* identity because their **values** must
+  unify; a trait is a contract, not a value.
+- **`seed_ext_traits`** (`crates/noeta-check/src/prelude.rs`) runs at **collect time** (import-aware),
+  called from `collect.rs` **after** the `Stmt::Trait` walk and **before** the `user_trait_impls`
+  collection. It iterates `imports.extern_types` for aliases resolving to a native trait, synthesizes
+  a `noeta_ast::TraitDecl` (`synth_trait_decl`), and `.or_insert`s it — so a user `trait Widget`
+  (collected first) **shadows** the same-named native trait (the S1/S2 "user shadows native" rule;
+  the plan's flagged shadow-ordering fork, resolved this way rather than native-wins).
+- **`SigType → TypeRef` reverse map** (`stdlib::sig_to_typeref` / `ret_to_typeref`): a `TraitDecl`'s
+  method sigs carry AST `TypeRef` (not lattice `Type`), because `check_user_trait_impl` (E0015) and
+  the `dyn`-method result typing (`member.rs`) read them through `field_type`. Primitive spellings
+  round-trip through `Type::from_ref`; a `SigType::Named` bakes its qualified identity so the declared
+  type resolves by identity regardless of alias presence; a variable/polymorphic form → permissive
+  `dyn` hole.
+- **3b — dynamic dispatch is the *existing* extern-method seam, ZERO runtime surgery** (Option A,
+  reviewed/approved). A native value behind `dyn NativeTrait` is an `ExtType` (extern-box) value; a
+  method call on it lowers to an ordinary method call, and **both backends already route an extern
+  receiver to native dispatch** keyed off the runtime value, not the static `dyn` type: tree-walker
+  `call_method` → `call_extern_method` (`crates/noeta-eval/src/lib.rs`), VM `Op::CallMethod`'s
+  `HeapKind::Extern` arm → `resolve_extern_route`/`call_extern_method` (`crates/noeta-vm/src/dispatch.rs`,
+  `methods.rs`). **No Object-arm change.** The only bridge is the checker **coercion channel**:
+  `seed_ext_traits` seeds `user_trait_impls[native_type_qualified][short_trait]` for each native type
+  advertising the trait in its existing `ExtType.traits` list (a non-built-in name there, which
+  `record_trait_impls` otherwise drops), so `assignable`/`type_impls_trait` coerces `Type::Named("fx.Button")`
+  → `dyn Widget`. The advertiser loop is written over a generic type source, so a future ExtClass with
+  a `traits` field joins it without redesign (Option B — dispatch over an ExtClass `Value::Object`
+  receiver — deferred, a separate Object-arm decision).
+- **Namespace cross-cut** (mirrors S1/S2): `UseKind::ExtTrait`, `namespace_types` / `classify_use` /
+  `resolve_namespace_child` / `qualified_extern` extended for `traits()`; `use fx.Widget` re-roots the
+  short name onto its qualified identity.
+- **ABI gate:** `ExtTrait`/`ExtTraitMethod` in `SCANNED` + `TABLE`; `ExtTrait.methods` is the
+  **Constraint** (enforcer `check_user_trait_impl` E0015, exerciser
+  `ext_constraint_enforcement.rs::a_native_trait_incomplete_impl_is_rejected`); the rest are Data with
+  live readers.
+- **Conformance:** `crates/noeta-conformance/tests/ext_trait_seam.rs` (own fixture extension) — the
+  differential proves a user `impl` + a `T: Widget` bound + a `dyn Widget` dispatching to a `.noe`
+  body (Card) AND to the **native** method (Button) agree on both backends, leak-oracle zero; two
+  check-only tests pin the incomplete-impl E0015 and the bound-violation E0025. All cases
+  gate-verified (mutate expect → fail → revert). Gates green: corpus 7/7, `noeta-check`/`noeta-vm`/
+  `noeta-eval` `--lib`, `noeta-ext-abi` `--lib`, `constraint_fields` + `ext_constraint_enforcement`,
+  workspace clippy `-D warnings`.
 
 ## Definition of done
 All three declaration kinds usable from a consuming project with correct namespace identity; enums exhaustive;

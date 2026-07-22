@@ -22,9 +22,9 @@
 use noeta_embed::{Error, Session};
 use noeta_ext_abi::registry::{
     BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, EnumBacking, ExtBundle, ExtClass,
-    ExtDerive, ExtDeriveMethod, ExtEnum, ExtField, ExtFn, ExtModule, ExtTier, ExtType, ExtVariant,
-    Extension, NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, SigType, TierSite,
-    VariantValue,
+    ExtDerive, ExtDeriveMethod, ExtEnum, ExtField, ExtFn, ExtModule, ExtTier, ExtTrait,
+    ExtTraitMethod, ExtType, ExtVariant, Extension, NativeOut, NativeValue, PackedConstraint, RetTy,
+    Scalar, SigType, TierSite, VariantValue,
 };
 use noeta_ext_abi::{CtxError, CtxOut, ErrorKind, Host, Slot, StdError};
 
@@ -191,6 +191,23 @@ const FX_DERIVES: &[ExtDerive] = &[ExtDerive {
     validate: Some(checked_validate),
 }];
 
+/// A **native trait** with one required method — the `ExtTrait.methods` constraint under test. No
+/// shipped extension declares a native trait, so the checker's E0015 (incomplete-impl) arm has never
+/// run for a native trait's contract against the corpus; this fixture is its exerciser. A user type
+/// `impl Renderable for T` must define `fn render(): string` or the impl is E0015.
+const FX_TRAITS: &[ExtTrait] = &[ExtTrait {
+    name: "Renderable",
+    namespace: "fx",
+    methods: &[ExtTraitMethod {
+        sig: ExtFn {
+            name: "render",
+            params: &[],
+            ret: RetTy::Concrete(SigType::String),
+        },
+        has_default: false,
+    }],
+}];
+
 /// A tier restricted to **methods**. std has no tier that attaches to methods but not to functions,
 /// so the annotation-site gate has only ever been observed saying "yes".
 const FX_TIERS: &[ExtTier] = &[ExtTier {
@@ -231,6 +248,9 @@ impl Extension for FxExtension {
     }
     fn classes(&self) -> &'static [ExtClass] {
         FX_CLASSES
+    }
+    fn traits(&self) -> &'static [ExtTrait] {
+        FX_TRAITS
     }
 }
 
@@ -341,6 +361,33 @@ fn a_native_class_field_mutability_is_enforced() {
     rejects(
         "use fx.{kern}\nuse fx.Widget\nw = kern.widget()\nw.label = \"x\"\necho 1\n",
         "not declared `mut`",
+    );
+}
+
+// --- ExtTrait.methods (native-extensibility S3) --------------------------------------------------
+
+/// `ExtTrait.methods` states the RULE a native trait's contract enforces on an implementor: every
+/// required (non-default) method must be present with matching arity/types, or the `impl` is E0015 —
+/// exactly a `.noe` trait. No shipped extension declares a native trait, so the checker's
+/// `check_user_trait_impl` arm has never run for a native contract against the corpus; this fixture
+/// is its exerciser. Both directions matter: a complete impl checks clean, an incomplete one is
+/// rejected.
+#[test]
+fn a_native_trait_incomplete_impl_is_rejected() {
+    // A COMPLETE `impl fx.Renderable for Card` — defines the required `render` — checks clean.
+    accepts(
+        "use fx.Renderable\n\
+         struct Card { title: string }\n\
+         impl Renderable for Card { fn render(): string { return self.title } }\n\
+         echo 1\n",
+    );
+    // An INCOMPLETE impl — the required `render` is missing — is E0015.
+    rejects(
+        "use fx.Renderable\n\
+         struct Card { title: string }\n\
+         impl Renderable for Card {}\n\
+         echo 1\n",
+        "must define `fn render`",
     );
 }
 

@@ -1,0 +1,351 @@
+//! **Native-declared traits** (native-extensibility S3): an extension *outside* `std` declares a
+//! real language **trait** — a contract user types `impl`/bound on (3a) AND a dynamic-dispatch
+//! surface over native values (3b) — and a program implements it, binds on it, and dispatches a
+//! trait method through `dyn Trait` over both a user value and a **native** (`ExtType`) value.
+//!
+//! A synthetic extension rather than an `std` consumer, deliberately (mirroring `ext_class_seam.rs`
+//! / `ext_enum_seam.rs`): the whole path is registry-driven, so nothing about `Widget`/`Button` is
+//! known to the checker or either backend except its [`ExtTrait`]/[`ExtType`] declaration. The
+//! corpus's `differential_backends_agree` oracle cannot reach it (std declares no native trait), so
+//! the differential assertion lives here.
+//!
+//! **The load-bearing test is the dynamic-dispatch one** (`native_trait_contract_and_dynamic_dispatch
+//! _agree_on_both_backends`): a native `Button` laundered through `dyn Widget`, calling `describe()`,
+//! must dispatch to the **native** method — the same extern-method seam a directly-typed extern
+//! value uses — identically on the tree-walker reference and the bytecode VM. That is what proves 3b
+//! rides the existing extern-method dispatch (no Object-arm change), and that a user type and a
+//! native type coexist behind one `dyn`.
+//!
+//! Two **check-only** tests pin the 3a contract diagnostics — an incomplete `impl` is E0015, a
+//! bound violation is E0025 — the native-trait twins of the built-in-trait checks.
+//!
+//! An **integration test** (own process) because the fixture installs into the process-global
+//! default registry — once per process — the single-registry path the CLI uses.
+
+use std::any::Any;
+
+use noeta_db::LangDatabase;
+use noeta_span::{Source, SourceId};
+use noeta_stdlib::registry::{
+    ExtFn, ExtModule, ExtTrait, ExtTraitMethod, ExtType, Extension, NativeOut, NativeValue, RetTy,
+    SigType,
+};
+use noeta_stdlib::{ExternBox, ExternValue, Host, StdError};
+use noeta_vm::VmBackend;
+
+// --- The native value behind the `dyn`: an extern type that implements the native trait -----------
+
+/// A `Button` — an opaque extern value whose `describe()` method is the native implementation of the
+/// `Widget` trait's contract. Held/aliased with reference semantics like any extern value; laundered
+/// through `dyn Widget` in the 3b test, where its method call must reach `button_dispatch`.
+#[derive(Debug, Clone)]
+struct ButtonBox {
+    label: String,
+}
+
+impl ExternValue for ButtonBox {
+    fn type_identity(&self) -> &'static str {
+        "fx.Button"
+    }
+    fn eq_value(&self, other: &dyn ExternValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<ButtonBox>()
+            .is_some_and(|b| b.label == self.label)
+    }
+    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<std::cmp::Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0
+    }
+    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        write!(out, "<button {}>", self.label)
+    }
+    fn clone_box(&self) -> Box<dyn ExternValue> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// `Button`'s method dispatch — the native implementation of the `Widget` trait method. Reached both
+/// for a directly-typed `Button.describe()` and for a `describe()` on a `dyn Widget` holding a
+/// `Button` (3b): the runtime keys dispatch off the extern value, not the static `dyn` type.
+fn button_dispatch(
+    recv: &mut dyn ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match method {
+        "describe" => {
+            let label = recv
+                .as_any()
+                .downcast_ref::<ButtonBox>()
+                .map(|b| b.label.clone())
+                .unwrap_or_default();
+            Ok(NativeOut::Str(format!("button:{label}")))
+        }
+        _ => Err(StdError {
+            kind: noeta_stdlib::ErrorKind::UnknownName,
+            message: format!("no method `{method}`"),
+        }),
+    }
+}
+
+/// The native `Button` type: declares `describe(): string` as an ordinary extern method, AND
+/// advertises that it implements the native `Widget` trait through the existing `traits` list — the
+/// 3b coercion channel `seed_ext_traits` reads into `user_trait_impls["fx.Button"]["Widget"]`.
+const BUTTON: ExtType = ExtType {
+    name: "Button",
+    namespace: "fx",
+    methods: &[ExtFn {
+        name: "describe",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    }],
+    dispatch: button_dispatch,
+    traits: &["Widget"],
+    ..ExtType::DEFAULTS
+};
+
+// --- The native trait -----------------------------------------------------------------------------
+
+/// The native `Widget` trait: one required method `describe(): string`. A user type implements it
+/// (3a); a native `Button` advertises it (3b). Keyed into the user-trait machinery by its imported
+/// short name, gated by `use fx.Widget`.
+const WIDGET: ExtTrait = ExtTrait {
+    name: "Widget",
+    namespace: "fx",
+    methods: &[ExtTraitMethod {
+        sig: ExtFn {
+            name: "describe",
+            params: &[],
+            ret: RetTy::Concrete(SigType::String),
+        },
+        has_default: false,
+    }],
+};
+
+// --- The module that constructs a native value ----------------------------------------------------
+
+const KIT_FNS: &[ExtFn] = &[ExtFn {
+    name: "make",
+    params: &[SigType::String],
+    ret: RetTy::Concrete(SigType::Named("Button")),
+}];
+
+fn kit_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "make" => {
+            let label = match args.first() {
+                Some(NativeValue::Str(s)) => s.clone(),
+                _ => String::new(),
+            };
+            Ok(NativeOut::Extern(ExternBox::new(ButtonBox { label })))
+        }
+        _ => Err(StdError {
+            kind: noeta_stdlib::ErrorKind::UnknownName,
+            message: format!("no function `{func}`"),
+        }),
+    }
+}
+
+struct FxExtension;
+
+impl Extension for FxExtension {
+    fn name(&self) -> &'static str {
+        "fx"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        &[ExtModule {
+            name: "kit",
+            functions: KIT_FNS,
+            dispatch: kit_dispatch,
+            ..ExtModule::DEFAULTS
+        }]
+    }
+    fn types(&self) -> &'static [ExtType] {
+        &[BUTTON]
+    }
+    fn traits(&self) -> &'static [ExtTrait] {
+        &[WIDGET]
+    }
+}
+
+static FX: FxExtension = FxExtension;
+
+fn ensure_installed() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| noeta_stdlib::registry::install_with_extras(&[&FX]));
+}
+
+// --- Helpers -------------------------------------------------------------------------------------
+
+/// Check + run a program on both backends, asserting they agree, exit 0, and each leaves the heap
+/// residency unchanged (leak oracle zero), returning the shared stdout. Mirrors `ext_class_seam.rs`.
+#[track_caller]
+fn run_both_agree(program: &str) -> String {
+    ensure_installed();
+    let db = LangDatabase::default();
+    let source = Source::new(SourceId::FIRST, "ext_trait_seam.noe", program);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+
+    let parsed = noeta_db::ast(&db, src);
+    assert!(
+        parsed.0.diagnostics.is_empty(),
+        "program must parse cleanly: {:?}",
+        parsed.0.diagnostics
+    );
+    let checked = noeta_db::checked(&db, src);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "program must check cleanly: {:?}",
+        checked.diagnostics
+    );
+
+    let eval_before = noeta_eval::live_count();
+    let reference =
+        noeta_conformance::reference::reference_run(&parsed.0.program, checked.sites.clone());
+    let eval_after = noeta_eval::live_count();
+    assert_eq!(
+        eval_before, eval_after,
+        "tree-walker leak oracle: heap residency must return to baseline"
+    );
+
+    let module = noeta_db::bytecode(&db, src)
+        .0
+        .as_ref()
+        .expect("program compiles to bytecode")
+        .clone();
+    let vm_before = noeta_value::live_count() as i64;
+    let vm = VmBackend::new().run_module(&module);
+    let vm_after = noeta_value::live_count() as i64;
+    assert_eq!(
+        vm_before, vm_after,
+        "VM leak oracle: heap residency must return to baseline"
+    );
+
+    assert_eq!(
+        reference, vm,
+        "backends must agree on the native-trait program"
+    );
+    assert_eq!(
+        reference.exit_code, 0,
+        "diagnostics: {:?}",
+        reference.diagnostics
+    );
+    reference.stdout
+}
+
+/// The check-only diagnostics of a program (parse is asserted clean; the checker's diagnostics are
+/// returned for a negative assertion), for the 3a contract-error cases.
+#[track_caller]
+fn check_diagnostics(program: &str) -> Vec<String> {
+    ensure_installed();
+    let db = LangDatabase::default();
+    let source = Source::new(SourceId::FIRST, "ext_trait_check.noe", program);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+    let checked = noeta_db::checked(&db, src);
+    checked.diagnostics.iter().map(|d| d.message.clone()).collect()
+}
+
+// --- Tests ---------------------------------------------------------------------------------------
+
+/// **The 3a contract + 3b dynamic dispatch, differential.** A user `Card` implements the native
+/// `Widget` (3a); a `<T: Widget>` bound accepts it (3a bound); and a `dyn Widget` dispatches
+/// `describe()` to a `.noe` body for `Card` AND to the **native** method for a `Button` (3b) — the
+/// two backends must build identical output for all of it.
+const PROGRAM: &str = r#"
+use fx.kit
+use fx.Widget
+use fx.Button
+
+// A user type implements the native trait (3a).
+struct Card {
+    title: string
+}
+impl Widget for Card {
+    fn describe(): string {
+        return "card:${self.title}"
+    }
+}
+
+// A `T: Widget` bound accepts the implementor (3a bound) and calls the trait method.
+fn announce<T: Widget>(w: T): string {
+    return w.describe()
+}
+
+// A `dyn Widget` dispatches the trait method dynamically over whatever concrete type it holds.
+fn render(w: dyn Widget): string {
+    return w.describe()
+}
+
+c = Card { title: "hi" }
+echo announce(c)
+echo render(c)
+
+// 3b: a NATIVE value (an extern `Button`) laundered through `dyn Widget` dispatches `describe()`
+// to the native method — the load-bearing case.
+b = kit.make("go")
+echo render(b)
+
+// Directly-typed native method call, for parity with the `dyn` dispatch above.
+echo b.describe()
+"#;
+
+#[test]
+fn native_trait_contract_and_dynamic_dispatch_agree_on_both_backends() {
+    let stdout = run_both_agree(PROGRAM);
+    assert_eq!(stdout, "card:hi\ncard:hi\nbutton:go\nbutton:go\n");
+}
+
+/// **3a — an incomplete `impl` is E0015.** A user type implementing the native `Widget` must define
+/// its required `describe`, exactly as for a `.noe` trait — the native trait's contract reaches
+/// `check_user_trait_impl` through `symbols.user_traits` keyed by the imported short name.
+#[test]
+fn an_incomplete_impl_of_a_native_trait_is_rejected() {
+    let diags = check_diagnostics(
+        "use fx.Widget\nstruct Card { title: string }\nimpl Widget for Card {}\necho 1\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|m| m.contains("must define `fn describe`")),
+        "expected an E0015 naming the missing `describe`, got {diags:?}"
+    );
+}
+
+/// **3a — a `T: Widget` bound violation is E0025.** A type that does not implement the native trait
+/// cannot be passed where the bound requires it, exactly as for a built-in-trait bound.
+#[test]
+fn a_native_trait_bound_violation_is_rejected() {
+    const SRC: &str = r#"
+use fx.Widget
+
+struct Plain {
+    n: int
+}
+
+fn announce<T: Widget>(w: T): string {
+    return w.describe()
+}
+
+echo announce(Plain { n: 1 })
+"#;
+    let diags = check_diagnostics(SRC);
+    assert!(
+        diags.iter().any(|m| m.contains("Widget")),
+        "expected a bound-violation diagnostic naming `Widget`, got {diags:?}"
+    );
+}

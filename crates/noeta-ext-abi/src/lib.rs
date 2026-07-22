@@ -52,10 +52,10 @@ pub use os::{ExecIo, ExecResult, Process};
 pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
 pub use registry::{
     ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
-    EnumBacking, ExtBundle, ExtCapability, ExtEnum, ExtFn, ExtModule, ExtType, ExtVariant,
-    Extension, HiddenArg, ModuleDispatch, NativeOut, NativeValue, PackedConstraint, RetTy, Scalar,
-    ScalarVec, SigType, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch, TypedTypeDispatch,
-    VariantValue,
+    EnumBacking, ExtBundle, ExtCapability, ExtEnum, ExtFn, ExtModule, ExtTrait, ExtTraitMethod,
+    ExtType, ExtVariant, Extension, HiddenArg, ModuleDispatch, NativeOut, NativeValue,
+    PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeArgInfo, TypeDispatch, TypeRecipe,
+    TypedDispatch, TypedTypeDispatch, VariantValue,
 };
 // The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
 // (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared

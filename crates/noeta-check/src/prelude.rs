@@ -116,6 +116,94 @@ impl Checker {
         }
     }
 
+    /// Seed the **imported** native traits (native-extensibility S3) into the user-trait tables —
+    /// the trait analogue of `seed_ext_classes`, but run at **collect time** (import-aware), not at
+    /// prelude, and keyed by the imported **short** name.
+    ///
+    /// A native trait slots into the checker's user-trait machinery (`symbols.user_traits` /
+    /// `user_trait_impls`), which is keyed by the source-written **short** name everywhere (an
+    /// `impl NativeTrait for T`, a `T: NativeTrait` bound, a `dyn NativeTrait` all name the trait by
+    /// the short spelling), exactly like a `.noe` trait and the built-in traits. So — unlike a native
+    /// enum/class, which is keyed by qualified identity because its *values* must unify — the trait
+    /// entry is keyed by the short name and gated by the `use`: this seeds only names present in
+    /// `imports.extern_types` that resolve to a native trait (`use fx.Widget`). Bare `impl Widget`
+    /// without the `use` resolves nothing, exactly like a missing import.
+    ///
+    /// Runs **after** the collect pass's `Stmt::Trait` walk and uses `.or_insert` throughout, so a
+    /// user `trait Widget` (collected first) **shadows** the same-short-named native trait —
+    /// consistent with S1/S2's "user shadows native".
+    ///
+    /// It also seeds the **3b dynamic-dispatch coercion channel**: for each native type advertising
+    /// this trait (a name in its [`ExtType::traits`] list matching the trait), it records
+    /// `user_trait_impls[native_type_qualified][short_trait] = []`, so a native value typed
+    /// `Type::Named("fx.Button")` coerces to `dyn Widget` (`assignable`/`type_impls_trait`) and its
+    /// method call dispatches through the existing extern-method seam — no runtime change. The
+    /// advertiser loop is written over a generic `(qualified_type, trait_names)` source, so a future
+    /// `ExtClass` gaining a `traits` field joins it without a redesign (Option A ships ExtType only).
+    pub(crate) fn seed_ext_traits(&mut self) {
+        // Snapshot the import aliases first so the immutable registry borrow is released before the
+        // `&mut self` symbol-table writes (the enum/class seeders take the same shape).
+        struct TraitSeed {
+            local: String,
+            decl: noeta_ast::TraitDecl,
+            impls: Vec<String>,
+        }
+        let aliases: Vec<(String, String)> = self
+            .imports
+            .extern_types
+            .iter()
+            .map(|(l, q)| (l.clone(), q.clone()))
+            .collect();
+        let seeds: Vec<TraitSeed> = aliases
+            .iter()
+            .filter_map(|(local, qualified)| {
+                let reg = self.reg();
+                let tr = reg.find_trait_qualified(qualified)?;
+                let decl = synth_trait_decl(reg, tr, local);
+                // Native types advertising this trait — a non-built-in name in `ExtType.traits`
+                // that matches the trait (by short or qualified spelling). `record_trait_impls`
+                // drops non-built-in names (they can't satisfy a built-in bound), so this is the
+                // one channel that records a native type's native-trait impl.
+                let impls: Vec<String> = reg
+                    .extensions()
+                    .iter()
+                    .flat_map(|ext| ext.types())
+                    .filter(|ty| {
+                        ty.traits
+                            .iter()
+                            .any(|t| *t == tr.name || tr.is_qualified(t))
+                    })
+                    .map(|ty| ty.qualified())
+                    .collect();
+                Some(TraitSeed {
+                    local: local.clone(),
+                    decl,
+                    impls,
+                })
+            })
+            .collect();
+        for TraitSeed {
+            local,
+            decl,
+            impls,
+        } in seeds
+        {
+            // A user `trait <local>` collected first wins (shadow ordering).
+            self.symbols
+                .user_traits
+                .entry(local.clone())
+                .or_insert(decl);
+            for ty in impls {
+                self.symbols
+                    .user_trait_impls
+                    .entry(ty)
+                    .or_default()
+                    .entry(local.clone())
+                    .or_default();
+            }
+        }
+    }
+
     /// Seed every installed extension's declared **native enums** (native-extensibility S1) into the
     /// checker's symbol tables, keyed by **qualified identity** (`std.http.SameSite`) — so a native
     /// enum is indistinguishable from a `.noe` enum to every downstream consumer (exhaustiveness
@@ -424,5 +512,74 @@ impl Checker {
         self.symbols
             .type_kinds
             .insert("Type".to_string(), noeta_types::TypeKind::Enum);
+    }
+}
+
+/// Synthesize a [`noeta_ast::TraitDecl`] from a native [`registry::ExtTrait`] (native-extensibility
+/// S3) — the declarative surface `seed_ext_traits` seeds into `symbols.user_traits`, so a native
+/// trait is indistinguishable from a `.noe` `trait` to `check_user_trait_impl` (E0015),
+/// `enforce_type_param_bounds` (E0025), and the `dyn`-method result typing. The decl is named by the
+/// imported **short** `local` name (alias-safe: the source writes that spelling); its methods' `sig`
+/// carries AST `TypeRef` types via the `SigType → TypeRef` reverse map (`stdlib::sig_to_typeref` /
+/// `ret_to_typeref`), because the user-trait checkers read those through `field_type`, exactly as
+/// they read a `.noe` trait's.
+fn synth_trait_decl(
+    reg: &noeta_ext_abi::registry::Registry,
+    tr: &noeta_ext_abi::ExtTrait,
+    local: &str,
+) -> noeta_ast::TraitDecl {
+    use noeta_ast::{Decorators, FnDecl, Param, TraitDecl, TraitMethod};
+    use noeta_span::Span;
+    let sp = Span::new(0, 0);
+    let methods = tr
+        .methods
+        .iter()
+        .map(|m| {
+            let params = m
+                .sig
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| Param {
+                    attrs: Vec::new(),
+                    // A native signature carries no parameter names; only the count and types are
+                    // load-bearing for the contract check, so positional placeholders suffice.
+                    name: format!("_{i}"),
+                    name_span: sp,
+                    ty: Some(stdlib::sig_to_typeref(reg, p)),
+                    default: None,
+                    span: sp,
+                })
+                .collect();
+            let sig = FnDecl {
+                name: m.sig.name.to_string(),
+                name_span: sp,
+                is_public: true,
+                type_params: Vec::new(),
+                params,
+                ret: Some(stdlib::ret_to_typeref(reg, &m.sig.ret)),
+                attrs: Vec::new(),
+                directives: Vec::new(),
+                is_dev_tier: false,
+                is_async: false,
+                tier: None,
+                captures: Vec::new(),
+                body: Vec::new(),
+                span: sp,
+            };
+            TraitMethod {
+                sig,
+                has_default: m.has_default,
+            }
+        })
+        .collect();
+    TraitDecl {
+        name: local.to_string(),
+        name_span: sp,
+        is_public: true,
+        type_params: Vec::new(),
+        methods,
+        decorators: Decorators::default(),
+        span: sp,
     }
 }

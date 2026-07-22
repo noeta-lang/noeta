@@ -377,6 +377,46 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // --- ExtTrait / ExtTraitMethod (native-extensibility S3) ------------------------------------
+    Row(
+        "ExtTrait",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn qualified(")),
+    ),
+    Row(
+        "ExtTrait",
+        "namespace",
+        Data(Anchor(REGISTRY, "pub fn qualified(")),
+    ),
+    // `methods` states the RULE the trait contract enforces on an implementor: every non-default
+    // method must be present with matching arity/types or the `impl` is E0015 (`check_user_trait_impl`).
+    // `seed_ext_traits` synthesizes a `TraitDecl` from these methods; no shipped extension declares a
+    // native trait, so a fixture extension is the only exerciser. Both directions matter (a complete
+    // impl checks clean; an incomplete one is rejected).
+    Row(
+        "ExtTrait",
+        "methods",
+        Constraint(
+            Anchor(CHECK_TRAITS, "fn check_user_trait_impl("),
+            Anchor(
+                EMBED_CONSTRAINTS,
+                "fn a_native_trait_incomplete_impl_is_rejected(",
+            ),
+        ),
+    ),
+    Row(
+        "ExtTraitMethod",
+        "sig",
+        Data(Anchor(CHECK_PRELUDE, "fn synth_trait_decl(")),
+    ),
+    // `has_default` decides whether an implementor may omit the method (a defaulted one is optional;
+    // a required one absent is E0015). `synth_trait_decl` copies it into the `TraitMethod`, and
+    // `check_user_trait_impl` reads it (`if tm.has_default { continue }`).
+    Row(
+        "ExtTraitMethod",
+        "has_default",
+        Data(Anchor(CHECK_PRELUDE, "fn synth_trait_decl(")),
+    ),
     // --- Method bundles -------------------------------------------------------------------------
     // What a type binding to the bundle must look like, validated at the `impl` site.
     Row(
@@ -690,6 +730,8 @@ const SCANNED: &[(&str, &[&str])] = &[
             "ExtVariant",
             "ExtClass",
             "ExtField",
+            "ExtTrait",
+            "ExtTraitMethod",
             "PackedConstraint",
             "BundleFn",
             "ExtBundle",
