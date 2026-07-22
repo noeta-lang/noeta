@@ -160,6 +160,17 @@ fn request_arg(req: ?Request): dyn {
     }
 }
 
+// The container key for an interface: a trait's SHORT name. A `dyn Trait` parameter reflects
+// (`params_of`) with its trait name FULLY QUALIFIED — a `dyn SessionStore` in an app that imported it
+// reflects as `DynTrait("para.aether.SessionStore")`, a `dyn Clock` on an app-local trait as
+// `DynTrait("Clock")` — so injection and registration meet on the last dotted segment. Keying on the
+// short name means a service is `bind`'d and injected by the same spelling the author writes at the
+// `dyn` site (`SessionStore`), not a fully-qualified path they would have to know to reproduce.
+fn short_iface(name: string): string {
+    parts = name.split(".")
+    return if parts.len() > 0 then parts[parts.len() - 1] else name
+}
+
 // Coerce a handler's return value into a `Response`. A handler may return a `Response` verbatim — its
 // status and headers survive to the reply — or a bare `string`, which becomes a `200 text/plain`
 // body. The runtime value is inspected (`as<Response>`) rather than the handler's declared return, so
@@ -306,16 +317,34 @@ pub class App {
     mut middleware: List<dyn Middleware>
     mut bound: List<string> // model type names that are route-bound (loaded from the store by id)
     mut store: dyn Store // the data-store seam (a NullStore until an app configures one)
+    mut services: Map<string, dyn> // the service container: concrete instances keyed by interface (short trait name)
     config: Config
 
     fn new(): App {
-        return App { routes: [], controllers: {}, middleware: [], bound: [], store: NullStore.new(), config: Config.new() }
+        store = NullStore.new()
+        app = App { routes: [], controllers: {}, middleware: [], bound: [], store: store, services: {}, config: Config.new() }
+        // The data `Store` is a service like any other — registered under `Store` so a `dyn Store`
+        // parameter resolves through the same container. `set_store` keeps this entry in step with the
+        // typed `store` field the flush/route-model path calls through.
+        app.bind("Store", store)
+        return app
     }
 
     // Wire in the data store an app's models load/persist through (its `para.db`-backed impl, a test
     // fake, …). Injected handler parameters and the end-of-request flush dispatch through it.
     fn set_store(s: dyn Store): void {
         self.store = s
+        // Keep the container's `Store` entry pointing at the live store, so `dyn Store` injection and
+        // the `store` field the flush/route-model path uses never diverge.
+        self.bind("Store", s)
+    }
+
+    // Register a concrete service instance under the interface a `dyn <name>` parameter resolves by.
+    // `name` is the interface's SHORT trait name (`"Store"`, `"SessionStore"`, `"Clock"`) — the same
+    // last segment `arg_for` normalizes a reflected `dyn Trait` to, so a service registered here is the
+    // one injected there. Providers call this during setup; re-binding a name replaces the service.
+    fn bind(name: string, service: dyn): void {
+        self.services = self.services.set(name, service)
     }
 
     // Mark a model type as **route-bound**: a handler parameter of this type is loaded from the store
@@ -417,39 +446,63 @@ pub class App {
     // "500 …" string `handle` used to return, now carried as a response body.
     fn invoke_action(ctrl: dyn, r: Route, id: string, body: string, req: ?Request): Response {
         target = "${r.controller}.${r.action}"
-        args = self.build_args(target, id, body, req)
-        return match invoke(ctrl, r.action, args) {
-            Ok(result) => coerce_response(result),
-            Err(e) => server.response(500, "500 ${e}"),
+        // A parameter that cannot be injected (an unregistered `dyn` service) fails the build into a
+        // `500` Response — an actionable error carried the same way an invocation error is, rather than
+        // a panic off the request path or the wrong service silently injected.
+        return match self.build_args(target, id, body, req) {
+            Ok(args) => match invoke(ctrl, r.action, args) {
+                Ok(result) => coerce_response(result),
+                Err(e) => server.response(500, "500 ${e}"),
+            },
+            Err(resp) => resp,
         }
     }
 
     // Build the handler's argument list by reflecting its parameters (`params_of`) and injecting each
-    // one by its declared type — a for-loop, not `.map`, because the injection reads `self`.
-    fn build_args(target: string, id: string, body: string, req: ?Request): List<dyn> {
+    // one by its declared type — a for-loop, not `.map`, because the injection reads `self` and any one
+    // parameter may fail the whole build (an unregistered service) into a `500` short-circuit.
+    fn build_args(target: string, id: string, body: string, req: ?Request): Result<List<dyn>, Response> {
         mut args: List<dyn> = []
         for p in params_of(target) {
-            args = args ~ [self.arg_for(p, id, body, req)]
+            match self.arg_for(p, id, body, req) {
+                Ok(a) => { args = args ~ [a] },
+                Err(resp) => { return Err(resp) },
+            }
         }
-        return args
+        return Ok(args)
     }
 
     // Inject one parameter by its reflected type:
-    //   - `dyn Trait`  → the registered store service (service injection by interface),
+    //   - `dyn Trait`  → the service registered for that interface (service injection by interface),
     //   - `Request`    → the live HTTP request (server path only; see `request_arg`),
     //   - a nominal type → route-model binding (if `bind_model`'d) else request-body decode.
     //
     // `Request` reflects as `Named("Request", [])` — the extern type's short name — so it is caught
     // inside the `Named` arm ahead of the body-decode fallback that would otherwise swallow it into a
     // JSON panic. A user body struct must not be named `Request`, which is the extern type's name.
-    fn arg_for(p: ParamInfo, id: string, body: string, req: ?Request): dyn {
+    // Returns a `Result` so an unresolvable `dyn` service becomes a `500` the caller renders, not a
+    // panic — the only injection outcome that is a *configuration* error rather than a client error.
+    fn arg_for(p: ParamInfo, id: string, body: string, req: ?Request): Result<dyn, Response> {
         return match p.type {
-            DynTrait(_) => self.store,
-            Struct(n, _) => self.materialize(n, id, body),
-            Class(n, _) => self.materialize(n, id, body),
-            Named(n, _) => if n == "Request" then request_arg(req) else self.materialize(n, id, body),
-            _ => panic("400 cannot inject a parameter of this type"),
+            DynTrait(n) => self.resolve_service(n),
+            Struct(n, _) => Ok(self.materialize(n, id, body)),
+            Class(n, _) => Ok(self.materialize(n, id, body)),
+            Named(n, _) => if n == "Request" then Ok(request_arg(req)) else Ok(self.materialize(n, id, body)),
+            _ => Err(server.response(500, "500 cannot inject a parameter of this type")),
         }
+    }
+
+    // Resolve a `dyn Trait` parameter to the service registered for its interface. The reflected trait
+    // name is fully qualified; the container keys on the short name (`short_iface`), so a `dyn Store` /
+    // `dyn SessionStore` / `dyn Clock` finds the instance `bind`'d under `"Store"` / `"SessionStore"` /
+    // `"Clock"`. An interface with no registered service is a configuration error, not a client one:
+    // a `500` naming the interface and how to provide it — never the wrong service silently injected.
+    fn resolve_service(name: string): Result<dyn, Response> {
+        key = short_iface(name)
+        if self.services.has(key) {
+            return Ok(self.services[key])
+        }
+        return Err(server.response(500, "500 no service registered for `dyn ${key}` — bind one during setup with `app.bind(\"${key}\", <instance>)` (or `app.set_store(...)` for the data `Store`)"))
     }
 
     // A nominal parameter is either a route-bound model (loaded from the store by the route id) or a
