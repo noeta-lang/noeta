@@ -480,6 +480,17 @@ fn string_method(name: &str) -> Option<Type> {
     })
 }
 
+/// The result type of a numeric list reduction (`sum`/`product`/`min`/`max`) — the element type
+/// itself — or `None` if the element is not numeric. `sum`/`product` return this directly (width-
+/// wrapping); `min`/`max` wrap it in `?T` for the empty case.
+fn numeric_reduce(elem: &Type) -> Option<Type> {
+    matches!(
+        elem,
+        Type::Int | Type::IntN { .. } | Type::Float | Type::F32 | Type::F64
+    )
+    .then(|| elem.clone())
+}
+
 fn list_method(name: &str, elem: &Type) -> Option<Type> {
     Some(match name {
         "reverse" | "sorted" | "slice" | "set" => list(elem.clone()),
@@ -490,14 +501,21 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
         // `len` is the collection length (P1.3 — `count` is iterator-only: a consuming terminal).
         "len" => Type::Int,
         // Eager collection methods reusing the free-function impls (prelude-redesign P1). `filter(f)`
-        // keeps the element type; `sum()` is numeric by element (`int`/`float`/hole); `map(f)` → a
-        // `List<R>` where `R` is the closure's return, refined at the call site (like iterator `map`).
+        // keeps the element type; `map(f)` → a `List<R>` where `R` is the closure's return, refined at
+        // the call site (like iterator `map`).
         "filter" => list(elem.clone()),
-        "sum" => match elem {
-            Type::Int => Type::Int,
-            Type::Float => Type::Float,
-            _ => Type::Unknown,
-        },
+        // Numeric reductions (packed-reductions arc): `sum`/`product` return the **element type**,
+        // wrapping at its width — folding `List<i32>` gives an `i32`, exactly as repeated `+`/`*`
+        // would (settled decision). `min`/`max` return `?T` (`none` for an empty list, like
+        // `first`/`last`). A packed scalar list folds its raw buffer; a boxed numeric list folds
+        // element-wise — one shared kernel, so both agree. (`sum` keeps its historical `Unknown` for a
+        // non-numeric element so it never newly rejects; the newer reductions require a number.)
+        "sum" => numeric_reduce(elem).unwrap_or(Type::Unknown),
+        "product" if numeric_reduce(elem).is_some() => elem.clone(),
+        "min" | "max" if numeric_reduce(elem).is_some() => opt(elem.clone()),
+        // `List<bool>` reductions: `any`/`all` → `bool`, `count` → the number of `true` elements.
+        "any" | "all" if matches!(elem, Type::Bool) => Type::Bool,
+        "count" if matches!(elem, Type::Bool) => Type::Int,
         "map" => list(Type::Dyn),
         // `to_bytes` serializes a `List<@packed>` to its raw flat buffer (P-PACK 4.4).
         "to_bytes" => Type::Bytes,
@@ -690,7 +708,7 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "reverse" | "sorted" | "len" | "sum" | "first" | "last" | "to_set" | "enumerate"
-        | "to_bytes" | "iter" => {
+        | "to_bytes" | "iter" | "product" | "min" | "max" | "any" | "all" | "count" => {
             vec![]
         }
         "contains" => vec![elem.clone()],

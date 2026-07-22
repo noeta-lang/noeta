@@ -612,6 +612,14 @@ impl<'m> Vm<'m> {
             }
             M::Sum => {
                 self.stdlib_arity(name, args, 0, span)?;
+                // A directly list-backed iterator (`xs.iter().sum()`, the canonical form) delegates to
+                // the eager list reduction over its remaining elements — so a packed narrow-width list
+                // folds its buffer and width-wraps *identically* to `xs.sum()` (no divergence). An
+                // adapter chain (`take`/`map`/…) falls through to the generic fold, where the element
+                // type is already a 64-bit `int`/`float`, so no width-wrapping is at stake.
+                if let Some((list, from)) = recv.iter_drain_list() {
+                    return self.call_list_reduction(list, "sum", from, span);
+                }
                 let mut int_total: i64 = 0;
                 let mut float_total: f64 = 0.0;
                 let mut any_float = false;
