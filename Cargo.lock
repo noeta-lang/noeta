@@ -4492,6 +4492,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-para-api"
+version = "0.1.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-check",
+ "noeta-ext-abi",
+ "noeta-lexer",
+ "noeta-loader",
+ "noeta-stdlib",
+ "serde_json",
+]
+
+[[package]]
 name = "noeta-para-db"
 version = "0.1.0"
 dependencies = [

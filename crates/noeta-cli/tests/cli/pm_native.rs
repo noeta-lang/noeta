@@ -104,7 +104,8 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrd};
 
 use noeta_ext_abi::registry::{
     BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, DirectiveCtx, ExtBundle,
-    ExtDirective, ExtFn, ExtModule, ExtType, Expansion, Extension, NativeOut, NativeValue,
+    ExtDirective, ExtFn, ExtModule, ExtType, Expansion, ExpansionError, Extension, NativeOut,
+    NativeValue,
     PackedConstraint, RetTy, Scalar, SigType, TierSite,
 };
 use noeta_ext_abi::{
@@ -402,9 +403,11 @@ fn pixels_bundle_dispatch(
 /// file the invocation points at. Deliberately reads a real file relative to `ctx.source_dir` and
 /// reports it in `reads` — that is the shape a spec-driven generator has, and it is what makes
 /// `noeta expand`'s output a function of the spec rather than of the directive's one line.
-fn expand_fx_spec(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_fx_spec(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     let arg = ctx.args.first().ok_or("no spec given")?;
     let path = std::path::Path::new(&ctx.source_dir).join(arg);
+    // `?` converts the `String`/`&str` messages via `ExpansionError`'s `From` impls; a real
+    // generator that wants the missing path watched would build the struct with `reads` instead.
     let spec = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut source = String::new();
     for name in spec.lines().map(str::trim).filter(|l| !l.is_empty()) {

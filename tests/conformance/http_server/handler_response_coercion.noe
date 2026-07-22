@@ -1,0 +1,51 @@
+// Handler return coercion (aether-sessions A2): a routed handler may return a `Response` verbatim —
+// its status and headers reach the reply — or a bare `string`, which becomes a `200 text/plain`
+// body. This pins the coercion para.aether's `invoke_action` runs on every dispatch: inspect the
+// runtime result (`as<Response>`), use it as-is when it is a `Response`, else wrap the string. The
+// mechanism is exercised under `serve` because a `Response` only means something on the server path;
+// the string-testable path projects the same value to its `.body()`. Both backends agree.
+// expect: stdout "resp: 201 made loc=/widgets/1"
+// expect: stdout "str: 200 hello ct=text/plain"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+
+class Widgets {
+    fn new(): Widgets { return Widgets {} }
+    fn created(): Response { return server.response(201, "made", {"location": "/widgets/1"}) }
+    fn greeting(): string { return "hello" }
+}
+
+// The A2 coercion, verbatim: a `Response` result is used as-is; anything else is a `200 text/plain`
+// wrap of its string rendering.
+fn coerce(result: dyn): Response {
+    return match result.as<Response>() {
+        some(resp) => resp,
+        none => server.response(200, result.as<string>() ?? "200 OK", {"content-type": "text/plain"}),
+    }
+}
+
+fn call(ctrl: Widgets, action: string): Response {
+    empty: List<dyn> = []
+    return match invoke(ctrl, action, empty) {
+        Ok(v) => coerce(v),
+        Err(e) => server.response(500, "500 ${e}"),
+    }
+}
+
+w = Widgets.new()
+
+fn handle(req: Request) use (w): Response {
+    if req.path() != "/" {
+        return server.response(200, "skip")
+    }
+    r1 = call(w, "created")
+    loc = r1.header("location") ?? "none"
+    echo "resp: ${r1.status()} ${r1.body()} loc=${loc}"
+    r2 = call(w, "greeting")
+    ct = r2.header("content-type") ?? "none"
+    echo "str: ${r2.status()} ${r2.body()} ct=${ct}"
+    return r1
+}
+
+server.serve(8080, handle)

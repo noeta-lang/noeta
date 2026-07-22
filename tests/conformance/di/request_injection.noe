@@ -1,0 +1,62 @@
+// Request injection by reflected type (aether-sessions A1): a handler parameter declared `Request`
+// is injected with the live HTTP request, so a controller method can read a header/cookie off it —
+// the mechanism para.aether's `arg_for` uses to inject the request ahead of its body-decode
+// fallback. The load-bearing fact: an extern `Request` parameter reflects (`params_of`) as
+// `Named("Request", [])` — the extern type's short name — which is what the injector matches on.
+// Driven by the sandbox request script (paths /, /health, /echo, /users/42, /users/42, /ws); the
+// `POST /echo` request carries `content-type: text/plain`, the others none, so the header read is
+// observable. Both backends run the identical reflect → inject → invoke loop.
+// expect: stdout "Request"
+// expect: stdout "GET / -> no-ct"
+// expect: stdout "GET /health -> no-ct"
+// expect: stdout "POST /echo -> text/plain"
+// expect: stdout "GET /users/42 -> no-ct"
+// expect: stdout "DELETE /users/42 -> no-ct"
+// expect: stdout "GET /ws -> no-ct"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+
+class Api {
+    fn new(): Api {
+        return Api {}
+    }
+    fn show(req: Request): string {
+        return req.header("content-type") ?? "no-ct"
+    }
+}
+
+// The reflected type of a `Request` parameter is the extern short name — pin it, since the injector
+// keys on exactly this spelling.
+reflected = match params_of("Api.show")[0].type {
+    Named(n, _) => n,
+    _ => "not-named",
+}
+echo reflected
+
+// Inject each parameter by its reflected type, recognising `Request` ahead of any nominal fallback,
+// then dispatch by name — the shape `App.build_args`/`App.arg_for` run per request.
+fn dispatch(api: Api, target: string, req: Request): string {
+    mut args: List<dyn> = []
+    for p in params_of(target) {
+        arg = match p.type {
+            Named(n, _) => if n == "Request" then req else panic("unexpected nominal ${n}"),
+            _ => panic("unexpected parameter kind"),
+        }
+        args = args ~ [arg]
+    }
+    return match invoke(api, "show", args) {
+        Ok(r) => r.as<string>() ?? "?",
+        Err(e) => "500 ${e}",
+    }
+}
+
+api = Api.new()
+
+fn handle(req: Request) use (api): Response {
+    out = dispatch(api, "Api.show", req)
+    echo "${req.method()} ${req.path()} -> ${out}"
+    return server.response(200, out)
+}
+
+server.serve(8080, handle)

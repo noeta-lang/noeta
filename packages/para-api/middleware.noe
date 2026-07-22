@@ -2,20 +2,36 @@
 //
 // Every one of these is an ordinary Noeta value implementing `para.api.Middleware`; none of them is
 // privileged by the framework, and each is a worked example of the shape you would write yourself.
-// They divide into the two things an onion can do:
+// They divide into the three things an onion can do:
 //
-//   * **pass through** — rewrite the request, call `next`, inspect the response (`Header`, `Logging`)
-//   * **short-circuit** — answer without calling `next` at all (`Mock`)
+//   * **pass through** — rewrite the request, call `next`, inspect the response (`Header`,
+//     `Logging`, `Record`)
+//   * **short-circuit** — answer without calling `next` at all (`Mock`, `Cache` on a hit)
+//   * **call `next` more than once** — re-run everything inside (`Retry`)
 //
-// The second is why middleware must take a callable `next` rather than a before/after hook pair: a
-// hook pair cannot express "answer without performing the request", which is exactly what a mock
-// (and a cache) is.
+// The last two are why middleware must take a callable `next` rather than a before/after hook pair.
+// A hook pair cannot express "answer without performing the request", which is exactly what a mock
+// and a cache hit are; and it cannot express "do that again", which is what an outer retry is.
 namespace para.api.middleware
 
 use std.http.{Request, Response, HttpError}
 use std.http.server
 use std.log
+use std.time
 use para.api.{Middleware, Next}
+
+// The part of a request URL a routing table keys on: the path, plus the query string when there is
+// one. `Request.path()` deliberately drops the query, which is right for routing a server but wrong
+// for identifying a *call* — `?page=1` and `?page=2` are two different resources, and a table that
+// cannot tell them apart cannot mock or cache a paginated API at all.
+//
+// Splitting on the first `?` is exact here: a fragment never travels to a server, so a request URL
+// has at most one `?` that matters and nothing after it to protect.
+fn target(req: Request): string {
+    url = req.url()
+    at = url.index_of("?") ?? -1
+    return if at < 0 then req.path() else req.path() ~ url.slice(at)
+}
 
 // Add a header to every outbound request. The simplest possible pass-through layer, and the one to
 // copy when writing your own: rewrite on the way in, delegate, return untouched.
@@ -54,8 +70,12 @@ impl Middleware for Logging {
         log.info("-> ${req.method()} ${req.url()}")
         outcome: Result<Response, HttpError> = next.run(req)
         match outcome {
-            Ok(resp) => { log.info("<- ${resp.status()} ${req.url()}") },
-            Err(e) => { log.error("<- ${e.kind()} ${req.url()}: ${e}") },
+            Ok(resp) => {
+                log.info("<- ${resp.status()} ${req.url()}")
+            },
+            Err(e) => {
+                log.error("<- ${e.kind()} ${req.url()}: ${e}")
+            },
         }
         return outcome
     }
@@ -68,6 +88,12 @@ impl Middleware for Logging {
 // it) — an exact match, not a pattern. That is on purpose: a fuzzy matcher in a mock turns a wrong
 // test into a passing one, and the failure mode of an exact key is a loud unmatched route rather
 // than a silently wrong reply.
+//
+// A route may also name a **query string** — `"/items?page=2"` — and lookup then prefers it. The
+// two-step (path-with-query first, bare path second) is what lets one mock answer a *paginated*
+// endpoint: register `/items` for the general case and `/items?page=2` for the page that differs.
+// Without it, every page of a `Link` walk matches the first route, which is an infinite loop rather
+// than a failed test.
 //
 // An unmatched request does NOT fall through to the network — it answers `fallback` (404 by
 // default). A mock that silently reached the real API would make a test suite depend on the
@@ -82,25 +108,274 @@ pub struct Mock {
 
     // Register a canned reply. Returns a NEW `Mock`, so a base mock can be shared and specialized.
     fn route(method: string, path: string, status: int, body: string = "", headers: Map<string, string> = {}): Mock {
-        reply = server.response(status, body, headers)
-        return Mock { routes: self.routes.set(Mock.key(method, path), reply), fallback: self.fallback }
+        return self.reply(method, path, server.response(status, body, headers))
     }
 
-    // The table key for a method/path pair. One function so registration and lookup can never
-    // disagree about spelling.
+    // Register a `Response` value verbatim. This is the door `Record.to_mock()` comes through: a
+    // recorded response carries its own headers and its own originating URL, and rebuilding it from
+    // `status` + `body` would throw both away — which would break exactly the replay that matters,
+    // a `Link`-paginated walk whose next-page URLs live in a header.
+    fn reply(method: string, path: string, resp: Response): Mock {
+        return Mock { routes: self.routes.set(Mock.key(method, path), resp), fallback: self.fallback }
+    }
+
+    // The table key for a method/path pair, and the one spelling of **request identity** shared by
+    // every keyed layer in this file — `Mock` routes on it, `Record` records under it, `Cache`
+    // caches by it. One function, so registration and lookup can never disagree, and so a recording
+    // can be handed straight to a mock without a translation step.
     fn key(method: string, path: string): string {
         return method.upper() ~ " " ~ path
     }
-}
 
-impl Middleware for Mock {
-    fn handle(req: Request, next: Next): Result<Response, HttpError> {
-        k = Mock.key(req.method(), req.path())
-        if self.routes.has(k) {
+    // The canned reply for a request — the "what would I answer" half, kept apart from the `impl`
+    // block's "wrap it in the middleware's `Result`" half. Returning a `Response` rather than a
+    // `Result` lets `to_mock` and any future caller reuse the lookup without unwrapping.
+    fn answer(req: Request): Response {
+        // Most specific first: a route that named a query string beats one that named only a path.
+        precise = Mock.key(req.method(), target(req))
+        if self.routes.has(precise) {
             // Indexing, not `get`: `get` answers `?Response`, and `Ok(optional)` would build a
             // `Result<?Response, …>` whose `Ok(resp)` binds an *optional* — one wrapper too many.
-            return Ok(self.routes[k])
+            return self.routes[precise]
         }
-        return Ok(server.response(self.fallback, "no mock route for ${k}"))
+        loose = Mock.key(req.method(), req.path())
+        if self.routes.has(loose) {
+            return self.routes[loose]
+        }
+        // Report the precise key — the unmatched thing the caller actually asked for, query and
+        // all, so the fix is a copy-paste rather than a guess.
+        return server.response(self.fallback, "no mock route for ${precise}")
+    }
+}
+
+// A `Mock` that never calls `next` is the short-circuit in its purest form: nothing inside this
+// layer runs, including the transport. `answer` does the lookup; `handle` only lifts its `Response`
+// into the middleware's `Result`.
+impl Middleware for Mock {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
+        return Ok(self.answer(req))
+    }
+}
+
+// Capture every request/response pair that flows through, so a real session can be replayed later
+// without a network — the recording half of `Mock`.
+//
+// It is a `class`, not a `struct`, and that is forced: a recorder accumulates across calls, so it
+// needs reference identity and mutable state. Every other middleware here is a value precisely
+// because it has nothing to accumulate.
+//
+// The intended loop is record once against the real API, then replay forever:
+//
+//     rec = Record.new()
+//     live = Api.new(client.new("https://api.example.com")).with(rec)
+//     walk(live)                       // hits the network once
+//     replay = Api.new(client.new("https://api.example.com")).with(rec.to_mock())
+//     walk(replay)                     // hits nothing, forever
+//
+// A failed request records nothing. There is no canned `Err` to hand back — `Mock` answers
+// responses — so a recording made through a broken network simply has a hole in it, which replays
+// as the mock's `fallback` and shows up as a loud unmatched route.
+pub class Record {
+    mut captured: Map<string, Response>
+    mut calls: List<string>
+
+    fn new(): Record {
+        return Record { captured: {}, calls: [] }
+    }
+
+    // Every request seen, in order, as `"METHOD /path?query"` — the same spelling `Mock.route`
+    // takes, so a test can assert on *what was called* and not only on what came back.
+    fn calls(): List<string> {
+        return self.calls
+    }
+
+    // The recording, as a `Mock` ready to stand in for the network. Responses are replayed
+    // verbatim, headers and all.
+    //
+    // A repeated call collapses: the table is keyed by request, so the LAST response wins. That is
+    // the right default for a paginated or idempotent walk (replaying page 2 twice must answer page
+    // 2 twice) and the wrong one for an endpoint whose answer changes per call — a mock cannot
+    // express a sequence, and pretending otherwise would make replay silently diverge.
+    fn to_mock(fallback: int = 404): Mock {
+        mut mock = Mock.new(fallback)
+        for k in self.captured.keys() {
+            // The key is already `"METHOD /target"`; `Mock.reply` re-derives it from the pair, so
+            // split it back apart rather than inventing a second key format.
+            cut = k.index_of(" ") ?? 0
+            mock = mock.reply(k.slice(0, cut), k.slice(cut + 1), self.captured[k])
+        }
+        return mock
+    }
+
+}
+
+impl Middleware for Record {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
+        k = Mock.key(req.method(), target(req))
+        self.calls = self.calls ~ [k]
+        outcome = next.run(req)
+        match outcome {
+            Ok(resp) => {
+                self.captured = self.captured.set(k, resp)
+            },
+            Err(_) => {},
+        }
+        return outcome
+    }
+}
+
+// Answer a repeated request from memory instead of performing it — the other reason middleware must
+// take a callable `next` rather than a before/after hook pair. A hit returns without ever calling
+// `next`, so nothing inside this layer (including the transport) runs at all.
+//
+// Three rules keep it from being a correctness hazard, and none of them is configurable:
+//
+//   * **Only safe methods are cached** (`GET`/`HEAD`). Caching a `POST` would let one side effect
+//     stand in for a second one that was supposed to happen.
+//   * **Only 2xx responses are cached.** A 404 or a 503 is a statement about *now*; replaying it is
+//     how a transient outage becomes a permanent one.
+//   * **Entries expire.** A cache with no TTL is not a cache, it is a memory leak that also serves
+//     stale data. `ttl_ms` is required by `new` for that reason.
+//
+// Time is read from `std.time`'s logical monotonic clock, which is deterministic — so a test can
+// `time.sleep` past an entry's TTL and observe the miss, without waiting.
+pub class Cache {
+    ttl_ms: int
+    mut entries: Map<string, Response>
+    mut stored_at: Map<string, int>
+    mut hits: int
+
+    fn new(ttl_ms: int): Cache {
+        return Cache { ttl_ms: ttl_ms, entries: {}, stored_at: {}, hits: 0 }
+    }
+
+    // How many requests were answered without touching `next`. Worth asserting on in a test: it is
+    // the difference between "the cache is configured" and "the cache is working".
+    fn hits(): int {
+        return self.hits
+    }
+
+    fn cacheable(method: string): bool {
+        m = method.upper()
+        return m == "GET" || m == "HEAD"
+    }
+
+}
+
+impl Middleware for Cache {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
+        if !Cache.cacheable(req.method()) {
+            return next.run(req)
+        }
+        k = Mock.key(req.method(), target(req))
+        // Read once per call, not per branch. `time.monotonic()` *advances* a tick on every read,
+        // so two reads inside one call would place a store and the hit test that follows it at
+        // different instants — and the difference would grow with traffic.
+        now = time.monotonic()
+        if self.entries.has(k) && now - self.stored_at.get_or(k, 0) < self.ttl_ms {
+            self.hits = self.hits + 1
+            return Ok(self.entries[k])
+        }
+        outcome = next.run(req)
+        match outcome {
+            Ok(resp) => {
+                if resp.ok() {
+                    self.entries = self.entries.set(k, resp)
+                    self.stored_at = self.stored_at.set(k, now)
+                }
+            },
+            Err(_) => {},
+        }
+        return outcome
+    }
+}
+
+// Re-run the WHOLE chain on a transient failure.
+//
+// `std.http`'s own `retry(n)` lives *inside* `send`, beneath every middleware — which is the right
+// place for a transport blip, but means a retried attempt never re-enters your layers: a per-attempt
+// trace id is never re-minted, a token refreshed by an auth layer is never re-read, and a `Record`
+// sees one call where two happened. This layer is the outer version, and the two are not
+// alternatives to stack: **put this on a client configured `retry(0)`**, or the attempt counts
+// multiply (3 outer × 3 inner = 9 requests for one call).
+//
+// Register it early — the first layer registered is the outermost — so it wraps the layers you want
+// re-run. Anything registered *before* it will not be.
+//
+// What counts as retryable is `HttpError.retryable()` and a named status list, never message text.
+// `retryable()` is true for exactly the transient kinds (`timeout`/`dns`/`connect`) and false for
+// the deterministic ones — a TLS failure will not fix itself, and a `protocol` failure may already
+// have been applied server-side.
+pub struct Retry {
+    max: int
+    base_ms: int
+    statuses: List<int>
+
+    // The defaults mirror `std.http`'s: three extra attempts, 250ms doubling, and the four statuses
+    // that actually mean "later" — 429, 502, 503, 504. Note what is absent: **500**. A generic
+    // server error is usually deterministic, and hammering it helps nobody.
+    fn new(max: int = 3, base_ms: int = 250): Retry {
+        return Retry { max: max, base_ms: base_ms, statuses: [429, 502, 503, 504] }
+    }
+
+    // Name the retryable statuses yourself — `[]` to retry transport failures only.
+    fn on(max: int, base_ms: int, statuses: List<int>): Retry {
+        return Retry { max: max, base_ms: base_ms, statuses: statuses }
+    }
+
+    // Exponential backoff, doubled per attempt and capped at 30s so a long retry budget cannot park
+    // a program for minutes.
+    fn backoff(base_ms: int, attempt: int): int {
+        mut ms = base_ms
+        mut i = 0
+        while i < attempt {
+            ms = ms * 2
+            if ms >= 30000 {
+                return 30000
+            }
+            i = i + 1
+        }
+        return ms
+    }
+
+    // A server's own `Retry-After` beats a computed curve — it knows its rate limit and we are
+    // guessing. Capped at 30s all the same: a broken `Retry-After: 86400` must not park a program
+    // for a day. Only the delta-seconds form is honoured; the HTTP-date form needs a wall clock,
+    // which this layer deliberately does not have.
+    fn delay_for(resp: Response, fallback_ms: int): int {
+        secs = (resp.header("retry-after") ?? "").trim().to_int() ?? -1
+        if secs < 0 {
+            return fallback_ms
+        }
+        return if secs * 1000 > 30000 then 30000 else secs * 1000
+    }
+
+}
+
+impl Middleware for Retry {
+    fn handle(req: Request, next: Next): Result<Response, HttpError> {
+        mut attempt = 0
+        while true {
+            outcome = next.run(req)
+            // The last attempt returns whatever it got, success or not — the caller sees the real
+            // outcome rather than a synthesized "retries exhausted" error that hides it.
+            if attempt >= self.max {
+                return outcome
+            }
+            wait = match outcome {
+                // Classified, never stringly-typed. A non-retryable kind returns immediately.
+                Err(e) => if e.retryable() then Retry.backoff(self.base_ms, attempt) else -1,
+                Ok(resp) => if self.statuses.contains(resp.status()) then Retry.delay_for(resp, Retry.backoff(self.base_ms, attempt)) else -1,
+            }
+            if wait < 0 {
+                return outcome
+            }
+            // Sleeps on the Clock capability, not the thread — so a retrying program stays
+            // reproducible under the deterministic sandbox instead of blocking.
+            time.sleep(wait)
+            attempt = attempt + 1
+        }
+        // Unreachable: the loop only leaves through a `return`.
+        return next.run(req)
     }
 }

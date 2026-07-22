@@ -1,0 +1,373 @@
+// `para.api.pagination` — following a paginated API, one strategy at a time.
+//
+// Paging is not one convention, it is at least four, and they disagree about everything: where the
+// cursor lives (header, query string, body), what ends the sequence (a missing link, a short page,
+// an explicit flag), and whether the next location is a URL or a number. So the extension point
+// here is a **strategy** — `next_page(req, resp) -> ?Request` — and `Link`, `Offset` and `Page` are
+// merely the three that ship as built-ins. The fourth convention, an opaque body cursor (Slack's
+// and Notion's `next_cursor`), is an ordinary user `impl` — `Cursor`, at the bottom of this file,
+// is written as one on purpose, to demonstrate that the trait is enough. A fully-qualified body URL
+// (Stripe's `next`) is the same code with `with_url` in place of `set_query`.
+//
+// **There is deliberately NO default strategy.** `pages` demands one by parameter, because a
+// paginator that guesses is worse than one that asks: guessing `Link` against an offset API reads
+// the first page and silently reports it as the whole result set, which is a wrong answer that
+// looks like a right one. Naming the strategy costs one argument and makes the convention part of
+// the code that reads it.
+//
+//     use para.api.pagination.{pages, Link}
+//
+//     for page in pages(api, api.prepare("get", "/repos"), Link.new()) {
+//         resp = page?
+//         echo resp.status()
+//     }
+//
+// `pages` returns an `Iterator`, not a `List`: a generator suspends between requests, so pages are
+// fetched only as they are consumed and the sequence composes with `take`/`map`/`filter` like any
+// other iterator. `take(2)` performs exactly two requests.
+namespace para.api.pagination
+
+use std.http.{Request, Response, HttpError}
+use para.api.Api
+
+// One paging convention. Given the request that produced `resp`, answer the request that fetches
+// the page after it — or `none` when `resp` was the last page.
+//
+// The whole protocol is that one function, and it is total: an implementation decides both *where*
+// the next page lives and *when* to stop, which is exactly the pair every convention couples. It
+// receives the `Request` as well as the `Response` because most conventions are relative to the
+// request that was just made (the next offset is *this* offset plus a limit), and because
+// `req.with_url(…)` is how a new request inherits the method, headers and body of the old one.
+pub trait PageStrategy {
+    fn next_page(req: Request, resp: Response): ?Request
+}
+
+// Stream the pages of a request as a lazy sequence, following `strategy` until it stops.
+//
+// Each element is the whole `Result<Response, HttpError>`, not a bare `Response`. Pagination is a
+// sequence of network calls and any one of them can fail; folding that into an abort would make a
+// transport blip on page 9 destroy the 8 pages already in hand. So a failure arrives as an element
+// you can `?`, log, or ignore — and the sequence *ends* there, because there is no next request to
+// derive from a response that never came.
+//
+// The first element is always the result of `first`; a strategy is only ever consulted about what
+// comes *after* a page it has seen.
+pub fn pages(api: Api, first: Request, strategy: dyn PageStrategy): Iterator<Result<Response, HttpError>> {
+    mut pending: ?Request = some(first)
+    while pending != none {
+        // The `while` condition already proved this is `some`, and Noeta has no narrowing on
+        // optionals — `?? first` unwraps it with a fallback that is unreachable by construction.
+        req = pending ?? first
+        outcome = api.send(req)
+        yield outcome
+        pending = match outcome {
+            Ok(resp) => strategy.next_page(req, resp),
+            // A transport failure carries no next-page information, so the sequence ends. The
+            // caller still received the `Err` above and can decide whether to start again.
+            Err(_) => none,
+        }
+    }
+}
+
+// --- URL arithmetic ----------------------------------------------------------------------------
+//
+// Two small pure helpers the built-in strategies are written in terms of. They are `pub` because a
+// user-written strategy needs exactly the same two operations, and re-deriving them per API is how
+// paginators grow subtle bugs.
+
+// Resolve a possibly-relative `Link` target against the URL it was found at.
+//
+// This is the whole reason `Response.url()` reports the *final* URL after redirects: a `Link`
+// header is emitted by whoever actually answered, so its relative targets are relative to that
+// server's path, not to the one you asked for. Handles the four RFC 3986 shapes a real API emits:
+// absolute, protocol-relative (`//host/p`), root-relative (`/p`), and path-relative (`p`).
+//
+// `base` may be empty — a `Response` synthesized in-process (a `Mock` reply, a `server.response`)
+// has no originating URL — in which case a relative target cannot be resolved and the target is
+// returned unchanged for the client's own base-URL resolution to handle.
+pub fn resolve_url(base: string, target: string): string {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return target
+    }
+    if base == "" {
+        return target
+    }
+    scheme = if base.starts_with("https://") then "https://" else "http://"
+    rest = base.slice(scheme.len())
+    // The origin is everything up to the first `/` of the path; a base with no path at all is its
+    // own origin.
+    slash = rest.index_of("/") ?? rest.len()
+    origin = scheme ~ rest.slice(0, slash)
+
+    if target.starts_with("//") {
+        return scheme ~ target.slice(2)
+    }
+    if target.starts_with("/") {
+        return origin ~ target
+    }
+    // Path-relative: replace the last segment of the base path, ignoring any query/fragment on the
+    // base (a relative target replaces both).
+    path = strip_after(strip_after(rest.slice(slash), "#"), "?")
+    cut = last_index_of(path, "/")
+    dir = if cut < 0 then "/" else path.slice(0, cut + 1)
+    return origin ~ dir ~ target
+}
+
+// Set (or replace) one query parameter on a URL, preserving everything else — the other parameters
+// in their original order, and the fragment.
+//
+// Rebuilding the query rather than appending matters: appending a second `page=` leaves the server
+// to pick one, and different servers pick differently (first, last, or a list). Replacement in
+// place also keeps a paginated URL stable enough to be logged and compared across pages.
+pub fn set_query(url: string, name: string, value: string): string {
+    // Split the fragment off first — a `#` legally contains `?` and `&`, so parsing the query
+    // before removing it would corrupt the fragment.
+    hash = url.index_of("#") ?? -1
+    head = if hash < 0 then url else url.slice(0, hash)
+    frag = if hash < 0 then "" else url.slice(hash)
+
+    q = head.index_of("?") ?? -1
+    path = if q < 0 then head else head.slice(0, q)
+    query = if q < 0 then "" else head.slice(q + 1)
+
+    mut parts: List<string> = []
+    mut replaced = false
+    if query != "" {
+        for pair in query.split("&") {
+            if pair == "" {
+                continue
+            }
+            eq = pair.index_of("=") ?? -1
+            key = if eq < 0 then pair else pair.slice(0, eq)
+            if key == name {
+                // Replace in place, and only once — a duplicated parameter collapses to one.
+                if !replaced {
+                    parts = parts ~ ["${name}=${value}"]
+                    replaced = true
+                }
+            } else {
+                parts = parts ~ [pair]
+            }
+        }
+    }
+    if !replaced {
+        parts = parts ~ ["${name}=${value}"]
+    }
+    return path ~ "?" ~ parts.join("&") ~ frag
+}
+
+// Everything before the first `sep`, or the whole string when it does not occur.
+fn strip_after(s: string, sep: string): string {
+    at = s.index_of(sep) ?? -1
+    return if at < 0 then s else s.slice(0, at)
+}
+
+// The last index of `sep` in `s`, or `-1`. There is no `last_index_of` on `string`, so this walks
+// `index_of` forward — the strings involved are URLs, so the cost is irrelevant and the clarity is
+// not.
+fn last_index_of(s: string, sep: string): int {
+    mut found = -1
+    mut from = 0
+    while true {
+        at = s.index_of(sep, from) ?? -1
+        if at < 0 {
+            break
+        }
+        found = at
+        from = at + 1
+    }
+    return found
+}
+
+// --- Built-in strategies -----------------------------------------------------------------------
+
+// RFC 8288 `Link` header — GitHub, GitLab, Shopify, Jira, WordPress.
+//
+// The best-behaved convention of the four, because the server tells you the exact next URL and
+// tells you it has stopped by omitting the relation. `std.http` parses the header for you into
+// `resp.links()` (a `rel -> target` map), so this strategy is a lookup and a resolve.
+//
+// The relation is configurable because `next` is not the only useful walk: `Link.rel("prev")` walks
+// backwards from a deep page, and some APIs paginate a sub-collection under a custom relation.
+pub struct Link {
+    rel: string
+
+    // The overwhelmingly common case: follow `rel="next"` until it is absent.
+    fn new(): Link {
+        return Link { rel: "next" }
+    }
+
+    fn rel(rel: string): Link {
+        return Link { rel: rel }
+    }
+
+}
+
+impl PageStrategy for Link {
+    fn next_page(req: Request, resp: Response): ?Request {
+        target = resp.links().get(self.rel) ?? ""
+        // No such relation is precisely how RFC 8288 spells "last page". This is the *only* stop
+        // condition Link needs — no counting, no probing for an empty body.
+        if target == "" {
+            return none
+        }
+        // Targets may be relative, and are relative to where the response actually came from —
+        // which is why `Response.url()` reports the FINAL URL after redirects, and why it is
+        // preferred over the request's.
+        //
+        // It falls back to the request's URL when the response has none. A `Response` synthesized
+        // in-process (a `Mock` reply, a `server.response`) reports an empty URL, and the request
+        // that produced it is the best base available — without this, a relative `Link` is
+        // unresolvable under a mock, which would make exactly this path the one part of pagination
+        // a hermetic test could not cover.
+        base = if resp.url() == "" then req.url() else resp.url()
+        return some(req.with_url(resolve_url(base, target)))
+    }
+}
+
+// `offset` + `limit` query parameters — the default of countless hand-rolled REST APIs.
+//
+// Unlike `Link`, an offset API sends no end-of-sequence signal at all: asking for the page after
+// the last one returns an empty page with a perfectly good `200`. So the caller must supply the
+// stop rule, as a predicate on the page that just arrived. There is no default for it for the same
+// reason there is no default strategy — a guess here does not fail loudly, it loops forever or
+// truncates silently.
+//
+// `is_last` is usually "this page was shorter than the limit", which after a typed decode reads:
+//
+//     Offset.new(100, fn(r) => match r.json::<List<Item>>() {
+//         Ok(items) => items.len() < 100,
+//         // A body that will not decode cannot be counted, so stop rather than page forever.
+//         Err(_) => true,
+//     })
+//
+// A non-2xx also ends the sequence, unconditionally: an offset API cannot express "next" through
+// an error status, so continuing past one can only mean hammering a broken endpoint.
+pub struct Offset {
+    limit: int
+    offset_param: string
+    limit_param: string
+    is_last: (Response) -> bool
+
+    fn new(limit: int, is_last: (Response) -> bool): Offset {
+        return Offset { limit: limit, offset_param: "offset", limit_param: "limit", is_last: is_last }
+    }
+
+    // The same convention under other spellings — `skip`/`take`, `start`/`count`, `from`/`size`.
+    fn named(offset_param: string, limit_param: string, limit: int, is_last: (Response) -> bool): Offset {
+        return Offset { limit: limit, offset_param: offset_param, limit_param: limit_param, is_last: is_last }
+    }
+
+}
+
+impl PageStrategy for Offset {
+    fn next_page(req: Request, resp: Response): ?Request {
+        if !resp.ok() {
+            return none
+        }
+        if self.is_last(resp) {
+            return none
+        }
+        // Read the window back off the request rather than tracking it in the strategy: a strategy
+        // value is shared across every page (and could be shared across two paginations at once),
+        // so the cursor must live in the request, which is the thing that actually advances.
+        cur = (req.query(self.offset_param) ?? "0").to_int() ?? 0
+        // The request's own limit wins over the configured one — a caller who prepared the first
+        // page with `?limit=20` means 20, and silently widening the window on page 2 would skip
+        // rows.
+        window = (req.query(self.limit_param) ?? "").to_int() ?? self.limit
+        url = set_query(req.url(), self.offset_param, "${cur + window}")
+        return some(req.with_url(set_query(url, self.limit_param, "${window}")))
+    }
+}
+
+// A `page` number query parameter — the other half of the hand-rolled REST world.
+//
+// Identical in spirit to `Offset` (no end signal, so the caller names the stop rule) and different
+// only in arithmetic: the cursor increments by one instead of by a window.
+//
+// `start` exists because the world disagrees about whether pages are 1-based or 0-based, and
+// getting it wrong silently drops or duplicates the first page. It is only consulted when the
+// request carries no page parameter at all — once one is present, the sequence follows it.
+pub struct Page {
+    param: string
+    start: int
+    is_last: (Response) -> bool
+
+    // 1-based `?page=N`, the common case.
+    fn new(is_last: (Response) -> bool): Page {
+        return Page { param: "page", start: 1, is_last: is_last }
+    }
+
+    fn named(param: string, start: int, is_last: (Response) -> bool): Page {
+        return Page { param: param, start: start, is_last: is_last }
+    }
+
+}
+
+impl PageStrategy for Page {
+    fn next_page(req: Request, resp: Response): ?Request {
+        if !resp.ok() {
+            return none
+        }
+        if self.is_last(resp) {
+            return none
+        }
+        cur = (req.query(self.param) ?? "").to_int() ?? self.start
+        return some(req.with_url(set_query(req.url(), self.param, "${cur + 1}")))
+    }
+}
+
+// --- Writing your own --------------------------------------------------------------------------
+//
+// `Cursor` is the fourth convention — an opaque token in the response *body* (Slack's
+// `next_cursor`, Notion's `next_cursor` + `has_more`, DynamoDB's `LastEvaluatedKey`) — and it ships
+// here as a worked example rather than as a privileged built-in, because it is the shape that
+// proves the trait is enough: it reads the body, decodes it, and stops on the API's own flag.
+//
+// It is `pub` and perfectly usable; it is placed under this heading because what it demonstrates
+// matters more than what it does. A body-URL convention (Stripe's fully-qualified `next`) is the
+// same code with `with_url(next)` instead of `set_query`.
+
+// The envelope a cursor API wraps its results in. Only the paging fields are declared — a typed
+// decode ignores the rest of the body, so `results` / `items` / `data` need no mention here.
+pub struct CursorEnvelope {
+    next_cursor: string
+    has_more: bool
+}
+
+// Follow an opaque body cursor, passing it back as a query parameter on the next request.
+//
+// The stop rule needs no predicate from the caller, unlike `Offset`/`Page`: a cursor API states
+// termination in the body itself, either by `has_more: false` or by an empty cursor. That is the
+// tell that a convention is well-designed, and the reason this one is short.
+pub struct Cursor {
+    param: string
+
+    // Slack spells it `cursor`; Notion spells it `start_cursor`.
+    fn new(param: string = "cursor"): Cursor {
+        return Cursor { param: param }
+    }
+
+}
+
+impl PageStrategy for Cursor {
+    fn next_page(req: Request, resp: Response): ?Request {
+        if !resp.ok() {
+            return none
+        }
+        // A body that will not decode is not a next page. It is deliberately not an abort either:
+        // `json::<T>()` is recoverable by construction because a body is remote input, and a
+        // server that changes shape should end a pagination, not kill the program holding its
+        // results. A decode failure therefore degrades to the same envelope the API sends on its
+        // last page.
+        env = match resp.json::<CursorEnvelope>() {
+            Ok(v) => v,
+            Err(_) => CursorEnvelope { next_cursor: "", has_more: false },
+        }
+        if !env.has_more || env.next_cursor == "" {
+            return none
+        }
+        return some(req.with_url(set_query(req.url(), self.param, env.next_cursor)))
+    }
+}

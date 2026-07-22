@@ -13,13 +13,20 @@
 //! without re-attribution the user would see nothing at all for a real error.
 
 use noeta_ext_abi::registry::{
-    DirectiveCtx, Expansion, ExtDirective, ExtModule, Extension, TierSite,
+    DirectiveCtx, Expansion, ExpansionError, ExtDirective, ExtModule, Extension, TierSite,
 };
 use noeta_ide::DocumentStore;
 use noeta_span::{Source, SourceId};
 
+/// The spec path a reads-reporting fixture claims. Built from the directive's own file directory
+/// (`ctx.source_dir`), exactly as `@openapi` resolves `"petstore.json"` — so the same fixture works
+/// both for the in-memory `link` (rooted at `/proj`) and for the on-disk `ImpactSession` test.
+fn spec_path(ctx: &DirectiveCtx) -> String {
+    format!("{}/petstore.json", ctx.source_dir)
+}
+
 /// A directive whose expansion checks: one method returning a constant.
-fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     Ok(Expansion {
         source: format!(
             "fn from_{}(): string {{ return self.base; }}\n",
@@ -32,10 +39,31 @@ fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, String> {
 /// A directive whose expansion **parses but does not check**: the generated body calls a function
 /// that does not exist. The fault is real, is the extension author's, and lands on a span the user's
 /// document does not own.
-fn expand_unchecked(_: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_unchecked(_: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     Ok(Expansion {
         source: "fn broken(): int { return no_such_function(); }\n".to_string(),
         reads: Vec::new(),
+    })
+}
+
+/// Succeeds **and reports a read** — a spec-driven generator's shape. Its read must reach
+/// [`noeta_db::LinkedProgram::reads`], the editor's rebuild trigger.
+fn expand_reads(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    Ok(Expansion {
+        source: format!(
+            "fn from_{}(): string {{ return self.base; }}\n",
+            ctx.args[0]
+        ),
+        reads: vec![spec_path(ctx)],
+    })
+}
+
+/// **Fails, but reports the file it read** — the reads-on-error contract. A missing spec is the
+/// archetype: the read must survive the failure so that *creating* the spec re-runs the expansion.
+fn expand_fails_with_read(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    Err(ExpansionError {
+        message: "the spec does not exist yet".to_string(),
+        reads: vec![spec_path(ctx)],
     })
 }
 
@@ -68,6 +96,16 @@ impl Extension for Fixture {
             ExtDirective {
                 name: "ix_unchecked",
                 expand: Some(expand_unchecked),
+                ..BASE
+            },
+            ExtDirective {
+                name: "ix_reads",
+                expand: Some(expand_reads),
+                ..BASE
+            },
+            ExtDirective {
+                name: "ix_fails",
+                expand: Some(expand_fails_with_read),
                 ..BASE
             },
         ]
@@ -228,6 +266,34 @@ fn a_fault_in_generated_code_is_reported_at_the_directive() {
     );
 }
 
+/// A successful expansion's reads reach the editor's link — the rebuild trigger the watcher folds
+/// into its watch set so a spec edit re-runs the generation.
+#[test]
+fn a_successful_expansion_reports_its_reads_to_the_link() {
+    let linked = link("@ix_reads(\"petstore\")\nstruct Api { base: string }\necho 1;\n");
+    assert!(linked.program.is_ok(), "the entry links");
+    assert_eq!(linked.reads, vec!["/proj/petstore.json".to_string()]);
+}
+
+/// **The reads-on-error crux.** A hook that fails because its spec is missing still reports the
+/// path, and that report survives all the way to `LinkedProgram.reads` even though the program did
+/// not link. Without this, creating the spec would leave the client stale — the watcher was never
+/// told to watch it. A `Result<Expansion, String>` could not carry it; the reads lived only in the
+/// `Ok`.
+#[test]
+fn a_failed_expansion_still_reports_its_reads_to_the_link() {
+    let linked = link("@ix_fails(\"petstore\")\nstruct Api { base: string }\necho 1;\n");
+    assert!(
+        linked.program.is_err(),
+        "a failed expansion fails the link (the members it declared are absent)"
+    );
+    assert_eq!(
+        linked.reads,
+        vec!["/proj/petstore.json".to_string()],
+        "the read must survive the failure — creating the spec has to re-trigger the expansion"
+    );
+}
+
 /// A workspace with no expanding directive is untouched: no expansion sources, no id past the
 /// members, and nothing to report. The cheap guard inside `run_expansion` means such a program never
 /// even materializes its sources.
@@ -236,6 +302,7 @@ fn a_workspace_with_no_expanding_directive_is_unchanged() {
     let linked = link(PLAIN);
     assert!(linked.program.is_ok(), "the entry links");
     assert!(linked.expansions.is_empty(), "nothing was generated");
+    assert!(linked.reads.is_empty(), "and nothing was read");
 
     let uri = "file:///noeta-ide-expansion-plain/main.noe";
     let store = store_with(uri, PLAIN);
@@ -243,4 +310,55 @@ fn a_workspace_with_no_expanding_directive_is_unchanged() {
         store.diagnostics(uri).expect("known").0.is_empty(),
         "and a clean program stays clean"
     );
+}
+
+/// The **watcher consumer**, end to end: an `ImpactSession` over an on-disk project whose entry
+/// carries a reads-reporting directive captures the read, and reports a change to that file as
+/// `Impact::All` — so `noeta test --watch` re-runs when the spec changes. This is the whole point of
+/// carrying `reads` to `LinkedProgram`: the impact diff speaks the `.noe` vocabulary and cannot see a
+/// `.json` edit unless it is taught to.
+#[test]
+fn an_impact_session_watches_the_files_an_expansion_read() {
+    install();
+    // A unique on-disk project — `ImpactSession` scans a real directory.
+    let dir = std::env::temp_dir().join(format!(
+        "noeta-reads-session-{}",
+        std::process::id() as u64 * 31 + 7
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the project dir");
+    let entry = dir.join("main.noe");
+    std::fs::write(
+        &entry,
+        "@ix_reads(\"petstore\")\nstruct Api { base: string }\n@test fn t(): void { assert(true); }\n",
+    )
+    .expect("write the entry");
+    // The spec the directive reports reading — present, so the project links clean.
+    let spec = dir.join("petstore.json");
+    std::fs::write(&spec, "{}").expect("write the spec");
+
+    let mut session =
+        noeta_ide::impact::ImpactSession::new(&entry).expect("the entry anchors a project");
+
+    // The session captured the spec as a watched read (canonicalized).
+    let canon_spec = spec.canonicalize().expect("the spec exists");
+    assert!(
+        session.reads().iter().any(|r| *r == canon_spec),
+        "the session must watch the spec the directive read; watched: {:?}",
+        session.reads()
+    );
+
+    // A change to the spec is All-impact: a `.noe` diff cannot narrow it, and it invalidates the
+    // generated members, so the whole suite must rerun.
+    match session.impact_of_changes(&[spec.clone()]) {
+        noeta_ide::impact::Impact::All { reason } => {
+            assert!(
+                reason.contains("spec read by an expanding directive"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("a spec change must rerun everything, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -6,6 +6,8 @@
 
 namespace para.db.query
 
+use para.db.Connection
+
 // A composed SQL statement ready to run: the text (with `?` placeholders) and its bound parameters.
 pub struct Query {
     sql: string
@@ -97,15 +99,12 @@ pub fn table(name: string): Q {
     return Q.new(name)
 }
 
-// Run a composed query on a connection, returning its rows (a `List<Map<string, dyn>>`). `conn` is
-// a `para.db.Connection`; typed `dyn` here because a native extern type imported across the package
-// boundary does not yet unify by identity with the value a sibling module's `db.connect` returns
-// (tracked as a follow-up) — method dispatch still reaches the native `query`.
-pub fn run(conn: dyn, q: Query): List<Map<string, dyn>> {
-    return conn.query(q.sql, q.params).as<List<Map<string, dyn>>>() ?? []
+// Run a composed query on a connection, returning its rows (a `List<Map<string, dyn>>`).
+pub fn run(conn: Connection, q: Query): List<Map<string, dyn>> {
+    return conn.query(q.sql, q.params)
 }
 
 // Execute a composed non-query statement (INSERT/UPDATE/DELETE), returning rows affected.
-pub fn exec(conn: dyn, q: Query): int {
-    return conn.execute(q.sql, q.params).as<int>() ?? 0
+pub fn exec(conn: Connection, q: Query): int {
+    return conn.execute(q.sql, q.params)
 }

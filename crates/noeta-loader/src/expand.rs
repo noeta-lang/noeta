@@ -87,6 +87,7 @@ pub struct Expanded {
 /// contract — an `expand` hook only ever sees an invocation that was legal.
 pub fn expand_program(
     program: &mut Program,
+    source_maps: &std::collections::HashMap<SourceId, crate::qualify::QMap>,
     sources: &[Source],
     next_id: u32,
     edition: noeta_lexer::Edition,
@@ -103,14 +104,21 @@ pub fn expand_program(
         // decorators while intending to add to its members, and the same shape as `plan_derive`.
         for plan in plan_for(&program.stmts[index], sources, registry) {
             let id = SourceId(next_id + out.sources.len() as u32);
-            match run_one(&plan, id, edition, text_tiers, sources) {
+            // The map of the file the directive was written in: generated members are written
+            // against *that* file's imports, so they qualify as its own statements did.
+            let map = source_maps.get(&plan.span.source);
+            let (reads, result) = run_one(&plan, id, edition, text_tiers, sources, map);
+            // Reads are recorded whether the expansion succeeded or failed: a failed hook's reported
+            // files are precisely what must re-trigger it when they change (a missing spec that is
+            // later written), so they belong in the rebuild trigger even though nothing was spliced.
+            out.reads.extend(reads);
+            match result {
                 Ok(done) => {
                     splice(&mut program.stmts[index], done.members);
                     out.sources.push(ExpandedSource {
                         source: done.source,
                         origin: plan.span,
                     });
-                    out.reads.extend(done.reads);
                 }
                 Err(diagnostic) => out.diagnostics.push(*diagnostic),
             }
@@ -147,11 +155,11 @@ struct Plan {
     span: Span,
 }
 
-/// A finished expansion.
+/// A finished expansion. Reads are returned separately from [`run_one`], because they must survive
+/// the *failure* paths too and a `Done` is only built on success.
 struct Done {
     source: Source,
     members: Members,
-    reads: Vec<String>,
 }
 
 /// Every expansion this statement calls for, in written order.
@@ -234,13 +242,19 @@ fn source_dir_of(span: Span, sources: &[Source]) -> String {
 }
 
 /// Run one hook and parse what it returned.
+///
+/// Returns the files the hook reported reading **and** the outcome, as two independent values,
+/// because the reads must survive every failure path — a hook that fails because a spec is missing
+/// still reported that spec, and *creating* it has to re-trigger this expansion. A `Done` is built
+/// only on success, so the reads cannot ride on it.
 fn run_one(
     plan: &Plan,
     id: SourceId,
     edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
     sources: &[Source],
-) -> Result<Done, Box<LoadDiagnostic>> {
+    map: Option<&crate::qualify::QMap>,
+) -> (Vec<String>, Result<Done, Box<LoadDiagnostic>>) {
     // Boxed: a `LoadDiagnostic` carries a whole `Source`, so an unboxed `Err` would make every
     // successful expansion pay for the failure case.
     let blame = |message: String| {
@@ -258,8 +272,23 @@ fn run_one(
     };
     let name = plan.directive.name;
     let hook = plan.directive.expand.expect("planned only where a hook is");
-    let expansion =
-        hook(&plan.ctx).map_err(|m| blame(format!("`@{name}` could not expand: {m}")))?;
+    // The hook's own error carries its reads (`ExpansionError`) for exactly this reason: a failure
+    // that read a file must report it, or the file's later appearance is invisible.
+    let expansion = match hook(&plan.ctx) {
+        Ok(expansion) => expansion,
+        Err(error) => {
+            return (
+                error.reads,
+                Err(blame(format!(
+                    "`@{name}` could not expand: {}",
+                    error.message
+                ))),
+            );
+        }
+    };
+    // From here on the reads are the success reads, returned on every branch below — a parse fault
+    // in the generated code does not un-read the spec that produced it.
+    let reads = expansion.reads;
 
     let text = format!(
         "{} {} {{\n{}\n}}\n",
@@ -280,21 +309,36 @@ fn run_one(
         // write, so the actionable facts are which expansion misbehaved and where — and since the
         // generated source is real and openable, a position in it is a real address.
         let at = source.line_col(first.span.start);
-        return Err(blame(format!(
-            "`@{name}` produced code that does not parse: {} (in the expansion at {}:{})",
-            first.message, at.line, at.col
-        )));
+        return (
+            reads,
+            Err(blame(format!(
+                "`@{name}` produced code that does not parse: {} (in the expansion at {}:{})",
+                first.message, at.line, at.col
+            ))),
+        );
     }
-    let members = members_of(parsed.program).ok_or_else(|| {
-        blame(format!(
-            "`@{name}` produced no declaration to take members from"
-        ))
-    })?;
-    Ok(Done {
-        source,
-        members,
-        reads: expansion.reads,
-    })
+    // Qualify before lifting the members out, while the expansion is still one statement — the
+    // same rewrite the linker already applied to everything the author wrote in this file.
+    //
+    // Without this, generated code can only name built-ins: `Api` in a generated field would reach
+    // the checker bare and resolve to nothing, and a hard-coded `para.api.Api` would be no better,
+    // because the qualified identity depends on what the *consumer* called the dependency. Borrowing
+    // the file's own map is the only spelling that is right in both cases.
+    let mut parsed = parsed;
+    if let Some(map) = map {
+        for stmt in &mut parsed.program.stmts {
+            crate::qualify::qualify_stmt(stmt, map);
+        }
+    }
+    match members_of(parsed.program) {
+        Some(members) => (reads, Ok(Done { source, members })),
+        None => (
+            reads,
+            Err(blame(format!(
+                "`@{name}` produced no declaration to take members from"
+            ))),
+        ),
+    }
 }
 
 /// The name the generated source appears under — in a diagnostic, in the editor, and in

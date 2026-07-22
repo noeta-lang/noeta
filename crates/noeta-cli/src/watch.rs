@@ -104,6 +104,12 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
     let mut session = impact_entry
         .as_deref()
         .and_then(noeta_ide::impact::ImpactSession::new);
+    // The first `.noe` argument of any command, so `run`/`serve` (which build no impact session)
+    // can still learn which non-`.noe` files their expansion hooks read and watch those too.
+    let watch_entry: Option<PathBuf> = args
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.extension().is_some_and(|e| e == "noe"));
     let mut extra: Vec<OsString> = Vec::new();
     loop {
         let mut cmd = Command::new(&exe);
@@ -116,6 +122,17 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
         if let Some(s) = session.as_mut() {
             s.rebaseline();
         }
+        // The non-`.noe` files an `@openapi` (or any expanding directive) reported reading — a spec.
+        // Recomputed each iteration because an edit to the `.noe` can change which spec it names.
+        // The session already holds them post-rebaseline; a sessionless mode links once to find
+        // them. Folded into the event filter below so a spec edit is not discarded as "not a source".
+        let watched_reads: Vec<PathBuf> = match session.as_ref() {
+            Some(s) => s.reads().to_vec(),
+            None => watch_entry
+                .as_deref()
+                .map(noeta_ide::impact::spec_reads)
+                .unwrap_or_default(),
+        };
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -132,15 +149,15 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
             // The server stopped for real (boot-time compile error, crash, Ctrl-C races): wait
             // for the next edit and try again — a red boot must retry once the code is fixed.
             eprintln!("[watch] finished ({status}) — waiting for changes");
-            wait_for_change(&rx);
+            wait_for_change(&rx, &watched_reads);
         } else {
             let mut changed = Vec::new();
-            let exited = run_until_change(&rx, &mut child, &mut changed);
+            let exited = run_until_change(&rx, &mut child, &mut changed, &watched_reads);
             if let Some(status) = exited {
                 // The program finished on its own (a `run` reaching its end, a crash): report and
                 // wait for the next change rather than looping hot.
                 eprintln!("[watch] finished ({status}) — waiting for changes");
-                changed = wait_for_change(&rx);
+                changed = wait_for_change(&rx, &watched_reads);
             } else {
                 // A relevant change arrived while the program was running: stop it and restart.
                 let _ = child.kill();
@@ -166,7 +183,7 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
                     }
                     Filter::Skip => {
                         eprintln!("[watch] nothing impacted — waiting for changes");
-                        changed = wait_for_change(&rx);
+                        changed = wait_for_change(&rx, &watched_reads);
                     }
                 }
             }
@@ -238,15 +255,16 @@ fn run_until_change(
     rx: &mpsc::Receiver<notify::Result<notify::Event>>,
     child: &mut Child,
     changed: &mut Vec<PathBuf>,
+    reads: &[PathBuf],
 ) -> Option<std::process::ExitStatus> {
     loop {
         if let Ok(Some(status)) = child.try_wait() {
             return Some(status);
         }
         match rx.recv_timeout(POLL) {
-            Ok(event) if relevant(&event) => {
-                collect_paths(&event, changed);
-                drain(rx, changed);
+            Ok(event) if relevant(&event, reads) => {
+                collect_paths(&event, changed, reads);
+                drain(rx, changed, reads);
                 return None;
             }
             // Irrelevant event, timeout tick, or a watcher error: keep polling. A disconnected
@@ -259,13 +277,16 @@ fn run_until_change(
 
 /// Block until a relevant change arrives (used after the child finished on its own); returns the
 /// changed source paths the debounced burst touched.
-fn wait_for_change(rx: &mpsc::Receiver<notify::Result<notify::Event>>) -> Vec<PathBuf> {
+fn wait_for_change(
+    rx: &mpsc::Receiver<notify::Result<notify::Event>>,
+    reads: &[PathBuf],
+) -> Vec<PathBuf> {
     loop {
         match rx.recv() {
-            Ok(event) if relevant(&event) => {
+            Ok(event) if relevant(&event, reads) => {
                 let mut changed = Vec::new();
-                collect_paths(&event, &mut changed);
-                drain(rx, &mut changed);
+                collect_paths(&event, &mut changed, reads);
+                drain(rx, &mut changed, reads);
                 return changed;
             }
             Ok(_) => {}
@@ -279,20 +300,34 @@ fn wait_for_change(rx: &mpsc::Receiver<notify::Result<notify::Event>>) -> Vec<Pa
 
 /// Debounce: keep draining events for [`DEBOUNCE`] after the first relevant one, collecting the
 /// source paths they touch.
-fn drain(rx: &mpsc::Receiver<notify::Result<notify::Event>>, changed: &mut Vec<PathBuf>) {
+fn drain(
+    rx: &mpsc::Receiver<notify::Result<notify::Event>>,
+    changed: &mut Vec<PathBuf>,
+    reads: &[PathBuf],
+) {
     while let Ok(event) = rx.recv_timeout(DEBOUNCE) {
-        collect_paths(&event, changed);
+        collect_paths(&event, changed, reads);
     }
 }
 
 /// Append `event`'s project-source paths (the filter [`relevant_path`] applies) to `changed`.
-fn collect_paths(event: &notify::Result<notify::Event>, changed: &mut Vec<PathBuf>) {
+fn collect_paths(
+    event: &notify::Result<notify::Event>,
+    changed: &mut Vec<PathBuf>,
+    reads: &[PathBuf],
+) {
     if let Ok(event) = event {
-        changed.extend(event.paths.iter().filter(|p| relevant_path(p)).cloned());
+        changed.extend(
+            event
+                .paths
+                .iter()
+                .filter(|p| relevant_path(p, reads))
+                .cloned(),
+        );
     }
 }
 
-fn relevant(event: &notify::Result<notify::Event>) -> bool {
+fn relevant(event: &notify::Result<notify::Event>, reads: &[PathBuf]) -> bool {
     let Ok(event) = event else { return false };
     // Mutations only. Access events MUST be ignored — the restarted program *reads* its own
     // sources to compile them, and reacting to those reads is a restart storm.
@@ -300,11 +335,18 @@ fn relevant(event: &notify::Result<notify::Event>) -> bool {
         event.kind,
         notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)
     );
-    mutation && event.paths.iter().any(|p| relevant_path(p))
+    mutation && event.paths.iter().any(|p| relevant_path(p, reads))
 }
 
-/// A project source path: `*.noe` or a manifest/lockfile, not inside a hidden directory.
-fn relevant_path(path: &Path) -> bool {
+/// A path the watch loop reacts to: `*.noe`, a manifest/lockfile, or a **file an expansion hook
+/// reported reading** (an `@openapi` spec), none inside a hidden directory.
+///
+/// The `reads` set is why a spec change restarts at all: without it a `.json`/`.yaml` change is
+/// invisible to the loop, and editing (or creating) the spec would leave the generated client
+/// stale. `reads` paths are canonicalized; `notify` reports canonical paths, so the comparison
+/// holds. A hidden-directory read is still excluded — nothing legitimate reads from one, and it is
+/// where build caches churn.
+fn relevant_path(path: &Path, reads: &[PathBuf]) -> bool {
     let hidden = path.components().any(|c| {
         c.as_os_str()
             .to_str()
@@ -317,7 +359,8 @@ fn relevant_path(path: &Path) -> bool {
     let is_manifest = path
         .file_name()
         .is_some_and(|n| n == "noeta.toml" || n == "noeta.lock");
-    is_noe || is_manifest
+    let is_read = reads.iter().any(|r| r == path);
+    is_noe || is_manifest || is_read
 }
 
 // ------------------------------------------------------------------ the in-process hot watcher
@@ -343,6 +386,11 @@ fn hot_watcher(
     wake: std::sync::Arc<noeta_host_real::Notify>,
 ) {
     let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.clone());
+    // Files an expansion hook read (an `@openapi` spec). A change to one is never entry-swappable —
+    // it regenerates members — so it must reach the `all_entry` check below and force a restart,
+    // which means passing the event filter first. Computed once: the hot process is restarted
+    // wholesale (and this recomputed) whenever the entry itself changes.
+    let reads = noeta_ide::impact::spec_reads(&entry);
     // The baseline: the source that is currently RUNNING (read back at spawn — the run thread
     // just compiled exactly this file).
     let Ok(mut applied_src) = std::fs::read_to_string(&entry) else {
@@ -387,7 +435,7 @@ fn hot_watcher(
             Ok(event) => event,
             Err(_) => return,
         };
-        if !relevant(&event) {
+        if !relevant(&event, &reads) {
             continue;
         }
         let mut paths: Vec<std::path::PathBuf> = match &event {
@@ -396,7 +444,7 @@ fn hot_watcher(
         };
         // Debounce, collecting every path the edit burst touched.
         while let Ok(more) = rx.recv_timeout(DEBOUNCE) {
-            if relevant(&more)
+            if relevant(&more, &reads)
                 && let Ok(e) = &more
             {
                 paths.extend(e.paths.iter().cloned());
@@ -405,7 +453,7 @@ fn hot_watcher(
         // Only source-relevant paths participate: an editor's atomic save emits a rename event
         // carrying BOTH paths (temp file + target), and the temp half must not read as "a change
         // outside the entry file".
-        paths.retain(|p| relevant_path(p));
+        paths.retain(|p| relevant_path(p, &reads));
         let all_entry = paths
             .iter()
             .all(|p| p.canonicalize().map(|c| c == entry_canon).unwrap_or(false));
