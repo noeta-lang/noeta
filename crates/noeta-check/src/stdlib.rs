@@ -411,6 +411,16 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
                 _ => Type::Dyn,
             })
         }
+        // A registered native **class**'s instance methods (native-extensibility S3 / Pass 2a) come
+        // from its `ExtClass` signature table, like the extern-type arm above. A native class is not
+        // generic, so there are no receiver type-variable bindings.
+        Type::Named(n, _) if reg.find_class_method(n, name).is_some() => {
+            let sig = reg.find_class_method(n, name)?;
+            Some(match sig.ret {
+                registry::RetTy::Concrete(s) => sig_to_type(reg, &s),
+                _ => Type::Dyn,
+            })
+        }
         // A native **backed** enum's `.value()` accessor (native-extensibility S1): the constraint
         // `ExtEnum.backing` states the accessor's type — a `String`-backed enum's `.value()` is
         // `string`, an `Int`-backed one's is `int`. A non-backed enum has NO `.value()` (returns
@@ -709,6 +719,12 @@ pub(super) fn method_params(
                     .collect(),
             )
         }
+        // A native **class**'s method parameters come from its `ExtClass` signature table
+        // (native-extensibility S3 / Pass 2a), like `method_return`; a native class is not generic.
+        Type::Named(n, _) if reg.find_class_method(n, name).is_some() => {
+            let sig = reg.find_class_method(n, name)?;
+            Some(sig.params.iter().map(|p| sig_to_type(reg, p)).collect())
+        }
         _ => None,
     }
 }
@@ -738,6 +754,12 @@ pub(super) fn method_required(
         return reg
             .find_type_method_sig(n, name)
             .map(|sig| registry::SigType::required_count(sig.params));
+    }
+    // A native class's method required-arg count (native-extensibility S3 / Pass 2a).
+    if let Type::Named(n, _) = receiver
+        && let Some(sig) = reg.find_class_method(n, name)
+    {
+        return Some(registry::SigType::required_count(sig.params));
     }
     builtin_method_required(receiver, name)
 }

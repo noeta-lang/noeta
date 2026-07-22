@@ -628,6 +628,22 @@ pub type TypeDispatch = fn(
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError>;
 
+/// A native **class**'s instance-method dispatch (native-extensibility S3 / Pass 2a) — the
+/// [`ExtClass`] analogue of [`TypeDispatch`]. A native class value is a real language `Object` (a
+/// class-kind shape), **not** an [`crate::ExternValue`], so its receiver crosses as the whole
+/// instance marshalled to a [`NativeValue::Instance`] (class name + `(field, value)` pairs in slot
+/// order) — the same shape a class value takes when it crosses arg-IN. The method reads its fields
+/// by name off `recv` (a language-value field like `label`, or its native-state extern-handle field
+/// as a [`NativeValue::Extern`]); it gets the same `&mut dyn Host` seam an [`ExtType`] method does.
+/// The receiver is a value snapshot — a method mutating the instance in place is a later, additive
+/// extension (arg-IN is likewise a snapshot); reading a field, the Pass-2a surface, is served fully.
+pub type ClassDispatch = fn(
+    recv: &NativeValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError>;
+
 /// A type's **higher-order** method dispatch (higher-order-abi H4): like [`TypeDispatch`], but
 /// the receiver and arguments arrive as opaque ctx slots and the body may re-enter the backend —
 /// call closures, reach per-run state, read/write the retained arena. What `Cell.update(f)` and
@@ -907,6 +923,18 @@ pub struct ExtClass {
     /// name, type, visibility, and mutability; the checker seeds them into `symbols.records`
     /// (types), `symbols.private_fields` (visibility), and `symbols.mut_fields` (mutability).
     pub fields: &'static [ExtField],
+    /// Instance-method signatures (native-extensibility S3 / Pass 2a) — same vocabulary as an
+    /// [`ExtType`]'s `methods`. A call `h.describe()` on a native class instance routes to
+    /// [`ExtClass::dispatch`]; the checker types the call off these signatures. Default empty (a
+    /// fields-only class, the S2 shape). Names are disjoint from the class's field names (a method
+    /// wins over a field, the checker's rule).
+    pub methods: &'static [ExtFn],
+    /// The one shared instance-method dispatch (native-extensibility S3 / Pass 2a) — the
+    /// [`ExtClass`] twin of [`ExtType::dispatch`]. Receives the instance marshalled to a
+    /// [`NativeValue::Instance`] plus the host seam; both backends route a class-kind object's
+    /// method call here (their `CallMethod` Object arm, on a native-class shape). A fields-only
+    /// class never reaches it, so the default reports an unregistered-method misuse.
+    pub dispatch: ClassDispatch,
 }
 
 /// One field of an [`ExtClass`]: its name, type, and the two access rules (visibility, mutability)
@@ -931,11 +959,18 @@ pub struct ExtField {
 
 impl ExtClass {
     /// Literal-shortening defaults (`..ExtClass::DEFAULTS`), mirroring [`ExtEnum::DEFAULTS`]: a
-    /// fieldless class under `std`.
+    /// fieldless, method-less class under `std`.
     pub const DEFAULTS: ExtClass = ExtClass {
         name: "",
         namespace: "std",
         fields: &[],
+        methods: &[],
+        dispatch: |_, method, _, _| {
+            Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("internal: no class-method dispatch registered (method `{method}`)"),
+            })
+        },
     };
 
     /// The class's **qualified identity** (`res.Handle`) — `namespace.name`, the string the checker
@@ -2204,6 +2239,17 @@ impl Registry {
     pub fn resolve_class(&self, name: &str) -> Option<&'static ExtClass> {
         self.find_class_qualified(name)
             .or_else(|| self.find_class(name))
+    }
+
+    /// Find a native class's instance-method signature (native-extensibility S3 / Pass 2a) — the
+    /// class twin of [`Registry::find_type_method`]. `name` is the runtime shape name (the **short**
+    /// name a class-kind object carries) or a qualified identity. What both backends' `CallMethod`
+    /// Object arm consults to decide a native-class method call routes to [`ExtClass::dispatch`].
+    pub fn find_class_method(&self, name: &str, method: &str) -> Option<&'static ExtFn> {
+        self.resolve_class(name)?
+            .methods
+            .iter()
+            .find(|m| m.name == method)
     }
 
     /// Every registered native trait (native-extensibility S3), across all units — what

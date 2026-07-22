@@ -377,6 +377,21 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // `methods` (native-extensibility S3 / Pass 2a): the class's instance-method signatures. Read
+    // by `find_class_method` (which the checker's `method_return`/`method_params` and both backends'
+    // CallMethod Object arm consult to route a native-class method call to `dispatch`).
+    Row(
+        "ExtClass",
+        "methods",
+        Data(Anchor(REGISTRY, "pub fn find_class_method(")),
+    ),
+    // `dispatch`: the one shared native-class instance-method dispatch, invoked by both backends'
+    // `call_native_class_method` (`(class.dispatch)(...)`).
+    Row(
+        "ExtClass",
+        "dispatch",
+        Data(Anchor(EVAL_LIB, "fn call_native_class_method(")),
+    ),
     // --- ExtTrait / ExtTraitMethod (native-extensibility S3) ------------------------------------
     Row(
         "ExtTrait",

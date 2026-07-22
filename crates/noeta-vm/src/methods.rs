@@ -510,6 +510,41 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Dispatch a **native class**'s instance method (native-extensibility S3 / Pass 2a) — the
+    /// [`noeta_stdlib::ExtClass`] analogue of [`Self::call_extern_method`]. The receiver is a
+    /// class-kind object; it crosses to the native `dispatch` as the whole instance marshalled to a
+    /// [`noeta_stdlib::NativeValue::Instance`] (its fields by name), the same shape a class value
+    /// takes arg-IN, so the method reads a field off it. Host threaded in, result materialized —
+    /// mirrors the tree-walker's `call_native_class_method`, so the two backends agree.
+    pub(crate) fn call_native_class_method(
+        &mut self,
+        recv: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        // Bound once (`&'static`, Copy), so it survives the `&mut self` host borrow below (IR3).
+        let reg = self.reg();
+        let class = recv
+            .shape()
+            .and_then(|s| reg.resolve_class(&s.name));
+        let Some(class) = class else {
+            return Err(self.error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("no native class method `{method}`"),
+            ));
+        };
+        let recv_native = marshal_native_arg(recv);
+        let nargs: Vec<noeta_stdlib::NativeValue> =
+            args.iter().map(|a| marshal_native_arg(*a)).collect();
+        let host = &mut *self.persist.host;
+        match (class.dispatch)(&recv_native, method, host, &nargs) {
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+        }
+    }
+
     /// Dispatch an iterator method (Track I). Mirrors the tree-walker's `call_iter_method`. `next`/
     /// `collect`/`count` consume the cursor; `take`/`drop`/`chain` build a new adapter that retains
     /// the receiver (and `chain`'s argument) — the same retain pattern as `iter()`, leak-verified.

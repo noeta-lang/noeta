@@ -1531,6 +1531,26 @@ impl<'m> Vm<'m> {
                                 None => {
                                     let shape = v.shape().unwrap();
                                     let Some(proto) = self.method_proto(&shape.name, method) else {
+                                        // A native class's instance method (native-extensibility S3
+                                        // / Pass 2a): no hoisted proto by this name, but the shape
+                                        // names a registered native class that declares it — route
+                                        // to the class's native `dispatch` (the Object-arm twin of
+                                        // the extern-method seam). A user class always resolves
+                                        // through the proto table above, so only a genuine native
+                                        // class reaches here. Left uncached like the field path.
+                                        if self.reg().find_class_method(&shape.name, method).is_some()
+                                        {
+                                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                                            let result = self.call_native_class_method(
+                                                v,
+                                                method,
+                                                arg_values.as_slice(),
+                                                *span,
+                                            )?;
+                                            set_reg(regs, fbase, *dst, result);
+                                            pc += 1;
+                                            continue;
+                                        }
                                         // The runtime member-call fallback (the field-access-then-
                                         // call desugar's `dyn` path): no method `method`, but the
                                         // shape HAS a field of that name — `obj.f(args)` means

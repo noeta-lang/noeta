@@ -81,6 +81,7 @@ const FX_CLASSES: &[ExtClass] = &[ExtClass {
             is_mut: false,
         },
     ],
+    ..ExtClass::DEFAULTS
 }];
 
 fn kern_dispatch(
