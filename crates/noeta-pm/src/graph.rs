@@ -271,6 +271,47 @@ fn resolve_graph_impl(
         registry_ids,
     );
 
+    // The root package's OWN native crate. A dependency's native crate becomes a `NativeCrate`
+    // during the walk, but the root package is never walked as its own dependency — so a package
+    // declaring `package.native` could not compose its own extension, and `noeta check`/`run` on a
+    // file *inside* that package failed to resolve a `use` of its own namespace (`use para.db`
+    // inside `para/db` itself). That is the reason such a package was checkable only as somebody
+    // else's dependency, and the reason a defect there — a stale `dyn` workaround, say — could
+    // survive unseen: CI structurally could not check the package on its own.
+    //
+    // No trust gate here, deliberately: `[trust].native` authorizes a *dependency's* native code,
+    // protecting a consumer from code they did not write. The root author IS that consumer, so a
+    // package trusting its own native code is redundant friction — the same reason cargo never asks
+    // you to authorize your own `build.rs`.
+    if let Some(pkg) = manifest.package()
+        && let Some(native) = &pkg.native
+    {
+        let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
+        // Guard against double-linking if the root ever appears as its own instance (a
+        // self-referential scope dependency).
+        if !graph.native_crates.iter().any(|nc| nc.identity == identity) {
+            validate_native_crate(&manifest_dir, native)?;
+            let content_hash = hash_tree(&manifest_dir).map_err(|err| {
+                PmError::Io(format!(
+                    "hashing the root package at `{}`: {err}",
+                    manifest_dir.display()
+                ))
+            })?;
+            // Absolute: the composer writes each crate as a path dependency in a shim `Cargo.toml`
+            // under its cache dir, so a relative `crate_dir` (which `manifest_dir` is whenever the
+            // entry was passed as a relative path) would resolve against the cache dir and vanish.
+            // A dependency's `inst.dir` is already materialized to an absolute path; the root's is
+            // not, so it is the one case that must canonicalize.
+            let crate_dir = manifest_dir.join(native);
+            let crate_dir = crate_dir.canonicalize().unwrap_or(crate_dir);
+            graph.native_crates.push(NativeCrate {
+                identity,
+                crate_dir,
+                content_hash,
+            });
+        }
+    }
+
     // Transparency-log enforcement (namespace-protection #1, TLog): when the consumer requires it,
     // every registry release must be publicly logged under a signed checkpoint that is an append-only
     // extension of the one pinned in `noeta.lock`. Feature-gated (the crypto + HTTP client), like
@@ -2051,6 +2092,51 @@ mod tests {
             err.message().contains("2026"),
             "enumerates the known editions: {err}"
         );
+    }
+
+    #[test]
+    fn a_root_package_composes_its_own_native_crate() {
+        // A package that declares `package.native` must compose that crate when it is itself the
+        // root — so `noeta check`/`run` on a file inside it resolves a `use` of its own namespace.
+        // Before this, the root was never walked as its own dependency, so its native never entered
+        // `native_crates` and the package was checkable only as somebody else's dependency.
+        let base = std::env::temp_dir().join("noeta_graph_test_root_native");
+        let _ = std::fs::remove_dir_all(&base);
+        let pkg = base.join("imgfx");
+        std::fs::create_dir_all(pkg.join("native")).unwrap();
+        // No `[trust].native` here on purpose: a package does not authorize its own native code,
+        // the way cargo never asks you to trust your own `build.rs`.
+        std::fs::write(
+            pkg.join("noeta.toml"),
+            "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("fx.noe"),
+            "namespace imgfx.fx;\npub fn one(): int { return 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("native").join("Cargo.toml"),
+            "[package]\nname = \"imgfx-native\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        let graph = resolve_graph(&pkg.join("fx.noe")).expect("root native resolves");
+        assert_eq!(
+            graph.native_crates.len(),
+            1,
+            "the root's own native composes"
+        );
+        let nc = &graph.native_crates[0];
+        assert_eq!(nc.identity, "acme/imgfx");
+        // Absolute even though nothing here materialized the root through the store — the
+        // canonicalization is what lets the composer's shim resolve the path dependency.
+        assert!(
+            nc.crate_dir.is_absolute(),
+            "root crate dir must be absolute"
+        );
+        assert!(nc.crate_dir.join("Cargo.toml").is_file());
     }
 
     #[test]

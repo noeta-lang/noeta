@@ -31,7 +31,8 @@
 //! whole answer to output scope.
 
 use noeta_ext_abi::registry::{
-    DirectiveCtx, Expansion, ExtDirective, ExtFn, ExtModule, Extension, NativeOut, NativeValue,
+    DirectiveCtx, ExtDirective, ExtFn, ExtModule, Expansion, ExpansionError, Extension, NativeOut,
+    NativeValue,
     RetTy, SigType, TierSite,
 };
 use noeta_ext_abi::{Host, StdError};
@@ -66,38 +67,43 @@ const OPENAPI: ExtDirective = ExtDirective {
 /// Every path is resolved against [`DirectiveCtx::source_dir`] — the directory of the file the
 /// directive was written in — so a spec sits next to the code that uses it and moving the pair
 /// keeps working, which resolving against the process's working directory would not.
-fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     // `max_args: Some(1)` is checked before a hook runs, so at most one argument arrives — but
     // *zero* is also legal under that contract, and `args[0]` would panic. A hook must still handle
     // the shapes its declaration permits; it is only relieved of the ones it forbids.
     let Some(arg) = ctx.args.first() else {
-        return Err(
-            "needs the path to an OpenAPI document, as in `@openapi(\"petstore.json\")`"
-                .to_string(),
-        );
+        // No path was named, so nothing was read — a bare message with empty reads.
+        return Err("needs the path to an OpenAPI document, as in `@openapi(\"petstore.json\")`"
+            .into());
     };
 
     let path = std::path::Path::new(&ctx.source_dir).join(arg);
     let display = path.display().to_string();
 
-    // Named before it is opened, so it is reported whether or not the read succeeds. This is the
-    // incrementality contract: a spec that is missing today and written tomorrow has to re-trigger
-    // this expansion, and it can only do that if the compiler was told the path was consulted.
+    // Named before it is opened, so it is reported whether or not the read succeeds — and reported
+    // on the *error* paths too, which is the whole point. This is the incrementality contract: a
+    // spec that is missing today and written tomorrow has to re-trigger this expansion, and it can
+    // only do that if the compiler was told the path was consulted. `failed` bundles that read set
+    // onto every failure below.
     let reads = vec![display.clone()];
+    let failed = |message: String| ExpansionError {
+        message,
+        reads: reads.clone(),
+    };
 
     if matches!(
         path.extension().and_then(|e| e.to_str()),
         Some("yaml" | "yml")
     ) {
-        return Err(format!(
+        return Err(failed(format!(
             "`{arg}` is YAML, and only JSON specs are read — convert it first \
              (any OpenAPI tool will, and both spellings are the same document)"
-        ));
+        )));
     }
 
     let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("could not read `{display}`: {e}"))?;
-    let spec = spec::parse(&text).map_err(|e| format!("`{arg}`: {e}"))?;
+        std::fs::read_to_string(&path).map_err(|e| failed(format!("could not read `{display}`: {e}")))?;
+    let spec = spec::parse(&text).map_err(|e| failed(format!("`{arg}`: {e}")))?;
 
     Ok(Expansion {
         source: codegen::client(&ctx.target, &spec),
@@ -236,7 +242,9 @@ mod tests {
             source_dir: String::new(),
         };
         let error = expand_openapi(&ctx).expect_err("no argument cannot expand");
-        assert!(error.contains("needs the path"), "{error}");
+        assert!(error.message.contains("needs the path"), "{}", error.message);
+        // No path was named, so nothing was read.
+        assert!(error.reads.is_empty(), "{:?}", error.reads);
     }
 
     #[test]
@@ -246,9 +254,34 @@ mod tests {
             named: Vec::new(),
             target: "PetStore".to_string(),
             site: TierSite::Type,
-            source_dir: String::new(),
+            source_dir: "/proj".to_string(),
         };
         let error = expand_openapi(&ctx).expect_err("yaml is not read");
-        assert!(error.contains("convert it first"), "{error}");
+        assert!(
+            error.message.contains("convert it first"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_failure_reports_the_spec_it_tried_so_creating_it_re_runs() {
+        // The reads-on-error contract: a missing spec still reports the path it looked for, because
+        // that path *appearing* is exactly what must re-trigger the expansion. A `Result<_, String>`
+        // could not carry this — the reads lived only in the `Ok`.
+        let ctx = DirectiveCtx {
+            args: vec!["does-not-exist.json".to_string()],
+            named: Vec::new(),
+            target: "PetStore".to_string(),
+            site: TierSite::Type,
+            source_dir: "/proj/api".to_string(),
+        };
+        let error = expand_openapi(&ctx).expect_err("a missing spec cannot expand");
+        assert!(error.message.contains("could not read"), "{}", error.message);
+        assert_eq!(
+            error.reads,
+            vec!["/proj/api/does-not-exist.json".to_string()],
+            "the missing spec must be reported so its later appearance re-runs the hook"
+        );
     }
 }

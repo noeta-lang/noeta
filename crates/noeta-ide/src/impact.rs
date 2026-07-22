@@ -278,6 +278,14 @@ pub struct ImpactSession {
     entry_uri: String,
     /// Member URI → the source text the last run observed (the diff baseline).
     baselines: HashMap<String, String>,
+    /// The **non-`.noe` files the linked program's expansion hooks reported reading** — an
+    /// `@openapi` spec, say — canonicalized. Captured at each rebaseline from
+    /// [`noeta_db::LinkedProgram::reads`]. The watcher watches these alongside the members so that
+    /// editing (or creating) one re-runs the client generation; `impact_of_changes` treats a change
+    /// to one as [`Impact::All`], because a spec change invalidates generated members that the
+    /// `.noe`-vocabulary diff cannot otherwise see. Empty for the common case of no expanding
+    /// directive.
+    reads: Vec<PathBuf>,
 }
 
 impl ImpactSession {
@@ -295,6 +303,7 @@ impl ImpactSession {
             dir,
             entry_uri,
             baselines: HashMap::new(),
+            reads: Vec::new(),
         };
         session.rebaseline();
         session
@@ -312,6 +321,46 @@ impl ImpactSession {
         let sources = self.scan();
         self.baselines = sources.iter().cloned().collect();
         self.cache = workspace::sync(&mut self.db, self.cache.take(), sources);
+        self.reads = self.baseline_reads();
+    }
+
+    /// The files the linked program's expansion hooks reported reading, canonicalized — the
+    /// non-`.noe` inputs the watcher must watch. Empty unless the project links and carries an
+    /// expanding directive. Errors (unlinkable project, unreadable path) degrade to "no extra reads"
+    /// rather than failing the session: the `.noe` watch still works, and the next successful link
+    /// recaptures them.
+    fn baseline_reads(&self) -> Vec<PathBuf> {
+        let Some(cache) = &self.cache else {
+            return Vec::new();
+        };
+        let Some(entry_index) = cache.source_uris.iter().position(|u| *u == self.entry_uri) else {
+            return Vec::new();
+        };
+        // Cheap when nothing changed — salsa memoizes the link. Reads survive even a failed link
+        // (an `@openapi` whose spec is missing still reported the path), which is what lets creating
+        // that spec re-trigger the watcher.
+        let link = noeta_db::linked_from(&self.db, cache.workspace, cache.programs[entry_index]);
+        link.reads
+            .iter()
+            .map(|r| {
+                // A read is resolved against the hook's `source_dir`, which in the editor's link is
+                // the source's *URI* (`file://…`), not a plain path — because the salsa workspace
+                // names its members by URI. Fold it back to a filesystem path so it can be compared
+                // to the canonical paths `notify` reports, then canonicalize.
+                let p = if r.starts_with("file://") {
+                    uri_to_path(r).unwrap_or_else(|| PathBuf::from(r))
+                } else {
+                    PathBuf::from(r)
+                };
+                p.canonicalize().unwrap_or(p)
+            })
+            .collect()
+    }
+
+    /// The non-`.noe` files this session watches on the expansion hooks' behalf (canonicalized) —
+    /// the watcher folds these into its watch set so a spec edit reaches [`impact_of_changes`].
+    pub fn reads(&self) -> &[PathBuf] {
+        &self.reads
     }
 
     /// The impact of a change burst (`changed` — the debounced paths the watcher collected)
@@ -345,6 +394,18 @@ impl ImpactSession {
         let mut seen = BTreeSet::new();
         for path in changed {
             let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            // A file an expansion hook read (an `@openapi` spec) is not a project member, but its
+            // change still invalidates the generated members. The impact diff speaks the `.noe`
+            // vocabulary and cannot narrow a spec change, so rerun everything — the honest,
+            // correct answer, and the whole reason the watcher was taught to watch this file.
+            if self.reads.iter().any(|r| *r == canon) {
+                return Impact::All {
+                    reason: format!(
+                        "a spec read by an expanding directive changed ({})",
+                        canon.display()
+                    ),
+                };
+            }
             let uri = path_to_uri(&canon);
             let Some(index) = cache.source_uris.iter().position(|u| *u == uri) else {
                 return Impact::All {
@@ -486,6 +547,16 @@ impl ImpactSession {
             })
             .collect()
     }
+}
+
+/// The non-`.noe` files an entry's expansion hooks read — the spec-watch set for the `run`/`serve`
+/// watch modes, which build no [`ImpactSession`] of their own (only `test`/`bench` narrow by
+/// impact). Links once and reports the reads, discarding the session. Empty when the entry cannot
+/// anchor a project or declares no expanding directive.
+pub fn spec_reads(entry: &Path) -> Vec<PathBuf> {
+    ImpactSession::new(entry)
+        .map(|s| s.reads().to_vec())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

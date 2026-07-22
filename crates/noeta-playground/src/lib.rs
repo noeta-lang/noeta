@@ -252,10 +252,26 @@ mod tests {
         // One buffer exercises all four smarts; positions are 0-based (line, UTF-16 character).
         let text = "fn add(a: int, b: int): int {\n  return a + b;\n}\n\necho add(1, 2);";
 
-        // Hover over `a` in `a + b` (line 1, col 9): its type.
+        // Hover over `a` in `a + b` (line 1, col 9): a bare-type hover — the composed Markdown
+        // carries the type.
         let hover = parsed(&hover_source(text, 1, 9));
         assert_eq!(hover["found"], true);
-        assert_eq!(hover["type"], "int");
+        assert!(
+            hover["value"].as_str().unwrap().contains("int"),
+            "value: {}",
+            hover["value"]
+        );
+
+        // Hover over `add` at its call site (line 4, col 5): the composed hover now shows the
+        // callable's full signature, not just its return type — the whole point of routing the
+        // playground through `hover_markdown`.
+        let call_hover = parsed(&hover_source(text, 4, 5));
+        assert_eq!(call_hover["found"], true);
+        assert!(
+            call_hover["value"].as_str().unwrap().contains("fn add("),
+            "value: {}",
+            call_hover["value"]
+        );
 
         // Definition of `add` at the call site (line 4, col 5) → the declaration on line 0.
         let def = parsed(&definition_source(text, 4, 5));

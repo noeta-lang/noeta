@@ -174,6 +174,13 @@ pub struct LinkedProgram {
     /// expansion ever produced, because salsa 0.27 cannot delete an input (see [`release_source`]).
     /// Consumers borrow the text out of the memo for as long as they borrow the db.
     pub expansions: Vec<noeta_loader::ExpandedSource>,
+    /// The **non-`.noe` files the expansion hooks reported reading** (an OpenAPI spec, say) — the
+    /// editor's rebuild trigger for foreign inputs. Populated whether the link **succeeded or
+    /// failed**: a hook that failed because its spec was missing still reported the path, and that
+    /// is exactly the read that must be watched, so that *creating* the file re-runs the expansion.
+    /// A consumer (`ImpactSession`) watches these alongside the `.noe` members. Empty for the
+    /// overwhelming majority of programs, which declare no expanding directive.
+    pub reads: Vec<String>,
 }
 
 /// Give a foreign-result newtype the two traits salsa needs for a memoized output, both in
@@ -610,7 +617,8 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         .cloned()
         .collect();
     if !entry_diags.is_empty() {
-        return unlinked(entry_diags);
+        // No reads: expansion has not run (the entry did not even parse).
+        return unlinked(entry_diags, Vec::new());
     }
 
     let entry_source = source_of(db, entry);
@@ -670,6 +678,8 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
                 .iter()
                 .flat_map(|m| m.diagnostics.iter().cloned())
                 .collect(),
+            // No reads: expansion has not run (a dependency module failed to parse).
+            Vec::new(),
         );
     }
 
@@ -706,7 +716,8 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         source_maps,
     } = match result {
         Ok(linkage) => linkage,
-        Err(load) => return unlinked(load.into_iter().map(|d| d.diagnostic).collect()),
+        // The link itself failed (before expansion). No reads yet.
+        Err(load) => return unlinked(load.into_iter().map(|d| d.diagnostic).collect(), Vec::new()),
     };
 
     // Compile-time directive expansion, through the loader's single decision point. The sources are
@@ -736,29 +747,34 @@ pub fn linked_from(db: &dyn salsa::Database, ws: Workspace, entry: SourceProgram
         edition_of(db, entry),
         &noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned()),
     );
-    match expansion {
-        // A failed expansion fails the link, exactly as it does under `noeta run`/`noeta check` —
-        // silently checking a program without the members it declares is the divergence this whole
-        // seam exists to prevent. The E0062 diagnostic blames the directive's own span, in the user's
-        // file, so the per-document view already renders it.
-        Err(load) => unlinked(load.into_iter().map(|d| d.diagnostic).collect()),
-        // `reads` — the non-`.noe` files the hooks read (an OpenAPI spec, say) — is the batch
-        // compiler's rebuild trigger. The editor drops it: its file watching is over `.noe` members,
-        // so editing a spec does not yet re-run the expansion. A known gap of the watcher, not of
-        // this seam; closing it means teaching the document store to watch foreign paths.
-        Ok((expansions, _reads)) => LinkedProgram {
-            program: Ok(program),
-            expansions,
-        },
+    let (expansions, reads, diagnostics) = expansion;
+    // A failed expansion fails the link, exactly as it does under `noeta run`/`noeta check` —
+    // silently checking a program without the members it declares is the divergence this whole seam
+    // exists to prevent. The E0062 diagnostic blames the directive's own span, in the user's file,
+    // so the per-document view already renders it. But the `reads` survive the failure and travel
+    // even here: the commonest failure is a spec that does not exist *yet*, and the file's later
+    // appearance can only re-run the expansion if the watcher was told to watch it.
+    if !diagnostics.is_empty() {
+        return unlinked(
+            diagnostics.into_iter().map(|d| d.diagnostic).collect(),
+            reads,
+        );
+    }
+    LinkedProgram {
+        program: Ok(program),
+        expansions,
+        reads,
     }
 }
 
 /// A link that produced no program: the diagnostics, and no expansions (nothing was generated —
-/// expansion runs only over a program that linked).
-fn unlinked(diagnostics: Vec<Diagnostic>) -> LinkedProgram {
+/// expansion runs only over a program that linked). `reads` may still be non-empty when the failure
+/// *was* the expansion — a hook that read a spec and then failed still reported the spec.
+fn unlinked(diagnostics: Vec<Diagnostic>, reads: Vec<String>) -> LinkedProgram {
     LinkedProgram {
         program: Err(diagnostics),
         expansions: Vec::new(),
+        reads,
     }
 }
 
