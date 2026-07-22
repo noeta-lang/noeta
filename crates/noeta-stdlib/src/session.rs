@@ -106,9 +106,45 @@ impl Keyring {
 pub struct Session {
     pub data: BTreeMap<String, String>,
     pub dirty: bool,
+    /// An opaque server-side id, out-of-band from the data.
+    ///
+    /// The stateless codec (`open`/`attach`/`encode`/`decode`) never sets or reads it — a signed
+    /// cookie carries the whole session, so it needs no external key. It exists for a **stored**
+    /// backend (`para/aether-db`), where the cookie carries only this small id and the data lives in
+    /// a row: the store tags a loaded `Session` with the row's id in `open`, reads it back in
+    /// `attach`, and thereby knows *which* row to update or delete. Two properties make it work:
+    ///
+    /// * It is **not** part of `data`, so it never shows through `data()` and never counts toward
+    ///   the cookie-size ceiling the data is bounded by.
+    /// * It **survives `clear()`** — deliberately, because a logout empties the data and the store
+    ///   still needs the id to delete the exact row. An in-data reserved key could not do this: the
+    ///   very act of clearing would erase the handle needed to revoke server-side.
+    pub id: Option<String>,
 }
 
 impl Session {
+    /// A clean (unchanged) session carrying `data` and no server-side id — the inverse of `data()`.
+    ///
+    /// This is how a **stored** backend rebuilds the `Session` currency from a row it read, so a
+    /// handler consumes a stored session with exactly the `get`/`set` it uses on a cookie one. It is
+    /// clean because a freshly loaded session has not been changed by the handler yet, and `attach`
+    /// keys off `dirty` — a pure read must not provoke a needless row write.
+    pub fn of(data: BTreeMap<String, String>) -> Session {
+        Session {
+            data,
+            dirty: false,
+            id: None,
+        }
+    }
+
+    /// A copy tagged with an opaque server-side `id` (see the field). Tagging is metadata, not a
+    /// data change, so it does **not** mark the session dirty.
+    pub fn with_id(&self, id: &str) -> Session {
+        let mut next = self.clone();
+        next.id = Some(id.to_string());
+        next
+    }
+
     pub fn with(&self, name: &str, value: &str) -> Session {
         let mut next = self.clone();
         next.data.insert(name.to_string(), value.to_string());
@@ -133,6 +169,9 @@ impl Session {
         Session {
             data: BTreeMap::new(),
             dirty: true,
+            // The server-side id outlives the data on purpose: a logout empties the session but a
+            // stored backend still needs the id to delete the row it points at.
+            id: self.id.clone(),
         }
     }
 }

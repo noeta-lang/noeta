@@ -1,0 +1,104 @@
+// DB-backed, revocable sessions wired into a para/aether app (the para/aether-db companion package).
+//
+// This is the STORED upgrade to std.session's stateless `CookieSessions`: the cookie carries only a
+// small opaque id and the session lives in a `sessions` row, so a session can outgrow a browser's
+// ~4 KB cookie ceiling AND a logout is a real server-side revocation — the row is deleted, so a
+// stolen cookie no longer resolves. The opt-in is one manifest line (see noeta.toml): this app adds
+// `para/aether-db` to the `para` scope it already lists aether and para/db under.
+//
+// The store is injected as a `dyn SessionStore` service (aether's DI): `app.bind("SessionStore", …)`
+// registers it, and every handler parameter typed `dyn SessionStore` receives it. Because the
+// currency is std.session's `Session`, these handlers are byte-for-byte what they would be over the
+// stateless store — swapping the bound line for a `CookieSessions` changes nothing above it.
+//
+// Driven here through `app.serve_request` — aether's non-blocking dispatch core — with the requests a
+// live server would deliver fabricated by an http client. That is deliberate: a real `server.serve`
+// blocks forever on a socket (never do that in a test), and the string-testable `dispatch_request`
+// path threads no `Request`, so it cannot deliver the cookies a session round-trip needs. A deployed
+// app just calls `server.serve(port, app.serve_request)`; the handlers are identical either way.
+//
+// expect: stdout "you are anonymous"
+// expect: stdout "logged in"
+// expect: stdout "session rows after login: 1"
+// expect: stdout "you are ada"
+// expect: stdout "logged out"
+// expect: stdout "session rows after logout: 0"
+// expect: exit 0
+
+use para.aether.{App, Get, Post, SessionStore}
+use para.db
+use para.aether_db.DbSessions
+use std.http.server
+use std.http.client
+use std.http.{Request, Response}
+
+// One controller, three routes, each reading or writing the INJECTED `dyn SessionStore`.
+class Sessions {
+    fn new(): Sessions {
+        return Sessions {}
+    }
+
+    // Read the session — who is logged in? No write, so a returning read costs no row write.
+    #[Get("/whoami")]
+    fn whoami(req: Request, store: dyn SessionStore): Response {
+        s = store.open(req)
+        who = s.get("user") ?? "anonymous"
+        return store.attach(server.response(200, "you are " ~ who), s)
+    }
+
+    // Log in — write the session: the store mints an opaque id, writes the row, sets the id cookie.
+    #[Post("/login")]
+    fn login(req: Request, store: dyn SessionStore): Response {
+        s = store.open(req).set("user", "ada")
+        return store.attach(server.response(200, "logged in"), s)
+    }
+
+    // Log out — clear the session: the store DELETES the row and expires the cookie. Revocable.
+    #[Post("/logout")]
+    fn logout(req: Request, store: dyn SessionStore): Response {
+        s = store.open(req).clear()
+        return store.attach(server.response(200, "logged out"), s)
+    }
+}
+
+// --- Wire the app. -----------------------------------------------------------------------------
+
+conn = db.connect("sqlite::memory:")
+conn.migrate("migrations") // create the `sessions` table from migrations/ beside this file
+
+app = App.new()
+app.register("Sessions", Sessions.new())
+// The opt-in stored store, bound under the interface a `dyn SessionStore` handler param resolves by.
+// Swap this one line for a `CookieSessions` and every handler above is unchanged.
+app.bind("SessionStore", DbSessions.new(conn, "sid", 3600, false))
+app.discover()
+
+// A client used ONLY to fabricate the `Request` values a live server would otherwise deliver.
+http = client.new("http://app")
+
+// 1. Anonymous — no cookie yet.
+r1 = http.prepare("GET", "http://app/whoami")
+echo app.serve_request(r1).body()
+
+// 2. Log in — writes the session row and sets the id cookie.
+r2 = http.prepare("POST", "http://app/login", "")
+echo app.serve_request(r2).body()
+
+after_login = conn.query("SELECT id FROM sessions", [])
+echo "session rows after login: ${after_login.len()}"
+
+// The opaque id the store minted — read straight from the row (the cookie carries exactly this).
+sid = after_login[0]["id"].as<string>() ?? ""
+
+// 3. Return with the cookie — the stored session rehydrates.
+r3 = http.prepare("GET", "http://app/whoami", "", {"cookie": "sid=" ~ sid})
+echo app.serve_request(r3).body()
+
+// 4. Log out — the row is deleted (revocable), the cookie expired.
+r4 = http.prepare("POST", "http://app/logout", "", {"cookie": "sid=" ~ sid})
+echo app.serve_request(r4).body()
+
+after_logout = conn.query("SELECT id FROM sessions", [])
+echo "session rows after logout: ${after_logout.len()}"
+
+conn.close()
