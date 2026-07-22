@@ -122,7 +122,48 @@ const HANDLE: ExtClass = ExtClass {
             is_mut: true,
         },
     ],
+    // A native **instance method** (native-extensibility S3 / Pass 2a): `h.describe()` reads the
+    // instance's `label` field off the marshalled receiver and returns a rendered string. Proves a
+    // class-kind object's method call routes to the class's native `dispatch` in both backends.
+    methods: &[ExtFn {
+        name: "describe",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    }],
+    dispatch: handle_dispatch,
+    ..ExtClass::DEFAULTS
 };
+
+/// `Handle`'s instance-method dispatch — the native implementation reached by `h.describe()`. The
+/// receiver crosses as the whole instance (`NativeValue::Instance`), so the method reads its `label`
+/// field by name, exactly as a native fn reads a class value passed arg-IN.
+fn handle_dispatch(
+    recv: &NativeValue,
+    method: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match method {
+        "describe" => {
+            let label = match recv {
+                NativeValue::Instance { fields, .. } => fields
+                    .iter()
+                    .find(|(k, _)| k == "label")
+                    .and_then(|(_, v)| match v {
+                        NativeValue::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            Ok(NativeOut::Str(format!("handle:{label}")))
+        }
+        _ => Err(StdError {
+            kind: noeta_stdlib::ErrorKind::UnknownName,
+            message: format!("no method `{method}`"),
+        }),
+    }
+}
 
 /// A pure-data class: all-public fields, **source-constructible** (`Point { x, y }`) — proves the
 /// backend `TypeInfo::Class`/`TypeDef` seeding and reference (aliasing) semantics without any native
@@ -144,6 +185,7 @@ const POINT: ExtClass = ExtClass {
             is_mut: true,
         },
     ],
+    ..ExtClass::DEFAULTS
 };
 
 const FX_CLASSES: &[ExtClass] = &[HANDLE, POINT];
@@ -344,6 +386,30 @@ fn native_classes_construct_alias_and_round_trip_identically_on_both_backends() 
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let stdout = run_both_agree(IDENTITY_PROGRAM);
     assert_eq!(stdout, "alpha\nlinked\ntrue\nfalse\n3\n10\n13\n99\n");
+}
+
+/// **Pass 2a — a native class's INSTANCE METHOD dispatches to native code.** `h.describe()` on a
+/// native `Handle` has no hoisted `.noe` body; both backends' `CallMethod` Object arm route it to
+/// the class's native `dispatch`, which reads the instance's `label` field off the marshalled
+/// receiver. The two backends must build the identical value — that is what proves the Object-arm
+/// native-class branch matches on both sides (the ExtType extern seam's class twin).
+const METHOD_PROGRAM: &str = r#"
+use fx.kit
+use fx.Handle
+
+// A native method call on a native class instance dispatches to `handle_dispatch`.
+h = kit.open("m")
+echo h.describe()
+
+// The same field, read directly, for parity with what the method read.
+echo h.label
+"#;
+
+#[test]
+fn native_class_method_dispatches_to_native_on_both_backends() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let stdout = run_both_agree(METHOD_PROGRAM);
+    assert_eq!(stdout, "handle:m\nm\n");
 }
 
 /// **Case 3 — destructor fires on linear collection.** A single `Handle` goes out of scope at program

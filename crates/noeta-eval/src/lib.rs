@@ -2532,25 +2532,31 @@ impl Interpreter {
             if name == "to_json" && args.is_empty() && object.def.derives_tojson {
                 return Ok(Value::Str(value_to_json(&receiver)));
             }
-            return match object.def.methods.get(name) {
-                Some(method) => {
-                    self.call_method_on(&Rc::clone(object), &Rc::clone(method), args, span)
-                }
-                // The runtime member-call fallback (the field-access-then-call desugar's `dyn`
-                // path): no method `name`, but the object HAS a field `name` — `obj.f(args)`
-                // means `(obj.f)(args)`, so call the field's value. The same order the checker
-                // pins statically (a method wins, the field is consulted only on a miss), and the
-                // same route the lowered `Field` + `Call` takes — a non-callable field value
-                // raises the indirect-call E0007 ("`X` is not callable"), identically in both
-                // backends. A type with neither stays the runtime E0005.
-                None => match object.field(name) {
-                    Some(value) => self.call(value, args, span),
-                    None => Err(self.runtime_error(
-                        DiagnosticCode::UnknownName,
-                        span,
-                        format!("type `{}` has no method `{name}`", object.def.name()),
-                    )),
-                },
+            if let Some(method) = object.def.methods.get(name) {
+                return self.call_method_on(&Rc::clone(object), &Rc::clone(method), args, span);
+            }
+            // A native class's instance method (native-extensibility S3 / Pass 2a): no hoisted
+            // `.noe` method by this name, but the object's shape names a registered native class
+            // that declares it — route to the class's native `dispatch` (the Object-arm twin of the
+            // extern-method seam). A user class always resolves through the method table above, so
+            // only a genuine native class reaches this branch.
+            if self.reg().find_class_method(object.def.name(), name).is_some() {
+                return self.call_native_class_method(&receiver, name, args, span);
+            }
+            // The runtime member-call fallback (the field-access-then-call desugar's `dyn`
+            // path): no method `name`, but the object HAS a field `name` — `obj.f(args)`
+            // means `(obj.f)(args)`, so call the field's value. The same order the checker
+            // pins statically (a method wins, the field is consulted only on a miss), and the
+            // same route the lowered `Field` + `Call` takes — a non-callable field value
+            // raises the indirect-call E0007 ("`X` is not callable"), identically in both
+            // backends. A type with neither stays the runtime E0005.
+            return match object.field(name) {
+                Some(value) => self.call(value, args, span),
+                None => Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("type `{}` has no method `{name}`", object.def.name()),
+                )),
             };
         }
         // `status.label()` — an enum instance method (the unified body, object-model slice 3). The
@@ -3298,6 +3304,42 @@ impl Interpreter {
             }
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
+        }
+    }
+
+    /// Dispatch a **native class**'s instance method (native-extensibility S3 / Pass 2a) — the
+    /// [`ExtClass`] analogue of [`Self::call_extern_method`]. The receiver is a class-kind object;
+    /// it crosses to the native `dispatch` as the whole instance marshalled to a
+    /// [`NativeValue::Instance`] (its fields by name), the same shape a class value takes arg-IN, so
+    /// the method reads a field off it. Host threaded in, result materialized — mirrors the VM's
+    /// `call_native_class_method`, so the two backends agree by construction.
+    fn call_native_class_method(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        // Bound once (IR3): `&'static`, so it survives the `&mut self` host borrow below.
+        let reg = self.reg();
+        let class = match recv {
+            Value::Object(obj) => reg.resolve_class(obj.def.name()),
+            _ => None,
+        };
+        let Some(class) = class else {
+            return Err(self.runtime_error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("no native class method `{name}`"),
+            ));
+        };
+        let recv_native = marshal_native_arg(recv);
+        let nargs: Vec<noeta_stdlib::NativeValue> = args.iter().map(marshal_native_arg).collect();
+        match (class.dispatch)(&recv_native, name, &mut *self.host, &nargs) {
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => {
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
         }
     }
 
