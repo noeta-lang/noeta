@@ -1634,6 +1634,21 @@ impl Checker {
         type_name: &str,
         env: &mut Env,
     ) -> Type {
+        // Resolve the source-written name to its **canonical record key** (native-extensibility S2):
+        // a native class is seeded under its *qualified* identity (`geo.Point`), so a source literal
+        // `Point { … }` must first map its short name through the `use`-import alias — exactly as
+        // native-enum construction resolves `Hue.Red`. A user type of the same short name is in
+        // `records` directly (a direct hit wins), and an ordinary user construction is unaffected.
+        let canonical: String = if self.symbols.records.contains_key(type_name) {
+            type_name.to_string()
+        } else {
+            self.imports
+                .extern_types
+                .get(type_name)
+                .cloned()
+                .unwrap_or_else(|| type_name.to_string())
+        };
+        let type_name: &str = &canonical;
         // `@validated` (validation arc): a `@validated` type may only be built from OUTSIDE
         // its own `impl`/methods through a validating constructor. A bare literal or a
         // record-update spread outside the type would bypass the invariant, so it is E0060.

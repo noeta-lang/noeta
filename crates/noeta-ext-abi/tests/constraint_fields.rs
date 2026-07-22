@@ -322,6 +322,61 @@ const TABLE: &[Row] = &[
         "value",
         Data(Anchor(EVAL_LIB, "resolve_enum(&e.enum_name)")),
     ),
+    // --- ExtClass / ExtField (native-extensibility S2) ------------------------------------------
+    Row(
+        "ExtClass",
+        "name",
+        Data(Anchor(REGISTRY, "pub fn qualified(")),
+    ),
+    Row(
+        "ExtClass",
+        "namespace",
+        Data(Anchor(REGISTRY, "pub fn qualified(")),
+    ),
+    Row(
+        "ExtClass",
+        "fields",
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_classes(")),
+    ),
+    Row(
+        "ExtField",
+        "name",
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_classes(")),
+    ),
+    Row(
+        "ExtField",
+        "ty",
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_classes(")),
+    ),
+    // `is_public` states the RULE the checker enforces on field access: a private field read/set
+    // from outside its class is E0035. `seed_ext_classes` reads it into `symbols.private_fields`
+    // (the enforced table `field_visible`/`report_private_field` consult); no shipped extension
+    // declares a native class, so a fixture is the only exerciser. Both directions matter.
+    Row(
+        "ExtField",
+        "is_public",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "fn seed_ext_classes("),
+            Anchor(
+                EMBED_CONSTRAINTS,
+                "fn a_native_class_field_visibility_is_enforced(",
+            ),
+        ),
+    ),
+    // `is_mut` states the RULE the checker enforces on field assignment: writing a non-`mut` field
+    // is E0033. `seed_ext_classes` reads it into `symbols.mut_fields` (the enforced table the
+    // field-assignment check consults); a fixture is the only exerciser.
+    Row(
+        "ExtField",
+        "is_mut",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "fn seed_ext_classes("),
+            Anchor(
+                EMBED_CONSTRAINTS,
+                "fn a_native_class_field_mutability_is_enforced(",
+            ),
+        ),
+    ),
     // --- Method bundles -------------------------------------------------------------------------
     // What a type binding to the bundle must look like, validated at the `impl` site.
     Row(
@@ -633,6 +688,8 @@ const SCANNED: &[(&str, &[&str])] = &[
             "ExtType",
             "ExtEnum",
             "ExtVariant",
+            "ExtClass",
+            "ExtField",
             "PackedConstraint",
             "BundleFn",
             "ExtBundle",

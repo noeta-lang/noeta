@@ -131,6 +131,21 @@ fn ext_enum_type_info(en: &noeta_ext_abi::registry::ExtEnum) -> TypeInfo {
     }
 }
 
+/// Build the compiler's constructible-type record for a native-declared class (native-extensibility
+/// S2), so `Point { x: 1, y: 2 }` lowers to `MakeStruct` with a **class-kind** shape exactly like a
+/// `.noe` class. Field order comes straight from the [`ExtClass`] (the same order the checker seeds
+/// and a native `NativeOut::Instance` supplies), so a source-constructed instance and a
+/// native-constructed one share the layout and interchange. A native class declares no methods here
+/// (this slice's classes are field + destructor only) and no `.noe` `destruct` block — its
+/// destructor is the extern-handle field's Rust `Drop`, run by the collector on free.
+fn ext_class_type_info(cl: &noeta_ext_abi::registry::ExtClass) -> TypeInfo {
+    let fields = cl.fields.iter().map(|f| f.name.to_string()).collect();
+    TypeInfo::Class {
+        fields,
+        fns: HashMap::new(),
+    }
+}
+
 /// Everything that varies a checked compile, so callers configure one entry point
 /// ([`compile_with`] / [`compile_session_with`]) instead of this family growing a
 /// `_with_isolates_and_debug_and_registry` combinatorial tail (audit-3 finding 9 — the
@@ -1125,6 +1140,16 @@ impl ModuleCompiler {
                                 if let Some(en) = self.registry.find_enum_qualified(&qualified) {
                                     self.types
                                         .insert(imported.name.clone(), ext_enum_type_info(en));
+                                }
+                            }
+                            // A native class (`use geo.Point`, native-extensibility S2): register it
+                            // as a **constructible** class-kind type handle keyed by the imported
+                            // short name, so `Point { … }` lowers exactly like a `.noe` class. The
+                            // registry (keyed by qualified identity) is the single source of fields.
+                            UseKind::ExtClass(qualified) => {
+                                if let Some(cl) = self.registry.find_class_qualified(&qualified) {
+                                    self.types
+                                        .insert(imported.name.clone(), ext_class_type_info(cl));
                                 }
                             }
                             _ => {
