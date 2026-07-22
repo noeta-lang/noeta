@@ -102,6 +102,16 @@ pub(crate) fn scalar_to_value(scalar: noeta_stdlib::Scalar) -> Value {
     }
 }
 
+/// Lift a numeric reduction result (packed-reductions arc) into a VM value. An integer (`int`/`IntN`,
+/// erased) becomes `Value::int`; the float widths keep their runtime tag.
+pub(crate) fn rednum_to_value(rn: noeta_stdlib::RedNum) -> Value {
+    match rn {
+        noeta_stdlib::RedNum::Int(i) => Value::int(i),
+        noeta_stdlib::RedNum::Float(f) => Value::float(f),
+        noeta_stdlib::RedNum::F32(f) => Value::f32(f),
+    }
+}
+
 /// Lift a native-extension [`noeta_stdlib::NativeOut`] result back into a VM value, supplying the
 /// result *shape* for an object result from the function's [`RetTy`] (the same shape as the named
 /// argument — e.g. `vec.add(v, w)` builds a value shaped like `v`).

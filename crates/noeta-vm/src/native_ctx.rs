@@ -41,7 +41,7 @@ fn packed_view(schema: &noeta_object::PackedSchema, buffer_len: usize) -> Packed
     }
 }
 
-fn packed_field(kind: &noeta_object::PackedKind) -> PackedField {
+pub(crate) fn packed_field(kind: &noeta_object::PackedKind) -> PackedField {
     use noeta_object::PackedKind;
     match kind {
         PackedKind::Int => PackedField::Int,
