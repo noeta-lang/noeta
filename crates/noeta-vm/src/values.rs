@@ -57,6 +57,22 @@ pub(crate) fn marshal_native_arg(value: Value) -> noeta_stdlib::NativeValue {
             }
             None => NativeValue::Opaque(value.type_name()),
         }
+    } else if value.is_enum() {
+        // A native enum value crossing INTO a dispatch (native-extensibility S1): the full variant
+        // (name + case + declaration index + payload), so a native fn can receive a variant a user
+        // matched or a native call produced — not the lossy `Opaque` the fallback would give.
+        // Mirrors the tree-walker's projection; the payload marshals recursively.
+        let shape = value.shape().expect("an enum value has a shape");
+        let fields = value
+            .enum_data()
+            .map(|d| d.iter().map(|&e| marshal_native_arg(e)).collect())
+            .unwrap_or_default();
+        NativeValue::Variant {
+            enum_name: shape.name.clone(),
+            variant: shape.variant.clone().unwrap_or_default(),
+            variant_index: shape.variant_index.unwrap_or(0),
+            fields,
+        }
     } else {
         NativeValue::Opaque(value.type_name())
     }
@@ -153,6 +169,23 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Some(inner) => make_some(materialize_native(*inner)),
         NativeOut::Ok(inner) => make_ok(materialize_native(*inner)),
         NativeOut::Err(inner) => make_err(materialize_native(*inner)),
+        // A native-declared enum value (native-extensibility S1): a REAL enum with a fresh interned
+        // shape carrying the enum's short name + variant + declaration index, so it is
+        // match-exhaustive and differential-identical to the tree-walker's `EnumValue`. The payload
+        // is materialized recursively (a payload-carrying variant nests). Shapes match by
+        // name+variant, so this interchanges with a directly-constructed shape.
+        NativeOut::Variant {
+            enum_name,
+            variant,
+            variant_index,
+            fields,
+        } => {
+            let shape = noeta_object::intern_shape(
+                Shape::enum_variant(enum_name, variant, Vec::new(), false)
+                    .with_variant_index(variant_index),
+            );
+            Value::enum_value(shape, fields.into_iter().map(materialize_native).collect())
+        }
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the VM's shape table), not here; async work is
         // ticketed at the dispatch return (extern-types X5), never materialized.
@@ -716,6 +749,10 @@ impl Vm<'_> {
             // `Result.Err(JsonError)`) carries a path-rich extern. A recipe decode of `T` itself
             // never yields one; it reaches here only inside a wrapper's `Err`.
             NativeOut::Extern(e) => MatOut::Value(Value::extern_value(e)),
+            // A native enum value (native-extensibility S1) — not decoded from a JSON recipe, but a
+            // native `Result`/`Option` wrapper may carry one, so materialize it through the
+            // ordinary (non-recipe) path.
+            out @ NativeOut::Variant { .. } => MatOut::Value(materialize_native(out)),
             // `Object` (shape-from-argument) and bulk scalar vectors (a packed reduction's result,
             // N3.4) are never produced by a recipe decode (a `TypeRecipe` names only JSON shapes).
             NativeOut::Object(_) | NativeOut::Spawn(_) | NativeOut::Scalars(_) => {

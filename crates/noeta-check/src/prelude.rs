@@ -35,6 +35,50 @@ impl Checker {
         self.register_tier_prelude();
         self.register_extension_attributes();
         self.seed_extern_type_traits();
+        self.seed_ext_enums();
+    }
+
+    /// Seed every installed extension's declared **native enums** (native-extensibility S1) into the
+    /// checker's symbol tables, keyed by **qualified identity** (`std.http.SameSite`) — so a native
+    /// enum is indistinguishable from a `.noe` enum to every downstream consumer (exhaustiveness
+    /// E0011, variant-pattern binding, `is`/construction typing). Runs eagerly at prelude time
+    /// (unlike the lazily-resolved extern types), because those consumers read `symbols.enums`
+    /// directly, before any lookup. Mirrors the collect pass's `Stmt::Enum` arm and the built-in
+    /// `register_cancelled` / `register_type_enum`; a user declaration of the same qualified name
+    /// would shadow it (collect runs after prelude).
+    pub(crate) fn seed_ext_enums(&mut self) {
+        // Snapshot the qualified declarations first so the immutable registry borrow is released
+        // before the `&mut self` symbol-table writes (the reactive/tier seeders take the same shape).
+        let decls: Vec<(String, Vec<VariantInfo>)> = self
+            .reg()
+            .enums()
+            .map(|en| {
+                let qualified = en.qualified();
+                let variants = en
+                    .variants
+                    .iter()
+                    .map(|v| VariantInfo {
+                        // A variant's payload types (accurate, like a struct's fields) — one source
+                        // of truth for pattern-binding and the `Send`/destructor classifiers. A
+                        // fieldless or backed variant has none.
+                        name: v.name.to_string(),
+                        fields: v
+                            .fields
+                            .iter()
+                            .map(|f| stdlib::sig_to_type(self.reg(), f))
+                            .collect(),
+                    })
+                    .collect();
+                (qualified, variants)
+            })
+            .collect();
+        for (qualified, variants) in decls {
+            self.symbols.enums.insert(qualified.clone(), variants);
+            self.symbols.types.insert(qualified.clone());
+            self.symbols
+                .type_kinds
+                .insert(qualified, noeta_types::TypeKind::Enum);
+        }
     }
 
     /// Seed the built-in traits that **extern types** declare through the extension registry (p2p

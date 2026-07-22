@@ -58,6 +58,18 @@ pub enum NativeValue {
     /// [`crate::ExternValue::clone_box`]. Extern arguments are never a hot path (their producers
     /// are host/IO-shaped), so by-value marshalling matches the rest of this view.
     Extern(crate::ExternBox),
+    /// A native-declared language **enum value** (native-extensibility S1) — the argument view of a
+    /// real [`Value::Enum`], so a dispatch may receive a variant a user matched or a native call
+    /// produced (`describe(color: Color)`). `enum_name` is the enum's **short** name (the runtime
+    /// identity, matching how a value carries it), `variant` the case, and `fields` its positional
+    /// payload deeply marshalled (empty for a fieldless/backed variant). The twin of
+    /// [`NativeOut::Variant`] on the return path.
+    Variant {
+        enum_name: String,
+        variant: String,
+        variant_index: u32,
+        fields: Vec<NativeValue>,
+    },
 }
 
 /// A backend-agnostic **result** the backend materializes into its own `Value`.
@@ -111,6 +123,21 @@ pub enum NativeOut {
     /// A registered extern-type value (extern-types X1) — `Uuid`, a `FileHandle`, … Each
     /// backend wraps it in its single extern hosting variant.
     Extern(crate::ExternBox),
+    /// A native-declared language **enum value** (native-extensibility S1) — a REAL enum the
+    /// backend materializes (a `Value::Enum` / interned enum shape), NOT a string shortcut, so a
+    /// user `match` over it is exhaustive (E0011). `enum_name` is the enum's **short** name (the
+    /// runtime identity a pattern's `type_name` compares against and both backends stamp on the
+    /// value), `variant` the case, `variant_index` the declaration index (what a derived
+    /// `Comparable` orders by, and what keeps the two backends' shapes identical), and `fields` the
+    /// positional payload, each itself a [`NativeOut`] so a payload-carrying variant nests. A
+    /// fieldless or backed variant carries an empty `fields`. The dispatch names the enum by its
+    /// short name; the checker's qualified identity is a separate, compile-time concern.
+    Variant {
+        enum_name: String,
+        variant: String,
+        variant_index: u32,
+        fields: Vec<NativeOut>,
+    },
     /// Async WORK instead of a value (extern-types X5): the backend tickets the descriptor on
     /// its executor (`spawn_ext`) and hands back a future — intercepted at the dispatch return,
     /// never reaching `materialize`. This is how an extension implements an async function
@@ -725,6 +752,106 @@ impl ExtType {
     }
 }
 
+// --- Native-declared enums (native-extensibility S1) ---------------------------------------------
+
+/// A first-class language **enum** contributed by an extension (native-extensibility S1): a real
+/// enum whose variants a user `match`es exhaustively (E0011), whose values a native fn/method
+/// returns and receives as REAL enum values — not opaque handles ([`ExtType`]) and not string
+/// shortcuts. Seeded **eagerly** at prelude time (unlike the lazily-resolved [`ExtType`]) because
+/// exhaustiveness, member access, and construction all read the checker's symbol tables directly.
+///
+/// Its **identity** is the qualified `namespace.name` ([`ExtEnum::qualified`], like [`ExtType`]) —
+/// what the checker keys `symbols.enums`/`Type::Named` on, so a native `std.http.SameSite` never
+/// collides with a user's own `SameSite`. Its **runtime** name (what a materialized value and a
+/// pattern's `type_name` carry) is the short [`ExtEnum::name`], which is the display form.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtEnum {
+    /// The **short display name** (`SameSite`). Identity is the qualified [`ExtEnum::qualified`].
+    pub name: &'static str,
+    /// The namespace this enum lives under (`std.http`) — its qualified identity is `namespace.name`,
+    /// mirroring [`ExtType::namespace`].
+    pub namespace: &'static str,
+    /// The variants in **declaration order** — the order a derived `Comparable` uses and the index
+    /// each variant's shape carries. A backed enum's variants are fieldless with a
+    /// [`ExtVariant::value`]; an algebraic enum's carry [`ExtVariant::fields`].
+    pub variants: &'static [ExtVariant],
+    /// The scalar kind each variant's `.value()` yields for a **backed** enum (`enum SameSite:
+    /// string`), or [`EnumBacking::None`] for a plain/algebraic enum. This states the RULE the
+    /// checker enforces on the `.value()` accessor's type: a `String`-backed enum's `.value()` is
+    /// `string`, an `Int`-backed one's is `int`, and a non-backed enum has no `.value()` at all.
+    pub backing: EnumBacking,
+}
+
+/// One variant of an [`ExtEnum`]: its case name plus **either** a positional payload (an algebraic
+/// variant, `Tagged(name: string)`) **or** a backing constant (a backed variant, `Pending =
+/// "pending"`) — never both, mirroring a `.noe` enum.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtVariant {
+    /// The variant's case name (`Lax`, `Tagged`) — matched by a pattern and stamped on the value.
+    pub name: &'static str,
+    /// The variant's positional payload types (empty for a fieldless or backed variant), same
+    /// signature vocabulary as an [`ExtFn`]'s parameters. Read when the checker binds a variant
+    /// pattern's payloads and when a backend materializes/marshals the payload values.
+    pub fields: &'static [SigType],
+    /// The variant's **backing constant** for a backed enum (`= "pending"`), or
+    /// [`VariantValue::None`] for a fieldless/algebraic variant. What `.value()` returns at runtime;
+    /// its scalar kind must agree with the enum's [`ExtEnum::backing`].
+    pub value: VariantValue,
+}
+
+impl ExtEnum {
+    /// Literal-shortening defaults (`..ExtEnum::DEFAULTS`), mirroring [`ExtType::DEFAULTS`]: a plain
+    /// (non-backed) enum names only its variants.
+    pub const DEFAULTS: ExtEnum = ExtEnum {
+        name: "",
+        namespace: "std",
+        variants: &[],
+        backing: EnumBacking::None,
+    };
+
+    /// The enum's **qualified identity** (`std.http.SameSite`) — `namespace.name`, the string the
+    /// checker keys `symbols.enums`/`Type::Named` on. [`ExtEnum::name`] is only the short form.
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace, self.name)
+    }
+
+    /// Whether `q` is this enum's qualified identity — allocation-free, mirroring
+    /// [`ExtType::is_qualified`] (probed per candidate on the per-keystroke resolution path).
+    pub fn is_qualified(&self, q: &str) -> bool {
+        q.len() == self.namespace.len() + 1 + self.name.len()
+            && q.as_bytes()[self.namespace.len()] == b'.'
+            && q.starts_with(self.namespace)
+            && q.ends_with(self.name)
+    }
+
+    /// The variant named `variant`, with its declaration index, if any.
+    pub fn variant(&self, variant: &str) -> Option<(u32, &'static ExtVariant)> {
+        self.variants
+            .iter()
+            .enumerate()
+            .find(|(_, v)| v.name == variant)
+            .map(|(i, v)| (i as u32, v))
+    }
+}
+
+/// The scalar kind a **backed** [`ExtEnum`]'s variants are backed by — what `.value()` yields.
+/// [`EnumBacking::None`] is a plain/algebraic enum (no `.value()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnumBacking {
+    None,
+    Str,
+    Int,
+}
+
+/// One backed variant's constant (`= "pending"` / `= 3`), or [`VariantValue::None`] for a
+/// fieldless/algebraic variant. Read by both backends' `.value()` materialization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VariantValue {
+    None,
+    Str(&'static str),
+    Int(i64),
+}
+
 // --- Method bundles (kernel-methods K0) ----------------------------------------------------------
 //
 // A **method bundle** is the nominal-binding half of the raw-buffer kernel story: N3.4 gave a
@@ -1151,6 +1278,12 @@ pub trait Extension: Sync {
     fn types(&self) -> &'static [ExtType] {
         &[]
     }
+    /// The extension's first-class **enums** (native-extensibility S1) — real language enums
+    /// (exhaustively matchable, returned/received as values). Default empty; seeded eagerly into
+    /// the checker's symbol tables at prelude time by qualified identity.
+    fn enums(&self) -> &'static [ExtEnum] {
+        &[]
+    }
     /// The extension's CLI subcommands (higher-order-abi H6). Default empty.
     fn commands(&self) -> &'static [crate::ExtCommand] {
         &[]
@@ -1303,6 +1436,11 @@ pub enum UseKind {
     MemberFn { module: String, func: String },
     /// A registered extension type (`use std.id.Uuid`) — qualified identity.
     ExternType(String),
+    /// A registered native **enum** (`use std.http.SameSite`, native-extensibility S1) — qualified
+    /// identity. Bound like an [`UseKind::ExternType`]: the checker maps the local name to the
+    /// qualified identity (so annotations/patterns resolve); the backends bind no runtime value
+    /// (a native enum's values arrive from native calls, not a source-level type handle).
+    ExtEnum(String),
     /// Under a known extension root but resolving to no module / namespace / member / type: a
     /// genuine error (a typo'd or nonexistent std target). An extension root is fully enumerable,
     /// so an unknown member cannot be a forward reference — unlike [`UseKind::UserImport`].
@@ -1422,6 +1560,7 @@ impl Registry {
                 .iter()
                 .any(|m| format!("{root}.{}", m.name).starts_with(&dotted))
                 || e.types().iter().any(|t| t.qualified().starts_with(&dotted))
+                || e.enums().iter().any(|t| t.qualified().starts_with(&dotted))
         })
     }
 
@@ -1448,6 +1587,11 @@ impl Registry {
                 }
             }
             for t in e.types() {
+                if let Some(rest) = t.qualified().strip_prefix(&dotted) {
+                    push_seg(rest, &mut out);
+                }
+            }
+            for t in e.enums() {
                 if let Some(rest) = t.qualified().strip_prefix(&dotted) {
                     push_seg(rest, &mut out);
                 }
@@ -1491,6 +1635,11 @@ impl Registry {
                     push(rest, &mut out);
                 }
             }
+            for t in e.enums() {
+                if let Some(rest) = t.qualified().strip_prefix(&dotted) {
+                    push(rest, &mut out);
+                }
+            }
         }
         out
     }
@@ -1513,6 +1662,15 @@ impl Registry {
                     out.push((rest.to_string(), q.to_string()));
                 }
             }
+            // Native enums project the same way (native-extensibility S1) — the exact channel the
+            // F5 leaf-module fix opened for extern types — so `use pkg.TheEnum` (or a `use pkg`
+            // group then `pkg.TheEnum`) resolves a native enum by identity.
+            for t in e.enums() {
+                let q = t.qualified();
+                if let Some(rest) = q.strip_prefix(&dotted) {
+                    out.push((rest.to_string(), q.to_string()));
+                }
+            }
         }
         out
     }
@@ -1524,7 +1682,11 @@ impl Registry {
         let qualified = format!("{prefix}.{member}");
         if self.find_module(&qualified).is_some() {
             NsChild::Module(qualified)
-        } else if self.find_type_qualified(&qualified).is_some() {
+        } else if self.find_type_qualified(&qualified).is_some()
+            || self.find_enum_qualified(&qualified).is_some()
+        {
+            // A native enum is a type-like member for namespace navigation (`pkg.SameSite` in a
+            // dotted annotation), resolved by identity exactly like an extern type.
             NsChild::Type(qualified)
         } else if self.is_namespace(&qualified) {
             NsChild::Namespace(qualified)
@@ -1552,6 +1714,9 @@ impl Registry {
         }
         if self.find_type_qualified(&qualified).is_some() {
             return UseKind::ExternType(qualified);
+        }
+        if self.find_enum_qualified(&qualified).is_some() {
+            return UseKind::ExtEnum(qualified);
         }
         if path.len() >= 2 {
             let module = path.join(".");
@@ -1748,6 +1913,39 @@ impl Registry {
             .or_else(|| self.find_type(name))
     }
 
+    /// Every registered native enum (native-extensibility S1), across all units — what
+    /// `Checker::seed_ext_enums` walks to pre-populate the enum symbol tables at prelude time.
+    pub fn enums(&self) -> impl Iterator<Item = &'static ExtEnum> + '_ {
+        self.units.iter().flat_map(|e| e.enums())
+    }
+
+    /// Find a native enum by its **short** name (the first match wins, mirroring
+    /// [`Registry::find_type`]). The unambiguous spelling within one extension's signature
+    /// vocabulary; runtime identity paths prefer [`Registry::find_enum_qualified`].
+    pub fn find_enum(&self, name: &str) -> Option<&'static ExtEnum> {
+        self.units
+            .iter()
+            .flat_map(|e| e.enums())
+            .find(|t| t.name == name)
+    }
+
+    /// Find a native enum by its **qualified identity** (`std.http.SameSite`) — allocation-free
+    /// probing, mirroring [`Registry::find_type_qualified`].
+    pub fn find_enum_qualified(&self, qualified: &str) -> Option<&'static ExtEnum> {
+        self.units
+            .iter()
+            .flat_map(|e| e.enums())
+            .find(|t| t.is_qualified(qualified))
+    }
+
+    /// Resolve a native enum from **either** a qualified identity or a bare short name — the
+    /// enum twin of [`Registry::resolve_type`], read by `qualified_extern` and the `.value()`
+    /// runtime accessor.
+    pub fn resolve_enum(&self, name: &str) -> Option<&'static ExtEnum> {
+        self.find_enum_qualified(name)
+            .or_else(|| self.find_enum(name))
+    }
+
     /// Find a registered extern type's method signature.
     pub fn find_type_method(&self, type_name: &str, method: &str) -> Option<&'static ExtFn> {
         self.resolve_type(type_name)?
@@ -1912,6 +2110,13 @@ impl Registry {
             }
             O::Map(entries) => {
                 for (_, value) in entries {
+                    self.debug_verify_out(owner, func, value);
+                }
+            }
+            // A native enum result (native-extensibility S1): recurse into its payload for any
+            // nested extern values, exactly like the `Struct`/`List` arms.
+            O::Variant { fields, .. } => {
+                for value in fields {
                     self.debug_verify_out(owner, func, value);
                 }
             }
@@ -2148,6 +2353,40 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     "extern type `{}` of unit `{}` declares namespace `{}`, outside the unit's \
                      root `{root}` — a missing `namespace:` defaults to `std`, which only std \
                      may claim",
+                    t.name,
+                    unit.name(),
+                    t.namespace
+                ));
+            }
+        }
+    }
+    // Native-enum identities (native-extensibility S1) — the same qualified-identity uniqueness and
+    // namespace-under-root rules extern types get, since native enums are keyed identically.
+    let mut enums: Vec<((&str, &str), &str)> = units
+        .iter()
+        .flat_map(|e| {
+            e.enums()
+                .iter()
+                .map(move |t| ((t.namespace, t.name), e.name()))
+        })
+        .collect();
+    enums.sort_unstable();
+    for pair in enums.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(format!(
+                "duplicate native enum `{}.{}` in the assembled registry (units `{}` and `{}`): \
+                 a qualified enum identity must be declared exactly once",
+                pair[0].0.0, pair[0].0.1, pair[0].1, pair[1].1
+            ));
+        }
+    }
+    for unit in units {
+        let root = unit.root();
+        for t in unit.enums() {
+            if t.namespace != root && !t.namespace.starts_with(&format!("{root}.")) {
+                return Err(format!(
+                    "native enum `{}` of unit `{}` declares namespace `{}`, outside the unit's \
+                     root `{root}`",
                     t.name,
                     unit.name(),
                     t.namespace

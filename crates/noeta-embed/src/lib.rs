@@ -222,6 +222,9 @@ fn from_native(value: NativeValue) -> Value {
                 .collect(),
         ),
         NativeValue::Opaque(name) => Value::Str(format!("<{name}>")),
+        // A native enum value (native-extensibility S1): surface its case name (a fieldless/backed
+        // variant is fully described by it), consistent with the display-string convention above.
+        NativeValue::Variant { variant, .. } => Value::Str(variant),
     }
 }
 

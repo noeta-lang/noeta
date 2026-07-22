@@ -753,11 +753,12 @@ impl Checker {
                 // `Type.Variant(args)` — an algebraic enum constructor applied to its data. Infer the
                 // enum's type arguments from the payload (R2b), so `Tree.Leaf(5)` is `Tree<int>`.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
-                    && self.is_enum_variant(tn, name)
+                    && let Some(key) = self.enum_type_key(tn)
+                    && self.is_enum_variant(&key, name)
                 {
                     // Payload types bind the enum's generics, so a closure payload must be real.
                     self.finalize_closure_args(&[], args, arg_exprs, env);
-                    return self.enum_construction_type(tn, name, args, call_span);
+                    return self.enum_construction_type(&key, name, args, call_span);
                 }
                 // `module.func(args)` — a native module call. The module identity comes from either a
                 // bare module binding (`client.get`, `client` from `use std.http.client`) or a

@@ -102,6 +102,35 @@ fn binds_native_value(
     )
 }
 
+/// Build the compiler's constructible-type record for a native-declared enum (native-extensibility
+/// S1b), so `Hue.Red` / `Hue.Labeled(x)` lower to `MakeEnum` exactly like a `.noe` enum. Variant
+/// declaration order — hence each variant's index — comes straight from the [`ExtEnum`], matching
+/// the index a native-returned variant carries and the tree-walker's `EnumDef`. A payload variant's
+/// field names are synthesized positionally (`_0`, `_1`, …): only their **count** is load-bearing
+/// (it gates the payload-vs-fieldless distinction in `lower_field` and the `MakeEnum` arg count),
+/// and enum equality/matching compare by name + variant + arity, never by field name — so this
+/// stays identical to the native-return path's empty-name shape.
+fn ext_enum_type_info(en: &noeta_ext_abi::registry::ExtEnum) -> TypeInfo {
+    let variants = en
+        .variants
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            (
+                v.name.to_string(),
+                VariantSlots {
+                    index: i as u32,
+                    fields: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                },
+            )
+        })
+        .collect();
+    TypeInfo::Enum {
+        variants,
+        fns: HashMap::new(),
+    }
+}
+
 /// Everything that varies a checked compile, so callers configure one entry point
 /// ([`compile_with`] / [`compile_session_with`]) instead of this family growing a
 /// `_with_isolates_and_debug_and_registry` combinatorial tail (audit-3 finding 9 — the
@@ -1082,10 +1111,26 @@ impl ModuleCompiler {
                     // (`use std.math.sqrt`) — resolves as a global value bound at the `use` site,
                     // not an opaque type, so neither is registered here.
                     for imported in names {
-                        if binds_native_value(self.registry, path, &imported.name) {
-                            continue;
+                        use noeta_ext_abi::registry::UseKind;
+                        match self.registry.classify_use(path, &imported.name) {
+                            UseKind::Module(_) | UseKind::MemberFn { .. } => continue,
+                            // A native enum (`use shade.Hue`, native-extensibility S1b): register it
+                            // as a **constructible** type handle keyed by the imported short name — so
+                            // `Hue.Red` / `Hue.Labeled(x)` lower exactly like a `.noe` enum. The
+                            // registry (keyed by qualified identity) is the single source of variants,
+                            // the same channel `Ordering` is hand-seeded through. The shape name is the
+                            // short local name, matching what a native-returned variant carries and
+                            // what a `TheEnum.Variant` pattern compares against (S1 identity note).
+                            UseKind::ExtEnum(qualified) => {
+                                if let Some(en) = self.registry.find_enum_qualified(&qualified) {
+                                    self.types
+                                        .insert(imported.name.clone(), ext_enum_type_info(en));
+                                }
+                            }
+                            _ => {
+                                self.types.insert(imported.name.clone(), TypeInfo::Opaque);
+                            }
                         }
-                        self.types.insert(imported.name.clone(), TypeInfo::Opaque);
                     }
                 }
                 _ => {}

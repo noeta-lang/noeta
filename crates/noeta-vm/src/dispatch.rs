@@ -1629,6 +1629,25 @@ impl<'m> Vm<'m> {
                                 pc += 1;
                                 continue;
                             }
+                            // `color.value()` on a native **backed** enum (native-extensibility
+                            // S1): a native enum has no user method proto, so its backing constant
+                            // is resolved from the registry by the value's (short) name + variant —
+                            // the twin of the tree-walker's `.value()` accessor.
+                            if method == "value"
+                                && args.is_empty()
+                                && let Some(en) = self.reg().resolve_enum(&shape.name)
+                                && let Some(variant) = shape.variant.as_deref()
+                                && let Some((_, vdef)) = en.variant(variant)
+                            {
+                                let out = match vdef.value {
+                                    noeta_stdlib::VariantValue::Str(s) => Value::string(s),
+                                    noeta_stdlib::VariantValue::Int(n) => Value::int(n),
+                                    noeta_stdlib::VariantValue::None => Value::unit(),
+                                };
+                                set_reg(regs, fbase, *dst, out);
+                                pc += 1;
+                                continue;
+                            }
                             let ci = *cache as usize;
                             let hit = match &caches[ci] {
                                 Some((cs, p)) if std::ptr::eq::<Shape>(*cs, shape) => Some(*p),

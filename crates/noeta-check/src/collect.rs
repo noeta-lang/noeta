@@ -66,6 +66,14 @@ impl Checker {
                         // annotation resolver keys on this.
                         self.imports.extern_types.insert(local, qualified);
                     }
+                    UseKind::ExtEnum(qualified) => {
+                        // A native-**enum** import (`use std.http.SameSite`, native-extensibility
+                        // S1): bind the local name to the enum's qualified identity through the SAME
+                        // `extern_types` channel — an annotation `SameSite` then resolves to the
+                        // qualified `Type::Named` the enum was seeded under, so a native fn returning
+                        // it unifies by identity and a `match` over it is exhaustive.
+                        self.imports.extern_types.insert(local, qualified);
+                    }
                     UseKind::MemberFn { module, func } => {
                         self.imports.imported_fns.insert(local, (module, func));
                     }
