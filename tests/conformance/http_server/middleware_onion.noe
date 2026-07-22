@@ -1,0 +1,77 @@
+// The middleware onion (aether-sessions A3): a middleware is a layer that receives the request AND
+// `next` — the rest of the pipeline with the routed handler at the bottom — so one layer can rewrite
+// the request on the way in, mutate the response on the way out, or short-circuit by never calling
+// `next`. This is the shape para.aether adopts (replacing the before-only hook), the same cursor
+// `Next { stack, index }` para/api uses, bottoming out here in an inline terminal handler.
+//
+// Driven by the sandbox request script. The pass-through layer (`Tap`) adds `x-tap` to the request —
+// the terminal echoes it, proving the rewrite reached inward — and `x-tap-out` to every response,
+// proving it runs on the way out even for a short-circuited request. The short-circuit layer
+// (`Block`) answers `/echo` with 403 WITHOUT calling `next`, so the terminal never runs for it (body
+// "blocked", not "handler …"). Both backends run the identical onion.
+// expect: stdout "GET / -> 200 [handler / tap=seen] out=done"
+// expect: stdout "GET /health -> 200 [handler /health tap=seen] out=done"
+// expect: stdout "POST /echo -> 403 [blocked] out=done"
+// expect: stdout "GET /users/42 -> 200 [handler /users/42 tap=seen] out=done"
+// expect: stdout "DELETE /users/42 -> 200 [handler /users/42 tap=seen] out=done"
+// expect: stdout "GET /ws -> 200 [handler /ws tap=seen] out=done"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+
+trait Middleware {
+    fn handle(req: Request, next: Next): Response
+}
+
+// The cursor: the rest of the pipeline as a value. `run` bottoms out in the terminal handler once the
+// stack is exhausted.
+struct Next {
+    stack: List<dyn Middleware>
+    index: int
+
+    fn run(req: Request): Response {
+        if self.index >= self.stack.len() {
+            tap = req.header("x-tap") ?? "none"
+            return server.response(200, "handler ${req.path()} tap=${tap}")
+        }
+        rest = Next { stack: self.stack, index: self.index + 1 }
+        return self.stack[self.index].handle(req, rest)
+    }
+}
+
+// Pass-through: rewrite the request (a header the terminal echoes), then mutate the response.
+class Tap {
+    fn new(): Tap { return Tap {} }
+    impl Middleware {
+        fn handle(req: Request, next: Next): Response {
+            resp = next.run(req.with_header("x-tap", "seen"))
+            return resp.with_header("x-tap-out", "done")
+        }
+    }
+}
+
+// Short-circuit: answer `/echo` without ever calling `next`.
+class Block {
+    fn new(): Block { return Block {} }
+    impl Middleware {
+        fn handle(req: Request, next: Next): Response {
+            if req.path() == "/echo" {
+                return server.response(403, "blocked")
+            }
+            return next.run(req)
+        }
+    }
+}
+
+pipeline: List<dyn Middleware> = [Tap.new(), Block.new()]
+
+fn handle(req: Request) use (pipeline): Response {
+    resp = Next { stack: pipeline, index: 0 }.run(req)
+    status = resp.status()
+    body = resp.body()
+    out = resp.header("x-tap-out") ?? "none"
+    echo "${req.method()} ${req.path()} -> ${status} [${body}] out=${out}"
+    return resp
+}
+
+server.serve(8080, handle)

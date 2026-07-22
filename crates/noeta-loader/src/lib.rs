@@ -1536,8 +1536,14 @@ fn link_core(
                 let refs = qualify::referenced_names(stmt);
                 let mut work = Vec::new();
                 for name in refs {
-                    if merge_one_dep(&name, mv, &mv.namespace, &module_maps, &mut merged_q, &mut imported)
-                    {
+                    if merge_one_dep(
+                        &name,
+                        mv,
+                        &mv.namespace,
+                        &module_maps,
+                        &mut merged_q,
+                        &mut imported,
+                    ) {
                         work.push(name);
                     }
                 }
@@ -1677,7 +1683,14 @@ fn merge_module_closure(
     // The root is already merged (under its local name); record its qualified identity so it is not
     // merged again, then expand its references to a fixpoint.
     merged_q.insert(format!("{}.{root}", path.join(".")));
-    expand_module_refs(vec![root.to_string()], module, path, module_maps, merged_q, imported);
+    expand_module_refs(
+        vec![root.to_string()],
+        module,
+        path,
+        module_maps,
+        merged_q,
+        imported,
+    );
 }
 
 /// Merge one same-module declaration `name` and report whether it was **freshly** merged.
