@@ -1,0 +1,61 @@
+// The stored-session primitives (the seam `para/aether-db` builds a server-side store on).
+//
+// `session.of` rebuilds a CLEAN session from data — the inverse of `data()` — so a stored backend
+// reconstitutes the very same `Session` a handler reads off a cookie, and a pure read never looks
+// dirty (which is what keeps a read from provoking a needless row write). `with_id`/`id` carry an
+// opaque server-side row key OUT of the data: it never shows through `data()`, and — the property
+// a revocable logout depends on — it SURVIVES `clear()`, so once the data is emptied the store can
+// still name the exact row to delete. None of this touches the signed-cookie codec: a cookie-only
+// session simply has no id.
+// expect: stdout "loaded: 42"
+// expect: stdout "clean: false"
+// expect: stdout "id: sess-7f3a"
+// expect: stdout "data-hides-id: 1"
+// expect: stdout "set-marks-dirty: true"
+// expect: stdout "id-kept-through-set: sess-7f3a"
+// expect: stdout "cleared-empty: 0"
+// expect: stdout "cleared-dirty: true"
+// expect: stdout "id-survives-clear: sess-7f3a"
+// expect: stdout "cookie-only-has-no-id: none"
+// expect: exit 0
+use std.session
+
+// A stored backend rebuilds the session from the row it read, then tags it with the row's key.
+data: Map<string, string> = {"user": "42"}
+s = session.of(data).with_id("sess-7f3a")
+
+who = s.get("user") ?? "?"
+echo "loaded: ${who}"
+
+// `of` is clean: a freshly loaded session has not been changed, so `attach` won't rewrite the row.
+clean = s.dirty()
+echo "clean: ${clean}"
+
+sid = s.id() ?? "none"
+echo "id: ${sid}"
+
+// The id is out-of-band — the data still holds exactly its one real entry, not the key.
+keys = s.data().keys().len()
+echo "data-hides-id: ${keys}"
+
+// A handler write marks it dirty (a write-back is now warranted) and keeps the id.
+s2 = s.set("role", "admin")
+d2 = s2.dirty()
+echo "set-marks-dirty: ${d2}"
+kept = s2.id() ?? "none"
+echo "id-kept-through-set: ${kept}"
+
+// Logout: `clear()` empties the data and marks dirty — but the row key survives, which is exactly
+// what lets the store DELETE the right row after the data itself is gone.
+out = s2.clear()
+empty = out.data().keys().len()
+echo "cleared-empty: ${empty}"
+dc = out.dirty()
+echo "cleared-dirty: ${dc}"
+survived = out.id() ?? "none"
+echo "id-survives-clear: ${survived}"
+
+// A plain cookie-only session (no tag) has no server-side id at all.
+plain = session.of(data)
+none_id = plain.id() ?? "none"
+echo "cookie-only-has-no-id: ${none_id}"

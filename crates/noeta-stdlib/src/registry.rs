@@ -1500,6 +1500,14 @@ const SESSION_FNS: &[ExtFn] = &[
         params: &[Str, KEYRING_SIG],
         ret: Concrete(SigType::Option(&SESSION_DATA_SIG)),
     },
+    // Build a clean (unchanged) session from data — the inverse of `data()`. A stored backend uses
+    // it to rebuild the `Session` currency from a row it read, so a handler consumes a stored
+    // session exactly as it does a cookie one. Clean so a pure read never provokes a row write.
+    ExtFn {
+        name: "of",
+        params: &[SESSION_DATA_SIG],
+        ret: Concrete(SESSION_SIG),
+    },
     // Read the session off a request. Never fails: an absent, forged, or expired cookie all yield
     // an empty session, because a caller has one correct response to all three.
     ExtFn {
@@ -1579,7 +1587,18 @@ fn session_dispatch(
                 .and_then(|t| crate::session::decode(&t, keys, host.clock_unix_ms()))
                 .unwrap_or_default();
             Ok(NativeOut::Extern(crate::ExternBox::new(
-                crate::session::Session { data, dirty: false },
+                crate::session::Session {
+                    data,
+                    dirty: false,
+                    id: None,
+                },
+            )))
+        }
+        "of" => {
+            want_arity(func, args, 1)?;
+            let data = want_session_data(func, args, 0)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::session::Session::of(data),
             )))
         }
         "attach" => {
@@ -2532,6 +2551,21 @@ const SESSION_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SESSION_DATA_SIG),
     },
+    // Tag a copy with an opaque server-side id (a stored backend's row key). Metadata, not a data
+    // change, so it does NOT mark the session dirty; and it rides alongside the data rather than in
+    // it, so it never shows through `data()`.
+    ExtFn {
+        name: "with_id",
+        params: &[Str],
+        ret: Concrete(SESSION_SIG),
+    },
+    // The opaque server-side id a stored backend tagged this session with, or none. Survives
+    // `clear()`, so a logout can still name the row to delete after the data is gone.
+    ExtFn {
+        name: "id",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
 ];
 
 fn session_method_dispatch(
@@ -2576,6 +2610,17 @@ fn session_method_dispatch(
         "data" => {
             want_arity(method, args, 0)?;
             Ok(session_data_out(&session.data))
+        }
+        "with_id" => {
+            want_arity(method, args, 1)?;
+            rebuilt(session.with_id(want_str(method, args, 0)?))
+        }
+        "id" => {
+            want_arity(method, args, 0)?;
+            Ok(match &session.id {
+                Some(id) => NativeOut::Some(Box::new(NativeOut::Str(id.clone()))),
+                None => NativeOut::None,
+            })
         }
         _ => Err(crate::no_method_error(
             crate::session::SESSION_TYPE_NAME,
@@ -4476,6 +4521,17 @@ const SESSION_DOCS: &[(&str, &str)] = &[
          unchanged session costs no header.",
     ),
     ("data", "Every entry, as a map."),
+    (
+        "with_id",
+        "A copy tagged with an opaque server-side id — a stored backend's row key. Metadata, not a \
+         data change, so it does not mark the session dirty, it never shows through `data()`, and \
+         it survives `clear()` so a logout can still name the row to delete.",
+    ),
+    (
+        "id",
+        "The opaque server-side id a stored backend tagged this session with, or none. A \
+         cookie-only session never has one.",
+    ),
 ];
 const SESSION_DOCS_MODULE: &[(&str, &str)] = &[
     (
@@ -4495,6 +4551,12 @@ const SESSION_DOCS_MODULE: &[(&str, &str)] = &[
         "Verify and decode a token, or none. A bad signature, an expired token, and a malformed \
          one are all none: a caller has one correct response to all three, and distinguishing them \
          would tell an attacker which guess was closer.",
+    ),
+    (
+        "of",
+        "Build a clean (unchanged) session from data — the inverse of `data()`. A stored backend \
+         uses it to rebuild the session from a row it loaded, so a handler reads a stored session \
+         exactly as it reads a cookie one. Clean, so a pure read never triggers a row write.",
     ),
     (
         "open",
