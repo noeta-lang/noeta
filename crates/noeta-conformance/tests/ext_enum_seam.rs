@@ -298,6 +298,89 @@ fn native_enums_round_trip_identically_on_both_backends() {
     assert_eq!(reference.stdout, EXPECTED_STDOUT);
 }
 
+/// **Source-level construction** (native-extensibility S1b): a native enum variant written directly
+/// in Noeta source — `Hue.Red`, backed `Tone.Cool`/`Level.Low`, payload-carrying `Tag.Labeled(s)` —
+/// constructs a real enum value, usable in a `match`, comparable with `==`, carrying its declared
+/// `.value()`, and passable back into native code. The two backends must build the identical value,
+/// which is the differential assertion here (the S1 round-trip only *received* a variant from native
+/// code; this originates one).
+const CONSTRUCT_PROGRAM: &str = r#"
+use shade.palette
+use shade.Hue
+use shade.Tone
+use shade.Level
+use shade.Tag
+
+// Construct a fieldless variant in source, then match it.
+c = Hue.Red
+echo match c {
+    Hue.Red => "red",
+    Hue.Green => "green",
+    Hue.Blue => "blue",
+}
+
+// A constructed variant is `==`-comparable and passes into native code (arg-IN).
+echo Hue.Blue == Hue.Blue
+echo Hue.Blue == Hue.Green
+echo palette.name_of(Hue.Green)
+
+// Backed-enum construction carries its declared `.value()` (string- and int-backed).
+echo Tone.Cool.value()
+echo Level.Low.value()
+
+// Payload-carrying variant construction: match-bound, and passed back into native code.
+lt = Tag.Labeled("built")
+echo match lt {
+    Tag.Plain => "plain",
+    Tag.Labeled(s) => s,
+}
+echo palette.tag_label(lt)
+"#;
+
+const CONSTRUCT_EXPECTED_STDOUT: &str = "red\ntrue\nfalse\nGreen\ncool\n1\nbuilt\nbuilt\n";
+
+#[test]
+fn native_enum_source_construction_round_trips_identically_on_both_backends() {
+    ensure_installed();
+
+    let db = LangDatabase::default();
+    let source = Source::new(SourceId::FIRST, "ext_enum_construct.noe", CONSTRUCT_PROGRAM);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+
+    let parsed = noeta_db::ast(&db, src);
+    assert!(
+        parsed.0.diagnostics.is_empty(),
+        "construction program must parse cleanly: {:?}",
+        parsed.0.diagnostics
+    );
+    let checked = noeta_db::checked(&db, src);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "construction program must check cleanly: {:?}",
+        checked.diagnostics
+    );
+
+    let reference =
+        noeta_conformance::reference::reference_run(&parsed.0.program, checked.sites.clone());
+    let module = noeta_db::bytecode(&db, src)
+        .0
+        .as_ref()
+        .expect("construction program compiles to bytecode")
+        .clone();
+    let vm = VmBackend::new().run_module(&module);
+
+    assert_eq!(
+        reference, vm,
+        "backends must agree on the native-enum construction program"
+    );
+    assert_eq!(
+        reference.exit_code, 0,
+        "diagnostics: {:?}",
+        reference.diagnostics
+    );
+    assert_eq!(reference.stdout, CONSTRUCT_EXPECTED_STDOUT);
+}
+
 /// A non-exhaustive `match` over a native enum is E0011, exactly as it is for a `.noe` enum — the
 /// native enum's variants reach the exhaustiveness checker through `symbols.enums` keyed by its
 /// qualified identity.

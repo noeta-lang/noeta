@@ -396,9 +396,10 @@ impl Checker {
         // generic enum a payload-free variant pins no parameter, so its arguments infer to `dyn`
         // (R2b) — keeping the arity consistent with a payload variant of the same enum.
         if let Expr::Ident { name: tn, .. } = receiver
-            && self.is_enum_variant(tn, name)
+            && let Some(key) = self.enum_type_key(tn)
+            && self.is_enum_variant(&key, name)
         {
-            return self.enum_construction_type(tn, name, &[], member_span);
+            return self.enum_construction_type(&key, name, &[], member_span);
         }
         // `Type.method` in value position (not the callee of a call) is an unbound **method handle**:
         // a callable taking the receiver as its first argument (prelude-redesign MH). Guarded to a

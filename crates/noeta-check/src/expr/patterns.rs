@@ -262,4 +262,24 @@ impl Checker {
             .get(type_name)
             .is_some_and(|vs| vs.iter().any(|v| v.name == variant))
     }
+
+    /// Resolve a source-written enum type name to the key it occupies in `symbols.enums` — the name
+    /// itself for a user/prelude enum, or, for a **native** enum imported `use pkg.TheEnum`, the
+    /// qualified identity its local short name aliases to. A native enum is seeded under its
+    /// qualified name alone (S1's two-identity model), so source-level construction
+    /// (`TheEnum.Variant`, native-extensibility S1b) follows the import alias — the same
+    /// `extern_types` channel a native fn's *return* type resolves through — to find it and yield a
+    /// construction result keyed by that qualified identity (so it unifies with a native signature).
+    /// A direct hit wins, so a user enum of the same short name shadows the import. `None` when the
+    /// name is not an enum in either form.
+    pub(crate) fn enum_type_key(&self, type_name: &str) -> Option<String> {
+        if self.symbols.enums.contains_key(type_name) {
+            return Some(type_name.to_string());
+        }
+        self.imports
+            .extern_types
+            .get(type_name)
+            .filter(|q| self.symbols.enums.contains_key(q.as_str()))
+            .cloned()
+    }
 }

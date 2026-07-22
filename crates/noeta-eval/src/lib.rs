@@ -1821,6 +1821,30 @@ impl Interpreter {
                 // last segment.
                 UseKind::Module(qualified) => Value::NativeModule(qualified),
                 UseKind::MemberFn { module, func } => Value::ModuleFn(module, func),
+                // A native enum (`use shade.Hue`, native-extensibility S1b): bind the imported short
+                // name to a real `EnumType`, so `Hue.Red` / `Hue.Labeled(x)` construct exactly like a
+                // `.noe` enum's `EnumType`. Variants (and hence their declaration indices) come from
+                // the registry keyed by qualified identity — the same source the bytecode compiler
+                // and the checker read; the `EnumDef` carries the **short** name the runtime value
+                // and every match pattern compare against (S1 identity note). A payload variant's
+                // field names are positional placeholders (only the count is load-bearing).
+                UseKind::ExtEnum(qualified) if reg.find_enum_qualified(&qualified).is_some() => {
+                    let en = reg.find_enum_qualified(&qualified).unwrap();
+                    Value::EnumType(Rc::new(EnumDef {
+                        name: en.name.to_string(),
+                        variants: en
+                            .variants
+                            .iter()
+                            .map(|v| VariantInfo {
+                                name: v.name.to_string(),
+                                field_names: (0..v.fields.len()).map(|n| format!("_{n}")).collect(),
+                            })
+                            .collect(),
+                        derives_comparable: false,
+                        derives_tojson: false,
+                        methods: HashMap::new(),
+                    }))
+                }
                 _ => {
                     Value::Type(Rc::new(TypeDef {
                         name: imported.name.clone(),

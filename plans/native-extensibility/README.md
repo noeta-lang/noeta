@@ -68,6 +68,7 @@ cross-cutting work.
 - [x] `NativeOut::Variant` materialized identically in both backends (differential)
 - [x] exhaustive `match` passes E0011; non-exhaustive errors E0011
 - [x] variant arg IN + variant return OUT; payload-carrying round-trip
+- [x] **S1b:** source-level construction (`Hue.Red`, backed `Tone.Warm`, payload `Tag.Labeled(s)`) in both backends
 - [x] `backing` enforced (backed `.value()` typing) with a fixture exerciser
 - [x] namespace projection: `use pkg.TheEnum` resolves + re-roots
 - [x] docs + conformance
@@ -91,15 +92,32 @@ cross-cutting work.
   value's short name + variant → the declared `VariantValue`); the checker types it off
   `ExtEnum.backing` (`stdlib::native_enum_backing_type`) — the ABI-gate enforcer for that Constraint.
   A non-backed enum has no `.value()`.
-- **Scope boundary (decision, plan left open):** S1 delivers the full **round-trip** (native returns
-  a variant → user `match`es it → user passes it back into native code) and `.value()`. **Source-level
-  construction of a native enum variant** (`SameSite.Lax` written in Noeta) is *not* wired: the
-  bytecode compiler builds its `TypeInfo::Enum` table from the program AST only (like it seeds
-  `Ordering` by hand), so a native enum name is not a constructible type handle at a call site. This
-  was never in the S1 checklist (which says "variant arg IN + variant return OUT; **round-trip**")
-  and the motivating `Cookie.with_same_site(SameSite.Lax)` needs `ExtClass Cookie` (S2) anyway. If a
-  future slice wants source construction, seed the compiler's `types` map + the tree-walker scope
-  from the registry (the same channel `Ordering` uses).
+- **Source-level construction — WIRED (S1b, native-extensibility):** `SameSite.Lax` (fieldless),
+  backed `Tone.Warm.value()`, and payload-carrying `Tag.Labeled(s)` can now be *written in Noeta
+  source* and construct a real enum value — usable in a `match`, `==`-comparable, and passable into
+  native code — not only received from a native call. Seeded through the **same channel `Ordering`
+  uses**, gated by the `use pkg.TheEnum` import (namespace identity preserved):
+  - **Bytecode compiler** (`register_types`, `crates/noeta-compiler/src/lib.rs`): the `Stmt::Use`
+    arm now inspects `classify_use`; a `UseKind::ExtEnum(qualified)` seeds `self.types` with a
+    `TypeInfo::Enum` (via `ext_enum_type_info`) keyed by the imported **short** name, so `Hue.Red` /
+    `Hue.Labeled(x)` lower to `MakeEnum` exactly like a `.noe` enum. Variant order (hence index)
+    comes from the registry; a payload variant's field names are positional placeholders (`_0`, …)
+    — only their **count** is load-bearing (gates `lower_field`'s payload-vs-fieldless split and the
+    `MakeEnum` arity), and enum `==`/match compare by name+variant+arity, never field name, so the
+    shape stays identical to the native-return path's empty-name shape.
+  - **Tree-walker** (`declare_use`, `crates/noeta-eval/src/lib.rs`): a `UseKind::ExtEnum` import now
+    binds the short name to a real `Value::EnumType(EnumDef)` built from the registry (was an opaque
+    `Value::Type`), so `read_member`/`make_variant` construct the same value. `.value()` still
+    resolves off the registry by the value's short name (S1).
+  - **Checker** (`enum_type_key`, `crates/noeta-check/src/expr/patterns.rs`, used by the two
+    construction sites in `member.rs`/`calls.rs`): a native enum is seeded under its *qualified* name
+    only, so `is_enum_variant`/`enum_construction_type` first resolve the source-written short name
+    through the `use`-import `extern_types` alias to the qualified key. Construction then yields
+    `Type::Named(qualified)`, which unifies with a native fn's parameter type by identity. A user
+    enum of the same short name shadows the import (direct hit wins).
+  - **Differential:** `crates/noeta-conformance/tests/ext_enum_seam.rs::native_enum_source_construction_round_trips_identically_on_both_backends`
+    — construct fieldless/backed/payload variants in source, match, `==`, `.value()`, and pass into
+    native code; asserts `reference_run == VmBackend::run_module` + exact stdout (gates verified).
 - **ABI gate:** `ExtEnum`/`ExtVariant` added to `SCANNED`; `ExtEnum.backing` is a Constraint
   (enforcer `native_enum_backing_type`, exerciser
   `ext_constraint_enforcement.rs::a_backed_ext_enum_value_type_is_enforced`); the remaining fields are
