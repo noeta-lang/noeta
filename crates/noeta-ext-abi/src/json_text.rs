@@ -50,6 +50,15 @@ pub fn stringify(value: &NativeValue) -> String {
                 format!("{{{}:[{}]}}", json_string(variant), parts.join(","))
             }
         }
+        // A native class instance (native-extensibility S2) serializes as a JSON object — its
+        // fields in declared order, exactly like a `Map`/record aggregate.
+        NativeValue::Instance { fields, .. } => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(key, value)| format!("{}:{}", json_string(key), stringify(value)))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
         // The shallow-marshal-only variants never reach the serializer: `json` is always deeply
         // marshalled (the only producer of a `stringify` argument).
         NativeValue::Bytes(_) | NativeValue::Object { .. } | NativeValue::Opaque(_) => {

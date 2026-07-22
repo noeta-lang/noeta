@@ -1979,6 +1979,9 @@ impl Interpreter {
             // decode one from a JSON recipe, but a native `Result`/`Option` wrapper may carry one,
             // so materialize it through the ordinary (non-recipe) path.
             out @ NativeOut::Variant { .. } => MatOut::Value(crate::materialize_native(out)),
+            // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
+            // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one.
+            out @ NativeOut::Instance { .. } => MatOut::Value(crate::materialize_native(out)),
             // A `TypeRecipe` names only JSON shapes; async work and bulk scalar vectors (a packed
             // reduction's result, N3.4) can never decode from one.
             NativeOut::Spawn(_) | NativeOut::Scalars(_) => {

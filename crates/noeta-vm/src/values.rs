@@ -39,6 +39,25 @@ pub(crate) fn marshal_native_arg(value: Value) -> noeta_stdlib::NativeValue {
         // An extern-type argument crosses by value (`clone_box`); extern producers are host/IO
         // shaped, never a hot path. Mirrors the tree-walker's projection.
         NativeValue::Extern(value.with_extern(|e| noeta_stdlib::ExternBox(e.clone_box())))
+    } else if matches!(value.shape().map(|s| s.kind), Some(ShapeKind::Class)) {
+        // A class instance crossing INTO a dispatch (native-extensibility S2): the full instance
+        // (class name + `(field, value)` pairs in slot order, each marshalled), so a native fn can
+        // receive a native class value a program constructed. Mirrors the tree-walker's projection;
+        // fields marshal recursively. (An extern-handle field would `clone_box`, so a class holding
+        // native state is not designed to cross arg-IN — its methods read it by reference instead.)
+        let shape = value.shape().expect("a class value has a shape");
+        let slots = value.slots().unwrap_or_default();
+        let fields = shape
+            .fields
+            .iter()
+            .cloned()
+            .zip(slots)
+            .map(|(name, slot)| (name, marshal_native_arg(slot)))
+            .collect();
+        NativeValue::Instance {
+            class: shape.name.clone(),
+            fields,
+        }
     } else if value.is_object() {
         // An object with all-scalar fields (e.g. a `Vec3`) projects to its field scalars in slot
         // order; anything with a non-scalar field is opaque (a dispatch that wanted an object will
@@ -195,6 +214,21 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                     .with_variant_index(variant_index),
             );
             Value::enum_value(shape, fields.into_iter().map(materialize_native).collect())
+        }
+        // A native-declared class instance (native-extensibility S2): a REAL reference `Object` with
+        // a fresh interned **class-kind** shape (`structural_eq = false` → `==` is identity), so it
+        // participates in the RC + cycle collector and aliases like a `.noe` class. Fields
+        // materialize recursively in the class's declared slot order (the native-state field is a
+        // `NativeOut::Extern` whose `Drop` is the destructor). The shape matches a source-constructed
+        // instance's (`make_record` with `ShapeKind::Class`), so the two interchange.
+        NativeOut::Instance { class, fields } => {
+            let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+            let shape = noeta_object::intern_shape(Shape::object(ShapeKind::Class, &class, names));
+            let slots = fields
+                .into_iter()
+                .map(|(_, out)| materialize_native(out))
+                .collect();
+            Value::object(shape, slots)
         }
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the VM's shape table), not here; async work is
@@ -763,6 +797,10 @@ impl Vm<'_> {
             // native `Result`/`Option` wrapper may carry one, so materialize it through the
             // ordinary (non-recipe) path.
             out @ NativeOut::Variant { .. } => MatOut::Value(materialize_native(out)),
+            // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
+            // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one; materialize
+            // it through the ordinary (non-recipe) path.
+            out @ NativeOut::Instance { .. } => MatOut::Value(materialize_native(out)),
             // `Object` (shape-from-argument) and bulk scalar vectors (a packed reduction's result,
             // N3.4) are never produced by a recipe decode (a `TypeRecipe` names only JSON shapes).
             NativeOut::Object(_) | NativeOut::Spawn(_) | NativeOut::Scalars(_) => {

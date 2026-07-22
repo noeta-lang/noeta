@@ -1,6 +1,6 @@
 # Arc — native extensibility: ExtEnum, ExtClass, ExtTrait
 
-Status: **in progress** — S1 (ExtEnum) complete; S2/S3 pending
+Status: **in progress** — S1 (ExtEnum) + S2 (ExtClass) complete; S3 pending
 
 Complete the native extension ABI so a Rust extension can declare real language **enums**, **classes**,
 and **traits** — not only opaque extern types (`ExtType`) and modules. Today none of `ExtEnum` /
@@ -139,11 +139,62 @@ Map both; pick the one that gives real class semantics (identity + destructor + 
 the least duplicated machinery. `ExtClass` is `ExtType` grown up — the same reference-identity family, plus
 fields + construction + destructor — not a struct.
 
-- [ ] representation decided + written down (identity, destructor, cycle participation proven)
-- [ ] language constructs a native class; fields read/(mut) per declared visibility
-- [ ] destructor runs on collection (leak oracle zero; a native-drop side effect observed)
-- [ ] reference identity (two bindings alias; `==` is identity)
-- [ ] namespace projection + gate + docs + conformance
+- [x] representation decided + written down (identity, destructor, cycle participation proven)
+- [x] language constructs a native class; fields read/(mut) per declared visibility
+- [x] destructor runs on collection (leak oracle zero; a native-drop side effect observed)
+- [x] reference identity (two bindings alias; `==` is identity)
+- [x] namespace projection + gate + docs + conformance
+
+### S2 — landed notes (native-extensibility S2)
+
+- **Representation chosen: (i) a real `Payload::Object` with `ShapeKind::Class`** (reviewed and
+  approved). Option (ii) — an extern-box typed as a fielded class — was disqualified on
+  *correctness*, not cost: an extern box is a GC **leaf** (`heap::children`'s `Payload::Extern` arm
+  yields nothing), so the cycle collector cannot trace *through* it; language-value fields would have
+  to be arena `Retained` entries, which the arena treats as **roots** (never collected) and which the
+  box's ctx-less `Drop` cannot release. Option (i) inherits identity, reference/aliasing semantics,
+  RC, and cycle participation from the object model unchanged; the only new runtime bit is
+  materializing a class-kind object from the carrier.
+- **`NativeOut::Instance { class, fields }`** (+ the arg-IN twin `NativeValue::Instance`) is the new
+  carrier — deliberately **not** an overload of `NativeOut::Struct` (which materializes
+  `ShapeKind::Struct`, a *value* struct, leaving that path untouched). Both backends materialize it
+  into a real class-kind `Object` (`Shape::object(ShapeKind::Class, …)` → `structural_eq = false` →
+  `==` is identity): VM `materialize_native` (`crates/noeta-vm/src/values.rs`), tree-walker
+  `materialize_native` (`crates/noeta-eval/src/lib.rs`, a fresh `TypeDef { is_struct:false,
+  structural_eq:false, destructor:None }`). Fields materialize recursively in declared slot order.
+- **Destructor = RAII on an extern-handle field** (the approved shape; no host-coupled finalizer
+  built). Native state lives in a field typed as an `ExtType` whose `ExternValue` has a Rust `Drop`;
+  when the object frees, the field's box drops and `Drop` runs — verified to fire on **both** paths:
+  a last-reference release *and* destructor-free cycle reclamation. The mechanism is `heap::free`
+  reconstructing and `drop`ping the `Box<Obj>` (so the `Payload::Extern` box always drops), on both
+  the `Trace` and `TrialDeletion`/exit-reaper paths.
+  - **Not seeded into `destructor_classes`** (deliberate — the plan listed it, but a native class has
+    no `.noe` `destruct` block): the cleanup is the field's `Drop`, which the collector runs
+    unconditionally. Seeding it would falsely claim a language destructor and *defer* the class's
+    destructor-free cycles to the exit reaper instead of reclaiming them mid-run; leaving it out keeps
+    mid-run reclamation and the `Drop` fires on every free path regardless.
+- **Seeding — `seed_ext_classes`** (`crates/noeta-check/src/prelude.rs`) mirrors
+  `register_extension_attributes` + the class-only tables the collect pass writes: `records` (field
+  types via `sig_to_type`), `type_kinds = Class`, `private_fields` (E0035), `mut_fields` (E0033),
+  keyed by **qualified identity** (`fx.Handle`). Source construction resolves the short name through
+  the `use`-import alias to the qualified `records` key (`synth_object_named`); backend source
+  construction seeds a class-kind `TypeInfo::Class` (bytecode) / `Value::Type` `TypeDef` (tree-walker)
+  under the imported short name, mirroring S1b's enum construction.
+- **Namespace cross-cut** (identical to S1): `UseKind::ExtClass`, `namespace_types`/`classify_use`/
+  `resolve_namespace_child`/`qualified_extern` extended for `classes()`; `use pkg.TheClass` re-roots
+  and unifies a native fn's `Handle` return by identity.
+- **ABI gate:** `ExtClass`/`ExtField` in `SCANNED` + `TABLE`; `ExtField.is_public` (E0035) and
+  `is_mut` (E0033) are **Constraints** exercised by fixtures in `ext_constraint_enforcement.rs`
+  (`a_native_class_field_visibility_is_enforced` / `a_native_class_field_mutability_is_enforced`); the
+  rest are Data with live readers.
+- **Conformance:** `crates/noeta-conformance/tests/ext_class_seam.rs` (own fixture extension, std
+  declares no class) — the differential proves construction (native + source), field read/mutate,
+  reference identity (`==`/aliasing), and arg-IN agree on both backends; two leak-oracle-zero tests
+  prove the destructor fires on linear collection **and** on mutual-reference cycle reclamation (both
+  guards' `Drop`), the load-bearing cases that distinguish a true class from a struct. All cases
+  gate-verified (mutate an expect → fail → revert). Gates green: corpus 7/7, `noeta-check`/`noeta-vm`/
+  `noeta-eval` `--lib`, `constraint_fields` + `ext_constraint_enforcement`, fmt, workspace clippy
+  `-D warnings`.
 
 ## S3 — ExtTrait (contract AND dynamic dispatch)
 
