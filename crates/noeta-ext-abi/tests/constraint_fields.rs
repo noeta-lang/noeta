@@ -400,6 +400,20 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // Exact vs Uniform arity: whether `fields` is matched one-for-one or as "≥min of one kind"
+    // (the array-ops integer/`Color` shapes). The impl-site check enforces it; the corpus watches
+    // both rejecting arms fire (wrong kind, too few, wrong exact arity).
+    Row(
+        "PackedConstraint",
+        "arity",
+        Constraint(
+            Anchor("crates/noeta-check/src/subst.rs", "fn constraint_mismatch("),
+            Anchor(
+                "tests/conformance/bundles/bind_int_color_errors.noe",
+                "expect:",
+            ),
+        ),
+    ),
     Row("BundleFn", "sig", Data(Anchor(REGISTRY, "pub fn method("))),
     // Element vs Bulk: which receiver may call the method. Calling a `Bulk` method on an
     // element (or the reverse) is not resolved, so the set is a rule about call sites.

@@ -5639,8 +5639,15 @@ const VEC_MODULES: &[ExtModule] = &[
         // intercepts, migrated.
         ctx_functions: crate::vec3::VEC_CTX_FNS,
         ctx_dispatch: Some(crate::vec3::vec_ctx_dispatch),
-        // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`, kernel-methods K1).
-        bundles: &[crate::vec3::VEC_KERNELS],
+        // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`, kernel-methods K1). The
+        // f32 vector bundle plus the array-ops integer (`IVec2`/`IVec3`) and `Color` shapes — one
+        // bundle per shape family, since each has a distinct method set and result types (an integer
+        // `dot` returns `int`, a `Color` has no `dot`/`length`).
+        bundles: &[
+            crate::vec3::VEC_KERNELS,
+            crate::ivec::VEC_INT_KERNELS,
+            crate::color::VEC_COLOR_KERNELS,
+        ],
         docs: VEC_DOCS,
         ..ExtModule::DEFAULTS
     },
