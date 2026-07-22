@@ -1,0 +1,5 @@
+// Element-wise `+`/`-`/`*` require two lists of equal length (array-ops arc); a mismatch is a runtime
+// error (no broadcasting). E0007 at the operator, exactly what the shared kernel refuses.
+// expect: error E0007 at 5:7
+// expect: exit 1
+echo ([1i32, 2i32] + [1i32, 2i32, 3i32])

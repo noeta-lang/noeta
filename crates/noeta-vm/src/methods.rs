@@ -620,6 +620,11 @@ impl<'m> Vm<'m> {
                 if let Some((list, from)) = recv.iter_drain_list() {
                     return self.call_list_reduction(list, "sum", from, span);
                 }
+                // A narrow-width source (`xs.iter().take(k)` over a `List<i32>`, …): the generic fold
+                // accumulates at 64 bits, so mask the integer total back to the element width at the
+                // end — the same wrap `xs.sum()` applies — so a narrow-typed iterator reduction agrees
+                // (array-ops arc). Traced through the width-preserving adapters only.
+                let narrow = recv.iter_narrow_width();
                 let mut int_total: i64 = 0;
                 let mut float_total: f64 = 0.0;
                 let mut any_float = false;
@@ -659,6 +664,8 @@ impl<'m> Vm<'m> {
                 }
                 if any_float {
                     Value::float(float_total + int_total as f64)
+                } else if let Some((signed, bits)) = narrow {
+                    Value::int(noeta_stdlib::mask_to_width(int_total, signed, bits))
                 } else {
                     Value::int(int_total)
                 }

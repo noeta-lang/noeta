@@ -126,16 +126,30 @@ impl Value {
             };
             match shape {
                 // No recursion and no user code: the cursor is read and advanced under one short
-                // borrow. `list_get` shares the list's reference; retain it for the new owner.
+                // borrow. A **boxed** list shares its stored reference (retain it for the new owner);
+                // a **packed** list has no `Payload::List` to index, so materialize the element
+                // (`packed_get` → an owned refcount-1 value, no retain). Reading the backing list's
+                // payload inside this borrow is sound — the backing list is a distinct allocation
+                // from the iterator node (an iterator can never be its own source).
                 IterShape::List => {
                     return Ok(heap::with_payload_mut(self, |p| {
                         let Payload::Iter(IterState::List { list, cursor }) = p else {
                             return None;
                         };
-                        let e = list.list_get(*cursor)?;
-                        *cursor += 1;
-                        e.inc_ref();
-                        Some(e)
+                        let list = *list;
+                        if list.is_packed_list() {
+                            if *cursor >= list.list_len().unwrap_or(0) {
+                                return None;
+                            }
+                            let e = list.packed_get(*cursor);
+                            *cursor += 1;
+                            Some(e)
+                        } else {
+                            let e = list.list_get(*cursor)?;
+                            *cursor += 1;
+                            e.inc_ref();
+                            Some(e)
+                        }
                     }));
                 }
                 IterShape::Take { source, remaining } => {
@@ -266,6 +280,48 @@ impl Value {
                 }
             }
         }
+    }
+
+    /// The narrow integer element width (`signed`, `bits < 64`) of this iterator's backing list,
+    /// traced through the **width-preserving** adapters (`take`/`drop`/`chain`/`filter`) to a packed
+    /// list — for masking a narrow-typed `sum` so `xs.iter().take(k).sum()` wraps at the same width
+    /// `xs.sum()` does (array-ops arc). `map`/`enumerate`/`zip` change the element type, so they stop
+    /// the trace (the fold then stays at 64 bits — the element is already a full `int`). `None` for a
+    /// boxed / wide / non-integer backing, or a non-iterator/non-list value.
+    pub fn iter_narrow_width(self) -> Option<(bool, u8)> {
+        // A packed list directly (the trace's leaf, or a bare list): read its single scalar field.
+        if self.is_packed_list() {
+            return self
+                .with_packed_ref(|schema, _| {
+                    if schema.shape.is_none()
+                        && schema.fields.len() == 1
+                        && let noeta_object::PackedKind::IntN { bits, signed } = &schema.fields[0]
+                        && *bits < 64
+                    {
+                        Some((*signed, *bits))
+                    } else {
+                        None
+                    }
+                })
+                .flatten();
+        }
+        if !self.is_iter() {
+            return None;
+        }
+        // Read the source to recurse on under a short borrow, then recurse with no borrow held (each
+        // source is a distinct allocation, so no aliasing) — the `iter_next_apply` discipline.
+        let source = heap::with_payload(self, |p| match p {
+            Payload::Iter(state) => match state {
+                IterState::List { list, .. } => Some(*list),
+                IterState::Take { source, .. }
+                | IterState::Drop { source, .. }
+                | IterState::Filter { source, .. } => Some(*source),
+                IterState::Chain { first, .. } => Some(*first),
+                _ => None,
+            },
+            _ => None,
+        });
+        source?.iter_narrow_width()
     }
 
     /// Deconstruct an `Option` value a generator step returned: `some(x)` → `Some(x)` (the payload
