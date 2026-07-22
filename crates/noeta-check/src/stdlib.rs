@@ -50,6 +50,12 @@ pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
     if let Some(en) = reg.resolve_enum(n) {
         return en.qualified();
     }
+    // A native class (native-extensibility S2) qualifies the same way, so a signature naming a
+    // class by its short name (`SigType::Named("Handle")` — a native fn's return/param) resolves to
+    // the qualified identity the checker keys `symbols.records`/`Type::Named` on.
+    if let Some(cl) = reg.resolve_class(n) {
+        return cl.qualified();
+    }
     n.to_string()
 }
 

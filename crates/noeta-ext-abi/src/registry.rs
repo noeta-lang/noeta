@@ -70,6 +70,16 @@ pub enum NativeValue {
         variant_index: u32,
         fields: Vec<NativeValue>,
     },
+    /// A native-declared language **class** instance (native-extensibility S2) — the argument view
+    /// of a real class `Object`, so a dispatch may receive a native class value a program
+    /// constructed or a native call produced (`relabel(h: Handle, s)`). `class` is the class's
+    /// **short** name (its runtime shape name); `fields` are its `(name, value)` pairs in slot
+    /// order, each deeply marshalled (an extern-handle field crosses as [`NativeValue::Extern`]).
+    /// The twin of [`NativeOut::Instance`] on the return path.
+    Instance {
+        class: String,
+        fields: Vec<(String, NativeValue)>,
+    },
 }
 
 /// A backend-agnostic **result** the backend materializes into its own `Value`.
@@ -137,6 +147,19 @@ pub enum NativeOut {
         variant: String,
         variant_index: u32,
         fields: Vec<NativeOut>,
+    },
+    /// A native-declared language **class** instance (native-extensibility S2) — a REAL reference
+    /// `Object` with a **class-kind** shape the backend materializes, NOT a value `struct`
+    /// ([`NativeOut::Struct`]): it has reference identity, participates in the RC + cycle collector,
+    /// and its extern-handle field's `Drop` is its destructor. `class` is the class's **short** name
+    /// (the runtime shape name, matching a source-constructed instance so the two interchange);
+    /// `fields` are its `(name, value)` pairs **in the class's declared slot order**, each itself a
+    /// [`NativeOut`] so a field nests (the native-state field is a [`NativeOut::Extern`] carrying the
+    /// handle). The dispatch names the class by its short name; the checker's qualified identity is a
+    /// separate, compile-time concern (the twin of [`NativeOut::Variant`]).
+    Instance {
+        class: String,
+        fields: Vec<(String, NativeOut)>,
     },
     /// Async WORK instead of a value (extern-types X5): the backend tickets the descriptor on
     /// its executor (`spawn_ext`) and hands back a future — intercepted at the dispatch return,
@@ -852,6 +875,85 @@ pub enum VariantValue {
     Int(i64),
 }
 
+// --- Native-declared classes (native-extensibility S2) -------------------------------------------
+
+/// A first-class language **class** contributed by an extension (native-extensibility S2): a TRUE
+/// reference type — reference identity (two bindings alias, `==` is identity), full participation in
+/// the RC + cycle collector, native state, a **destructor** (native Rust cleanup on collection),
+/// AND language-visible fields the language reads, mutates, and constructs. Unlike an [`ExtType`]
+/// (an opaque handle), a class exposes named fields; unlike a value `struct` ([`NativeOut::Struct`]),
+/// it has identity and a destructor.
+///
+/// **Representation** (decided S2): a native class value is a real language `Object` with a
+/// class-kind shape — so identity, reference semantics, RC, and cycle participation come from the
+/// object model unchanged. Native state + destructor ride on a **field typed as an extern handle**
+/// (an [`ExtType`] whose Rust `Drop` is the cleanup): when the object is collected — last reference
+/// or destructor-free cycle reclamation — that field's box is dropped and its `Drop` runs. No
+/// host-coupled finalizer is involved (a deliberate follow-up, not S2).
+///
+/// Its **identity** is the qualified `namespace.name` ([`ExtClass::qualified`], like [`ExtType`] /
+/// [`ExtEnum`]) — what the checker keys `symbols.records`/`Type::Named` on, so a native
+/// `res.Handle` never collides with a user's own `Handle`. Its **runtime** shape carries the short
+/// [`ExtClass::name`] (the display form and what a constructed/materialized value stamps).
+#[derive(Debug, Clone, Copy)]
+pub struct ExtClass {
+    /// The **short display name** (`Handle`). Identity is the qualified [`ExtClass::qualified`].
+    pub name: &'static str,
+    /// The namespace this class lives under (`res`) — its qualified identity is `namespace.name`,
+    /// mirroring [`ExtType::namespace`] / [`ExtEnum::namespace`].
+    pub namespace: &'static str,
+    /// The class's fields in **declaration (slot) order** — the order a native constructor supplies
+    /// values in ([`NativeOut::Instance`]) and the order the object's slots take. Each states its
+    /// name, type, visibility, and mutability; the checker seeds them into `symbols.records`
+    /// (types), `symbols.private_fields` (visibility), and `symbols.mut_fields` (mutability).
+    pub fields: &'static [ExtField],
+}
+
+/// One field of an [`ExtClass`]: its name, type, and the two access rules (visibility, mutability)
+/// the checker enforces. The native-state/destructor field is an ordinary field whose `ty` names an
+/// extern handle ([`SigType::Named`] of an [`ExtType`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ExtField {
+    /// The field's name (`label`, `guard`) — how the language reads it (`h.label`) and how a native
+    /// constructor keys its value in [`NativeOut::Instance`].
+    pub name: &'static str,
+    /// The field's declared type, same signature vocabulary as an [`ExtFn`]'s parameters. Seeded
+    /// into `symbols.records` (via `sig_to_type`) so `h.field` types correctly.
+    pub ty: SigType,
+    /// Whether the field is **public** — readable/writable from outside the class. A `false` field
+    /// is private: an access from outside is E0035, exactly like a `.noe` class's default-private
+    /// field. Seeded into `symbols.private_fields` (the enforcer).
+    pub is_public: bool,
+    /// Whether the field is **mutable** — assignable after construction (`h.field = v`). A `false`
+    /// field is read-only: an assignment is E0033. Seeded into `symbols.mut_fields` (the enforcer).
+    pub is_mut: bool,
+}
+
+impl ExtClass {
+    /// Literal-shortening defaults (`..ExtClass::DEFAULTS`), mirroring [`ExtEnum::DEFAULTS`]: a
+    /// fieldless class under `std`.
+    pub const DEFAULTS: ExtClass = ExtClass {
+        name: "",
+        namespace: "std",
+        fields: &[],
+    };
+
+    /// The class's **qualified identity** (`res.Handle`) — `namespace.name`, the string the checker
+    /// keys `symbols.records`/`Type::Named` on. [`ExtClass::name`] is only the short form.
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace, self.name)
+    }
+
+    /// Whether `q` is this class's qualified identity — allocation-free, mirroring
+    /// [`ExtType::is_qualified`] (probed per candidate on the per-keystroke resolution path).
+    pub fn is_qualified(&self, q: &str) -> bool {
+        q.len() == self.namespace.len() + 1 + self.name.len()
+            && q.as_bytes()[self.namespace.len()] == b'.'
+            && q.starts_with(self.namespace)
+            && q.ends_with(self.name)
+    }
+}
+
 // --- Method bundles (kernel-methods K0) ----------------------------------------------------------
 //
 // A **method bundle** is the nominal-binding half of the raw-buffer kernel story: N3.4 gave a
@@ -1284,6 +1386,12 @@ pub trait Extension: Sync {
     fn enums(&self) -> &'static [ExtEnum] {
         &[]
     }
+    /// The extension's first-class **classes** (native-extensibility S2) — real reference-type
+    /// language classes (identity, destructor, fields, cycle participation). Default empty; seeded
+    /// eagerly into the checker's symbol tables at prelude time by qualified identity.
+    fn classes(&self) -> &'static [ExtClass] {
+        &[]
+    }
     /// The extension's CLI subcommands (higher-order-abi H6). Default empty.
     fn commands(&self) -> &'static [crate::ExtCommand] {
         &[]
@@ -1441,6 +1549,11 @@ pub enum UseKind {
     /// qualified identity (so annotations/patterns resolve); the backends bind no runtime value
     /// (a native enum's values arrive from native calls, not a source-level type handle).
     ExtEnum(String),
+    /// A registered native **class** (`use res.Handle`, native-extensibility S2) — qualified
+    /// identity. Bound like an [`UseKind::ExternType`] in the checker (the local name maps to the
+    /// qualified identity so annotations/construction resolve); the backends bind a **constructible**
+    /// class-kind type handle under the imported short name so `Handle { ... }` builds a real class.
+    ExtClass(String),
     /// Under a known extension root but resolving to no module / namespace / member / type: a
     /// genuine error (a typo'd or nonexistent std target). An extension root is fully enumerable,
     /// so an unknown member cannot be a forward reference — unlike [`UseKind::UserImport`].
@@ -1671,6 +1784,15 @@ impl Registry {
                     out.push((rest.to_string(), q.to_string()));
                 }
             }
+            // Native classes project the same way (native-extensibility S2) — so `use pkg.TheClass`
+            // (or a `use pkg` group then `pkg.TheClass`) resolves a native class by identity, the
+            // exact leaf-module channel extern types and native enums use.
+            for t in e.classes() {
+                let q = t.qualified();
+                if let Some(rest) = q.strip_prefix(&dotted) {
+                    out.push((rest.to_string(), q.to_string()));
+                }
+            }
         }
         out
     }
@@ -1684,9 +1806,10 @@ impl Registry {
             NsChild::Module(qualified)
         } else if self.find_type_qualified(&qualified).is_some()
             || self.find_enum_qualified(&qualified).is_some()
+            || self.find_class_qualified(&qualified).is_some()
         {
-            // A native enum is a type-like member for namespace navigation (`pkg.SameSite` in a
-            // dotted annotation), resolved by identity exactly like an extern type.
+            // A native enum or class is a type-like member for namespace navigation (`pkg.SameSite`
+            // / `pkg.Handle` in a dotted annotation), resolved by identity like an extern type.
             NsChild::Type(qualified)
         } else if self.is_namespace(&qualified) {
             NsChild::Namespace(qualified)
@@ -1717,6 +1840,9 @@ impl Registry {
         }
         if self.find_enum_qualified(&qualified).is_some() {
             return UseKind::ExtEnum(qualified);
+        }
+        if self.find_class_qualified(&qualified).is_some() {
+            return UseKind::ExtClass(qualified);
         }
         if path.len() >= 2 {
             let module = path.join(".");
@@ -1946,6 +2072,36 @@ impl Registry {
             .or_else(|| self.find_enum(name))
     }
 
+    /// Every registered native class (native-extensibility S2), across all units — what
+    /// `Checker::seed_ext_classes` walks to pre-populate the record symbol tables at prelude time.
+    pub fn classes(&self) -> impl Iterator<Item = &'static ExtClass> + '_ {
+        self.units.iter().flat_map(|e| e.classes())
+    }
+
+    /// Find a native class by its **short** name (first match wins, mirroring [`Registry::find_type`]).
+    pub fn find_class(&self, name: &str) -> Option<&'static ExtClass> {
+        self.units
+            .iter()
+            .flat_map(|e| e.classes())
+            .find(|t| t.name == name)
+    }
+
+    /// Find a native class by its **qualified identity** (`res.Handle`) — allocation-free probing,
+    /// mirroring [`Registry::find_type_qualified`].
+    pub fn find_class_qualified(&self, qualified: &str) -> Option<&'static ExtClass> {
+        self.units
+            .iter()
+            .flat_map(|e| e.classes())
+            .find(|t| t.is_qualified(qualified))
+    }
+
+    /// Resolve a native class from **either** a qualified identity or a bare short name — the class
+    /// twin of [`Registry::resolve_type`], read by `qualified_extern`.
+    pub fn resolve_class(&self, name: &str) -> Option<&'static ExtClass> {
+        self.find_class_qualified(name)
+            .or_else(|| self.find_class(name))
+    }
+
     /// Find a registered extern type's method signature.
     pub fn find_type_method(&self, type_name: &str, method: &str) -> Option<&'static ExtFn> {
         self.resolve_type(type_name)?
@@ -2117,6 +2273,13 @@ impl Registry {
             // nested extern values, exactly like the `Struct`/`List` arms.
             O::Variant { fields, .. } => {
                 for value in fields {
+                    self.debug_verify_out(owner, func, value);
+                }
+            }
+            // A native class instance (native-extensibility S2): recurse into each field for any
+            // nested extern values (the native-state handle field is one), like the `Struct` arm.
+            O::Instance { fields, .. } => {
+                for (_, value) in fields {
                     self.debug_verify_out(owner, func, value);
                 }
             }

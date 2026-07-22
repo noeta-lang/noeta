@@ -36,6 +36,84 @@ impl Checker {
         self.register_extension_attributes();
         self.seed_extern_type_traits();
         self.seed_ext_enums();
+        self.seed_ext_classes();
+    }
+
+    /// Seed every installed extension's declared **native classes** (native-extensibility S2) into
+    /// the checker's symbol tables, keyed by **qualified identity** (`res.Handle`) — so a native
+    /// class is indistinguishable from a `.noe` class to every downstream consumer (field typing,
+    /// visibility E0035, mutability E0033, construction, reference-type semantics). Runs eagerly at
+    /// prelude time, mirroring `register_extension_attributes` (which seeds `records`/`types`/
+    /// `type_kinds`) plus the class-only tables the collect pass's `Stmt::Class` arm writes
+    /// (`private_fields`, `mut_fields`). A user declaration of the same qualified name shadows it
+    /// (collect runs after prelude).
+    ///
+    /// **Not** seeded into `destructor_classes`: a native class has no `.noe` `destruct` block — its
+    /// destructor is the extern-handle field's Rust `Drop`, which the RC/cycle collector runs on
+    /// collection unconditionally (heap free drops the field's box). Marking it in
+    /// `destructor_classes` would falsely claim a language destructor and defer its destructor-free
+    /// cycles to the exit reaper; leaving it out keeps mid-run cycle reclamation, and the field's
+    /// `Drop` fires on every free path regardless (verified by the S2 leak oracle).
+    pub(crate) fn seed_ext_classes(&mut self) {
+        // Snapshot the qualified declarations first so the immutable registry borrow is released
+        // before the `&mut self` symbol-table writes (the enum seeder takes the same shape).
+        struct ClassDecl {
+            qualified: String,
+            fields: Vec<(String, Type)>,
+            private: HashSet<String>,
+            muts: HashSet<String>,
+        }
+        let decls: Vec<ClassDecl> = self
+            .reg()
+            .classes()
+            .map(|cl| {
+                let fields = cl
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.to_string(), stdlib::sig_to_type(self.reg(), &f.ty)))
+                    .collect();
+                // Fields default **private** (a class's `.noe` rule) — only `is_public` are exempt.
+                let private = cl
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_public)
+                    .map(|f| f.name.to_string())
+                    .collect();
+                let muts = cl
+                    .fields
+                    .iter()
+                    .filter(|f| f.is_mut)
+                    .map(|f| f.name.to_string())
+                    .collect();
+                ClassDecl {
+                    qualified: cl.qualified(),
+                    fields,
+                    private,
+                    muts,
+                }
+            })
+            .collect();
+        for ClassDecl {
+            qualified,
+            fields,
+            private,
+            muts,
+        } in decls
+        {
+            self.symbols.records.insert(qualified.clone(), fields);
+            self.symbols.types.insert(qualified.clone());
+            self.symbols
+                .type_kinds
+                .insert(qualified.clone(), noeta_types::TypeKind::Class);
+            if !private.is_empty() {
+                self.symbols
+                    .private_fields
+                    .insert(qualified.clone(), private);
+            }
+            if !muts.is_empty() {
+                self.symbols.mut_fields.insert(qualified, muts);
+            }
+        }
     }
 
     /// Seed every installed extension's declared **native enums** (native-extensibility S1) into the

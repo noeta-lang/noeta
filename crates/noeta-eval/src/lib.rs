@@ -1845,6 +1845,34 @@ impl Interpreter {
                         methods: HashMap::new(),
                     }))
                 }
+                // A native class (`use geo.Point`, native-extensibility S2): bind the imported short
+                // name to a **constructible** class `TypeDef` — fields (in registry order),
+                // `structural_eq = false` (reference identity), `is_struct = false`, non-opaque — so
+                // `Point { … }` constructs a real class `Object` exactly like a `.noe` class. The
+                // registry (keyed by qualified identity) is the single source of fields, and the def
+                // carries the **short** name a value stamps; matches the VM's `TypeInfo::Class` seed.
+                UseKind::ExtClass(qualified) if reg.find_class_qualified(&qualified).is_some() => {
+                    let cl = reg.find_class_qualified(&qualified).unwrap();
+                    Value::Type(Rc::new(TypeDef {
+                        name: cl.name.to_string(),
+                        fields: cl
+                            .fields
+                            .iter()
+                            .map(|f| FieldSpec {
+                                name: f.name.to_string(),
+                            })
+                            .collect(),
+                        methods: HashMap::new(),
+                        destructor: None,
+                        is_struct: false,
+                        structural_eq: false,
+                        key_capable: std::cell::Cell::new(false),
+                        derives_comparable: false,
+                        derives_tojson: false,
+                        opaque: false,
+                        field_defaults: Vec::new(),
+                    }))
+                }
                 _ => {
                     Value::Type(Rc::new(TypeDef {
                         name: imported.name.clone(),
@@ -5575,6 +5603,24 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
         // An extern-type argument crosses by value (`clone_box`); extern producers are host/IO
         // shaped, never a hot path. Mirrors the VM-side projection.
         Value::Extern(e) => NativeValue::Extern(e.borrow().clone()),
+        // A class instance crossing INTO a dispatch (native-extensibility S2): the full instance
+        // (class name + `(field, value)` pairs in slot order, each marshalled), so a native fn can
+        // receive a native class value a program constructed. Mirrors the VM's projection; a value
+        // `struct` and an opaque import take the scalar/opaque paths below instead.
+        Value::Object(obj) if !obj.def.is_struct && !obj.def.opaque => {
+            let slots = obj.slots.borrow();
+            let fields = obj
+                .def
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .zip(slots.iter().map(marshal_native_arg))
+                .collect();
+            NativeValue::Instance {
+                class: obj.def.name().to_string(),
+                fields,
+            }
+        }
         // An object with all-scalar fields (e.g. a `Vec3`) projects to its field scalars in slot
         // order; anything with a non-scalar field is opaque (a dispatch that wanted an object will
         // report the type error). Mirrors the prior `read_vec3`.
@@ -5722,6 +5768,36 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant_index: variant_index as usize,
             reflect: None,
         })),
+        // A native-declared class instance (native-extensibility S2): a REAL reference `Object` with
+        // a fresh class `TypeDef` (`structural_eq = false` → `==` is identity, `is_struct = false`),
+        // so it aliases and participates in the cycle collector like a `.noe` class. Fields
+        // materialize recursively in declared slot order (the native-state field is a
+        // `NativeOut::Extern` whose `Drop` is the destructor). Differential-identical to the VM's
+        // class-kind shape, and interchangeable with a source-constructed instance.
+        NativeOut::Instance { class, fields } => {
+            let field_specs = fields
+                .iter()
+                .map(|(n, _)| FieldSpec { name: n.clone() })
+                .collect();
+            let slots: Vec<Value> = fields
+                .into_iter()
+                .map(|(_, out)| materialize_native(out))
+                .collect();
+            let def = Rc::new(TypeDef {
+                name: class,
+                fields: field_specs,
+                methods: HashMap::new(),
+                destructor: None,
+                is_struct: false,
+                structural_eq: false,
+                key_capable: std::cell::Cell::new(false),
+                derives_comparable: false,
+                derives_tojson: false,
+                opaque: false,
+                field_defaults: Vec::new(),
+            });
+            Value::Object(Rc::new(ObjectValue::new(def, slots)))
+        }
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
         // work is ticketed at the dispatch return (extern-types X5), never materialized.

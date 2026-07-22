@@ -74,6 +74,15 @@ impl Checker {
                         // it unifies by identity and a `match` over it is exhaustive.
                         self.imports.extern_types.insert(local, qualified);
                     }
+                    UseKind::ExtClass(qualified) => {
+                        // A native-**class** import (`use res.Handle`, native-extensibility S2): bind
+                        // the local name to the class's qualified identity through the SAME
+                        // `extern_types` channel — an annotation `Handle` and a construction
+                        // `Handle { ... }` then resolve to the qualified `Type::Named` the class was
+                        // seeded under (`symbols.records`/`private_fields`/`mut_fields`), so a native
+                        // fn returning it unifies by identity, field access types, and E0035/E0033 fire.
+                        self.imports.extern_types.insert(local, qualified);
+                    }
                     UseKind::MemberFn { module, func } => {
                         self.imports.imported_fns.insert(local, (module, func));
                     }

@@ -21,9 +21,10 @@
 
 use noeta_embed::{Error, Session};
 use noeta_ext_abi::registry::{
-    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, EnumBacking, ExtBundle, ExtDerive,
-    ExtDeriveMethod, ExtEnum, ExtFn, ExtModule, ExtTier, ExtType, ExtVariant, Extension, NativeOut,
-    NativeValue, PackedConstraint, RetTy, Scalar, SigType, TierSite, VariantValue,
+    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, EnumBacking, ExtBundle, ExtClass,
+    ExtDerive, ExtDeriveMethod, ExtEnum, ExtField, ExtFn, ExtModule, ExtTier, ExtType, ExtVariant,
+    Extension, NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, SigType, TierSite,
+    VariantValue,
 };
 use noeta_ext_abi::{CtxError, CtxOut, ErrorKind, Host, Slot, StdError};
 
@@ -41,7 +42,46 @@ const KERN_FNS: &[ExtFn] = &[
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Tone")),
     },
+    // Returns an instance of the native class below, so a program has one to access fields on
+    // (the visibility/mutability constraints under test are on *field access*).
+    ExtFn {
+        name: "widget",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Named("Widget")),
+    },
 ];
+
+/// A **native class** with a public, a public-mutable, and a private field — the `ExtField.is_public`
+/// and `ExtField.is_mut` constraints under test. No shipped extension declares a native class, so the
+/// checker's E0035 (private-field access) and E0033 (non-`mut` assignment) arms never run against the
+/// corpus for a native class; this fixture is their exerciser.
+const FX_CLASSES: &[ExtClass] = &[ExtClass {
+    name: "Widget",
+    namespace: "fx",
+    fields: &[
+        // Public + read-only: readable outside, but assigning it is E0033.
+        ExtField {
+            name: "label",
+            ty: SigType::String,
+            is_public: true,
+            is_mut: false,
+        },
+        // Public + mutable: readable and assignable outside.
+        ExtField {
+            name: "tag",
+            ty: SigType::Int,
+            is_public: true,
+            is_mut: true,
+        },
+        // Private: reading it from outside the class is E0035.
+        ExtField {
+            name: "secret",
+            ty: SigType::Int,
+            is_public: false,
+            is_mut: false,
+        },
+    ],
+}];
 
 fn kern_dispatch(
     func: &str,
@@ -55,6 +95,15 @@ fn kern_dispatch(
             variant: "Warm".to_string(),
             variant_index: 0,
             fields: vec![],
+        }),
+        // A `Widget` instance — fields in declared slot order (label, tag, secret).
+        "widget" => Ok(NativeOut::Instance {
+            class: "Widget".to_string(),
+            fields: vec![
+                ("label".to_string(), NativeOut::Str("w".to_string())),
+                ("tag".to_string(), NativeOut::Scalar(Scalar::Int(0))),
+                ("secret".to_string(), NativeOut::Scalar(Scalar::Int(0))),
+            ],
         }),
         _ => Err(StdError {
             kind: ErrorKind::UnknownName,
@@ -180,6 +229,9 @@ impl Extension for FxExtension {
     fn enums(&self) -> &'static [ExtEnum] {
         FX_ENUMS
     }
+    fn classes(&self) -> &'static [ExtClass] {
+        FX_CLASSES
+    }
 }
 
 static FX: FxExtension = FxExtension;
@@ -256,6 +308,39 @@ fn a_backed_ext_enum_value_type_is_enforced() {
     rejects(
         "use fx.{kern}\nn: int = kern.tone().value()\necho n\n",
         "expected `int`, found `string`",
+    );
+}
+
+// --- ExtField.is_public / ExtField.is_mut (native-extensibility S2) ------------------------------
+
+/// `ExtField.is_public` states the RULE the checker enforces on a native class's field access: a
+/// field not declared `pub` is private, and reading it from outside its class is E0035 — exactly a
+/// `.noe` class's default-private field. No shipped extension declares a native class, so a fixture
+/// is the only exerciser. Both directions matter: the public field is *readable*, the private one is
+/// *rejected*.
+#[test]
+fn a_native_class_field_visibility_is_enforced() {
+    // Reading the **public** `label` off a native class instance types as `string`.
+    accepts("use fx.{kern}\nuse fx.Widget\nw = kern.widget()\ns: string = w.label\necho s\n");
+    // Reading the **private** `secret` from outside the class is E0035, exactly as for a `.noe`
+    // class's default-private field.
+    rejects(
+        "use fx.{kern}\nuse fx.Widget\nw = kern.widget()\necho w.secret\n",
+        "private field `secret`",
+    );
+}
+
+/// `ExtField.is_mut` states the RULE the checker enforces on a native class's field assignment:
+/// writing a field not declared `mut` is E0033. A fixture is the only exerciser. Both directions
+/// matter: the `mut` field is *assignable*, the read-only one is *rejected*.
+#[test]
+fn a_native_class_field_mutability_is_enforced() {
+    // The **mut** `tag` field is assignable in place (reference `class` semantics — no `mut` binding).
+    accepts("use fx.{kern}\nuse fx.Widget\nw = kern.widget()\nw.tag = 5\necho w.tag\n");
+    // The public-but-**read-only** `label` field is not `mut`: assigning it is E0033.
+    rejects(
+        "use fx.{kern}\nuse fx.Widget\nw = kern.widget()\nw.label = \"x\"\necho 1\n",
+        "not declared `mut`",
     );
 }
 
