@@ -2817,6 +2817,22 @@ impl Interpreter {
             let repr = repr.clone();
             return self.call_list_reduction(&repr, name, span);
         }
+        // `checked_sum()` (array-ops arc): the opt-in overflow-reporting reduction, beside the folds.
+        if let Value::List(repr) = &receiver
+            && name == "checked_sum"
+            && args.is_empty()
+        {
+            let repr = repr.clone();
+            return self.call_list_checked_sum(&repr, span);
+        }
+        // Element-wise array-programming methods (array-ops arc): `scale`/`abs`/`neg`/`clamp` produce
+        // a new list; one shared kernel with the operators, so packed and boxed paths agree.
+        if let Value::List(repr) = &receiver
+            && noeta_stdlib::is_bulk_method(name)
+        {
+            let repr = repr.clone();
+            return self.call_list_bulk_method(&repr, name, &args, span);
+        }
         // Eager collection methods that reuse the prelude builtin impls (prelude-redesign P1):
         // `xs.map(f)` / `xs.filter(f)` on a list. Routed through `call_builtin` with the receiver as
         // the first argument, so the method form and the (legacy) free-function form `map(xs, f)`
@@ -3451,6 +3467,11 @@ impl Interpreter {
                     }
                     return self.call_list_reduction_from(&repr, "sum", cursor, span);
                 }
+                // A narrow-width source (`xs.iter().take(k)` over a `List<i32>`, …): the generic fold
+                // accumulates at 64 bits, so mask the integer total back to the element width at the
+                // end — the same wrap `xs.sum()` applies — so a narrow-typed iterator reduction agrees
+                // (array-ops arc). Traced through the width-preserving adapters only.
+                let narrow = iter_narrow_bits(&Value::Iter(Rc::clone(state)));
                 let mut int_total: i64 = 0;
                 let mut float_total: f64 = 0.0;
                 let mut any_float = false;
@@ -3475,6 +3496,8 @@ impl Interpreter {
                 }
                 Ok(if any_float {
                     Value::Float(float_total + int_total as f64)
+                } else if let Some((signed, bits)) = narrow {
+                    Value::Int(noeta_stdlib::mask_to_width(int_total, signed, bits))
                 } else {
                     Value::Int(int_total)
                 })
@@ -4900,10 +4923,131 @@ impl Interpreter {
                 };
             }
         }
+        // Element-wise array-programming ops (array-ops arc): `+`/`-`/`*` on two lists of the same
+        // numeric element type fold element-wise into a new list (`~` is concat, so the operator is
+        // free). Packed operands fold their buffers, boxed operands their scalars — one shared
+        // `noeta-stdlib` kernel, so both representations and both backends agree; ints wrap at width.
+        if let (Value::List(l), Value::List(r)) = (&left, &right)
+            && let Some(bop) = elem_bin_op(op)
+        {
+            let (l, r) = (l.clone(), r.clone());
+            return self.call_list_elementwise(bop, &l, &r, span);
+        }
         match ops::apply_binary(op, &left, &right) {
             Ok(value) => Ok(value),
             Err(error) => Err(self.runtime_error(error.code, span, error.text)),
         }
+    }
+
+    /// Element-wise `+`/`-`/`*` over two numeric lists (array-ops arc). A length mismatch is a runtime
+    /// error (E0007). Two packed scalar buffers of the same field fold directly (the result shares the
+    /// operand's packed schema); otherwise both sides materialize to scalars and fold — the boxed
+    /// fallback, matching the packed path for a given list type.
+    fn call_list_elementwise(
+        &mut self,
+        op: noeta_stdlib::ElemBinOp,
+        left: &ListRepr,
+        right: &ListRepr,
+        span: Span,
+    ) -> Eval<Value> {
+        if left.len() != right.len() {
+            return Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                noeta_stdlib::length_mismatch(op).message,
+            ));
+        }
+        // Packed fast path: two single-field scalar buffers of the same element kind.
+        if let (ListRepr::Packed(pa), ListRepr::Packed(pb)) = (left, right) {
+            let (va, vb) = (pa.seam_view(), pb.seam_view());
+            if va.fields.len() == 1 && vb.fields.len() == 1 && va.fields[0] == vb.fields[0] {
+                let bytes = noeta_stdlib::zip_num_packed(op, &va.fields[0], pa.raw(), pb.raw())
+                    .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
+                return Ok(Value::List(ListRepr::Packed(pa.like(bytes))));
+            }
+        }
+        // Boxed fallback: fold the materialized scalars.
+        let a: Vec<_> = self.list_scalars(left, op.symbol(), 0, span)?.collect();
+        let b: Vec<_> = self.list_scalars(right, op.symbol(), 0, span)?.collect();
+        let out = noeta_stdlib::zip_num_scalars(op, &a, &b)
+            .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
+        Ok(Value::list(out.into_iter().map(scalar_to_value).collect()))
+    }
+
+    /// The bulk array-programming **methods** (array-ops arc): `scale(s)`, `abs()`, `neg()`,
+    /// `clamp(lo, hi)` — each producing a new list of the operand's numeric element type. A packed
+    /// list folds its buffer; a boxed list its scalars — the shared `noeta-stdlib` kernel, so the two
+    /// representations (and both backends) agree.
+    fn call_list_bulk_method(
+        &mut self,
+        list: &ListRepr,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        let arg_scalar = |this: &mut Self, i: usize| -> Eval<noeta_stdlib::Scalar> {
+            match args.get(i).and_then(value_to_scalar) {
+                Some(s) => Ok(s),
+                None => Err(this.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("`{method}` expects a numeric argument"),
+                )),
+            }
+        };
+        // Packed fast path: a single-field scalar buffer.
+        if let ListRepr::Packed(p) = list {
+            let view = p.seam_view();
+            if view.fields.len() == 1 {
+                let field = &view.fields[0];
+                let bytes = match method {
+                    "scale" => noeta_stdlib::scale_num_packed(field, p.raw(), arg_scalar(self, 0)?),
+                    "clamp" => noeta_stdlib::clamp_num_packed(
+                        field,
+                        p.raw(),
+                        arg_scalar(self, 0)?,
+                        arg_scalar(self, 1)?,
+                    ),
+                    _ => {
+                        let op = noeta_stdlib::ElemMap::from_name(method)
+                            .expect("the caller gates this to a bulk method name");
+                        noeta_stdlib::map_num_packed(op, field, p.raw())
+                    }
+                }
+                .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
+                return Ok(Value::List(ListRepr::Packed(p.like(bytes))));
+            }
+        }
+        // Boxed fallback.
+        let a: Vec<_> = self.list_scalars(list, method, 0, span)?.collect();
+        let out = match method {
+            "scale" => noeta_stdlib::scale_num_scalars(&a, arg_scalar(self, 0)?),
+            "clamp" => noeta_stdlib::clamp_num_scalars(&a, arg_scalar(self, 0)?, arg_scalar(self, 1)?),
+            _ => {
+                let op = noeta_stdlib::ElemMap::from_name(method)
+                    .expect("the caller gates this to a bulk method name");
+                noeta_stdlib::map_num_scalars(op, &a)
+            }
+        }
+        .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
+        Ok(Value::list(out.into_iter().map(scalar_to_value).collect()))
+    }
+
+    /// `checked_sum()` (array-ops arc): the opt-in overflow-reporting sum — `none` on integer
+    /// overflow, `some(total)` otherwise. A packed buffer folds directly; a boxed list its scalars.
+    fn call_list_checked_sum(&mut self, list: &ListRepr, span: Span) -> Eval<Value> {
+        let folded = match list {
+            ListRepr::Packed(p) if p.seam_view().fields.len() == 1 => {
+                let view = p.seam_view();
+                noeta_stdlib::checked_sum_packed(&view.fields[0], p.raw())
+            }
+            _ => noeta_stdlib::checked_sum_scalars(self.list_scalars(list, "checked_sum", 0, span)?),
+        }
+        .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
+        Ok(match folded {
+            Some(rn) => builtin_enum("Option", "some", vec![rednum_to_value(rn)]),
+            None => builtin_enum("Option", "none", Vec::new()),
+        })
     }
 
     /// A sign-dependent fixed-width integer op (Tier W3): `/ % < <= > >=` where the operand width
@@ -5696,6 +5840,51 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
 /// Project a primitive tree-walker value onto a [`noeta_stdlib::Scalar`], or `None` if not primitive.
 /// Lift a numeric reduction result (packed-reductions arc) into a tree-walker `Value`. An integer
 /// (`int`/`IntN`, erased) becomes `Value::Int`; the float widths keep their runtime tag.
+/// The narrow integer element width (`signed`, `bits < 64`) of a list, or `None` for a boxed / wide /
+/// non-integer list — for masking a narrow-typed iterator reduction (array-ops arc).
+fn list_narrow_bits(v: &Value) -> Option<(bool, u8)> {
+    if let Value::List(ListRepr::Packed(p)) = v {
+        let view = p.seam_view();
+        if view.fields.len() == 1
+            && let noeta_stdlib::PackedField::IntN { bits, signed } = view.fields[0]
+            && bits < 64
+        {
+            return Some((signed, bits));
+        }
+    }
+    None
+}
+
+/// Trace an iterator's narrow integer element width back through the **width-preserving** adapters
+/// (`take`/`drop`/`chain`/`filter`) to its backing list (array-ops arc), so `xs.iter().take(k).sum()`
+/// wraps at the same width `xs.sum()` does. `map`/`enumerate`/`zip` change the element type, so they
+/// stop the trace (the fold then stays at 64 bits — the element is already a full `int`).
+fn iter_narrow_bits(v: &Value) -> Option<(bool, u8)> {
+    match v {
+        Value::List(_) => list_narrow_bits(v),
+        Value::Iter(state) => match &*state.borrow() {
+            IterState::List { list, .. } => list_narrow_bits(list),
+            IterState::Take { source, .. }
+            | IterState::Drop { source, .. }
+            | IterState::Filter { source, .. } => iter_narrow_bits(source),
+            IterState::Chain { first, .. } => iter_narrow_bits(first),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Map an arithmetic operator to its element-wise list op (array-ops arc): `+`/`-`/`*` fold two
+/// lists element-wise; `/`/`%` (and every non-arithmetic operator) have no list form (`None`).
+fn elem_bin_op(op: BinaryOp) -> Option<noeta_stdlib::ElemBinOp> {
+    Some(match op {
+        BinaryOp::Add => noeta_stdlib::ElemBinOp::Add,
+        BinaryOp::Sub => noeta_stdlib::ElemBinOp::Sub,
+        BinaryOp::Mul => noeta_stdlib::ElemBinOp::Mul,
+        _ => return None,
+    })
+}
+
 fn rednum_to_value(rn: noeta_stdlib::RedNum) -> Value {
     match rn {
         noeta_stdlib::RedNum::Int(i) => Value::Int(i),

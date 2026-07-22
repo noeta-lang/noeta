@@ -1090,11 +1090,28 @@ impl ExtTrait {
 /// a type binding to the bundle must look like, validated **at the impl site, at compile time**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackedConstraint {
-    /// Required field kinds, in slot (declared) order — exact arity and kinds.
+    /// Required field kinds. Interpreted per [`arity`](Self::arity): under [`ConstraintArity::Exact`]
+    /// these are the fields in slot (declared) order, exactly; under [`ConstraintArity::Uniform`]
+    /// only `fields[0]` matters — every field of the bound type must equal it.
     pub fields: &'static [ConstraintField],
     /// Required storage layout (`Any` for layout-agnostic kernels that branch on
     /// `PackedView::column` themselves).
     pub layout: ConstraintLayout,
+    /// How [`fields`](Self::fields) is matched against the bound type's field list.
+    pub arity: ConstraintArity,
+}
+
+/// How a [`PackedConstraint`]'s field list is matched against a bound type (kernel-methods; extended
+/// by the array-ops integer/u8 vector shapes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintArity {
+    /// The bound type's fields must equal `fields` exactly — same count, same kinds, in order (a
+    /// fixed-shape kernel: an f32 `Vec3`, a 4×`u8` `Color`).
+    Exact,
+    /// The bound type has **at least `min`** fields, **all** of the single kind in `fields[0]` — a
+    /// uniform primitive vector of flexible width (`IVec2`/`IVec3`/… all bind one integer bundle).
+    /// `fields` must hold exactly one kind.
+    Uniform { min: usize },
 }
 
 /// One required field kind in a [`PackedConstraint`] (primitives only — a bundle over nested
@@ -1105,6 +1122,10 @@ pub enum ConstraintField {
     Float,
     F32,
     Bool,
+    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc) — the array-ops integer
+    /// (`IVec2`/`IVec3` at `i32`) and `Color` (`u8`) vector shapes. Mirrors
+    /// [`crate::PackedField::IntN`] / `noeta_ast::reflect::PackedKind::IntN`.
+    IntN { bits: u8, signed: bool },
 }
 
 /// The storage layout a [`PackedConstraint`] requires of the bound type.
@@ -2824,6 +2845,20 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     ));
                 }
             }
+            // A `Uniform` constraint reads only `fields[0]` (every field of the bound type must
+            // equal it) — declaring more than one kind is an author bug that would silently ignore
+            // the rest, so refuse it here where every assembly path passes.
+            if let ConstraintArity::Uniform { .. } = bundle.constraint.arity
+                && bundle.constraint.fields.len() != 1
+            {
+                return Err(format!(
+                    "bundle `{}.{}` has a `Uniform` arity constraint but declares {} field kinds — \
+                     a uniform vector constraint names exactly one kind (`fields[0]`)",
+                    module.name,
+                    bundle.name,
+                    bundle.constraint.fields.len()
+                ));
+            }
             for (j, method) in bundle.methods.iter().enumerate() {
                 for other in &bundle.methods[j + 1..] {
                     if method.sig.name == other.sig.name {
@@ -3243,6 +3278,7 @@ mod runtime_registry_tests {
             ConstraintField::F32,
         ],
         layout: ConstraintLayout::Any,
+        arity: ConstraintArity::Exact,
     };
     const KERNELS: ExtBundle = ExtBundle {
         name: "Kernels",

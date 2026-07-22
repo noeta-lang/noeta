@@ -34,6 +34,7 @@
 pub use noeta_ext_abi::*;
 
 pub mod cell;
+pub mod color;
 pub mod cookie;
 pub mod crypto;
 /// The `std.datetime` calendar/timezone surface (Ring 3), gated behind the default-on
@@ -47,6 +48,7 @@ pub mod host;
 pub mod http_client;
 pub mod id;
 pub mod iter;
+pub mod ivec;
 pub mod json;
 pub mod liveview;
 pub mod log;
@@ -57,6 +59,7 @@ pub mod net;
 pub mod quat;
 pub mod random;
 pub mod reactive;
+pub mod bulk;
 pub mod reductions;
 /// The `std.regex` engine surface (Ring 3), gated behind the default-on `ring-regex` feature so a
 /// footprint-tailored build can shed the engine and its Unicode tables.
@@ -75,9 +78,14 @@ pub mod vec3;
 pub use handle::{FileHandle, FileMode, Flush};
 pub use host::{CounterIds, DeterministicClock, DeterministicEntropy, SandboxHost, SeededRng};
 pub use iter::IterMethod;
+pub use bulk::{
+    ElemBinOp, ElemMap, clamp_num_packed, clamp_num_scalars, is_bulk_method, length_mismatch,
+    map_num_packed, map_num_scalars, scale_num_packed, scale_num_scalars, zip_num_packed,
+    zip_num_scalars,
+};
 pub use reductions::{
-    BoolReduce, NumReduce, RedBool, RedNum, reduce_bool_packed, reduce_bool_scalars,
-    reduce_num_packed, reduce_num_scalars,
+    BoolReduce, NumReduce, RedBool, RedNum, checked_sum_packed, checked_sum_scalars,
+    reduce_bool_packed, reduce_bool_scalars, reduce_num_packed, reduce_num_scalars,
 };
 #[cfg(feature = "ring-regex")]
 pub use regex::RegexExtension;

@@ -26,6 +26,34 @@ impl Checker {
                 }
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
+                // Element-wise **array-programming** ops (array-ops arc): `+`/`-`/`*` on two lists of
+                // the SAME numeric element type → a list of that type (element-wise, wrapping for
+                // ints; a length mismatch is a runtime error). No broadcasting, no coercion — a
+                // differing element type is E0007 (`List<i32> + List<int>`), exactly what the runtime
+                // would refuse. `/`/`%` are not defined on lists (they fall through to the generic
+                // path, which reports E0007). The runtime folds the packed buffer / boxed scalars via
+                // one shared `noeta-stdlib` kernel; a plain `Op::Binary` dispatches it (no width site —
+                // the element width lives in the packed field, read at runtime).
+                if let (Type::List(a), Type::List(b)) = (&lt, &rt)
+                    && matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
+                {
+                    let numeric = |t: &Type| {
+                        matches!(
+                            t,
+                            Type::Int | Type::IntN { .. } | Type::Float | Type::F32 | Type::F64
+                        )
+                    };
+                    // A `dyn`/hole element defers (keep the concrete side's element type if any).
+                    if a.defers_to_runtime() || b.defers_to_runtime() {
+                        let elem = if a.defers_to_runtime() { b } else { a };
+                        return Type::List(elem.clone());
+                    }
+                    if numeric(a) && numeric(b) && a == b {
+                        return Type::List(a.clone());
+                    }
+                    self.report_operator_error(op, &lt, &rt, None, span);
+                    return Type::Unknown;
+                }
                 // Fixed-width integers (Tier W): `+ - * / %` on two same-width `IntN` yield that
                 // width — `+ - *` mask the result (W2, sign-agnostic), `/ %` use the width-carrying
                 // sign-aware op (W3). Mixed-width or `IntN` mixed with `int`/`float` needs an explicit

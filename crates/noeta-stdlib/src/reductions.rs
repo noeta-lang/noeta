@@ -235,6 +235,96 @@ pub fn reduce_num_packed(
     })
 }
 
+// A `checked_add` fold, reporting overflow at the element width instead of wrapping (the opt-in
+// `checked_sum` — the unchecked `sum` still wraps). `Some(acc)` normally, `None` on overflow.
+macro_rules! checked_int_sum {
+    ($ty:ty, $bytes:expr) => {{
+        let mut acc: $ty = 0;
+        let mut overflow = false;
+        for x in elems!($ty, $bytes) {
+            match acc.checked_add(x) {
+                Some(v) => acc = v,
+                None => {
+                    overflow = true;
+                    break;
+                }
+            }
+        }
+        if overflow {
+            None
+        } else {
+            Some(RedNum::Int(acc as i64))
+        }
+    }};
+}
+
+/// `checked_sum()` over a packed **scalar** buffer: `Ok(Some(total))` normally, `Ok(None)` on integer
+/// overflow at the element width (floats never report overflow — an empty list sums to the identity
+/// `0`, always `Some`). Numeric fields only; a non-numeric field is an error.
+pub fn checked_sum_packed(field: &PackedField, bytes: &[u8]) -> Result<Option<RedNum>, StdError> {
+    Ok(match field {
+        PackedField::Int => checked_int_sum!(i64, bytes),
+        PackedField::IntN { bits: 8, signed: true } => checked_int_sum!(i8, bytes),
+        PackedField::IntN { bits: 8, signed: false } => checked_int_sum!(u8, bytes),
+        PackedField::IntN { bits: 16, signed: true } => checked_int_sum!(i16, bytes),
+        PackedField::IntN { bits: 16, signed: false } => checked_int_sum!(u16, bytes),
+        PackedField::IntN { bits: 32, signed: true } => checked_int_sum!(i32, bytes),
+        PackedField::IntN { bits: 32, signed: false } => checked_int_sum!(u32, bytes),
+        PackedField::IntN { bits: 64, signed: true } => checked_int_sum!(i64, bytes),
+        PackedField::IntN { bits: 64, signed: false } => checked_int_sum!(u64, bytes),
+        PackedField::Float | PackedField::F64 => {
+            let mut acc = 0f64;
+            for x in elems!(f64, bytes) {
+                acc += x;
+            }
+            Some(RedNum::Float(acc))
+        }
+        PackedField::F32 => {
+            let mut acc = 0f32;
+            for x in elems!(f32, bytes) {
+                acc += x;
+            }
+            Some(RedNum::F32(acc))
+        }
+        PackedField::Bool => return Err(non_numeric(NumReduce::Sum, "bool")),
+        PackedField::IntN { .. } => return Err(non_numeric(NumReduce::Sum, "int")),
+        PackedField::Struct(_) => return Err(non_numeric(NumReduce::Sum, "structs")),
+    })
+}
+
+/// `checked_sum()` over a **boxed** scalar list — the fallback sharing the overflow convention with
+/// [`checked_sum_packed`]. Integers fold at 64 bits (the only boxed integer widths are
+/// `int`/`i64`/`u64`, exact at 64; narrow widths are always packed).
+pub fn checked_sum_scalars(
+    scalars: impl Iterator<Item = Scalar>,
+) -> Result<Option<RedNum>, StdError> {
+    let mut int_acc: i64 = 0;
+    let mut float_acc: f64 = 0.0;
+    let mut any_float = false;
+    for s in scalars {
+        match s {
+            Scalar::Int(i) => match int_acc.checked_add(i) {
+                Some(v) => int_acc = v,
+                None => return Ok(None),
+            },
+            Scalar::Float(f) => {
+                any_float = true;
+                float_acc += f;
+            }
+            Scalar::F32(f) => {
+                any_float = true;
+                float_acc += f as f64;
+            }
+            Scalar::Bool(_) => return Err(non_numeric(NumReduce::Sum, "bool")),
+        }
+    }
+    Ok(Some(if any_float {
+        RedNum::Float(float_acc + int_acc as f64)
+    } else {
+        RedNum::Int(int_acc)
+    }))
+}
+
 /// The numeric domain of one boxed element: an integer (`int`/`IntN`, erased to `i64`) or a float.
 #[derive(Clone, Copy)]
 enum Num {

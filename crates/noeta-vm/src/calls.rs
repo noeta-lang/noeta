@@ -515,6 +515,20 @@ impl<'m> Vm<'m> {
         {
             return self.call_list_reduction(v, method, 0, span);
         }
+        // `checked_sum()` (array-ops arc): the opt-in overflow-reporting reduction, beside the folds.
+        if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+            && method == "checked_sum"
+            && args.is_empty()
+        {
+            return self.call_list_checked_sum(v, span);
+        }
+        // Element-wise array-programming methods (array-ops arc): `scale`/`abs`/`neg`/`clamp` produce
+        // a new list; one shared kernel with the operators, so packed and boxed paths agree.
+        if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+            && noeta_stdlib::is_bulk_method(method)
+        {
+            return self.call_list_bulk_method(v, method, args, span);
+        }
         // Eager collection methods reusing the prelude builtin impls (prelude-redesign
         // P1): `xs.map(f)` / `xs.filter(f)` on a list, routed through `call_builtin` with the
         // receiver as the first argument so the method and (legacy) free-function forms share one
@@ -679,6 +693,140 @@ impl<'m> Vm<'m> {
             ));
         }
         Ok(scalars)
+    }
+
+    /// Element-wise `+`/`-`/`*` over two numeric lists (array-ops arc). A length mismatch is a runtime
+    /// error (E0007). Two packed scalar buffers of the same field fold directly (the result shares the
+    /// operand's packed schema); otherwise both sides materialize to scalars and fold — one shared
+    /// `noeta-stdlib` kernel, so packed/boxed and both backends agree. `left`/`right` are borrowed.
+    pub(crate) fn call_list_elementwise(
+        &mut self,
+        op: noeta_stdlib::ElemBinOp,
+        left: Value,
+        right: Value,
+        span: Span,
+    ) -> Result<Value, Abort> {
+        if left.list_len() != right.list_len() {
+            return Err(self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                noeta_stdlib::length_mismatch(op).message,
+            ));
+        }
+        // Packed fast path: two single-field scalar buffers of the same element kind.
+        if let Some((schema, a_bytes)) = left.packed_parts()
+            && schema.shape.is_none()
+            && schema.fields.len() == 1
+        {
+            let field = crate::native_ctx::packed_field(&schema.fields[0]);
+            let mut out: Option<Result<Vec<u8>, noeta_stdlib::StdError>> = None;
+            right.with_packed_ref(|rs, rb| {
+                if rs.shape.is_none()
+                    && rs.fields.len() == 1
+                    && crate::native_ctx::packed_field(&rs.fields[0]) == field
+                    && rb.len() == a_bytes.len()
+                {
+                    out = Some(noeta_stdlib::zip_num_packed(op, &field, &a_bytes, rb));
+                }
+            });
+            if let Some(res) = out {
+                let bytes =
+                    res.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+                return Ok(Value::packed_list(schema, bytes));
+            }
+        }
+        // Boxed fallback: fold the materialized scalars.
+        let a = self.list_reduction_scalars(left, op.symbol(), 0, span)?;
+        let b = self.list_reduction_scalars(right, op.symbol(), 0, span)?;
+        let out = noeta_stdlib::zip_num_scalars(op, &a, &b)
+            .map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+        Ok(Value::list(
+            out.into_iter().map(crate::values::scalar_to_value).collect(),
+        ))
+    }
+
+    /// The bulk array-programming **methods** (array-ops arc): `scale(s)`, `abs()`, `neg()`,
+    /// `clamp(lo, hi)` — each producing a new list of the operand's numeric element type. A packed
+    /// list folds its buffer, a boxed list its scalars — the shared kernel, so the two agree. The
+    /// receiver `v` is borrowed; `args` are borrowed.
+    pub(crate) fn call_list_bulk_method(
+        &mut self,
+        v: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        let arg_scalar = |this: &mut Self, i: usize| -> Result<noeta_stdlib::Scalar, Abort> {
+            match args.get(i).copied().and_then(crate::values::value_to_scalar) {
+                Some(s) => Ok(s),
+                None => Err(this.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("`{method}` expects a numeric argument"),
+                )),
+            }
+        };
+        // Packed fast path: a single-field scalar buffer.
+        if let Some((schema, bytes)) = v.packed_parts()
+            && schema.shape.is_none()
+            && schema.fields.len() == 1
+        {
+            let field = crate::native_ctx::packed_field(&schema.fields[0]);
+            let result = match method {
+                "scale" => {
+                    let s = arg_scalar(self, 0)?;
+                    noeta_stdlib::scale_num_packed(&field, &bytes, s)
+                }
+                "clamp" => {
+                    let (lo, hi) = (arg_scalar(self, 0)?, arg_scalar(self, 1)?);
+                    noeta_stdlib::clamp_num_packed(&field, &bytes, lo, hi)
+                }
+                _ => {
+                    let op = noeta_stdlib::ElemMap::from_name(method)
+                        .expect("the caller gates this to a bulk method name");
+                    noeta_stdlib::map_num_packed(op, &field, &bytes)
+                }
+            };
+            let out = result.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+            return Ok(Value::packed_list(schema, out));
+        }
+        // Boxed fallback.
+        let a = self.list_reduction_scalars(v, method, 0, span)?;
+        let result = match method {
+            "scale" => noeta_stdlib::scale_num_scalars(&a, arg_scalar(self, 0)?),
+            "clamp" => {
+                noeta_stdlib::clamp_num_scalars(&a, arg_scalar(self, 0)?, arg_scalar(self, 1)?)
+            }
+            _ => {
+                let op = noeta_stdlib::ElemMap::from_name(method)
+                    .expect("the caller gates this to a bulk method name");
+                noeta_stdlib::map_num_scalars(op, &a)
+            }
+        };
+        let out = result.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+        Ok(Value::list(
+            out.into_iter().map(crate::values::scalar_to_value).collect(),
+        ))
+    }
+
+    /// `checked_sum()` (array-ops arc): the opt-in overflow-reporting sum — `none` on integer
+    /// overflow, `some(total)` otherwise. Beside the reduction folds; the receiver `v` is borrowed.
+    pub(crate) fn call_list_checked_sum(&mut self, v: Value, span: Span) -> Result<Value, Abort> {
+        let folded = match v.packed_parts() {
+            Some((schema, bytes)) if schema.shape.is_none() && schema.fields.len() == 1 => {
+                let field = crate::native_ctx::packed_field(&schema.fields[0]);
+                noeta_stdlib::checked_sum_packed(&field, &bytes)
+            }
+            _ => {
+                let scalars = self.list_reduction_scalars(v, "checked_sum", 0, span)?;
+                noeta_stdlib::checked_sum_scalars(scalars.into_iter())
+            }
+        };
+        let folded = folded.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+        Ok(match folded {
+            Some(rn) => make_some(rednum_to_value(rn)),
+            None => make_none(),
+        })
     }
 
     /// Run an unbound method handle (`Type.method`) applied to `args` on a fresh frame stack,

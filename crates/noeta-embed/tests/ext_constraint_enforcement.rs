@@ -21,10 +21,10 @@
 
 use noeta_embed::{Error, Session};
 use noeta_ext_abi::registry::{
-    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, EnumBacking, ExtBundle, ExtClass,
-    ExtDerive, ExtDeriveMethod, ExtEnum, ExtField, ExtFn, ExtModule, ExtTier, ExtTrait,
-    ExtTraitMethod, ExtType, ExtVariant, Extension, NativeOut, NativeValue, PackedConstraint, RetTy,
-    Scalar, SigType, TierSite, VariantValue,
+    BundleFn, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout, EnumBacking,
+    ExtBundle, ExtClass, ExtDerive, ExtDeriveMethod, ExtEnum, ExtField, ExtFn, ExtModule, ExtTier,
+    ExtTrait, ExtTraitMethod, ExtType, ExtVariant, Extension, NativeOut, NativeValue,
+    PackedConstraint, RetTy, Scalar, SigType, TierSite, VariantValue,
 };
 use noeta_ext_abi::{CtxError, CtxOut, ErrorKind, Host, Slot, StdError};
 
@@ -145,6 +145,7 @@ const COLS_BUNDLE: ExtBundle = ExtBundle {
     constraint: PackedConstraint {
         fields: &[ConstraintField::F32, ConstraintField::F32],
         layout: ConstraintLayout::Column,
+        arity: ConstraintArity::Exact,
     },
     methods: &[BundleFn {
         sig: ExtFn {

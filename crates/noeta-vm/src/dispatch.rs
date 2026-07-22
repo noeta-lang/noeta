@@ -3196,12 +3196,26 @@ impl<'m> Vm<'m> {
                             }
                             continue;
                         }
-                        match apply_binary(*op, left, right) {
-                            Ok(v) => {
-                                set_reg(regs, fbase, *dst, v);
-                                pc += 1;
+                        // Element-wise array-programming ops (array-ops arc): `+`/`-`/`*` on two lists
+                        // of the same numeric element type fold into a new list (`~` is concat, so the
+                        // operator is free). One shared `noeta-stdlib` kernel with the tree-walker, so
+                        // the differential holds; ints wrap at the element width. The result is a fresh
+                        // value (owns its reference) — no retain, like `MaskWidth`.
+                        if left.is_list()
+                            && right.is_list()
+                            && let Some(bop) = elem_bin_op(*op)
+                        {
+                            let v = self.call_list_elementwise(bop, left, right, *span)?;
+                            set_reg(regs, fbase, *dst, v);
+                            pc += 1;
+                        } else {
+                            match apply_binary(*op, left, right) {
+                                Ok(v) => {
+                                    set_reg(regs, fbase, *dst, v);
+                                    pc += 1;
+                                }
+                                Err(e) => return Err(self.error(e.code, *span, e.text)),
                             }
-                            Err(e) => return Err(self.error(e.code, *span, e.text)),
                         }
                     }
                     Op::WideInt {
@@ -3627,6 +3641,17 @@ impl ArgBuf {
 }
 
 /// Overwrite a register, releasing the value it held.
+/// Map an arithmetic operator to its element-wise list op (array-ops arc): `+`/`-`/`*` fold two lists
+/// element-wise; every other operator has no list form (`None` → the scalar `apply_binary`).
+pub(crate) fn elem_bin_op(op: noeta_ast::BinaryOp) -> Option<noeta_stdlib::ElemBinOp> {
+    Some(match op {
+        noeta_ast::BinaryOp::Add => noeta_stdlib::ElemBinOp::Add,
+        noeta_ast::BinaryOp::Sub => noeta_stdlib::ElemBinOp::Sub,
+        noeta_ast::BinaryOp::Mul => noeta_stdlib::ElemBinOp::Mul,
+        _ => return None,
+    })
+}
+
 pub(crate) fn set_reg(regs: &mut [Value], base: usize, dst: u16, value: Value) {
     let idx = base + dst as usize;
     let old = regs[idx];

@@ -1,0 +1,76 @@
+// Array-ops arc: integer vector kernels (`vec.IntKernels`) over `@packed` structs of `i32` fields.
+// A single `Uniform` bundle binds both IVec2 (2 fields) and IVec3 (3 fields). Componentwise
+// add/sub/scale/min/max WRAP at i32 width (the arc convention); `dot` WIDENS to `int` (i64), the one
+// reduction whose accumulator width matters. Bulk `*_all` over a packed `List<IVecN>` matches the
+// element ops (the shared kernel — both backends agree, the differential pins it), on row + column.
+// expect: stdout "IVec3 {x: 11, y: 22, z: 33}"
+// expect: stdout "IVec3 {x: -9, y: -18, z: -27}"
+// expect: stdout "IVec3 {x: 2, y: 4, z: 6}"
+// expect: stdout "IVec3 {x: 1, y: 2, z: 3}"
+// expect: stdout "IVec3 {x: 10, y: 20, z: 30}"
+// expect: stdout "140"
+// expect: stdout "IVec3 {x: -2147483648, y: 0, z: 0}"
+// expect: stdout "2147488281"
+// expect: stdout "IVec2 {x: 4, y: 6}"
+// expect: stdout "11"
+// expect: stdout "[IVec3 {x: 11, y: 22, z: 33}, IVec3 {x: 5, y: 6, z: 7}]"
+// expect: stdout "[IVec3 {x: -9, y: -18, z: -27}, IVec3 {x: 3, y: 4, z: 5}]"
+// expect: stdout "[IVec3 {x: 2, y: 4, z: 6}, IVec3 {x: 8, y: 10, z: 12}]"
+// expect: stdout "[140, 15]"
+// expect: stdout "[140, 15]"
+// expect: stdout "[]"
+// expect: exit 0
+use std.{vec}
+
+@packed struct IVec3 { x: i32; y: i32; z: i32 }
+@packed struct IVec2 { x: i32; y: i32 }
+@packed(Layout.Column) struct CVec3 { x: i32; y: i32; z: i32 }
+
+impl vec.IntKernels for IVec3 {}
+impl vec.IntKernels for IVec2 {}
+impl vec.IntKernels for CVec3 {}
+
+a = IVec3 { x: 1i32, y: 2i32, z: 3i32 }
+b = IVec3 { x: 10i32, y: 20i32, z: 30i32 }
+
+// Element methods: `v.add(w)` ≡ the componentwise op, result shaped like the receiver.
+echo a.add(b)
+echo a.sub(b)
+echo a.scale(2i32)
+echo a.min(b)
+echo b.max(a)
+echo a.dot(b)                       // 1·10 + 2·20 + 3·30 = 140
+
+// Integer arithmetic WRAPS at i32 width: MAX + 1 → MIN.
+big = IVec3 { x: 2147483647i32, y: 0i32, z: 0i32 }
+one = IVec3 { x: 1i32, y: 0i32, z: 0i32 }
+echo big.add(one)
+
+// `dot` WIDENS to int: 46341² = 2147488281 exceeds i32::MAX (2147483647). Widened, not wrapped —
+// a wrap would give a negative. This pins the width decision.
+w = IVec3 { x: 46341i32, y: 0i32, z: 0i32 }
+echo w.dot(w)
+
+// The 2-component shape binds the same bundle.
+p = IVec2 { x: 3i32, y: 4i32 }
+q = IVec2 { x: 1i32, y: 2i32 }
+echo p.add(q)
+echo p.dot(q)                       // 3·1 + 4·2 = 11
+
+// Bulk `*_all` over a packed `List<IVec3>` — same kernel as the element ops.
+xs = [IVec3 { x: 1i32, y: 2i32, z: 3i32 }, IVec3 { x: 4i32, y: 5i32, z: 6i32 }]
+ys = [IVec3 { x: 10i32, y: 20i32, z: 30i32 }, IVec3 { x: 1i32, y: 1i32, z: 1i32 }]
+echo xs.add_all(ys)
+echo xs.sub_all(ys)
+echo xs.scale_all(2i32)
+echo xs.dot_all(ys)                 // [140, 4+5+6] = [140, 15]
+
+// Column layout: elementwise ops are layout-agnostic, `dot_all` takes the layout-correct fallback —
+// both must give the identical result as the row buffers above.
+cxs = [CVec3 { x: 1i32, y: 2i32, z: 3i32 }, CVec3 { x: 4i32, y: 5i32, z: 6i32 }]
+cys = [CVec3 { x: 10i32, y: 20i32, z: 30i32 }, CVec3 { x: 1i32, y: 1i32, z: 1i32 }]
+echo cxs.dot_all(cys)
+
+// An empty receiver dispatches (route is call-site-resolved, not shape-discovered).
+empty: List<IVec3> = []
+echo empty.add_all(empty)
