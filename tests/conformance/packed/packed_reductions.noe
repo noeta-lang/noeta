@@ -1,0 +1,84 @@
+// Packed-reductions arc: a reduction over a packed scalar `List<T>` folds the raw byte buffer in a
+// tight kernel instead of materializing every element. `sum`/`product`/`min`/`max` (numeric) and
+// `any`/`all`/`count` (`List<bool>`) all share one body in `noeta-stdlib`, so the packed fast path,
+// the boxed fallback, and the two backends agree by construction. Integer reductions WRAP at the
+// element width (a reduction is repeated `+`/`*`); `min`/`max` return `?T` (`none` for an empty list).
+// expect: stdout "10"
+// expect: stdout "24"
+// expect: stdout "some(1)"
+// expect: stdout "some(4)"
+// expect: stdout "44"
+// expect: stdout "some(200)"
+// expect: stdout "some(100)"
+// expect: stdout "-294967296"
+// expect: stdout "-294967296"
+// expect: stdout "7.0"
+// expect: stdout "11.25"
+// expect: stdout "some(1.5)"
+// expect: stdout "some(3.0)"
+// expect: stdout "10"
+// expect: stdout "6"
+// expect: stdout "30"
+// expect: stdout "some(10)"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "2"
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "none"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "0"
+// expect: exit 0
+
+// --- Packed `List<i32>`: the buffer-direct fast path. ---
+xs = [1i32, 2i32, 3i32, 4i32]
+echo xs.sum()                            // 10  (an i32, width-wrapping)
+echo xs.product()                        // 24
+echo xs.min()                            // some(1)
+echo xs.max()                            // some(4)
+
+// Unsigned narrow width folds unsigned: 200 + 100 wraps at u8 to 44.
+us = [200u8, 100u8]
+echo us.sum()                            // 44
+echo us.max()                            // some(200)
+echo us.min()                            // some(100)
+
+// Integer `sum` WRAPS at the element width, exactly as folding with `+` would: two 2e9 i32 values
+// overflow i32 (max 2147483647) to -294967296. `iter().sum()` delegates to the same kernel, so it
+// width-wraps identically — no divergence between `xs.sum()` and `xs.iter().sum()`.
+big = [2000000000i32, 2000000000i32]
+echo big.sum()                           // -294967296
+echo big.iter().sum()                    // -294967296  (identical)
+
+// --- Packed `List<f32>`: the float kernel folds in f32 precision (one shared body → both backends
+// byte-identical). ---
+fs = [1.5f32, 2.5f32, 3.0f32]
+echo fs.sum()                            // 7.0
+echo fs.product()                        // 11.25
+echo fs.min()                            // some(1.5)
+echo fs.max()                            // some(3.0)
+
+// --- Boxed numeric lists reduce identically (packed vs boxed agree for a given list type). ---
+echo [1, 2, 3, 4].sum()                  // 10   (List<int>, boxed) — matches the packed i32 sum
+echo [1, 2, 3].sum()                     // 6
+echo [10i64, 20i64].sum()               // 30   (List<i64> stays boxed)
+echo [10i64, 20i64].min()               // some(10)
+
+// --- `List<bool>` reductions. ---
+bs = [true, false, true]
+echo bs.any()                            // true
+echo bs.all()                            // false
+echo bs.count()                          // 2  (the number of `true` elements, not the length)
+
+// --- Empty-list conventions: `sum`→0, `product`→1, `min`/`max`→none. ---
+empty = [1i32].filter(fn(x) => false)
+echo empty.sum()                         // 0
+echo empty.product()                     // 1
+echo empty.min()                         // none
+
+// Empty `List<bool>`: any→false, all→true, count→0.
+empty_bs = [true].filter(fn(x) => false)
+echo empty_bs.any()                      // false
+echo empty_bs.all()                      // true
+echo empty_bs.count()                    // 0

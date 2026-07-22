@@ -82,6 +82,23 @@ impl Value {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Iter(_)))
     }
 
+    /// If this iterator is directly backed by a list (`xs.iter()` with no adapters), return the
+    /// backing list value and the cursor's current position, and **drain** it (advance the cursor to
+    /// the end). Used by the eager reduction delegation (packed-reductions arc) so `xs.iter().sum()`
+    /// folds the same buffer as `xs.sum()` and thus width-wraps identically. The returned list value
+    /// is borrowed (still owned by the iterator), so the caller must not release it. `None` for an
+    /// adapter/generator iterator or a non-iterator.
+    pub fn iter_drain_list(self) -> Option<(Value, usize)> {
+        heap::with_payload_mut(self, |p| {
+            let Payload::Iter(IterState::List { list, cursor }) = p else {
+                return None;
+            };
+            let start = *cursor;
+            *cursor = list.list_len().unwrap_or(start);
+            Some((*list, start))
+        })
+    }
+
     /// Advance the iterator, returning the next element — a freshly-retained owning reference the
     /// caller takes ownership of — or `None` at end. The caller must have checked [`Value::is_iter`].
     ///

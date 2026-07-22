@@ -47,6 +47,27 @@ pub(crate) fn maybe_watch() -> Option<ExitCode> {
     if args.len() == before {
         return None;
     }
+    // A native-dependency program's directives (`@openapi`) and modules live only inside its
+    // composed toolchain — the registry symbols are not linked into this stock binary. So the impact
+    // session `watch_loop` builds would link against a std-only registry and resolve none of them.
+    // Delegate the whole `--watch` invocation to the composed toolchain first (`exec`, same argv,
+    // `NOETA_COMPOSED=1`); it re-enters here with the guard set, so `maybe_delegate` returns without
+    // delegating again and the loop — session and all — runs with every native extension registered
+    // and `current_exe()` pointing at the composed binary (so spawned child runs stay composed).
+    // A pure-Noeta program resolves no native crates and delegates nothing, looping here as before.
+    if let Some(entry) = args
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.extension().is_some_and(|e| e == "noe"))
+    {
+        // Absolute: the entry arrives as typed (`main.noe`), and `maybe_delegate` finds the manifest
+        // from the entry's *parent* — empty for a bare relative name, which would skip delegation.
+        let entry = std::fs::canonicalize(&entry)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(&entry));
+        if let Err(code) = crate::compose::maybe_delegate(&entry) {
+            return Some(code);
+        }
+    }
     Some(watch_loop(&args))
 }
 

@@ -2797,16 +2797,29 @@ impl Interpreter {
                 )),
             };
         }
+        // Buffer-direct list reductions (packed-reductions arc): `sum`/`product`/`min`/`max` on a
+        // numeric list, `any`/`all`/`count` on a `List<bool>`. A packed scalar list folds its raw
+        // byte buffer in a tight kernel; a boxed list folds element-wise — one shared body in
+        // `noeta-stdlib`, so both representations and both backends agree. `sum` intercepts here
+        // (superseding the old materializing `Builtin::Sum`) so the packed fast path and the
+        // width-wrapping result type apply.
+        if let Value::List(repr) = &receiver
+            && args.is_empty()
+            && (noeta_stdlib::NumReduce::from_name(name).is_some()
+                || noeta_stdlib::BoolReduce::from_name(name).is_some())
+        {
+            let repr = repr.clone();
+            return self.call_list_reduction(&repr, name, span);
+        }
         // Eager collection methods that reuse the prelude builtin impls (prelude-redesign P1):
-        // `xs.map(f)` / `xs.filter(f)` / `xs.sum()` on a list. Routed through `call_builtin` with the
-        // receiver as the first argument, so the method form and the (legacy) free-function form
-        // `map(xs, f)` share exactly one implementation. A user object's own `map`/`filter`/`sum`
-        // method wins — it is dispatched earlier, before this built-in fallback.
+        // `xs.map(f)` / `xs.filter(f)` on a list. Routed through `call_builtin` with the receiver as
+        // the first argument, so the method form and the (legacy) free-function form `map(xs, f)`
+        // share exactly one implementation. A user object's own `map`/`filter` method wins — it is
+        // dispatched earlier, before this built-in fallback.
         if let Value::List(_) = &receiver
             && let Some(builtin) = match name {
                 "map" if args.len() == 1 => Some(Builtin::Map),
                 "filter" if args.len() == 1 => Some(Builtin::Filter),
-                "sum" if args.is_empty() => Some(Builtin::Sum),
                 _ => None,
             }
         {
@@ -3378,6 +3391,24 @@ impl Interpreter {
             }
             M::Sum => {
                 self.expect_std_arity(name, args, 0, span)?;
+                // A directly list-backed iterator (`xs.iter().sum()`, the canonical form) delegates to
+                // the eager list reduction over its remaining elements — so a packed narrow-width list
+                // folds its buffer and width-wraps *identically* to `xs.sum()` (no divergence). An
+                // adapter chain (`take`/`map`/…) falls through to the generic fold below, where the
+                // element type is already a 64-bit `int`/`float`, so no width-wrapping is at stake.
+                let direct = match &*state.borrow() {
+                    IterState::List {
+                        list: Value::List(repr),
+                        cursor,
+                    } => Some((repr.clone(), *cursor)),
+                    _ => None,
+                };
+                if let Some((repr, cursor)) = direct {
+                    if let IterState::List { cursor, .. } = &mut *state.borrow_mut() {
+                        *cursor = repr.len(); // drain
+                    }
+                    return self.call_list_reduction_from(&repr, "sum", cursor, span);
+                }
                 let mut int_total: i64 = 0;
                 let mut float_total: f64 = 0.0;
                 let mut any_float = false;
@@ -4577,6 +4608,100 @@ impl Interpreter {
         }
     }
 
+    /// Buffer-direct list reductions (packed-reductions arc): `sum`/`product`/`min`/`max` (numeric)
+    /// and `any`/`all`/`count` (`List<bool>`). A packed scalar list folds its raw byte buffer through
+    /// the shared kernel; a boxed (or packed-struct) list folds its scalar elements — one body in
+    /// `noeta-stdlib`, so the packed and boxed paths and the two backends all agree. `sum`/`product`
+    /// wrap at the element width; `min`/`max` return `?T` (`none` for an empty list).
+    fn call_list_reduction(&mut self, list: &ListRepr, method: &str, span: Span) -> Eval<Value> {
+        self.call_list_reduction_from(list, method, 0, span)
+    }
+
+    /// [`call_list_reduction`](Self::call_list_reduction) over the elements at or after `from` — the
+    /// form `iter().sum()` delegates to, so a directly list-backed iterator's `sum` folds the same
+    /// buffer (and thus width-wraps identically) as `xs.sum()`.
+    fn call_list_reduction_from(
+        &mut self,
+        list: &ListRepr,
+        method: &str,
+        from: usize,
+        span: Span,
+    ) -> Eval<Value> {
+        if let Some(op) = noeta_stdlib::NumReduce::from_name(method) {
+            // Packed scalar fast path (a single-field packed element is a contiguous native-width
+            // buffer, so `[from..]` is a byte sub-slice); otherwise fold the materialized scalars.
+            let folded = match list {
+                ListRepr::Packed(p) if p.seam_view().fields.len() == 1 => {
+                    let view = p.seam_view();
+                    noeta_stdlib::reduce_num_packed(
+                        op,
+                        &view.fields[0],
+                        &p.raw()[from * view.byte_size..],
+                    )
+                }
+                _ => noeta_stdlib::reduce_num_scalars(
+                    op,
+                    self.list_scalars(list, method, from, span)?,
+                ),
+            };
+            let folded =
+                folded.map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
+            return Ok(match op {
+                noeta_stdlib::NumReduce::Min | noeta_stdlib::NumReduce::Max => match folded {
+                    Some(rn) => builtin_enum("Option", "some", vec![rednum_to_value(rn)]),
+                    None => builtin_enum("Option", "none", Vec::new()),
+                },
+                // `sum`/`product` always yield a value (identity for the empty list).
+                _ => rednum_to_value(folded.expect("sum/product fold to a value")),
+            });
+        }
+        let op = noeta_stdlib::BoolReduce::from_name(method)
+            .expect("the caller gates this to a reduction method name");
+        let folded = match list {
+            ListRepr::Packed(p) if p.seam_view().fields.len() == 1 => {
+                noeta_stdlib::reduce_bool_packed(op, &p.raw()[from * p.seam_view().byte_size..])
+            }
+            _ => {
+                noeta_stdlib::reduce_bool_scalars(op, self.list_scalars(list, method, from, span)?)
+                    .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?
+            }
+        };
+        Ok(match folded {
+            noeta_stdlib::RedBool::Bool(b) => Value::Bool(b),
+            noeta_stdlib::RedBool::Int(i) => Value::Int(i),
+        })
+    }
+
+    /// Materialize a list's elements at or after `from` as primitive [`Scalar`](noeta_stdlib::Scalar)s
+    /// for the boxed reduction fallback, erroring on a non-scalar element (an object/string — a
+    /// struct-packed or heterogeneous list a reduction cannot fold).
+    fn list_scalars(
+        &mut self,
+        list: &ListRepr,
+        method: &str,
+        from: usize,
+        span: Span,
+    ) -> Eval<std::vec::IntoIter<noeta_stdlib::Scalar>> {
+        let items = list.to_rc_vec();
+        let mut scalars = Vec::with_capacity(items.len().saturating_sub(from));
+        for item in items.iter().skip(from) {
+            match value_to_scalar(item) {
+                Some(s) => scalars.push(s),
+                None => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`{method}` expects a list of numbers, found an element of type {}",
+                            item.type_name()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(scalars.into_iter())
+    }
+
     fn sum_list(&mut self, items: &[Value], span: Span) -> Eval<Value> {
         let mut int_total: i64 = 0;
         let mut float_total: f64 = 0.0;
@@ -5527,6 +5652,16 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
 }
 
 /// Project a primitive tree-walker value onto a [`noeta_stdlib::Scalar`], or `None` if not primitive.
+/// Lift a numeric reduction result (packed-reductions arc) into a tree-walker `Value`. An integer
+/// (`int`/`IntN`, erased) becomes `Value::Int`; the float widths keep their runtime tag.
+fn rednum_to_value(rn: noeta_stdlib::RedNum) -> Value {
+    match rn {
+        noeta_stdlib::RedNum::Int(i) => Value::Int(i),
+        noeta_stdlib::RedNum::Float(f) => Value::Float(f),
+        noeta_stdlib::RedNum::F32(f) => Value::F32(f),
+    }
+}
+
 pub(crate) fn value_to_scalar(value: &Value) -> Option<noeta_stdlib::Scalar> {
     use noeta_stdlib::Scalar;
     Some(match value {
