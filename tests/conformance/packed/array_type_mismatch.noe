@@ -1,0 +1,6 @@
+// Element-wise `+`/`-`/`*` do NOT coerce between element types (array-ops arc): `List<i32> + List<int>`
+// is a static type error, not a silent widen — the checker rejects it (E0007) before either backend
+// runs, exactly like the runtime "cannot apply" it mirrors.
+// expect: error E0007 at 6:7
+// expect: exit 1
+echo ([1i32, 2i32] + [1, 2])

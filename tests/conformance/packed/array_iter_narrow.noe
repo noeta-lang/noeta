@@ -1,0 +1,27 @@
+// Narrow-typed iterator reductions (array-ops arc): `xs.iter().take(k).sum()` on a narrow-width list
+// must return that width's type and WRAP at its width — so it agrees with `xs.sum()`. Before this arc
+// `Iterator<iN>.sum()` was typed `Unknown` and folded unmasked at 64 bits; now the reduction is typed
+// at the element width and the generic adapter fold masks the total back to that width (traced through
+// the width-preserving adapters `take`/`drop`/`chain`/`filter`). A directly list-backed
+// `xs.iter().sum()` already delegates to the same buffer-folding kernel `xs.sum()` uses.
+// expect: stdout "-294967296"
+// expect: stdout "-294967296"
+// expect: stdout "3"
+// expect: stdout "true"
+// expect: exit 0
+
+// take(2) sums two 2e9 i32 values → 4e9, which wraps at i32 to -294967296.
+tri = [2000000000i32, 2000000000i32, 2000000000i32]
+echo tri.iter().take(2).sum()            // -294967296  (wraps at i32)
+
+// The reference: summing the same two elements as a list wraps identically — no divergence between
+// the iterator-adapter fold and the buffer fold.
+pair = [2000000000i32, 2000000000i32]
+echo pair.sum()                          // -294967296
+
+// A non-overflowing narrow reduction stays exact.
+small = [1i32, 2i32, 3i32]
+echo small.iter().take(2).sum()          // 3
+
+// The adapter fold agrees with the list reduction on the same window.
+echo (tri.iter().take(2).sum() == pair.sum())  // true

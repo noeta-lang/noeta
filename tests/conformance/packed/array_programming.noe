@@ -1,0 +1,57 @@
+// Array-programming layer (array-ops arc): element-wise `+`/`-`/`*` on two lists of the same numeric
+// element type (`~` is concat, so the operator is free), plus the `scale`/`abs`/`neg`/`clamp` methods
+// and the `checked_sum` reduction. A packed scalar list folds its raw byte buffer; a boxed list folds
+// its scalars — one shared `noeta-stdlib` kernel, so the two representations and both backends agree.
+// Integer ops WRAP at the element width (settled decision, like scalar `+` and the reductions);
+// `checked_sum` reports overflow with `none` instead.
+// expect: stdout "[11, 22, 33]"
+// expect: stdout "[9, 18, 27]"
+// expect: stdout "[10, 40, 90]"
+// expect: stdout "[2, 4, 6]"
+// expect: stdout "[1, 2, 3]"
+// expect: stdout "[-1, 2, -3]"
+// expect: stdout "[0, 0, 5, 6]"
+// expect: stdout "[-294967296, -294967296]"
+// expect: stdout "[11, 22, 33]"
+// expect: stdout "[2, 4, 6]"
+// expect: stdout "[-1, -2, -3]"
+// expect: stdout "[3.0, 5.0]"
+// expect: stdout "[3.0, 5.0]"
+// expect: stdout "none"
+// expect: stdout "some(6)"
+// expect: exit 0
+
+// --- Packed `List<i32>`: the buffer-direct fast path. ---
+xs = [1i32, 2i32, 3i32]
+ys = [10i32, 20i32, 30i32]
+echo (xs + ys)                           // [11, 22, 33]
+echo (ys - xs)                           // [9, 18, 27]
+echo (xs * ys)                           // [10, 40, 90]
+echo xs.scale(2)                         // [2, 4, 6]  (list × scalar)
+
+neg_xs = [1i32, -2i32, 3i32]
+echo neg_xs.abs()                        // [1, 2, 3]
+echo neg_xs.neg()                        // [-1, 2, -3]
+echo [-5i32, 0i32, 5i32, 10i32].clamp(0i32, 6i32)  // [0, 0, 5, 6]
+
+// Integer element-wise ops WRAP at the element width, exactly as folding with `+` would: two 2e9 i32
+// values overflow i32 (max 2147483647) to -294967296.
+big = [2000000000i32, 2000000000i32]
+echo (big + big)                         // [-294967296, -294967296]
+
+// --- Boxed `List<int>`: the scalar-loop fallback. It must agree with the packed path. ---
+a = [1, 2, 3]
+b = [10, 20, 30]
+echo (a + b)                             // [11, 22, 33]
+echo a.scale(2)                          // [2, 4, 6]
+echo a.neg()                             // [-1, -2, -3]
+
+// --- Packed `List<f32>`: the float kernel (one shared body → both backends byte-identical). ---
+fs = [1.5f32, 2.5f32]
+echo (fs + fs)                           // [3.0, 5.0]
+echo fs.scale(2.0)                       // [3.0, 5.0]
+
+// `checked_sum()` — the opt-in overflow-reporting sum (the unchecked `sum` still wraps): `none` on an
+// overflowing i32 list, `some(total)` otherwise.
+echo big.checked_sum()                   // none  (2e9 + 2e9 overflows i32)
+echo xs.checked_sum()                    // some(6)

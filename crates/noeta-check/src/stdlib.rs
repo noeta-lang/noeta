@@ -398,13 +398,11 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
         "filter" => iterable_iter(elem.clone()),
         "map" => iterable_iter(Type::Dyn),
         "count" => Type::Int,
-        // `sum()` → `int` for a concrete `Iterator<int>`, `float` for `Iterator<float>`, else a
-        // numeric hole — mirroring the eager `sum` builtin (Track I.1b.2).
-        "sum" => match elem {
-            Type::Int => Type::Int,
-            Type::Float => Type::Float,
-            _ => Type::Unknown,
-        },
+        // `sum()` → the element type for a concrete numeric `Iterator<T>` (array-ops arc): a narrow
+        // element (`iN`/`uN`/`f32`/`f64`) returns THAT type and wraps at its width, so
+        // `xs.iter().take(k).sum()` agrees with `xs.sum()`; a non-numeric element stays `Unknown` (as
+        // the eager `sum` builtin does, so it never newly rejects).
+        "sum" => numeric_reduce(elem).unwrap_or(Type::Unknown),
         _ => return None,
     })
 }
@@ -519,6 +517,14 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
         "sum" => numeric_reduce(elem).unwrap_or(Type::Unknown),
         "product" if numeric_reduce(elem).is_some() => elem.clone(),
         "min" | "max" if numeric_reduce(elem).is_some() => opt(elem.clone()),
+        // `checked_sum()` (array-ops arc): the opt-in overflow-reporting sum — `?T`, `none` on
+        // integer overflow. Numeric lists only (the unchecked `sum` still wraps).
+        "checked_sum" if numeric_reduce(elem).is_some() => opt(elem.clone()),
+        // Element-wise array-programming methods (array-ops arc): `scale(s)` (list × scalar),
+        // `abs()`, `neg()`, and `clamp(lo, hi)` — each returns a list of the same numeric element
+        // type (element-wise, wrapping for ints). Packed lists fold their buffer, boxed lists their
+        // scalars — one shared `noeta-stdlib` kernel, so both agree.
+        "scale" | "abs" | "neg" | "clamp" if numeric_reduce(elem).is_some() => list(elem.clone()),
         // `List<bool>` reductions: `any`/`all` → `bool`, `count` → the number of `true` elements.
         "any" | "all" if matches!(elem, Type::Bool) => Type::Bool,
         "count" if matches!(elem, Type::Bool) => Type::Int,
@@ -714,10 +720,16 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "reverse" | "sorted" | "len" | "sum" | "first" | "last" | "to_set" | "enumerate"
-        | "to_bytes" | "iter" | "product" | "min" | "max" | "any" | "all" | "count" => {
+        | "to_bytes" | "iter" | "product" | "min" | "max" | "any" | "all" | "count"
+        | "checked_sum" | "abs" | "neg" => {
             vec![]
         }
         "contains" => vec![elem.clone()],
+        // Element-wise array-programming methods (array-ops arc): `scale(s)` takes one scalar of the
+        // element type, `clamp(lo, hi)` two — a numeric-literal argument adapts into a fixed-width
+        // element type (`xs.scale(2)` on a `List<i32>`), like any other typed position.
+        "scale" => vec![elem.clone()],
+        "clamp" => vec![elem.clone(), elem.clone()],
         // `join(sep?)` — separator optional (default empty); `slice(start, end?)` — end optional
         // (default the list length). See `builtin_method_required`.
         "join" => vec![Type::String],
