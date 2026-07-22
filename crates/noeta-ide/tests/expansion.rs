@@ -343,14 +343,14 @@ fn an_impact_session_watches_the_files_an_expansion_read() {
     // The session captured the spec as a watched read (canonicalized).
     let canon_spec = spec.canonicalize().expect("the spec exists");
     assert!(
-        session.reads().iter().any(|r| *r == canon_spec),
+        session.reads().contains(&canon_spec),
         "the session must watch the spec the directive read; watched: {:?}",
         session.reads()
     );
 
     // A change to the spec is All-impact: a `.noe` diff cannot narrow it, and it invalidates the
     // generated members, so the whole suite must rerun.
-    match session.impact_of_changes(&[spec.clone()]) {
+    match session.impact_of_changes(std::slice::from_ref(&spec)) {
         noeta_ide::impact::Impact::All { reason } => {
             assert!(
                 reason.contains("spec read by an expanding directive"),

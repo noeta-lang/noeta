@@ -398,7 +398,7 @@ impl ImpactSession {
             // change still invalidates the generated members. The impact diff speaks the `.noe`
             // vocabulary and cannot narrow a spec change, so rerun everything — the honest,
             // correct answer, and the whole reason the watcher was taught to watch this file.
-            if self.reads.iter().any(|r| *r == canon) {
+            if self.reads.contains(&canon) {
                 return Impact::All {
                     reason: format!(
                         "a spec read by an expanding directive changed ({})",
