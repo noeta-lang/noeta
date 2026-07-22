@@ -268,7 +268,8 @@ impl<'m> Vm<'m> {
                 })
                 .collect();
             packed_schemas.push(noeta_object::intern_schema(noeta_object::PackedSchema {
-                shape: shapes[def.shape as usize],
+                // A bare-scalar element carries no shape (`None`) — it materializes to a bare `int`/`f32`.
+                shape: def.shape.map(|i| shapes[i as usize]),
                 fields,
                 byte_size: def.byte_size as usize,
                 column: def.column,

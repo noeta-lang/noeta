@@ -4,10 +4,30 @@
 //! from the crate root (audit-1 finding 8) — same crate, so private access is preserved; no
 //! behavior change.
 
+use noeta_ast::reflect::TypeRepr;
 use noeta_object::{PackedKind, PackedSchema};
 
 use crate::Value;
 use crate::heap::{self, Payload};
+
+/// Map a bare-scalar element's [`PackedKind`] to its reflected [`TypeRepr`] (packed-widths bare-scalar
+/// arc) — the element type a scalar packed list reflects. Only the sub-8-byte numerics ever reach here
+/// (`IntN`/`F32`); the other arms are defensive and mirror the width-erased scalar each stores.
+fn packed_kind_to_repr(kind: &PackedKind) -> TypeRepr {
+    match kind {
+        PackedKind::Int => TypeRepr::Int,
+        PackedKind::Float => TypeRepr::Float,
+        PackedKind::F32 => TypeRepr::F32,
+        PackedKind::F64 => TypeRepr::F64,
+        PackedKind::IntN { bits, signed } => TypeRepr::IntN {
+            bits: *bits,
+            signed: *signed,
+        },
+        PackedKind::Bool => TypeRepr::Bool,
+        // A scalar element is never a nested struct; reflect head-only if one ever appears.
+        PackedKind::Struct(_) => TypeRepr::Dyn,
+    }
+}
 
 impl Value {
     /// A flat `List<packed>` value (refcount 1, P-PACK 2.4): `bytes` holds the elements packed as raw
@@ -30,6 +50,11 @@ impl Value {
     /// or a field whose runtime kind disagrees) so the caller can fall back to a boxed list — the flat
     /// form is only ever used when exactly correct.
     pub fn pack_element(self, schema: &PackedSchema, out: &mut Vec<u8>) -> bool {
+        // A bare-scalar element (`List<i32>`/`List<f32>`): the value is a bare `int`/`f32`, not an
+        // object, so it packs directly through its single field kind (no `Payload::Object` to read).
+        if schema.shape.is_none() {
+            return pack_scalar(self, &schema.fields[0], out);
+        }
         heap::with_payload(self, |p| match p {
             Payload::Object { slots, .. } if slots.len() == schema.fields.len() => {
                 for (kind, &slot) in schema.fields.iter().zip(slots.iter()) {
@@ -151,7 +176,9 @@ impl Value {
                 if index >= count {
                     return None;
                 }
-                let slot = schema.shape.slot_of(field)?;
+                // A bare-scalar element has no named fields (`shape == None`), so a field read never
+                // resolves — the checker only fuses `list[i].field` on a struct element anyway.
+                let slot = schema.shape?.slot_of(field)?;
                 // The field's byte offset resolves through the layout axis (row vs column, P-SIMD C2).
                 let at = schema.field_offset(index, slot, count);
                 let width = schema.fields[slot].byte_width();
@@ -160,6 +187,23 @@ impl Value {
             _ => None,
         })?;
         Some(decode_packed_field(&kind, &slice, 0))
+    }
+
+    /// The reflected **element** [`TypeRepr`] of a bare-scalar packed list (`List<i32>`/`List<f32>`),
+    /// derived from its schema — so a value laundered through `dyn` still reports `List<i32>`, not
+    /// `List<dyn>`, keeping slice-1's reflection distinctness (`List<i32> is List<int>` → false) without
+    /// a per-value tag. `None` for a boxed list or a **struct**-packed list (whose reflection stays
+    /// head-only, unchanged). Read on the reflection path only — the packed-list value carries no tag.
+    pub fn packed_scalar_elem_repr(self) -> Option<TypeRepr> {
+        if !self.is_packed_list() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, .. } if schema.shape.is_none() => {
+                Some(packed_kind_to_repr(&schema.fields[0]))
+            }
+            _ => None,
+        })
     }
 
     /// The raw flat byte buffer of a packed list (`to_bytes`, P-PACK 4.4), regardless of element
@@ -313,7 +357,7 @@ impl Value {
             Payload::PackedList {
                 schema: s2,
                 bytes: b2,
-            } => std::ptr::eq(schema.shape, s2.shape).then(|| b2.clone()),
+            } => std::ptr::eq(schema, *s2).then(|| b2.clone()),
             _ => None,
         })?;
         // Same shape ⇒ same layout. Row appends the buffers; column interleaves per column (P-SIMD C2).
@@ -343,9 +387,7 @@ impl Value {
             _ => unreachable!("packed_extend_in_place on a non-packed list"),
         });
         heap::with_payload_mut(self, |p| match p {
-            Payload::PackedList { schema, bytes }
-                if std::ptr::eq(schema.shape, other_schema.shape) =>
-            {
+            Payload::PackedList { schema, bytes } if std::ptr::eq(*schema, other_schema) => {
                 if schema.column {
                     // Column layout must rebuild (each column grows in the middle of the buffer).
                     *bytes = column_concat(schema, bytes, &other_bytes);
@@ -430,6 +472,34 @@ fn write_intn(out: &mut Vec<u8>, value: i64, bits: u8) {
     }
 }
 
+/// Pack one bare-scalar list element (`self`) — a bare `int`/`f32`, not an object — onto the end of
+/// `out` per its single `kind` (packed-widths bare-scalar arc). The inverse of [`decode_packed_field`].
+/// Returns `false` (leaving `out` untouched of a partial write is the caller's staging concern) if the
+/// value's runtime kind disagrees with the slot, so the caller can demote to a boxed list. A scalar
+/// element is only ever a fixed-width numeric (`IntN`/`F32`) or, defensively, one of the other
+/// primitives — never a nested `Struct` (a scalar has no struct wrapper).
+fn pack_scalar(value: Value, kind: &PackedKind, out: &mut Vec<u8>) -> bool {
+    match kind {
+        PackedKind::Int => value
+            .as_int()
+            .map(|i| out.extend_from_slice(&(i as u64).to_le_bytes()))
+            .is_some(),
+        PackedKind::Float | PackedKind::F64 => value
+            .as_float()
+            .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
+            .is_some(),
+        PackedKind::F32 => value
+            .as_f32()
+            .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
+            .is_some(),
+        PackedKind::IntN { bits, .. } => value.as_int().map(|i| write_intn(out, i, *bits)).is_some(),
+        PackedKind::Bool => value.as_bool().map(|b| out.push(u8::from(b))).is_some(),
+        // Unreachable for a real scalar list (a scalar element is a primitive, never a nested struct),
+        // but demote rather than panic if some future caller hands one in.
+        PackedKind::Struct(_) => false,
+    }
+}
+
 /// Decode one packed field at byte `offset` into an owned [`Value`] — the per-field counterpart of
 /// [`unpack_element`], used by [`Value::packed_field`] to read a single field without materializing
 /// the whole element (P-PACK 3.2b byte-addressed).
@@ -446,6 +516,15 @@ fn decode_packed_field(kind: &PackedKind, bytes: &[u8], offset: usize) -> Value 
 }
 
 fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value, usize) {
+    // A bare-scalar element (`List<i32>`/`List<f32>`) materializes to a bare `Value` — a byte-read
+    // and tag, no object allocation (the scalar-access win). Its single field is the whole element.
+    if schema.shape.is_none() {
+        let kind = &schema.fields[0];
+        return (
+            decode_packed_field(kind, bytes, offset),
+            offset + kind.byte_width(),
+        );
+    }
     let mut slots = Vec::with_capacity(schema.fields.len());
     let mut at = offset;
     for kind in &schema.fields {
@@ -481,7 +560,11 @@ fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value,
             }
         }
     }
-    (Value::object(schema.shape, slots), at)
+    // The scalar case returned above, so a struct element always has a shape here.
+    (
+        Value::object(schema.shape.expect("struct element has a shape"), slots),
+        at,
+    )
 }
 
 /// Gather element `index`'s fields (a buffer of `count` elements) into a fresh **row-order** byte

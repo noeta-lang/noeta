@@ -1311,7 +1311,7 @@ impl Checker {
                 // buffer. Recording the layout in `packed_list_sites` (the channel list literals use)
                 // hands the backend the schema to rebuild the list. Generic over any declared packable
                 // type (no hardcoded list — extension-friendly).
-                match self.packed_layout(&elem) {
+                match self.packed_list_layout(&elem) {
                     Some(layout) => {
                         self.sites.packed_list_sites.insert(*span, layout);
                         // Validation arc: if the packed element type implements `Validate`, mark the
@@ -1327,7 +1327,7 @@ impl Checker {
                             DiagnosticCode::InvalidPackedType,
                             *span,
                             format!(
-                                "`from_bytes::<{elem}>` requires a packable `@packed` struct element type"
+                                "`from_bytes::<{elem}>` requires a packable element type — a `@packed` struct or a sub-8-byte fixed-width numeric (`i32`/`u8`/`f32`, …)"
                             ),
                         );
                     }

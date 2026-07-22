@@ -1412,17 +1412,21 @@ impl ModuleCompiler {
     fn intern_packed_schema(&mut self, layout: &noeta_ast::reflect::PackedLayout) -> u32 {
         use noeta_ast::reflect::PackedKind;
 
-        let shape = self.intern_shape(
-            Shape::object(
-                noeta_object::ShapeKind::Struct,
-                layout.type_name.clone(),
-                layout.fields.iter().map(|f| f.name.clone()).collect(),
+        // A bare-scalar element (`List<i32>`/`List<f32>`) has no struct wrapper — no shape to intern; it
+        // materializes to a bare `int`/`f32`. A `@packed` struct interns its shape (the same entry
+        // `MakeStruct` uses) so a materialized element shares shape identity with a constructed one.
+        let shape = (!layout.is_scalar()).then(|| {
+            self.intern_shape(
+                Shape::object(
+                    noeta_object::ShapeKind::Struct,
+                    layout.type_name.clone(),
+                    layout.fields.iter().map(|f| f.name.clone()).collect(),
+                )
+                // Carry the key-capability so a materialized element keys maps/sets exactly like a
+                // constructed one (P-PKEY).
+                .with_key_capable(self.key_capable_types.contains(&layout.type_name)),
             )
-            // The schema's element shape is the same entry `MakeStruct` uses — carry the
-            // key-capability so a materialized element keys maps/sets exactly like a
-            // constructed one (P-PKEY).
-            .with_key_capable(self.key_capable_types.contains(&layout.type_name)),
-        );
+        });
         let fields = layout
             .fields
             .iter()

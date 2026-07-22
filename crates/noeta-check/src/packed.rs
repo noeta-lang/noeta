@@ -216,6 +216,22 @@ impl Checker {
         }
     }
 
+    /// The packed layout of a **list element** type `elem` — a `@packed` struct (via [`packed_layout`])
+    /// **or** a bare sub-8-byte fixed-width numeric ([`scalar_packed_kind`]), the latter as a scalar
+    /// (`no-struct`) layout. This is the gate for `List<T>` *literal* construction and `from_bytes`,
+    /// where a bare `List<i32>`/`List<u8>`/`List<f32>` earns a compact flat buffer (packed-widths
+    /// bare-scalar arc). `note_map_packed` and nested struct-field recursion deliberately keep using the
+    /// struct-only `packed_layout`, so a mapped scalar result stays boxed (behaviourally identical) and a
+    /// scalar struct field is still resolved by its field-kind, not by recursion.
+    ///
+    /// [`packed_layout`]: Self::packed_layout
+    pub(crate) fn packed_list_layout(&self, elem: &Type) -> Option<noeta_ast::reflect::PackedLayout> {
+        if let Some(kind) = scalar_packed_kind(elem) {
+            return Some(noeta_ast::reflect::PackedLayout::scalar(kind));
+        }
+        self.packed_layout(elem)
+    }
+
     pub(crate) fn packed_layout(&self, ty: &Type) -> Option<noeta_ast::reflect::PackedLayout> {
         use noeta_ast::reflect::{PackedField, PackedKind, PackedLayout};
         let Type::Named(name, args) = ty else {
@@ -254,7 +270,7 @@ impl Checker {
     /// Record a list-construction site at `span` if its element type `elem` is a packed struct
     /// (P-PACK Phase 2) — the span both backends key on to pick the flat raw-buffer representation.
     pub(crate) fn note_packed_list(&mut self, elem: &Type, span: Span) {
-        if let Some(layout) = self.packed_layout(elem) {
+        if let Some(layout) = self.packed_list_layout(elem) {
             self.sites.packed_list_sites.insert(span, layout);
         }
     }
@@ -315,5 +331,27 @@ impl Checker {
                     );
             }
         }
+    }
+}
+
+/// The [`PackedKind`] a **bare scalar** list element packs to, or `None` if `ty` is not a compaction
+/// candidate (packed-widths bare-scalar arc). Only fixed-width numerics **narrower than 8 bytes**
+/// qualify — `i8 u8 i16 u16 i32 u32` (widths 1/2/4) and `f32` (4). A `i64`/`u64`/`f64` element is
+/// already 8 bytes when boxed, so packing it buys **zero** storage and only adds materialization cost;
+/// the width is still reified through slice 1's construction tag, so no reflection fidelity is lost.
+/// `int`/`float` are the hot-path erased defaults (no width to store, no win) and `bool` is out of
+/// scope for this slice. A scalar element has no struct wrapper — see [`PackedLayout::scalar`].
+///
+/// [`PackedKind`]: noeta_ast::reflect::PackedKind
+/// [`PackedLayout::scalar`]: noeta_ast::reflect::PackedLayout::scalar
+fn scalar_packed_kind(ty: &Type) -> Option<noeta_ast::reflect::PackedKind> {
+    use noeta_ast::reflect::PackedKind;
+    match ty {
+        Type::F32 => Some(PackedKind::F32),
+        Type::IntN { bits, signed } if *bits < 64 => Some(PackedKind::IntN {
+            bits: *bits,
+            signed: *signed,
+        }),
+        _ => None,
     }
 }

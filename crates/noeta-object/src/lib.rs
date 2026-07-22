@@ -178,9 +178,12 @@ impl Shape {
 /// directly-constructed one, plus each field's kind in slot (declared) order and the total width.
 #[derive(Debug, Clone)]
 pub struct PackedSchema {
-    /// The element type's shape — materialized elements use this exact handle.
-    pub shape: &'static Shape,
-    /// One entry per field, in `shape.fields` (slot) order.
+    /// The element type's shape — materialized elements use this exact handle. **`None`** marks a
+    /// bare-scalar element (packed-widths bare-scalar arc): a `List<i32>`/`List<f32>` has one scalar
+    /// field and no struct wrapper, so it materializes to a bare `int`/`f32` rather than an object.
+    pub shape: Option<&'static Shape>,
+    /// One entry per field, in `shape.fields` (slot) order. A scalar element (`shape == None`) holds
+    /// exactly one — the element's own primitive kind.
     pub fields: Vec<PackedKind>,
     /// **Bytes** per element — the sum of each field's [`PackedKind::byte_width`] (P-PACK 3.2b: the
     /// VM stores a `List<packed>` as a byte buffer so an `f32` field is 4 bytes, not 8).
@@ -323,7 +326,7 @@ mod intern {
     /// they are themselves interned (same content ⇒ same address).
     #[derive(PartialEq, Eq, Hash)]
     struct SchemaKey {
-        shape: usize,
+        shape: Option<usize>,
         fields: Vec<KindKey>,
         byte_size: usize,
         column: bool,
@@ -343,7 +346,7 @@ mod intern {
     impl SchemaKey {
         fn of(schema: &PackedSchema) -> SchemaKey {
             SchemaKey {
-                shape: std::ptr::from_ref(schema.shape).addr(),
+                shape: schema.shape.map(|s| std::ptr::from_ref(s).addr()),
                 fields: schema
                     .fields
                     .iter()

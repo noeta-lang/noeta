@@ -1,0 +1,51 @@
+// Packed-widths (bare-scalar) arc: a bare `List<T>` for a sub-8-byte fixed-width numeric packs into a
+// compact flat buffer — `List<i32>` is 4 bytes/element, `List<i8>` 1 byte — exactly as a
+// `List<@packed struct>` already does, rather than a boxed 8-bytes-per-element `Rc<Vec<Value>>`. The
+// flat form stays invisible to RunResult: index, iterate, `len`, `push`, `map`/`filter`, `==`, and
+// `to_bytes`/`from_bytes` all observe the same values a boxed list would. Signedness is a slot
+// property (a stored `0xFF` reads back `-1` through `i8`, `255` through `u8`). Only sub-8-byte widths
+// pack — `List<i64>`/`List<f64>`/`List<int>` stay boxed (an 8-byte element wins nothing by packing).
+// expect: stdout "8"
+// expect: stdout "3"
+// expect: stdout "3"
+// expect: stdout "10"
+// expect: stdout "[10, 20, 30]"
+// expect: stdout "[2, 4, 6]"
+// expect: stdout "[20, 30]"
+// expect: stdout "-1"
+// expect: stdout "255"
+// expect: stdout "60000"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+
+// `List<i32>` compacts to 4 bytes/element: two elements ⇒ 8 bytes (vs 16 boxed).
+xs = [1i32, 2i32]
+echo xs.to_bytes().len()                 // 8
+
+// `List<i8>` compacts to 1 byte/element: three elements ⇒ 3 bytes.
+bs = [1i8, 2i8, 3i8]
+echo bs.to_bytes().len()                 // 3
+
+// Index, len, push, map, filter all behave as the boxed list.
+ys = [10i32, 20i32, 30i32]
+echo ys.len()                            // 3
+echo ys[0]                               // 10
+echo ys                                  // [10, 20, 30]
+echo [1i32, 2i32, 3i32].map(fn(x) => x * 2i32)   // [2, 4, 6]
+echo ys.filter(fn(x) => x > 10i32)       // [20, 30]
+
+// Sign vs zero extension on read-back, tightly packed at the natural width.
+echo [-1i8, 5i8][0]                      // -1  (i8 sign-extends)
+echo [255u8, 1u8][0]                     // 255 (u8 zero-extends)
+echo [60000u16, 1u16][0]                 // 60000 (u16, 2-byte slot)
+
+// Equality across representations: a packed `List<i32>` equals the boxed `List<int>` element-wise.
+echo [1i32, 2i32] == [1, 2]              // true
+
+// `to_bytes`/`from_bytes` round-trip on a scalar-packed list.
+echo from_bytes::<i32>(xs.to_bytes()) == xs   // true
+
+// A negative `i8` packs to the same single byte a `255u8` does (the width is one byte for both).
+echo [-1i8].to_bytes() == [255u8].to_bytes()  // true

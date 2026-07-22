@@ -84,7 +84,13 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// decoded by a version-5 reader would map the old discriminants onto the wrong variants — a `Bool`
 /// head read as `F32`, a `Struct` field read as an `IntN` — and desynchronise the chunk. Same rule
 /// as the bumps before it: any change to a serialized enum's variant set is a wire break.
-pub const FORMAT_VERSION: u8 = 5;
+///
+/// Bumped to 6 by the packed-widths **bare-scalar** arc: `PackedSchemaDef::shape` (in
+/// `Module::packed_schemas`) changed from `u32` to `Option<u32>` so a bare-scalar `List<i32>`/`List<f32>`
+/// element can carry *no* shape (it materializes to a bare `int`/`f32`, not an object). postcard prefixes
+/// an `Option` with a present/absent discriminant byte, so the field's encoding — and every byte after it
+/// in the schema table — shifts; a version-5 reader would misread the leading `u32` as an `Option` tag.
+pub const FORMAT_VERSION: u8 = 6;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

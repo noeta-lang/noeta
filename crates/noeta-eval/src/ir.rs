@@ -1412,7 +1412,7 @@ impl Interpreter {
                         self.runtime_error(
                             DiagnosticCode::InvalidPackedType,
                             *span,
-                            "`from_bytes` requires a packable `@packed` struct element type"
+                            "`from_bytes` requires a packable element type — a `@packed` struct or a sub-8-byte fixed-width numeric (`i32`/`u8`/`f32`, …)"
                                 .to_string(),
                         )
                     })?;

@@ -86,7 +86,7 @@ fn packed_list_round_trips_and_frees() {
         vec!["x".into(), "y".into()],
     ));
     let schema = noeta_object::intern_schema(PackedSchema {
-        shape,
+        shape: Some(shape),
         fields: vec![PackedKind::Int, PackedKind::Int],
         byte_size: 16,
         column: false,
@@ -151,7 +151,7 @@ fn packed_push_streams_in_place_and_frees() {
         vec!["x".into(), "y".into()],
     ));
     let schema = noeta_object::intern_schema(PackedSchema {
-        shape,
+        shape: Some(shape),
         fields: vec![PackedKind::Int, PackedKind::Int],
         byte_size: 16,
         column: false,
@@ -193,7 +193,7 @@ fn packed_column_layout_round_trips_and_frees() {
         vec!["v".into(), "flag".into()],
     ));
     let schema = noeta_object::intern_schema(PackedSchema {
-        shape,
+        shape: Some(shape),
         fields: vec![PackedKind::Int, PackedKind::Bool],
         byte_size: 9,
         column: true,
@@ -602,7 +602,7 @@ fn packed_f32_byte_layout_round_trips() {
         vec!["a".into(), "b".into()],
     ));
     let schema = noeta_object::intern_schema(PackedSchema {
-        shape,
+        shape: Some(shape),
         fields: vec![PackedKind::F32, PackedKind::Int],
         byte_size: 12,
         column: false,
@@ -646,7 +646,7 @@ fn packed_field_reads_one_field_without_materializing() {
         vec!["x".into(), "y".into()],
     ));
     let schema = noeta_object::intern_schema(PackedSchema {
-        shape,
+        shape: Some(shape),
         fields: vec![PackedKind::Int, PackedKind::Int],
         byte_size: 16,
         column: false,
@@ -676,7 +676,7 @@ fn packed_select_keeps_the_list_flat() {
         vec!["x".into(), "y".into()],
     ));
     let schema = noeta_object::intern_schema(PackedSchema {
-        shape,
+        shape: Some(shape),
         fields: vec![PackedKind::Int, PackedKind::Int],
         byte_size: 16,
         column: false,
@@ -715,7 +715,7 @@ fn packed_set_and_concat_keep_the_list_flat() {
         vec!["x".into(), "y".into()],
     ));
     let schema = noeta_object::intern_schema(PackedSchema {
-        shape,
+        shape: Some(shape),
         fields: vec![PackedKind::Int, PackedKind::Int],
         byte_size: 16,
         column: false,
