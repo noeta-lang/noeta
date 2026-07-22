@@ -103,7 +103,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrd};
 
 use noeta_ext_abi::registry::{
-    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, DirectiveCtx, ExtBundle,
+    BundleFn, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout, DirectiveCtx,
+    ExtBundle,
     ExtDirective, ExtFn, ExtModule, ExtType, Expansion, ExpansionError, Extension, NativeOut,
     NativeValue,
     PackedConstraint, RetTy, Scalar, SigType, TierSite,
@@ -369,6 +370,7 @@ const PIXELS_BUNDLE: ExtBundle = ExtBundle {
             ConstraintField::F32,
         ],
         layout: ConstraintLayout::Any,
+        arity: ConstraintArity::Exact,
     },
     methods: &[BundleFn {
         sig: ExtFn {

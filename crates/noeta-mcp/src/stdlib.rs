@@ -225,10 +225,13 @@ fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtBundle) -> 
         .fields
         .iter()
         .map(|f| match f {
-            ConstraintField::Int => "int",
-            ConstraintField::Float => "float",
-            ConstraintField::F32 => "f32",
-            ConstraintField::Bool => "bool",
+            ConstraintField::Int => "int".to_string(),
+            ConstraintField::Float => "float".to_string(),
+            ConstraintField::F32 => "f32".to_string(),
+            ConstraintField::Bool => "bool".to_string(),
+            ConstraintField::IntN { bits, signed } => {
+                format!("{}{bits}", if *signed { 'i' } else { 'u' })
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -236,6 +239,13 @@ fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtBundle) -> 
         ConstraintLayout::Any => "any layout",
         ConstraintLayout::Row => "row layout",
         ConstraintLayout::Column => "column layout",
+    };
+    // A `Uniform` constraint reads only `fields[0]` — every field must be that kind, `min` or more.
+    let fields = match b.constraint.arity {
+        noeta_stdlib::ConstraintArity::Exact => fields,
+        noeta_stdlib::ConstraintArity::Uniform { min } => {
+            format!("{min}+ uniform {fields}")
+        }
     };
     let (mut element_methods, mut bulk_methods) = (Vec::new(), Vec::new());
     for m in b.methods {

@@ -1,0 +1,40 @@
+// Array-ops arc: `Color` kernels (`vec.ColorKernels`) over a 4×`u8` `@packed` struct (RGBA).
+// Channel math SATURATES — the one deliberate exception to the arc's wrap convention: `bright +
+// bright` must clamp to 255 (never wrap to a dark value), an underflowing subtract must clamp to 0.
+// Add/sub/scale only (a colour has no dot/length). Bulk `*_all` over a packed `List<Color>` matches
+// the element ops (shared kernel — both backends agree, the differential pins it).
+// expect: stdout "Color {r: 255, g: 255, b: 100, a: 255}"
+// expect: stdout "Color {r: 0, g: 90, b: 0, a: 0}"
+// expect: stdout "Color {r: 255, g: 200, b: 100, a: 255}"
+// expect: stdout "Color {r: 100, g: 50, b: 25, a: 128}"
+// expect: stdout "[Color {r: 255, g: 20, b: 0, a: 255}, Color {r: 150, g: 110, b: 0, a: 255}]"
+// expect: stdout "[Color {r: 100, g: 0, b: 0, a: 255}, Color {r: 0, g: 90, b: 0, a: 0}]"
+// expect: stdout "[Color {r: 255, g: 20, b: 0, a: 255}, Color {r: 100, g: 200, b: 0, a: 255}]"
+// expect: exit 0
+use std.{vec}
+
+@packed struct Color { r: u8; g: u8; b: u8; a: u8 }
+
+impl vec.ColorKernels for Color {}
+
+bright = Color { r: 200u8, g: 100u8, b: 50u8, a: 255u8 }
+other  = Color { r: 100u8, g: 200u8, b: 50u8, a: 0u8 }
+
+// add SATURATES at 255: r 200+100=300→255, g 100+200=300→255 (never wraps to 44/44).
+echo bright.add(other)
+
+// sub SATURATES at 0: r 50-100→0 (never wraps up to 206).
+dark = Color { r: 50u8, g: 100u8, b: 0u8, a: 255u8 }
+minus = Color { r: 100u8, g: 10u8, b: 0u8, a: 255u8 }
+echo dark.sub(minus)
+
+// scale SATURATES: r 200·2=400→255, a 255·2=510→255. Half rounds away from zero: a 255·0.5=127.5→128.
+echo bright.scale(2.0)
+echo bright.scale(0.5)
+
+// Bulk `*_all` over a packed `List<Color>` — same saturating kernel as the element ops.
+cs = [Color { r: 200u8, g: 10u8, b: 0u8, a: 255u8 }, Color { r: 50u8, g: 100u8, b: 0u8, a: 255u8 }]
+ds = [Color { r: 100u8, g: 10u8, b: 0u8, a: 0u8 }, Color { r: 100u8, g: 10u8, b: 0u8, a: 255u8 }]
+echo cs.add_all(ds)
+echo cs.sub_all(ds)
+echo cs.scale_all(2.0)

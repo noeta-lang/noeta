@@ -680,18 +680,20 @@ pub(crate) fn constraint_mismatch(
     constraint: &noeta_ext_abi::PackedConstraint,
 ) -> Option<String> {
     use noeta_ast::reflect::PackedKind;
-    use noeta_ext_abi::{ConstraintField, ConstraintLayout};
+    use noeta_ext_abi::{ConstraintArity, ConstraintField, ConstraintLayout};
+    fn render_one(f: &ConstraintField) -> String {
+        match f {
+            ConstraintField::Int => "int".to_string(),
+            ConstraintField::Float => "float".to_string(),
+            ConstraintField::F32 => "f32".to_string(),
+            ConstraintField::Bool => "bool".to_string(),
+            ConstraintField::IntN { bits, signed } => {
+                format!("{}{bits}", if *signed { 'i' } else { 'u' })
+            }
+        }
+    }
     fn render(fields: &[ConstraintField]) -> String {
-        fields
-            .iter()
-            .map(|f| match f {
-                ConstraintField::Int => "int",
-                ConstraintField::Float => "float",
-                ConstraintField::F32 => "f32",
-                ConstraintField::Bool => "bool",
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+        fields.iter().map(render_one).collect::<Vec<_>>().join(", ")
     }
     let kinds: Option<Vec<ConstraintField>> = layout
         .fields
@@ -701,10 +703,11 @@ pub(crate) fn constraint_mismatch(
             PackedKind::Float => Some(ConstraintField::Float),
             PackedKind::F32 => Some(ConstraintField::F32),
             PackedKind::Bool => Some(ConstraintField::Bool),
-            // Constraints cover the `int`/`float`/`f32`/`bool` kernel vocabulary only (kernel bundles
-            // are f32/word-shaped); a narrower fixed width (`i32`/`u8`/`f64`) or a nested packed
-            // struct is not constraint-coverable — treated as a mismatch, an additive extension later.
-            PackedKind::F64 | PackedKind::IntN { .. } | PackedKind::Struct(_) => None,
+            // Fixed-width integers carry the array-ops integer/`Color` vector shapes (`i32`/`u8`).
+            PackedKind::IntN { bits, signed } => Some(ConstraintField::IntN { bits, signed }),
+            // `f64` and nested packed structs are still not constraint-coverable — an additive
+            // extension later; treated as a mismatch.
+            PackedKind::F64 | PackedKind::Struct(_) => None,
         })
         .collect();
     let Some(kinds) = kinds else {
@@ -714,12 +717,28 @@ pub(crate) fn constraint_mismatch(
                 .to_string(),
         );
     };
-    if kinds != constraint.fields {
-        return Some(format!(
-            "the bundle requires fields ({}), found ({})",
-            render(constraint.fields),
-            render(&kinds)
-        ));
+    match constraint.arity {
+        ConstraintArity::Exact => {
+            if kinds != constraint.fields {
+                return Some(format!(
+                    "the bundle requires fields ({}), found ({})",
+                    render(constraint.fields),
+                    render(&kinds)
+                ));
+            }
+        }
+        // A uniform vector of flexible width: at least `min` fields, all of the single required kind
+        // (`fields[0]`) — one bundle over `IVec2`/`IVec3`/… . Install-time validated to hold one kind.
+        ConstraintArity::Uniform { min } => {
+            let want = constraint.fields[0];
+            if kinds.len() < min || kinds.iter().any(|k| *k != want) {
+                return Some(format!(
+                    "the bundle requires at least {min} `{}` fields, found ({})",
+                    render_one(&want),
+                    render(&kinds)
+                ));
+            }
+        }
     }
     match constraint.layout {
         ConstraintLayout::Any => {}

@@ -424,8 +424,8 @@ pub fn soa_length(a: &SoaVec3) -> Vec<f32> {
 // path the old intercepts had.
 
 use crate::registry::{
-    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, ExtBundle, ExtFn, NativeOut,
-    NativeValue, PackedConstraint, RetTy, Scalar, ScalarVec, SigType,
+    BundleFn, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout, ExtBundle, ExtFn,
+    NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, ScalarVec, SigType,
 };
 use crate::{CtxError, CtxOut, CtxResult, NativeCtx, PackedField, PackedView, Slot, ctx_arity};
 
@@ -443,6 +443,7 @@ pub(crate) const VEC_KERNELS: ExtBundle = ExtBundle {
             ConstraintField::F32,
         ],
         layout: ConstraintLayout::Any,
+        arity: ConstraintArity::Exact,
     },
     methods: &[
         // --- Element methods (`v.dot(w)` on a single bound value) ---
