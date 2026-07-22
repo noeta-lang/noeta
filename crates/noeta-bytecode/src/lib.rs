@@ -1286,7 +1286,10 @@ pub struct MethodEntry {
 pub struct PackedSchemaDef {
     /// The element type's shape, an index into [`Module::shapes`] — the same entry `MakeStruct`
     /// uses for that type, so a materialized element shares shape identity with a constructed one.
-    pub shape: u32,
+    /// **`None`** marks a bare-scalar element (packed-widths bare-scalar arc): a `List<i32>`/`List<f32>`
+    /// has one scalar field (in [`Self::fields`]) and no struct wrapper, so it materializes to a bare
+    /// `int`/`f32` rather than an object — there is no shape to reference.
+    pub shape: Option<u32>,
     /// One entry per field, in slot (declared) order.
     pub fields: Vec<PackedFieldDef>,
     /// Bytes per element (the per-element stride into the flat byte buffer; P-PACK 3.2b — an `f32`
@@ -1467,10 +1470,13 @@ impl Module {
                         PackedFieldDef::Struct(idx) => format!("packed{idx}"),
                     })
                     .collect();
+                let shape = match schema.shape {
+                    Some(s) => format!("s{s}"),
+                    None => "scalar".to_string(),
+                };
                 let _ = writeln!(
                     out,
-                    "  packed{i} = s{} [{}] ({} bytes)",
-                    schema.shape,
+                    "  packed{i} = {shape} [{}] ({} bytes)",
                     fields.join(", "),
                     schema.byte_size
                 );

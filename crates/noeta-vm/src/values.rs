@@ -322,7 +322,14 @@ pub(crate) fn vm_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         "string" => TypeRepr::Str,
         "bytes" => TypeRepr::Bytes,
         "unit" => TypeRepr::Unit,
-        "list" => TypeRepr::List(dyn_()),
+        // A bare-scalar packed list (`List<i32>`/`List<f32>`) recovers its element width from its
+        // schema — so a laundered value still reflects `List<i32>`, not `List<dyn>` (slice-1 identity).
+        // A boxed or struct-packed list has no scalar schema and reflects head-only.
+        "list" => TypeRepr::List(
+            v.packed_scalar_elem_repr()
+                .map(Box::new)
+                .unwrap_or_else(dyn_),
+        ),
         "set" => TypeRepr::Set(dyn_()),
         "map" => TypeRepr::Map(dyn_(), dyn_()),
         "function" => TypeRepr::Fn(Vec::new(), dyn_()),

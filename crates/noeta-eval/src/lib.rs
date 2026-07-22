@@ -2152,6 +2152,22 @@ impl Interpreter {
     ) -> Option<Rc<PackedSchema>> {
         use noeta_ast::reflect::PackedKind;
 
+        // A bare-scalar element (`List<i32>`/`List<f32>`) has no nominal type — no scope lookup, no
+        // `def`; its single field's kind is the whole element. Build the one-slot schema directly.
+        if layout.is_scalar() {
+            let kind = scalar_slot_kind(&layout.fields[0].kind)?;
+            let byte_size = layout.byte_size();
+            if byte_size == 0 {
+                return None;
+            }
+            return Some(Rc::new(PackedSchema {
+                def: None,
+                fields: vec![PackedSlot { kind }],
+                byte_size,
+                column: false,
+            }));
+        }
+
         let def = match self.scope.lookup(&layout.type_name) {
             Some(Value::Type(def)) => def,
             _ => return None,
@@ -2181,7 +2197,7 @@ impl Interpreter {
             return None; // a zero-field packed struct has no recoverable element count — stay boxed.
         }
         Some(Rc::new(PackedSchema {
-            def,
+            def: Some(def),
             fields,
             byte_size,
             column: layout.column,
@@ -4994,6 +5010,25 @@ fn invoke_err(message: String) -> Value {
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
 /// Mirrors the VM's `vm_type_repr` exactly so both backends reflect identical `Type` values.
+/// Map a bare-scalar element's checker [`PackedKind`](noeta_ast::reflect::PackedKind) to the eval
+/// [`SlotKind`] (packed-widths bare-scalar arc). A scalar element is a single primitive — a nested
+/// `Struct` is not a scalar, so it returns `None` (the caller stays boxed) defensively.
+fn scalar_slot_kind(kind: &noeta_ast::reflect::PackedKind) -> Option<SlotKind> {
+    use noeta_ast::reflect::PackedKind;
+    Some(match kind {
+        PackedKind::Int => SlotKind::Int,
+        PackedKind::Float => SlotKind::Float,
+        PackedKind::F32 => SlotKind::F32,
+        PackedKind::F64 => SlotKind::F64,
+        PackedKind::IntN { bits, signed } => SlotKind::IntN {
+            bits: *bits,
+            signed: *signed,
+        },
+        PackedKind::Bool => SlotKind::Bool,
+        PackedKind::Struct(_) => return None,
+    })
+}
+
 fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
     use noeta_ast::reflect::TypeRepr;
     let dyn_ = || Box::new(TypeRepr::Dyn);
@@ -5008,9 +5043,12 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         // A list carrying a reflected type tag (R1 — a tagged literal, preserved through pure
         // aliasing) reports that precise element type; an untagged/packed list falls back to the
         // head-only `List(Dyn)`. Mirrors the VM's `vm_type_repr` tag consultation.
+        // A bare-scalar packed list (`List<i32>`/`List<f32>`) recovers its element width from its
+        // schema — a laundered value still reflects `List<i32>`, not `List<dyn>` (slice-1 identity).
         Value::List(repr) => repr
             .reflect()
             .map(|r| (*r).clone())
+            .or_else(|| repr.scalar_elem_repr().map(|e| TypeRepr::List(Box::new(e))))
             .unwrap_or_else(|| TypeRepr::List(dyn_())),
         // A tuple has no reflection descriptor (like a union) — it erases to the dynamic top.
         Value::Tuple(_) => TypeRepr::Dyn,

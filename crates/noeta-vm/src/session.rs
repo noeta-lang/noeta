@@ -93,7 +93,8 @@ impl SessionState {
                 .collect();
             self.packed_schemas
                 .push(noeta_object::intern_schema(PackedSchema {
-                    shape: self.shapes[def.shape as usize],
+                    // A bare-scalar element carries no shape (`None`) — see `PackedSchema::shape`.
+                    shape: def.shape.map(|i| self.shapes[i as usize]),
                     fields,
                     byte_size: def.byte_size as usize,
                     column: def.column,

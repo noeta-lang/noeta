@@ -1285,9 +1285,14 @@ fn push_attrs(
 /// the flat `List<packed>` representation stays invisible to `RunResult`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PackedLayout {
-    /// The packed struct's type name — the nominal type of a materialized element.
+    /// The packed struct's type name — the nominal type of a materialized element. **Empty** marks a
+    /// *bare-scalar* layout (packed-widths bare-scalar arc): a `List<i32>`/`List<u8>`/`List<f32>` whose
+    /// element is a single sub-8-byte numeric with no struct wrapper. A scalar layout has exactly one
+    /// (unnamed) field and materializes to a bare `Value` (`int`/`f32`), not a `Value::Object` — user
+    /// types always have a non-empty name, so the emptiness is an unambiguous marker. Use
+    /// [`PackedLayout::is_scalar`] rather than testing the string directly.
     pub type_name: String,
-    /// The fields in declared (slot) order.
+    /// The fields in declared (slot) order. A scalar layout ([`Self::is_scalar`]) holds exactly one.
     pub fields: Vec<PackedField>,
     /// Whether lists of this element are stored **column-major** — the `@packed(Layout.Column)`
     /// attribute (P-SIMD C2). A performance-only property (see `noeta_object::PackedSchema::column`);
@@ -1328,6 +1333,27 @@ pub enum PackedKind {
 }
 
 impl PackedLayout {
+    /// A **bare-scalar** element layout (packed-widths bare-scalar arc): a single unnamed field of
+    /// `kind`, no struct wrapper, so a `List<i32>`/`List<u8>`/`List<f32>` stores its elements as a flat
+    /// `byte_width`-per-element buffer that materializes back to a bare `int`/`f32` (not a
+    /// `Value::Object`). Row/column is moot for one field, so it is always row-major.
+    pub fn scalar(kind: PackedKind) -> PackedLayout {
+        PackedLayout {
+            type_name: String::new(),
+            fields: vec![PackedField {
+                name: String::new(),
+                kind,
+            }],
+            column: false,
+        }
+    }
+
+    /// Whether this is a bare-scalar element layout (no nominal struct — a `List<i32>`/`List<f32>`),
+    /// materializing to a bare `Value` rather than a `Value::Object`. See [`Self::type_name`].
+    pub fn is_scalar(&self) -> bool {
+        self.type_name.is_empty()
+    }
+
     /// The number of machine words one value of this layout occupies — the sum of each field's width
     /// (a primitive is 1; a nested struct is its own `word_count`). Pre-Phase-3 every primitive is one
     /// 64-bit word; Phase 3 (`f32`) will narrow specific slots.
