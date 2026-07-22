@@ -47,6 +47,11 @@ fn packed_field(kind: &noeta_object::PackedKind) -> PackedField {
         PackedKind::Int => PackedField::Int,
         PackedKind::Float => PackedField::Float,
         PackedKind::F32 => PackedField::F32,
+        PackedKind::F64 => PackedField::F64,
+        PackedKind::IntN { bits, signed } => PackedField::IntN {
+            bits: *bits,
+            signed: *signed,
+        },
         PackedKind::Bool => PackedField::Bool,
         PackedKind::Struct(inner) => {
             PackedField::Struct(inner.fields.iter().map(packed_field).collect())
@@ -639,9 +644,11 @@ impl NativeCtx for VmCtx<'_, '_> {
         fields: &[Scalar],
     ) -> CtxResult<Slot> {
         let list = self.get(list)?;
-        // The shape only — a packed list's schema carries it directly, no materialization.
+        // The shape only — a struct-packed list's schema carries it directly, no materialization. A
+        // bare-scalar packed list has no shape (`None`), so `flatten` yields `None` and the field-count
+        // filter below correctly rejects: this kernel builds a struct element, not a bare scalar.
         let shape = if list.is_packed_list() {
-            list.with_packed_ref(|schema, _| schema.shape)
+            list.with_packed_ref(|schema, _| schema.shape).flatten()
         } else {
             list.list_get(index).and_then(|e| e.shape())
         };

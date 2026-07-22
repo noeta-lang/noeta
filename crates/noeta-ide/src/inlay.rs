@@ -291,8 +291,26 @@ impl Walker<'_> {
                 }
             }
             Expr::Object(lit) => {
+                // A target-typed `.{ … }` shows the name the checker inferred, rendered *before* the
+                // `.{` so the line reads as the named form it stands for: `Limits.{ rps: 1 }`. This
+                // is not an annotation the author could have omitted — it is elided syntax restored,
+                // and without it the type is simply unrecoverable when reading the code (a diff
+                // outside an editor never shows it at all). Hence it ships with the feature.
+                if lit.type_name.is_none()
+                    && lit.type_name_span.source == self.source
+                    && let Some(repr) = self.expr_types.get(&lit.span)
+                {
+                    self.hints.push(TypeHint {
+                        offset: lit.type_name_span.start,
+                        label: repr.display_short(),
+                        kind: HintKind::Type,
+                    });
+                }
                 for field in &lit.fields {
                     self.expr(&field.value);
+                }
+                if let Some(spread) = &lit.spread {
+                    self.expr(spread);
                 }
             }
             Expr::Try { expr, .. }
@@ -323,7 +341,9 @@ impl Walker<'_> {
             Expr::Invoke {
                 recv, name, args, ..
             } => {
-                self.expr(recv);
+                if let Some(recv) = recv {
+                    self.expr(recv);
+                }
                 self.expr(name);
                 self.expr(args);
             }

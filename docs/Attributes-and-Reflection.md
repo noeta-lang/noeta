@@ -119,9 +119,9 @@ for r in routes {
 
 The compile-time `(declaration, role)` index built from `@role(...)` tags — each binding has a `.target` and a `.role`. The optional turbofish scopes the query to a single `@semantic` enum (the mirror of `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only the bindings whose role is a `Semantic` variant, while bare `roles_of()` returns the whole index. The enum is resolved at compile time (closed-world); naming a non-`@semantic` type is an error (E0031).
 
-### `invoke(recv, name, args): Result<dyn, dyn>`
+### `invoke(recv, name, args): Result<dyn, dyn>` / `invoke(name, args): Result<dyn, dyn>`
 
-Fallible dispatch by name — `recv` is a value (→ an instance method) or a bare type name (→ an associated function). Returns `Err` on an unknown name, a non-string name, or an arity mismatch:
+Fallible dispatch by name. With three operands, `recv` is a value (→ an instance method) or a bare type name (→ an associated function):
 
 ```noeta check
 echo match invoke(Shape.new(2, 3), "area", []) {
@@ -129,6 +129,21 @@ echo match invoke(Shape.new(2, 3), "area", []) {
     Err(e) => "no such method",
 }
 ```
+
+With two, `name` is a **top-level function** — the same string `params_of` takes for a free fn, so reflecting a signature and then calling it round-trips on one name:
+
+```noeta check
+fn greet(who: string = "stranger"): string { return "hi ${who}" }
+
+echo match invoke("greet", ["ada"]) {
+    Ok(v)  => v,
+    Err(e) => "no such function",
+}
+```
+
+The two-operand form searches the top-level function namespace and nothing else. A type name, a qualified `Type.method`, and a local variable holding a function are each simply not found — reaching a type's methods is what the three-operand form is for, and a function value you already hold you can just call.
+
+Every resolution failure is an `Err`, never an abort: an unknown name, a non-string name, non-list args, and an arity mismatch alike. A parameter with a default may be omitted from `args`, exactly as at a direct call site — the pair to `ParamInfo.optional`. A panic *inside* the invoked body is a normal abort; only the by-name resolution is caught.
 
 ## Where this is headed
 

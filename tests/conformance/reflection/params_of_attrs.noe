@@ -1,0 +1,58 @@
+// The end-to-end case parameter attributes exist for: reflect a signature ONCE and read each
+// parameter's own metadata beside it. `params_of(target)` yields `ParamInfo { name, type, optional,
+// attrs }`, so a signature-driven framework — a CLI deriving flags, a router deriving query
+// parameters — never has to re-join `attributes_of` target strings back onto the parameter list.
+//
+// `attrs` is a VIEW of the attribute manifest, not a second table: the instances come from the same
+// rows `attributes_of::<Arg>()` returns, reached through the same key builder. So the two surfaces
+// cannot disagree about which attribute belongs to which parameter — the failure mode a separately
+// maintained parameter-attribute table would eventually have.
+//
+// A parameter may carry an attribute AND a default; the two are independent facts about it, and
+// `optional` keeps reporting the default while `attrs` reports the metadata.
+// expect: stdout "target: help=target triple short= optional=false"
+// expect: stdout "release: help=optimize short=r optional=true"
+// expect: stdout "jobs: help= short= optional=true"
+// expect: stdout "run/cmd: help=the command short="
+// expect: stdout "bare attrs=0"
+// expect: exit 0
+@attribute(Param)
+struct Arg {
+    help: string
+    short: string = ""
+}
+
+fn build(
+    #[Arg(help: "target triple")] target: string,
+    #[Arg(help: "optimize", short: "r")] release: bool = false,
+    jobs: int = 4,
+): void {
+    return;
+}
+
+class Tools {
+    fn new(): Tools { return Tools {} }
+    fn run(#[Arg(help: "the command")] cmd: string): string { return cmd }
+}
+
+// Narrowing recovers the attribute's own type off the heterogeneous `List<dyn>` — a parameter may
+// carry attributes of several different structs, so there is no single element type to name.
+fn describe(p: ParamInfo): string {
+    for a in p.attrs {
+        if a is Arg {
+            return "help=${a.help} short=${a.short}";
+        }
+    }
+    return "help= short=";
+}
+
+for p in params_of("build") {
+    echo "${p.name}: ${describe(p)} optional=${p.optional}";
+}
+for p in params_of("Tools.run") {
+    echo "run/${p.name}: ${describe(p)}";
+}
+
+// An unattributed parameter reports the empty list, not a missing field.
+bare = params_of("build").filter(fn(p) => p.name == "jobs");
+echo "bare attrs=${bare[0].attrs.len()}";

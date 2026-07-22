@@ -1,0 +1,45 @@
+// A type reference in attribute position carries its **generic arguments** through to the
+// materialized `Type` value. The arguments survive parse, qualification, the manifest and serde;
+// they used to be dropped at the last hop — both backends matched `AttrValue::TypeRef { name, .. }`
+// and rebuilt the type from the head name alone, so `List<int>` materialized as `Type.List(Type.Dyn)`
+// and `Pair<int, string>` as `Type.Struct(Pair, [])`. Nesting is projected recursively, and the
+// nominal-kind classification (`Type.Struct` for a declared struct, pinned by
+// `attribute_type_ref_arg.noe`) applies at every depth, not just the head.
+// expect: stdout "Type.List(Type.Int)"
+// expect: stdout "Type.Map(Type.String, Type.List(Type.Int))"
+// expect: stdout "Type.Struct(Pair, [Type.Int, Type.String])"
+// expect: stdout "Type.List(Type.Struct(Codec, []))"
+// expect: stdout "Type.Result(Type.Int, Type.String)"
+// expect: stdout "Type.Option(Type.Struct(Codec, []))"
+// expect: stdout "Type.Set(Type.String)"
+// expect: exit 0
+struct Pair<A, B> { a: A  b: B }
+struct Codec { v: int }
+
+@attribute
+struct Builds { target: Type }
+
+#[Builds(target: List<int>)]
+struct Simple { id: int }
+
+#[Builds(target: Map<string, List<int>>)]
+struct Nested { id: int }
+
+#[Builds(target: Pair<int, string>)]
+struct UserGeneric { id: int }
+
+#[Builds(target: List<Codec>)]
+struct NominalArg { id: int }
+
+#[Builds(target: Result<int, string>)]
+struct TwoArg { id: int }
+
+#[Builds(target: Option<Codec>)]
+struct Opt { id: int }
+
+#[Builds(target: Set<string>)]
+struct SetArg { id: int }
+
+for b in attributes_of::<Builds>() {
+    echo "${b.value.target}";
+}

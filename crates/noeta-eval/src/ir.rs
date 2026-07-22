@@ -1412,7 +1412,7 @@ impl Interpreter {
                         self.runtime_error(
                             DiagnosticCode::InvalidPackedType,
                             *span,
-                            "`from_bytes` requires a packable `@packed` struct element type"
+                            "`from_bytes` requires a packable element type — a `@packed` struct or a sub-8-byte fixed-width numeric (`i32`/`u8`/`f32`, …)"
                                 .to_string(),
                         )
                     })?;
@@ -1734,7 +1734,10 @@ impl Interpreter {
                 args,
                 span,
             } => {
-                let receiver = self.eval_ir_atom(recv, frame)?;
+                let receiver = match recv {
+                    Some(recv) => Some(self.eval_ir_atom(recv, frame)?),
+                    None => None,
+                };
                 let name_val = self.eval_ir_atom(name, frame)?;
                 let args_val = self.eval_ir_atom(args, frame)?;
                 self.invoke_dynamic(receiver, name_val, args_val, *span)

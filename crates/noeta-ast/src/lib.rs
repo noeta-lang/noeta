@@ -11,12 +11,14 @@ use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
 pub mod bodies;
+pub mod builtin_ty;
 pub mod derive;
 pub mod desugar;
 mod pretty;
 pub mod reflect;
 mod syntax_kind;
 
+pub use builtin_ty::{BuiltinTy, Spelling, parse_int_width};
 pub use pretty::Pretty;
 pub use syntax_kind::SyntaxKind;
 
@@ -538,6 +540,14 @@ impl Sites {
     pub const FIELD: Sites = Sites(1 << 6);
     /// An enum variant. As [`FIELD`](Self::FIELD).
     pub const VARIANT: Sites = Sites(1 << 7);
+    /// A callable's declared parameter. As [`FIELD`](Self::FIELD): not a directive site — no
+    /// built-in or registered tier attaches to a parameter — but a `#[...]` attribute target, so a
+    /// signature-driven consumer can hang per-argument metadata (`#[Arg(help: "…")]`) on the
+    /// parameter it describes rather than on a parallel list that desynchronises the moment someone
+    /// reorders the signature. Carried here for the same reason the two before it are: this
+    /// vocabulary names *every* place a decoration can be written, so no caller has to invent an
+    /// "unrepresentable site" case.
+    pub const PARAM: Sites = Sites(1 << 8);
     /// Every type declaration — struct, class, enum. (Deliberately excludes `trait`: a trait is a
     /// contract, not a data type, and every type directive on one is `E0054`.)
     pub const TYPE: Sites = Sites(Self::STRUCT.0 | Self::CLASS.0 | Self::ENUM.0);
@@ -574,6 +584,7 @@ impl Sites {
             (Sites::METHOD, "a method"),
             (Sites::FIELD, "a field"),
             (Sites::VARIANT, "an enum variant"),
+            (Sites::PARAM, "a parameter"),
         ] {
             if self.contains(bit) {
                 parts.push(name);
@@ -1329,11 +1340,35 @@ pub struct TierDecl {
 /// functions, methods) — never for closure parameters or enum-variant fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
+    /// The parameter's leading `#[...]` data attributes, in source order. Same annotation form and
+    /// same constant-literal argument rules as a field's or a function's — a parameter is simply
+    /// one more attachment site ([`Sites::PARAM`]). They exist so per-argument metadata can live on
+    /// the argument: a CLI framework's `#[Arg(short: "r", help: "…")]` describes exactly one
+    /// parameter, and hanging it off the fn-level attribute as a positional side-list would silently
+    /// mean something else the first time a parameter moved.
+    pub attrs: Vec<Attribute>,
     pub name: String,
     pub name_span: Span,
     pub ty: Option<TypeRef>,
     pub default: Option<Expr>,
     pub span: Span,
+}
+
+impl Param {
+    /// Is this parameter **optional** — may a well-formed call leave it unsupplied?
+    ///
+    /// This is the declaration-side half of the calling convention, and the counterpart of
+    /// `noeta_bytecode::is_param_filled`, which answers the call-site half ("did *this* call supply
+    /// parameter `p`?") from an argument count and a supplied mask. The two meet at the checker's
+    /// arity rule: a call is well-formed only if every parameter it leaves unfilled is optional, so
+    /// an unfilled parameter always has a default thunk to run. Naming the declaration side here
+    /// keeps the pair legible — and keeps `required_params`, the trailing-only `E0026` check, and
+    /// the reflected `ParamInfo.optional` reading the same predicate rather than three independent
+    /// spellings of `default.is_some()` that can drift apart if optionality ever grows a second
+    /// source (a `?`-marked parameter, say).
+    pub fn is_optional(&self) -> bool {
+        self.default.is_some()
+    }
 }
 
 /// A type reference in source (e.g. `int`, `List<Item>`, `Result<Order, OrderError>`,
@@ -1628,17 +1663,29 @@ pub enum Expr {
     /// `Semantic` variant; bare `roles_of()` (`ty = None`) returns the whole index.
     RolesOf { ty: Option<TypeRef>, span: Span },
     /// The reflection query `params_of(target)` — a callable's declared parameter list, returned as a
-    /// `List<ParamInfo>` (each `{ name: string, type: Type }`). `target` is a runtime `string`
+    /// `List<ParamInfo>` (each `{ name: string, type: Type, optional: bool }`). `target` is a runtime `string`
     /// naming a function or method (a bare fn name, or a qualified `Type.method`), the same target
     /// keying the attribute manifest. Built from the same compiler-built parameter index both
     /// backends read; surfaces a controller method's declared parameter types for dependency injection.
     ParamsOf { target: Box<Expr>, span: Span },
-    /// The reflection invocation `invoke(recv, name, args)` — fallible by-name dispatch. `recv` is a
-    /// value (→ instance method) or a bare type name (→ associated function); `name` is a runtime
-    /// `string`; `args` is a runtime `List`. Evaluates to `Result<dyn, dyn>` — `Ok(retval)` on a
-    /// hit, `Err(msg)` when the name is unknown or the arity is wrong (P2.6).
+    /// The reflection invocation `invoke(recv, name, args)` / `invoke(name, args)` — fallible
+    /// by-name dispatch. `name` is a runtime `string`; `args` is a runtime `List`. Evaluates to
+    /// `Result<dyn, dyn>` — `Ok(retval)` on a hit, `Err(msg)` when the name is unknown or the arity
+    /// is wrong (P2.6).
+    ///
+    /// `recv` distinguishes the two surface forms, and it is an `Option` rather than a sentinel
+    /// receiver expression *deliberately*: the two forms resolve `name` in **different namespaces**
+    /// (a type's method table vs. the top-level function namespace), so every reader of this node
+    /// has to decide which one it is. A synthesized "unit receiver" would let a reader fall through
+    /// to the method path and silently look up a free function among a type's methods.
+    ///
+    /// - `Some(recv)` — the three-argument form. `recv` is a value (→ instance method) or a bare
+    ///   type name (→ associated function).
+    /// - `None` — the two-argument form `invoke(name, args)`. `name` names a **top-level function**,
+    ///   the same string that keys [`Expr::ParamsOf`] for a free fn, so reflecting a signature and
+    ///   then calling it round-trips on one name.
     Invoke {
-        recv: Box<Expr>,
+        recv: Option<Box<Expr>>,
         name: Box<Expr>,
         args: Box<Expr>,
         span: Span,
@@ -1698,7 +1745,14 @@ pub enum Expr {
 /// explicitly, so the full-initialization guarantee still holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectLit {
-    pub type_name: String,
+    /// The nominal type being built, or `None` for the **target-typed** form `.{ … }`, whose name
+    /// comes from the expected type at the literal's position rather than from the source. The
+    /// checker resolves it and records the answer in `Sites::inferred_object_types` (keyed by
+    /// [`Self::span`]) for lowering to read — the name is never written back here, because checking
+    /// sees the AST by shared reference. `Option` rather than an empty-string sentinel so every
+    /// reader is forced to say what it does with an un-named literal.
+    pub type_name: Option<String>,
+    /// The span of the type name, or of the `.{` token itself for the target-typed form.
     pub type_name_span: Span,
     pub fields: Vec<FieldInit>,
     pub spread: Option<Box<Expr>>,
@@ -2060,7 +2114,11 @@ impl Expr {
                 name: n,
                 args,
                 ..
-            } => recv.mentions(name) || n.mentions(name) || args.mentions(name),
+            } => {
+                recv.as_ref().is_some_and(|r| r.mentions(name))
+                    || n.mentions(name)
+                    || args.mentions(name)
+            }
             Expr::TypedModuleCall { recv, args, .. } => recv.mentions(name) || any_args(args),
             // The callee is a top-level fn name, never a local binding, so only the arguments count.
             Expr::TypedCall { args, .. } => any_args(args),
@@ -2153,7 +2211,11 @@ impl Expr {
             Expr::Channel { capacity, .. } => capacity.has_await(),
             Expr::Invoke {
                 recv, name, args, ..
-            } => recv.has_await() || name.has_await() || args.has_await(),
+            } => {
+                recv.as_ref().is_some_and(|r| r.has_await())
+                    || name.has_await()
+                    || args.has_await()
+            }
             Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any_args(args),
             Expr::TypedCall { args, .. } => any_args(args),
             Expr::TypedMethodCall { recv, args, .. } => recv.has_await() || any_args(args),

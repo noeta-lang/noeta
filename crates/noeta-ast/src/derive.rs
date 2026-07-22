@@ -388,6 +388,7 @@ pub fn plan_builtin_via(
     // `fn <name>(other: <Type>): <ret>` — the shared shape of every template's single method.
     let sig = |name: &str, ret: TypeRef| FnDecl {
         params: vec![Param {
+            attrs: Vec::new(),
             name: "other".to_string(),
             name_span: span,
             ty: Some(named(type_name, span)),
@@ -411,7 +412,7 @@ pub fn plan_builtin_via(
         }
         // fn add(other: T): T { return T { f: self.f + other.f } }
         let construct = Expr::Object(ObjectLit {
-            type_name: type_name.to_string(),
+            type_name: Some(type_name.to_string()),
             type_name_span: span,
             fields: vec![FieldInit {
                 name: via_field.clone(),
@@ -526,6 +527,7 @@ pub fn plan_native_derive(methods: &[(String, usize, String)], span: Span) -> Ve
         .map(|(name, arity, handler)| {
             let params: Vec<Param> = (0..*arity)
                 .map(|i| Param {
+                    attrs: Vec::new(),
                     name: format!("a{i}"),
                     name_span: span,
                     ty: Some(named("dyn", span)),
@@ -781,7 +783,9 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            visit_expr_types(recv, f);
+            if let Some(recv) = recv {
+                visit_expr_types(recv, f);
+            }
             visit_expr_types(name, f);
             visit_expr_types(args, f);
         }

@@ -80,6 +80,11 @@ impl SessionState {
                     PackedFieldDef::Int => PackedKind::Int,
                     PackedFieldDef::Float => PackedKind::Float,
                     PackedFieldDef::F32 => PackedKind::F32,
+                    PackedFieldDef::F64 => PackedKind::F64,
+                    PackedFieldDef::IntN { bits, signed } => PackedKind::IntN {
+                        bits: *bits,
+                        signed: *signed,
+                    },
                     PackedFieldDef::Bool => PackedKind::Bool,
                     PackedFieldDef::Struct(idx) => {
                         PackedKind::Struct(self.packed_schemas[*idx as usize])
@@ -88,7 +93,8 @@ impl SessionState {
                 .collect();
             self.packed_schemas
                 .push(noeta_object::intern_schema(PackedSchema {
-                    shape: self.shapes[def.shape as usize],
+                    // A bare-scalar element carries no shape (`None`) — see `PackedSchema::shape`.
+                    shape: def.shape.map(|i| self.shapes[i as usize]),
                     fields,
                     byte_size: def.byte_size as usize,
                     column: def.column,

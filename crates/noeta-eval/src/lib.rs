@@ -1909,14 +1909,27 @@ impl Interpreter {
     }
 
     /// Materialize a callable's declared parameter list from the reflection info into a
-    /// `List<ParamInfo>` — each `{ name: string, type: Type }`. `type` is the prelude `Type` ADT
-    /// value built from the parameter's declared type (the same `build_type_value` `type_of` uses).
-    /// Builds a fresh `TypeDef`; the VM builds the matching shape the same way, so the values agree
-    /// by construction. An unknown target yields an empty list.
+    /// `List<ParamInfo>` — each `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`.
+    /// `type` is the prelude `Type` ADT value built from the parameter's declared type (the same
+    /// `build_type_value` `type_of` uses), `optional` reports whether the parameter declared a
+    /// default, and `attrs` holds the parameter's `#[...]` attribute instances. Builds a fresh
+    /// `TypeDef`; the VM builds the matching shape the same way, so the values agree by
+    /// construction. An unknown target yields an empty list.
+    ///
+    /// `attrs` is **joined from the attribute manifest**, not carried in the parameter record: the
+    /// rows are exactly the ones `attributes_of::<T>()` returns for the same parameter, reached
+    /// through the shared `param_attributes_for` key. So the two query surfaces are two renderings
+    /// of one table, and a parameter attribute cannot be visible through one and missing from the
+    /// other.
     fn materialize_params(&self, target: &str) -> Value {
         let info_def = Rc::new(fresh_type_def(
             noeta_ast::reflect::PARAM_INFO,
-            &["name".to_string(), "type".to_string()],
+            &[
+                "name".to_string(),
+                "type".to_string(),
+                "optional".to_string(),
+                "attrs".to_string(),
+            ],
             true,
         ));
         let items: Vec<Value> = self
@@ -1924,9 +1937,37 @@ impl Interpreter {
             .params_for(target)
             .iter()
             .map(|p| {
-                // `info_def` is `{ name, type }` — build the slots in that order.
-                let slots = vec![Value::Str(p.name.clone()), build_type_value(&p.ty)];
+                // `info_def` is `{ name, type, optional, attrs }` — build the slots in that order.
+                let slots = vec![
+                    Value::Str(p.name.clone()),
+                    build_type_value(&p.ty),
+                    Value::Bool(p.optional),
+                    self.materialize_param_attrs(target, &p.name),
+                ];
                 Value::Object(Rc::new(ObjectValue::new(info_def.clone(), slots)))
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// One parameter's `#[...]` attributes, materialized into a `List<dyn>` of attribute-struct
+    /// instances. Each instance is built exactly as `attributes_of` builds it — same
+    /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads
+    /// off `ParamInfo.attrs` is indistinguishable from the one it would read off an `Attributed`.
+    fn materialize_param_attrs(&self, callable: &str, param: &str) -> Value {
+        let items: Vec<Value> = self
+            .reflection
+            .param_attributes_for(callable, param)
+            .into_iter()
+            .map(|a| {
+                let shape = noeta_ast::reflect::attribute_shape(&a.name, &self.reflection);
+                let slots: Vec<Value> =
+                    noeta_ast::reflect::materialize_args(a, &shape.fields, &shape.defaults)
+                        .iter()
+                        .map(|v| attr_value_to_eval(v, &self.reflection))
+                        .collect();
+                let def = Rc::new(fresh_type_def(&a.name, &shape.fields, shape.is_struct));
+                Value::Object(Rc::new(ObjectValue::new(def, slots)))
             })
             .collect();
         Value::list(items)
@@ -2111,6 +2152,22 @@ impl Interpreter {
     ) -> Option<Rc<PackedSchema>> {
         use noeta_ast::reflect::PackedKind;
 
+        // A bare-scalar element (`List<i32>`/`List<f32>`) has no nominal type — no scope lookup, no
+        // `def`; its single field's kind is the whole element. Build the one-slot schema directly.
+        if layout.is_scalar() {
+            let kind = scalar_slot_kind(&layout.fields[0].kind)?;
+            let byte_size = layout.byte_size();
+            if byte_size == 0 {
+                return None;
+            }
+            return Some(Rc::new(PackedSchema {
+                def: None,
+                fields: vec![PackedSlot { kind }],
+                byte_size,
+                column: false,
+            }));
+        }
+
         let def = match self.scope.lookup(&layout.type_name) {
             Some(Value::Type(def)) => def,
             _ => return None,
@@ -2125,6 +2182,11 @@ impl Interpreter {
                 PackedKind::Int => SlotKind::Int,
                 PackedKind::Float => SlotKind::Float,
                 PackedKind::F32 => SlotKind::F32,
+                PackedKind::F64 => SlotKind::F64,
+                PackedKind::IntN { bits, signed } => SlotKind::IntN {
+                    bits: *bits,
+                    signed: *signed,
+                },
                 PackedKind::Bool => SlotKind::Bool,
                 PackedKind::Struct(inner) => SlotKind::Struct(self.resolve_packed_schema(inner)?),
             };
@@ -2135,7 +2197,7 @@ impl Interpreter {
             return None; // a zero-field packed struct has no recoverable element count — stay boxed.
         }
         Some(Rc::new(PackedSchema {
-            def,
+            def: Some(def),
             fields,
             byte_size,
             column: layout.column,
@@ -2737,14 +2799,15 @@ impl Interpreter {
         }
     }
 
-    /// `invoke(recv, name, args)` — fallible by-name dispatch (P2.6). Reuses the same name-keyed
-    /// method tables as `call_method`, but **pre-checks** name resolution and arity so a miss is a
-    /// runtime `Result.Err` rather than a recorded diagnostic. A panic *inside* the invoked body
-    /// still aborts (the `?` propagation below), so only the by-name *resolution* is caught. The
-    /// VM's `Op::Invoke` mirrors this exactly, building identical `Ok`/`Err` values.
+    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch (P2.6). Reuses
+    /// the same name-keyed method tables as `call_method` (or, receiver-less, the global scope), but
+    /// **pre-checks** name resolution and arity so a miss is a runtime `Result.Err` rather than a
+    /// recorded diagnostic. A panic *inside* the invoked body still aborts (the `?` propagation
+    /// below), so only the by-name *resolution* is caught. The VM's `Op::Invoke` mirrors this
+    /// exactly, building identical `Ok`/`Err` values.
     fn invoke_dynamic(
         &mut self,
-        receiver: Value,
+        receiver: Option<Value>,
         name_val: Value,
         args_val: Value,
         span: Span,
@@ -2762,6 +2825,28 @@ impl Interpreter {
             )));
         };
         let args: Vec<Value> = (*items.to_rc_vec()).clone();
+        // No receiver: the free-function form. `method` names a **top-level function** — the same
+        // string `params_of` takes for a free fn — so resolution is a lookup in the global scope
+        // and nowhere else. Deliberately NOT `self.scope`: the VM reads a global slot, so consulting
+        // the local chain here would let `invoke("g", …)` find a local `g` in one backend and miss
+        // it in the other. Calling through `call_closure` also means the callee gets its ordinary
+        // sealed child scope, exactly as a direct `g(...)` would.
+        let Some(receiver) = receiver else {
+            let Some(Value::Function(closure)) = self.globals.lookup(method) else {
+                return Ok(invoke_err(free_fn_miss_message(method)));
+            };
+            let required = required_count(&closure.defaults);
+            if args.len() < required || args.len() > closure.params.len() {
+                return Ok(invoke_err(arity_message(
+                    "function",
+                    required,
+                    closure.params.len(),
+                    args.len(),
+                )));
+            }
+            let result = self.call_closure(&closure, args, span)?;
+            return Ok(builtin_enum("Result", "Ok", vec![result]));
+        };
         // A reflection `Type` value (e.g. a stored attribute type-ref) dispatches like the type
         // handle it names: resolve it to the type and fall through to the `Value::Type` arm.
         let receiver = match reflection_type_name(&receiver) {
@@ -4925,6 +5010,25 @@ fn invoke_err(message: String) -> Value {
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
 /// Mirrors the VM's `vm_type_repr` exactly so both backends reflect identical `Type` values.
+/// Map a bare-scalar element's checker [`PackedKind`](noeta_ast::reflect::PackedKind) to the eval
+/// [`SlotKind`] (packed-widths bare-scalar arc). A scalar element is a single primitive — a nested
+/// `Struct` is not a scalar, so it returns `None` (the caller stays boxed) defensively.
+fn scalar_slot_kind(kind: &noeta_ast::reflect::PackedKind) -> Option<SlotKind> {
+    use noeta_ast::reflect::PackedKind;
+    Some(match kind {
+        PackedKind::Int => SlotKind::Int,
+        PackedKind::Float => SlotKind::Float,
+        PackedKind::F32 => SlotKind::F32,
+        PackedKind::F64 => SlotKind::F64,
+        PackedKind::IntN { bits, signed } => SlotKind::IntN {
+            bits: *bits,
+            signed: *signed,
+        },
+        PackedKind::Bool => SlotKind::Bool,
+        PackedKind::Struct(_) => return None,
+    })
+}
+
 fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
     use noeta_ast::reflect::TypeRepr;
     let dyn_ = || Box::new(TypeRepr::Dyn);
@@ -4939,9 +5043,12 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         // A list carrying a reflected type tag (R1 — a tagged literal, preserved through pure
         // aliasing) reports that precise element type; an untagged/packed list falls back to the
         // head-only `List(Dyn)`. Mirrors the VM's `vm_type_repr` tag consultation.
+        // A bare-scalar packed list (`List<i32>`/`List<f32>`) recovers its element width from its
+        // schema — a laundered value still reflects `List<i32>`, not `List<dyn>` (slice-1 identity).
         Value::List(repr) => repr
             .reflect()
             .map(|r| (*r).clone())
+            .or_else(|| repr.scalar_elem_repr().map(|e| TypeRepr::List(Box::new(e))))
             .unwrap_or_else(|| TypeRepr::List(dyn_())),
         // A tuple has no reflection descriptor (like a union) — it erases to the dynamic top.
         Value::Tuple(_) => TypeRepr::Dyn,
@@ -5016,11 +5123,16 @@ fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         TypeRepr::Int
         | TypeRepr::Float
         | TypeRepr::F32
+        | TypeRepr::F64
         | TypeRepr::Bool
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
         | TypeRepr::Dyn => Vec::new(),
+        // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
+        TypeRepr::IntN { signed, bits } => {
+            vec![Value::Int(i64::from(*bits)), Value::Bool(*signed)]
+        }
         TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => {
             vec![build_type_value(t)]
         }
@@ -5138,7 +5250,7 @@ fn attr_value_to_eval(
             let slots: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::Object(Rc::new(ObjectValue::new(def, slots)))
         }
-        A::TypeRef { name, .. } => build_type_value(&reflection.type_ref_repr(name)),
+        A::TypeRef { name, args } => build_type_value(&reflection.type_ref_repr(name, args)),
     }
 }
 
@@ -5171,34 +5283,52 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 | Value::BoundMethod(..)
         ),
         TypeRef::Named { name, args, .. } => {
-            let head_ok = match name.as_str() {
-                "int" => matches!(value, Value::Int(_)),
-                "float" => matches!(value, Value::Float(_)),
-                "bool" => matches!(value, Value::Bool(_)),
-                "string" => matches!(value, Value::Str(_)),
-                "bytes" => matches!(value, Value::Bytes(_)),
-                "void" | "unit" => matches!(value, Value::Unit),
-                // Narrowing to the open top is a no-op: every value is a `dyn`.
-                "dyn" | "Any" => true,
-                "List" | "list" => matches!(value, Value::List(_)),
-                "Map" | "map" => matches!(value, Value::Map(..)),
-                "Set" | "set" => matches!(value, Value::Set(..)),
-                // Abstract kind-types match any value of that declaration kind (structs and classes are
-                // both `Object`s, told apart by `TypeDef::is_struct`).
-                "Enum" => matches!(value, Value::Enum(_)),
-                "Struct" => matches!(value, Value::Object(o) if o.def.is_struct),
-                "Class" => matches!(value, Value::Object(o) if !o.def.is_struct),
-                // `Option`/`Result` are enums whose shape name is the type name, like a user
-                // enum; an extern-type value matches its registered type name (`x is Uuid`).
-                other => match value {
-                    Value::Object(object) => object.def.name() == other,
-                    Value::Enum(enum_value) => enum_value.enum_name == other,
+            // The built-in heads, exhaustive over `BuiltinTy` so this and the VM's `narrow_head` —
+            // the two halves of the differential — cannot drift apart. `None` means the name has no
+            // built-in head and falls through to the nominal match below.
+            let builtin_ok = noeta_ast::BuiltinTy::from_name_any(name).and_then(|b| {
+                use noeta_ast::BuiltinTy;
+                Some(match b {
+                    BuiltinTy::Int => matches!(value, Value::Int(_)),
+                    // Subtype edge `F32 <: float`: a plain `float` OR a reified `f32` matches `float`.
+                    BuiltinTy::Float => matches!(value, Value::Float(_) | Value::F32(_)),
+                    // The `f32` head matches only a reified `f32` — a plain `float` is not a subtype.
+                    BuiltinTy::F32 => matches!(value, Value::F32(_)),
+                    BuiltinTy::Bool => matches!(value, Value::Bool(_)),
+                    BuiltinTy::Str => matches!(value, Value::Str(_)),
+                    BuiltinTy::Bytes => matches!(value, Value::Bytes(_)),
+                    BuiltinTy::Unit => matches!(value, Value::Unit),
+                    // Narrowing to the open top is a no-op: every value is a `dyn`.
+                    BuiltinTy::Dyn => true,
+                    BuiltinTy::List => matches!(value, Value::List(_)),
+                    BuiltinTy::Map => matches!(value, Value::Map(..)),
+                    BuiltinTy::Set => matches!(value, Value::Set(..)),
+                    // Abstract kind-types match any value of that declaration kind (structs and
+                    // classes are both `Object`s, told apart by `TypeDef::is_struct`).
+                    BuiltinTy::KindEnum => matches!(value, Value::Enum(_)),
+                    BuiltinTy::KindStruct => matches!(value, Value::Object(o) if o.def.is_struct),
+                    BuiltinTy::KindClass => matches!(value, Value::Object(o) if !o.def.is_struct),
+                    // `Option`/`Result` are enums whose shape name *is* the type name, so they fall
+                    // to the nominal path like a user enum.
+                    BuiltinTy::Option | BuiltinTy::Result => return None,
+                    // The erased widths carry no runtime tag on a scalar, so they never match a
+                    // scalar (the checker warns). `f32` alone is reified, handled above. See the VM's
+                    // `narrow_head`.
+                    BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+                })
+            });
+            let head_ok = match builtin_ok {
+                Some(ok) => ok,
+                // A nominal target: a user record/class/enum, `Option`/`Result`, or an extern type.
+                None => match value {
+                    Value::Object(object) => object.def.name() == name,
+                    Value::Enum(enum_value) => &enum_value.enum_name == name,
                     // An extern value matches by its qualified identity (`std.id.Uuid`) — the
                     // target an imported native type lowers to, compared directly against the
                     // identity the value itself carries — so it never matches a same-short-named
                     // user type nor another namespace's same-short-named extern type (mirrors
                     // the VM's `narrow_matches`).
-                    Value::Extern(e) => e.borrow().type_identity() == other,
+                    Value::Extern(e) => e.borrow().type_identity() == name.as_str(),
                     _ => false,
                 },
             };
@@ -5209,7 +5339,7 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
             if head_ok && !args.is_empty() {
                 let target: Vec<noeta_ast::reflect::TypeRepr> = args
                     .iter()
-                    .map(noeta_ast::reflect::typeref_to_repr)
+                    .map(noeta_ast::reflect::typeref_to_repr_arg)
                     .collect();
                 noeta_ast::reflect::narrow_args_match(&target, &eval_type_repr(value))
             } else {
@@ -5732,6 +5862,30 @@ fn arity_message(kind: &str, required: usize, total: usize, supplied: usize) -> 
         format!(
             "this {kind} takes between {required} and {total} argument(s) but {supplied} were supplied"
         )
+    }
+}
+
+/// The message for a free-function `invoke(name, args)` that resolved to nothing callable, worded
+/// identically to the VM's `free_fn_miss_message` (so the differential matches).
+///
+/// **One message for every kind of miss** — unbound, bound to a non-function, or naming a type — and
+/// that uniformity is load-bearing rather than lazy. The two backends index the top-level namespace
+/// with different structures: the tree-walker's global scope holds types and functions together,
+/// while the VM's global slot table holds only value bindings (a type name is not a global there at
+/// all). Reporting *why* the lookup failed would therefore report different things in each backend
+/// for the same program. What both can always agree on is that no top-level function of this name
+/// was found.
+///
+/// The qualified-name hint needs no namespace knowledge — it is a property of the string — so it
+/// stays identical in both backends by construction.
+fn free_fn_miss_message(name: &str) -> String {
+    if name.contains('.') {
+        format!(
+            "no top-level function `{name}`; a qualified name dispatches through the three-argument \
+             `invoke(recv, name, args)`"
+        )
+    } else {
+        format!("no top-level function `{name}`")
     }
 }
 

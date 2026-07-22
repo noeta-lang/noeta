@@ -106,7 +106,7 @@ Host introspection. Under the sandbox the fixture is `HOME=/home/sandbox`, `USER
 
 | Function | Signature | Notes |
 |---|---|---|
-| `env.get` | `get(key: string) -> string` | Missing key is E0021. |
+| `env.get` | `get(key: string) -> ?string` | `none` when unset — pair with `??` for a default: `env.get("PORT") ?? "8080"`. |
 | `env.set` | `set(key: string, value: string) -> void` | Writes the **program's view** of the environment: reads observe it, `os.exec` children inherit it; the parent process is untouched. |
 | `env.keys` | `keys() -> List<string>` | Sorted. |
 | `env.parse` | `parse(s: string) -> Map<string, string>` | Parse `.env`-format text into a map (no environment mutation). |
@@ -455,7 +455,7 @@ use std.http.client
 
 gh = client.new("https://api.github.com")
     .header("accept", "application/vnd.github+json")
-    .bearer(env.get("GITHUB_TOKEN"))
+    .bearer(env.get("GITHUB_TOKEN") ?? "")
     .timeout(30_000)
 
 repo = gh.get("/repos/nsrosenqvist/noeta")?

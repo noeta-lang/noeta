@@ -170,6 +170,11 @@ pub enum StrPart {
 pub enum NarrowTarget {
     Int,
     Float,
+    /// An `f32` target (`x is f32` / `x.as<f32>()`). Unlike the other fixed widths, `f32` is
+    /// *reified* at runtime (a distinct NaN-box tag), so it has a head of its own. The subtype edge
+    /// `F32 <: float` lives in the matcher: an `f32` value matches both this target **and**
+    /// [`NarrowTarget::Float`], while a plain `float` value matches only `Float`.
+    F32,
     Bool,
     String,
     /// A `bytes` target (`x is bytes` / `x.as<bytes>()`) — P-PACK 4.4.
@@ -775,7 +780,7 @@ pub enum Op {
         role_enum: Option<NameId>,
     },
     /// `params_of(target)`: `dst = List<ParamInfo>` — the declared parameter list of the fn/method
-    /// named by the runtime `string` in `src`, each materialized into a `ParamInfo { name, type }`
+    /// named by the runtime `string` in `src`, each materialized into a `ParamInfo { name, type, optional }`
     /// from the module's reflection info. The `type` is the `Type` ADT value built from the
     /// parameter's declared type. An unknown target yields an empty list. Reads `Module::reflection`.
     ParamsOf {
@@ -826,15 +831,22 @@ pub enum Op {
         dst: Reg,
         name: NameId,
     },
-    /// `invoke(recv, name, args)`: `dst = Result<dyn, dyn>` — fallible by-name dispatch. `recv` holds
-    /// an object (→ instance method, keyed `(shape, name)`) or a reflection `Type` value (→ associated
-    /// function, keyed `(type, name)`); `name` is a runtime `string`; `args` a runtime `List`. An unknown name,
-    /// a non-string name, a non-list args, or an arity mismatch builds `Result.Err(string)` (via
-    /// `err_shape`); a hit pushes a call frame whose result is wrapped in `Result.Ok` (via
+    /// `invoke(recv, name, args)` / `invoke(name, args)`: `dst = Result<dyn, dyn>` — fallible
+    /// by-name dispatch. `name` is a runtime `string`; `args` a runtime `List`. An unknown name, a
+    /// non-string name, a non-list args, or an arity mismatch builds `Result.Err(string)` (via
+    /// `err_shape`); a hit calls the resolved body and wraps its result in `Result.Ok` (via
     /// `ok_shape`). A panic inside the invoked body propagates as a normal abort (P2.6).
+    ///
+    /// `recv` selects the namespace, and there is no sentinel register for "no receiver" — a
+    /// register always holds *some* value, so a sentinel would be indistinguishable from a real
+    /// receiver that happened to be unit:
+    /// - `Some(reg)` — the register holds an object (→ instance method, keyed `(shape, name)`) or a
+    ///   reflection `Type` value (→ associated function, keyed `(type, name)`).
+    /// - `None` — the free-function form: `name` resolves against the module's **global slot
+    ///   table**, the same binding `Op::CallGlobal` reads for a statically-known top-level `fn`.
     Invoke {
         dst: Reg,
-        recv: Reg,
+        recv: Option<Reg>,
         name: Reg,
         args: Reg,
         ok_shape: u32,
@@ -1274,7 +1286,10 @@ pub struct MethodEntry {
 pub struct PackedSchemaDef {
     /// The element type's shape, an index into [`Module::shapes`] — the same entry `MakeStruct`
     /// uses for that type, so a materialized element shares shape identity with a constructed one.
-    pub shape: u32,
+    /// **`None`** marks a bare-scalar element (packed-widths bare-scalar arc): a `List<i32>`/`List<f32>`
+    /// has one scalar field (in [`Self::fields`]) and no struct wrapper, so it materializes to a bare
+    /// `int`/`f32` rather than an object — there is no shape to reference.
+    pub shape: Option<u32>,
     /// One entry per field, in slot (declared) order.
     pub fields: Vec<PackedFieldDef>,
     /// Bytes per element (the per-element stride into the flat byte buffer; P-PACK 3.2b — an `f32`
@@ -1293,6 +1308,11 @@ pub enum PackedFieldDef {
     Float,
     /// A 32-bit float field (P-PACK Phase 3).
     F32,
+    /// An explicit 64-bit float field `f64` (packed-widths arc).
+    F64,
+    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc): `bits/8` bytes, `signed`
+    /// deciding read-back extension.
+    IntN { bits: u8, signed: bool },
     Bool,
     Struct(u32),
 }
@@ -1442,14 +1462,21 @@ impl Module {
                         PackedFieldDef::Int => "int".to_string(),
                         PackedFieldDef::Float => "float".to_string(),
                         PackedFieldDef::F32 => "f32".to_string(),
+                        PackedFieldDef::F64 => "f64".to_string(),
+                        PackedFieldDef::IntN { bits, signed } => {
+                            format!("{}{bits}", if *signed { 'i' } else { 'u' })
+                        }
                         PackedFieldDef::Bool => "bool".to_string(),
                         PackedFieldDef::Struct(idx) => format!("packed{idx}"),
                     })
                     .collect();
+                let shape = match schema.shape {
+                    Some(s) => format!("s{s}"),
+                    None => "scalar".to_string(),
+                };
                 let _ = writeln!(
                     out,
-                    "  packed{i} = s{} [{}] ({} bytes)",
-                    schema.shape,
+                    "  packed{i} = {shape} [{}] ({} bytes)",
                     fields.join(", "),
                     schema.byte_size
                 );
@@ -1853,7 +1880,10 @@ fn op_repr(
             name,
             args,
             ..
-        } => format!("Invoke      r{dst} <- invoke(r{recv}, r{name}, r{args})"),
+        } => match recv {
+            Some(recv) => format!("Invoke      r{dst} <- invoke(r{recv}, r{name}, r{args})"),
+            None => format!("Invoke      r{dst} <- invoke(r{name}, r{args})"),
+        },
         Op::TypedModuleCall {
             dst,
             module,

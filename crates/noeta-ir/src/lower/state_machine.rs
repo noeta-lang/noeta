@@ -153,6 +153,7 @@ pub(super) fn desugar_state_machine(
 
     let step = Expr::Closure {
         params: vec![Param {
+            attrs: Vec::new(),
             name: RESUME_PARAM.to_string(),
             name_span: span,
             ty: None,
@@ -1144,7 +1145,9 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            hoist_in_expr(recv, pre, ctr);
+            if let Some(recv) = recv {
+                hoist_in_expr(recv, pre, ctr);
+            }
             hoist_in_expr(name, pre, ctr);
             hoist_in_expr(args, pre, ctr);
         }

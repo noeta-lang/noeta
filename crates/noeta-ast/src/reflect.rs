@@ -4,7 +4,9 @@
 //! the tree-walker and the VM **by construction** — there is no second walk to drift from the first.
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
-use crate::{AttrArg, AttrValue, Attribute, Expr, FieldDecl, Program, Stmt, TypeRef, UnaryOp};
+use crate::{
+    AttrArg, AttrValue, Attribute, BuiltinTy, Expr, FieldDecl, Program, Stmt, TypeRef, UnaryOp,
+};
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
@@ -45,9 +47,27 @@ impl ReflectionInfo {
             .chain(fragment.manifest.iter().map(|a| a.target.as_str()))
             .chain(fragment.roles.iter().map(|r| r.target.as_str()))
             .collect();
+        // Every callable this fragment (re)declares, by the target its parameters are keyed under.
+        // A callable always emits a `ParamRecord` (`push_params` emits both renderings together), so
+        // this set is exactly "the callables whose parameter lists this fragment redefines".
+        let fragment_callables: std::collections::HashSet<&str> =
+            fragment.params.iter().map(|p| p.target.as_str()).collect();
         self.types.retain(|t| !redeclared.contains(t.name.as_str()));
-        self.manifest
-            .retain(|a| !redeclared.contains(a.target.as_str()));
+        self.manifest.retain(|a| {
+            match split_param_attr_target(&a.target) {
+                // A parameter row lives and dies with its callable's parameter list, not with its
+                // own key: redeclaring `fn build(target: string)` without the `#[Arg]` it used to
+                // carry must *drop* the old row, and the new fragment names no such target to
+                // supersede it. Keying the purge on the callable is the same move the `params`
+                // purge below makes, for the same reason — and it is why the parameter key is
+                // built to be splittable back into its callable at all.
+                Some((callable, _)) => {
+                    !fragment_callables.contains(callable)
+                        && !redeclared.contains(param_base(callable))
+                }
+                None => !redeclared.contains(a.target.as_str()),
+            }
+        });
         self.roles
             .retain(|r| !redeclared.contains(r.target.as_str()));
         // Param records are keyed by a callable's target (`fn` or `Type.method`); a redeclared
@@ -67,6 +87,7 @@ impl ReflectionInfo {
         });
         drop(redeclared);
         drop(param_bases);
+        drop(fragment_callables);
         self.types.extend(fragment.types);
         self.manifest.extend(fragment.manifest);
         self.roles.extend(fragment.roles);
@@ -83,6 +104,18 @@ impl ReflectionInfo {
             .unwrap_or(&[])
     }
 
+    /// The data attributes attached to one **parameter** of `callable`, in source order.
+    ///
+    /// The join that makes `ParamInfo.attrs` a *view* of the attribute manifest rather than a second
+    /// copy of it: `params_of` materializes each parameter's attributes through here, and
+    /// `attributes_of::<T>()` reads the very same rows off the same table. Both go through
+    /// [`param_attr_target`] for the key, so the two surfaces cannot disagree about which attribute
+    /// belongs to which parameter — they are one fact rendered twice.
+    pub fn param_attributes_for(&self, callable: &str, param: &str) -> Vec<&AttributeRecord> {
+        let key = param_attr_target(callable, param);
+        self.manifest.iter().filter(|a| a.target == key).collect()
+    }
+
     /// The data attributes attached to `target`, in source order — the manifest query tooling and
     /// `attributes_of` use to discover, e.g., every type tagged `#[Entity]`.
     pub fn attributes_for<'a>(
@@ -97,31 +130,41 @@ impl ReflectionInfo {
         self.types.iter().find(|t| t.name == name)
     }
 
-    /// The reflection [`TypeRepr`] of a **type reference** by name — a bare type name used as a value
-    /// (`#[Encode(codec: JsonCodec)]`). Reports the same precise constructor a `type_of` over a value
-    /// of that type would: a built-in scalar/collection maps to its lattice variant (`int` →
-    /// `Type.Int`, `list` → `Type.List(Dyn)`), and a declared type maps by *kind* (`Type.Struct`/
+    /// The reflection [`TypeRepr`] of a **type reference** — a type name used as a value
+    /// (`#[Encode(codec: JsonCodec)]`, `#[Builds(target: List<int>)]`), given its head `name` and
+    /// its generic `args`. Reports the same precise constructor a `type_of` over a value of that
+    /// type would: a built-in scalar/collection maps to its lattice variant (`int` → `Type.Int`,
+    /// `List<int>` → `Type.List(Type.Int)`), and a declared type maps by *kind* (`Type.Struct`/
     /// `Enum`/`Class`). Only a name with no known classification — an opaque import, or one of the
     /// abstract kind-types `Enum`/`Struct`/`Class` used directly — stays `Type.Named`, the honest
     /// unknown-kind fallback. Both backends build a type-ref through this one function, so the
     /// materialized `Type` value agrees across the differential by construction.
-    pub fn type_ref_repr(&self, name: &str) -> TypeRepr {
-        if let Some(scalar) = scalar_repr(name) {
-            return scalar;
-        }
-        let dyn_box = || Box::new(TypeRepr::Dyn);
-        match name {
-            "list" | "List" => TypeRepr::List(dyn_box()),
-            "set" | "Set" => TypeRepr::Set(dyn_box()),
-            "map" | "Map" => TypeRepr::Map(dyn_box(), dyn_box()),
-            "Option" => TypeRepr::Option(dyn_box()),
-            "Result" => TypeRepr::Result(dyn_box(), dyn_box()),
-            _ => match self.type_named(name).map(|t| t.kind) {
-                Some(TypeKind::Struct) => TypeRepr::Struct(name.to_string(), Vec::new()),
-                Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), Vec::new()),
-                Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), Vec::new()),
-                None => TypeRepr::Named(name.to_string(), Vec::new()),
-            },
+    ///
+    /// The arguments are projected **recursively and kind-aware**, so `List<JsonCodec>` is
+    /// `Type.List(Type.Struct("JsonCodec", []))` rather than a head with the arguments erased. Pass
+    /// `&[]` for a genuinely argument-less reference (a bare name used as an `invoke` receiver).
+    pub fn type_ref_repr(&self, name: &str, args: &[TypeRef]) -> TypeRepr {
+        named_repr(name, args, &|n, a| self.nominal_repr(n, a), true)
+    }
+
+    /// The reflection [`TypeRepr`] of a surface [`TypeRef`], **kind-aware** — the structural
+    /// counterpart of [`type_ref_repr`](Self::type_ref_repr), reached for the nested arguments of a
+    /// generic type reference (`Map<string, List<int>>`) and for the forms a bare name cannot spell
+    /// (`?T`, `A | B`, `(A) -> B`). Differs from the free [`typeref_to_repr`] only in classifying a
+    /// declared nominal by its kind instead of the kind-agnostic [`TypeRepr::Named`].
+    pub fn typeref_repr(&self, ty: &TypeRef) -> TypeRepr {
+        typeref_repr_with(ty, &|n, a| self.nominal_repr(n, a), true)
+    }
+
+    /// Classify a **declared** nominal name by its kind, carrying `args` through. The one half of
+    /// the type-ref projection that needs the type registry — everything else is shared with
+    /// [`typeref_to_repr`] via [`named_repr`].
+    fn nominal_repr(&self, name: &str, args: Vec<TypeRepr>) -> TypeRepr {
+        match self.type_named(name).map(|t| t.kind) {
+            Some(TypeKind::Struct) => TypeRepr::Struct(name.to_string(), args),
+            Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), args),
+            Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), args),
+            None => TypeRepr::Named(name.to_string(), args),
         }
     }
 }
@@ -160,7 +203,7 @@ pub struct RoleRecord {
 
 /// One callable's declared parameter list — a top-level fn or a method — keyed by the same target
 /// convention as the attribute manifest (a bare fn name, or a qualified `Type.method`). `params_of()`
-/// materializes each into a `List<ParamInfo>` (each `{ name: string, type: Type }`).
+/// materializes each into a `List<ParamInfo>` (each `{ name: string, type: Type, optional: bool }`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ParamRecord {
     /// The callable's target: a top-level fn's bare name, or a method's qualified `Type.method` name.
@@ -169,19 +212,60 @@ pub struct ParamRecord {
     pub params: Vec<ParamSig>,
 }
 
-/// One declared parameter — its name and the reflection [`TypeRepr`] of its annotated type. An
-/// unannotated parameter's type is [`TypeRepr::Dyn`]. `params_of()` materializes each into a
-/// `ParamInfo { name: string, type: Type }` whose `type` is the `Type` ADT value `type_of` builds.
+/// One declared parameter — its name, the reflection [`TypeRepr`] of its annotated type, and
+/// whether it is optional. An unannotated parameter's type is [`TypeRepr::Dyn`]. `params_of()`
+/// materializes each into a `ParamInfo { name: string, type: Type, optional: bool }` whose `type` is
+/// the `Type` ADT value `type_of` builds.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ParamSig {
     pub name: String,
     pub ty: TypeRepr,
+    /// Whether a call may leave this parameter unsupplied — [`crate::Param::is_optional`], i.e. the
+    /// parameter declared a default. Deliberately a *flag*, not the default value: a default is an
+    /// arbitrary [`crate::Expr`], so surfacing the value would drag const evaluation into the
+    /// reflection manifest, and optionality is the fact a signature-driven consumer actually needs
+    /// (a CLI framework mapping required parameters to positional arguments and optional ones to
+    /// flags; a router splitting required from optional query parameters).
+    pub optional: bool,
 }
 
 /// The declaration base a param record's target keys on for latest-wins purging: the type name
 /// before the `.` of a `Type.method` target, or the whole name for a bare top-level fn.
 fn param_base(target: &str) -> &str {
     target.split_once('.').map(|(ty, _)| ty).unwrap_or(target)
+}
+
+/// The separator between a callable's target and one of its **parameters** in an attribute-manifest
+/// key: `Tools.build#target`, `build#release`.
+///
+/// Deliberately *not* a third `.`. A parameter attribute needs three components where the rest of
+/// the manifest needs two, and the existing two-component form is already ambiguous under a third:
+/// `build.target` would read equally as "parameter `target` of the free function `build`" and as
+/// "method `target` of the type `build`", with no way for a reader to choose. Every consumer that
+/// splits a target — [`param_base`] here, and the `para/aether` package, which takes `parts[0]` /
+/// `parts[1]` off a naive `split(".")` — would have silently picked one reading.
+///
+/// A distinct separator makes the key **self-describing** instead: the presence of a `#` *is* the
+/// statement "this target names a parameter", so one rule ([`split_param_attr_target`]) decides it
+/// for every reader, and the dotted rule that came before is left meaning exactly what it always
+/// meant. Nothing that splits on `.` today changes behaviour, because no key it can see grew a
+/// component.
+pub const PARAM_ATTR_SEP: char = '#';
+
+/// The attribute-manifest key of one **parameter** of `callable` — the write half of the rule
+/// [`split_param_attr_target`] reads. `callable` is the target the parameter's callable is already
+/// known by (a bare fn name, or a qualified `Type.method`), so a parameter key extends its
+/// callable's key rather than being spelled independently of it.
+pub fn param_attr_target(callable: &str, param: &str) -> String {
+    format!("{callable}{PARAM_ATTR_SEP}{param}")
+}
+
+/// Split a manifest target back into `(callable, parameter)`, or `None` if it does not name a
+/// parameter — the read half of [`param_attr_target`], and the **only** place a target string is
+/// interpreted as naming a parameter. Both the `params_of` join and the latest-wins purge go
+/// through it, so "what a parameter key looks like" cannot come to mean two things.
+pub fn split_param_attr_target(target: &str) -> Option<(&str, &str)> {
+    target.split_once(PARAM_ATTR_SEP)
 }
 
 /// The kind of a declared type.
@@ -252,10 +336,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                     }
                 }
                 for method in &decl.methods {
-                    params.push(ParamRecord {
-                        target: format!("{}.{}", decl.name, method.name),
-                        params: param_sigs(&method.params),
-                    });
+                    push_params(
+                        &mut manifest,
+                        &mut params,
+                        format!("{}.{}", decl.name, method.name),
+                        &method.params,
+                    );
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -278,10 +364,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
-                    params.push(ParamRecord {
-                        target,
-                        params: param_sigs(&method.params),
-                    });
+                    push_params(&mut manifest, &mut params, target, &method.params);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -298,10 +381,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 // their decorators into `Decorators`. A `fn` carries `#[...]` attributes and a
                 // `@tier(...)` declaration, neither of which is a type decorator.
                 push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
-                params.push(ParamRecord {
-                    target: decl.name.clone(),
-                    params: param_sigs(&decl.params),
-                });
+                push_params(
+                    &mut manifest,
+                    &mut params,
+                    decl.name.clone(),
+                    &decl.params,
+                );
             }
             // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
             // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
@@ -319,10 +404,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 // A trait's abstract method signatures carry declared parameters too, keyed by the
                 // `Trait.method` convention — surfaced via `params_of` like a concrete method's.
                 for method in &decl.methods {
-                    params.push(ParamRecord {
-                        target: format!("{}.{}", decl.name, method.sig.name),
-                        params: param_sigs(&method.sig.params),
-                    });
+                    push_params(
+                        &mut manifest,
+                        &mut params,
+                        format!("{}.{}", decl.name, method.sig.name),
+                        &method.sig.params,
+                    );
                 }
             }
             Stmt::Enum(decl) => {
@@ -343,10 +430,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
                     push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
-                    params.push(ParamRecord {
-                        target,
-                        params: param_sigs(&method.params),
-                    });
+                    push_params(&mut manifest, &mut params, target, &method.params);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -393,14 +477,49 @@ pub fn build(program: &Program) -> ReflectionInfo {
 
 /// Project a callable's declared parameters onto their reflection [`ParamSig`]s — each parameter's
 /// name paired with the [`TypeRepr`] of its annotated type (an unannotated parameter is
-/// [`TypeRepr::Dyn`]). Shared by every callable arm of [`build`] so a fn, method, and trait method
-/// sig all surface their parameters identically.
+/// [`TypeRepr::Dyn`]) and its optionality. Shared by every callable arm of [`build`] so a fn,
+/// method, and trait method sig all surface their parameters identically.
+/// Record one callable's parameters — **both** of the renderings they have, from one walk.
+///
+/// A callable's parameter list reaches reflection twice: as the [`ParamRecord`] `params_of(target)`
+/// materializes, and as attribute-manifest rows keyed [`param_attr_target`] so `attributes_of::<T>()`
+/// discovers a parameter attribute exactly as it discovers one on a field or a method. They are one
+/// fact, so one function emits both: there is no parameter list that can appear in the manifest but
+/// not in `params_of`, and no key the two sides could spell differently.
+///
+/// The `params_of` side then *joins back* on the manifest at materialization time rather than
+/// carrying its own copy of the attributes — see `ParamSig`, which is deliberately unchanged. That
+/// is what keeps the two renderings a projection of one table instead of two tables that must be
+/// kept in step.
+fn push_params(
+    manifest: &mut Vec<AttributeRecord>,
+    params: &mut Vec<ParamRecord>,
+    target: String,
+    decls: &[crate::Param],
+) {
+    for p in decls {
+        push_attrs(
+            manifest,
+            &param_attr_target(&target, &p.name),
+            p.name_span,
+            &p.attrs,
+        );
+    }
+    params.push(ParamRecord {
+        target,
+        params: param_sigs(decls),
+    });
+}
+
 fn param_sigs(params: &[crate::Param]) -> Vec<ParamSig> {
     params
         .iter()
         .map(|p| ParamSig {
             name: p.name.clone(),
             ty: p.ty.as_ref().map(typeref_to_repr).unwrap_or(TypeRepr::Dyn),
+            // Through `Param::is_optional`, not an open-coded `default.is_some()`: reflection must
+            // report the same optionality the checker's arity rule enforces.
+            optional: p.is_optional(),
         })
         .collect()
 }
@@ -526,6 +645,21 @@ pub enum TypeRepr {
     Float,
     /// The 32-bit float scalar `f32` (P-PACK Phase 3; variant name `F32`).
     F32,
+    /// The explicit 64-bit float `f64` (packed-widths arc; variant name `F64`). A runtime *scalar*
+    /// `f64` is bit-identical to `float` and reflects as `Float`; this variant appears where the
+    /// width is physically reified — a packed list element or a declared-type reflection — so
+    /// `List<f64>` is distinguishable from `List<float>` while their equal elements stay `==`.
+    F64,
+    /// A fixed-width integer `i8..i64`/`u8..u64` (packed-widths arc; variant name `IntN`). Like
+    /// [`TypeRepr::F64`], a runtime *scalar* is erased to `Int` (Tier W) and reflects as `Int`; this
+    /// variant carries the width where it is reified — a packed list element or a declared type — so
+    /// `List<i32>` is distinguishable from `List<int>` while equal elements stay `==`.
+    IntN {
+        /// `true` for the `iN` family, `false` for `uN`.
+        signed: bool,
+        /// One of 8, 16, 32, 64.
+        bits: u8,
+    },
     Bool,
     /// The `string` scalar (variant name `String`, mirroring the lattice).
     Str,
@@ -597,6 +731,8 @@ impl TypeRepr {
             TypeRepr::Int => "Int",
             TypeRepr::Float => "Float",
             TypeRepr::F32 => "F32",
+            TypeRepr::F64 => "F64",
+            TypeRepr::IntN { .. } => "IntN",
             TypeRepr::Bool => "Bool",
             TypeRepr::Str => "String",
             TypeRepr::Bytes => "Bytes",
@@ -616,6 +752,95 @@ impl TypeRepr {
             TypeRepr::Union(_) => "Union",
         }
     }
+
+    /// The **payload shape** of the `Type.*` variant this descriptor constructs. Paired with
+    /// [`variant_name`](Self::variant_name) it is the full declaration of one prelude-enum
+    /// variant, which is what the checker registers and what both backends materialize.
+    pub fn adt_fields(&self) -> AdtFields {
+        match self {
+            TypeRepr::Int
+            | TypeRepr::Float
+            | TypeRepr::F32
+            | TypeRepr::F64
+            | TypeRepr::Bool
+            | TypeRepr::Str
+            | TypeRepr::Bytes
+            | TypeRepr::Unit
+            | TypeRepr::Dyn => AdtFields::None,
+            // The fixed-width integer carries its `(bits, signed)` so a reflected `Type.IntN`
+            // reports exactly which width it is (matched structurally by narrowing regardless).
+            TypeRepr::IntN { .. } => AdtFields::IntWidth,
+            TypeRepr::List(_) | TypeRepr::Set(_) | TypeRepr::Option(_) => AdtFields::Types(1),
+            TypeRepr::Map(_, _) | TypeRepr::Result(_, _) => AdtFields::Types(2),
+            TypeRepr::Enum(_, _)
+            | TypeRepr::Struct(_, _)
+            | TypeRepr::Class(_, _)
+            | TypeRepr::Named(_, _) => AdtFields::NameAndArgs,
+            TypeRepr::Fn(_, _) => AdtFields::ParamsAndRet,
+            TypeRepr::Union(_) => AdtFields::TypeList,
+            TypeRepr::DynTrait(_) => AdtFields::Name,
+        }
+    }
+}
+
+/// The payload shape of one `Type.*` prelude-enum variant — the closed vocabulary of field lists
+/// the ADT uses, so the checker's registration is a projection of [`TypeRepr::adt_fields`] rather
+/// than a hand-maintained parallel table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdtFields {
+    /// No payload (the scalars).
+    None,
+    /// `n` recursive `Type` fields — a container's element / key / value types.
+    Types(usize),
+    /// `(name: string, args: List<Type>)` — the nominal variants.
+    NameAndArgs,
+    /// `(members: List<Type>)` — a union's members.
+    TypeList,
+    /// `(params: List<Type>, ret: Type)` — a function type.
+    ParamsAndRet,
+    /// `(name: string)` — a trait object's trait name.
+    Name,
+    /// `(bits: int, signed: bool)` — a fixed-width integer's width descriptor (packed-widths arc).
+    IntWidth,
+}
+
+/// One sample [`TypeRepr`] per variant. Running each through the exhaustive
+/// [`TypeRepr::variant_name`] / [`TypeRepr::adt_fields`] matches yields the prelude `Type` enum's
+/// full declaration — so the checker registers the ADT from the reflection descriptor itself
+/// instead of re-listing the variants and their arities in a table that can drift.
+///
+/// **Adding a [`TypeRepr`] variant**: both matches above will fail to compile until you handle it;
+/// add its sample here at the same time, or the prelude enum will silently lack the variant.
+pub fn type_adt_variants() -> Vec<TypeRepr> {
+    let any = || Box::new(TypeRepr::Dyn);
+    let name = || String::new();
+    vec![
+        TypeRepr::Int,
+        TypeRepr::Float,
+        TypeRepr::F32,
+        TypeRepr::F64,
+        TypeRepr::IntN {
+            signed: true,
+            bits: 32,
+        },
+        TypeRepr::Bool,
+        TypeRepr::Str,
+        TypeRepr::Bytes,
+        TypeRepr::Unit,
+        TypeRepr::Dyn,
+        TypeRepr::List(any()),
+        TypeRepr::Set(any()),
+        TypeRepr::Option(any()),
+        TypeRepr::Map(any(), any()),
+        TypeRepr::Result(any(), any()),
+        TypeRepr::Enum(name(), Vec::new()),
+        TypeRepr::Struct(name(), Vec::new()),
+        TypeRepr::Class(name(), Vec::new()),
+        TypeRepr::Named(name(), Vec::new()),
+        TypeRepr::Fn(Vec::new(), any()),
+        TypeRepr::Union(Vec::new()),
+        TypeRepr::DynTrait(name()),
+    ]
 }
 
 /// A [`TypeRepr`] displays as its **Noeta surface spelling** — the source form a developer
@@ -672,6 +897,10 @@ impl TypeRepr {
             TypeRepr::Int => f.write_str("int"),
             TypeRepr::Float => f.write_str("float"),
             TypeRepr::F32 => f.write_str("f32"),
+            TypeRepr::F64 => f.write_str("f64"),
+            TypeRepr::IntN { signed, bits } => {
+                write!(f, "{}{bits}", if *signed { 'i' } else { 'u' })
+            }
             TypeRepr::Bool => f.write_str("bool"),
             TypeRepr::Str => f.write_str("string"),
             TypeRepr::Bytes => f.write_str("bytes"),
@@ -742,55 +971,131 @@ impl TypeRepr {
 /// (the R3 matcher keys on the name, not the kind, so `Named("Box")` matches a value tagged
 /// `Struct("Box")`). Built-in scalars/collections map to their lattice variant; a `?T` is `Option<T>`.
 /// Used to turn a narrow target (`x is List<int>`) into the shape compared against a value's tag.
-/// The [`TypeRepr`] of a built-in **scalar** type name — one with no type arguments and no nominal
-/// resolution. `None` for a container (`List`/`Map`/…), a user type, or `Any`-shaped name that the
-/// two mappers below handle differently. Shared by [`ReflectionInfo::type_ref_repr`] and
-/// [`typeref_to_repr`], which agree on the scalars but diverge on containers (bare `dyn` args vs the
-/// real `TypeRef` args) and on the fallback (nominal-kind lookup vs `TypeRepr::Named`).
-fn scalar_repr(name: &str) -> Option<TypeRepr> {
-    Some(match name {
-        "int" => TypeRepr::Int,
-        "float" => TypeRepr::Float,
-        "f32" => TypeRepr::F32,
-        "bool" => TypeRepr::Bool,
-        "string" => TypeRepr::Str,
-        "bytes" => TypeRepr::Bytes,
-        "void" | "unit" => TypeRepr::Unit,
-        "dyn" | "Any" => TypeRepr::Dyn,
-        _ => return None,
+/// The [`TypeRepr`] of a built-in type constructor, reading its type arguments through `arg`.
+/// `None` for the three abstract kind-types (`Enum`/`Struct`/`Class`), which have no reflection
+/// descriptor of their own — no *value* is an `Enum`, so each caller resolves them through its own
+/// nominal fallback (kind lookup / `TypeRepr::Named`).
+///
+/// Shared by [`ReflectionInfo::type_ref_repr`] and [`typeref_to_repr`]: they agree on the whole
+/// vocabulary and differ only in what `arg` yields — bare `dyn` for the name-only mapper, the real
+/// nested `TypeRef` reprs for the structural one.
+///
+/// A **declared** `f64`/`iN`/`uN` keeps its width here (`TypeRepr::F64`/`TypeRepr::IntN`), the
+/// physically-meaningful reflection for a type annotation and a narrow target (packed-widths arc).
+/// A runtime *scalar value* of one of these still erases to `Float`/`Int` (no boxing site to stamp
+/// a width tag on), so `type_of` of a scalar reports the lattice variant — the deliberate split
+/// between declared-type reflection (width-carrying) and value reflection (width-erased). Both
+/// declared-type surfaces (`params_of` and the narrow matcher) route through [`BuiltinTy`] here, so
+/// they cannot drift from each other.
+fn builtin_repr(
+    builtin: BuiltinTy,
+    arg: impl Fn(usize) -> Box<TypeRepr>,
+    top: bool,
+) -> Option<TypeRepr> {
+    Some(match builtin {
+        BuiltinTy::Int => TypeRepr::Int,
+        // A fixed width reifies only in **container-element position**, never as a top-level scalar
+        // (packed-widths arc). At the top a declared `i32`/`u8`/`f64` erases to `Int`/`Float` — the
+        // rule `params_of` and `type_of` agree on, since a scalar value carries no width tag. As a
+        // list/map/option *element* it keeps its width, so `List<i32>` is distinguishable from
+        // `List<int>` (the element is a physically distinct storage slot). `arg(_)` recurses in
+        // element position, so the width survives at every depth below the top scalar.
+        BuiltinTy::IntN { signed, bits } => {
+            if top {
+                TypeRepr::Int
+            } else {
+                TypeRepr::IntN { signed, bits }
+            }
+        }
+        BuiltinTy::Float => TypeRepr::Float,
+        BuiltinTy::F64 => {
+            if top {
+                TypeRepr::Float
+            } else {
+                TypeRepr::F64
+            }
+        }
+        BuiltinTy::F32 => TypeRepr::F32,
+        BuiltinTy::Bool => TypeRepr::Bool,
+        BuiltinTy::Str => TypeRepr::Str,
+        BuiltinTy::Bytes => TypeRepr::Bytes,
+        BuiltinTy::Unit => TypeRepr::Unit,
+        BuiltinTy::Dyn => TypeRepr::Dyn,
+        BuiltinTy::List => TypeRepr::List(arg(0)),
+        BuiltinTy::Set => TypeRepr::Set(arg(0)),
+        BuiltinTy::Map => TypeRepr::Map(arg(0), arg(1)),
+        BuiltinTy::Option => TypeRepr::Option(arg(0)),
+        BuiltinTy::Result => TypeRepr::Result(arg(0), arg(1)),
+        BuiltinTy::KindEnum | BuiltinTy::KindStruct | BuiltinTy::KindClass => return None,
     })
 }
 
+/// The **top-level** reflection of a surface type: a bare scalar `i32`/`f64` erases to `Int`/`Float`
+/// (declared-scalar erasure), while container elements keep their width. Used for a parameter's or
+/// attribute's declared type, and kind-agnostic for nominals (the R3 matcher keys on the name).
 pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
-    let boxed = |t: &TypeRef| Box::new(typeref_to_repr(t));
-    let dyn_box = || Box::new(TypeRepr::Dyn);
+    typeref_repr_with(ty, &|name, args| TypeRepr::Named(name.to_string(), args), true)
+}
+
+/// The reflection of a surface type already in **element position** — a narrow target's type
+/// argument, e.g. the `i32` of `x is List<i32>` (packed-widths arc). A fixed width keeps its width so
+/// the target matches a value's width-carrying tag; nominals stay kind-agnostic.
+pub fn typeref_to_repr_arg(ty: &TypeRef) -> TypeRepr {
+    typeref_repr_with(ty, &|name, args| TypeRepr::Named(name.to_string(), args), false)
+}
+
+/// How a projection resolves a **nominal** type name — the one axis on which the two type-ref
+/// converters differ. [`typeref_to_repr`] answers [`TypeRepr::Named`] unconditionally (the R3
+/// narrow matcher keys on the name and is deliberately kind-tolerant); [`ReflectionInfo::typeref_repr`]
+/// looks the name up in the type registry and answers `Struct`/`Class`/`Enum`.
+///
+/// It is a parameter rather than two copies of the walk because the copies drifted: the kind-aware
+/// converter used to be a name-only lookup that dropped its type arguments, so an attribute
+/// argument `List<int>` materialized as `Type.List(Type.Dyn)` while the same annotation reflected
+/// through `params_of` kept the `int`. Both are now the same walk.
+type NominalResolver<'a> = dyn Fn(&str, Vec<TypeRepr>) -> TypeRepr + 'a;
+
+/// The [`TypeRepr`] of a **named** type reference — head name plus generic arguments — resolving
+/// nominals through `nominal`. The single place surface generic application becomes a reflection
+/// type: a built-in constructor reads its arguments positionally (a missing one is the `Dyn` top,
+/// the inference hole the bare `list`/`map` spellings leave), and anything else is nominal with its
+/// arguments carried through verbatim. Shared by [`ReflectionInfo::type_ref_repr`] (which has only
+/// the name and args, never a whole [`TypeRef`]) and the [`TypeRef::Named`] arm of the walk.
+fn named_repr(name: &str, args: &[TypeRef], nominal: &NominalResolver<'_>, top: bool) -> TypeRepr {
+    // A type argument is always in element position (`top = false`), so a width inside it survives.
+    let arg = |i: usize| match args.get(i) {
+        Some(t) => Box::new(typeref_repr_with(t, nominal, false)),
+        None => Box::new(TypeRepr::Dyn),
+    };
+    BuiltinTy::from_name_any(name)
+        .and_then(|b| builtin_repr(b, arg, top))
+        .unwrap_or_else(|| {
+            nominal(
+                name,
+                args.iter()
+                    .map(|a| typeref_repr_with(a, nominal, false))
+                    .collect(),
+            )
+        })
+}
+
+/// Walk a surface [`TypeRef`] into a [`TypeRepr`], resolving nominal names through `nominal`. The
+/// single converter behind both [`typeref_to_repr`] and [`ReflectionInfo::typeref_repr`]. `top`
+/// distinguishes a bare scalar (declared width erases) from an element (width kept) — see
+/// [`builtin_repr`]; every recursive position is an element, so `recur` passes `false`.
+fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> TypeRepr {
+    let recur = |t: &TypeRef| typeref_repr_with(t, nominal, false);
     match ty {
-        TypeRef::Union { members, .. } => {
-            TypeRepr::Union(members.iter().map(typeref_to_repr).collect())
-        }
-        TypeRef::Optional { inner, .. } => TypeRepr::Option(boxed(inner)),
+        TypeRef::Union { members, .. } => TypeRepr::Union(members.iter().map(recur).collect()),
+        TypeRef::Optional { inner, .. } => TypeRepr::Option(Box::new(recur(inner))),
         // A trait object reflects as `DynTrait(name)` — the dynamic top refined by its trait bound, so
         // reflection can recover which trait a parameter is bound to (service injection by interface).
         TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.clone()),
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
-        TypeRef::Fn { params, ret, .. } => TypeRepr::Fn(
-            params.iter().map(typeref_to_repr).collect(),
-            Box::new(typeref_to_repr(ret)),
-        ),
-        TypeRef::Named { name, args, .. } => {
-            if let Some(scalar) = scalar_repr(name) {
-                return scalar;
-            }
-            let arg = |i: usize| args.get(i).map(boxed).unwrap_or_else(dyn_box);
-            match name.as_str() {
-                "List" | "list" => TypeRepr::List(arg(0)),
-                "Set" | "set" => TypeRepr::Set(arg(0)),
-                "Map" | "map" => TypeRepr::Map(arg(0), arg(1)),
-                "Option" => TypeRepr::Option(arg(0)),
-                "Result" => TypeRepr::Result(arg(0), arg(1)),
-                _ => TypeRepr::Named(name.clone(), args.iter().map(typeref_to_repr).collect()),
-            }
+        TypeRef::Fn { params, ret, .. } => {
+            TypeRepr::Fn(params.iter().map(recur).collect(), Box::new(recur(ret)))
         }
+        TypeRef::Named { name, args, .. } => named_repr(name, args, nominal, top),
     }
 }
 
@@ -812,10 +1117,14 @@ pub fn arg_matches(expected: &TypeRepr, actual: &TypeRepr) -> bool {
         (Int, Int)
         | (Float, Float)
         | (F32, F32)
+        | (F64, F64)
         | (Bool, Bool)
         | (Str, Str)
         | (Bytes, Bytes)
         | (Unit, Unit) => true,
+        // Two fixed-width integers match iff they are the same width and signedness — this is what
+        // makes `List<i32>` distinct from `List<i16>` and from `List<int>` (which is `Int`).
+        (IntN { signed: es, bits: eb }, IntN { signed: as_, bits: ab }) => es == as_ && eb == ab,
         (DynTrait(e), DynTrait(a)) => e == a,
         (Union(es), a) => es.iter().any(|e| arg_matches(e, a)),
         (e, Union(as_)) => as_.iter().any(|a| arg_matches(e, a)),
@@ -858,9 +1167,18 @@ pub const SEMANTIC_ENUM: &str = "Semantic";
 /// may be any `@semantic` enum (the built-in `Semantic` or a user one), not a single fixed type.
 pub const ROLE_BINDING: &str = "RoleBinding";
 
-/// The `ParamInfo` prelude struct's name — `{ name: string, type: Type }`, the element type of
-/// `params_of()`'s result list. `type` is the reflection `Type` ADT value (the same ADT `type_of`
-/// returns), built from the parameter's declared type annotation.
+/// The `ParamInfo` prelude struct's name — `{ name: string, type: Type, optional: bool, attrs:
+/// List<dyn> }`, the element type of `params_of()`'s result list. `type` is the reflection `Type`
+/// ADT value (the same ADT `type_of` returns), built from the parameter's declared type annotation;
+/// `optional` reports whether the parameter declared a default, and so whether a call may omit it;
+/// `attrs` holds the parameter's materialized `#[...]` attribute instances, in source order.
+///
+/// `attrs` exists so a signature-driven consumer can read a signature *once*: `params_of("build")`
+/// yields each parameter beside its own metadata, which is what a CLI or router derivation actually
+/// wants. The alternative — `attributes_of::<Arg>()` and re-joining its `target` strings back onto
+/// the parameter list — works, and still does, but makes every such consumer re-implement the key
+/// format. It is a view, not a second table: the values come from the same manifest rows
+/// `attributes_of` returns, via [`ReflectionInfo::param_attributes_for`].
 pub const PARAM_INFO: &str = "ParamInfo";
 
 /// The built-in **test-metadata attributes** (object-model slice 6h) — prelude `@attribute` structs
@@ -914,7 +1232,7 @@ pub const SEMANTIC_VARIANTS: &[&str] = &[
 /// spellings the checker's `TargetKind::from_name` accepts, shared so its diagnostics help and IDE
 /// completion can never drift from the accepted set (a checker test asserts lockstep).
 pub const ATTRIBUTE_TARGET_KINDS: &[&str] = &[
-    "Struct", "Class", "Enum", "Function", "Method", "Field", "Variant",
+    "Struct", "Class", "Enum", "Function", "Method", "Field", "Variant", "Param",
 ];
 
 /// The prelude `FieldEntry` struct — the element type of `fields_of(value)`'s result (derive
@@ -967,9 +1285,14 @@ fn push_attrs(
 /// the flat `List<packed>` representation stays invisible to `RunResult`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PackedLayout {
-    /// The packed struct's type name — the nominal type of a materialized element.
+    /// The packed struct's type name — the nominal type of a materialized element. **Empty** marks a
+    /// *bare-scalar* layout (packed-widths bare-scalar arc): a `List<i32>`/`List<u8>`/`List<f32>` whose
+    /// element is a single sub-8-byte numeric with no struct wrapper. A scalar layout has exactly one
+    /// (unnamed) field and materializes to a bare `Value` (`int`/`f32`), not a `Value::Object` — user
+    /// types always have a non-empty name, so the emptiness is an unambiguous marker. Use
+    /// [`PackedLayout::is_scalar`] rather than testing the string directly.
     pub type_name: String,
-    /// The fields in declared (slot) order.
+    /// The fields in declared (slot) order. A scalar layout ([`Self::is_scalar`]) holds exactly one.
     pub fields: Vec<PackedField>,
     /// Whether lists of this element are stored **column-major** — the `@packed(Layout.Column)`
     /// attribute (P-SIMD C2). A performance-only property (see `noeta_object::PackedSchema::column`);
@@ -992,12 +1315,45 @@ pub enum PackedKind {
     /// A 32-bit float field (P-PACK Phase 3). One word like the other primitives in slice 3.2a; slice
     /// 3.2b narrows it to a 4-byte slot.
     F32,
+    /// An explicit 64-bit float field `f64` (packed-widths arc) — 8 bytes, storage-identical to
+    /// `Float` but a distinct kind so packed reflection reports `f64`.
+    F64,
+    /// A fixed-width integer field (packed-widths arc): `bits/8` bytes, `signed` deciding read-back
+    /// extension. The compiled/runtime counterparts (`noeta_bytecode::PackedFieldDef::IntN`,
+    /// `noeta_object::PackedKind::IntN`) carry the same pair.
+    IntN {
+        /// One of 8, 16, 32, 64.
+        bits: u8,
+        /// `true` for the `iN` family, `false` for `uN`.
+        signed: bool,
+    },
     Bool,
     /// A nested `@packed` struct, laid out contiguously in the parent's buffer.
     Struct(Box<PackedLayout>),
 }
 
 impl PackedLayout {
+    /// A **bare-scalar** element layout (packed-widths bare-scalar arc): a single unnamed field of
+    /// `kind`, no struct wrapper, so a `List<i32>`/`List<u8>`/`List<f32>` stores its elements as a flat
+    /// `byte_width`-per-element buffer that materializes back to a bare `int`/`f32` (not a
+    /// `Value::Object`). Row/column is moot for one field, so it is always row-major.
+    pub fn scalar(kind: PackedKind) -> PackedLayout {
+        PackedLayout {
+            type_name: String::new(),
+            fields: vec![PackedField {
+                name: String::new(),
+                kind,
+            }],
+            column: false,
+        }
+    }
+
+    /// Whether this is a bare-scalar element layout (no nominal struct — a `List<i32>`/`List<f32>`),
+    /// materializing to a bare `Value` rather than a `Value::Object`. See [`Self::type_name`].
+    pub fn is_scalar(&self) -> bool {
+        self.type_name.is_empty()
+    }
+
     /// The number of machine words one value of this layout occupies — the sum of each field's width
     /// (a primitive is 1; a nested struct is its own `word_count`). Pre-Phase-3 every primitive is one
     /// 64-bit word; Phase 3 (`f32`) will narrow specific slots.
@@ -1005,7 +1361,12 @@ impl PackedLayout {
         self.fields
             .iter()
             .map(|f| match &f.kind {
-                PackedKind::Int | PackedKind::Float | PackedKind::F32 | PackedKind::Bool => 1,
+                PackedKind::Int
+                | PackedKind::Float
+                | PackedKind::F32
+                | PackedKind::F64
+                | PackedKind::IntN { .. }
+                | PackedKind::Bool => 1,
                 PackedKind::Struct(inner) => inner.word_count(),
             })
             .sum()
@@ -1021,7 +1382,8 @@ impl PackedLayout {
             .map(|f| match &f.kind {
                 PackedKind::Bool => 1,
                 PackedKind::F32 => 4,
-                PackedKind::Int | PackedKind::Float => 8,
+                PackedKind::Int | PackedKind::Float | PackedKind::F64 => 8,
+                PackedKind::IntN { bits, .. } => (*bits as usize) / 8,
                 PackedKind::Struct(inner) => inner.byte_size(),
             })
             .sum()
@@ -1081,6 +1443,102 @@ mod tests {
         assert_eq!(
             TypeRepr::Union(vec![TypeRepr::Int, TypeRepr::Str]).to_string(),
             "int | string"
+        );
+    }
+
+    /// A named `TypeRef` with the given generic arguments, spans elided.
+    fn named(name: &str, args: Vec<TypeRef>) -> TypeRef {
+        TypeRef::Named {
+            name: name.to_string(),
+            args,
+            span: Span::new(0, 0),
+        }
+    }
+
+    /// A registry holding one struct, so the kind-aware projection has something to classify.
+    fn one_struct(name: &str) -> ReflectionInfo {
+        ReflectionInfo {
+            types: vec![TypeInfo {
+                name: name.to_string(),
+                kind: TypeKind::Struct,
+                fields: Vec::new(),
+                field_defaults: Vec::new(),
+                variants: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A type reference's generic arguments reach the reflected type, recursively — the defect that
+    /// made `#[Builds(target: List<int>)]` materialize as `Type.List(Type.Dyn)`. Both backends call
+    /// this one method, so fixing it here fixes both; it was invisible to the differential precisely
+    /// because they were identically wrong.
+    #[test]
+    fn type_ref_arguments_are_not_erased() {
+        let info = ReflectionInfo::default();
+        assert_eq!(
+            info.type_ref_repr("List", &[named("int", vec![])]),
+            TypeRepr::List(boxed(TypeRepr::Int))
+        );
+        assert_eq!(
+            info.type_ref_repr(
+                "Map",
+                &[
+                    named("string", vec![]),
+                    named("List", vec![named("int", vec![])]),
+                ]
+            ),
+            TypeRepr::Map(
+                boxed(TypeRepr::Str),
+                boxed(TypeRepr::List(boxed(TypeRepr::Int)))
+            )
+        );
+        // No arguments still means the `Dyn` top — a bare `List` is an inference hole, not an error.
+        assert_eq!(
+            info.type_ref_repr("List", &[]),
+            TypeRepr::List(boxed(TypeRepr::Dyn))
+        );
+    }
+
+    /// Arguments and the nominal-kind classification hold *together*: a declared struct is
+    /// `Type.Struct` at the head **and** in argument position. The two properties used to live in
+    /// separate converters (`type_ref_repr` had the kind, `typeref_to_repr` had the arguments), and
+    /// neither had both.
+    #[test]
+    fn kind_classification_survives_and_reaches_arguments() {
+        let info = one_struct("Codec");
+        assert_eq!(
+            info.type_ref_repr("Codec", &[named("int", vec![])]),
+            TypeRepr::Struct("Codec".to_string(), vec![TypeRepr::Int])
+        );
+        assert_eq!(
+            info.type_ref_repr("List", &[named("Codec", vec![])]),
+            TypeRepr::List(boxed(TypeRepr::Struct("Codec".to_string(), vec![])))
+        );
+        // An undeclared name has no kind, so it stays the honest `Named` fallback — still with its
+        // arguments.
+        assert_eq!(
+            info.type_ref_repr("Opaque", &[named("int", vec![])]),
+            TypeRepr::Named("Opaque".to_string(), vec![TypeRepr::Int])
+        );
+    }
+
+    /// The two converters agree on **everything except the nominal kind** — the one axis they are
+    /// meant to differ on ([`typeref_to_repr`] feeds the deliberately kind-tolerant R3 narrow
+    /// matcher). Sharing one walk is what makes that the only difference.
+    #[test]
+    fn the_two_converters_differ_only_in_nominal_kind() {
+        let info = one_struct("Codec");
+        let ty = named("Map", vec![named("string", vec![]), named("List", vec![])]);
+        assert_eq!(info.typeref_repr(&ty), typeref_to_repr(&ty));
+        let nominal = named("Codec", vec![]);
+        assert_eq!(
+            info.typeref_repr(&nominal),
+            TypeRepr::Struct("Codec".to_string(), vec![])
+        );
+        assert_eq!(
+            typeref_to_repr(&nominal),
+            TypeRepr::Named("Codec".to_string(), vec![])
         );
     }
 

@@ -33,10 +33,25 @@ fn span(s: Span) -> String {
     format!("@{}..{}", s.start, s.end)
 }
 
+/// A callable's parameters, for the S-expression dump.
+///
+/// Each parameter renders its `#[...]` attributes ahead of its name. The fmt safety gate compares
+/// this form before and after formatting, so an unrendered attribute would be an attribute the
+/// formatter could silently drop — the same failure the labelled-argument rendering below exists to
+/// prevent, and a worse one here: dropping `#[Arg(short: "r")]` changes what a signature-driven
+/// framework generates while leaving the program's own behaviour identical, so nothing else would
+/// notice.
 fn param_list(params: &[Param]) -> String {
     params
         .iter()
-        .map(|p| p.name.as_str())
+        .map(|p| {
+            let attrs: String = p
+                .attrs
+                .iter()
+                .map(|a| format!("#[{}{}] ", a.name, attr_args_str(&a.args)))
+                .collect();
+            format!("{attrs}{}", p.name)
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -696,7 +711,10 @@ impl Pretty for ObjectLit {
     fn pretty(&self, out: &mut String, level: usize) {
         // The header line is already indented by the caller (`Expr::pretty` emits the
         // leading indent before delegating here), so we start the text directly.
-        out.push_str(&format!("(object {} {}", self.type_name, span(self.span)));
+        // A target-typed `.{ … }` dumps its head as `.{` — the name is not in the source, and the
+        // dump is a faithful view of the AST, not of what the checker will later infer.
+        let head = self.type_name.as_deref().unwrap_or(".{");
+        out.push_str(&format!("(object {} {}", head, span(self.span)));
         for field in &self.fields {
             out.push('\n');
             indent(out, level + 1);
@@ -1149,9 +1167,18 @@ impl Pretty for Expr {
                 args,
                 span: s,
             } => {
-                out.push_str(&format!("(invoke {}\n", span(*s)));
-                recv.pretty(out, level + 1);
-                out.push('\n');
+                // The free-fn form prints as `invoke-free`, so a snapshot can never confuse the two
+                // dispatch namespaces by operand count alone.
+                let head = if recv.is_some() {
+                    "invoke"
+                } else {
+                    "invoke-free"
+                };
+                out.push_str(&format!("({head} {}\n", span(*s)));
+                if let Some(recv) = recv {
+                    recv.pretty(out, level + 1);
+                    out.push('\n');
+                }
                 name.pretty(out, level + 1);
                 out.push('\n');
                 args.pretty(out, level + 1);

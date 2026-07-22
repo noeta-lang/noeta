@@ -1,0 +1,30 @@
+// `#[...]` data attributes attach to a callable's PARAMETERS, on a free function and on a method
+// alike. They land in the shared manifest like any other attribute, keyed `callable#param` — a
+// distinct `#` separator rather than a third dotted component, because `build.target` would read
+// equally as "parameter `target` of fn `build`" and "method `target` of type `build`", and every
+// consumer that splits a target would have had to guess. The `#` makes the key self-describing.
+//
+// This is what per-argument metadata exists for: `#[Arg(help: …)]` describes exactly one parameter,
+// and riding on the fn-level attribute as a parallel positional list would silently mean something
+// else the first time someone reordered the signature. Built statically, so both backends agree.
+// expect: stdout "build#target -> target triple"
+// expect: stdout "build#release -> optimize"
+// expect: stdout "Tools.run#cmd -> the command"
+// expect: exit 0
+@attribute(Param)
+struct Arg { help: string }
+
+fn build(#[Arg(help: "target triple")] target: string, #[Arg(help: "optimize")] release: bool): void {
+    return;
+}
+
+class Tools {
+    fn new(): Tools { return Tools {} }
+    fn run(#[Arg(help: "the command")] cmd: string): string { return cmd }
+}
+
+// Several parameters of one callable each carry their own attribute, and each surfaces separately
+// under its own key — the property a parallel side-list cannot offer.
+for a in attributes_of::<Arg>() {
+    echo "${a.target} -> ${a.value.help}";
+}

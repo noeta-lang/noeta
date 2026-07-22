@@ -424,7 +424,9 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            bound_in_expr(recv, names);
+            if let Some(recv) = recv {
+                bound_in_expr(recv, names);
+            }
             bound_in_expr(name, names);
             bound_in_expr(args, names);
         }
@@ -750,7 +752,12 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
             visit(name, NameKind::Value, Some(*span));
         }
         Expr::Object(lit) => {
-            visit(&mut lit.type_name, NameKind::Type, Some(lit.type_name_span));
+            // A target-typed `.{ … }` has no name to qualify. It needs none: the name it will adopt
+            // comes from the expected type, which the checker reads *after* this pass has already
+            // qualified the annotation/signature it comes from — so the adopted name is the FQN.
+            if let Some(name) = &mut lit.type_name {
+                visit(name, NameKind::Type, Some(lit.type_name_span));
+            }
             for f in &mut lit.fields {
                 q_expr(&mut f.value, visit);
             }
@@ -887,7 +894,9 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            q_expr(recv, visit);
+            if let Some(recv) = recv {
+                q_expr(recv, visit);
+            }
             q_expr(name, visit);
             q_expr(args, visit);
         }
@@ -1075,7 +1084,7 @@ mod tests {
         let Expr::Object(lit) = value else {
             panic!("object")
         };
-        assert_eq!(lit.type_name, "App.Store.Order");
+        assert_eq!(lit.type_name.as_deref(), Some("App.Store.Order"));
     }
 
     /// Annotations, generic args, `is`/`as`, a static call, and an enum path all qualify; an

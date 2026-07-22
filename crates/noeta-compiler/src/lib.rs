@@ -1412,17 +1412,21 @@ impl ModuleCompiler {
     fn intern_packed_schema(&mut self, layout: &noeta_ast::reflect::PackedLayout) -> u32 {
         use noeta_ast::reflect::PackedKind;
 
-        let shape = self.intern_shape(
-            Shape::object(
-                noeta_object::ShapeKind::Struct,
-                layout.type_name.clone(),
-                layout.fields.iter().map(|f| f.name.clone()).collect(),
+        // A bare-scalar element (`List<i32>`/`List<f32>`) has no struct wrapper — no shape to intern; it
+        // materializes to a bare `int`/`f32`. A `@packed` struct interns its shape (the same entry
+        // `MakeStruct` uses) so a materialized element shares shape identity with a constructed one.
+        let shape = (!layout.is_scalar()).then(|| {
+            self.intern_shape(
+                Shape::object(
+                    noeta_object::ShapeKind::Struct,
+                    layout.type_name.clone(),
+                    layout.fields.iter().map(|f| f.name.clone()).collect(),
+                )
+                // Carry the key-capability so a materialized element keys maps/sets exactly like a
+                // constructed one (P-PKEY).
+                .with_key_capable(self.key_capable_types.contains(&layout.type_name)),
             )
-            // The schema's element shape is the same entry `MakeStruct` uses — carry the
-            // key-capability so a materialized element keys maps/sets exactly like a
-            // constructed one (P-PKEY).
-            .with_key_capable(self.key_capable_types.contains(&layout.type_name)),
-        );
+        });
         let fields = layout
             .fields
             .iter()
@@ -1430,6 +1434,11 @@ impl ModuleCompiler {
                 PackedKind::Int => noeta_bytecode::PackedFieldDef::Int,
                 PackedKind::Float => noeta_bytecode::PackedFieldDef::Float,
                 PackedKind::F32 => noeta_bytecode::PackedFieldDef::F32,
+                PackedKind::F64 => noeta_bytecode::PackedFieldDef::F64,
+                PackedKind::IntN { bits, signed } => noeta_bytecode::PackedFieldDef::IntN {
+                    bits: *bits,
+                    signed: *signed,
+                },
                 PackedKind::Bool => noeta_bytecode::PackedFieldDef::Bool,
                 PackedKind::Struct(inner) => {
                     noeta_bytecode::PackedFieldDef::Struct(self.intern_packed_schema(inner))
@@ -3597,7 +3606,7 @@ impl<'m> FnCompiler<'m> {
                 name,
                 args,
                 span,
-            } => self.lower_invoke(recv, name, args, dst, *span),
+            } => self.lower_invoke(recv.as_ref(), name, args, dst, *span),
             Rvalue::TypedModuleCall {
                 module,
                 func,
@@ -4439,28 +4448,29 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `invoke(recv, name, args)` — fallible by-name dispatch. A bare type-name receiver becomes a
-    /// first-class type handle; any other receiver compiles normally. Both flow through the
-    /// runtime-dispatched `Op::Invoke`.
+    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch. A bare
+    /// type-name receiver becomes a first-class type handle; any other receiver compiles normally;
+    /// the free-fn form emits no receiver register at all. All flow through the runtime-dispatched
+    /// `Op::Invoke`.
     fn lower_invoke(
         &mut self,
-        recv: &Atom,
+        recv: Option<&Atom>,
         name: &Atom,
         args: &Atom,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let recv_reg = if let Atom::Var {
-            name: type_name, ..
-        } = recv
-            && self.module.types.contains_key(type_name)
-        {
-            let r = self.alloc_reg();
-            let name = self.module.intern_name(type_name);
-            self.code.push(Op::TypeValue { dst: r, name });
-            r
-        } else {
-            self.atom_reg(recv)?
+        let recv_reg = match recv {
+            Some(Atom::Var {
+                name: type_name, ..
+            }) if self.module.types.contains_key(type_name) => {
+                let r = self.alloc_reg();
+                let name = self.module.intern_name(type_name);
+                self.code.push(Op::TypeValue { dst: r, name });
+                Some(r)
+            }
+            Some(recv) => Some(self.atom_reg(recv)?),
+            None => None,
         };
         let name_reg = self.atom_reg(name)?;
         let args_reg = self.atom_reg(args)?;
@@ -4761,6 +4771,48 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
     )
 }
 
+/// The runtime head constructor a **built-in type name** narrows to, or `None` when the name has
+/// no dedicated head and falls back to a nominal (`NarrowTarget::Named`) match by shape name.
+///
+/// Exhaustive over [`BuiltinTy`] so this and the tree-walker's `runtime_matches` — the two halves
+/// of the differential — cannot drift: a new built-in fails to compile in both until handled.
+///
+/// This funnel dropped a bare `tuple` head the VM alone recognized. `tuple` is not a built-in type
+/// name (`Type::is_builtin_name` rejects it, so the checker reports an unknown type before any
+/// narrowing runs) and the tree-walker always treated it nominally — so the two backends now agree
+/// on an unreachable case they used to answer differently. A tuple target is written `(A, B)`,
+/// which reaches [`NarrowTarget::Tuple`] through `TypeRef::Tuple`.
+fn narrow_head(name: &str) -> Option<NarrowTarget> {
+    use noeta_ast::BuiltinTy;
+    Some(match BuiltinTy::from_name_any(name)? {
+        BuiltinTy::Int => NarrowTarget::Int,
+        BuiltinTy::Float => NarrowTarget::Float,
+        // `f32` is reified at runtime (distinct NaN-box tag), so it gets a head; the matcher's
+        // `F32 <: float` edge makes `(f32) is float` true while `(float) is f32` stays false.
+        BuiltinTy::F32 => NarrowTarget::F32,
+        BuiltinTy::Bool => NarrowTarget::Bool,
+        BuiltinTy::Str => NarrowTarget::String,
+        BuiltinTy::Bytes => NarrowTarget::Bytes,
+        BuiltinTy::Unit => NarrowTarget::Unit,
+        BuiltinTy::Dyn => NarrowTarget::Dyn,
+        BuiltinTy::List => NarrowTarget::List,
+        BuiltinTy::Map => NarrowTarget::Map,
+        BuiltinTy::Set => NarrowTarget::Set,
+        // Abstract kind-types match any value of that declaration kind.
+        BuiltinTy::KindEnum => NarrowTarget::AnyEnum,
+        BuiltinTy::KindStruct => NarrowTarget::AnyStruct,
+        BuiltinTy::KindClass => NarrowTarget::AnyClass,
+        // `Option`/`Result` are enums whose shape name *is* the type name, so they narrow through
+        // the nominal path like a user enum rather than needing a head of their own.
+        BuiltinTy::Option | BuiltinTy::Result => return None,
+        // The erased widths (`f64`, `i8..u64`) carry no runtime tag on a scalar, so they fall to the
+        // nominal path and never match a scalar. The checker warns on a bare-scalar `is i32`/`is f64`
+        // (statically always-false); giving them heads would need scalar reification, which the arc
+        // deliberately declines. `f32` alone is reified and handled above. Both backends agree.
+        BuiltinTy::F64 | BuiltinTy::IntN { .. } => return None,
+    })
+}
+
 /// Reduce a narrowing target type (`x.as<T>()`) to its runtime head constructor. Mirrors the
 /// tree-walker's `runtime_matches` mapping exactly so both backends decide a narrowing the same
 /// way. `Option`/`Result` and user records/classes/enums all become `Named` (matched by shape
@@ -4780,23 +4832,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // element type.
         TypeRef::Fn { .. } => NarrowTarget::Fn,
         TypeRef::Named { name, args, .. } => {
-            let head = match name.as_str() {
-                "int" => NarrowTarget::Int,
-                "float" => NarrowTarget::Float,
-                "bool" => NarrowTarget::Bool,
-                "string" => NarrowTarget::String,
-                "bytes" => NarrowTarget::Bytes,
-                "void" | "unit" => NarrowTarget::Unit,
-                "dyn" | "Any" => NarrowTarget::Dyn,
-                "List" | "list" => NarrowTarget::List,
-                "Map" | "map" => NarrowTarget::Map,
-                "Set" | "set" => NarrowTarget::Set,
-                "tuple" => NarrowTarget::Tuple,
-                "Enum" => NarrowTarget::AnyEnum,
-                "Struct" => NarrowTarget::AnyStruct,
-                "Class" => NarrowTarget::AnyClass,
-                other => NarrowTarget::Named(other.to_string()),
-            };
+            let head = narrow_head(name).unwrap_or_else(|| NarrowTarget::Named(name.clone()));
             // A parametrized target (`List<int>`, `Box<int>`) additionally checks its type arguments
             // against the value's reflected tag (R3); a bare name (`List`, `Box`, `Struct`) stays the
             // head-only target, preserving the widening `x is List` and the untagged fallback.
@@ -4807,7 +4843,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
                     head: Box::new(head),
                     args: args
                         .iter()
-                        .map(noeta_ast::reflect::typeref_to_repr)
+                        .map(noeta_ast::reflect::typeref_to_repr_arg)
                         .collect(),
                 }
             }

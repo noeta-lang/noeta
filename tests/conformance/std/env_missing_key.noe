@@ -1,5 +1,11 @@
-// Reading an environment variable absent from the sandbox fixture is a runtime E0021 (IoError),
-// identical in both backends — mirroring fs.read on a missing file.
-// expect: error E0021 at 5:6
+// An environment variable absent from the sandbox fixture reads as `none`, not a failure —
+// optional configuration is ordinary data, so `??` supplies the default. Identical in both
+// backends. (Contrast `fs.read` on a missing file, which is still an E0021: a program that
+// names a file means it; a program that reads `env` usually has a fallback in mind.)
+// expect: stdout "fallback"
+// expect: stdout "true"
+// expect: exit 0
 use std.{env};
-echo env.get("DOES_NOT_EXIST");
+
+echo env.get("DOES_NOT_EXIST") ?? "fallback";
+echo env.get("DOES_NOT_EXIST") == none;

@@ -496,7 +496,9 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            rec!(recv);
+            if let Some(recv) = recv {
+                rec!(recv);
+            }
             rec!(name);
             rec!(args);
         }

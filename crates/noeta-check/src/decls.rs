@@ -17,7 +17,7 @@ impl Checker {
     pub(crate) fn validate_param_defaults(&mut self, params: &[Param], env: &mut Env) {
         let mut seen_default = false;
         for p in params {
-            if p.default.is_some() {
+            if p.is_optional() {
                 seen_default = true;
             } else if seen_default {
                 self.error(
@@ -34,20 +34,31 @@ impl Checker {
         let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
         for p in params {
             let Some(default) = &p.default else { continue };
-            let actual = self.synth(default, env);
+            // The parameter's declared type is the default's expected type, so a target-typed
+            // `.{ … }` default adopts it (`fn retry(r: Retry = .{ attempts: 3 })`). Only that form
+            // routes through `check`; every other default keeps synthesizing exactly as before, so
+            // no existing inference changes.
+            let declared =
+                p.ty.is_some()
+                    .then(|| erase_type_params(param_type(p, &self.imports.extern_types), &tps));
+            let actual = match (&declared, default) {
+                (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
+                    self.check(default, expected, env)
+                }
+                _ => self.synth(default, env),
+            };
             // Skip the type check when the parameter has no annotation (already an `E0022`) or its
             // type is generic/`dyn` (erases to `dyn`, which accepts any default).
-            if p.ty.is_some() {
-                let expected = erase_type_params(param_type(p, &self.imports.extern_types), &tps);
-                if !self.arg_assignable(&actual, &expected) {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        default.span(),
-                        format!(
-                            "default value of type `{actual}` is not assignable to parameter type `{expected}`"
-                        ),
-                    );
-                }
+            if let Some(expected) = declared
+                && !self.arg_assignable(&actual, &expected)
+            {
+                self.error(
+                    DiagnosticCode::TypeMismatch,
+                    default.span(),
+                    format!(
+                        "default value of type `{actual}` is not assignable to parameter type `{expected}`"
+                    ),
+                );
             }
         }
     }
@@ -63,21 +74,30 @@ impl Checker {
         let tps: HashSet<String> = self.coloring.type_params.keys().cloned().collect();
         for f in fields {
             let Some(default) = &f.default else { continue };
-            let actual = self.synth(default, env);
+            // The field's declared type is the default's expected type — the field analogue of the
+            // parameter rule above, so `r: Retry = .{ attempts: 3 }` names its type.
+            let declared = f
+                .ty
+                .is_some()
+                .then(|| erase_type_params(field_type(&f.ty, &self.imports.extern_types), &tps));
+            let actual = match (&declared, default) {
+                (Some(expected), Expr::Object(l)) if l.type_name.is_none() => {
+                    self.check(default, expected, env)
+                }
+                _ => self.synth(default, env),
+            };
             // Skip the type check when the field has no annotation (every field requires one, so an
             // un-annotated field is already reported) or its type erases to `dyn` (accepts any).
-            if f.ty.is_some() {
-                let expected =
-                    erase_type_params(field_type(&f.ty, &self.imports.extern_types), &tps);
-                if !self.arg_assignable(&actual, &expected) {
-                    self.error(
-                        DiagnosticCode::TypeMismatch,
-                        default.span(),
-                        format!(
-                            "default value of type `{actual}` is not assignable to field type `{expected}`"
-                        ),
-                    );
-                }
+            if let Some(expected) = declared
+                && !self.arg_assignable(&actual, &expected)
+            {
+                self.error(
+                    DiagnosticCode::TypeMismatch,
+                    default.span(),
+                    format!(
+                        "default value of type `{actual}` is not assignable to field type `{expected}`"
+                    ),
+                );
             }
         }
     }
@@ -200,6 +220,11 @@ impl Checker {
                 self.check_type_opt(&field.ty);
             }
             self.check_attrs(&variant.attrs, TargetKind::Variant);
+            // A variant's payload fields are parsed by the shared parameter grammar, so they can
+            // carry `#[...]` too. Validate them as parameters — capability gate and construction —
+            // rather than leaving the one parameter list in the language whose attributes nothing
+            // looks at.
+            self.check_param_attrs(&variant.fields);
         }
         self.check_derives(&e.name, &e.decorators.derives, &[], &e.methods);
         let standalone = self.standalone_for(&e.name);
@@ -392,23 +417,15 @@ impl Checker {
                 // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
                 // formed from an extern type requires it key-capable — a mutable handle's hash
                 // or order could go stale under a key, so `Map<FileHandle, _>` is a type error.
-                let key_position = match name.as_str() {
-                    "Map" => args.first(),
-                    "Set" => args.first(),
-                    _ => None,
-                };
-                if let Some(TypeRef::Named {
-                    name: key_name,
-                    span: key_span,
-                    ..
-                }) = key_position
-                    && self.named_key_capable(key_name, name == "Set") == Some(false)
+                let key_role = keyed_container_role(name);
+                if let Some((role, is_set)) = key_role
+                    && let Some(TypeRef::Named {
+                        name: key_name,
+                        span: key_span,
+                        ..
+                    }) = args.first()
+                    && self.named_key_capable(key_name, is_set) == Some(false)
                 {
-                    let role = if name == "Map" {
-                        "key a map"
-                    } else {
-                        "member a set"
-                    };
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         *key_span,
@@ -420,10 +437,46 @@ impl Checker {
                          value kind (struct/enum) ordering structurally",
                     );
                 }
-                for arg in args {
-                    self.check_type_ref(arg);
-                }
+                self.check_type_args(name, args, *span);
             }
+        }
+    }
+
+    /// Validate a named type's **generic arguments**: each argument is itself a type reference that
+    /// must resolve (`List<Ghost>` flags `Ghost`, E0013), and a built-in constructor applied to the
+    /// wrong number of them is E0058.
+    ///
+    /// Arity is read from [`BuiltinTy::arity`] — the one table that knows a `List` takes one
+    /// argument and a `Map` two — so the rule is stated once rather than per use site. Two forms are
+    /// deliberately admitted: **no** arguments at all (`x: List` is an inference hole the checker
+    /// fills forward, not an error), and the bare lowercase spellings `list`/`map`/`set`, which are
+    /// *defined* as the unspecified-element form. Only a written argument list of the wrong length
+    /// is diagnosed. User generic types are not arity-checked here; instantiation owns that.
+    ///
+    /// Shared by [`check_type_ref`](Self::check_type_ref) and the attribute-argument type reference,
+    /// which reaches a `TypeRef` through [`AttrValue::TypeRef`] rather than an annotation — the
+    /// second caller is why this is a method and not inlined above. Its arguments used to be
+    /// validated by nobody at all, so `#[Builds(target: List<int, string, bogus>)]` passed silently.
+    pub(crate) fn check_type_args(&mut self, name: &str, args: &[TypeRef], span: Span) {
+        if let Some((builtin, spelling)) = BuiltinTy::from_name(name)
+            && spelling == noeta_ast::Spelling::Canonical
+            && !args.is_empty()
+            && args.len() != builtin.arity()
+        {
+            let arity = builtin.arity();
+            let msg = if arity == 0 {
+                format!("`{name}` takes no type arguments, found {}", args.len())
+            } else {
+                format!(
+                    "`{name}` takes {arity} type argument(s), found {}",
+                    args.len()
+                )
+            };
+            self.error(DiagnosticCode::InvalidTypeArguments, span, msg)
+                .help("supply exactly one type argument per parameter, or omit `<…>` entirely and let the element type infer");
+        }
+        for arg in args {
+            self.check_type_ref(arg);
         }
     }
 
@@ -440,8 +493,8 @@ impl Checker {
         fn layout_key_capable(layout: &noeta_ast::reflect::PackedLayout) -> bool {
             use noeta_ast::reflect::PackedKind;
             layout.fields.iter().all(|f| match &f.kind {
-                PackedKind::Int | PackedKind::Bool => true,
-                PackedKind::Float | PackedKind::F32 => false,
+                PackedKind::Int | PackedKind::IntN { .. } | PackedKind::Bool => true,
+                PackedKind::Float | PackedKind::F32 | PackedKind::F64 => false,
                 PackedKind::Struct(inner) => layout_key_capable(inner),
             })
         }
@@ -484,5 +537,41 @@ impl Checker {
             return Some(false);
         }
         None
+    }
+}
+
+/// Whether a built-in type name has a **key position** its first type argument occupies, and if so
+/// the role that position plays in a diagnostic (`Map<K, _>` keys a map, `Set<T>` members a set)
+/// plus whether the looser set rules apply. `None` for everything else.
+///
+/// Exhaustive over [`BuiltinTy`] on purpose: a new built-in container has to declare here whether
+/// its arguments are keys, rather than silently inheriting "not keyed". Only the canonical
+/// spellings are keyed — a bare `map`/`set` carries no arguments to gate.
+fn keyed_container_role(name: &str) -> Option<(&'static str, bool)> {
+    use noeta_types::{BuiltinTy, Spelling};
+    let (builtin, spelling) = BuiltinTy::from_name(name)?;
+    if spelling == Spelling::Bare {
+        return None;
+    }
+    match builtin {
+        BuiltinTy::Map => Some(("key a map", false)),
+        BuiltinTy::Set => Some(("member a set", true)),
+        // `List`/`Option`/`Result` arguments are ordinary element/payload positions — nothing is
+        // hashed or ordered by them, so any type may sit there.
+        BuiltinTy::List | BuiltinTy::Option | BuiltinTy::Result => None,
+        // The scalars and the abstract kind-types take no arguments at all.
+        BuiltinTy::Int
+        | BuiltinTy::Float
+        | BuiltinTy::F32
+        | BuiltinTy::F64
+        | BuiltinTy::IntN { .. }
+        | BuiltinTy::Bool
+        | BuiltinTy::Str
+        | BuiltinTy::Bytes
+        | BuiltinTy::Unit
+        | BuiltinTy::Dyn
+        | BuiltinTy::KindEnum
+        | BuiltinTy::KindStruct
+        | BuiltinTy::KindClass => None,
     }
 }

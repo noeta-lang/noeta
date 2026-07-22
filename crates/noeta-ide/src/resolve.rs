@@ -838,7 +838,9 @@ impl Resolver {
             Expr::Invoke {
                 recv, name, args, ..
             } => {
-                self.walk_expr(recv);
+                if let Some(recv) = recv {
+                    self.walk_expr(recv);
+                }
                 self.walk_expr(name);
                 self.walk_expr(args);
             }

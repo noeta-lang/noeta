@@ -1,0 +1,7 @@
+// A computed callee is arity-checked against its function type's parameter list, like a named one.
+// Only the upper bound binds: a function *value* does not record which of its parameters carry
+// defaults, so the lower bound stays `0` — the same leniency a `Fn`-typed local or field gets.
+// expect: error E0007 at 7:6
+// expect: exit 1
+handlers: Map<string, (int) -> int> = { "x": fn(v: int): int => v }
+echo handlers["x"](1, 2, 3)

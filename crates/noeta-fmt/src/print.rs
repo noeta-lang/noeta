@@ -1004,7 +1004,18 @@ impl Printer<'_> {
     }
 
     fn param(&self, param: &Param) -> Result<Doc, FmtError> {
-        let mut parts = vec![Doc::text(param.name.clone())];
+        let mut parts = Vec::new();
+        // A parameter's `#[...]` attributes lead it on the same line, space-separated — unlike a
+        // declaration's, which get a hardline each. A parameter is an inline element of a
+        // comma-separated list, so a hardline here would break the list from inside a single item
+        // and leave the closing `)` stranded. Whether the *list* breaks stays the source-directed
+        // decision `params` already makes, which is the behaviour an attributed signature wants:
+        // author it across lines and it stays across lines.
+        for a in &param.attrs {
+            parts.push(self.attribute(a)?);
+            parts.push(Doc::text(" "));
+        }
+        parts.push(Doc::text(param.name.clone()));
         if let Some(ty) = &param.ty {
             parts.push(Doc::text(": "));
             parts.push(self.type_ref(ty)?);
@@ -2247,15 +2258,21 @@ impl Printer<'_> {
             Expr::RolesOf { ty: None, .. } => Doc::text("roles_of()"),
             Expr::Invoke {
                 recv, name, args, ..
-            } => Doc::concat([
-                Doc::text("invoke("),
-                self.expr(recv)?,
-                Doc::text(", "),
-                self.expr(name)?,
-                Doc::text(", "),
-                self.expr(args)?,
-                Doc::text(")"),
-            ]),
+            } => {
+                // The receiver, when there is one, prints as a leading operand; the free-fn form
+                // prints the two it has. Formatting never changes which form was written — the
+                // arity IS the surface distinction.
+                let mut parts = vec![Doc::text("invoke(")];
+                if let Some(recv) = recv {
+                    parts.push(self.expr(recv)?);
+                    parts.push(Doc::text(", "));
+                }
+                parts.push(self.expr(name)?);
+                parts.push(Doc::text(", "));
+                parts.push(self.expr(args)?);
+                parts.push(Doc::text(")"));
+                Doc::concat(parts)
+            }
             Expr::FieldSet {
                 receiver,
                 field,
@@ -2805,8 +2822,14 @@ impl Printer<'_> {
         if let Some(spread) = &obj.spread {
             ds.push(Doc::concat([Doc::text("..."), self.expr(spread)?]));
         }
+        // The head is either `Name ` (name, space, then the brace) or the target-typed `.` that
+        // fuses straight into the brace — `.{` is one token, so a space would not round-trip.
+        let head = match &obj.type_name {
+            Some(name) => format!("{name} "),
+            None => ".".to_string(),
+        };
         if ds.is_empty() {
-            return Ok(Doc::text(format!("{} {{}}", obj.type_name)));
+            return Ok(Doc::text(format!("{head}{{}}")));
         }
         // The `{` sits just after the type name; a break before the first field (or spread) means the
         // author wrote the literal across lines, so keep it broken.
@@ -2817,7 +2840,7 @@ impl Printer<'_> {
             .or_else(|| obj.spread.as_ref().map(|s| s.span().start));
         let broke = first.is_some_and(|f| self.seq_broke(obj.type_name_span.end, f));
         Ok(Doc::concat([
-            Doc::text(format!("{} ", obj.type_name)),
+            Doc::text(head),
             self.delimited("{", ds, "}", true, broke),
         ]))
     }

@@ -207,6 +207,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                     // global per call — so a hot swap rebinding `fetch` reaches the live loop.
                     noeta_stdlib::EntryArg::Ident(name) if hot => Expr::Closure {
                         params: vec![noeta_ast::Param {
+                            attrs: Vec::new(),
                             name: "req".to_string(),
                             name_span: sp,
                             ty: None,
@@ -326,6 +327,7 @@ pub(crate) fn serve_parallel_impl(
     let handler = if hot {
         Expr::Closure {
             params: vec![noeta_ast::Param {
+                            attrs: Vec::new(),
                 name: "req".to_string(),
                 name_span: sp,
                 ty: None,

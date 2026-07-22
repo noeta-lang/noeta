@@ -525,6 +525,9 @@ pub(crate) fn is_deferred_literal_arg(expr: &Expr) -> bool {
     matches!(
         expr,
         Expr::Closure { .. } | Expr::List { .. } | Expr::Map { .. }
+        // A target-typed `.{ … }` is the *most* deferred literal there is: without the expectation
+        // it has no type at all, not merely an imprecise one. A named `Name { … }` stays eager.
+        | Expr::Object(noeta_ast::ObjectLit { type_name: None, .. })
     )
 }
 
@@ -698,9 +701,10 @@ pub(crate) fn constraint_mismatch(
             PackedKind::Float => Some(ConstraintField::Float),
             PackedKind::F32 => Some(ConstraintField::F32),
             PackedKind::Bool => Some(ConstraintField::Bool),
-            // Constraints cover primitive fields only (a bundle over nested packed structs is a
-            // later, additive extension).
-            PackedKind::Struct(_) => None,
+            // Constraints cover the `int`/`float`/`f32`/`bool` kernel vocabulary only (kernel bundles
+            // are f32/word-shaped); a narrower fixed width (`i32`/`u8`/`f64`) or a nested packed
+            // struct is not constraint-coverable — treated as a mismatch, an additive extension later.
+            PackedKind::F64 | PackedKind::IntN { .. } | PackedKind::Struct(_) => None,
         })
         .collect();
     let Some(kinds) = kinds else {
@@ -758,6 +762,6 @@ pub(crate) fn param_type(p: &Param, xt: &HashMap<String, String>) -> Type {
 pub(crate) fn required_params(params: &[Param]) -> usize {
     params
         .iter()
-        .position(|p| p.default.is_some())
+        .position(|p| p.is_optional())
         .unwrap_or(params.len())
 }

@@ -260,6 +260,13 @@ impl<'m> Vm<'m> {
                     noeta_bytecode::PackedFieldDef::Int => noeta_object::PackedKind::Int,
                     noeta_bytecode::PackedFieldDef::Float => noeta_object::PackedKind::Float,
                     noeta_bytecode::PackedFieldDef::F32 => noeta_object::PackedKind::F32,
+                    noeta_bytecode::PackedFieldDef::F64 => noeta_object::PackedKind::F64,
+                    noeta_bytecode::PackedFieldDef::IntN { bits, signed } => {
+                        noeta_object::PackedKind::IntN {
+                            bits: *bits,
+                            signed: *signed,
+                        }
+                    }
                     noeta_bytecode::PackedFieldDef::Bool => noeta_object::PackedKind::Bool,
                     noeta_bytecode::PackedFieldDef::Struct(idx) => {
                         noeta_object::PackedKind::Struct(self.persist.packed_schemas[*idx as usize])
@@ -269,7 +276,8 @@ impl<'m> Vm<'m> {
             self.persist
                 .packed_schemas
                 .push(noeta_object::intern_schema(noeta_object::PackedSchema {
-                    shape: self.persist.shapes[def.shape as usize],
+                    // A bare-scalar element carries no shape (`None`) — see `PackedSchema::shape`.
+                    shape: def.shape.map(|i| self.persist.shapes[i as usize]),
                     fields,
                     byte_size: def.byte_size as usize,
                     column: def.column,
@@ -607,6 +615,7 @@ impl<'m> Vm<'m> {
                     params: params
                         .iter()
                         .map(|name| Param {
+                            attrs: Vec::new(),
                             name: name.clone(),
                             name_span: span,
                             ty: None,

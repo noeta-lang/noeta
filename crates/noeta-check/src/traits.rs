@@ -442,6 +442,18 @@ impl Checker {
                     ),
                 );
             }
+            // A trait method's parameters carry `#[...]` attributes like any other callable's, and
+            // reflection emits them: `build` keys a trait's signatures `Trait.method` and pushes
+            // their parameter rows. So they must be validated, or an attribute that is not an
+            // attribute struct at all could reach the manifest through a trait and nowhere else.
+            //
+            // Only for a method WITHOUT a default: a defaulted one is a real body, reached through
+            // `check_fn` from `check_trait_default_bodies` below, which checks its parameters as
+            // part of checking the callable. Checking here too would report each misplacement
+            // twice — the same double-report the directive check above was restructured to avoid.
+            if !m.has_default {
+                self.check_param_attrs(&m.sig.params);
+            }
             // A trait's REQUIRED-method set stays monomorphic (the pinned D3 boundary): a
             // per-method `<...>` on a trait method has no coherent instantiation site — the trait
             // is dispatched dynamically and each `impl` would have to agree on the method's own

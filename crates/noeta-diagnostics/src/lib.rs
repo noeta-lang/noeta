@@ -259,11 +259,13 @@ pub enum DiagnosticCode {
     /// a differently-typed error out of the function. Declare `impl From<Source>` on the target
     /// error type, or align the function's declared error type.
     TryErrorMismatch,
-    /// An explicit turbofish instantiation (`f::<T, ...>(args)`) that cannot apply: the callee is
-    /// not a generic function (or not a function at all), or the number of type arguments does not
-    /// match the function's declared type parameters. Type arguments bind to the declaration's
-    /// parameters in order; supply exactly one per parameter, or drop the turbofish and let the
-    /// arguments infer them.
+    /// A generic application carrying the wrong type arguments. Two sites report it: an explicit
+    /// turbofish instantiation (`f::<T, ...>(args)`) that cannot apply — the callee is not a generic
+    /// function (or not a function at all), or the count does not match the declared type parameters
+    /// — and a **built-in type constructor** applied at the wrong arity in a type reference
+    /// (`List<int, string>`, `Map<int>`). In both cases type arguments bind to the constructor's
+    /// parameters in order; supply exactly one per parameter, or omit `<…>` entirely and let them
+    /// infer.
     InvalidTypeArguments,
     /// A binder (parameter, `for` variable, match-pattern binding, local binding) reuses a name
     /// that already means something in scope — an enclosing binding, a top-level function or type,
@@ -292,6 +294,12 @@ pub enum DiagnosticCode {
     /// directive misbehaved. The position inside the generated source goes in the message, because
     /// that source is real and openable rather than a fiction the compiler made up.
     DirectiveExpansionFailed,
+    /// **Warning.** A bare-scalar type test `x is iN`/`x is f64` names a fixed-width numeric that is
+    /// *erased* to `int`/`float` on a scalar value — no scalar carries a width tag, so the test is
+    /// statically always false. `f32` is exempt (reified at runtime) and container targets like
+    /// `List<i32>` are exempt (packed element widths are distinct). The fix is to test the base type
+    /// (`x is int` / `x is float`). Advisory, not an error: the program still compiles.
+    ErasedWidthNarrow,
 }
 
 impl DiagnosticCode {
@@ -360,6 +368,7 @@ impl DiagnosticCode {
         DiagnosticCode::ValidatedConstruction,
         DiagnosticCode::InvalidArgument,
         DiagnosticCode::DirectiveExpansionFailed,
+        DiagnosticCode::ErasedWidthNarrow,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -428,6 +437,7 @@ impl DiagnosticCode {
             DiagnosticCode::ValidatedConstruction => "E0060",
             DiagnosticCode::InvalidArgument => "E0061",
             DiagnosticCode::DirectiveExpansionFailed => "E0062",
+            DiagnosticCode::ErasedWidthNarrow => "E0063",
         }
     }
 
@@ -487,6 +497,20 @@ impl Diagnostic {
         Diagnostic {
             code,
             severity: Severity::Error,
+            span,
+            message: message.into(),
+            labels: Vec::new(),
+            help: None,
+        }
+    }
+
+    /// A **warning**-severity diagnostic: the program is well-formed and still compiles, but the
+    /// construct is almost certainly a mistake (e.g. a statically always-false test). Same shape as
+    /// [`error`](Diagnostic::error), only the severity differs.
+    pub fn warning(code: DiagnosticCode, span: Span, message: impl Into<String>) -> Diagnostic {
+        Diagnostic {
+            code,
+            severity: Severity::Warning,
             span,
             message: message.into(),
             labels: Vec::new(),

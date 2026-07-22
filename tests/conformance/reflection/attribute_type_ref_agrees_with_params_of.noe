@@ -1,0 +1,87 @@
+// **Cross-surface oracle.** The differential (tree-walker vs VM) cannot catch a *correlated* error,
+// and the dropped generic arguments were exactly that: both backends lowered `AttrValue::TypeRef`
+// themselves, both discarded the arguments, both agreed — on the wrong answer. What does catch it is
+// reaching the same declared type through a second, independently-implemented surface and demanding
+// the two agree. `params_of` projects an annotation through the arg-preserving `typeref_to_repr`;
+// an attribute type reference projects the same syntax through the kind-aware `type_ref_repr`. The
+// same type written both ways must reflect identically. (Same technique as
+// `params_of_numeric_widths.noe`, which pins `params_of` against `type_of`.)
+//
+// The one deliberate difference, normalized away by `norm` below: `params_of` reports a declared
+// nominal kind-agnostically (`Type.Named`), because its result is also what the `x is T` narrow
+// matcher compares against and that matcher keys on the name rather than the kind. An attribute type
+// reference has the type registry available and reports the precise kind (`Type.Struct`), which
+// `attribute_type_ref_arg.noe` pins. Everything else — every constructor, every argument, at every
+// depth — must be identical.
+// expect: stdout "List<int> agree: true"
+// expect: stdout "shape: List(Int)"
+// expect: stdout "Map<string, List<int>> agree: true"
+// expect: stdout "shape: Map(String, List(Int))"
+// expect: stdout "List<Codec> agree: true"
+// expect: stdout "shape: List(nominal Codec[])"
+// expect: stdout "Pair<int, string> agree: true"
+// expect: stdout "shape: nominal Pair[Int, String]"
+// expect: stdout "kinds differ by design: Type.Struct(Pair, [Type.Int, Type.String]) vs Type.Named(Pair, [Type.Int, Type.String])"
+// expect: exit 0
+struct Pair<A, B> { a: A  b: B }
+struct Codec { v: int }
+
+@attribute
+struct Builds { target: Type }
+
+#[Builds(target: List<int>)]
+struct S1 { id: int }
+#[Builds(target: Map<string, List<int>>)]
+struct S2 { id: int }
+#[Builds(target: List<Codec>)]
+struct S3 { id: int }
+#[Builds(target: Pair<int, string>)]
+struct S4 { id: int }
+
+// The same four types, written as parameter annotations instead of attribute arguments.
+fn mirror(a: List<int>, b: Map<string, List<int>>, c: List<Codec>, d: Pair<int, string>): void {
+    return
+}
+
+// Render a reflected `Type` structurally, collapsing the three nominal kinds (and the unknown-kind
+// `Named`) into one `nominal` spelling — the normalization that makes the two surfaces comparable
+// on everything except the one axis they are *supposed* to differ on. Recursive, so a difference at
+// any depth still shows.
+fn norm(t: Type): string {
+    return match t {
+        Type.Int => "Int",
+        Type.Float => "Float",
+        Type.String => "String",
+        Type.Bool => "Bool",
+        Type.Dyn => "Dyn",
+        Type.List(e) => "List(${norm(e)})",
+        Type.Set(e) => "Set(${norm(e)})",
+        Type.Option(e) => "Option(${norm(e)})",
+        Type.Map(k, v) => "Map(${norm(k)}, ${norm(v)})",
+        Type.Result(o, e) => "Result(${norm(o)}, ${norm(e)})",
+        Type.Struct(n, a) => "nominal ${n}[${norm_all(a)}]",
+        Type.Class(n, a) => "nominal ${n}[${norm_all(a)}]",
+        Type.Enum(n, a) => "nominal ${n}[${norm_all(a)}]",
+        Type.Named(n, a) => "nominal ${n}[${norm_all(a)}]",
+        _ => "?",
+    };
+}
+
+fn norm_all(types: List<Type>): string {
+    return types.map(fn(t) => norm(t)).join(", ");
+}
+
+attr = attributes_of::<Builds>().map(fn(b) => b.value.target)
+param = params_of("mirror").map(fn(p) => p.type)
+
+labels = ["List<int>", "Map<string, List<int>>", "List<Codec>", "Pair<int, string>"]
+mut i: int = 0
+while i < 4 {
+    echo "${labels[i]} agree: ${norm(attr[i]) == norm(param[i])}";
+    // The normalized shape itself, so the test pins *what* they agree on rather than merely that
+    // they agree — two identically-erased answers would otherwise still pass.
+    echo "shape: ${norm(attr[i])}";
+    i = i + 1;
+}
+
+echo "kinds differ by design: ${attr[3]} vs ${param[3]}";

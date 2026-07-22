@@ -545,9 +545,11 @@ pub enum Rvalue {
     /// `params_of(target)` — the declared parameter list of the fn/method named by the runtime
     /// `target` string, materialized as `List<ParamInfo>`.
     ParamsOf { target: Atom, span: Span },
-    /// `invoke(recv, name, args)` — fallible by-name dispatch.
+    /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch. `recv` is
+    /// `None` for the free-function form, where `name` resolves in the top-level function namespace
+    /// instead of a type's method table.
     Invoke {
-        recv: Atom,
+        recv: Option<Atom>,
         name: Atom,
         args: Atom,
         span: Span,

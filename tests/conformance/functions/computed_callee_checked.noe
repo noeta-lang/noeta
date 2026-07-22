@@ -1,0 +1,35 @@
+// Every shape of computed callee that types and runs correctly, pinned so tightening the argument
+// check does not close the door on the calls it was meant to admit: a function value reached
+// through a map index, through a list index, and through a call that returns one — plus the two
+// paths that must keep their existing behavior. A `Callable` OBJECT still routes to its `call`
+// method (the object protocol is consulted only after the function-type case, and the two are
+// disjoint), and a `dyn` callee stays permissive — the dynamic escape hatch, unchecked by design,
+// with the runtime's "not callable"/arity checks as its net.
+// expect: stdout "42"
+// expect: stdout "42"
+// expect: stdout "42"
+// expect: stdout "15"
+// expect: stdout "99"
+// expect: exit 0
+class Adder {
+    pub base: int
+
+    impl Callable {
+        fn call(x: int): int { return self.base + x }
+    }
+}
+
+fn make_tripler(): (int) -> int { return fn(v: int): int => v * 3 }
+
+handlers: Map<string, (int) -> int> = { "x": fn(v: int): int => v + 1 }
+echo handlers["x"](41)
+
+doublers: List<(int) -> int> = [fn(v: int): int => v * 2]
+echo doublers[0](21)
+
+echo make_tripler()(14)
+
+echo Adder { base: 10 }(5)
+
+anything: dyn = fn(v: int): int => v
+echo anything(99)

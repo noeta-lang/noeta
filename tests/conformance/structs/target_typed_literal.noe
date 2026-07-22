@@ -1,0 +1,58 @@
+// A target-typed struct literal `.{ … }` adopts its nominal type from the EXPECTED type at its
+// position, so a one-off struct needs no name at the use site. Every position that supplies an
+// expectation accepts it: a call argument, a field initializer, a `return`, an annotated binding, a
+// list element, a map value, and a defaulted parameter.
+// expect: stdout "8080"
+// expect: stdout "0.0.0.0"
+// expect: stdout "GET"
+// expect: stdout "/health"
+// expect: stdout "3"
+// expect: stdout "60"
+// expect: stdout "quick"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "9"
+// expect: exit 0
+struct ServerOpts { port: int host: string }
+struct Route { method: string path: string }
+struct Wrapper { inner: Route count: int }
+struct Retry { attempts: int }
+
+// A call argument.
+fn configure(opts: ServerOpts): void {
+    echo opts.port;
+    echo opts.host;
+}
+configure(.{ port: 8080, host: "0.0.0.0" });
+
+// A `return` in a function with a declared return type.
+fn make(): Route {
+    return .{ method: "GET", path: "/health" };
+}
+r = make();
+echo r.method;
+echo r.path;
+
+// A field initializer inside another literal — the field's declared type is the expectation.
+w = Wrapper { inner: .{ method: "PUT", path: "/x" }, count: 3 };
+echo w.count;
+
+// A defaulted parameter: the parameter's declared type drives the default expression too.
+fn retry(r: Retry = .{ attempts: 60 }): int {
+    return r.attempts;
+}
+echo retry();
+
+// An annotated binding.
+rt: Route = .{ method: "quick", path: "/b" };
+echo rt.method;
+
+// A list element — the annotation's element type is the expectation.
+rs: List<Retry> = [.{ attempts: 1 }, .{ attempts: 2 }];
+for x in rs {
+    echo x.attempts;
+}
+
+// A map value — the annotation's value type is the expectation.
+ms: Map<string, Retry> = { "a": .{ attempts: 9 } };
+echo ms["a"].attempts;

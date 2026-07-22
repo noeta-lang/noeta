@@ -52,7 +52,45 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// where the package version stays put across such a change. Without the bump a `.noeb` written by
 /// an earlier build passes the version gate and is then postcard-decoded against the new layout —
 /// a silent misread. The gate turns that into an explicit `UnsupportedFormat`.
-pub const FORMAT_VERSION: u8 = 2;
+///
+/// Bumped to 3 when `reflect::ParamSig` gained its `optional` flag. `Module::reflection` is part of
+/// the postcard payload, and postcard is **not** self-describing: a struct is its fields back to
+/// back with no names or tags, so an extra `bool` shifts every byte after it. A version-2 bundle
+/// decoded by a version-3 reader would read the next parameter's name length as the flag and
+/// desynchronise from there — a corrupt manifest, not a clean error. Same reasoning as the bump
+/// before it: any change to the serialized shape, however additive it looks in Rust, is a format
+/// break on the wire.
+///
+/// Bumped to 4 when `Op::Invoke` gained the free-function form and its `recv` register became an
+/// `Option<Reg>`. Same non-self-describing-encoding reasoning: an `Option` writes a discriminant
+/// byte ahead of the register, so a version-3 reader would take that byte *as* the receiver
+/// register and desynchronise for the rest of the chunk. `Module::code` is part of the payload, so
+/// an op-layout change is a format break exactly as a manifest change is.
+///
+/// Parameter attributes, by contrast, did **not** bump it, and that is the same rule read the other
+/// way round: they added no field to any serialized struct. A parameter's `#[...]` attributes ride
+/// as ordinary rows in `reflection.manifest`, a `Vec<AttributeRecord>` whose element shape is
+/// untouched — a longer vector, not a different layout, and postcard length-prefixes vectors. Nor
+/// can an earlier artifact be *stale* the way a layout change makes one: a bundle written before
+/// that slice came from a compiler that could not parse an attribute in a parameter list, so its
+/// source cannot have contained one, and the rows it lacks are rows its program never had.
+///
+/// Bumped to 5 by the packed-widths arc, which added variants to three serialized enums in the
+/// postcard payload — all non-self-describing, so a new variant shifts every discriminant after it.
+/// `NarrowTarget` (embedded in `Op::As`/`Op::TypeTest`, part of `Module::code`) gained an `F32` head
+/// for reified `f32` narrowing; `PackedFieldDef` (in `Module::packed_schemas`) gained `F64` and
+/// `IntN { bits, signed }`; and `reflect::TypeRepr` (baked into `Op` narrow targets and
+/// construction-site tags) gained the matching `F64` and `IntN { signed, bits }`. A version-4 bundle
+/// decoded by a version-5 reader would map the old discriminants onto the wrong variants — a `Bool`
+/// head read as `F32`, a `Struct` field read as an `IntN` — and desynchronise the chunk. Same rule
+/// as the bumps before it: any change to a serialized enum's variant set is a wire break.
+///
+/// Bumped to 6 by the packed-widths **bare-scalar** arc: `PackedSchemaDef::shape` (in
+/// `Module::packed_schemas`) changed from `u32` to `Option<u32>` so a bare-scalar `List<i32>`/`List<f32>`
+/// element can carry *no* shape (it materializes to a bare `int`/`f32`, not an object). postcard prefixes
+/// an `Option` with a present/absent discriminant byte, so the field's encoding — and every byte after it
+/// in the schema table — shifts; a version-5 reader would misread the leading `u32` as an `Option` tag.
+pub const FORMAT_VERSION: u8 = 6;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

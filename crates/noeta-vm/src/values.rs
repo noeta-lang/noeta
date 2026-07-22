@@ -322,7 +322,14 @@ pub(crate) fn vm_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         "string" => TypeRepr::Str,
         "bytes" => TypeRepr::Bytes,
         "unit" => TypeRepr::Unit,
-        "list" => TypeRepr::List(dyn_()),
+        // A bare-scalar packed list (`List<i32>`/`List<f32>`) recovers its element width from its
+        // schema — so a laundered value still reflects `List<i32>`, not `List<dyn>` (slice-1 identity).
+        // A boxed or struct-packed list has no scalar schema and reflects head-only.
+        "list" => TypeRepr::List(
+            v.packed_scalar_elem_repr()
+                .map(Box::new)
+                .unwrap_or_else(dyn_),
+        ),
         "set" => TypeRepr::Set(dyn_()),
         "map" => TypeRepr::Map(dyn_(), dyn_()),
         "function" => TypeRepr::Fn(Vec::new(), dyn_()),
@@ -349,11 +356,16 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
         TypeRepr::Int
         | TypeRepr::Float
         | TypeRepr::F32
+        | TypeRepr::F64
         | TypeRepr::Bool
         | TypeRepr::Str
         | TypeRepr::Bytes
         | TypeRepr::Unit
         | TypeRepr::Dyn => Vec::new(),
+        // `Type.IntN(bits: int, signed: bool)` — the width descriptor.
+        TypeRepr::IntN { signed, bits } => {
+            vec![Value::int(i64::from(*bits)), Value::bool(*signed)]
+        }
         TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => {
             vec![build_type_value(t)]
         }
@@ -426,7 +438,7 @@ pub(crate) fn attr_value_to_vm(
             let values: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::object(shape, values)
         }
-        A::TypeRef { name, .. } => build_type_value(&reflection.type_ref_repr(name)),
+        A::TypeRef { name, args } => build_type_value(&reflection.type_ref_repr(name, args)),
     }
 }
 
@@ -461,6 +473,30 @@ pub(crate) fn make_attr_enum(enum_name: &str, variant: &str, data: Vec<Value>) -
         !data.is_empty(),
     ));
     Value::enum_value(shape, data)
+}
+
+/// The message for a free-function `invoke(name, args)` that resolved to nothing callable, worded
+/// identically to the tree-walker's `free_fn_miss_message` (so the differential matches).
+///
+/// **One message for every kind of miss** — no such global, an unbound one, or one holding a
+/// non-closure — and that uniformity is load-bearing rather than lazy. The two backends index the
+/// top-level namespace with different structures: the tree-walker's global scope holds types and
+/// functions together, while this global slot table holds only value bindings (a type name is not a
+/// global here at all). Reporting *why* the lookup failed would therefore report different things
+/// in each backend for the same program. What both can always agree on is that no top-level
+/// function of this name was found.
+///
+/// The qualified-name hint needs no namespace knowledge — it is a property of the string — so it
+/// stays identical in both backends by construction.
+pub(crate) fn free_fn_miss_message(name: &str) -> String {
+    if name.contains('.') {
+        format!(
+            "no top-level function `{name}`; a qualified name dispatches through the three-argument \
+             `invoke(recv, name, args)`"
+        )
+    } else {
+        format!("no top-level function `{name}`")
+    }
 }
 
 /// The arity-mismatch message, worded identically to the tree-walker's (so the differential

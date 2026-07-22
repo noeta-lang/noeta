@@ -178,9 +178,12 @@ impl Shape {
 /// directly-constructed one, plus each field's kind in slot (declared) order and the total width.
 #[derive(Debug, Clone)]
 pub struct PackedSchema {
-    /// The element type's shape — materialized elements use this exact handle.
-    pub shape: &'static Shape,
-    /// One entry per field, in `shape.fields` (slot) order.
+    /// The element type's shape — materialized elements use this exact handle. **`None`** marks a
+    /// bare-scalar element (packed-widths bare-scalar arc): a `List<i32>`/`List<f32>` has one scalar
+    /// field and no struct wrapper, so it materializes to a bare `int`/`f32` rather than an object.
+    pub shape: Option<&'static Shape>,
+    /// One entry per field, in `shape.fields` (slot) order. A scalar element (`shape == None`) holds
+    /// exactly one — the element's own primitive kind.
     pub fields: Vec<PackedKind>,
     /// **Bytes** per element — the sum of each field's [`PackedKind::byte_width`] (P-PACK 3.2b: the
     /// VM stores a `List<packed>` as a byte buffer so an `f32` field is 4 bytes, not 8).
@@ -229,18 +232,34 @@ pub enum PackedKind {
     Float,
     /// A 32-bit float field (P-PACK Phase 3) — **4 bytes** (slice 3.2b), half an `int`/`float`.
     F32,
+    /// An explicit 64-bit float field `f64` (packed-widths arc) — **8 bytes**, storage-identical to
+    /// `Float` but a distinct kind so packed reflection can report `f64` rather than `float`.
+    F64,
+    /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc): `bits/8` bytes, packed at
+    /// its natural width. `signed` decides the read-back extension — a signed slot sign-extends its
+    /// top bit, an unsigned one zero-extends — so a stored `-1i8` reads back `-1` and a `255u8` reads
+    /// back `255`. The runtime *scalar* stays an 8-byte `int` (Tier W erasure); only the buffer slot
+    /// is narrowed.
+    IntN {
+        /// One of 8, 16, 32, 64.
+        bits: u8,
+        /// `true` for the `iN` family, `false` for `uN`.
+        signed: bool,
+    },
     Bool,
     Struct(&'static PackedSchema),
 }
 
 impl PackedKind {
-    /// The number of bytes this field occupies in a packed buffer (P-PACK 3.2b): an `f32` is 4, the
-    /// other primitives are 8, and a nested struct is its own `byte_size`.
+    /// The number of bytes this field occupies in a packed buffer: `bool` is 1, `f32`/`i32`/`u32`
+    /// are 4, `int`/`float`/`f64`/`i64`/`u64` are 8, an `i8`/`u8` is 1, an `i16`/`u16` is 2, and a
+    /// nested struct is its own `byte_size` (packed-widths arc — every width packs at its width).
     pub fn byte_width(&self) -> usize {
         match self {
             PackedKind::Bool => 1,
             PackedKind::F32 => 4,
-            PackedKind::Int | PackedKind::Float => 8,
+            PackedKind::Int | PackedKind::Float | PackedKind::F64 => 8,
+            PackedKind::IntN { bits, .. } => (*bits as usize) / 8,
             PackedKind::Struct(inner) => inner.byte_size,
         }
     }
@@ -307,7 +326,7 @@ mod intern {
     /// they are themselves interned (same content ⇒ same address).
     #[derive(PartialEq, Eq, Hash)]
     struct SchemaKey {
-        shape: usize,
+        shape: Option<usize>,
         fields: Vec<KindKey>,
         byte_size: usize,
         column: bool,
@@ -318,6 +337,8 @@ mod intern {
         Int,
         Float,
         F32,
+        F64,
+        IntN { bits: u8, signed: bool },
         Bool,
         Struct(usize),
     }
@@ -325,7 +346,7 @@ mod intern {
     impl SchemaKey {
         fn of(schema: &PackedSchema) -> SchemaKey {
             SchemaKey {
-                shape: std::ptr::from_ref(schema.shape).addr(),
+                shape: schema.shape.map(|s| std::ptr::from_ref(s).addr()),
                 fields: schema
                     .fields
                     .iter()
@@ -333,6 +354,11 @@ mod intern {
                         PackedKind::Int => KindKey::Int,
                         PackedKind::Float => KindKey::Float,
                         PackedKind::F32 => KindKey::F32,
+                        PackedKind::F64 => KindKey::F64,
+                        PackedKind::IntN { bits, signed } => KindKey::IntN {
+                            bits: *bits,
+                            signed: *signed,
+                        },
                         PackedKind::Bool => KindKey::Bool,
                         PackedKind::Struct(inner) => {
                             KindKey::Struct(std::ptr::from_ref::<PackedSchema>(inner).addr())

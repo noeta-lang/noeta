@@ -1,0 +1,42 @@
+// Packed-widths (bare-scalar) arc: making `List<i32>` a *packed* buffer must not disturb slice-1
+// reflection. A scalar-packed list carries no per-value tag, so its reflected element type is
+// recovered from the packed schema — a value laundered through `dyn` still reports `List<i32>`, not
+// `List<dyn>`. So `List<i32> is List<i32>` stays true and `is List<int>` stays false. The excluded
+// 8-byte widths (`i64`/`f64`) stay *boxed* yet remain distinctly typed via slice-1's construction tag,
+// so their reflection is unchanged too. Both backends recover the width identically (differential).
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "iN 32 true"
+// expect: stdout "iN 8 false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+
+fn launder(v: dyn): dyn { return v; }
+
+// A packed `List<i32>` reflects its element width through the schema, not a tag.
+xs: dyn = launder([1i32, 2i32])
+echo xs is List<i32>              // true
+echo xs is List<int>             // false — i32 is distinct from int
+
+// A packed `List<u8>` likewise.
+us: dyn = launder([1u8, 2u8, 3u8])
+echo us is List<u8>              // true
+echo us is List<i8>             // false — unsigned vs signed slot
+
+// The width surfaces in the reflected `Type` ADT for both a 4-byte and a 1-byte scalar list.
+echo match type_of(launder([7i32])) {
+  Type.List(Type.IntN(bits, signed)) => "iN ${bits} ${signed}",
+  _ => "other",
+}                                // iN 32 true
+echo match type_of(launder([7u8])) {
+  Type.List(Type.IntN(bits, signed)) => "iN ${bits} ${signed}",
+  _ => "other",
+}                                // iN 8 false
+
+// The excluded 8-byte widths stay boxed but keep their slice-1 tagged distinctness.
+gs: dyn = launder([1i64, 2i64])
+echo gs is List<i64>            // true
+echo gs is List<int>           // false — i64 distinct from int, even though both are 8 bytes

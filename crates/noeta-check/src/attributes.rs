@@ -68,6 +68,19 @@ impl Checker {
         }
     }
 
+    /// Validate the `#[...]` attributes on each of a callable's declared parameters.
+    ///
+    /// A thin fan-out over [`check_attrs`](Self::check_attrs) with `TargetKind::Param` — deliberately
+    /// not its own set of rules. A parameter attribute is an attribute: same capability gate
+    /// (E0029), same placement gate (E0030), same construction rules for its literal arguments. The
+    /// only thing particular to a parameter is *which* target kind it reports, and that is this
+    /// function's whole content.
+    pub(crate) fn check_param_attrs(&mut self, params: &[noeta_ast::Param]) {
+        for param in params {
+            self.check_attrs(&param.attrs, TargetKind::Param);
+        }
+    }
+
     /// Check that a `#[Foo(...)]` attribute's arguments construct a valid `Foo` — the all-fields
     /// contract of any struct literal, applied to the literal arguments. Positional arguments bind
     /// to fields in declaration order, named arguments by name; each field must be set exactly once
@@ -192,10 +205,16 @@ impl Checker {
                 "Result" => Type::Result(Box::new(Type::Dyn), Box::new(Type::Dyn)),
                 _ => Type::Named(enum_name.clone(), Vec::new()),
             },
-            // A bare name in attribute position is a type reference — a value of the reflection
-            // `Type` enum. It must name a real type (else E0013); a `Type` value is then assignable
-            // to a `Type`-typed (or `dyn`) field.
-            AttrValue::TypeRef { name, .. } => {
+            // A name in attribute position is a type reference — a value of the reflection `Type`
+            // enum. It must name a real type (else E0013); a `Type` value is then assignable to a
+            // `Type`-typed (or `dyn`) field.
+            AttrValue::TypeRef { name, args } => {
+                // The generic arguments are a type reference each, and get the same validation any
+                // annotation's arguments get: an unresolvable nested name is E0013 and a built-in
+                // constructor at the wrong arity is E0058. They were previously unchecked, so
+                // `List<int, string, bogus>` in attribute position passed silently — the head name
+                // was validated and the arguments simply were not looked at.
+                self.check_type_args(name, args, span);
                 if !Type::is_builtin_name(name)
                     && !PRELUDE_TYPES.contains(&name.as_str())
                     && !self.symbols.types.contains(name)

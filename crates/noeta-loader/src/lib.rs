@@ -2995,7 +2995,7 @@ mod tests {
             let Expr::Object(lit) = value else {
                 panic!("object literal")
             };
-            lit.type_name.clone()
+            lit.type_name.clone().expect("named literal")
         };
         assert_eq!(ctor("a"), "App.Models.User");
         assert_eq!(ctor("b"), "App.People.User");

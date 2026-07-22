@@ -514,7 +514,10 @@ fn op_facts(op: &Op) -> OpFacts {
             ..
         } => {
             f.def = Some(*dst);
-            f.uses.push(*recv);
+            // The free-fn form reads no receiver register — its callee comes from a global slot.
+            if let Some(recv) = recv {
+                f.uses.push(*recv);
+            }
             f.uses.push(*name);
             f.uses.push(*args);
         }
@@ -1026,7 +1029,9 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             ..
         } => {
             m(dst);
-            m(recv);
+            if let Some(recv) = recv {
+                m(recv);
+            }
             m(name);
             m(args);
         }

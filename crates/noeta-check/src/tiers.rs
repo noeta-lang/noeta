@@ -1269,7 +1269,12 @@ impl Checker {
     /// string/list/map/class/enum/`dyn`/generic — is heap-shaped and cannot lay out flat.
     pub(crate) fn is_packable_type(&self, ty: &Type) -> bool {
         match ty {
-            Type::Int | Type::Float | Type::F32 | Type::Bool => true,
+            Type::Int
+            | Type::Float
+            | Type::F32
+            | Type::F64
+            | Type::IntN { .. }
+            | Type::Bool => true,
             Type::Named(name, args) if args.is_empty() => {
                 self.symbols.packed_structs.contains(name)
             }

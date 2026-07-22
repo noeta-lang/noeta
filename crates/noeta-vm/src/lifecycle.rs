@@ -172,7 +172,11 @@ pub(crate) fn try_classify(v: Value) -> Option<TryOutcome> {
 pub(crate) fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
     let kind = match target {
         NarrowTarget::Int => "int",
-        NarrowTarget::Float => "float",
+        // Subtype edge `F32 <: float`: a plain `float` OR a reified `f32` value matches `float`.
+        NarrowTarget::Float => return v.type_name() == "float" || v.is_f32(),
+        // The `f32` head matches only a reified `f32` value (a plain `float` is the base, not a
+        // subtype — `(float) is f32` is false).
+        NarrowTarget::F32 => return v.is_f32(),
         NarrowTarget::Bool => "bool",
         NarrowTarget::String => "string",
         NarrowTarget::Bytes => "bytes",
@@ -250,6 +254,13 @@ impl<'m> Vm<'m> {
                     noeta_bytecode::PackedFieldDef::Int => noeta_object::PackedKind::Int,
                     noeta_bytecode::PackedFieldDef::Float => noeta_object::PackedKind::Float,
                     noeta_bytecode::PackedFieldDef::F32 => noeta_object::PackedKind::F32,
+                    noeta_bytecode::PackedFieldDef::F64 => noeta_object::PackedKind::F64,
+                    noeta_bytecode::PackedFieldDef::IntN { bits, signed } => {
+                        noeta_object::PackedKind::IntN {
+                            bits: *bits,
+                            signed: *signed,
+                        }
+                    }
                     noeta_bytecode::PackedFieldDef::Bool => noeta_object::PackedKind::Bool,
                     noeta_bytecode::PackedFieldDef::Struct(idx) => {
                         noeta_object::PackedKind::Struct(packed_schemas[*idx as usize])
@@ -257,7 +268,8 @@ impl<'m> Vm<'m> {
                 })
                 .collect();
             packed_schemas.push(noeta_object::intern_schema(noeta_object::PackedSchema {
-                shape: shapes[def.shape as usize],
+                // A bare-scalar element carries no shape (`None`) — it materializes to a bare `int`/`f32`.
+                shape: def.shape.map(|i| shapes[i as usize]),
                 fields,
                 byte_size: def.byte_size as usize,
                 column: def.column,
@@ -306,6 +318,15 @@ impl<'m> Vm<'m> {
                 .or_default()
                 .insert(m.method.clone(), m.proto);
         }
+        // Name → global slot, for the free-function `Op::Invoke`. A later slot wins, matching the
+        // compiler's own `global_slots` map (which a rebinding overwrites in place), so the VM
+        // resolves a name to the same slot the statically-compiled `Op::CallGlobal` would.
+        let global_slots: HashMap<String, u32> = module
+            .global_names
+            .iter()
+            .enumerate()
+            .map(|(slot, name)| (name.clone(), slot as u32))
+            .collect();
         let destructors = module.destructors.iter().cloned().collect();
         let field_defaults = module
             .field_defaults
@@ -350,6 +371,7 @@ impl<'m> Vm<'m> {
             persist,
             map_packed,
             methods,
+            global_slots,
             destructors,
             field_defaults,
             destruct_reachable,
@@ -912,15 +934,28 @@ impl<'m> Vm<'m> {
     }
 
     /// Materialize a callable's declared parameter list from the module's reflection info into a
-    /// `List<ParamInfo>` — each `{ name: string, type: Type }`. `type` is the prelude `Type` ADT
-    /// value built from the parameter's declared type (the same `build_type_value` `type_of` uses).
-    /// The `ParamInfo` shape is built fresh; because shape equality is structural, it matches the
-    /// tree-walker's by construction. An unknown target yields an empty list.
+    /// `List<ParamInfo>` — each `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`.
+    /// `type` is the prelude `Type` ADT value built from the parameter's declared type (the same
+    /// `build_type_value` `type_of` uses), `optional` reports whether the parameter declared a
+    /// default, and `attrs` holds the parameter's `#[...]` attribute instances. The `ParamInfo`
+    /// shape is built fresh; because shape equality is structural, it matches the tree-walker's by
+    /// construction. An unknown target yields an empty list.
+    ///
+    /// `attrs` is **joined from the attribute manifest**, not carried in the parameter record: the
+    /// rows are exactly the ones `attributes_of::<T>()` returns for the same parameter, reached
+    /// through the shared `param_attributes_for` key. So the two query surfaces are two renderings
+    /// of one table, and a parameter attribute cannot be visible through one and missing from the
+    /// other.
     pub(crate) fn materialize_params(&self, target: &str) -> Value {
         let info_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             noeta_ast::reflect::PARAM_INFO,
-            vec!["name".to_string(), "type".to_string()],
+            vec![
+                "name".to_string(),
+                "type".to_string(),
+                "optional".to_string(),
+                "attrs".to_string(),
+            ],
         ));
         let items: Vec<Value> = self
             .module
@@ -930,8 +965,43 @@ impl<'m> Vm<'m> {
             .map(|p| {
                 Value::object(
                     info_shape,
-                    vec![Value::string(&p.name), build_type_value(&p.ty)],
+                    vec![
+                        Value::string(&p.name),
+                        build_type_value(&p.ty),
+                        Value::bool(p.optional),
+                        self.materialize_param_attrs(target, &p.name),
+                    ],
                 )
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// One parameter's `#[...]` attributes, materialized into a `List<dyn>` of attribute-struct
+    /// instances. Each instance is built exactly as `materialize_attributes` builds it — same
+    /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads
+    /// off `ParamInfo.attrs` is indistinguishable from the one it would read off an `Attributed`.
+    pub(crate) fn materialize_param_attrs(&self, callable: &str, param: &str) -> Value {
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .param_attributes_for(callable, param)
+            .into_iter()
+            .map(|a| {
+                let shape = noeta_ast::reflect::attribute_shape(&a.name, &self.module.reflection);
+                let kind = if shape.is_struct {
+                    ShapeKind::Struct
+                } else {
+                    ShapeKind::Class
+                };
+                let values: Vec<Value> =
+                    noeta_ast::reflect::materialize_args(a, &shape.fields, &shape.defaults)
+                        .iter()
+                        .map(|v| attr_value_to_vm(v, &self.module.reflection))
+                        .collect();
+                let t_shape =
+                    noeta_object::intern_shape(Shape::object(kind, &a.name, shape.fields.clone()));
+                Value::object(t_shape, values)
             })
             .collect();
         Value::list(items)
