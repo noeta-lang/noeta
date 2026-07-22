@@ -14,6 +14,8 @@ namespace para.aether
 use std.http.server
 use std.http.{Request, Response}
 use std.json
+use std.session
+use std.session.{Session, Keyring}
 use std.task.sleep
 
 // --- Route attributes: users tag controller methods with these. -------------------------------
@@ -111,28 +113,62 @@ pub async fn every(ms: int, action: () -> void): void {
     }
 }
 
-// --- Middleware. -------------------------------------------------------------------------------
+// --- Middleware (the onion). -------------------------------------------------------------------
 //
-// A middleware runs before the route handler and may short-circuit the request. `before` returns
-// `some(response)` to stop the pipeline and reply immediately (auth reject, cached hit, CORS
-// preflight), or `none` to let the request continue to the next middleware / the handler. This is
-// the L1 `dyn Trait` machinery: middlewares are `dyn Middleware` in a pipeline, dispatched
-// dynamically on their concrete type.
-
+// A middleware is a LAYER of an onion, not a before/after hook pair: `handle` receives the request
+// AND `next` — the rest of the pipeline, with the routed handler at the bottom. So a layer may
+// rewrite the request before continuing (`next.run(rewritten)`), inspect or replace the response on
+// the way out, or answer WITHOUT ever calling `next` — an auth reject, a cache hit, a CORS preflight.
+// A before/after pair cannot express "answer without dispatching", which is exactly what a
+// short-circuit is; this is the same shape para/api's client-side onion uses, bottoming out in the
+// app's `serve_request` rather than a client's `send`. Middlewares are `dyn Middleware` (L1),
+// dispatched dynamically on their concrete type.
 pub trait Middleware {
-    fn before(req: Request): ?Response
+    fn handle(req: Request, next: Next): Response
 }
 
-// Run the before-pipeline: the first middleware that returns a response short-circuits; otherwise
-// `none` lets the request proceed to the route handler.
-fn run_before(pipeline: List<dyn Middleware>, req: Request): ?Response {
-    for mw in pipeline {
-        short = mw.before(req)
-        if short != none {
-            return short
+// The rest of the pipeline, as a value. `next.run(req)` continues inward; the innermost `run` bottoms
+// out in the app's `serve_request`, where the route is dispatched and the unit-of-work flushed.
+//
+// A cursor (stack + index), not a closure captured per layer: the stack is shared by every `Next` in
+// a pipeline and only the index advances, so entering a layer allocates one small struct rather than
+// capturing an environment.
+pub struct Next {
+    stack: List<dyn Middleware>
+    index: int
+    app: App
+
+    // Continue inward. Calling this is what makes a layer transparent; NOT calling it is what makes a
+    // layer answer on its own (an auth reject, a cache hit, a short-circuit reply).
+    fn run(req: Request): Response {
+        if self.index >= self.stack.len() {
+            return self.app.serve_request(req)
         }
+        rest = Next { stack: self.stack, index: self.index + 1, app: self.app }
+        return self.stack[self.index].handle(req, rest)
     }
-    return none
+}
+
+// Inject the live request for a handler's `Request` parameter. It is absent on the string-testable
+// path (`dispatch_request` threads `none`): a handler that reads the request — a header, a cookie —
+// is exercised through `serve`, where the real request exists. Panicking rather than fabricating an
+// empty request keeps the string path honest about what it can and cannot cover.
+fn request_arg(req: ?Request): dyn {
+    return match req {
+        some(r) => r,
+        none => panic("400 a `Request` parameter is only available on the server path, not the string-testable `dispatch_request`"),
+    }
+}
+
+// Coerce a handler's return value into a `Response`. A handler may return a `Response` verbatim — its
+// status and headers survive to the reply — or a bare `string`, which becomes a `200 text/plain`
+// body. The runtime value is inspected (`as<Response>`) rather than the handler's declared return, so
+// a method typed `Response`, `string`, or `dyn` all resolve at the one point the value exists.
+fn coerce_response(result: dyn): Response {
+    return match result.as<Response>() {
+        some(resp) => resp,
+        none => server.response(200, result.as<string>() ?? "200 OK", {"content-type": "text/plain"}),
+    }
 }
 
 // --- Configuration registry. ------------------------------------------------------------------
@@ -199,6 +235,56 @@ impl Store for NullStore {
     fn stage(model: string, data: string): void {}
 
     fn flush(): void {}
+}
+
+// --- The session-store seam. -------------------------------------------------------------------
+//
+// aether offers sessions behind ONE interface, so a handler reads and writes a session the same way
+// regardless of where the state actually lives:
+//   - the **stateless** default (`CookieSessions`) carries the whole session in a signed, HMAC'd
+//     cookie via `std.session` — no server state, nothing to configure, and correct under
+//     `serve --parallel` (every worker reads a cookie none of them had to write, where an in-memory
+//     map would silently fragment).
+//   - a **stored** upgrade keeps only a small session id in the cookie and the data server-side, for
+//     sessions too large for a browser's ~4 KB cookie or that must be revocable. Per the
+//     http-sessions design that impl belongs in **para/db** — it owns the connection and the
+//     migrations — and aether reaches it through the `para` scope, not a hard dependency.
+//
+// A handler obtains its session with `store.open(req)` and persists it with `store.attach(resp, s)`.
+// `Session` is `std.session`'s own type, so the two backends are interchangeable at the call site: a
+// handler written against `CookieSessions` moves to the stored backend without a line changing.
+pub trait SessionStore {
+    // The session carried by this request — an empty one when the request has no valid session (the
+    // caller has the same correct response to "absent", "forged", and "expired").
+    fn open(req: Request): Session
+    // Persist `session` onto `resp` and return the reply to send: a `Set-Cookie` for the stateless
+    // default, a row write plus a small id cookie for a stored backend. An unchanged session costs
+    // no header, so calling this unconditionally is safe.
+    fn attach(resp: Response, session: Session): Response
+}
+
+// The stateless default: the whole session rides in a signed cookie (`std.session`). Wire it once and
+// hand it to handlers. `secure` should be true behind https — it makes the cookie https-only; leave
+// it false only for a plain-http localhost. `max_age` (seconds) bounds a stolen token's lifetime,
+// which matters precisely because a stateless session has nothing to revoke against.
+pub class CookieSessions {
+    keys: Keyring
+    max_age: int
+    secure: bool
+
+    fn new(keys: Keyring, max_age: int, secure: bool): CookieSessions {
+        return CookieSessions { keys: keys, max_age: max_age, secure: secure }
+    }
+
+    impl SessionStore {
+        fn open(req: Request): Session {
+            return session.open(req, self.keys)
+        }
+
+        fn attach(resp: Response, s: Session): Response {
+            return session.attach(resp, s, self.keys, self.max_age, self.secure)
+        }
+    }
 }
 
 // --- Service providers. -----------------------------------------------------------------------
@@ -287,60 +373,81 @@ pub class App {
         self.routes = table
     }
 
-    // The testable dispatch core: resolve a route (matching `{param}` patterns and capturing the id),
-    // inject its handler's parameters by reflected type, invoke, and return the response body. `body`
-    // is the raw request body (JSON).
+    // The string-testable entry point: resolve + dispatch, then hand back the response *body* as a
+    // plain string. It exists so an app can drive its whole DI + route-model-binding path with no
+    // server (`app.handle("POST", "/users", body)`); the reply's status and headers are the server
+    // path's concern (`serve_request`), so extracting `.body()` here is exactly the projection that
+    // keeps this call byte-for-byte what it always returned — including "404 Not Found" and the
+    // "500 …" strings, which are now the bodies of a 404/500 `Response`. No live request to inject,
+    // so a handler that declares a `Request` parameter is exercised through `serve`, not this call.
     fn handle(method: string, path: string, body: string): string {
+        return self.resolve(method, path, body, none).body()
+    }
+
+    // The route-matching core shared by the string path (`handle`, an absent request) and the server
+    // path (`serve_request`, the live request). A matched route dispatches with the optional request
+    // in scope, so a handler parameter typed `Request` can be injected when one is available. Returns
+    // a full `Response` — status and headers included — so the server path carries them verbatim and
+    // the string path projects out the body.
+    fn resolve(method: string, path: string, body: string, req: ?Request): Response {
         for r in self.routes {
             if r.method == method {
                 m = path_match(r.path, path)
                 if m != none {
                     id = m ?? ""
-                    return self.dispatch(r, id, body)
+                    return self.dispatch(r, id, body, req)
                 }
             }
         }
-        return "404 Not Found"
+        return server.response(404, "404 Not Found")
     }
 
     // Dispatch a matched route: look up its controller instance and invoke the action with the
-    // captured route id in scope (for route-model binding).
-    fn dispatch(r: Route, id: string, body: string): string {
+    // captured route id in scope (for route-model binding) and the optional live request (for DI).
+    fn dispatch(r: Route, id: string, body: string, req: ?Request): Response {
         if self.controllers.has(r.controller) {
-            return self.invoke_action(self.controllers[r.controller], r, id, body)
+            return self.invoke_action(self.controllers[r.controller], r, id, body, req)
         }
-        return "500 no controller ${r.controller}"
+        return server.response(500, "500 no controller ${r.controller}")
     }
 
-    // Invoke a controller action with its injected arguments; render the string result.
-    fn invoke_action(ctrl: dyn, r: Route, id: string, body: string): string {
+    // Invoke a controller action with its injected arguments and coerce the result into a `Response`:
+    // a handler may return a `Response` verbatim (status + headers survive) or a bare `string`
+    // (a `200 text/plain` reply). An invocation error is a `500` whose body is the error — the same
+    // "500 …" string `handle` used to return, now carried as a response body.
+    fn invoke_action(ctrl: dyn, r: Route, id: string, body: string, req: ?Request): Response {
         target = "${r.controller}.${r.action}"
-        args = self.build_args(target, id, body)
+        args = self.build_args(target, id, body, req)
         return match invoke(ctrl, r.action, args) {
-            Ok(result) => result.as<string>() ?? "200 OK",
-            Err(e) => "500 ${e}",
+            Ok(result) => coerce_response(result),
+            Err(e) => server.response(500, "500 ${e}"),
         }
     }
 
     // Build the handler's argument list by reflecting its parameters (`params_of`) and injecting each
     // one by its declared type — a for-loop, not `.map`, because the injection reads `self`.
-    fn build_args(target: string, id: string, body: string): List<dyn> {
+    fn build_args(target: string, id: string, body: string, req: ?Request): List<dyn> {
         mut args: List<dyn> = []
         for p in params_of(target) {
-            args = args ~ [self.arg_for(p, id, body)]
+            args = args ~ [self.arg_for(p, id, body, req)]
         }
         return args
     }
 
     // Inject one parameter by its reflected type:
     //   - `dyn Trait`  → the registered store service (service injection by interface),
+    //   - `Request`    → the live HTTP request (server path only; see `request_arg`),
     //   - a nominal type → route-model binding (if `bind_model`'d) else request-body decode.
-    fn arg_for(p: ParamInfo, id: string, body: string): dyn {
+    //
+    // `Request` reflects as `Named("Request", [])` — the extern type's short name — so it is caught
+    // inside the `Named` arm ahead of the body-decode fallback that would otherwise swallow it into a
+    // JSON panic. A user body struct must not be named `Request`, which is the extern type's name.
+    fn arg_for(p: ParamInfo, id: string, body: string, req: ?Request): dyn {
         return match p.type {
             DynTrait(_) => self.store,
             Struct(n, _) => self.materialize(n, id, body),
             Class(n, _) => self.materialize(n, id, body),
-            Named(n, _) => self.materialize(n, id, body),
+            Named(n, _) => if n == "Request" then request_arg(req) else self.materialize(n, id, body),
             _ => panic("400 cannot inject a parameter of this type"),
         }
     }
@@ -357,13 +464,12 @@ pub class App {
         }
     }
 
-    // The HTTP adapter: run the middleware pipeline (short-circuit if any responds), otherwise
-    // dispatch to the routed handler and reply — flushing the request's unit-of-work afterwards.
+    // The HTTP adapter: enter the middleware onion at its outermost layer. Each layer may rewrite the
+    // request, inspect or replace the response, or short-circuit; `Next.run` bottoms out in
+    // `serve_request`, which dispatches the route and flushes the unit-of-work. The first middleware
+    // registered is the outermost — it sees the request first and the response last.
     fn route(req: Request): Response {
-        return match run_before(self.middleware, req) {
-            some(resp) => resp,
-            none => self.serve_request(req),
-        }
+        return Next { stack: self.middleware, index: 0, app: self }.run(req)
     }
 
     // The string-testable request cycle: dispatch to the routed handler, then commit the request's
@@ -376,10 +482,17 @@ pub class App {
         return out
     }
 
-    // Dispatch one live HTTP request to its handler, then commit the unit-of-work.
+    // Dispatch one live HTTP request to its handler, then commit the unit-of-work. Unlike the
+    // string-testable `dispatch_request`, this threads the live `Request` down to `arg_for` (so a
+    // `Request` parameter is injected with the real one) AND returns the handler's `Response`
+    // verbatim — its status and headers reach the client, where `dispatch_request` projected only the
+    // body to a string. The route → flush sequence is otherwise identical, so the string path stays a
+    // faithful rehearsal of the server path. It is the onion's terminal — `Next.run` calls it once
+    // the pipeline is exhausted.
     fn serve_request(req: Request): Response {
-        body = self.dispatch_request(req.method(), req.path(), req.body())
-        return server.response(200, body)
+        resp = self.resolve(req.method(), req.path(), req.body(), some(req))
+        self.store.flush()
+        return resp
     }
 
     // Run the app on `port`, dispatching each request through the router.

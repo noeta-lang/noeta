@@ -1271,6 +1271,103 @@ impl DocumentStore {
         Some((descriptor, index.range(span, encoding)))
     }
 
+    /// The **composed hover** at `position`: the single Markdown string a client shows, assembled
+    /// from the eight `hover_*` primitives under one fixed precedence, so every consumer (the LSP,
+    /// the web playground) renders identical hovers and cannot drift.
+    ///
+    /// Precedence — the first that matches wins: [`hover_tier`](Self::hover_tier),
+    /// [`hover_directive`](Self::hover_directive), [`hover_use`](Self::hover_use),
+    /// [`hover_namespace`](Self::hover_namespace), [`hover_signature`](Self::hover_signature),
+    /// [`hover_type_definition`](Self::hover_type_definition), then
+    /// [`hover_type`](Self::hover_type). The signature/type-def/type branches append the symbol's
+    /// [`hover_doc`](Self::hover_doc) prose after a `\n\n---\n\n` rule when present; the type branch
+    /// also carries a non-default-storage `note` line. When nothing above matches but the symbol
+    /// still has doc prose, the result is a **doc-only** hover.
+    ///
+    /// The returned `Range` is optional: it is `Some` for every branch that underlines a span
+    /// (tier/directive/use/namespace/signature/type-def/type), and **`None`** for the doc-only
+    /// fallback — which has no expression span of its own (it fires on a declaration's *name*).
+    /// `None` (the outer option) means no hover at all at this position.
+    pub fn hover_markdown(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(String, Option<Range>)> {
+        let found = self.hover_type(uri, position, encoding);
+        let doc = self.hover_doc(uri, position, encoding);
+        let tier = self.hover_tier(uri, position, encoding);
+        let directive = self.hover_directive(uri, position, encoding);
+        let use_stmt = self.hover_use(uri, position, encoding);
+        let namespace = self.hover_namespace(uri, position, encoding);
+        let signature = self.hover_signature(uri, position, encoding);
+        let type_def = self.hover_type_definition(uri, position, encoding);
+
+        // Hovering an embedded-language block's tier name (`@sql { … }`) describes its body — the
+        // declared language and, for an expression tier, its value type — read from the tier
+        // registry (program + extension declarations alike). Takes precedence over the type hover
+        // because the cursor is on the tier name, not a typed sub-expression.
+        if let Some((descriptor, range)) = tier {
+            return Some((descriptor, Some(range)));
+        }
+        // A decorator directive (`@attribute`, `@role`, `@semantic`, `@packed`, `@derive`) —
+        // described in place; the tier directives are the tier hover's.
+        if let Some((value, range)) = directive {
+            return Some((value, Some(range)));
+        }
+        // Any element of a `use` statement — imported items (with their signature/definition and
+        // doc prose) and module path segments. No other hover fires inside a `use`.
+        if let Some((value, range)) = use_stmt {
+            return Some((value, Some(range)));
+        }
+        // A namespace-group name (`http` from `use std.http`) has no typed expression, so describe
+        // the group and its members here (module-namespaces).
+        if let Some((descriptor, range)) = namespace {
+            return Some((descriptor, Some(range)));
+        }
+        // Hovering a callable's *name* shows its declaration (`fn manhattan(): int`) plus any doc —
+        // ahead of the type hover, whose tightest span at a call is the result type alone (`int`).
+        if let Some((sig, range)) = signature {
+            let mut value = format!("```noeta\n{sig}\n```");
+            if let Some(doc) = doc {
+                value.push_str("\n\n---\n\n");
+                value.push_str(&doc);
+            }
+            return Some((value, Some(range)));
+        }
+        // Hovering a type name (`Point`) shows its declaration — fields/variants and method
+        // signatures — ahead of the type hover, which would otherwise report just the nominal name.
+        if let Some((def, range)) = type_def {
+            let mut value = format!("```noeta\n{def}\n```");
+            if let Some(doc) = doc {
+                value.push_str("\n\n---\n\n");
+                value.push_str(&doc);
+            }
+            return Some((value, Some(range)));
+        }
+        match (found, doc) {
+            // `TypeRepr` displays as its Noeta surface spelling (`impl Display` in
+            // `noeta_ast::reflect`) — the same rendering the debugger's Variables view uses.
+            // A non-default storage fact (`@packed` / flat list) follows as a plain line, and
+            // the declaration's attached `@doc` prose (already Markdown) follows after a rule.
+            (Some((repr, note, range)), doc) => {
+                let mut value = match note {
+                    Some(note) => format!("```noeta\n{repr}\n```\n{note}"),
+                    None => format!("```noeta\n{repr}\n```"),
+                };
+                if let Some(doc) = doc {
+                    value.push_str("\n\n---\n\n");
+                    value.push_str(&doc);
+                }
+                Some((value, Some(range)))
+            }
+            // No typed expression under the cursor (e.g. the declaration's own name), but the
+            // symbol has attached `@doc` prose — a doc-only hover with no span of its own.
+            (None, Some(doc)) => Some((doc, None)),
+            (None, None) => None,
+        }
+    }
+
     /// The quick-fixes offered over `range` — today, the one the `@`-directive name-space can
     /// answer for: an `@name` that resolves to nothing, rewritten to the nearest name that does.
     ///

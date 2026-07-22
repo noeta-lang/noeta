@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use noeta_ext_abi::registry::{
-    DirectiveCtx, Expansion, ExtDirective, ExtModule, Extension, TierSite,
+    DirectiveCtx, Expansion, ExpansionError, ExtDirective, ExtModule, Extension, TierSite,
 };
 use noeta_loader::{Linked, LoadDiagnostic, RawModule, link};
 
@@ -22,7 +22,7 @@ static GATED_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// Emits one method per positional argument, plus one named `prefix` if given — enough to prove
 /// that arguments arrive, that a string literal arrives unquoted, and that named arguments are kept
 /// apart from positional ones.
-fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     let mut source = String::new();
     for arg in &ctx.args {
         source.push_str(&format!("fn from_{arg}(): int {{ return 1; }}\n"));
@@ -40,17 +40,23 @@ fn expand_ok(ctx: &DirectiveCtx) -> Result<Expansion, String> {
     })
 }
 
-fn expand_err(_: &DirectiveCtx) -> Result<Expansion, String> {
-    Err("the spec has no paths".to_string())
+/// Fails, but reports the file it read on the way — the error-path incrementality contract. A
+/// missing spec is the archetype: the hook read (tried to open) a path, failed, and must still
+/// report it so its later appearance re-runs the expansion.
+fn expand_err(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    Err(ExpansionError {
+        message: "the spec has no paths".to_string(),
+        reads: vec![format!("{}/spec.yaml", ctx.source_dir)],
+    })
 }
 
 /// Reachable only from the two skip tests, so entering it at all is the failure they look for.
-fn expand_gated(ctx: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_gated(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     GATED_CALLS.fetch_add(1, Ordering::SeqCst);
     expand_ok(ctx)
 }
 
-fn expand_garbage(_: &DirectiveCtx) -> Result<Expansion, String> {
+fn expand_garbage(_: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     Ok(Expansion {
         source: "fn broken( {{{".to_string(),
         reads: Vec::new(),

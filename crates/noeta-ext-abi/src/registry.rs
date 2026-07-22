@@ -1104,9 +1104,9 @@ pub struct ExtDirective {
     pub expand: Option<DirectiveExpand>,
 }
 
-/// An [`ExtDirective::expand`] hook: the decorated declaration in, an [`Expansion`] out, or a
-/// message to report at the directive's span.
-pub type DirectiveExpand = fn(&DirectiveCtx) -> Result<Expansion, String>;
+/// An [`ExtDirective::expand`] hook: the decorated declaration in, an [`Expansion`] out, or an
+/// [`ExpansionError`] to report at the directive's span.
+pub type DirectiveExpand = fn(&DirectiveCtx) -> Result<Expansion, ExpansionError>;
 
 /// What an expansion produced: the members, and the files it took them from.
 #[derive(Debug, Clone, Default)]
@@ -1125,6 +1125,45 @@ pub struct Expansion {
     /// stale until something else invalidates it. Report every file opened, including ones that
     /// turned out to be missing or empty (their *appearing* later is a change too).
     pub reads: Vec<String>,
+}
+
+/// Why an expansion failed — **and what it read on the way to failing.**
+///
+/// The reads matter on the error path more than on the success path, not less: the commonest
+/// failure is a spec that is not there *yet*, and the incrementality contract only closes if the
+/// compiler is told which path was consulted, so that *creating* the file re-runs the hook. A
+/// `Result<Expansion, String>` could not carry that — the reads lived only in the `Ok` — so this
+/// type gives the error the same `reads` channel the success has.
+///
+/// A hook with nothing to report converts a bare message: `return Err("no paths".into())` leaves
+/// `reads` empty. A hook that opened a file before failing builds the struct so the file is still
+/// watched.
+#[derive(Debug, Clone, Default)]
+pub struct ExpansionError {
+    /// The message reported at the directive's span (as E0062).
+    pub message: String,
+    /// Every file the hook read before it failed — the same contract as [`Expansion::reads`], and
+    /// the reason a missing file that later appears re-triggers the expansion instead of staying
+    /// stale.
+    pub reads: Vec<String>,
+}
+
+impl From<String> for ExpansionError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            reads: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for ExpansionError {
+    fn from(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            reads: Vec::new(),
+        }
+    }
 }
 
 /// Two directives are equal when they **declare** the same thing. `expand` is excluded: a function

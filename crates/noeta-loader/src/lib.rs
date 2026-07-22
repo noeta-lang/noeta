@@ -503,14 +503,21 @@ fn expand_into(
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<Vec<String>, Vec<LoadDiagnostic>> {
     let next_id = sources.len() as u32;
-    let (expansions, reads) = run_expansion(
+    let (expansions, reads, diagnostics) = run_expansion(
         program,
         source_maps,
         || sources.clone(),
         next_id,
         root_edition,
         text_tiers,
-    )?;
+    );
+    // A failed expansion fails the link (a program cannot be checked without the members its
+    // directives declare). The batch CLI is single-shot — it does not watch — so the error-path
+    // reads have no consumer here and are dropped with the error; the salsa path
+    // (`noeta_db::linked_from`) is the one that keeps them, for the watcher.
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
     for expansion in expansions {
         editions.set(expansion.source.id(), root_edition);
         sources.push(expansion.source);
@@ -535,8 +542,14 @@ fn expand_into(
 /// reconstruct — a price no program without an expanding directive (nearly all of them) should pay
 /// per keystroke. Callers that already hold a slice pass a cheap clone of it.
 ///
-/// Returns the expansion sources (already id'd, each with the directive that produced it) and every
-/// file the hooks reported reading.
+/// Returns the expansion sources (already id'd, each with the directive that produced it), every
+/// file the hooks reported reading, and the diagnostics.
+///
+/// The three are returned **side by side, not as a `Result`**, because `reads` must survive a
+/// failed expansion: a hook that failed because its spec was missing still reported that spec, and
+/// the rebuild trigger needs it so that *creating* the file re-runs the expansion. A `Result` would
+/// have discarded the reads on the `Err`, which is the exact case that matters most. Callers fail
+/// the link when `diagnostics` is non-empty, but register `reads` either way.
 pub fn run_expansion(
     program: &mut Program,
     source_maps: &std::collections::HashMap<SourceId, qualify::QMap>,
@@ -544,10 +557,10 @@ pub fn run_expansion(
     next_id: u32,
     root_edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
-) -> Result<(Vec<ExpandedSource>, Vec<String>), Vec<LoadDiagnostic>> {
+) -> (Vec<ExpandedSource>, Vec<String>, Vec<LoadDiagnostic>) {
     let registry = noeta_ext_abi::registry::single_registry_process();
     if !expand::has_expansions(program, registry) {
-        return Ok((Vec::new(), Vec::new()));
+        return (Vec::new(), Vec::new(), Vec::new());
     }
     // Expansion ids continue past the sources this link already has. That numbering is **per
     // render**, deliberately: in the directory mode two different entries of the same directory can
@@ -565,10 +578,7 @@ pub fn run_expansion(
         text_tiers,
         registry,
     );
-    if !expanded.diagnostics.is_empty() {
-        return Err(expanded.diagnostics);
-    }
-    Ok((expanded.sources, expanded.reads))
+    (expanded.sources, expanded.reads, expanded.diagnostics)
 }
 
 /// Link the entry against its sibling modules **and its dependency packages** (package-manager P2.1).
@@ -948,14 +958,19 @@ impl ParsedDir {
             &broken,
             Some(&self.native_roots),
         )?;
-        let (expansions, reads) = run_expansion(
+        let (expansions, reads, diagnostics) = run_expansion(
             &mut program,
             &source_maps,
             || self.sources.clone(),
             self.sources.len() as u32,
             self.root_edition,
             &self.text_tiers,
-        )?;
+        );
+        // Directory mode (`noeta check`) is single-shot — it does not watch — so a failed
+        // expansion's reads have no rebuild trigger to feed and are dropped with the error.
+        if !diagnostics.is_empty() {
+            return Err(diagnostics);
+        }
         Ok(EntryLink {
             program,
             expansions,
@@ -1521,8 +1536,14 @@ fn link_core(
                 let refs = qualify::referenced_names(stmt);
                 let mut work = Vec::new();
                 for name in refs {
-                    if merge_one_dep(&name, mv, &mv.namespace, &module_maps, &mut merged_q, &mut imported)
-                    {
+                    if merge_one_dep(
+                        &name,
+                        mv,
+                        &mv.namespace,
+                        &module_maps,
+                        &mut merged_q,
+                        &mut imported,
+                    ) {
                         work.push(name);
                     }
                 }
@@ -1662,7 +1683,14 @@ fn merge_module_closure(
     // The root is already merged (under its local name); record its qualified identity so it is not
     // merged again, then expand its references to a fixpoint.
     merged_q.insert(format!("{}.{root}", path.join(".")));
-    expand_module_refs(vec![root.to_string()], module, path, module_maps, merged_q, imported);
+    expand_module_refs(
+        vec![root.to_string()],
+        module,
+        path,
+        module_maps,
+        merged_q,
+        imported,
+    );
 }
 
 /// Merge one same-module declaration `name` and report whether it was **freshly** merged.

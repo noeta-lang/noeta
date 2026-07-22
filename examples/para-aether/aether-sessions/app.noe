@@ -1,0 +1,70 @@
+// noeta-aether request context, Response handlers, the middleware onion, and stateless sessions —
+// the aether-sessions arc, in one app:
+//
+//   * A1 REQUEST CONTEXT  — a handler parameter typed `Request` is injected with the live request,
+//     so it can read a header or a session cookie off it.
+//   * A2 RESPONSE HANDLERS — a handler returns a `Response`, so it sets its own status and emits a
+//     `Set-Cookie` (a plain `string` handler still works, coerced to `200 text/plain`).
+//   * A3 MIDDLEWARE ONION  — a layer receives the request AND `next`, the rest of the pipeline, so it
+//     can rewrite the request, mutate the response, or short-circuit.
+//   * A4 SESSIONS          — the stateless `CookieSessions` store carries the whole session in a
+//     signed, HMAC'd cookie via `std.session`; no server state, correct under `serve --parallel`.
+//
+// This is a server, so the example gate CHECKS it rather than running it (running a socket server is
+// not hermetic). Try it yourself: `noeta run app.noe`, then `curl -i localhost:8080/` and
+// `curl -i -X POST localhost:8080/login`.
+use para.aether.{App, Get, Post, Middleware, Next, CookieSessions, SessionStore}
+use std.http.server
+use std.http.{Request, Response}
+use std.session
+
+// A1 + A2 + A4: every handler reads the live request, uses the injected session store, and returns a
+// `Response`. The store is held as a field (a `dyn SessionStore`), so swapping the stateless default
+// for a stored backend is a one-line change at the wiring site, not in any handler.
+class Home {
+    sessions: dyn SessionStore
+
+    fn new(sessions: dyn SessionStore): Home {
+        return Home { sessions: sessions }
+    }
+
+    // Read the session off the request and greet whoever it names.
+    #[Get("/")]
+    fn index(req: Request): Response {
+        s = self.sessions.open(req)
+        who = s.get("user") ?? "guest"
+        return server.response(200, "hello, ${who}")
+    }
+
+    // Write the session onto the reply — a `Set-Cookie` the browser carries back next time.
+    #[Post("/login")]
+    fn login(req: Request): Response {
+        s = self.sessions.open(req).set("user", "ada")
+        return self.sessions.attach(server.response(200, "logged in"), s)
+    }
+}
+
+// A3: a pass-through onion layer — stamp every reply with a header on the way out.
+class Stamp {
+    fn new(): Stamp {
+        return Stamp {}
+    }
+
+    impl Middleware {
+        fn handle(req: Request, next: Next): Response {
+            return next.run(req).with_header("x-app", "aether")
+        }
+    }
+}
+
+// Wire the app: a stateless session store (dev config — `secure = false` for plain-http localhost),
+// one controller, one onion layer. In production load the secret from the environment and set
+// `secure = true`.
+keys = session.keyring(["0123456789abcdef0123456789abcdef"])
+sessions = CookieSessions.new(keys, 3600, false)
+
+app = App.new()
+app.register("Home", Home.new(sessions))
+app.use_middleware(Stamp.new())
+app.discover()
+app.serve(8080)

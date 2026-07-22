@@ -211,11 +211,9 @@ fn the_directive_is_refused_where_its_members_would_make_no_sense() {
     // unknown-directive code, which would mean the name had failed to resolve at all.
     let checked = noeta_check::check_all(&linked.program);
     assert!(
-        checked
-            .diagnostics
-            .iter()
-            .any(|d| d.code.code() == "E0054"
-                && d.message.contains("`@openapi` does not apply to a function")),
+        checked.diagnostics.iter().any(|d| d.code.code() == "E0054"
+            && d.message
+                .contains("`@openapi` does not apply to a function")),
         "the checker must report the misplaced directive: {:?}",
         checked
             .diagnostics

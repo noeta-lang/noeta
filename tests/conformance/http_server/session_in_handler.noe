@@ -1,0 +1,79 @@
+// std.session end to end through the aether dispatch path (aether-sessions A4, step 1): with the
+// request injected (A1), the handler returning a Response (A2), and dispatch by reflection/invoke,
+// a controller method can `session.open(req, keys)` on the way in and `session.attach(resp, …)` on
+// the way out with NO framework session feature — it composes out of A1–A3 and std.session alone.
+// This is what the stored `SessionStore` upgrade builds on; proving it first shows the stateless
+// path needs nothing new.
+//
+// Pinned: a cookieless request opens an empty session (user → "anon") and its reply carries exactly
+// one Secure Set-Cookie; feeding the emitted token back as a Cookie header recovers the value on the
+// next dispatch. Both backends agree.
+// expect: stdout "first: was:anon setcookie=1 secure=true"
+// expect: stdout "return: was:42"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+use std.session
+use std.session.{Session, Keyring}
+
+// A controller in the aether shape: inject `Request`, return `Response`. It reads the session off the
+// request and writes the updated one onto the reply.
+class Account {
+    keys: Keyring
+
+    fn new(keys: Keyring): Account {
+        return Account { keys: keys }
+    }
+
+    fn login(req: Request): Response {
+        s = session.open(req, self.keys)
+        who = s.get("user") ?? "anon"
+        s2 = s.set("user", "42")
+        body = "was:${who}"
+        return session.attach(server.response(200, body), s2, self.keys, 3600, true)
+    }
+}
+
+// The A2 coercion, inline (conformance cannot import para.aether).
+fn coerce(result: dyn): Response {
+    return match result.as<Response>() {
+        some(resp) => resp,
+        none => server.response(200, result.as<string>() ?? "200 OK"),
+    }
+}
+
+// Dispatch through reflection: inject the request, invoke by name, coerce the result — the A1+A2 path.
+fn dispatch(a: Account, req: Request): Response {
+    args: List<dyn> = [req]
+    return match invoke(a, "login", args) {
+        Ok(v) => coerce(v),
+        Err(e) => server.response(500, "500 ${e}"),
+    }
+}
+
+keys = session.keyring(["0123456789abcdef0123456789abcdef"])
+acct = Account.new(keys)
+
+fn handle(req: Request) use (acct, keys): Response {
+    if req.path() != "/" {
+        return server.response(200, "skip")
+    }
+
+    // A cookieless request: empty session ("anon"), reply carries one Secure Set-Cookie.
+    r1 = dispatch(acct, req)
+    sc = r1.headers_all("set-cookie")
+    secure = sc[0].contains("Secure")
+    echo "first: ${r1.body()} setcookie=${sc.len()} secure=${secure}"
+
+    // The browser's return trip: the token a logged-in session encodes to comes back as a Cookie
+    // header; dispatching again recovers the value.
+    logged = session.open(req, keys).set("user", "42")
+    token = session.encode(logged.data(), keys, 3600)
+    returning = req.with_header("cookie", "session=" ~ token)
+    r2 = dispatch(acct, returning)
+    echo "return: ${r2.body()}"
+
+    return r1
+}
+
+server.serve(8080, handle)
