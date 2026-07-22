@@ -216,8 +216,14 @@ mod tests {
             r#"{"paths":{"/search":{"get":{"operationId":"search","parameters":[
                {"name":"q","in":"query","required":true,"schema":{"type":"string"}}]}}}}"#,
         );
-        assert!(out.contains("fn search(q: string, query: Map<string, string> = {})"), "{out}");
-        assert!(out.contains(r#"Api.query_string(query.set("q", "${q}"))"#), "{out}");
+        assert!(
+            out.contains("fn search(q: string, query: Map<string, string> = {})"),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"Api.query_string(query.set("q", "${q}"))"#),
+            "{out}"
+        );
     }
 
     #[test]
@@ -237,7 +243,10 @@ mod tests {
         let with = generate(
             r#"{"paths":{"/pets":{"post":{"operationId":"createPet","requestBody":{}}}}}"#,
         );
-        assert!(with.contains(r#"fn create_pet(body: string = "", query"#), "{with}");
+        assert!(
+            with.contains(r#"fn create_pet(body: string = "", query"#),
+            "{with}"
+        );
         assert!(with.contains(", body)"), "{with}");
 
         let without = generate(r#"{"paths":{"/pets":{"get":{"operationId":"listPets"}}}}"#);
@@ -283,7 +292,10 @@ mod tests {
             r#"{"paths":{"/x/{query}":{"get":{"operationId":"x","parameters":[
                {"name":"query","in":"path","schema":{"type":"string"}}]}}}}"#,
         );
-        assert!(out.contains("fn x(query_2: string, query: Map<string, string> = {})"), "{out}");
+        assert!(
+            out.contains("fn x(query_2: string, query: Map<string, string> = {})"),
+            "{out}"
+        );
         assert!(out.contains(r#"Api.encode("${query_2}")"#), "{out}");
     }
 }

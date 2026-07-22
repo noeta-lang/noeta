@@ -561,26 +561,41 @@ fn parse_entry(entry: &Path, src: &str) -> Option<noeta_ast::Program> {
 mod tests {
     use super::*;
 
+    // No expansion reads in play for the source/manifest/hidden cases — the second argument only
+    // adds paths, it never removes one.
+    const NO_READS: &[PathBuf] = &[];
+
     #[test]
     fn source_and_manifest_paths_are_relevant() {
-        assert!(relevant_path(Path::new("src/main.noe")));
-        assert!(relevant_path(Path::new("/abs/dir/app.noe")));
-        assert!(relevant_path(Path::new("noeta.toml")));
-        assert!(relevant_path(Path::new("deps/noeta.lock")));
+        assert!(relevant_path(Path::new("src/main.noe"), NO_READS));
+        assert!(relevant_path(Path::new("/abs/dir/app.noe"), NO_READS));
+        assert!(relevant_path(Path::new("noeta.toml"), NO_READS));
+        assert!(relevant_path(Path::new("deps/noeta.lock"), NO_READS));
     }
 
     #[test]
     fn hidden_dirs_backups_and_foreign_files_are_not() {
-        assert!(!relevant_path(Path::new(".git/objects/ab.noe")));
-        assert!(!relevant_path(Path::new("src/.cache/x.noe")));
-        assert!(!relevant_path(Path::new("src/main.noe~")));
-        assert!(!relevant_path(Path::new("src/lib.rs")));
-        assert!(!relevant_path(Path::new("Cargo.toml")));
+        assert!(!relevant_path(Path::new(".git/objects/ab.noe"), NO_READS));
+        assert!(!relevant_path(Path::new("src/.cache/x.noe"), NO_READS));
+        assert!(!relevant_path(Path::new("src/main.noe~"), NO_READS));
+        assert!(!relevant_path(Path::new("src/lib.rs"), NO_READS));
+        assert!(!relevant_path(Path::new("Cargo.toml"), NO_READS));
     }
 
     #[test]
     fn relative_prefixes_do_not_count_as_hidden() {
-        assert!(relevant_path(Path::new("./src/main.noe")));
-        assert!(relevant_path(Path::new("../sibling/app.noe")));
+        assert!(relevant_path(Path::new("./src/main.noe"), NO_READS));
+        assert!(relevant_path(Path::new("../sibling/app.noe"), NO_READS));
+    }
+
+    #[test]
+    fn a_reported_read_is_relevant_even_though_it_is_not_a_noe_file() {
+        // The reason the `reads` argument exists (directive-expansion arc): an OpenAPI spec a hook
+        // read is not a `.noe` file and matches no manifest name, so it would be filtered out — but
+        // editing it must rebuild the generated client. A path listed in `reads` is relevant.
+        let reads = [PathBuf::from("api/petstore.json")];
+        assert!(relevant_path(Path::new("api/petstore.json"), &reads));
+        // A foreign file NOT among the reads stays irrelevant — the branch adds only what was read.
+        assert!(!relevant_path(Path::new("api/other.json"), &reads));
     }
 }

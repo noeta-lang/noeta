@@ -31,9 +31,8 @@
 //! whole answer to output scope.
 
 use noeta_ext_abi::registry::{
-    DirectiveCtx, ExtDirective, ExtFn, ExtModule, Expansion, ExpansionError, Extension, NativeOut,
-    NativeValue,
-    RetTy, SigType, TierSite,
+    DirectiveCtx, Expansion, ExpansionError, ExtDirective, ExtFn, ExtModule, Extension, NativeOut,
+    NativeValue, RetTy, SigType, TierSite,
 };
 use noeta_ext_abi::{Host, StdError};
 
@@ -73,8 +72,9 @@ fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     // the shapes its declaration permits; it is only relieved of the ones it forbids.
     let Some(arg) = ctx.args.first() else {
         // No path was named, so nothing was read — a bare message with empty reads.
-        return Err("needs the path to an OpenAPI document, as in `@openapi(\"petstore.json\")`"
-            .into());
+        return Err(
+            "needs the path to an OpenAPI document, as in `@openapi(\"petstore.json\")`".into(),
+        );
     };
 
     let path = std::path::Path::new(&ctx.source_dir).join(arg);
@@ -101,8 +101,8 @@ fn expand_openapi(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
         )));
     }
 
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| failed(format!("could not read `{display}`: {e}")))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| failed(format!("could not read `{display}`: {e}")))?;
     let spec = spec::parse(&text).map_err(|e| failed(format!("`{arg}`: {e}")))?;
 
     Ok(Expansion {
@@ -242,7 +242,11 @@ mod tests {
             source_dir: String::new(),
         };
         let error = expand_openapi(&ctx).expect_err("no argument cannot expand");
-        assert!(error.message.contains("needs the path"), "{}", error.message);
+        assert!(
+            error.message.contains("needs the path"),
+            "{}",
+            error.message
+        );
         // No path was named, so nothing was read.
         assert!(error.reads.is_empty(), "{:?}", error.reads);
     }
@@ -277,7 +281,11 @@ mod tests {
             source_dir: "/proj/api".to_string(),
         };
         let error = expand_openapi(&ctx).expect_err("a missing spec cannot expand");
-        assert!(error.message.contains("could not read"), "{}", error.message);
+        assert!(
+            error.message.contains("could not read"),
+            "{}",
+            error.message
+        );
         assert_eq!(
             error.reads,
             vec!["/proj/api/does-not-exist.json".to_string()],
