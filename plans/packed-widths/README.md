@@ -56,14 +56,22 @@ Slices 1 and 2 are **done and merged** (arc `c822c181`, combined gate 7/7 includ
 | 2 | f32 scalar narrowing + erased-width warning | ✅ done | `NarrowTarget::F32` + `F32 <: float` in both matchers; `.as<T>()` honors the edge. **E0063** warns on scalar `is iN`/`is f64`; `is f32`/`is int`/`is List<iN>` do not. |
 | 3 | SIMD/kernel acceleration where it pays | ⏸ deferred | Optional. Slice 1 delivers storage + reflection — the reasons the width exists. Slice 3 only vectorizes *ops* on the new-width buffers, and only where a kernel exists (today f32/vector-shaped). No correctness or fidelity gap without it; everything runs scalar-ly. Scope against a concrete workload rather than speculatively. |
 
-### Deferred as a separate arc (not a loose end here)
+### Bare-scalar-list compaction — DONE (slice 4, merged `a5fe8b77`)
 
-**Bare-scalar-list compaction** — `List<i32>` as a *raw* 4-byte buffer, versus `List<@packed struct>`.
-No primitive has this today, not even `f32` (`packed_layout` requires the element to be a declared
-`@packed` struct). So it is a distinct capability for *all* primitives, needing a scalar-element
-materialization mode in both value backends — genuinely its own arc. The reflection distinctness it
-would enable is already delivered here via the construction tag; only the compact *storage* of a
-bare scalar list is outstanding.
+`List<T>` for a **sub-8-byte** fixed-width numeric (`i8 u8 i16 u16 i32 u32 f32`) now uses a compact
+flat buffer instead of a boxed `Rc<Vec<Value>>` — `List<i32>` is 4 B/element, `List<i8>` 1 B (up to
+8× smaller). The bounded path: the packed-list machinery (`ListRepr::Packed` / `Payload::PackedList`)
+already existed and was representation-transparent; the one new concept is a **scalar element
+schema**, done by making the struct wrapper `Option` (`None` = scalar), so a bare scalar is a
+degenerate single-field layout that materializes to a bare `Value` with **no allocation** (cheaper
+to access than a struct element). Reflection distinctness is recovered from the *schema* (a packed
+list has no per-value tag), and even carries signedness (`List<u8> is List<i8>` → false). Equality
+stays across-representation (`List<i32> == List<int>` → true). FORMAT_VERSION 5 → 6.
+
+**Scope decision:** only sub-8-byte widths pack — `i64`/`u64`/`f64` gain nothing (a boxed element is
+already 8 B, and slice 1 tagged them distinct), and `int`/`float`/`bool` bare lists stay boxed
+(hot-path default / out of scope). A `.map()` producing a scalar list stays boxed (observationally
+identical, avoids widening the map-packing builtin).
 
 This arc branches off `arc-cli-foundations` (unmerged) because slice 2 uses the `BuiltinTy` enum
 that arc introduced — doing the f32 narrowing anywhere else would add a scattered case `BuiltinTy`
