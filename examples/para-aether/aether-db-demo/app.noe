@@ -72,6 +72,27 @@ class SqlStore {
     }
 }
 
+// A SECOND service, distinct from the data `Store`, to show the container resolves each `dyn`
+// parameter by its own interface — not the single-service stub that handed the `Store` to every
+// `dyn`. `Clock` is an app-local interface (no `para` import), so it also exercises short-name keying
+// on a bare, unqualified trait name alongside the imported, fully-qualified `Store`.
+trait Clock {
+    fn stamp(): string
+}
+
+// A fixed clock — deterministic output makes the injected service observable in the string path.
+class FixedClock {
+    fn new(): FixedClock {
+        return FixedClock {}
+    }
+
+    impl Clock {
+        fn stamp(): string {
+            return "2026-07-22T00:00:00Z"
+        }
+    }
+}
+
 class UsersController {
     fn new(): UsersController {
         return UsersController {}
@@ -83,12 +104,14 @@ class UsersController {
         return "user ${user.id}: ${user.name} (${user.age})"
     }
 
-    // Service injection (`store: dyn Store`) + unit-of-work: the handler stages an insert and returns
-    // immediately; aether flushes the write after the response.
+    // Service injection by interface + unit-of-work: TWO distinct services inject into one handler —
+    // `store: dyn Store` (the data store) and `clock: dyn Clock` (a separate service) — each resolved
+    // to the instance registered for ITS interface, proving the container is not the single-service
+    // stub. The handler stages an insert and returns immediately; aether flushes the write afterward.
     #[Post("/users")]
-    fn create(body: CreateUser, store: dyn Store): string {
+    fn create(body: CreateUser, store: dyn Store, clock: dyn Clock): string {
         store.stage("User", body.to_json())
-        return "queued ${body.name}"
+        return "queued ${body.name} at ${clock.stamp()}"
     }
 }
 
@@ -101,6 +124,9 @@ conn.execute("INSERT INTO users (id, name, age) VALUES (?, ?, ?)", [1, "Ada", 36
 app = App.new()
 app.register("UsersController", UsersController.new())
 app.set_store(SqlStore.new(conn))
+// A second service, registered by its interface name — injected wherever a handler declares `dyn Clock`,
+// independently of the data `Store`.
+app.bind("Clock", FixedClock.new())
 app.bind_model("User")
 app.discover()
 

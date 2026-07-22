@@ -18,29 +18,29 @@ use std.http.server
 use std.http.{Request, Response}
 use std.session
 
-// A1 + A2 + A4: every handler reads the live request, uses the injected session store, and returns a
-// `Response`. The store is held as a field (a `dyn SessionStore`), so swapping the stateless default
-// for a stored backend is a one-line change at the wiring site, not in any handler.
+// A1 + A2 + A4 + DI: every handler reads the live request and returns a `Response`. The session store
+// is INJECTED into each handler as a `dyn SessionStore` parameter — the container resolves it to the
+// instance registered under `SessionStore` at wiring — rather than held as a controller field. So the
+// controller carries no session state, and swapping the stateless default for a stored backend is a
+// one-line change at the wiring site (`app.bind("SessionStore", …)`), with no handler touched.
 class Home {
-    sessions: dyn SessionStore
-
-    fn new(sessions: dyn SessionStore): Home {
-        return Home { sessions: sessions }
+    fn new(): Home {
+        return Home {}
     }
 
     // Read the session off the request and greet whoever it names.
     #[Get("/")]
-    fn index(req: Request): Response {
-        s = self.sessions.open(req)
+    fn index(req: Request, sessions: dyn SessionStore): Response {
+        s = sessions.open(req)
         who = s.get("user") ?? "guest"
         return server.response(200, "hello, ${who}")
     }
 
     // Write the session onto the reply — a `Set-Cookie` the browser carries back next time.
     #[Post("/login")]
-    fn login(req: Request): Response {
-        s = self.sessions.open(req).set("user", "ada")
-        return self.sessions.attach(server.response(200, "logged in"), s)
+    fn login(req: Request, sessions: dyn SessionStore): Response {
+        s = sessions.open(req).set("user", "ada")
+        return sessions.attach(server.response(200, "logged in"), s)
     }
 }
 
@@ -64,7 +64,9 @@ keys = session.keyring(["0123456789abcdef0123456789abcdef"])
 sessions = CookieSessions.new(keys, 3600, false)
 
 app = App.new()
-app.register("Home", Home.new(sessions))
+app.register("Home", Home.new())
+// Register the session store under its interface — handlers receive it injected as `dyn SessionStore`.
+app.bind("SessionStore", sessions)
 app.use_middleware(Stamp.new())
 app.discover()
 app.serve(8080)
