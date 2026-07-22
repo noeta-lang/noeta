@@ -1342,7 +1342,19 @@ fn link_core(
                 Resolution::NoModule => {
                     let root = path.first();
                     let retained = match &retain {
-                        RetainPolicy::Lenient => !root.is_some_and(|r| project_roots.contains(r)),
+                        // A **native extension root** (`std`, or a native dependency's own root like
+                        // `para` for `para/api`) is always retained: its non-`.noe` modules
+                        // (`para.url`, `std.http`) are resolved downstream by the registry, never by
+                        // a loaded file. This must hold even when that root *also* names a loaded
+                        // project namespace — a native package ships both `.noe` modules (`para.api`)
+                        // and native modules (`para.url`) under one root — otherwise a dependency
+                        // module's own `use para.url` is misread as a missing project module and the
+                        // whole link fails (which silently broke `--watch` for `@openapi` programs:
+                        // the impact session links Lenient, so it never saw the native module).
+                        RetainPolicy::Lenient => {
+                            root.is_some_and(|r| reg.is_extension_root(r))
+                                || !root.is_some_and(|r| project_roots.contains(r))
+                        }
                         RetainPolicy::Complete { native_roots } => root
                             .is_some_and(|r| reg.is_extension_root(r) || native_roots.contains(r)),
                     };
