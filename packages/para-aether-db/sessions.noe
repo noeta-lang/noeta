@@ -1,0 +1,144 @@
+// para.aether-db — a DB-backed, revocable session store for para/aether.
+//
+// The stored upgrade to std.session's stateless `CookieSessions`. Where the stateless store carries
+// the whole session in a signed cookie, this one keeps only a small opaque id in the cookie and the
+// data in a `sessions` row. Reach for it when a session outgrows a browser's ~4 KB cookie ceiling, or
+// when a logout must be REVOCABLE server-side — the row is deleted, so a stolen cookie no longer
+// resolves, which the stateless store (nothing to revoke against) cannot offer.
+//
+// It implements para.aether's `SessionStore` over the SAME `Session` currency std.session defines, so
+// `DbSessions` and `CookieSessions` are interchangeable at a `dyn SessionStore` call site: a handler
+// written against one moves to the other without a line changing.
+
+namespace para.aether_db
+
+use para.aether.SessionStore
+use para.db.Connection
+use std.http.{Request, Response}
+use std.http.server
+use std.session
+use std.session.Session
+use std.json
+use std.crypto
+use std.datetime
+
+// The store. Construct it with a live `Connection`, the cookie name the opaque id rides in, the
+// lifetime of a stored session in seconds, and whether the cookie is `Secure` (true behind https,
+// false only for a plain-http localhost — the same out-loud choice `CookieSessions` makes).
+pub class DbSessions {
+    conn: Connection
+    cookie_name: string
+    max_age: int
+    secure: bool
+
+    fn new(conn: Connection, cookie_name: string, max_age: int, secure: bool): DbSessions {
+        return DbSessions { conn: conn, cookie_name: cookie_name, max_age: max_age, secure: secure }
+    }
+
+    impl SessionStore {
+        // Read the session carried by `req`. The opaque id cookie names a row: a present, unexpired
+        // row rehydrates into a CLEAN `Session` tagged with that id (clean, so a pure read never
+        // provokes a row write); everything else — no cookie, no row, an expired row — yields an
+        // empty session, the one correct answer to "absent", "forged", and "expired" alike.
+        fn open(req: Request): Session {
+            return match req.cookie(self.cookie_name) {
+                some(sid) => self.load(sid),
+                none => empty_session(),
+            }
+        }
+
+        // Persist `session` onto `resp` and return the reply to send:
+        //   * unchanged (`!dirty`) — nothing: no row write and no header, so a pure read is free.
+        //   * emptied (a `clear()`) — DELETE the row and expire the cookie: a real, revocable logout.
+        //   * otherwise — UPSERT the row (data as JSON, fresh expiry) under its id, minted on the
+        //     first write, and set the id cookie.
+        fn attach(resp: Response, session: Session): Response {
+            if !session.dirty() {
+                return resp
+            }
+            data = session.data()
+            if data.keys().len() == 0 {
+                return self.revoke(resp, session)
+            }
+            return self.persist(resp, session, data)
+        }
+    }
+
+    // Load the row for `sid`, rehydrated into a clean, id-tagged session. An absent or expired row is
+    // an empty session, so a forged or stale id is indistinguishable from carrying none. Expiry is
+    // compared in-app (a bound parameter) rather than in SQL, so the one statement runs unchanged on
+    // both drivers para/db ships.
+    fn load(sid: string): Session {
+        now = datetime.now().unix_ms() / 1000
+        rows = self.conn.query(
+            "SELECT data FROM sessions WHERE id = ? AND expires_at > ?",
+            [sid, now],
+        )
+        if rows.len() == 0 {
+            return empty_session()
+        }
+        raw = rows[0]["data"].as<string>() ?? "{}"
+        return session.of(decode_data(raw)).with_id(sid)
+    }
+
+    // UPSERT the session's data under its id (minted on the first write), then set the id cookie.
+    // `ON CONFLICT(id) DO UPDATE` is one statement for insert-or-overwrite; the data is JSON and the
+    // expiry an absolute unix second, both plain columns.
+    fn persist(resp: Response, session: Session, data: Map<string, string>): Response {
+        sid = session.id() ?? mint_id()
+        expires = datetime.now().unix_ms() / 1000 + self.max_age
+        payload = json.stringify(data)
+        self.conn.execute(
+            "INSERT INTO sessions (id, data, expires_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at",
+            [sid, payload, expires],
+        )
+        cookie = server.cookie(self.cookie_name, sid)
+            .with_http_only(true)
+            .with_same_site("Lax")
+            .with_path("/")
+            .with_secure(self.secure)
+            .with_max_age(self.max_age)
+        return resp.with_cookie(cookie)
+    }
+
+    // Delete the row the session still names (its id survives `clear()` precisely so this can find
+    // it) and overwrite the cookie with its expired form. This is the logout the stateless store
+    // cannot give: the authoritative copy is server-side, so destroying it revokes the session for
+    // real — a copy of the id taken earlier no longer resolves to anything.
+    fn revoke(resp: Response, session: Session): Response {
+        match session.id() {
+            some(sid) => { self.conn.execute("DELETE FROM sessions WHERE id = ?", [sid]) },
+            none => {},
+        }
+        expired = server.cookie(self.cookie_name, "")
+            .with_path("/")
+            .with_secure(self.secure)
+            .expired()
+        return resp.with_cookie(expired)
+    }
+}
+
+// A fresh, empty, untagged session — the "no session here" answer `open` gives a request with no
+// valid stored session. Untagged, so its first write mints a new id rather than reusing a stale one.
+fn empty_session(): Session {
+    blank: Map<string, string> = {}
+    return session.of(blank)
+}
+
+// A high-entropy opaque id, minted on a session's first write. NOT a signed payload: the row is the
+// source of truth and this is only its key, so it carries no data and needs no verification — only
+// unguessability. 16 crypto-random bytes (128 bits), hex-encoded.
+fn mint_id(): string {
+    return crypto.random_bytes(16).to_hex()
+}
+
+// Rebuild a `Map<string, string>` from a stored JSON object. A malformed blob — which should never
+// happen, since the store wrote it — degrades to an empty session rather than aborting the read.
+fn decode_data(raw: string): Map<string, string> {
+    parsed = json.parse(raw).as<Map<string, dyn>>() ?? {}
+    mut out: Map<string, string> = {}
+    for k in parsed.keys() {
+        out = out.set(k, parsed[k].as<string>() ?? "")
+    }
+    return out
+}

@@ -628,6 +628,22 @@ pub type TypeDispatch = fn(
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError>;
 
+/// A native **class**'s instance-method dispatch (native-extensibility S3 / Pass 2a) — the
+/// [`ExtClass`] analogue of [`TypeDispatch`]. A native class value is a real language `Object` (a
+/// class-kind shape), **not** an [`crate::ExternValue`], so its receiver crosses as the whole
+/// instance marshalled to a [`NativeValue::Instance`] (class name + `(field, value)` pairs in slot
+/// order) — the same shape a class value takes when it crosses arg-IN. The method reads its fields
+/// by name off `recv` (a language-value field like `label`, or its native-state extern-handle field
+/// as a [`NativeValue::Extern`]); it gets the same `&mut dyn Host` seam an [`ExtType`] method does.
+/// The receiver is a value snapshot — a method mutating the instance in place is a later, additive
+/// extension (arg-IN is likewise a snapshot); reading a field, the Pass-2a surface, is served fully.
+pub type ClassDispatch = fn(
+    recv: &NativeValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError>;
+
 /// A type's **higher-order** method dispatch (higher-order-abi H4): like [`TypeDispatch`], but
 /// the receiver and arguments arrive as opaque ctx slots and the body may re-enter the backend —
 /// call closures, reach per-run state, read/write the retained arena. What `Cell.update(f)` and
@@ -907,6 +923,24 @@ pub struct ExtClass {
     /// name, type, visibility, and mutability; the checker seeds them into `symbols.records`
     /// (types), `symbols.private_fields` (visibility), and `symbols.mut_fields` (mutability).
     pub fields: &'static [ExtField],
+    /// Instance-method signatures (native-extensibility S3 / Pass 2a) — same vocabulary as an
+    /// [`ExtType`]'s `methods`. A call `h.describe()` on a native class instance routes to
+    /// [`ExtClass::dispatch`]; the checker types the call off these signatures. Default empty (a
+    /// fields-only class, the S2 shape). Names are disjoint from the class's field names (a method
+    /// wins over a field, the checker's rule).
+    pub methods: &'static [ExtFn],
+    /// The one shared instance-method dispatch (native-extensibility S3 / Pass 2a) — the
+    /// [`ExtClass`] twin of [`ExtType::dispatch`]. Receives the instance marshalled to a
+    /// [`NativeValue::Instance`] plus the host seam; both backends route a class-kind object's
+    /// method call here (their `CallMethod` Object arm, on a native-class shape). A fields-only
+    /// class never reaches it, so the default reports an unregistered-method misuse.
+    pub dispatch: ClassDispatch,
+    /// The **traits this class declares** (native-extensibility S3 / Pass 2b) — the [`ExtClass`]
+    /// twin of [`ExtType::traits`]. A name matching a native [`ExtTrait`] makes the class satisfy
+    /// that trait: `seed_ext_traits` records it into `user_trait_impls[class_qualified][trait]`, so
+    /// a native class value coerces to `dyn Trait` and its trait-method call dispatches to the
+    /// class's native method (the Pass-2a Object-arm branch). Default empty.
+    pub traits: &'static [&'static str],
 }
 
 /// One field of an [`ExtClass`]: its name, type, and the two access rules (visibility, mutability)
@@ -931,11 +965,19 @@ pub struct ExtField {
 
 impl ExtClass {
     /// Literal-shortening defaults (`..ExtClass::DEFAULTS`), mirroring [`ExtEnum::DEFAULTS`]: a
-    /// fieldless class under `std`.
+    /// fieldless, method-less class under `std`.
     pub const DEFAULTS: ExtClass = ExtClass {
         name: "",
         namespace: "std",
         fields: &[],
+        methods: &[],
+        dispatch: |_, method, _, _| {
+            Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("internal: no class-method dispatch registered (method `{method}`)"),
+            })
+        },
+        traits: &[],
     };
 
     /// The class's **qualified identity** (`res.Handle`) — `namespace.name`, the string the checker
@@ -945,6 +987,84 @@ impl ExtClass {
     }
 
     /// Whether `q` is this class's qualified identity — allocation-free, mirroring
+    /// [`ExtType::is_qualified`] (probed per candidate on the per-keystroke resolution path).
+    pub fn is_qualified(&self, q: &str) -> bool {
+        q.len() == self.namespace.len() + 1 + self.name.len()
+            && q.as_bytes()[self.namespace.len()] == b'.'
+            && q.starts_with(self.namespace)
+            && q.ends_with(self.name)
+    }
+}
+
+// --- Native-declared traits (native-extensibility S3) --------------------------------------------
+
+/// A first-class language **trait** contributed by an extension (native-extensibility S3). Two
+/// capabilities in one declaration:
+///
+/// - **A contract for user types (3a):** a program writes `impl NativeTrait for MyType { ... }`,
+///   binds on it (`fn f<T: NativeTrait>(x: T)`), and an incomplete impl is **E0015** — exactly as
+///   for a `.noe` `trait`. The checker seeds this declaration into its **user-trait** machinery
+///   (`symbols.user_traits` / `user_trait_impls`; `satisfies_user_trait`,
+///   `enforce_type_param_bounds`, `check_user_trait_impl`), NOT the closed `BuiltinTrait` enum — a
+///   native trait is indistinguishable from a `.noe` one to every downstream consumer.
+///
+/// - **Dynamic dispatch over native values (3b):** a native value (an [`ExtType`] instance)
+///   laundered through `dyn NativeTrait`, calling a trait method, dispatches to the **native**
+///   method — the same extern-method seam a directly-typed extern value uses (`resp.json()`), so no
+///   new runtime plumbing. A native type advertises that it implements the trait through its
+///   existing [`ExtType::traits`] list (a non-built-in name there is matched against a native trait
+///   and seeded into `user_trait_impls`); the trait methods are declared as the type's ordinary
+///   [`ExtType::methods`] and answered by its `dispatch`.
+///
+/// Its **identity** is the qualified `namespace.name` ([`ExtTrait::qualified`], like [`ExtType`] /
+/// [`ExtEnum`] / [`ExtClass`]) for the `use`-projection + namespace re-rooting; the user-trait
+/// tables are keyed by the imported **short** name (the vocabulary `impl`/bound sites are written
+/// in, exactly like a `.noe` trait and the built-in traits), resolved through the `use`-import
+/// alias.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtTrait {
+    /// The **short display name** (`Widget`). Identity is the qualified [`ExtTrait::qualified`].
+    pub name: &'static str,
+    /// The namespace this trait lives under (`fx`) — its qualified identity is `namespace.name`,
+    /// mirroring [`ExtType::namespace`] / [`ExtEnum::namespace`] / [`ExtClass::namespace`].
+    pub namespace: &'static str,
+    /// The trait's method contract, in declaration order. A **required** method
+    /// ([`ExtTraitMethod::has_default`] `false`) must be present in an `impl` or it is E0015; a
+    /// default-carrying one is optional for an implementor.
+    pub methods: &'static [ExtTraitMethod],
+}
+
+/// One method in an [`ExtTrait`]: an ordinary [`ExtFn`] signature (the receiver is `self`, not in
+/// `params`) plus whether it carries a **default** — the ABI twin of the AST `TraitMethod { sig,
+/// has_default }`. A required method's implementor must provide it (E0015); a defaulted one is
+/// optional. (Default *bodies* are a later slice: `has_default` marks the method optional for the
+/// contract check; a native trait's defaults are answered by the implementing native type's
+/// dispatch, not a hoisted `.noe` body.)
+#[derive(Debug, Clone, Copy)]
+pub struct ExtTraitMethod {
+    /// The method's signature (name, parameter types, return) — same vocabulary as any [`ExtFn`].
+    pub sig: ExtFn,
+    /// Whether the method carries a default (optional for an implementor); `false` for a required
+    /// method whose absence in an `impl` is E0015.
+    pub has_default: bool,
+}
+
+impl ExtTrait {
+    /// Literal-shortening defaults (`..ExtTrait::DEFAULTS`), mirroring [`ExtClass::DEFAULTS`]: a
+    /// method-less trait under `std`.
+    pub const DEFAULTS: ExtTrait = ExtTrait {
+        name: "",
+        namespace: "std",
+        methods: &[],
+    };
+
+    /// The trait's **qualified identity** (`fx.Widget`) — `namespace.name`, what `classify_use` /
+    /// `namespace_types` project a `use pkg.TheTrait` onto. [`ExtTrait::name`] is only the short form.
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace, self.name)
+    }
+
+    /// Whether `q` is this trait's qualified identity — allocation-free, mirroring
     /// [`ExtType::is_qualified`] (probed per candidate on the per-keystroke resolution path).
     pub fn is_qualified(&self, q: &str) -> bool {
         q.len() == self.namespace.len() + 1 + self.name.len()
@@ -1413,6 +1533,12 @@ pub trait Extension: Sync {
     fn classes(&self) -> &'static [ExtClass] {
         &[]
     }
+    /// The extension's first-class **traits** (native-extensibility S3) — real language traits that
+    /// user types `impl`/bound on (3a) and that dispatch dynamically over native values (3b).
+    /// Default empty; seeded eagerly into the checker's user-trait tables at prelude time.
+    fn traits(&self) -> &'static [ExtTrait] {
+        &[]
+    }
     /// The extension's CLI subcommands (higher-order-abi H6). Default empty.
     fn commands(&self) -> &'static [crate::ExtCommand] {
         &[]
@@ -1575,6 +1701,12 @@ pub enum UseKind {
     /// qualified identity so annotations/construction resolve); the backends bind a **constructible**
     /// class-kind type handle under the imported short name so `Handle { ... }` builds a real class.
     ExtClass(String),
+    /// A registered native **trait** (`use fx.Widget`, native-extensibility S3) — qualified
+    /// identity. The checker maps the local (imported short) name to the qualified identity and
+    /// seeds the user-trait tables under the short name, so `impl Widget for T`, `T: Widget`
+    /// bounds, and `dyn Widget` resolve; the backends bind no runtime value (a native trait is a
+    /// contract + a dynamic-dispatch surface, not a source-level value handle).
+    ExtTrait(String),
     /// Under a known extension root but resolving to no module / namespace / member / type: a
     /// genuine error (a typo'd or nonexistent std target). An extension root is fully enumerable,
     /// so an unknown member cannot be a forward reference — unlike [`UseKind::UserImport`].
@@ -1814,6 +1946,15 @@ impl Registry {
                     out.push((rest.to_string(), q.to_string()));
                 }
             }
+            // Native traits project the same way (native-extensibility S3) — so `use pkg.TheTrait`
+            // (or a `use pkg` group then `pkg.TheTrait`) re-roots a native trait onto its qualified
+            // identity, the alias `collect` maps the short name through to seed the user-trait tables.
+            for t in e.traits() {
+                let q = t.qualified();
+                if let Some(rest) = q.strip_prefix(&dotted) {
+                    out.push((rest.to_string(), q.to_string()));
+                }
+            }
         }
         out
     }
@@ -1828,9 +1969,11 @@ impl Registry {
         } else if self.find_type_qualified(&qualified).is_some()
             || self.find_enum_qualified(&qualified).is_some()
             || self.find_class_qualified(&qualified).is_some()
+            || self.find_trait_qualified(&qualified).is_some()
         {
-            // A native enum or class is a type-like member for namespace navigation (`pkg.SameSite`
-            // / `pkg.Handle` in a dotted annotation), resolved by identity like an extern type.
+            // A native enum, class, or trait is a type-like member for namespace navigation
+            // (`pkg.SameSite` / `pkg.Handle` / `pkg.Widget` in a dotted annotation or bound),
+            // resolved by identity like an extern type.
             NsChild::Type(qualified)
         } else if self.is_namespace(&qualified) {
             NsChild::Namespace(qualified)
@@ -1864,6 +2007,9 @@ impl Registry {
         }
         if self.find_class_qualified(&qualified).is_some() {
             return UseKind::ExtClass(qualified);
+        }
+        if self.find_trait_qualified(&qualified).is_some() {
+            return UseKind::ExtTrait(qualified);
         }
         if path.len() >= 2 {
             let module = path.join(".");
@@ -2121,6 +2267,48 @@ impl Registry {
     pub fn resolve_class(&self, name: &str) -> Option<&'static ExtClass> {
         self.find_class_qualified(name)
             .or_else(|| self.find_class(name))
+    }
+
+    /// Find a native class's instance-method signature (native-extensibility S3 / Pass 2a) — the
+    /// class twin of [`Registry::find_type_method`]. `name` is the runtime shape name (the **short**
+    /// name a class-kind object carries) or a qualified identity. What both backends' `CallMethod`
+    /// Object arm consults to decide a native-class method call routes to [`ExtClass::dispatch`].
+    pub fn find_class_method(&self, name: &str, method: &str) -> Option<&'static ExtFn> {
+        self.resolve_class(name)?
+            .methods
+            .iter()
+            .find(|m| m.name == method)
+    }
+
+    /// Every registered native trait (native-extensibility S3), across all units — what
+    /// `Checker::seed_ext_traits` walks to pre-populate the user-trait tables at prelude time, and
+    /// what `seed_extern_type_traits` matches an [`ExtType::traits`] name against.
+    pub fn traits(&self) -> impl Iterator<Item = &'static ExtTrait> + '_ {
+        self.units.iter().flat_map(|e| e.traits())
+    }
+
+    /// Find a native trait by its **short** name (first match wins, mirroring [`Registry::find_type`]).
+    pub fn find_trait(&self, name: &str) -> Option<&'static ExtTrait> {
+        self.units
+            .iter()
+            .flat_map(|e| e.traits())
+            .find(|t| t.name == name)
+    }
+
+    /// Find a native trait by its **qualified identity** (`fx.Widget`) — allocation-free probing,
+    /// mirroring [`Registry::find_type_qualified`].
+    pub fn find_trait_qualified(&self, qualified: &str) -> Option<&'static ExtTrait> {
+        self.units
+            .iter()
+            .flat_map(|e| e.traits())
+            .find(|t| t.is_qualified(qualified))
+    }
+
+    /// Resolve a native trait from **either** a qualified identity or a bare short name — the trait
+    /// twin of [`Registry::resolve_type`], read by `qualified_extern`.
+    pub fn resolve_trait(&self, name: &str) -> Option<&'static ExtTrait> {
+        self.find_trait_qualified(name)
+            .or_else(|| self.find_trait(name))
     }
 
     /// Find a registered extern type's method signature.

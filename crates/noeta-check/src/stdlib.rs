@@ -56,6 +56,12 @@ pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
     if let Some(cl) = reg.resolve_class(n) {
         return cl.qualified();
     }
+    // A native trait (native-extensibility S3) qualifies the same way, so a signature naming a
+    // trait by its short name (`dyn Widget` in a native method's parameter, a `Var` bound) resolves
+    // to the qualified identity the `use`-projection re-roots the short name onto.
+    if let Some(tr) = reg.resolve_trait(n) {
+        return tr.qualified();
+    }
     n.to_string()
 }
 
@@ -66,6 +72,96 @@ pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
 /// declaration position.
 pub(crate) fn sig_to_type(reg: &registry::Registry, sig: &registry::SigType) -> Type {
     sig_to_type_bound(reg, sig, &[])
+}
+
+/// The **reverse map** `SigType → TypeRef` (native-extensibility S3) — the AST-level twin of
+/// [`sig_to_type`]. `seed_ext_traits` synthesizes a [`noeta_ast::TraitDecl`] from an
+/// [`registry::ExtTrait`]; a `TraitDecl`'s method signatures ([`noeta_ast::FnDecl`]) carry their
+/// parameter and return types as **AST `TypeRef`** (not lattice [`Type`]), because the user-trait
+/// checkers (`check_user_trait_impl`, the `dyn`-method result typing in `member.rs`) read them
+/// through `field_type`/`from_ref_q` exactly as they read a `.noe` trait's. Primitive spellings
+/// (`int`/`string`/`void`/…) round-trip through [`noeta_types::Type::from_ref`]; a
+/// [`registry::SigType::Named`] bakes its **qualified identity** (`qualified_extern`) so the
+/// declared type resolves to the seeded `Type::Named` regardless of whether the consumer imported
+/// the short-name alias (a user's `impl` method resolves its own short name through its `use` to the
+/// same qualified string, so the two sides compare equal). A polymorphic/variable form has no
+/// declaration-site meaning, so it becomes a permissive `dyn` hole (which `sig_types_compatible`
+/// treats as compatible — never a wrong concrete type).
+pub(crate) fn sig_to_typeref(
+    reg: &registry::Registry,
+    sig: &registry::SigType,
+) -> noeta_ast::TypeRef {
+    use noeta_ast::TypeRef;
+    use noeta_span::Span;
+    let sp = Span::new(0, 0);
+    let named = |name: &str| TypeRef::Named {
+        name: name.to_string(),
+        args: Vec::new(),
+        span: sp,
+    };
+    let named_args = |name: &str, args: Vec<TypeRef>| TypeRef::Named {
+        name: name.to_string(),
+        args,
+        span: sp,
+    };
+    use registry::SigType;
+    match sig {
+        SigType::Int => named("int"),
+        SigType::Float => named("float"),
+        SigType::F32 => named("f32"),
+        SigType::Bool => named("bool"),
+        SigType::String => named("string"),
+        SigType::Bytes => named("bytes"),
+        SigType::Unit => named("void"),
+        SigType::Dyn => named("dyn"),
+        SigType::List(t) => named_args("List", vec![sig_to_typeref(reg, t)]),
+        SigType::Option(t) => named_args("Option", vec![sig_to_typeref(reg, t)]),
+        SigType::Map(k, v) => {
+            named_args("Map", vec![sig_to_typeref(reg, k), sig_to_typeref(reg, v)])
+        }
+        SigType::Result(ok, err) => named_args(
+            "Result",
+            vec![sig_to_typeref(reg, ok), sig_to_typeref(reg, err)],
+        ),
+        SigType::Future(t) => named_args(FUTURE, vec![sig_to_typeref(reg, t)]),
+        // A registered extern/native type carries its **qualified identity** so the declared type
+        // resolves to the seeded `Type::Named` by identity (see the doc note above).
+        SigType::Named(n) => named(&qualified_extern(reg, n)),
+        SigType::Union(members) => TypeRef::Union {
+            members: members.iter().map(|m| sig_to_typeref(reg, m)).collect(),
+            span: sp,
+        },
+        SigType::Optional(inner) => sig_to_typeref(reg, inner),
+        SigType::Fn(params, ret) => TypeRef::Fn {
+            params: params.iter().map(|p| sig_to_typeref(reg, p)).collect(),
+            ret: Box::new(sig_to_typeref(reg, ret)),
+            span: sp,
+        },
+        SigType::Generic(n, args) => {
+            named_args(&qualified_extern(reg, n), args.iter().map(|a| sig_to_typeref(reg, a)).collect())
+        }
+        // A signature-level variable has no concrete declaration-site meaning — a permissive hole.
+        SigType::Var(_) | SigType::BoundedVar(_, _) => named("dyn"),
+    }
+}
+
+/// The **return type** of a native trait method as a `TypeRef` (native-extensibility S3): the
+/// [`registry::RetTy`] twin of [`sig_to_typeref`]. A trait method declares a concrete return
+/// ([`registry::RetTy::Concrete`]); the polymorphic forms (`SameAsArg`/`NumericPreserving`/turbofish
+/// `TypeArg`) have no fixed declaration-site type, so they become a permissive `dyn` hole.
+pub(crate) fn ret_to_typeref(
+    reg: &registry::Registry,
+    ret: &registry::RetTy,
+) -> noeta_ast::TypeRef {
+    use noeta_span::Span;
+    match ret {
+        registry::RetTy::Concrete(s) => sig_to_typeref(reg, s),
+        _ => noeta_ast::TypeRef::Named {
+            name: "dyn".to_string(),
+            args: Vec::new(),
+            span: Span::new(0, 0),
+        },
+    }
 }
 
 /// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
@@ -312,6 +408,16 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
                 registry::RetTy::Concrete(s) => {
                     sig_to_type_bound(reg, &s, &receiver_bindings(targs))
                 }
+                _ => Type::Dyn,
+            })
+        }
+        // A registered native **class**'s instance methods (native-extensibility S3 / Pass 2a) come
+        // from its `ExtClass` signature table, like the extern-type arm above. A native class is not
+        // generic, so there are no receiver type-variable bindings.
+        Type::Named(n, _) if reg.find_class_method(n, name).is_some() => {
+            let sig = reg.find_class_method(n, name)?;
+            Some(match sig.ret {
+                registry::RetTy::Concrete(s) => sig_to_type(reg, &s),
                 _ => Type::Dyn,
             })
         }
@@ -619,6 +725,12 @@ pub(super) fn method_params(
                     .collect(),
             )
         }
+        // A native **class**'s method parameters come from its `ExtClass` signature table
+        // (native-extensibility S3 / Pass 2a), like `method_return`; a native class is not generic.
+        Type::Named(n, _) if reg.find_class_method(n, name).is_some() => {
+            let sig = reg.find_class_method(n, name)?;
+            Some(sig.params.iter().map(|p| sig_to_type(reg, p)).collect())
+        }
         _ => None,
     }
 }
@@ -648,6 +760,12 @@ pub(super) fn method_required(
         return reg
             .find_type_method_sig(n, name)
             .map(|sig| registry::SigType::required_count(sig.params));
+    }
+    // A native class's method required-arg count (native-extensibility S3 / Pass 2a).
+    if let Type::Named(n, _) = receiver
+        && let Some(sig) = reg.find_class_method(n, name)
+    {
+        return Some(registry::SigType::required_count(sig.params));
     }
     builtin_method_required(receiver, name)
 }

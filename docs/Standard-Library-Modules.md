@@ -754,7 +754,15 @@ built on it.
 | `session.attach` | `attach(resp: Response, s: Session, keys: Keyring, max_age: int, secure: bool) -> Response` | Writes the cookie back, but only if the session changed. |
 | `session.encode` | `encode(data: Map<string,string>, keys: Keyring, max_age: int) -> string` | The raw codec, for a non-cookie carrier or a different name. |
 | `session.decode` | `decode(token: string, keys: Keyring) -> Map<string,string>?` | Verify and decode, or none. |
-| `Session` methods | `get(name) -> string?`, `set(name, value) -> Session`, `remove(name) -> Session`, `clear() -> Session`, `dirty() -> bool`, `data() -> Map<string,string>` | Copy-modify, like `Response` and `Cookie`. |
+| `session.of` | `of(data: Map<string,string>) -> Session` | Build a **clean** session from data — the inverse of `data()`. A server-side store rebuilds the `Session` from a row with it; clean, so a pure read never triggers a write. |
+| `Session` methods | `get(name) -> string?`, `set(name, value) -> Session`, `remove(name) -> Session`, `clear() -> Session`, `dirty() -> bool`, `data() -> Map<string,string>`, `with_id(id) -> Session`, `id() -> string?` | Copy-modify, like `Response` and `Cookie`. |
+
+`session.of`, `with_id`, and `id` exist for a **server-side store** and are inert for cookie sessions.
+A stored backend keeps a small opaque id in the cookie and the data in a row: it rebuilds the
+`Session` from the row with `of`, tags it with the row's key via `with_id`, and reads that key back in
+`attach` with `id`. The id is held out-of-band from the data — it never shows through `data()`, never
+counts toward the cookie ceiling, and **survives `clear()`**, so a logout that empties the session can
+still name the exact row to delete (a true, revocable logout). A cookie-only session simply has no id.
 
 ```noeta ignore
 use std.http.server

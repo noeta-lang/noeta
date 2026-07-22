@@ -83,6 +83,15 @@ impl Checker {
                         // fn returning it unifies by identity, field access types, and E0035/E0033 fire.
                         self.imports.extern_types.insert(local, qualified);
                     }
+                    UseKind::ExtTrait(qualified) => {
+                        // A native-**trait** import (`use fx.Widget`, native-extensibility S3): record
+                        // the short→qualified alias through the SAME `extern_types` channel — so a
+                        // `dyn Widget` annotation / a native method's `Widget`-typed signature resolve
+                        // to the qualified identity (`qualified_extern`). The user-trait table entry
+                        // (`user_traits["Widget"]`) is seeded from this alias by `seed_ext_traits`,
+                        // AFTER the `Stmt::Trait` walk, so a user `trait Widget` shadows it.
+                        self.imports.extern_types.insert(local, qualified);
+                    }
                     UseKind::MemberFn { module, func } => {
                         self.imports.imported_fns.insert(local, (module, func));
                     }
@@ -546,6 +555,12 @@ impl Checker {
                 _ => {}
             }
         }
+        // Seed the imported **native traits** (native-extensibility S3) into `user_traits` /
+        // `user_trait_impls` now — AFTER the `Stmt::Trait` walk above, so a user `trait` of the same
+        // short name (already in `user_traits`) shadows the native one (`.or_insert`), and BEFORE the
+        // impl-collection loop below, so an `impl NativeTrait for T` is recognized (UT2) and a native
+        // type's advertised impl backs the `dyn NativeTrait` coercion (3b).
+        self.seed_ext_traits();
         // Record which user traits each type implements (L1, UT2), from standalone `impl`s,
         // in-body `impl`s, and `@derive(UserTrait)` (a fully-defaulted trait adopted wholesale —
         // `check_derives` enforces the fully-defaulted part). Done after the main walk so every
