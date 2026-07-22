@@ -163,10 +163,7 @@ impl Checker {
                     Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new()),
                 ),
                 ("optional".to_string(), Type::Bool),
-                (
-                    "attrs".to_string(),
-                    Type::List(Box::new(Type::Dyn)),
-                ),
+                ("attrs".to_string(), Type::List(Box::new(Type::Dyn))),
             ],
         );
         // `FieldEntry { name: string, value: dyn }` — the element type of `fields_of()`'s result

@@ -492,7 +492,9 @@ fn pack_scalar(value: Value, kind: &PackedKind, out: &mut Vec<u8>) -> bool {
             .as_f32()
             .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
             .is_some(),
-        PackedKind::IntN { bits, .. } => value.as_int().map(|i| write_intn(out, i, *bits)).is_some(),
+        PackedKind::IntN { bits, .. } => {
+            value.as_int().map(|i| write_intn(out, i, *bits)).is_some()
+        }
         PackedKind::Bool => value.as_bool().map(|b| out.push(u8::from(b))).is_some(),
         // Unreachable for a real scalar list (a scalar element is a primitive, never a nested struct),
         // but demote rather than panic if some future caller hands one in.

@@ -327,7 +327,7 @@ pub(crate) fn serve_parallel_impl(
     let handler = if hot {
         Expr::Closure {
             params: vec![noeta_ast::Param {
-                            attrs: Vec::new(),
+                attrs: Vec::new(),
                 name: "req".to_string(),
                 name_span: sp,
                 ty: None,
