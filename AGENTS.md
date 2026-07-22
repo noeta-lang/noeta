@@ -110,6 +110,7 @@ Prefer enums and constants over raw string literals. Variant names, format ident
 - **`cargo fmt --all`** — format the entire workspace with `rustfmt`. All code must be formatted before committing.
 - **`cargo clippy -- -D warnings`** — run Clippy with warnings-as-errors. Fix all diagnostics; do not `#[allow]` them without justification.
 - No custom `rustfmt.toml` — we use the default `rustfmt` style.
+- **The CI toolchain is pinned to `@1.97.0`** (in every `ci.yml` job + `release.yml`; miri stays nightly). Clippy lints are version-sensitive, so lint against 1.97.0 locally — a floating `@stable` will silently add lints that only surface as a red CI you didn't cause.
 
 ## Design Patterns
 
@@ -161,11 +162,14 @@ cargo llvm-cov --workspace --html           # browsable report under target/llvm
 
 Setup if missing: `rustup component add llvm-tools-preview && cargo install cargo-llvm-cov`. Treat a coverage drop on a touched file as a regression to fix, not to ignore.
 
+> [!IMPORTANT]
+> **A language change silently rots hand-written fixtures that have no expected-output file.** The conformance corpus is protected (every case pins its `// expect:` output), but Rust in-test fixtures (fixtures embedded in `#[test]`s) and the programs under `examples/` are not — they just stop compiling under the new rule with nothing asserting they still should. After any language change, check these first. Examples run as their own gated CI step: core examples inline, but **package examples are `#[ignore]`d and serial** (each composes its own toolchain, and concurrent compositions corrupt the shared cache).
+
 **Benchmarks (M2.0+).** `cargo bench -p noeta-vm` runs the `criterion` benches over the VM hot paths (dispatch loop, property access through inline caches, allocation) in `crates/noeta-vm/benches/vm.rs`. VM-touching changes should check no regression against the baseline; positioned as the last/scheduled CI gate (implementation-plan §6.6/§6.7).
 
 ### Version Control and Continuous Work
 
-Commit as you go and always implement features in full, no stubs or todos unless deferring entire subsystems. When a task is clear, work independently and verify changes using the comprehensive test suite.
+Commit as you go and always implement features in full, no stubs or todos unless deferring entire subsystems. When a task is clear, work independently and verify changes using the comprehensive test suite. Commit each green, gated slice as it completes — do not wait for per-commit authorization — but **never `git push` without explicit authorization**.
 
 This project is currently pre-alpha and not public, so you don't need to worry about pull requests.
 
@@ -177,6 +181,17 @@ This project is currently pre-alpha and not public, so you don't need to worry a
 > git worktree add -b <branch> .claude/worktrees/<name> <base>
 > ```
 > then `cd` into it and do all editing, building, and committing there (`<base>` is usually `main`, or another session's HEAD when continuing from it). If work has already leaked into the root, recover non-destructively: `git reset` (unstage only, never `--hard`), branch a worktree from the polluting commit, finish there, and `git restore` only your *own* stray files out of the root.
+
+> [!WARNING]
+> **The parallel-worktree setup has sharp edges that have each burned an agent for real. Internalize these:**
+>
+> - **The Bash working directory silently resets to the shared root `/home/niklas/Code/lang`** (typically after a command that `cd`s elsewhere; a "Shell cwd was reset to …" line is easy to miss). A relative-path edit then lands in the *root* instead of your worktree, and `git`/`cargo` then report the *root's* state — which has looked like "phantom compile errors" and "a lost HEAD" that were never real. **Use absolute paths for every file and `CARGO_TARGET_DIR`, and confirm the directory (`cd <worktree> && pwd && git log --oneline -1`) before trusting any `git`/`cargo` output.** Prefer the Edit/Write tools (cwd-independent) over shell heredocs for source edits.
+> - **`git stash` is shared per-repository across all worktrees** — never use it as a "clean tree" control. A pop can conflict with, or surface, another agent's stash, and it does not stash committed work anyway. To compare against a baseline, check out the commit in a separate throwaway worktree.
+> - **Ship from the *main* checkout, not the worktree.** `git merge <branch>` run from inside that branch's own worktree is a silent no-op ("Already up to date"), and `git worktree remove` then deletes your own cwd. Split the ship step: (1) commit inside the worktree; (2) `cd /home/niklas/Code/lang` as a fresh command; (3) merge + `git worktree remove <path>` from there.
+> - **Other sessions' worktrees under `.claude/worktrees/` may hold live, uncommitted work.** Before removing any worktree or deleting any branch, check `git status --porcelain` in it and confirm with the user — a branch whose tip is merged may still carry the next feature on top.
+
+> [!IMPORTANT]
+> **Use a per-agent `CARGO_TARGET_DIR` — a shared target dir causes last-writer-wins rlib contamination (identical-version path crates) and phantom test failures.** Target dirs are ~70–210 GB *each* and `/home` (450 GB) fills fast with several worktrees active — a full disk has **truncated a source file mid-write**. Check `df -h /home` before a long build, and **do not build in `/tmp`** (a 14 GB tmpfs, far too small — the build dies partway). Deleting a worktree's *own* `target/` is safe, but never another agent's while they may be mid-build.
 
 > [!NOTE]
 > We follow conventional commits for all commit titles and PRs.
