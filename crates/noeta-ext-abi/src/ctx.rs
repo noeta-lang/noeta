@@ -109,7 +109,10 @@ pub enum PackedField {
     F64,
     /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc): `bits/8` bytes, `signed`
     /// deciding read-back extension.
-    IntN { bits: u8, signed: bool },
+    IntN {
+        bits: u8,
+        signed: bool,
+    },
     Bool,
     Struct(Vec<PackedField>),
 }

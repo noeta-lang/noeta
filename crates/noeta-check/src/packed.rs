@@ -225,7 +225,10 @@ impl Checker {
     /// scalar struct field is still resolved by its field-kind, not by recursion.
     ///
     /// [`packed_layout`]: Self::packed_layout
-    pub(crate) fn packed_list_layout(&self, elem: &Type) -> Option<noeta_ast::reflect::PackedLayout> {
+    pub(crate) fn packed_list_layout(
+        &self,
+        elem: &Type,
+    ) -> Option<noeta_ast::reflect::PackedLayout> {
         if let Some(kind) = scalar_packed_kind(elem) {
             return Some(noeta_ast::reflect::PackedLayout::scalar(kind));
         }

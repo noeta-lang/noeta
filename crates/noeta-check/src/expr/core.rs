@@ -1169,7 +1169,9 @@ impl Checker {
                     self.warn(
                         DiagnosticCode::ErasedWidthNarrow,
                         *span,
-                        format!("`{name}` erases to `{base}` at runtime; `x is {name}` is always false"),
+                        format!(
+                            "`{name}` erases to `{base}` at runtime; `x is {name}` is always false"
+                        ),
                     )
                     .help(format!("did you mean `x is {base}`?"));
                 }

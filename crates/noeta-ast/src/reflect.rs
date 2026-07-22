@@ -381,12 +381,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 // their decorators into `Decorators`. A `fn` carries `#[...]` attributes and a
                 // `@tier(...)` declaration, neither of which is a type decorator.
                 push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
-                push_params(
-                    &mut manifest,
-                    &mut params,
-                    decl.name.clone(),
-                    &decl.params,
-                );
+                push_params(&mut manifest, &mut params, decl.name.clone(), &decl.params);
             }
             // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
             // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
@@ -1034,14 +1029,22 @@ fn builtin_repr(
 /// (declared-scalar erasure), while container elements keep their width. Used for a parameter's or
 /// attribute's declared type, and kind-agnostic for nominals (the R3 matcher keys on the name).
 pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
-    typeref_repr_with(ty, &|name, args| TypeRepr::Named(name.to_string(), args), true)
+    typeref_repr_with(
+        ty,
+        &|name, args| TypeRepr::Named(name.to_string(), args),
+        true,
+    )
 }
 
 /// The reflection of a surface type already in **element position** — a narrow target's type
 /// argument, e.g. the `i32` of `x is List<i32>` (packed-widths arc). A fixed width keeps its width so
 /// the target matches a value's width-carrying tag; nominals stay kind-agnostic.
 pub fn typeref_to_repr_arg(ty: &TypeRef) -> TypeRepr {
-    typeref_repr_with(ty, &|name, args| TypeRepr::Named(name.to_string(), args), false)
+    typeref_repr_with(
+        ty,
+        &|name, args| TypeRepr::Named(name.to_string(), args),
+        false,
+    )
 }
 
 /// How a projection resolves a **nominal** type name — the one axis on which the two type-ref
@@ -1124,7 +1127,16 @@ pub fn arg_matches(expected: &TypeRepr, actual: &TypeRepr) -> bool {
         | (Unit, Unit) => true,
         // Two fixed-width integers match iff they are the same width and signedness — this is what
         // makes `List<i32>` distinct from `List<i16>` and from `List<int>` (which is `Int`).
-        (IntN { signed: es, bits: eb }, IntN { signed: as_, bits: ab }) => es == as_ && eb == ab,
+        (
+            IntN {
+                signed: es,
+                bits: eb,
+            },
+            IntN {
+                signed: as_,
+                bits: ab,
+            },
+        ) => es == as_ && eb == ab,
         (DynTrait(e), DynTrait(a)) => e == a,
         (Union(es), a) => es.iter().any(|e| arg_matches(e, a)),
         (e, Union(as_)) => as_.iter().any(|a| arg_matches(e, a)),
