@@ -525,6 +525,18 @@ impl NativeCtx for EvalCtx<'_> {
         Ok(self.insert(built))
     }
 
+    fn packed_element_fields(&mut self, slot: Slot) -> CtxResult<Option<Vec<noeta_stdlib::PackedField>>> {
+        // The element bundle methods' width source (scalar-unification slice 3), the tree-walker twin
+        // of the VM's `packed_schemas` scan: the interpreter records every `@packed` struct's field
+        // type names, so the value's own `def` name recovers the exact kinds a single struct value's
+        // boxed scalars erase.
+        let name = match self.get(slot)? {
+            Value::Object(obj) => obj.def.name().to_string(),
+            _ => return Ok(None),
+        };
+        Ok(self.interp.packed_field_kinds(&name))
+    }
+
     // ----- scheduler-service sub-capabilities: the interpreter is its own provider (returns `self`).
     // `HotReload` is not overridden (the tree-walker is never under `serve --watch`) — it takes the
     // trait defaults (0/None), the same inert answers the flat method gave before the split. -----

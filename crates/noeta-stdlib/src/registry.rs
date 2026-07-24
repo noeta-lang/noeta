@@ -5705,10 +5705,13 @@ const VEC_MODULES: &[ExtModule] = &[
         // f32 vector bundle plus the array-ops integer (`IVec2`/`IVec3`) and `Color` shapes — one
         // bundle per shape family, since each has a distinct method set and result types (an integer
         // `dot` returns `int`, a `Color` has no `dot`/`length`).
+        // The TWO unified bundles (scalar-unification slice 3), generic over the element type:
+        // `vec.Kernels` (default arithmetic, every numeric width incl. f64) and `vec.SatKernels`
+        // (saturating, integer/`Color`). They replace the three per-type bundles the array-ops arc
+        // shipped — one generic kernel body per op serves every width.
         bundles: &[
-            crate::vec3::VEC_KERNELS,
-            crate::ivec::VEC_INT_KERNELS,
-            crate::color::VEC_COLOR_KERNELS,
+            crate::vec_kernels::VEC_KERNELS,
+            crate::vec_kernels::VEC_SAT_KERNELS,
         ],
         docs: VEC_DOCS,
         ..ExtModule::DEFAULTS

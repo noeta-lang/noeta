@@ -163,11 +163,19 @@ impl Checker {
         let required = noeta_ext_abi::SigType::required_count(method.sig.params);
         self.check_args(&params, required, args, &[], span, name);
         self.sites.bundle_call_sites.insert(call_span, route);
+        // Resolve the bound shape's uniform element type (scalar-unification ABI), so an
+        // element-relative return (`Elem`/`ElemWide`/`ElemFloat`) types against the concrete field
+        // kind of the struct this bundle was `impl`-bound to — `dot` → `int` for an i16 vector,
+        // `f32` for an f32 vector. The bound struct is the receiver's own `@packed` type.
+        let elem = self
+            .packed_layout(&Type::Named(type_name.clone(), vec![]))
+            .and_then(|layout| stdlib::packed_elem_type(&layout));
         Some(stdlib::bundle_method_return(
             self.reg(),
             &method.sig,
             recv,
             args,
+            elem.as_ref(),
         ))
     }
 

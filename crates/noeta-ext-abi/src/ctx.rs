@@ -389,6 +389,18 @@ pub trait NativeCtx {
         fields: &[Scalar],
     ) -> CtxResult<Slot>;
 
+    /// The **packed field kinds** of a single value whose type is a `@packed` struct (scalar-
+    /// unification slice 3), in slot order, or `None` if the value's type has no resolvable packed
+    /// layout. The width source for the *element* bundle methods (`v.add(w)`, `Color.scale(2.0)`):
+    /// a bulk method reads a packed `List<T>`'s widths from [`NativeCtx::with_packed`], but an element
+    /// method receives a single struct value whose fields are erased to width-less boxed scalars at the
+    /// seam — this recovers the exact width so integer wrapping and saturation clamp at the right bits.
+    /// The default is `None` (a backend that never runs the vector bundles); both in-tree backends
+    /// resolve it from their own type registry. A non-`@packed` value returns `None`.
+    fn packed_element_fields(&mut self, _slot: Slot) -> CtxResult<Option<Vec<PackedField>>> {
+        Ok(None)
+    }
+
     // ----- scheduler-service sub-capabilities -----
     //
     // Three cross-cutting **backend services** an extension may consume, grouped behind their own

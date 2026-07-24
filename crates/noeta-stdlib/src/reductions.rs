@@ -19,7 +19,11 @@
 //! `mask_to_width` are equal (the low `bits` bits are a ring homomorphism under `+`/`*`), so folding
 //! in the native type — what these kernels do — is the width-wrapped result the language's `+` gives.
 
+// `Scalar` (the enum) is the boxed runtime element of the *fallback* folds; `scalar::Scalar` (aliased
+// `Elem`) is the per-width element trait the packed folds are now generic over. Two distinct concepts
+// that unfortunately share the name — the alias keeps both readable in one file.
 use crate::registry::Scalar;
+use crate::scalar::Scalar as Elem;
 use crate::{ErrorKind, PackedField, StdError};
 
 /// A numeric list reduction: `sum`, `product`, `min`, `max`.
@@ -117,145 +121,93 @@ fn non_bool(op: BoolReduce) -> StdError {
     }
 }
 
-// A `chunks_exact` iterator of native-typed elements read little-endian out of a packed buffer. The
-// closure form re-creates the iterator per reduction arm (each arm consumes it once); the
-// bounds-check-free `chunks_exact` + fixed-width `from_le_bytes` is the tight loop LLVM vectorizes.
-macro_rules! elems {
-    ($ty:ty, $bytes:expr) => {
-        $bytes
-            .chunks_exact(std::mem::size_of::<$ty>())
-            .map(|c| <$ty>::from_le_bytes(c.try_into().expect("chunks_exact width")))
-    };
-}
-
-macro_rules! int_fold {
-    ($ty:ty, $bytes:expr, $op:expr) => {{
-        match $op {
-            // Fold in the native width: the accumulator wraps at exactly the element width, which is
-            // the width-wrapped result `+`/`*` would give (settled decision — no saturate, no error).
-            NumReduce::Sum => {
-                let mut acc: $ty = 0;
-                for x in elems!($ty, $bytes) {
-                    acc = acc.wrapping_add(x);
-                }
-                Some(RedNum::Int(acc as i64))
+/// Fold one packed element buffer under `op`, generic over the element type. One body,
+/// monomorphized once per width — the `chunks_exact` + [`Elem::read_le`] loop is the same tight,
+/// bounds-check-free shape the per-width macros had, so LLVM still autovectorizes each mono.
+///
+/// `Sum`/`Product` accumulate in the native width (wrapping) seeded at the identity, so an *empty*
+/// buffer folds to `0`/`1` (always `Some`); `Min`/`Max` return `None` for an empty buffer. Integer
+/// wrap and the float NaN-avoiding `min`/`max` live in the [`Elem`] impl, so this body is
+/// width-agnostic yet byte-identical to the old per-width fold.
+fn reduce_buf<S: Elem>(op: NumReduce, bytes: &[u8]) -> Option<S> {
+    let elems = || bytes.chunks_exact(S::BYTES).map(S::read_le);
+    match op {
+        NumReduce::Sum => {
+            let mut acc = S::ZERO;
+            for x in elems() {
+                acc = acc.add(x);
             }
-            NumReduce::Product => {
-                let mut acc: $ty = 1;
-                for x in elems!($ty, $bytes) {
-                    acc = acc.wrapping_mul(x);
-                }
-                Some(RedNum::Int(acc as i64))
-            }
-            // A stored element is already in range, so the winner needs no re-mask; `as i64` is the
-            // erased runtime word (sign-extended for a signed width, zero-extended for an unsigned).
-            NumReduce::Min => elems!($ty, $bytes)
-                .reduce(|a, b| if b < a { b } else { a })
-                .map(|m| RedNum::Int(m as i64)),
-            NumReduce::Max => elems!($ty, $bytes)
-                .reduce(|a, b| if b > a { b } else { a })
-                .map(|m| RedNum::Int(m as i64)),
+            Some(acc)
         }
-    }};
-}
-
-macro_rules! float_fold {
-    ($ty:ty, $bytes:expr, $op:expr, $wrap:expr) => {{
-        match $op {
-            NumReduce::Sum => {
-                let mut acc: $ty = 0.0;
-                for x in elems!($ty, $bytes) {
-                    acc += x;
-                }
-                Some($wrap(acc))
+        NumReduce::Product => {
+            let mut acc = S::ONE;
+            for x in elems() {
+                acc = acc.mul(x);
             }
-            NumReduce::Product => {
-                let mut acc: $ty = 1.0;
-                for x in elems!($ty, $bytes) {
-                    acc *= x;
-                }
-                Some($wrap(acc))
-            }
-            // `f32::min`/`f32::max` are total (they return the non-NaN operand when one is NaN), so the
-            // reduction is deterministic — both backends fold in the same order and agree.
-            NumReduce::Min => elems!($ty, $bytes).reduce(<$ty>::min).map($wrap),
-            NumReduce::Max => elems!($ty, $bytes).reduce(<$ty>::max).map($wrap),
+            Some(acc)
         }
-    }};
+        NumReduce::Min => elems().reduce(|a, b| a.min(b)),
+        NumReduce::Max => elems().reduce(|a, b| a.max(b)),
+    }
 }
 
 /// Fold a packed **scalar** buffer directly. `field` is the single element field's kind (a scalar
 /// list is one field per element, so its buffer is a contiguous native-width array regardless of the
 /// row/column flag). Returns `None` only for `min`/`max` over an empty buffer (→ the caller's `none`);
 /// `sum`/`product` of empty return their identity (`0`/`1`). A non-numeric element kind is an error.
+///
+/// The `match` picks the *monomorphization*; each arm is [`reduce_buf`] at that width, then re-boxes
+/// the folded element into [`RedNum`] (an integer rides as its erased `i64` word — sign-extended for a
+/// signed width, zero-extended for an unsigned, exactly as the stored element's runtime word).
 pub fn reduce_num_packed(
     op: NumReduce,
     field: &PackedField,
     bytes: &[u8],
 ) -> Result<Option<RedNum>, StdError> {
     Ok(match field {
-        PackedField::Int => int_fold!(i64, bytes, op),
-        PackedField::IntN {
-            bits: 8,
-            signed: true,
-        } => int_fold!(i8, bytes, op),
-        PackedField::IntN {
-            bits: 8,
-            signed: false,
-        } => int_fold!(u8, bytes, op),
-        PackedField::IntN {
-            bits: 16,
-            signed: true,
-        } => int_fold!(i16, bytes, op),
-        PackedField::IntN {
-            bits: 16,
-            signed: false,
-        } => int_fold!(u16, bytes, op),
-        PackedField::IntN {
-            bits: 32,
-            signed: true,
-        } => int_fold!(i32, bytes, op),
-        PackedField::IntN {
-            bits: 32,
-            signed: false,
-        } => int_fold!(u32, bytes, op),
-        PackedField::IntN {
-            bits: 64,
-            signed: true,
-        } => int_fold!(i64, bytes, op),
-        PackedField::IntN {
-            bits: 64,
-            signed: false,
-        } => int_fold!(u64, bytes, op),
-        PackedField::Float | PackedField::F64 => float_fold!(f64, bytes, op, RedNum::Float),
-        PackedField::F32 => float_fold!(f32, bytes, op, RedNum::F32),
+        PackedField::Int => reduce_buf::<i64>(op, bytes).map(RedNum::Int),
+        PackedField::IntN { bits: 8, signed: true } => {
+            reduce_buf::<i8>(op, bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 8, signed: false } => {
+            reduce_buf::<u8>(op, bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 16, signed: true } => {
+            reduce_buf::<i16>(op, bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 16, signed: false } => {
+            reduce_buf::<u16>(op, bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 32, signed: true } => {
+            reduce_buf::<i32>(op, bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 32, signed: false } => {
+            reduce_buf::<u32>(op, bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 64, signed: true } => {
+            reduce_buf::<i64>(op, bytes).map(RedNum::Int)
+        }
+        PackedField::IntN { bits: 64, signed: false } => {
+            reduce_buf::<u64>(op, bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::Float | PackedField::F64 => reduce_buf::<f64>(op, bytes).map(RedNum::Float),
+        PackedField::F32 => reduce_buf::<f32>(op, bytes).map(RedNum::F32),
         PackedField::Bool => return Err(non_numeric(op, "bool")),
         PackedField::IntN { .. } => return Err(non_numeric(op, "int")),
         PackedField::Struct(_) => return Err(non_numeric(op, "structs")),
     })
 }
 
-// A `checked_add` fold, reporting overflow at the element width instead of wrapping (the opt-in
-// `checked_sum` — the unchecked `sum` still wraps). `Some(acc)` normally, `None` on overflow.
-macro_rules! checked_int_sum {
-    ($ty:ty, $bytes:expr) => {{
-        let mut acc: $ty = 0;
-        let mut overflow = false;
-        for x in elems!($ty, $bytes) {
-            match acc.checked_add(x) {
-                Some(v) => acc = v,
-                None => {
-                    overflow = true;
-                    break;
-                }
-            }
-        }
-        if overflow {
-            None
-        } else {
-            Some(RedNum::Int(acc as i64))
-        }
-    }};
+/// A `checked_add` fold, reporting overflow at the element width instead of wrapping (the opt-in
+/// `checked_sum` — the unchecked [`reduce_buf`] `Sum` still wraps). `Some(total)` normally, `None` on
+/// integer overflow. Floats never overflow (their [`Elem::checked_add`] is total), so a float buffer
+/// always yields `Some` — an empty buffer folds to the identity `0`.
+fn checked_sum_buf<S: Elem>(bytes: &[u8]) -> Option<S> {
+    let mut acc = S::ZERO;
+    for c in bytes.chunks_exact(S::BYTES) {
+        acc = acc.checked_add(S::read_le(c))?;
+    }
+    Some(acc)
 }
 
 /// `checked_sum()` over a packed **scalar** buffer: `Ok(Some(total))` normally, `Ok(None)` on integer
@@ -263,29 +215,33 @@ macro_rules! checked_int_sum {
 /// `0`, always `Some`). Numeric fields only; a non-numeric field is an error.
 pub fn checked_sum_packed(field: &PackedField, bytes: &[u8]) -> Result<Option<RedNum>, StdError> {
     Ok(match field {
-        PackedField::Int => checked_int_sum!(i64, bytes),
-        PackedField::IntN { bits: 8, signed: true } => checked_int_sum!(i8, bytes),
-        PackedField::IntN { bits: 8, signed: false } => checked_int_sum!(u8, bytes),
-        PackedField::IntN { bits: 16, signed: true } => checked_int_sum!(i16, bytes),
-        PackedField::IntN { bits: 16, signed: false } => checked_int_sum!(u16, bytes),
-        PackedField::IntN { bits: 32, signed: true } => checked_int_sum!(i32, bytes),
-        PackedField::IntN { bits: 32, signed: false } => checked_int_sum!(u32, bytes),
-        PackedField::IntN { bits: 64, signed: true } => checked_int_sum!(i64, bytes),
-        PackedField::IntN { bits: 64, signed: false } => checked_int_sum!(u64, bytes),
-        PackedField::Float | PackedField::F64 => {
-            let mut acc = 0f64;
-            for x in elems!(f64, bytes) {
-                acc += x;
-            }
-            Some(RedNum::Float(acc))
+        PackedField::Int => checked_sum_buf::<i64>(bytes).map(RedNum::Int),
+        PackedField::IntN { bits: 8, signed: true } => {
+            checked_sum_buf::<i8>(bytes).map(|v| RedNum::Int(v as i64))
         }
-        PackedField::F32 => {
-            let mut acc = 0f32;
-            for x in elems!(f32, bytes) {
-                acc += x;
-            }
-            Some(RedNum::F32(acc))
+        PackedField::IntN { bits: 8, signed: false } => {
+            checked_sum_buf::<u8>(bytes).map(|v| RedNum::Int(v as i64))
         }
+        PackedField::IntN { bits: 16, signed: true } => {
+            checked_sum_buf::<i16>(bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 16, signed: false } => {
+            checked_sum_buf::<u16>(bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 32, signed: true } => {
+            checked_sum_buf::<i32>(bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 32, signed: false } => {
+            checked_sum_buf::<u32>(bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::IntN { bits: 64, signed: true } => {
+            checked_sum_buf::<i64>(bytes).map(RedNum::Int)
+        }
+        PackedField::IntN { bits: 64, signed: false } => {
+            checked_sum_buf::<u64>(bytes).map(|v| RedNum::Int(v as i64))
+        }
+        PackedField::Float | PackedField::F64 => checked_sum_buf::<f64>(bytes).map(RedNum::Float),
+        PackedField::F32 => checked_sum_buf::<f32>(bytes).map(RedNum::F32),
         PackedField::Bool => return Err(non_numeric(NumReduce::Sum, "bool")),
         PackedField::IntN { .. } => return Err(non_numeric(NumReduce::Sum, "int")),
         PackedField::Struct(_) => return Err(non_numeric(NumReduce::Sum, "structs")),
@@ -346,19 +302,21 @@ impl Num {
 /// — is identical to the packed kernel's sequential fold.
 fn combine(op: NumReduce, a: Num, b: Num) -> Num {
     match (a, b) {
+        // `Ord::min`/`Ord::max` and `f64::min`/`f64::max` are named explicitly: the `Elem` trait is in
+        // scope for the packed folds, and its own `min`/`max` would otherwise make `x.min(y)` ambiguous.
         (Num::Int(x), Num::Int(y)) => Num::Int(match op {
             NumReduce::Sum => x.wrapping_add(y),
             NumReduce::Product => x.wrapping_mul(y),
-            NumReduce::Min => x.min(y),
-            NumReduce::Max => x.max(y),
+            NumReduce::Min => Ord::min(x, y),
+            NumReduce::Max => Ord::max(x, y),
         }),
         _ => {
             let (x, y) = (a.as_f64(), b.as_f64());
             Num::Float(match op {
                 NumReduce::Sum => x + y,
                 NumReduce::Product => x * y,
-                NumReduce::Min => x.min(y),
-                NumReduce::Max => x.max(y),
+                NumReduce::Min => f64::min(x, y),
+                NumReduce::Max => f64::max(x, y),
             })
         }
     }

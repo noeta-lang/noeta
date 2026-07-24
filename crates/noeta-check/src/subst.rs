@@ -690,52 +690,93 @@ pub(crate) fn constraint_mismatch(
             ConstraintField::IntN { bits, signed } => {
                 format!("{}{bits}", if *signed { 'i' } else { 'u' })
             }
+            ConstraintField::AnyNumeric => "numeric".to_string(),
+            ConstraintField::AnyInteger => "integer".to_string(),
         }
     }
     fn render(fields: &[ConstraintField]) -> String {
         fields.iter().map(render_one).collect::<Vec<_>>().join(", ")
     }
-    let kinds: Option<Vec<ConstraintField>> = layout
-        .fields
-        .iter()
-        .map(|f| match f.kind {
-            PackedKind::Int => Some(ConstraintField::Int),
-            PackedKind::Float => Some(ConstraintField::Float),
-            PackedKind::F32 => Some(ConstraintField::F32),
-            PackedKind::Bool => Some(ConstraintField::Bool),
-            // Fixed-width integers carry the array-ops integer/`Color` vector shapes (`i32`/`u8`).
-            PackedKind::IntN { bits, signed } => Some(ConstraintField::IntN { bits, signed }),
-            // `f64` and nested packed structs are still not constraint-coverable — an additive
-            // extension later; treated as a mismatch.
-            PackedKind::F64 | PackedKind::Struct(_) => None,
-        })
-        .collect();
-    let Some(kinds) = kinds else {
-        return Some(
-            "the bundle's constraint covers primitive fields only; the type has a nested packed \
-             field"
-                .to_string(),
-        );
-    };
+    // Render a bound field's actual kind (the "found" side of a mismatch). Unlike the old
+    // map-to-`ConstraintField`, this renders `f64` and a nested packed struct directly, so the
+    // `AnyNumeric` form can accept an `f64` field the old mapping had to bail on.
+    fn render_kind(k: &PackedKind) -> String {
+        match k {
+            PackedKind::Int => "int".to_string(),
+            PackedKind::Float => "float".to_string(),
+            PackedKind::F32 => "f32".to_string(),
+            PackedKind::F64 => "f64".to_string(),
+            PackedKind::Bool => "bool".to_string(),
+            PackedKind::IntN { bits, signed } => {
+                format!("{}{bits}", if *signed { 'i' } else { 'u' })
+            }
+            PackedKind::Struct(_) => "<packed struct>".to_string(),
+        }
+    }
+    fn render_kinds(fields: &[noeta_ast::reflect::PackedField]) -> String {
+        fields
+            .iter()
+            .map(|f| render_kind(&f.kind))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    // Whether one required constraint field is satisfied by a bound field's kind. The specific
+    // forms stay EXACT (`Int`↔`Int`, `IntN` same bits+signedness, …); `AnyNumeric` accepts any
+    // numeric kind of any width/signedness (`int`/`float`/`f32`/`f64`/`iN`/`uN`) but never `bool`
+    // or a nested packed struct — the generalization that lets one bundle bind every numeric width.
+    fn field_matches(want: &ConstraintField, kind: &PackedKind) -> bool {
+        match (want, kind) {
+            (ConstraintField::Int, PackedKind::Int) => true,
+            (ConstraintField::Float, PackedKind::Float) => true,
+            (ConstraintField::F32, PackedKind::F32) => true,
+            (ConstraintField::Bool, PackedKind::Bool) => true,
+            (
+                ConstraintField::IntN { bits: wb, signed: ws },
+                PackedKind::IntN { bits: fb, signed: fs },
+            ) => wb == fb && ws == fs,
+            (ConstraintField::AnyNumeric, k) => matches!(
+                k,
+                PackedKind::Int
+                    | PackedKind::Float
+                    | PackedKind::F32
+                    | PackedKind::F64
+                    | PackedKind::IntN { .. }
+            ),
+            // The saturating bundle's field: any integer width/signedness, never a float or bool.
+            (ConstraintField::AnyInteger, k) => {
+                matches!(k, PackedKind::Int | PackedKind::IntN { .. })
+            }
+            _ => false,
+        }
+    }
     match constraint.arity {
         ConstraintArity::Exact => {
-            if kinds != constraint.fields {
+            if layout.fields.len() != constraint.fields.len()
+                || !constraint
+                    .fields
+                    .iter()
+                    .zip(&layout.fields)
+                    .all(|(want, f)| field_matches(want, &f.kind))
+            {
                 return Some(format!(
                     "the bundle requires fields ({}), found ({})",
                     render(constraint.fields),
-                    render(&kinds)
+                    render_kinds(&layout.fields)
                 ));
             }
         }
-        // A uniform vector of flexible width: at least `min` fields, all of the single required kind
-        // (`fields[0]`) — one bundle over `IVec2`/`IVec3`/… . Install-time validated to hold one kind.
+        // A uniform vector of flexible width: at least `min` fields, all satisfying the single
+        // required kind (`fields[0]`) — one bundle over `IVec2`/`IVec3`/… (or, with `AnyNumeric`,
+        // every numeric width). Install-time validated to hold one kind.
         ConstraintArity::Uniform { min } => {
             let want = constraint.fields[0];
-            if kinds.len() < min || kinds.iter().any(|k| *k != want) {
+            if layout.fields.len() < min
+                || !layout.fields.iter().all(|f| field_matches(&want, &f.kind))
+            {
                 return Some(format!(
                     "the bundle requires at least {min} `{}` fields, found ({})",
                     render_one(&want),
-                    render(&kinds)
+                    render_kinds(&layout.fields)
                 ));
             }
         }

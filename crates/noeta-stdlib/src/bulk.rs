@@ -16,7 +16,11 @@
 //! wrapped result the language's `+`/`-`/`*` gives. `abs`/`neg` wrap likewise (`i32::MIN.neg()` stays
 //! `i32::MIN`). `clamp` needs no wrap — its result is already one of its in-range inputs.
 
+// `Scalar` (the enum) is the boxed runtime element of the *fallback* folds; `scalar::Scalar` (aliased
+// `Elem`) is the per-width element trait the packed kernels are now generic over. Two distinct concepts
+// that unfortunately share the name — the alias keeps both readable in one file.
 use crate::registry::Scalar;
+use crate::scalar::Scalar as Elem;
 use crate::{ErrorKind, PackedField, StdError};
 
 /// An element-wise binary op with no natural surface spelling difference — the `+`/`-`/`*` operators.
@@ -81,43 +85,29 @@ pub fn length_mismatch(op: ElemBinOp) -> StdError {
 }
 
 // --- Packed byte-buffer kernels (the fast path: two contiguous native-width buffers) ---
+//
+// Each kernel below is one generic `fn f<S: Elem>` body monomorphized once per element width — the
+// `chunks_exact` + [`Elem::read_le`] loop is the same tight, bounds-check-free shape the per-width
+// macros had, so LLVM still autovectorizes each mono. Integer wrap and the float IEEE/`min`/`max`
+// policy live in the [`Elem`] impl, so a body is width-agnostic yet byte-identical to the old macros.
+// The `match field` dispatch that follows each body only *selects* the monomorphization (and carries
+// the element-typed scalar arguments for `scale`/`clamp`).
 
-/// Element-wise binary over two equal-width integer buffers, wrapping at the native width.
-macro_rules! zip_int {
-    ($ty:ty, $a:expr, $b:expr, $op:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let mut out = Vec::with_capacity($a.len());
-        for (p, q) in $a.chunks_exact(w).zip($b.chunks_exact(w)) {
-            let x = <$ty>::from_le_bytes(p.try_into().expect("chunks_exact width"));
-            let y = <$ty>::from_le_bytes(q.try_into().expect("chunks_exact width"));
-            let r = match $op {
-                ElemBinOp::Add => x.wrapping_add(y),
-                ElemBinOp::Sub => x.wrapping_sub(y),
-                ElemBinOp::Mul => x.wrapping_mul(y),
-            };
-            out.extend_from_slice(&r.to_le_bytes());
-        }
-        out
-    }};
-}
-
-/// Element-wise binary over two equal-width float buffers (IEEE, per lane).
-macro_rules! zip_float {
-    ($ty:ty, $a:expr, $b:expr, $op:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let mut out = Vec::with_capacity($a.len());
-        for (p, q) in $a.chunks_exact(w).zip($b.chunks_exact(w)) {
-            let x = <$ty>::from_le_bytes(p.try_into().expect("chunks_exact width"));
-            let y = <$ty>::from_le_bytes(q.try_into().expect("chunks_exact width"));
-            let r = match $op {
-                ElemBinOp::Add => x + y,
-                ElemBinOp::Sub => x - y,
-                ElemBinOp::Mul => x * y,
-            };
-            out.extend_from_slice(&r.to_le_bytes());
-        }
-        out
-    }};
+/// Element-wise binary over two equal-width buffers into a fresh buffer: integers wrap at the width
+/// ([`Elem::add`]/`sub`/`mul`), floats are IEEE. The caller guarantees the two buffers pair up
+/// exactly (equal length + equal element width).
+fn zip_buf<S: Elem>(op: ElemBinOp, a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(a.len());
+    for (p, q) in a.chunks_exact(S::BYTES).zip(b.chunks_exact(S::BYTES)) {
+        let (x, y) = (S::read_le(p), S::read_le(q));
+        let r = match op {
+            ElemBinOp::Add => x.add(y),
+            ElemBinOp::Sub => x.sub(y),
+            ElemBinOp::Mul => x.mul(y),
+        };
+        r.write_le(&mut out);
+    }
+    out
 }
 
 /// Fold two packed **scalar** buffers of the same field kind element-wise into a fresh buffer. The
@@ -130,48 +120,32 @@ pub fn zip_num_packed(
     b: &[u8],
 ) -> Result<Vec<u8>, StdError> {
     Ok(match field {
-        PackedField::Int => zip_int!(i64, a, b, op),
-        PackedField::IntN { bits: 8, signed: true } => zip_int!(i8, a, b, op),
-        PackedField::IntN { bits: 8, signed: false } => zip_int!(u8, a, b, op),
-        PackedField::IntN { bits: 16, signed: true } => zip_int!(i16, a, b, op),
-        PackedField::IntN { bits: 16, signed: false } => zip_int!(u16, a, b, op),
-        PackedField::IntN { bits: 32, signed: true } => zip_int!(i32, a, b, op),
-        PackedField::IntN { bits: 32, signed: false } => zip_int!(u32, a, b, op),
-        PackedField::IntN { bits: 64, signed: true } => zip_int!(i64, a, b, op),
-        PackedField::IntN { bits: 64, signed: false } => zip_int!(u64, a, b, op),
-        PackedField::Float | PackedField::F64 => zip_float!(f64, a, b, op),
-        PackedField::F32 => zip_float!(f32, a, b, op),
+        PackedField::Int => zip_buf::<i64>(op, a, b),
+        PackedField::IntN { bits: 8, signed: true } => zip_buf::<i8>(op, a, b),
+        PackedField::IntN { bits: 8, signed: false } => zip_buf::<u8>(op, a, b),
+        PackedField::IntN { bits: 16, signed: true } => zip_buf::<i16>(op, a, b),
+        PackedField::IntN { bits: 16, signed: false } => zip_buf::<u16>(op, a, b),
+        PackedField::IntN { bits: 32, signed: true } => zip_buf::<i32>(op, a, b),
+        PackedField::IntN { bits: 32, signed: false } => zip_buf::<u32>(op, a, b),
+        PackedField::IntN { bits: 64, signed: true } => zip_buf::<i64>(op, a, b),
+        PackedField::IntN { bits: 64, signed: false } => zip_buf::<u64>(op, a, b),
+        PackedField::Float | PackedField::F64 => zip_buf::<f64>(op, a, b),
+        PackedField::F32 => zip_buf::<f32>(op, a, b),
         PackedField::Bool => return Err(non_numeric(op.symbol(), "bool")),
         PackedField::IntN { .. } => return Err(non_numeric(op.symbol(), "int")),
         PackedField::Struct(_) => return Err(non_numeric(op.symbol(), "structs")),
     })
 }
 
-/// Scale a packed buffer by a scalar factor into a fresh buffer (integers wrap at the element width).
-macro_rules! scale_int {
-    ($ty:ty, $a:expr, $k:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let k = $k as $ty;
-        let mut out = Vec::with_capacity($a.len());
-        for c in $a.chunks_exact(w) {
-            let x = <$ty>::from_le_bytes(c.try_into().expect("chunks_exact width"));
-            out.extend_from_slice(&x.wrapping_mul(k).to_le_bytes());
-        }
-        out
-    }};
-}
-
-macro_rules! scale_float {
-    ($ty:ty, $a:expr, $k:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let k = $k as $ty;
-        let mut out = Vec::with_capacity($a.len());
-        for c in $a.chunks_exact(w) {
-            let x = <$ty>::from_le_bytes(c.try_into().expect("chunks_exact width"));
-            out.extend_from_slice(&(x * k).to_le_bytes());
-        }
-        out
-    }};
+/// Scale a packed buffer by a scalar factor `k` (already the element type) into a fresh buffer.
+/// Integers wrap at the width ([`Elem::mul`]); floats multiply IEEE. The dispatch arm narrows the
+/// laundered `i64`/`f64` factor to `S` with an `as` cast, exactly the old per-width macros' `$k as $ty`.
+fn scale_buf<S: Elem>(a: &[u8], k: S) -> Vec<u8> {
+    let mut out = Vec::with_capacity(a.len());
+    for c in a.chunks_exact(S::BYTES) {
+        S::read_le(c).mul(k).write_le(&mut out);
+    }
+    out
 }
 
 fn factor_i64(factor: Scalar) -> i64 {
@@ -199,73 +173,38 @@ pub fn scale_num_packed(field: &PackedField, a: &[u8], factor: Scalar) -> Result
     let ki = factor_i64(factor);
     let kf = factor_f64(factor);
     Ok(match field {
-        PackedField::Int => scale_int!(i64, a, ki),
-        PackedField::IntN { bits: 8, signed: true } => scale_int!(i8, a, ki),
-        PackedField::IntN { bits: 8, signed: false } => scale_int!(u8, a, ki),
-        PackedField::IntN { bits: 16, signed: true } => scale_int!(i16, a, ki),
-        PackedField::IntN { bits: 16, signed: false } => scale_int!(u16, a, ki),
-        PackedField::IntN { bits: 32, signed: true } => scale_int!(i32, a, ki),
-        PackedField::IntN { bits: 32, signed: false } => scale_int!(u32, a, ki),
-        PackedField::IntN { bits: 64, signed: true } => scale_int!(i64, a, ki),
-        PackedField::IntN { bits: 64, signed: false } => scale_int!(u64, a, ki),
-        PackedField::Float | PackedField::F64 => scale_float!(f64, a, kf),
-        PackedField::F32 => scale_float!(f32, a, kf as f32),
+        PackedField::Int => scale_buf::<i64>(a, ki),
+        PackedField::IntN { bits: 8, signed: true } => scale_buf::<i8>(a, ki as i8),
+        PackedField::IntN { bits: 8, signed: false } => scale_buf::<u8>(a, ki as u8),
+        PackedField::IntN { bits: 16, signed: true } => scale_buf::<i16>(a, ki as i16),
+        PackedField::IntN { bits: 16, signed: false } => scale_buf::<u16>(a, ki as u16),
+        PackedField::IntN { bits: 32, signed: true } => scale_buf::<i32>(a, ki as i32),
+        PackedField::IntN { bits: 32, signed: false } => scale_buf::<u32>(a, ki as u32),
+        PackedField::IntN { bits: 64, signed: true } => scale_buf::<i64>(a, ki),
+        PackedField::IntN { bits: 64, signed: false } => scale_buf::<u64>(a, ki as u64),
+        PackedField::Float | PackedField::F64 => scale_buf::<f64>(a, kf),
+        PackedField::F32 => scale_buf::<f32>(a, kf as f32),
         PackedField::Bool => return Err(non_numeric("scale", "bool")),
         PackedField::IntN { .. } => return Err(non_numeric("scale", "int")),
         PackedField::Struct(_) => return Err(non_numeric("scale", "structs")),
     })
 }
 
-/// Unary map over a **signed** integer buffer: `abs` wraps (`i32::MIN.wrapping_abs() == i32::MIN`),
-/// `neg` wraps.
-macro_rules! map_signed_int {
-    ($ty:ty, $a:expr, $op:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let mut out = Vec::with_capacity($a.len());
-        for c in $a.chunks_exact(w) {
-            let x = <$ty>::from_le_bytes(c.try_into().expect("chunks_exact width"));
-            let r = match $op {
-                ElemMap::Abs => x.wrapping_abs(),
-                ElemMap::Neg => x.wrapping_neg(),
-            };
-            out.extend_from_slice(&r.to_le_bytes());
-        }
-        out
-    }};
-}
-
-/// Unary map over an **unsigned** integer buffer: `abs` is the identity (already non-negative), `neg`
-/// wraps (two's-complement negation at the width).
-macro_rules! map_unsigned_int {
-    ($ty:ty, $a:expr, $op:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let mut out = Vec::with_capacity($a.len());
-        for c in $a.chunks_exact(w) {
-            let x = <$ty>::from_le_bytes(c.try_into().expect("chunks_exact width"));
-            let r = match $op {
-                ElemMap::Abs => x,
-                ElemMap::Neg => x.wrapping_neg(),
-            };
-            out.extend_from_slice(&r.to_le_bytes());
-        }
-        out
-    }};
-}
-
-macro_rules! map_float {
-    ($ty:ty, $a:expr, $op:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let mut out = Vec::with_capacity($a.len());
-        for c in $a.chunks_exact(w) {
-            let x = <$ty>::from_le_bytes(c.try_into().expect("chunks_exact width"));
-            let r = match $op {
-                ElemMap::Abs => x.abs(),
-                ElemMap::Neg => -x,
-            };
-            out.extend_from_slice(&r.to_le_bytes());
-        }
-        out
-    }};
+/// Unary element-wise map over a packed buffer into a fresh buffer, same element type. `abs` and
+/// `neg` route through [`Elem::abs`]/[`Elem::neg`], which capture the per-signedness policy: signed
+/// integers wrap (`i32::MIN.abs() == i32::MIN`, `neg` two's-complement), unsigned `abs` is the
+/// identity while `neg` wraps, floats use `f::abs`/unary `-`. One body replaces the three old macros.
+fn map_buf<S: Elem>(op: ElemMap, a: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(a.len());
+    for c in a.chunks_exact(S::BYTES) {
+        let x = S::read_le(c);
+        let r = match op {
+            ElemMap::Abs => x.abs(),
+            ElemMap::Neg => x.neg(),
+        };
+        r.write_le(&mut out);
+    }
+    out
 }
 
 /// `xs.abs()` / `xs.neg()`: element-wise unary map over a packed buffer, same element type (integers
@@ -276,17 +215,17 @@ pub fn map_num_packed(op: ElemMap, field: &PackedField, a: &[u8]) -> Result<Vec<
         ElemMap::Neg => "neg",
     };
     Ok(match field {
-        PackedField::Int => map_signed_int!(i64, a, op),
-        PackedField::IntN { bits: 8, signed: true } => map_signed_int!(i8, a, op),
-        PackedField::IntN { bits: 8, signed: false } => map_unsigned_int!(u8, a, op),
-        PackedField::IntN { bits: 16, signed: true } => map_signed_int!(i16, a, op),
-        PackedField::IntN { bits: 16, signed: false } => map_unsigned_int!(u16, a, op),
-        PackedField::IntN { bits: 32, signed: true } => map_signed_int!(i32, a, op),
-        PackedField::IntN { bits: 32, signed: false } => map_unsigned_int!(u32, a, op),
-        PackedField::IntN { bits: 64, signed: true } => map_signed_int!(i64, a, op),
-        PackedField::IntN { bits: 64, signed: false } => map_unsigned_int!(u64, a, op),
-        PackedField::Float | PackedField::F64 => map_float!(f64, a, op),
-        PackedField::F32 => map_float!(f32, a, op),
+        PackedField::Int => map_buf::<i64>(op, a),
+        PackedField::IntN { bits: 8, signed: true } => map_buf::<i8>(op, a),
+        PackedField::IntN { bits: 8, signed: false } => map_buf::<u8>(op, a),
+        PackedField::IntN { bits: 16, signed: true } => map_buf::<i16>(op, a),
+        PackedField::IntN { bits: 16, signed: false } => map_buf::<u16>(op, a),
+        PackedField::IntN { bits: 32, signed: true } => map_buf::<i32>(op, a),
+        PackedField::IntN { bits: 32, signed: false } => map_buf::<u32>(op, a),
+        PackedField::IntN { bits: 64, signed: true } => map_buf::<i64>(op, a),
+        PackedField::IntN { bits: 64, signed: false } => map_buf::<u64>(op, a),
+        PackedField::Float | PackedField::F64 => map_buf::<f64>(op, a),
+        PackedField::F32 => map_buf::<f32>(op, a),
         PackedField::Bool => return Err(non_numeric(who, "bool")),
         PackedField::IntN { .. } => return Err(non_numeric(who, "int")),
         PackedField::Struct(_) => return Err(non_numeric(who, "structs")),
@@ -295,34 +234,14 @@ pub fn map_num_packed(op: ElemMap, field: &PackedField, a: &[u8]) -> Result<Vec<
 
 /// `xs.clamp(lo, hi)`: constrain each element into `[lo, hi]`, computed as `max(lo).min(hi)` per
 /// element so it is total even if `lo > hi` (no wrap needed — the result is one of the in-range
-/// inputs). Signed/unsigned integer ordering follows the field's signedness.
-macro_rules! clamp_int {
-    ($ty:ty, $a:expr, $lo:expr, $hi:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let lo = $lo as $ty;
-        let hi = $hi as $ty;
-        let mut out = Vec::with_capacity($a.len());
-        for c in $a.chunks_exact(w) {
-            let x = <$ty>::from_le_bytes(c.try_into().expect("chunks_exact width"));
-            let r = x.max(lo).min(hi);
-            out.extend_from_slice(&r.to_le_bytes());
-        }
-        out
-    }};
-}
-
-macro_rules! clamp_float {
-    ($ty:ty, $a:expr, $lo:expr, $hi:expr) => {{
-        let w = std::mem::size_of::<$ty>();
-        let lo = $lo as $ty;
-        let hi = $hi as $ty;
-        let mut out = Vec::with_capacity($a.len());
-        for c in $a.chunks_exact(w) {
-            let x = <$ty>::from_le_bytes(c.try_into().expect("chunks_exact width"));
-            out.extend_from_slice(&x.max(lo).min(hi).to_le_bytes());
-        }
-        out
-    }};
+/// inputs). Signed/unsigned/float ordering follows [`Elem::max`]/[`Elem::min`] (the float variant
+/// keeps the reduction's NaN-avoiding policy). `lo`/`hi` arrive already narrowed to `S` by the arm.
+fn clamp_buf<S: Elem>(a: &[u8], lo: S, hi: S) -> Vec<u8> {
+    let mut out = Vec::with_capacity(a.len());
+    for c in a.chunks_exact(S::BYTES) {
+        S::read_le(c).max(lo).min(hi).write_le(&mut out);
+    }
+    out
 }
 
 pub fn clamp_num_packed(
@@ -334,17 +253,17 @@ pub fn clamp_num_packed(
     let (li, hi_i) = (factor_i64(lo), factor_i64(hi));
     let (lf, hf) = (factor_f64(lo), factor_f64(hi));
     Ok(match field {
-        PackedField::Int => clamp_int!(i64, a, li, hi_i),
-        PackedField::IntN { bits: 8, signed: true } => clamp_int!(i8, a, li, hi_i),
-        PackedField::IntN { bits: 8, signed: false } => clamp_int!(u8, a, li, hi_i),
-        PackedField::IntN { bits: 16, signed: true } => clamp_int!(i16, a, li, hi_i),
-        PackedField::IntN { bits: 16, signed: false } => clamp_int!(u16, a, li, hi_i),
-        PackedField::IntN { bits: 32, signed: true } => clamp_int!(i32, a, li, hi_i),
-        PackedField::IntN { bits: 32, signed: false } => clamp_int!(u32, a, li, hi_i),
-        PackedField::IntN { bits: 64, signed: true } => clamp_int!(i64, a, li, hi_i),
-        PackedField::IntN { bits: 64, signed: false } => clamp_int!(u64, a, li, hi_i),
-        PackedField::Float | PackedField::F64 => clamp_float!(f64, a, lf, hf),
-        PackedField::F32 => clamp_float!(f32, a, lf as f32, hf as f32),
+        PackedField::Int => clamp_buf::<i64>(a, li, hi_i),
+        PackedField::IntN { bits: 8, signed: true } => clamp_buf::<i8>(a, li as i8, hi_i as i8),
+        PackedField::IntN { bits: 8, signed: false } => clamp_buf::<u8>(a, li as u8, hi_i as u8),
+        PackedField::IntN { bits: 16, signed: true } => clamp_buf::<i16>(a, li as i16, hi_i as i16),
+        PackedField::IntN { bits: 16, signed: false } => clamp_buf::<u16>(a, li as u16, hi_i as u16),
+        PackedField::IntN { bits: 32, signed: true } => clamp_buf::<i32>(a, li as i32, hi_i as i32),
+        PackedField::IntN { bits: 32, signed: false } => clamp_buf::<u32>(a, li as u32, hi_i as u32),
+        PackedField::IntN { bits: 64, signed: true } => clamp_buf::<i64>(a, li, hi_i),
+        PackedField::IntN { bits: 64, signed: false } => clamp_buf::<u64>(a, li as u64, hi_i as u64),
+        PackedField::Float | PackedField::F64 => clamp_buf::<f64>(a, lf, hf),
+        PackedField::F32 => clamp_buf::<f32>(a, lf as f32, hf as f32),
         PackedField::Bool => return Err(non_numeric("clamp", "bool")),
         PackedField::IntN { .. } => return Err(non_numeric("clamp", "int")),
         PackedField::Struct(_) => return Err(non_numeric("clamp", "structs")),
@@ -434,7 +353,12 @@ pub fn map_num_scalars(op: ElemMap, a: &[Scalar]) -> Result<Vec<Scalar>, StdErro
 pub fn clamp_num_scalars(a: &[Scalar], lo: Scalar, hi: Scalar) -> Result<Vec<Scalar>, StdError> {
     a.iter()
         .map(|&x| match x {
-            Scalar::Int(i) => Ok(Scalar::Int(i.max(factor_i64(lo)).min(factor_i64(hi)))),
+            // `Ord::min`/`max` named explicitly: `i64` now implements `Elem` (in scope for the packed
+            // kernels), so a bare `i.max(..)` is ambiguous between `Ord` and `Elem::max`. For a
+            // total-order integer the two agree, so this is the same `Ord` clamp as before.
+            Scalar::Int(i) => {
+                Ok(Scalar::Int(Ord::min(Ord::max(i, factor_i64(lo)), factor_i64(hi))))
+            }
             Scalar::F32(f) => {
                 Ok(Scalar::F32(f.max(factor_f64(lo) as f32).min(factor_f64(hi) as f32)))
             }
