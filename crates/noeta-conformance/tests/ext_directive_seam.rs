@@ -560,3 +560,35 @@ fn native_role_binding_surfaces_on_both_backends() {
          {{target, role}} binding — correct target and enum variant — identically on both backends"
     );
 }
+
+// --- Native FIELDED @attribute runtime reflection (native-type-unification D2 follow-up) ----------
+
+#[test]
+fn native_fielded_attribute_reflects_its_fields_on_both_backends() {
+    let _guard = SERIAL.lock().unwrap();
+    // `cfg.Route` is a native **fielded** `@attribute` struct (`Route { path: string }`), the native
+    // twin of a `.noe` `@attribute(Function, Method) struct Route`. Applying `#[Route("/x")]` to a
+    // linked decl and reading `attributes_of::<Route>()` must materialize a real `Route` instance
+    // whose `path == "/x"` — identically on both backends — exactly as a data-only `ExtAttribute`
+    // (`#[Skip("reason")]`) already does. The fielded attribute's shape reaches the reflection
+    // manifest via `extension_attribute_types` (which now threads `ext_fielded_attributes`), so
+    // `attribute_shape("cfg.Route")` resolves its field and `materialize_args` binds `"/x"` into it.
+    // Before the fix the shape was empty and `c.value.path` had nothing to read — this is the gate.
+    let stdout = run_linked_both_agree(
+        "use cfg.Route\n\
+         #[Route(\"/x\")]\n\
+         fn handler(): int { return 1; }\n\
+         attrs = attributes_of::<Route>()\n\
+         echo attrs.len()\n\
+         for c in attrs {\n\
+         \x20   echo \"${c.target}=${c.value.path}\"\n\
+         }\n",
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["1", "handler=/x"],
+        "a native fielded `@attribute` applied in a linked module must materialize its instance with \
+         the applied field value (`path == \"/x\"`), identically on both backends"
+    );
+}

@@ -94,9 +94,23 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
     };
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&relevance));
     let ir = noeta_ir_passes::thread_reuse(&ir);
+    let packed_type_layouts = checked
+        .sites
+        .packed_type_layouts
+        .iter()
+        .map(|l| (l.type_name.clone(), l.clone()))
+        .collect();
     let sites = checked.sites.type_of_sites;
     let deserialize_recipes = checked.sites.deserialize_recipes.iter().cloned().collect();
-    move || IrRefBackend::new().run_ir(&program, &ir, sites, deserialize_recipes)
+    move || {
+        IrRefBackend::new().run_ir(
+            &program,
+            &ir,
+            sites,
+            deserialize_recipes,
+            packed_type_layouts,
+        )
+    }
 }
 
 /// Build an `n`-element packed/boxed `Vec3` list, run it through a flat-preserving **producer**

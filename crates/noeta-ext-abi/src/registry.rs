@@ -1320,6 +1320,18 @@ impl ExtFielded {
         kind: FieldedKind::Struct,
         ..ExtFielded::DEFAULTS
     };
+
+    /// Whether this fielded struct is usable as a `#[...]` data attribute — it carries
+    /// [`ExtTypeDirective::Attribute`] (D2). Assembly guarantees such a type is `Struct`-kind
+    /// (a class carrying `@attribute` is rejected at [`Registry::validate`]), so a `true` here is a
+    /// well-formed attribute whose fields are its construction contract. This is the fielded twin of
+    /// an [`ExtAttribute`] existing, and the predicate `extension_attribute_types` reflects on so a
+    /// native fielded `@attribute` materializes through the *same* manifest path as a data-only one.
+    pub fn is_attribute(&self) -> bool {
+        self.directives
+            .iter()
+            .any(|d| matches!(d, ExtTypeDirective::Attribute(_)))
+    }
 }
 
 impl NominalType for ExtFielded {
@@ -3949,6 +3961,17 @@ pub fn ext_attributes() -> impl Iterator<Item = &'static ExtAttribute> {
 
 pub fn find_ext_attribute(name: &str) -> Option<&'static ExtAttribute> {
     default_registry().and_then(|r| r.find_ext_attribute(name))
+}
+
+/// Every registered native **fielded** `@attribute` struct (D2) — the fielded twin of
+/// [`ext_attributes`]. `extension_attribute_types` reflects on these alongside the data-only
+/// [`ExtAttribute`]s, so a native fielded `@attribute` (`Route { path: string }`) lands in the same
+/// reflection manifest and `attributes_of::<Route>()` materializes its instance through the one
+/// shared [`crate::registry::ExtFielded::is_attribute`] path.
+pub fn ext_fielded_attributes() -> impl Iterator<Item = &'static ExtFielded> {
+    default_registry()
+        .into_iter()
+        .flat_map(|r| r.fielded().filter(|f| f.is_attribute()))
 }
 
 pub fn find_type(name: &str) -> Option<&'static ExtType> {

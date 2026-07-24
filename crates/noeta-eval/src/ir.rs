@@ -53,6 +53,14 @@ enum MatOut {
 /// `type_of_sites`, so the reference backend decodes by runtime type identically to the VM.
 pub type DeserializeRecipes = std::collections::HashMap<String, noeta_stdlib::TypeRecipe>;
 
+/// Every `@packed` struct's flat layout by type name (native type-declaration unification, Slice E2),
+/// lifted from `noeta_check::Sites::packed_type_layouts`. Threaded through the `run_ir` entry points
+/// beside `deserialize_recipes` so the from-scratch producer [`NativeCtx::make_packed`] can resolve a
+/// produced `List<packed>`'s element schema BY (qualified) name — the tree-walker twin of the VM's
+/// interned `packed_schemas` by-name scan. Absent (empty) on the checkerless REPL session path, where
+/// no `@packed` layout is known.
+pub type PackedTypeLayouts = std::collections::HashMap<String, noeta_ast::reflect::PackedLayout>;
+
 /// The flat temporary store for one function activation (or the top level). Indexed by
 /// [`noeta_ir::Temp`]; a slot is `None` until its defining `let` runs.
 /// Whether an atom is an ANF temporary (vs a named source variable or a constant). A temp receiver
@@ -120,8 +128,15 @@ impl IrRefBackend {
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
         deserialize_recipes: DeserializeRecipes,
+        packed_type_layouts: PackedTypeLayouts,
     ) -> RunResult {
-        Interpreter::new().run_ir(ast, ir, type_of_sites, deserialize_recipes)
+        Interpreter::new().run_ir(
+            ast,
+            ir,
+            type_of_sites,
+            deserialize_recipes,
+            packed_type_layouts,
+        )
     }
 
     /// As [`IrRefBackend::run_ir`], plus the abort traceback (empty for a clean run) — the
@@ -132,8 +147,15 @@ impl IrRefBackend {
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
         deserialize_recipes: DeserializeRecipes,
+        packed_type_layouts: PackedTypeLayouts,
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
-        Interpreter::new().run_ir_traced(ast, ir, type_of_sites, deserialize_recipes)
+        Interpreter::new().run_ir_traced(
+            ast,
+            ir,
+            type_of_sites,
+            deserialize_recipes,
+            packed_type_layouts,
+        )
     }
 
     /// As [`IrRefBackend::run_ir`], but against a caller-provided [`noeta_stdlib::Host`]
@@ -148,14 +170,24 @@ impl IrRefBackend {
         host: Box<dyn noeta_stdlib::Host>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
         deserialize_recipes: DeserializeRecipes,
+        packed_type_layouts: PackedTypeLayouts,
     ) -> RunResult {
-        Interpreter::with_host(host).run_ir(ast, ir, type_of_sites, deserialize_recipes)
+        Interpreter::with_host(host).run_ir(
+            ast,
+            ir,
+            type_of_sites,
+            deserialize_recipes,
+            packed_type_layouts,
+        )
     }
 
     /// As [`IrRefBackend::run_ir_with_host`], but also swapping the async executor (Track A.4).
     /// The CLI pairs a real host with a real wall-clock executor so `sleep`/`concurrent` run against
     /// real time; conformance never calls this (it keeps the default [`noeta_stdlib::SandboxExecutor`]),
     /// so this path is out-of-oracle.
+    // The real-host/real-executor entry threads the same site maps as the sandbox path plus its two
+    // boxed capabilities; one over the lint's arg ceiling since Slice E2 added `packed_type_layouts`.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_ir_with_host_and_executor(
         &self,
         ast: &Program,
@@ -164,12 +196,14 @@ impl IrRefBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
         deserialize_recipes: DeserializeRecipes,
+        packed_type_layouts: PackedTypeLayouts,
     ) -> RunResult {
         Interpreter::with_host_and_executor(host, executor).run_ir(
             ast,
             ir,
             type_of_sites,
             deserialize_recipes,
+            packed_type_layouts,
         )
     }
 }
@@ -184,9 +218,16 @@ impl Interpreter {
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
         deserialize_recipes: DeserializeRecipes,
+        packed_type_layouts: PackedTypeLayouts,
     ) -> RunResult {
-        self.run_ir_traced(ast, ir, type_of_sites, deserialize_recipes)
-            .0
+        self.run_ir_traced(
+            ast,
+            ir,
+            type_of_sites,
+            deserialize_recipes,
+            packed_type_layouts,
+        )
+        .0
     }
 
     /// [`Interpreter::run_ir`] plus the abort traceback (empty for a clean run) — the tree-walker
@@ -197,6 +238,7 @@ impl Interpreter {
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
         deserialize_recipes: DeserializeRecipes,
+        packed_type_layouts: PackedTypeLayouts,
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
         // Arm the safepoint-GC trigger for this run (the eval mirror of the VM's arm).
         crate::leak::safepoint_arm(crate::leak::safepoint_step());
@@ -209,6 +251,9 @@ impl Interpreter {
         // The `@derive(Deserialize<Json>)` decode registry (L2.2 DI) `json.decode_typed` resolves
         // against — lifted from the checker's sites, identical to the VM's map by construction.
         self.deserialize_recipes = deserialize_recipes;
+        // Slice E2: every `@packed` struct's layout by name, so a native fn's `make_packed` resolves a
+        // produced list's element schema — the tree-walker twin of the VM's interned `packed_schemas`.
+        self.packed_type_layouts = packed_type_layouts;
         // The forwarding type-argument table (poly-values F2b) rides the IR itself, so both
         // backends read the same entries by construction.
         self.type_args = ir.type_args.clone();
@@ -2077,7 +2122,21 @@ impl Interpreter {
                 }
                 // A `json.parse::<T>` result carries no reflected tag (R2) — its concrete type is
                 // recovered head-only from the shape; untagged.
-                let value = self.construct_object(&name, span, field_values, None, None, span)?;
+                //
+                // A NATIVE fielded struct (native type-declaration unification) has no `.noe` def in
+                // scope — it is scope-bound only under its short name, while the recipe carries the
+                // QUALIFIED identity `type_to_recipe` keyed against `symbols.records` — so
+                // `construct_object` (a scope lookup) cannot build it. Build the native struct-kind
+                // Object directly instead, the same value-`TypeDef` shape `materialize_native` gives a
+                // `NativeOut::Instance{kind:Struct}` (reused via `fielded_object`), keyed by the
+                // qualified identity so the `has_validator` re-entry below dispatches `validate` to the
+                // type's native `dispatch` (`call_method` → `find_class_method` → the fielded seam).
+                let value = if self.reg().resolve_fielded(&name).is_some() {
+                    let fields = field_values.into_iter().map(|(n, _, v)| (n, v)).collect();
+                    crate::fielded_object(name.clone(), true, fields)
+                } else {
+                    self.construct_object(&name, span, field_values, None, None, span)?
+                };
                 // Bottom-up: every field is materialized and validated above, so the type's own
                 // `validate` sees an already-valid value. A rejection short-circuits before this
                 // node becomes a `Value`.

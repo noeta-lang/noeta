@@ -407,36 +407,109 @@ pub fn synthesized_config_attr(attr_name: &str, args: &[AttrArg], tier_span: Spa
 /// fallback is gone).
 pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
     use noeta_ext_abi::registry as ext;
-    ext::ext_attributes()
-        .map(|attr| noeta_ast::reflect::TypeInfo {
-            // The **qualified** identity (`std.test.Skip`) — the manifest shape `attributes_of`
-            // matches must key on the same FQN the loader rewrites applications to (D2b).
-            name: attr.qualified(),
-            kind: noeta_ast::reflect::TypeKind::Struct,
-            fields: attr.fields.iter().map(|f| f.name.to_string()).collect(),
-            field_types: attr
-                .fields
-                .iter()
-                .map(|f| match f.ty {
-                    ext::AttrFieldType::Int => noeta_ast::reflect::TypeRepr::Int,
-                    ext::AttrFieldType::Str => noeta_ast::reflect::TypeRepr::Str,
-                    ext::AttrFieldType::Dyn => noeta_ast::reflect::TypeRepr::Dyn,
+    let data_only = ext::ext_attributes().map(|attr| noeta_ast::reflect::TypeInfo {
+        // The **qualified** identity (`std.test.Skip`) — the manifest shape `attributes_of`
+        // matches must key on the same FQN the loader rewrites applications to (D2b).
+        name: attr.qualified(),
+        kind: noeta_ast::reflect::TypeKind::Struct,
+        fields: attr.fields.iter().map(|f| f.name.to_string()).collect(),
+        // The field's declared type as a reflection `TypeRepr` (struct-reflection arc), so
+        // `field_specs_of` reports a data-only native attribute's field types precisely.
+        field_types: attr
+            .fields
+            .iter()
+            .map(|f| match f.ty {
+                ext::AttrFieldType::Int => noeta_ast::reflect::TypeRepr::Int,
+                ext::AttrFieldType::Str => noeta_ast::reflect::TypeRepr::Str,
+                ext::AttrFieldType::Dyn => noeta_ast::reflect::TypeRepr::Dyn,
+            })
+            .collect(),
+        // Optional iff the field carries a literal default (`Skip.reason = ""`).
+        field_optional: attr.fields.iter().map(|f| f.default.is_some()).collect(),
+        field_defaults: attr
+            .fields
+            .iter()
+            .map(|f| {
+                f.default.map(|d| match d {
+                    ext::AttrFieldDefault::Str(s) => noeta_ast::AttrValue::Str(s.to_string()),
+                    ext::AttrFieldDefault::Int(n) => noeta_ast::AttrValue::Int(n),
                 })
-                .collect(),
-            field_optional: attr.fields.iter().map(|f| f.default.is_some()).collect(),
-            field_defaults: attr
-                .fields
-                .iter()
-                .map(|f| {
-                    f.default.map(|d| match d {
-                        ext::AttrFieldDefault::Str(s) => noeta_ast::AttrValue::Str(s.to_string()),
-                        ext::AttrFieldDefault::Int(n) => noeta_ast::AttrValue::Int(n),
-                    })
-                })
-                .collect(),
-            variants: Vec::new(),
-        })
-        .collect()
+            })
+            .collect(),
+        variants: Vec::new(),
+    });
+    // A native **fielded** `@attribute` struct (D2) — a real `ExtFielded` carrying
+    // `ExtTypeDirective::Attribute` — is an attribute to every consumer, so its shape must reach the
+    // same reflection manifest the data-only `ExtAttribute`s do. Without this, `attribute_shape`
+    // finds no `TypeInfo` for the fielded attribute and `attributes_of::<Route>()` materializes an
+    // empty instance. Assembly guarantees a fielded `@attribute` is `Struct`-kind. `ExtField` carries
+    // no literal default, so every field is mandatory (`None`) — the E0009 construction check ensures
+    // each is supplied at the application site, exactly as for a data-only attribute's mandatory field.
+    let fielded = ext::ext_fielded_attributes().map(|f| noeta_ast::reflect::TypeInfo {
+        name: f.qualified(),
+        kind: noeta_ast::reflect::TypeKind::Struct,
+        fields: f
+            .fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect(),
+        // A fielded attribute's field types come from the same `SigType` signature vocabulary the
+        // checker seeds into `symbols.records`; project each to its reflection `TypeRepr` so
+        // `field_specs_of` reports a native fielded attribute's field types precisely (struct-
+        // reflection arc). An `ExtField` carries no literal default, so every field is mandatory.
+        field_types: f
+            .fields
+            .iter()
+            .map(|field| sig_type_to_repr(&field.ty))
+            .collect(),
+        field_optional: f.fields.iter().map(|_| false).collect(),
+        field_defaults: f.fields.iter().map(|_| None).collect(),
+        variants: Vec::new(),
+    });
+    data_only.chain(fielded).collect()
+}
+
+/// Project a registry [`SigType`](noeta_ext_abi::registry::SigType) onto its reflection
+/// [`TypeRepr`](noeta_ast::reflect::TypeRepr) — the type-level counterpart of the checker's
+/// [`sig_to_typeref`](crate::stdlib::sig_to_typeref)/[`sig_to_type`](crate::stdlib::sig_to_type),
+/// so a native fielded type's field types reflect through `field_specs_of` the same way a `.noe`
+/// struct's do. Registry-free (unlike `sig_to_typeref`, which needs the registry to qualify a name):
+/// a nominal keeps its bare registry name as a kind-agnostic `Named`, matching how `params_of`
+/// projects a declared nominal. A polymorphic/variable position has no declaration-site type and
+/// becomes `Dyn`; a trailing-optional wrapper is an arity marker and unwraps to its inner type.
+fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> noeta_ast::reflect::TypeRepr {
+    use noeta_ast::reflect::TypeRepr;
+    use noeta_ext_abi::registry::SigType;
+    let boxed = |s: &SigType| Box::new(sig_type_to_repr(s));
+    match sig {
+        SigType::Int => TypeRepr::Int,
+        SigType::Float => TypeRepr::Float,
+        SigType::F32 => TypeRepr::F32,
+        SigType::Bool => TypeRepr::Bool,
+        SigType::String => TypeRepr::Str,
+        SigType::Bytes => TypeRepr::Bytes,
+        SigType::Unit => TypeRepr::Unit,
+        SigType::Dyn => TypeRepr::Dyn,
+        SigType::List(t) => TypeRepr::List(boxed(t)),
+        SigType::Option(t) => TypeRepr::Option(boxed(t)),
+        SigType::Map(k, v) => TypeRepr::Map(boxed(k), boxed(v)),
+        SigType::Result(ok, err) => TypeRepr::Result(boxed(ok), boxed(err)),
+        SigType::Future(t) => TypeRepr::Named("Future".to_string(), vec![sig_type_to_repr(t)]),
+        SigType::Named(n) => TypeRepr::Named((*n).to_string(), Vec::new()),
+        SigType::Generic(n, args) => TypeRepr::Named(
+            (*n).to_string(),
+            args.iter().map(sig_type_to_repr).collect(),
+        ),
+        SigType::Union(members) => TypeRepr::Union(members.iter().map(sig_type_to_repr).collect()),
+        SigType::Fn(params, ret) => {
+            TypeRepr::Fn(params.iter().map(sig_type_to_repr).collect(), boxed(ret))
+        }
+        // A trailing-optional parameter is an arity marker, not a value type (as `sig_to_typeref`
+        // treats it) — reflect the inner type.
+        SigType::Optional(inner) => sig_type_to_repr(inner),
+        // A signature-level type variable has no declaration-site type — a permissive hole.
+        SigType::Var(_) | SigType::BoundedVar(_, _) => TypeRepr::Dyn,
+    }
 }
 
 /// Embed the installed extensions' attribute shapes into a freshly built reflection artifact —

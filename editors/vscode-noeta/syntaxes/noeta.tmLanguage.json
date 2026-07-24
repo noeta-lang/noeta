@@ -180,6 +180,7 @@
         },
         {
           "name": "string.quoted.single.noeta",
+          "comment": "A single-quoted string is a RAW literal (lexer `RawStr`): it does NOT interpolate, and its only escapes are `\\'` and `\\\\` — `${…}`, `{`, `$`, `\\n` are all literal (ideal for regex/paths/JSON). So no `#interpolation` and no `#string-escapes` (which would honor `\\u{…}`/`\\x`/`\\$` a raw string does not).",
           "begin": "'",
           "end": "'",
           "beginCaptures": {
@@ -189,8 +190,11 @@
             "0": { "name": "punctuation.definition.string.end.noeta" }
           },
           "patterns": [
-            { "include": "#string-escapes" },
-            { "include": "#interpolation" }
+            {
+              "name": "constant.character.escape.noeta",
+              "comment": "The only two escapes a raw string honors.",
+              "match": "\\\\['\\\\]"
+            }
           ]
         },
         {
@@ -324,7 +328,7 @@
         },
         {
           "name": "keyword.other.reflection.noeta",
-          "match": "\\b(type_of|attributes_of|roles_of|from_bytes|invoke)\\b"
+          "match": "\\b(type_of|attributes_of|roles_of|fields_of|params_of|from_bytes|invoke)\\b"
         }
       ]
     },

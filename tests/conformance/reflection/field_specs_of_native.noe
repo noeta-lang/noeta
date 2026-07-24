@@ -1,0 +1,19 @@
+// `field_specs_of(name)` works on a NATIVE (extension-declared) attribute, not just a `.noe` struct:
+// the installed extensions' attribute shapes are embedded into the reflection artifact
+// (`extend_reflection`), and the type-level field schema flows through the same `field_types` /
+// `field_optional` a program-declared struct's does. Keyed by the attribute's QUALIFIED name.
+//
+//   * `std.test.Skip { reason: string = "" }` — one field, optional (it carries a literal default).
+//   * `std.bench.Bench { iterations: int }`    — one field, mandatory (no default).
+//
+// This pins the native-reflection path the native-type-unification arc restructured: a data-only
+// native attribute's `{name, type, optional}` is precise and agrees across both backends.
+// expect: stdout "skip: reason Type.String optional=true"
+// expect: stdout "bench: iterations Type.Int optional=false"
+// expect: exit 0
+for s in field_specs_of::<std.test.Skip>() {
+    echo "skip: ${s.name} ${s.type} optional=${s.optional}"
+}
+for s in field_specs_of::<std.bench.Bench>() {
+    echo "bench: ${s.name} ${s.type} optional=${s.optional}"
+}
