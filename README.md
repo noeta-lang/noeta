@@ -37,11 +37,11 @@ echo match validate(cart) {
 - **Batteries and tooling.** A layered standard library and a toolchain that runs, checks, builds, formats, tests, benchmarks, profiles, and documents your code — `run`/`build`/`check`/`repl`, `test`/`bench`/`doc`, `fmt`/`profile`, plus `lsp`/`dap`/`mcp` editor & agent servers and a package manager.
 
 > [!NOTE]
-> **Status: pre-alpha, not public.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), WebAssembly builds and the browser playground (`noeta build --wasm`/`--serve`), a package manager, and the `noeta lsp` / `noeta dap` / `noeta mcp` editor & agent tooling all ship today. LiveView (server-driven UI over WebSockets) ships as the `para/html` package — the first-party `para` package family (html, api, cli, aether, db, p2p) lives in its own repositories under the noeta-lang org; still on the roadmap: desktop packaging. Until alpha, anything may change without notice — syntax, stdlib, and file formats included. The [wiki](docs/Home.md) marks the plan-vs-reality boundary everywhere.
+> **Status: pre-alpha, not public.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), WebAssembly builds and the browser playground (`noeta build --wasm`/`--serve`), a package manager, and the `noeta lsp` / `noeta dap` / `noeta mcp` editor & agent tooling all ship today. LiveView (server-driven UI over WebSockets) ships as the `para/html` package — the first-party `para` package family (html, api, cli, aether, db, p2p) lives in its own repositories under the noeta-lang org; still on the roadmap: desktop packaging. Until alpha, anything may change without notice — syntax, stdlib, and file formats included. The [docs](https://docs.noeta.dev) mark the plan-vs-reality boundary everywhere.
 
 ## Try it
 
-Requires a recent stable Rust toolchain (1.95+).
+The quickest taste is the **[playground](https://play.noeta.dev)** — the real toolchain compiled to WebAssembly, running in your browser with nothing to install. To build from source, you need a recent stable Rust toolchain (1.95+).
 
 ```sh
 cargo build                                 # build the workspace + the `noeta` binary
@@ -54,14 +54,15 @@ To put `noeta` on your `PATH`: `cargo install --path crates/noeta-cli`.
 
 ## Documentation
 
-The complete documentation is the **[wiki](docs/Home.md)** (`docs/`, GitHub-Wiki format):
+- **Website** — **<https://noeta.dev>**
+- **Docs** — **<https://docs.noeta.dev>** — the complete language & standard-library reference:
+  - [Getting Started](https://docs.noeta.dev/getting-started) and the [Language Tour](https://docs.noeta.dev/language-tour) — learn the language from zero.
+  - [Bundled tools](https://docs.noeta.dev/the-cli) — the CLI, test runner, benchmarks, and doc extraction.
+  - [Concepts & design](https://docs.noeta.dev/architecture-and-pipeline) — the VM, memory management, concurrency, and every technique under the hood.
+- **Playground** — **<https://play.noeta.dev>** — run Noeta in your browser; the real toolchain compiled to WebAssembly, not a transpiler.
+- **Registry** — **<https://registry.noeta.dev>** — the hosted package registry.
 
-- **[Getting Started](docs/Getting-Started.md)** and the **[Language Tour](docs/Language-Tour.md)** — learn the language from zero.
-- **[Bundled tools](docs/The-CLI.md)** — the CLI, test runner, benchmarks, and doc extraction.
-- **[Language & standard-library reference](docs/Home.md)** — the exhaustive reference for syntax and the stdlib.
-- **[Concepts & design](docs/Architecture-and-Pipeline.md)** — the VM, memory management, concurrency, and every technique under the hood.
-
-For contributors: **[the developer guide](docs/Contributing.md)** and, in the repo, `ARCHITECTURE.md` (implementation overview), `AGENTS.md` (conventions + the new-feature template), `CONTRIBUTING.md`, and `plans/` (the roadmap and task tracker).
+For contributors: the [developer guide](https://docs.noeta.dev/contributing) walks through the workflow; `ARCHITECTURE.md` (implementation overview), `AGENTS.md` (conventions + the new-feature template), `CONTRIBUTING.md`, and `plans/` (the roadmap and task tracker) live in this repo.
 
 ## License
 

@@ -78,6 +78,8 @@ The representation is a real language `Object` with a **class-kind shape** — s
 
 **Native state + destructor.** A class that wraps a Rust resource holds it in a **field typed as an extern handle** (an `ExtType` whose `ExternValue` has a Rust `Drop`). When the object is collected — a last-reference release **or** a destructor-free cycle reclamation — the field's box is dropped and its `Drop` runs the cleanup; this is deterministic and needs no new machinery, because the heap free always drops the payload. (There is no host-coupled finalizer — see *Won't-build* below; a native class's destructor is self-contained RAII, the same discipline `FileHandle` uses.) `std`'s battery declares no `ExtClass`; the `ext_class_seam` fixture is the differential + leak-oracle proof that identity, fields, cycle participation, and destructor firing all hold on both backends.
 
+**`ExtStruct` is the value-type twin** (`Extension::structs()`, fielded-unification): the same `name`/`namespace`/`fields` declaration, but structural equality, copy-on-assign, and no identity or destructor — a native-declared value struct, not a class. Both hooks produce the shared `ExtFielded` type, distinguished only by its `FieldedKind`.
+
 ## Async functions: the `ExternIo` seam
 
 An extension implements an **async** function without ever seeing the executor: its dispatch returns *work* (`NativeOut::Spawn(descriptor)`) instead of a value, and the backend tickets the descriptor on its executor and hands back a `Future`. The descriptor has two bodies — `run_sync(host)`, which the deterministic sandbox executor always runs **at spawn** (so an extension's async function is differential-deterministic no matter what its real body does), and an optional real body (a blocking closure for the runtime's blocking pool, or a native future) for true concurrency under `noeta run`. No real body means the real executor degrades to the sync body at spawn — correct, just serial. The `fs.*_async` family is the dogfood: its descriptors live in the same registry crate, and adding `exists_async`/`remove_async`/`list_async` touched no backend code.
@@ -121,11 +123,14 @@ The element-wise *fallback* (a boxed, non-packed operand) is expressible in the 
 ## Method bundles: `impl vec.Kernels for Px {}`
 
 Raw-buffer kernels as free functions are structurally connected to the data (`vec.dot_all(xs, ys)`
-accepts any 3×`f32` packed list) — invisible to the checker and the editor. A **method bundle** is
-the nominal binding on top (kernel-methods arc): a module registers a named set of methods with a
-**structural constraint** (`ExtBundle { name, constraint, methods, ctx_dispatch }` on
-`ExtModule::bundles` — each method `Element`, on a value of the bound type, or `Bulk`, on a
-`List<T>` of it), and a user type opts in explicitly:
+accepts any uniform numeric packed list) — invisible to the checker and the editor. A **method
+bundle** is the nominal binding on top (kernel-methods arc), and since the ExtBundle→ExtTrait
+convergence it is no longer its own mechanism: a bundle is a fully-defaulted native **`ExtTrait`**
+(`Extension::traits()`) carrying a structural **`self_constraint`** (`PackedConstraint` — the field
+kinds and arity the implementing type's shape must satisfy), native-derived **`assoc_types`** (the
+element-relative return types, `Self::Wide`/`Self::Float`), and a shared **`dispatch`** answering
+every defaulted method. Each `ExtTraitMethod` marks its receiver `Element` — on a value of the
+bound type — or `Bulk` — on a `List<T>` of it — and a user type opts in explicitly:
 
 ```noe
 use std.{vec}
@@ -137,17 +142,26 @@ d  = xs.dot_all(ys)                 // Bulk: methods on List<Px> — same kernel
 v2 = v.normalize()                  // Element: methods on Px itself
 ```
 
-The binding is what makes the whole toolchain smart: the impl site validates the shape requirement
-(three `f32` fields — a mismatch is a compile-time diagnostic naming expected vs found), method
-calls type nominally (`SameAsArg(0)` = the receiver's own type, so `xs.add_all(ys)[0].x` resolves
-statically), member completion lists the bound methods, and conflicts are rejected receiver-aware
-(an `Element` method against the type's own methods/fields, a `Bulk` method against built-in list
-methods). Dispatch is **call-site-resolved**: the checker bakes the `(module, bundle)` route into
-the compiled call — zero runtime discovery, an empty list receiver works, and the method form
-measures at parity with the module-function form (`tests/bench/kernel-methods/`). The flip side:
-bundle methods are not reachable through a `dyn` receiver (`dyn` stays the escape hatch; a runtime
-binding table would be additive). `std.vec`'s `Kernels` is the dogfood; a third-party bundle over
-the consumer's own packed type is proven through toolchain composition in the CLI e2e.
+`@derive(vec.Kernels)` binds identically — a bundle is `impl`-ed or derived, never both (the
+checker dedups and flags a double binding). The binding is what makes the whole toolchain smart:
+the impl site validates the shape requirement (a mismatch is a compile-time diagnostic naming
+expected vs found — `vec.Kernels` itself accepts any uniform numeric `@packed` shape, every integer
+width plus `f32`/`f64`, via `ConstraintArity::Uniform`), method calls type nominally (`SameAsArg(0)`
+= the receiver's own type, so `xs.add_all(ys)[0].x` resolves statically), member completion lists
+the bound methods, and conflicts are rejected receiver-aware (an `Element` method against the
+type's own methods/fields, a `Bulk` method against built-in list methods). Dispatch is
+**call-site-resolved**: the checker bakes the `(module, trait)` route into the compiled call — zero
+runtime discovery, an empty list receiver works, and the method form measures at parity with the
+module-function form (`tests/bench/kernel-methods/`). The flip side: bundle methods are not
+reachable through a `dyn` receiver (`dyn` stays the escape hatch; a runtime binding table would be
+additive). `std.vec`'s `Kernels`/`SatKernels` are the dogfood; a third-party bundle over the
+consumer's own packed type is proven through toolchain composition in the CLI e2e.
+
+`ExtTrait` is not only the kernel-bundle mechanism, though — it is the general native-trait seam
+(native-extensibility S3): a program `impl`s a plain native trait for its own types and binds on it
+(`fn f<T: NativeTrait>(x: T)`) exactly as for a `.noe` trait, and a native value laundered through
+`dyn NativeTrait` dispatches to its native method with no new runtime plumbing. `self_constraint` is
+what a kernel bundle adds on top — most native traits declare `None` and are shape-agnostic.
 
 ## Writing a native package
 
@@ -161,7 +175,7 @@ version = "1.0.0"
 native = "native"        # relative dir containing the entry crate's Cargo.toml
 ```
 
-The entry crate is an ordinary Rust library that depends on `noeta-ext-abi` and exports its extension units as a slice — one crate, any number of units (core's own `std` is six units in one crate):
+The entry crate is an ordinary Rust library that depends on `noeta-ext-abi` and exports its extension units as a slice — one crate, any number of units (core's own `std` is five units in one crate):
 
 ```rust
 use noeta_ext_abi::registry::{ExtFn, ExtModule, Extension, /* … */};
@@ -243,7 +257,7 @@ An extension can contribute a CLI subcommand (`ExtCommand`: name, help, typed `A
 
 ## The `Host` capability
 
-All host-coupled effects — filesystem, clock, PRNG, `env`/`args`, the operating system (`os`: subprocess exec + spawn/lifecycle control + system introspection), entropy, ids, the network, and the three telemetry signals — go through one `Host` trait (eleven mandatory capability traits, blanket-impl'd), plus one **policy** seam, `P2pProvider`: a host declares through `real_p2p() -> Option<RealP2pConfig>` whether **real** peer networking is permitted here (and with what app-id) — `RealHost` returns `Some`, the deterministic hosts the default `None`. Note it hands out **no transport**: no host implements `P2p` at all (that moved to the `para.p2p` extension — see below). Two implementations exist: `SandboxHost` (deterministic in-memory VFS, logical clock, seeded RNG, a **pure network responder**, and a scripted exec command set — what the differential always runs) and `RealHost` (real disk, real env, real subprocesses, per-isolate tokio, and a real reqwest client — what `noeta run` uses, never differential-tested).
+All host-coupled effects — filesystem, clock, PRNG, `env`/`args`, the console (`std.io`'s stdin/tty/prompt seam), the operating system (`os`: subprocess exec + spawn/lifecycle control + system introspection), entropy, ids, the network, and the three telemetry signals — go through one `Host` trait (twelve mandatory capability traits, blanket-impl'd), plus one **policy** seam, `P2pProvider`: a host declares through `real_p2p() -> Option<RealP2pConfig>` whether **real** peer networking is permitted here (and with what app-id) — `RealHost` returns `Some`, the deterministic hosts the default `None`. Note it hands out **no transport**: no host implements `P2p` at all (that moved to the `para.p2p` extension — see below). Two implementations exist: `SandboxHost` (deterministic in-memory VFS, logical clock, seeded RNG, a **pure network responder**, and a scripted exec command set — what the differential always runs) and `RealHost` (real disk, real env, real subprocesses, per-isolate tokio, and a real reqwest client — what `noeta run` uses, never differential-tested).
 
 **P2p is a capability an *extension* provides, not the host — the whole transport.** When the p2p stack left `std` for the non-default `para` package, `P2p` stopped being a mandatory arm of `Host`; and the transport itself then moved out of the hosts **entirely** into the `para.p2p` extension. The extension owns one `P2pBackend` (`Arc<Mutex<dyn P2p + Send>>`) in per-run ctx state (`ExtState`), created on first use from the host's `real_p2p()` policy: the **real p2panda node** (shipped with the package) when the host permits real networking *and* the extension is built with its `ring-p2p` feature, otherwise the deterministic **loopback broker** (`noeta_ext_abi::P2pBroker`, dep-free). Both implement `P2p`; the surface reaches either through one `with_p2p` seam. So **no host implements `P2p` at all** — `RealHost` included — and `noeta-host-real` links no p2panda: the entire iroh/QUIC tree travels with the out-of-tree package (a non-`para` `--native` binary is ~4 MB, a `para` one ~27 MB). The wrinkle the seam solves: the async `p2p.receive` leaf is `Send` while `ExtState` is not, so the backend lives behind a `Send` `Arc<Mutex<…>>` the receive descriptor captures at spawn — the ABI that lets an extension own an async-reachable host capability. This is the same "simulate deterministically, deploy real" split as the async executor and isolate scheduler. The network capability (http arc) set the async pattern: `RealHost` overrides `net_spawn` to hand the executor a genuine `RealBody::Async` reqwest future while the sandbox resolves at spawn; `os.exec_async` follows it with a `RealBody::Blocking` subprocess body.
 
@@ -324,6 +338,13 @@ One subtlety worth knowing if you are debugging this path: a turbofish method ca
 - **Shipped (capability-broker seam):** cross-extension collaboration became a **trait discovered by type** rather than a hardcoded method or a concrete-type coupling. A provider declares an `ExtCapability` on `Extension::capabilities()`; a consumer calls `capability::<dyn Trait>(ctx)` and gets a handle that owns a clone of the provider's `ExtState` (so it coexists with `&mut dyn NativeCtx`, releasing its engine borrow before every re-entry). The first contract is `noeta-reactive-abi`'s `ReactiveSource` — `para.synced` now reaches the reactive engine through it and depends on **nothing** of `noeta-stdlib` (the old `extension_point` free-function facade is deleted). Recovery is unsafe-free (a `Box<dyn Trait>` erased as `Box<dyn Any>`, downcast back); `TypeId` is consistent within the one linked program the composed toolchain builds. **And the flat `NativeCtx` god-trait was slimmed:** the scheduler's own cross-cutting services — task-local tracing context, the future-completion hook, the hot-reload channel — moved off it into `TaskContext`/`FutureTracing`/`HotReload` sub-traits reached via `ctx.task_context()`/`.future_tracing()`/`.hot_reload()` (backend returns `self` — no lookup, no `Rc` pessimization of the hot scheduler fields the broker would have forced). Two mechanisms, keyed to who owns the state; both let a consumer move out-of-tree without naming the other side. No regression (reactive/host hot paths benchmarked flat).
 - **Shipped (native-extensibility S1 — `ExtEnum`):** native-declared **enums** — plain, string-/int-backed, and payload-carrying — seeded eagerly into the checker's `symbols.enums` by qualified identity, so a `match` over one is exhaustive (E0011). Values cross both ways (`NativeOut::Variant` / `NativeValue::Variant`, materialized identically on both backends) and are **source-constructible** (`Hue.Red`, `Tag.Labeled(s)`) once imported. Backed `.value()` is a real typed accessor.
 - **Shipped (native-extensibility S2 — `ExtClass`):** native-declared **classes** — true reference types (identity, aliasing, RC + cycle participation) with language-visible fields (`ExtField`, seeded into `records`/`private_fields`/`mut_fields`, E0035/E0033 enforced) and a **RAII destructor** (native state in an extern-handle field whose `Drop` the collector runs on collection, on both the last-reference and cycle-reclamation paths). Values are produced as `NativeOut::Instance` (a real class-kind `Object`, *not* the value-struct `NativeOut::Struct`) and cross IN as `NativeValue::Instance`; a pure-data class is source-constructible. Proven by the `ext_class_seam` differential + leak oracle.
+- **Shipped (native-extensibility S3 — `ExtTrait`):** native-declared **traits** — a contract user
+  types `impl`/bind on exactly like a `.noe` trait (an incomplete impl is E0015), and dynamic
+  dispatch over native values through `dyn NativeTrait`. The same mechanism, generalized further by
+  the ExtBundle→ExtTrait convergence (assoc types, native default bodies, a structural
+  `self_constraint`), is what the kernel bundles (`vec.Kernels`/`vec.SatKernels`, see
+  [Method bundles](#method-bundles-impl-veckernels-for-px-)) are now built on — `ExtBundle` no
+  longer exists as its own type.
 - **Won't-build (recorded):** *Host-coupled finalizers* — a Rust-side resource in an extern box (or an `ExtClass`'s extern-handle field) already finalizes deterministically (RC-zero drops the box, `Drop` runs); a finalizer with `Host` access at free time has no sound access point (values die in release paths carrying no host, including teardown cascades), so buffered types keep explicit `close()`. `ExtType`'s `..DEFAULTS` makes a later `finalizer` field additive if concrete demand appears.
 - **Deferred:** publishing the toolchain (and registry) repos — the step that makes a package's true departure from the monorepo portable (a `file://` clone proves the mechanism today, but a committed git-dep needs a reachable public repo; in-tree copies stay path deps until then). The hosted-registry *client* is no longer the gap: registry routing (`[registries]`, `NOETA_REGISTRY_URL`), `noeta publish`/`noeta claim`, and transparency-log verification all ship in `noeta-pm`, with the registry service in its own repo. Also deferred: dynamic loading (the dyn dispatch tables are already in place; every compiled-in extension monomorphizes past them).
 

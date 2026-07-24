@@ -120,6 +120,11 @@ and `mcp` alike.
 - `examples_find` — CI-tested example programs by feature, concept, or diagnostic code.
 - `stdlib_api` — the real standard-library signatures, straight from the compiler's own registry.
 - `explain_diagnostic` — what an `E0xxx` means, with real programs that trigger and fix it.
+- `project_docs` / `doc_browse` / `doc_page` — the *project's own* `@doc { … }` documentation
+  (distinct from `docs_search`, which reads this language guide): `project_docs` collects every
+  block resolved to what it documents; `doc_browse` walks the same navigable tree the editor's docs
+  browser shows (root → modules → declarations → members); `doc_page` reads one node's signature and
+  prose. All three work from a parse alone, so they read work-in-progress code.
 
 **Understand** — the compiler's semantic answers:
 - `check` — type-check code; the same JSON diagnostics `noeta check --format json` emits.
@@ -146,8 +151,9 @@ and `mcp` alike.
 **Execute** — run and observe, not just read:
 - `run` / `eval` / `test` — run a program (stdout/exit/traceback), evaluate an expression
   (value + type), run `@test` blocks. **Sandboxed and deterministic by default** (in-memory fs,
-  logical clock, seeded random; `real: true` opts into the real host), and always bounded by
-  liveness limits — a runaway loop is stopped, never hung.
+  logical clock, seeded random; `real: true` opts into the real host). `run` is bounded by
+  liveness limits — a runaway loop is stopped, never hung; `eval` and `test` do not yet enforce
+  that bound, so avoid pointing either at code with an unbounded loop.
 - `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — interactive debug
   sessions over the VM's own debugger seam: pause at entry or breakpoints, read the call stack and
   live locals, step by line, evaluate expressions in a paused frame (type-checked against the

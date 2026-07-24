@@ -6,7 +6,7 @@ This complements the TextMate grammar in `../vscode-noeta/` (which serves VS Cod
 
 ## Status
 
-Parses **≈96% of the repository's Noeta** — 642 of 666 `.noe` files clean (2026-07 sweep); the remainder are intentional syntax-error tests, features newer than the grammar (expression tiers `@name{…}`, kernel-method `impl vec.Kernels` bundles), or the two documented gaps (multi-line structured attribute arguments and declared third-party text tiers). Built from the real lexer/parser surface and validated against the language's conformance corpus.
+Parses **≈95% of the repository's Noeta** — 920 of 970 `.noe` files clean (2026-07-25 recount); the remainder are intentional syntax-error tests, features newer than the grammar (expression tiers `@name{…}`, kernel-method `impl vec.Kernels` bundles), or the two documented gaps (multi-line structured attribute arguments and declared third-party text tiers). Built from the real lexer/parser surface and validated against the language's conformance corpus.
 
 Highlights:
 

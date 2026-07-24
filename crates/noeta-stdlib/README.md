@@ -8,11 +8,11 @@ The shared standard-library and host-capability layer.
 
 ## The load-bearing idea: shared semantics, differential by construction
 
-The project's spine is the **differential oracle**: the M0 tree-walker (`noeta-eval`, frozen as the reference) and the M1 VM (`noeta-vm`) must produce identical `RunResult`s for every program. Duplicating stdlib logic across the two backends would put that guarantee at the mercy of two hand-kept-in-sync copies.
+The project's spine is the **differential oracle**: the reference backend (`noeta-eval`, a Core-IR interpreter frozen as the oracle) and the M1 VM (`noeta-vm`) must produce identical `RunResult`s for every program. Duplicating stdlib logic across the two backends would put that guarantee at the mercy of two hand-kept-in-sync copies.
 
 Instead: **where a Ring 1 operation is expressible over data that is represented *identically* in both runtimes, its semantics live here once and both backends call into it.** Then the two backends agree not because a test caught a divergence, but because there is only one implementation.
 
-Strings are the canonical case. Both backends store a string as a Rust `String` (the tree-walker's `Value::Str(String)` and the VM's `Payload::Str(String)`), so the entire string-method surface lives here:
+Strings are the canonical case. Both backends store a string as a Rust `String` (`noeta-eval`'s `Value::Str(String)` and the VM's `Payload::Str(String)`), so the entire string-method surface lives here:
 
 - [`string_method`]`(recv: &str, method: &str, args: &[Arg]) -> Dispatch` is the single dispatcher.
 - [`Arg`] is the backend-agnostic projection of an argument value (only the primitive shapes the stdlib introspects; everything else is `Arg::Other`).

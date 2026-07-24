@@ -10,7 +10,7 @@ Noeta programs run as WebAssembly in three shapes, all from the same source with
 
 Both build verbs are **millisecond-fast binary surgery**, not compilations: the toolchain patches your program's compiled bundle into a prebuilt engine (the same mechanism as `noeta build --exe`, adapted to the WebAssembly binary format). No Rust toolchain, no `cargo`, no separate build step.
 
-The safety story is the same as everywhere else in Noeta: the **wasm differential oracle** runs the entire conformance corpus through the shipped wasm engine under wasmtime — in both deployment shapes — and asserts the output byte-identical to a native run (stdout, exit code, and rendered diagnostics/tracebacks). A program does not behave differently because it compiled to wasm.
+The safety story is the same as everywhere else in Noeta: the **wasm differential oracle** runs the entire conformance corpus through the shipped wasm engine under wasmtime — for the standalone module shape (`--wasm`) — and asserts the output byte-identical to a native run (stdout, exit code, and rendered diagnostics/tracebacks). The serve component (`--serve`) shares the same underlying engine but isn't yet in that automated corpus; it's checked by hand against Spin instead (see below). A program does not behave differently because it compiled to wasm.
 
 ## Standalone modules — `noeta build --wasm`
 
@@ -23,7 +23,7 @@ wasmtime run --dir . app.wasm data  # grant the working directory, pass args
 The artifact is a single `wasm32-wasip1` module: the bytecode VM with your program's bundle stapled into its data section. What the program sees:
 
 - **Real file IO** over the directories the host grants (`wasmtime run --dir .`); no preopens means file operations return ordinary IO errors.
-- **Real environment, arguments, wall clock, and entropy** — `env.get`, `args.all()`, `time.unix_ms()`, and `id.uuid()` behave exactly as under `noeta run`.
+- **Real environment, arguments, wall clock, and entropy** — `env.get`, `args.all()`, `datetime.now().unix_ms()`, and `id.uuid()` behave exactly as under `noeta run`.
 - **The language's determinism rules hold**: `random.seed(n)` still makes `random.*` a pure function of `n`, and `monotonic` stays a logical ordering device — real time and real entropy live in their own capabilities, as on every host.
 - `os.platform()` reports `"wasi"`, `os.arch()` reports `"wasm32"`.
 
@@ -33,7 +33,7 @@ Execution is the tier-0 interpreter; the wasm engine's own JIT compiles the inte
 
 ## HTTP at the edge — `noeta build --serve`
 
-An unchanged `server.serve` program — the same one `noeta serve` runs on your machine — deploys as a **`wasi:http` component**:
+An unchanged `server.serve` program — the same one `noeta run` runs on your machine, on a real socket — deploys as a **`wasi:http` component**:
 
 ```noeta check
 use std.http.server

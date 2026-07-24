@@ -121,7 +121,7 @@ Iteration/display order over packed keys is **field-wise** (declaration order, n
 
 ## Set
 
-Sorted and de-duplicated; not indexable. Display form `{1, 2, 3}`; empty `#{}`.
+Sorted and de-duplicated; not indexable. Display form `{1, 2, 3}` (an empty set displays as `{}`); the empty-set literal is written `#{}`, since a bare `{}` is a map.
 
 Elements are a single **orderable** type: a primitive, a key-capable native type, a key-capable `@packed` struct (ordered by content — type name, then field-wise), or any other **value kind** — structs and enums order structurally (the same ordering `@derive(Comparable)` and `.sorted()` use), so `[P {x: 2}, P {x: 1}].to_set()` canonicalizes like any primitive set. A `class` element is rejected (statically at a `Set<T>` annotation): a set stores a sorted snapshot, and a reference could be mutated after insertion.
 

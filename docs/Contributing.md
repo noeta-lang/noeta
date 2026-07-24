@@ -11,7 +11,7 @@ Noeta is a pre-alpha, not-yet-public implementation built primarily through agen
 | What the language is | [Home](Home) and the [Language Tour](Language-Tour) |
 | How the implementation is structured | [Architecture & Pipeline](Architecture-and-Pipeline), and `ARCHITECTURE.md` in the repo |
 | The full conventions & agent workflow | `AGENTS.md` in the repo |
-| The individual subsystems | the [Concepts & design](Home#4--concepts--design-under-the-hood) pages |
+| The individual subsystems | the [Concepts & design](Home#concepts--design) pages |
 | What to work on next | `plans/roadmap.md` (the frontier) and `plans/backlog.md` (every open item) |
 
 ## Build & run

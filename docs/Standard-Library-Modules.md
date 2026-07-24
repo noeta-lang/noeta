@@ -21,14 +21,14 @@ Pure scalar math. The real-valued functions (`sqrt`/`pow`, trig and inverse trig
 | `pi` | `pi() -> float` | `math.pi()` → `3.14159…` |
 | `e` | `e() -> float` | `math.e()` → `2.71828…` |
 | `sqrt` | `sqrt(x: float) -> float` | `math.sqrt(16.0)` → `4.0` |
-| `pow` | `pow(base: float, exp: float) -> float` | `math.pow(2, 10)` → `1024.0` |
+| `pow` | `pow(base: float, exp: float) -> float` | `math.pow(2.0, 10.0)` → `1024.0` |
 | `abs` | `abs(x: number) -> number` | `math.abs(-7)` → `7` |
 | `floor` | `floor(x: float) -> int` | `math.floor(2.9)` → `2` |
 | `ceil` | `ceil(x: float) -> int` | `math.ceil(2.1)` → `3` |
 | `round` | `round(x: float) -> int` | `math.round(2.5)` → `3` |
 | `min` | `min(a: number, b: number) -> number` | `math.min(3, 8)` → `3` |
 | `max` | `max(a: number, b: number) -> number` | `math.max(3, 3.5)` → `3.5` |
-| `sin` / `cos` / `tan` | `(x: float) -> float` | radians; `math.cos(0)` → `1.0` |
+| `sin` / `cos` / `tan` | `(x: float) -> float` | radians; `math.cos(0.0)` → `1.0` |
 | `asin` / `acos` / `atan` | `(x: float) -> float` | result in radians; `math.acos(1.0)` → `0.0` |
 | `atan2` | `atan2(y: float, x: float) -> float` | quadrant-aware angle; `math.atan2(1.0, 1.0)` → `0.785…` |
 | `ln` | `ln(x: float) -> float` | natural log; `math.ln(math.e())` → `1.0` |
@@ -918,8 +918,9 @@ tracing.with_span("checkout", fn(): void {
 **Opt-in.** Nothing is emitted until `OTEL_EXPORTER_OTLP_ENDPOINT` is set — a program that never
 configures a collector pays nothing. Once configured, server requests, async work, and channel /
 isolate messages are **auto-instrumented** into connected traces with no code changes. `Span` is a
-reserved type name (declaring your own is **E0049**); a non-scalar `set_attribute` value is a
-compile error (**E0007**). Full surface, config, and design on [Observability](Observability).
+namespaced extern type, not a reserved name — you may declare your own `Span` (a clash arises only if
+you also `use std.tracing.Span` in the same scope, an import conflict — **E0020**); a non-scalar
+`set_attribute` value is a compile error (**E0007**). Full surface, config, and design on [Observability](Observability).
 
 ## `log`
 
@@ -964,7 +965,7 @@ use std.{vec}
 a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
 b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }
 echo vec.dot(a, b)          // 32.0
-echo vec.cross(a, b)        // V3 { x: -3.0, y: 6.0, z: -3.0 }
+echo vec.cross(a, b)        // V3 {x: -3.0, y: 6.0, z: -3.0}
 ```
 
 `vec`: `add`, `sub`, `scale`, `dot`, `cross`, `length`, `normalize`, `distance`, `lerp`, `reflect`, `clamp`, `min`, `max`, `abs`. `quat`: `mul`, `conjugate`, `normalize`, `slerp`, `dot`, `length`, `rotate_vec3`.
