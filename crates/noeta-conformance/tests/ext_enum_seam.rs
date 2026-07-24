@@ -52,6 +52,7 @@ const HUE: ExtEnum = ExtEnum {
         ret: RetTy::Concrete(SigType::String),
     }],
     dispatch: shade_enum_dispatch,
+    traits: &[],
 };
 
 const TONE: ExtEnum = ExtEnum {
@@ -74,6 +75,7 @@ const TONE: ExtEnum = ExtEnum {
     // native enum method call never shadows it. `dispatch` is inert here (no `methods`).
     methods: &[],
     dispatch: shade_enum_dispatch,
+    traits: &[],
 };
 
 const LEVEL: ExtEnum = ExtEnum {
@@ -94,6 +96,7 @@ const LEVEL: ExtEnum = ExtEnum {
     backing: EnumBacking::Int,
     methods: &[],
     dispatch: shade_enum_dispatch,
+    traits: &[],
 };
 
 const TAG: ExtEnum = ExtEnum {
@@ -120,6 +123,7 @@ const TAG: ExtEnum = ExtEnum {
         ret: RetTy::Concrete(SigType::String),
     }],
     dispatch: shade_enum_dispatch,
+    traits: &[],
 };
 
 const FX_ENUMS: &[ExtEnum] = &[HUE, TONE, LEVEL, TAG];

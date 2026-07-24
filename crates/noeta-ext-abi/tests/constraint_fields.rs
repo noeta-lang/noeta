@@ -111,6 +111,7 @@ const CLI_SERVE: &str = "crates/noeta-cli/src/cmd/serve.rs";
 const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforcement.rs";
 const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
 const CONFORMANCE_STRUCT_SEAM: &str = "crates/noeta-conformance/tests/ext_struct_seam.rs";
+const CONFORMANCE_TRAIT_SEAM: &str = "crates/noeta-conformance/tests/ext_trait_seam.rs";
 const LOADER_EXPAND: &str = "crates/noeta-loader/src/expand.rs";
 
 use Verdict::{Constraint, Data, Prose};
@@ -252,7 +253,7 @@ const TABLE: &[Row] = &[
         Constraint(
             Anchor(
                 "crates/noeta-check/src/prelude.rs",
-                "fn seed_extern_type_traits(",
+                "fn seed_native_builtin_traits(",
             ),
             Anchor("crates/noeta-check/src/tests.rs", "Mergeable"),
         ),
@@ -323,6 +324,24 @@ const TABLE: &[Row] = &[
         "ExtEnum",
         "dispatch",
         Data(Anchor(EVAL_LIB, "fn call_native_enum_method(")),
+    ),
+    // `traits` (native-extensibility Slice C): the traits this enum advertises — the `ExtEnum` twin
+    // of `ExtType::traits` / `ExtFielded::traits`, uniform across every native kind. A native-trait
+    // name is recorded by `seed_ext_traits` into `user_trait_impls[qualified][trait]` so a native
+    // enum value coerces to `dyn Trait` and its trait-method call dispatches to native code
+    // (`call_native_enum_method`); a built-in name is filtered off to `seed_native_builtin_traits`.
+    // No shipped extension declares a native enum with traits, so the `ext_trait_seam` dynamic-
+    // dispatch test (a native `Mode` enum behind `dyn Widget`) is the only exerciser.
+    Row(
+        "ExtEnum",
+        "traits",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "fn seed_ext_traits("),
+            Anchor(
+                CONFORMANCE_TRAIT_SEAM,
+                "fn native_trait_contract_and_dynamic_dispatch_agree_on_both_backends(",
+            ),
+        ),
     ),
     Row(
         "ExtVariant",
