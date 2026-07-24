@@ -1,0 +1,64 @@
+// Kernel-methods via `@derive`: a method bundle binds through `@derive(vec.Kernels)` exactly as it
+// does through `impl vec.Kernels for T {}` — same registration, same methods. This pins the derive
+// form across every width the unified bundle serves (f32 / i32 / f64) plus the saturating bundle
+// (u8), and shows a bundle composing with an ordinary trait derive in one list
+// (`@derive(vec.Kernels, Equatable)`). The results are byte-identical to the `impl`-form fixtures
+// (`ivec.noe`/`dvec.noe`/`color.noe`), because a derive-bound bundle IS an impl-bound bundle — the
+// differential pins both backends agreeing.
+// expect: stdout "V3 {x: 5.0, y: 7.0, z: 9.0}"
+// expect: stdout "32.0"
+// expect: stdout "5.0"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "IVec3 {x: 11, y: 22, z: 33}"
+// expect: stdout "140"
+// expect: stdout "DVec3 {x: -3.0, y: -3.0, z: -3.0}"
+// expect: stdout "32.0"
+// expect: stdout "Color {r: 255, g: 255, b: 100, a: 255}"
+// expect: exit 0
+use std.{vec}
+
+// A bundle alongside an ordinary built-in derive in ONE `@derive` — each arm resolves to the right
+// target (a bundle binding vs. the `Equatable` recipe).
+@packed
+@derive(vec.Kernels, Equatable)
+struct V3 { x: f32; y: f32; z: f32 }
+
+@packed
+@derive(vec.Kernels)
+struct IVec3 { x: i32; y: i32; z: i32 }
+
+@packed
+@derive(vec.Kernels)
+struct DVec3 { x: f64; y: f64; z: f64 }
+
+@packed
+@derive(vec.SatKernels)
+struct Color { r: u8; g: u8; b: u8; a: u8 }
+
+// f32 vector — element ops, the widened `dot`, the float-promoted `length`, plus the `Equatable`
+// derive the same list contributed.
+a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
+b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }
+echo a.add(b)                                      // 1+4, 2+5, 3+6
+echo a.dot(b)                                      // 1·4 + 2·5 + 3·6 = 32.0
+echo V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }.length()   // 5.0
+echo a == a
+echo a == b
+
+// i32 vector — the SAME unified bundle, integer widths: `dot` widens to `int`.
+i = IVec3 { x: 1i32, y: 2i32, z: 3i32 }
+j = IVec3 { x: 10i32, y: 20i32, z: 30i32 }
+echo i.add(j)
+echo i.dot(j)                                      // 1·10 + 2·20 + 3·30 = 140
+
+// f64 vector — the width with no fixed-bundle ancestor, reached only by the unified bundle.
+d = DVec3 { x: 1.0f64, y: 2.0f64, z: 3.0f64 }
+e = DVec3 { x: 4.0f64, y: 5.0f64, z: 6.0f64 }
+echo d.sub(e)
+echo d.dot(e)                                      // 1·4 + 2·5 + 3·6 = 32.0
+
+// u8 colour — the SATURATING bundle: 200+100=300 clamps to 255, never wraps.
+bright = Color { r: 200u8, g: 100u8, b: 50u8, a: 255u8 }
+other  = Color { r: 100u8, g: 200u8, b: 50u8, a: 0u8 }
+echo bright.add(other)

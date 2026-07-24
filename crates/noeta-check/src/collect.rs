@@ -718,20 +718,40 @@ impl Checker {
             }
         }
         // Method-bundle bindings (kernel-methods K1) resolve after the whole collect walk, so a
-        // binding is visible to method typing regardless of where the `impl` sits relative to
-        // the `use` that binds its module. Resolution failures stay silent here — pass 2's
-        // `check_bundle_impl` reports them at the impl site.
+        // binding is visible to method typing regardless of where the `impl`/`@derive` sits relative
+        // to the `use` that binds its module. The TWO spellings register identically: a standalone
+        // `impl <module>.<Bundle> for T {}` and a `@derive(<module>.<Bundle>)` on the type — the
+        // latter is exactly the former (a bundle binding is shape-derived behavior, so `@derive` is
+        // its natural home). Resolution failures stay silent here — pass 2 reports them at the site
+        // (`check_bundle_impl` / `check_derives`). A dotted name that is a known user trait is never
+        // a bundle (a cross-package trait `para.aether.Store` is dotted once qualified).
         for stmt in &program.stmts {
-            if let Stmt::Impl(decl) = stmt
-                && let Some((module, bundle)) = self.resolve_bundle_ref(&decl.trait_name)
-            {
-                let bindings = self
-                    .symbols
-                    .bundle_impls
-                    .entry(decl.target.clone())
-                    .or_default();
+            // `(target, bundle-path, site span)` for every binding this statement contributes.
+            let candidates: Vec<(&str, &str, Span)> = match stmt {
+                Stmt::Impl(decl) => {
+                    vec![(
+                        decl.target.as_str(),
+                        decl.trait_name.as_str(),
+                        decl.trait_span,
+                    )]
+                }
+                Stmt::Struct(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
+                Stmt::Class(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
+                Stmt::Enum(d) => bundle_derive_candidates(&d.name, &d.decorators.derives),
+                _ => continue,
+            };
+            for (target, trait_name, span) in candidates {
+                if self.symbols.user_traits.contains_key(trait_name) {
+                    continue;
+                }
+                let Some((module, bundle)) = self.resolve_bundle_ref(trait_name) else {
+                    continue;
+                };
+                let bindings = self.symbols.bundle_impls.entry(target.to_string()).or_default();
                 // A duplicate binding of the same bundle is a coherence error (reported there);
-                // don't double-record it, or method typing would see each method twice.
+                // don't double-record it, or method typing would see each method twice. This also
+                // dedups a type that writes BOTH `@derive(vec.Kernels)` and `impl vec.Kernels for
+                // T {}` — one `bundle_impls` entry, and `check_coherence` flags the duplicate.
                 if !bindings
                     .iter()
                     .any(|b| b.module == module && b.bundle.name == bundle.name)
@@ -739,7 +759,7 @@ impl Checker {
                     bindings.push(BoundBundle {
                         module,
                         bundle,
-                        span: decl.trait_span,
+                        span,
                     });
                 }
             }
@@ -1137,6 +1157,20 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::IntN { .. }
         | Expr::Bool { .. } => {}
     }
+}
+
+/// A type's `@derive` arguments as bundle-binding candidates `(target, bundle-path, span)` — the
+/// derive-form counterpart of a standalone `impl <module>.<Bundle> for T {}`. Only those whose name
+/// actually resolves to a registered bundle are kept (by the caller); the rest are ordinary trait
+/// derives handled elsewhere.
+fn bundle_derive_candidates<'a>(
+    name: &'a str,
+    derives: &'a [DeriveSpec],
+) -> Vec<(&'a str, &'a str, Span)> {
+    derives
+        .iter()
+        .map(|d| (name, d.name.as_str(), d.span))
+        .collect()
 }
 
 /// The checker's answers for the shared derive cascade: user traits from the symbol table (which

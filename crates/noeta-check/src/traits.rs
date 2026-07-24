@@ -544,15 +544,43 @@ impl Checker {
                 decl.trait_name, decl.target
             ));
         }
-        let target_ty = Type::Named(decl.target.clone(), vec![]);
+        self.check_bundle_binding(
+            &decl.target,
+            decl.target_span,
+            decl.trait_span,
+            &decl.trait_name,
+            bundle,
+        );
+    }
+
+    /// Validate a bundle binding against its target and register its consequences — the shared
+    /// core of the two spellings that bind a bundle: `impl <module>.<Bundle> for T {}`
+    /// ([`Self::check_bundle_impl`]) and `@derive(<module>.<Bundle>)` ([`Self::check_derives`]).
+    /// Because a `@derive(vec.Kernels)` is *exactly* `impl vec.Kernels for T {}`, both funnel here:
+    /// the packed-target + constraint checks (the runtime shape check, moved to compile time,
+    /// E0015), the flat-layout schema registration, and the method-name conflict rules. Resolution
+    /// (module/bundle lookup, E0014) and the empty-body rule are the caller's — a derive has no
+    /// body and its argument already resolved to `bundle`.
+    ///
+    /// `target_span` locates the packed/constraint diagnostics (the type being bound); `binding_span`
+    /// is the binding site (the `impl`'s trait path or the `@derive` argument) — conflicts report
+    /// there, and the textually-later binding carries the diagnostic.
+    pub(crate) fn check_bundle_binding(
+        &mut self,
+        target: &str,
+        target_span: Span,
+        binding_span: Span,
+        trait_name: &str,
+        bundle: &'static noeta_ext_abi::ExtBundle,
+    ) {
+        let target_ty = Type::Named(target.to_string(), vec![]);
         let Some(layout) = self.packed_layout(&target_ty) else {
             self.error(
                 DiagnosticCode::InvalidImpl,
-                decl.target_span,
+                target_span,
                 format!(
-                    "`{}` cannot bind `{}`: a method bundle binds to a `@packed` struct declared \
-                     in this module",
-                    decl.target, decl.trait_name
+                    "`{target}` cannot bind `{trait_name}`: a method bundle binds to a `@packed` \
+                     struct declared in this module"
                 ),
             )
             .help("mark the target `@packed` — bundles are packed-operations method sets");
@@ -561,11 +589,8 @@ impl Checker {
         if let Some(message) = constraint_mismatch(&layout, &bundle.constraint) {
             self.error(
                 DiagnosticCode::InvalidImpl,
-                decl.target_span,
-                format!(
-                    "`{}` does not satisfy `{}`: {message}",
-                    decl.target, decl.trait_name
-                ),
+                target_span,
+                format!("`{target}` does not satisfy `{trait_name}`: {message}"),
             );
             return;
         }
@@ -587,23 +612,21 @@ impl Checker {
                     if self
                         .symbols
                         .methods
-                        .contains_key(&(decl.target.clone(), m.sig.name.to_string()))
+                        .contains_key(&(target.to_string(), m.sig.name.to_string()))
                     {
                         conflicts.push(format!(
-                            "`{}` already declares a method `{}`",
-                            decl.target, m.sig.name
+                            "`{target}` already declares a method `{}`",
+                            m.sig.name
                         ));
                     }
                     if self
                         .symbols
                         .records
-                        .get(&decl.target)
+                        .get(target)
                         .is_some_and(|fields| fields.iter().any(|(f, _)| f == m.sig.name))
                     {
-                        conflicts.push(format!(
-                            "`{}` already declares a field `{}`",
-                            decl.target, m.sig.name
-                        ));
+                        conflicts
+                            .push(format!("`{target}` already declares a field `{}`", m.sig.name));
                     }
                 }
                 noeta_ext_abi::BundleReceiver::Bulk => {
@@ -619,23 +642,17 @@ impl Checker {
                 }
             }
         }
-        for earlier in self
-            .symbols
-            .bundle_impls
-            .get(&decl.target)
-            .into_iter()
-            .flatten()
-        {
+        for earlier in self.symbols.bundle_impls.get(target).into_iter().flatten() {
             // Only bindings textually before this one (single-report discipline, like
             // `check_coherence`); skip this binding's own collect record.
-            if earlier.bundle.name == bundle_name || earlier.span.start >= decl.trait_span.start {
+            if earlier.bundle.name == bundle.name || earlier.span.start >= binding_span.start {
                 continue;
             }
             for m in bundle.methods {
                 if earlier.bundle.method(m.sig.name).is_some() {
                     conflicts.push(format!(
-                        "`{}` already acquires `{}` from bundle `{}`",
-                        decl.target, m.sig.name, earlier.bundle.name
+                        "`{target}` already acquires `{}` from bundle `{}`",
+                        m.sig.name, earlier.bundle.name
                     ));
                 }
             }
@@ -643,11 +660,8 @@ impl Checker {
         for conflict in conflicts {
             self.error(
                 DiagnosticCode::ConflictingTraitImpl,
-                decl.trait_span,
-                format!(
-                    "{conflict} — binding `{}` would make the name ambiguous",
-                    decl.trait_name
-                ),
+                binding_span,
+                format!("{conflict} — binding `{trait_name}` would make the name ambiguous"),
             );
         }
     }
@@ -789,6 +803,48 @@ impl Checker {
                 // type's own fields/methods, or the whole trait forwarded through a field.
                 if let Some(decl) = self.symbols.user_traits.get(&spec.name).cloned() {
                     self.check_user_trait_derive(type_name, spec, &decl, fields, type_methods);
+                    continue;
+                }
+                // A method-BUNDLE binding via derive (kernel-methods): `@derive(vec.Kernels)` is
+                // *exactly* `impl vec.Kernels for T {}` — a bundle binding is shape-derived behavior,
+                // so `@derive` is its natural home. A dotted name that resolves to a registered
+                // `ExtBundle` (its module bound by a `use`) funnels into the SAME impl-site
+                // validation — the packed-target + constraint check that yields the identical E0015
+                // an empty `impl` would (`check_bundle_binding`); the binding itself was recorded in
+                // `collect` beside the `impl` form. A bundle takes no member bindings, no `via:`, and
+                // no type arguments — those belong to trait derives.
+                if spec.name.contains('.')
+                    && let Some((_, bundle)) = self.resolve_bundle_ref(&spec.name)
+                {
+                    if let Some(b) = spec.bindings.first() {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            b.span,
+                            format!(
+                                "`{}: {}` — `{}` is a method bundle; it binds wholesale and takes \
+                                 no member bindings",
+                                b.member, b.target, spec.name
+                            ),
+                        );
+                    } else if let Some((_, via_span)) = &spec.via {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            *via_span,
+                            format!("`{}` is a method bundle; `via:` does not apply", spec.name),
+                        );
+                    } else if !spec.args.is_empty() {
+                        self.error(
+                            DiagnosticCode::UnderivableTrait,
+                            spec.span,
+                            format!("method bundle `{}` takes no type arguments", spec.name),
+                        );
+                    } else {
+                        // Same target as the impl form: the decorated type, at the derive argument's
+                        // span (which is both where the shape error points and the binding site).
+                        self.check_bundle_binding(
+                            type_name, spec.span, spec.span, &spec.name, bundle,
+                        );
+                    }
                     continue;
                 }
                 // A NATIVE derive recipe (layer 4, `ExtDerive`): synthesizes handler forwards —
