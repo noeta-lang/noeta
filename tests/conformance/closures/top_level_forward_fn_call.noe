@@ -1,0 +1,11 @@
+// A top-level statement calls a `fn` declared textually LATER in the file. The checker hoists every
+// top-level declaration (collect.rs pass 1), so the forward reference type-checks; the runtime must
+// agree by binding all top-level `fn`s before the statement sequence runs — the same hoist that
+// already lets fn bodies and mutually-recursive fns forward-reference. Previously this aborted with
+// a runtime E0005 ("cannot find `greet`"), a checker/runtime mismatch.
+// expect: stdout "hello"
+// expect: exit 0
+echo greet()
+fn greet(): string {
+    return "hello";
+}

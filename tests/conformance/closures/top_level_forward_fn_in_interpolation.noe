@@ -1,0 +1,9 @@
+// The forward reference to a later-declared top-level `fn` also resolves inside a `${…}` string
+// interpolation hole — the hole merely contains the call, so the top-level fn hoist covers it. This
+// is the shape the bug was first noticed in; it is fixed by the same hoist as the plain call.
+// expect: stdout "x: hello"
+// expect: exit 0
+echo "x: ${greet()}"
+fn greet(): string {
+    return "hello";
+}
