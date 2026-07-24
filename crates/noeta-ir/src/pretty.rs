@@ -284,6 +284,19 @@ impl Printer<'_> {
                 module,
                 bundle
             ),
+            Rvalue::TraitMethod {
+                receiver,
+                trait_name,
+                name,
+                args,
+                ..
+            } => format!(
+                "{}.{}({}) via trait {}",
+                atom(receiver),
+                name,
+                atoms(args),
+                trait_name
+            ),
             Rvalue::Field { receiver, name, .. } => format!("{}.{}", atom(receiver), name),
             Rvalue::MethodHandle {
                 ty,

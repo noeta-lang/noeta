@@ -722,6 +722,34 @@ impl Interpreter {
         )
     }
 
+    /// Call a **trait default-body** method (ExtBundle→ExtTrait convergence, slice 2) — the
+    /// tree-walker twin of the VM's `call_trait_method`: the compiler baked the `(trait, method)`
+    /// route, receiver rides as slot 0. `trait_q` is the trait's qualified identity.
+    pub(crate) fn call_trait_method(
+        &mut self,
+        trait_q: &str,
+        method: &str,
+        recv: Value,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        // Bound before the closures so they capture the registry, not `self` (IR3).
+        let reg = self.reg();
+        self.ctx_receiver_call(
+            recv,
+            args,
+            span,
+            || format!("trait {trait_q}.{method}"),
+            |ctx, arg_slots| reg.dispatch_trait_method(trait_q, method, ctx, 0, arg_slots),
+            || {
+                reg.find_trait_qualified(trait_q)
+                    .and_then(|t| t.methods.iter().find(|m| m.sig.name == method))
+                    .map(|m| m.sig.ret)
+                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
+            },
+        )
+    }
+
     /// The shared receiver-seeded ctx-call shape (extern-type ctx methods + bundle methods) —
     /// the tree-walker twin of the VM's `ctx_receiver_call`.
     fn ctx_receiver_call(

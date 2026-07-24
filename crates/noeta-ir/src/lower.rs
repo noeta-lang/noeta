@@ -136,6 +136,10 @@ pub struct LoweringSites<'a> {
     /// Method-bundle call sites (kernel-methods K2) → the resolved `(module, bundle)` route,
     /// baked into an [`Rvalue::BundleMethod`] instead of the generic [`Rvalue::Method`].
     pub bundle_call_sites: &'a HashMap<Span, (String, String)>,
+    /// Trait default-body call sites (ExtBundle→ExtTrait convergence, slice 2) → the resolved
+    /// `(trait_qualified, method)` route, baked into an [`Rvalue::TraitMethod`] instead of the generic
+    /// [`Rvalue::Method`]. The trait twin of [`Self::bundle_call_sites`].
+    pub trait_call_sites: &'a HashMap<Span, (String, String)>,
     /// Namespace-group member-access sites (`http.client`) → the resolved concrete module identity,
     /// emitted as an [`Rvalue::NativeModule`] instead of a field load.
     pub namespace_module_sites: &'a HashMap<Span, String>,
@@ -200,6 +204,7 @@ impl LoweringSites<'static> {
             member_method_call_sites: SPANS.get_or_init(HashSet::new),
             f32_literal_sites: SPANS.get_or_init(HashSet::new),
             bundle_call_sites: PAIRS.get_or_init(HashMap::new),
+            trait_call_sites: PAIRS.get_or_init(HashMap::new),
             namespace_module_sites: NAMES.get_or_init(HashMap::new),
             try_conversion_sites: NAMES.get_or_init(HashMap::new),
             type_arg_table: TYPE_ARGS.get_or_init(Vec::new),
@@ -241,6 +246,7 @@ macro_rules! lowering_sites {
             member_method_call_sites: &$s.member_method_call_sites,
             f32_literal_sites: &$s.f32_literal_sites,
             bundle_call_sites: &$s.bundle_call_sites,
+            trait_call_sites: &$s.trait_call_sites,
             namespace_module_sites: &$s.namespace_module_sites,
             try_conversion_sites: &$s.try_conversion_sites,
             type_arg_table: &$s.type_arg_table,
@@ -1818,6 +1824,7 @@ impl Lowerer<'_> {
                         supplied.is_none()
                             || !(self.sites.width_sites.contains_key(span)
                                 || self.sites.bundle_call_sites.contains_key(span)
+                                || self.sites.trait_call_sites.contains_key(span)
                                 || self.sites.decode_typed_sites.contains(span)),
                         "a call with a skipped parameter lowered to a form that cannot carry its \
                          supplied-mask"
@@ -1852,6 +1859,23 @@ impl Lowerer<'_> {
                                 receiver,
                                 module: module.clone(),
                                 bundle: bundle.clone(),
+                                name: name.clone(),
+                                args: arg_atoms,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
+                    // A trait default-body method call (ExtBundle→ExtTrait convergence, slice 2): the
+                    // checker resolved this call span to a native trait's defaulted method with a
+                    // trait-level dispatch and no overriding implementor — bake the (trait, method)
+                    // route in, receiver as slot 0.
+                    if let Some((trait_name, _method)) = self.sites.trait_call_sites.get(span) {
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::TraitMethod {
+                                receiver,
+                                trait_name: trait_name.clone(),
                                 name: name.clone(),
                                 args: arg_atoms,
                                 span: *span,

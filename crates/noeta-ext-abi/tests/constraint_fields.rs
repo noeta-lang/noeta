@@ -113,6 +113,8 @@ const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
 const CONFORMANCE_STRUCT_SEAM: &str = "crates/noeta-conformance/tests/ext_struct_seam.rs";
 const CONFORMANCE_TRAIT_SEAM: &str = "crates/noeta-conformance/tests/ext_trait_seam.rs";
 const CONFORMANCE_ASSOC_SEAM: &str = "crates/noeta-conformance/tests/ext_assoc_seam.rs";
+const CONFORMANCE_TRAIT_DEFAULT_SEAM: &str =
+    "crates/noeta-conformance/tests/ext_trait_default_seam.rs";
 const CONFORMANCE_DIRECTIVE_SEAM: &str = "crates/noeta-conformance/tests/ext_directive_seam.rs";
 const LOADER_EXPAND: &str = "crates/noeta-loader/src/expand.rs";
 
@@ -581,6 +583,22 @@ const TABLE: &[Row] = &[
             Anchor(
                 CONFORMANCE_ASSOC_SEAM,
                 "fn native_derived_associated_type_resolves_on_both_backends(",
+            ),
+        ),
+    ),
+    // `dispatch` (ExtBundle→ExtTrait convergence, slice 2): the trait's native default-body dispatch.
+    // States a RULE — a defaulted method an implementor omits is answered by the TRAIT itself, through
+    // this shared ctx dispatch (receiver as slot 0), rather than the receiver's own dispatch. Both
+    // backends route it via `Registry::dispatch_trait_method`; no shipped extension declares a native
+    // trait with a default dispatch, so the trait-default seam fixture is the only exerciser.
+    Row(
+        "ExtTrait",
+        "dispatch",
+        Constraint(
+            Anchor(REGISTRY, "pub fn dispatch_trait_method("),
+            Anchor(
+                CONFORMANCE_TRAIT_DEFAULT_SEAM,
+                "fn native_trait_default_bodies_agree_on_both_backends(",
             ),
         ),
     ),

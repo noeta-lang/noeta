@@ -1399,7 +1399,26 @@ pub struct ExtTrait {
     /// This is the mechanism that generalizes the bundle ABI's element-relative returns
     /// ([`RetTy::ElemWide`]/[`RetTy::ElemFloat`]) to a first-class trait contract.
     pub assoc_types: &'static [ExtAssocType],
+    /// The trait's **native default-body dispatch** (ExtBundle→ExtTrait convergence, slice 2) — the
+    /// second capability a [`ExtBundle`] had that a trait lacked. When present, a method that
+    /// [`ExtTraitMethod::has_default`] marks optional AND that the implementing type does **not**
+    /// itself provide is answered by the **trait**, through this one shared [`TraitDispatch`]
+    /// (a [`CtxTypeDispatch`]: the receiver rides as ctx slot 0, exactly like [`ExtBundle::ctx_dispatch`]).
+    /// So a fully-defaulted native trait with a `dispatch` behaves like a bundle bind — an empty
+    /// `impl X for T {}` (or a native type's `traits` advertisement) adopts every default body — while
+    /// still permitting an override: a type that provides the method wins (source 1), the trait's
+    /// default answers only when it does not (source 2), and a `.noe`-bodied default hoists as before
+    /// (source 3). `None` leaves `has_default` meaning only "optional", the pre-slice-2 behavior.
+    /// The checker records a `(trait, method)` call-site route (`trait_call_sites`) and both backends
+    /// dispatch it through [`Registry::dispatch_trait_method`], the trait twin of `dispatch_bundle_method`.
+    pub dispatch: Option<TraitDispatch>,
 }
+
+/// A native trait's **default-body dispatch** ([`ExtTrait::dispatch`], slice 2): the same
+/// [`CtxTypeDispatch`] shape [`ExtBundle::ctx_dispatch`] uses — the receiver arrives as ctx slot 0,
+/// arguments after it, and the body may re-enter the backend. Re-homed onto the trait, keyed by
+/// `(trait, method)` instead of `(module, bundle, method)`.
+pub type TraitDispatch = CtxTypeDispatch;
 
 /// One **native-derived associated type** on an [`ExtTrait`] (slice 1b): a name and the
 /// [`AssocDerivation`] that computes its concrete `Type` from the implementing type's element. The
@@ -1436,9 +1455,9 @@ pub enum AssocDerivation {
 /// One method in an [`ExtTrait`]: an ordinary [`ExtFn`] signature (the receiver is `self`, not in
 /// `params`) plus whether it carries a **default** — the ABI twin of the AST `TraitMethod { sig,
 /// has_default }`. A required method's implementor must provide it (E0015); a defaulted one is
-/// optional. (Default *bodies* are a later slice: `has_default` marks the method optional for the
-/// contract check; a native trait's defaults are answered by the implementing native type's
-/// dispatch, not a hoisted `.noe` body.)
+/// optional. When the trait carries a native [`ExtTrait::dispatch`] (slice 2), a defaulted method an
+/// implementor omits is answered by the **trait's own** default-body dispatch; without one it stays
+/// the pre-slice-2 behavior (the method routes to the receiver's own dispatch, native-extensibility S3).
 #[derive(Debug, Clone, Copy)]
 pub struct ExtTraitMethod {
     /// The method's signature (name, parameter types, return) — same vocabulary as any [`ExtFn`].
@@ -1456,6 +1475,7 @@ impl ExtTrait {
         namespace: "std",
         methods: &[],
         assoc_types: &[],
+        dispatch: None,
     };
 }
 
@@ -2594,6 +2614,36 @@ impl Registry {
             None => Err(StdError {
                 kind: crate::ErrorKind::UnknownName,
                 message: format!("no bundle `{bundle}` in module `{module}`"),
+            }
+            .into()),
+        }
+    }
+
+    /// Route a **trait default-body** method call to the trait's shared ctx dispatch
+    /// (ExtBundle→ExtTrait convergence, slice 2) — the trait twin of [`Registry::dispatch_bundle_method`].
+    /// The checker resolved this call span to a `(trait, method)` route because the method is defaulted,
+    /// the trait carries a native [`ExtTrait::dispatch`], and the implementing type provides no override.
+    /// `trait_q` is the trait's **qualified identity** (`fx.Gadget`); the receiver rides as slot 0.
+    pub fn dispatch_trait_method(
+        &self,
+        trait_q: &str,
+        method: &str,
+        ctx: &mut dyn crate::NativeCtx,
+        recv: crate::Slot,
+        args: &[crate::Slot],
+    ) -> Result<crate::CtxOut, crate::CtxError> {
+        match self.find_trait_qualified(trait_q) {
+            Some(t) => match t.dispatch {
+                Some(d) => d(method, ctx, recv, args),
+                None => Err(StdError {
+                    kind: crate::ErrorKind::UnknownName,
+                    message: format!("trait `{trait_q}` has no default-body dispatch"),
+                }
+                .into()),
+            },
+            None => Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("no trait `{trait_q}`"),
             }
             .into()),
         }
@@ -3987,6 +4037,25 @@ pub fn dispatch_bundle_method(
         None => Err(StdError {
             kind: crate::ErrorKind::UnknownName,
             message: format!("no bundle `{bundle}` in module `{module}`"),
+        }
+        .into()),
+    }
+}
+
+/// Route a trait default-body method call through the process-global default registry (slice 2) — the
+/// trait twin of [`dispatch_bundle_method`].
+pub fn dispatch_trait_method(
+    trait_q: &str,
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    match default_registry() {
+        Some(r) => r.dispatch_trait_method(trait_q, method, ctx, recv, args),
+        None => Err(StdError {
+            kind: crate::ErrorKind::UnknownName,
+            message: format!("no trait `{trait_q}`"),
         }
         .into()),
     }

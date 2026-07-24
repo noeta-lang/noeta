@@ -788,6 +788,18 @@ pub fn dispatch_bundle_method(
     noeta_ext_abi::registry::dispatch_bundle_method(module, bundle, method, ctx, recv, args)
 }
 
+/// See [`noeta_ext_abi::registry::dispatch_trait_method`] (ExtBundle→ExtTrait convergence, slice 2).
+pub fn dispatch_trait_method(
+    trait_q: &str,
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    ensure();
+    noeta_ext_abi::registry::dispatch_trait_method(trait_q, method, ctx, recv, args)
+}
+
 /// See [`noeta_ext_abi::registry::find_type`].
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
     ensure();

@@ -602,6 +602,9 @@ fn op_facts(op: &Op) -> OpFacts {
         }
         Op::BundleMethod {
             dst, recv, args, ..
+        }
+        | Op::TraitMethod {
+            dst, recv, args, ..
         } => {
             f.def = Some(*dst);
             f.uses.push(*recv);
@@ -1118,6 +1121,9 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(text);
         }
         Op::BundleMethod {
+            dst, recv, args, ..
+        }
+        | Op::TraitMethod {
             dst, recv, args, ..
         } => {
             m(dst);

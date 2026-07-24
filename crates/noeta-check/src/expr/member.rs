@@ -179,6 +179,61 @@ impl Checker {
         ))
     }
 
+    /// Type a **trait default-body** method call (ExtBundle→ExtTrait convergence, slice 2): a method
+    /// on a concrete receiver whose type implements a **native** trait, where the method is that
+    /// trait's *defaulted* method, the trait carries a native default-body dispatch
+    /// ([`noeta_ext_abi::ExtTrait::dispatch`]), and the receiver's type provides **no override**. On a
+    /// hit: records the `(trait-qualified, method)` route at the call span for lowering to bake in
+    /// (source 2 of the three answer sources), checks arity/argument types against the trait's declared
+    /// signature, and returns the method's declared return type. `None` = not a trait-answered call;
+    /// the caller falls through to `method_call_return` (source 1 — the type's own method — and the
+    /// `.noe`-default hoist, source 3, are both reached there and take precedence by construction).
+    ///
+    /// Like the bundle path, only **statically-known concrete receivers** route here — a `dyn` receiver
+    /// stays the documented escape hatch (it cannot know the concrete type provides no override).
+    pub(crate) fn trait_default_method_call(
+        &mut self,
+        recv: &Type,
+        name: &str,
+        args: &[Type],
+        span: Span,
+        call_span: Span,
+    ) -> Option<Type> {
+        let Type::Named(type_name, _) = recv else {
+            return None;
+        };
+        // A pure lookup: `native_trait_default_sites` was computed at collect time and already excludes
+        // every method the type provides (native inherent or an `impl` override — source 1) and every
+        // `.noe` trait (source 3). A hit here is exactly a source-(2) trait-answered call.
+        let (qualified, local) = self
+            .symbols
+            .native_trait_default_sites
+            .get(&(type_name.clone(), name.to_string()))?
+            .clone();
+        // Type the call from the synthesized decl (identical to the `dyn Trait` typing) — native traits
+        // carry no type parameters, so no substitution is needed.
+        let decl = self.symbols.user_traits.get(&local)?;
+        let m = decl.methods.iter().find(|m| m.sig.name == name)?;
+        let params: Vec<Type> = m
+            .sig
+            .params
+            .iter()
+            .map(|p| param_type(p, &self.imports.extern_types))
+            .collect();
+        let required = required_params(&m.sig.params);
+        let ret = m
+            .sig
+            .ret
+            .as_ref()
+            .map(|t| from_ref_q(t, &self.imports.extern_types))
+            .unwrap_or(Type::Unknown);
+        self.sites
+            .trait_call_sites
+            .insert(call_span, (qualified, name.to_string()));
+        self.check_args(&params, required, args, &[], span, name);
+        Some(ret)
+    }
+
     /// Resolve a method call on an in-scope **type parameter** through its user-trait bounds
     /// (S4.3c, typed): the first bound whose trait declares `name` types the call, its signature
     /// substituted at the bound's instantiation — under `<T: Keyed<int>>`, `x.key()` is `int` and

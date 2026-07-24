@@ -879,6 +879,18 @@ impl Checker {
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
                 let recv = self.synth(receiver, env);
+                // A trait default-body method (ExtBundle→ExtTrait convergence, slice 2): a native
+                // trait's *defaulted* method the receiver's concrete type does not provide — the TRAIT
+                // answers (source 2). Checked FIRST, before the `symbols.methods` resolution below,
+                // because a native-default method has no real signature there (it is deliberately not
+                // UT5-registered — a synth signature would misclassify a no-`self` body as an associated
+                // fn). `native_trait_default_sites` already excludes overrides and inherent methods, so
+                // a hit here is unambiguous; the route is baked at the call span.
+                if let Some(ret) =
+                    self.trait_default_method_call(&recv, name, args, span, call_span)
+                {
+                    return ret;
+                }
                 // A user-declared instance method resolves through the same path as a static call
                 // (generic methods instantiate + enforce bounds); the receiver's type arguments seed
                 // the instantiation so the result is precise. A built-in method or a deferred

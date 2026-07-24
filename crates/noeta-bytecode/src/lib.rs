@@ -947,6 +947,19 @@ pub enum Op {
         args: Box<[Reg]>,
         span: Span,
     },
+    /// A **trait default-body** method call (ExtBundle→ExtTrait convergence, slice 2):
+    /// `recv.method(args)` statically routed to a native trait's defaulted method whose trait carries
+    /// a native default-body dispatch and whose implementing type provides no override (the checker
+    /// verified this and baked the `(trait, method)` route). Dispatches through the trait's shared ctx
+    /// dispatch with the receiver as slot 0; the trait twin of [`Op::BundleMethod`].
+    TraitMethod {
+        dst: Reg,
+        recv: Reg,
+        trait_name: NameId,
+        method: NameId,
+        args: Box<[Reg]>,
+        span: Span,
+    },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
     MatchInt {
@@ -1970,6 +1983,22 @@ fn op_repr(
                 args.join(", "),
                 n(module),
                 n(bundle)
+            )
+        }
+        Op::TraitMethod {
+            dst,
+            recv,
+            trait_name,
+            method,
+            args,
+            ..
+        } => {
+            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            format!(
+                "TraitMethod r{dst} <- r{recv}.{}({}) via trait {}",
+                n(method),
+                args.join(", "),
+                n(trait_name)
             )
         }
         Op::IsType { dst, src, target } => {

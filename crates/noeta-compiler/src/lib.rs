@@ -3888,6 +3888,29 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            // A trait default-body call (ExtBundle→ExtTrait convergence, slice 2): route baked by the
+            // checker; the receiver and args are borrowed registers, the ctx-method convention.
+            Rvalue::TraitMethod {
+                receiver,
+                trait_name,
+                name,
+                args,
+                span,
+            } => {
+                let recv = self.atom_reg(receiver)?;
+                let args = self.atom_regs(args)?;
+                let trait_id = self.module.intern_name(trait_name);
+                let method_id = self.module.intern_name(name);
+                self.code.push(Op::TraitMethod {
+                    dst,
+                    recv,
+                    trait_name: trait_id,
+                    method: method_id,
+                    args,
+                    span: *span,
+                });
+                Ok(())
+            }
         }
     }
 
