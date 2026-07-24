@@ -1,0 +1,119 @@
+==================
+Dot-brace target-typed literal as a call argument
+==================
+
+echo configure(.{ port: 8080, host: "h" })
+
+---
+
+(source_file
+  (echo_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (dot_brace_literal
+          (identifier)
+          (integer_literal)
+          (identifier)
+          (string_literal))))))
+
+==================
+Dot-brace literal in a typed binding
+==================
+
+mut r: Retry = .{ attempts: 3 }
+
+---
+
+(source_file
+  (let_statement
+    (identifier)
+    (identifier)
+    (dot_brace_literal
+      (identifier)
+      (integer_literal))))
+
+==================
+Grouped import still parses after the fused dot-brace token
+==================
+
+use std.{fs, io}
+
+---
+
+(source_file
+  (use_declaration
+    (identifier)
+    (identifier)
+    (identifier)))
+
+==================
+Generic trait impl
+==================
+
+impl From<Low> {
+  fn f(): int { return 1 }
+}
+
+---
+
+(source_file
+  (impl_block
+    (trait_reference
+      (identifier)
+      (identifier))
+    (function_declaration
+      (identifier)
+      (parameters)
+      (primitive_type)
+      (block
+        (return_statement
+          (integer_literal))))))
+
+==================
+Qualified trait impl
+==================
+
+impl vec.Kernels for V3 {
+}
+
+---
+
+(source_file
+  (impl_block
+    (trait_reference
+      (qualified_identifier
+        (identifier)
+        (identifier)))
+    (identifier)))
+
+==================
+Generic qualified trait impl for a type
+==================
+
+impl a.Keyed<string> for Tag {
+}
+
+---
+
+(source_file
+  (impl_block
+    (trait_reference
+      (qualified_identifier
+        (identifier)
+        (identifier))
+      (primitive_type))
+    (identifier)))
+
+==================
+Single-quoted raw string does not interpolate
+==================
+
+mut r = 'raw ${name} {brace} $dollar'
+
+---
+
+(source_file
+  (let_statement
+    (identifier)
+    (string_literal)))

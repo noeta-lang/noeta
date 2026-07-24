@@ -13,6 +13,7 @@
 (boolean_literal) @boolean
 (string_literal) @string
 (escape_sequence) @string.escape
+(raw_escape_sequence) @string.escape
 (self) @variable.builtin
 
 ; ---------------------------------------------------------- string interpolation
@@ -31,7 +32,7 @@
 (trait_declaration name: (identifier) @type)
 (trait_object_type trait: (identifier) @type)
 (type_parameter name: (identifier) @type)
-(impl_block trait: (identifier) @type)
+(impl_block trait: (trait_reference name: (identifier) @type))
 (enum_variant name: (identifier) @constructor)
 (type_pattern type: (identifier) @type)
 (parameter type: (identifier) @type)
