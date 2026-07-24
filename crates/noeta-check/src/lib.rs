@@ -293,6 +293,19 @@ fn check_all_impl(
     checker.into_checked()
 }
 
+/// A `@packed` layout name→layout map projected into a deterministically-ordered vector for the
+/// compiler's [`Sites::packed_type_layouts`] schema-availability channel (Slice E2). Sorted by type
+/// name so the interned `packed_schemas` table — and thus the `.noeb` startup cache — is order-stable
+/// regardless of the `HashMap`'s iteration order (the same determinism the `map_packed_sites` sort
+/// buys).
+fn sorted_packed_layouts(
+    layouts: &HashMap<String, noeta_ast::reflect::PackedLayout>,
+) -> Vec<noeta_ast::reflect::PackedLayout> {
+    let mut out: Vec<noeta_ast::reflect::PackedLayout> = layouts.values().cloned().collect();
+    out.sort_by(|a, b| a.type_name.cmp(&b.type_name));
+    out
+}
+
 /// [`check_all`], but the checker **stays alive as a [`SessionChecker`]** — the debug console's
 /// seed (session-checker C3): console fragments then check against everything the program
 /// declared and bound, exactly as later REPL entries check against earlier ones. The returned
@@ -351,7 +364,13 @@ pub fn check_all_session_opts(program: &Program, opts: CheckOptions) -> (Checked
     let checked = Checked {
         diagnostics: std::mem::take(&mut checker.diags),
         expr_types: checker.sites.expr_types.clone(),
-        sites: checker.sites.clone().into_sites(checker.relevance.clone()),
+        sites: {
+            let mut sites = checker.sites.clone().into_sites(checker.relevance.clone());
+            // Slice E2: seed the from-scratch producer's schema-availability channel (the
+            // accumulator projection above cannot — the layouts read `symbols`).
+            sites.packed_type_layouts = sorted_packed_layouts(&checker.packed_layouts_public());
+            sites
+        },
         bundle_bindings: checker.bundle_bindings_public(),
         packed_layouts: checker.packed_layouts_public(),
     };
@@ -534,10 +553,15 @@ impl SessionChecker {
     /// (span-keyed by per-entry `SourceId`s, so a consumer's lookups only ever hit the right
     /// entry). What a checked session compile (C5) threads into `compile_with_sites`.
     pub fn sites_snapshot(&self) -> Sites {
-        self.checker
+        let mut sites = self
+            .checker
             .sites
             .clone()
-            .into_sites(self.checker.relevance.clone())
+            .into_sites(self.checker.relevance.clone());
+        // Slice E2: a checked session compile can also produce a `List<packed>` from scratch, so its
+        // snapshot carries every `@packed` struct's layout for `make_packed`'s by-name resolution.
+        sites.packed_type_layouts = sorted_packed_layouts(&self.checker.packed_layouts_public());
+        sites
     }
 
     /// Reset the per-entry lexical scratch to its neutral state. The whole-program phases leave
@@ -1355,13 +1379,16 @@ impl Checker {
     fn into_checked(self) -> Checked {
         let bundle_bindings = self.bundle_bindings_public();
         let packed_layouts = self.packed_layouts_public();
+        let packed_type_layouts = sorted_packed_layouts(&packed_layouts);
         let relevance = self.relevance;
         let mut sites = self.sites;
         let expr_types = std::mem::take(&mut sites.expr_types);
+        let mut sites = sites.into_sites(relevance);
+        sites.packed_type_layouts = packed_type_layouts;
         Checked {
             diagnostics: self.diags,
             expr_types,
-            sites: sites.into_sites(relevance),
+            sites,
             bundle_bindings,
             packed_layouts,
         }

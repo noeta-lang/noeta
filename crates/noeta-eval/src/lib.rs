@@ -101,11 +101,18 @@ impl Backend for IrRefBackend {
         );
         let ir = noeta_ir_passes::thread_reuse(&ir);
         let deserialize_recipes = checked.sites.deserialize_recipes.iter().cloned().collect();
+        let packed_type_layouts = checked
+            .sites
+            .packed_type_layouts
+            .iter()
+            .map(|l| (l.type_name.clone(), l.clone()))
+            .collect();
         self.run_ir(
             program,
             &ir,
             checked.sites.type_of_sites,
             deserialize_recipes,
+            packed_type_layouts,
         )
     }
 }
@@ -1304,6 +1311,12 @@ struct Interpreter {
     /// `run_ir` start; `Rvalue::DecodeTyped` (`json.decode_typed(name, text)`) looks a runtime type
     /// name up here to decode a JSON body into that type. Empty on every run with no such derive.
     deserialize_recipes: std::collections::HashMap<String, noeta_stdlib::TypeRecipe>,
+    /// Every `@packed` struct's flat layout by (qualified) type name (native type-declaration
+    /// unification, Slice E2), lifted from the checker's sites at `run_ir` start. The from-scratch
+    /// producer [`NativeCtx::make_packed`](crate::native_ctx) resolves a produced `List<packed>`'s
+    /// element schema by name here — the tree-walker twin of the VM's interned `packed_schemas`
+    /// by-name scan. Empty on the checkerless REPL session path (no `@packed` layout is known there).
+    packed_type_layouts: std::collections::HashMap<String, noeta_ast::reflect::PackedLayout>,
     /// The program-wide **type-argument table** (poly-values F2b) — the concrete instantiations of
     /// forwarding generics, lifted from the IR `Program` at `run_ir` start. A dynamic
     /// call-site-typed site resolves its per-instantiation recipe/name through the hidden slot's
@@ -1408,6 +1421,7 @@ impl Interpreter {
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
             deserialize_recipes: std::collections::HashMap::new(),
+            packed_type_layouts: std::collections::HashMap::new(),
             type_args: Vec::new(),
             call_sites: Vec::new(),
             abort_trace: Vec::new(),
@@ -2228,6 +2242,43 @@ impl Interpreter {
             .collect()
     }
 
+    /// The **constructible `TypeDef`** for a `@packed` element type named `name` — the scope binding
+    /// for a source struct (bound by its unqualified name), or a registry-built def for a native
+    /// `@packed` struct (native type-declaration unification, Slice E2). A native struct's **qualified**
+    /// layout name (`geo.Pt`) is never scope-bound — a `use geo.Pt` binds only the short name `Pt` — so
+    /// packed-schema resolution for a native element (a `List<Pt>` literal, or the from-scratch
+    /// `make_packed` producer) falls through to the registry, building the same value-`TypeDef` a
+    /// native import binds (fields in registry order, structural `==`), which the VM's interned shape
+    /// mirrors. `None` if the name resolves to neither a scope type nor a native fielded *struct*.
+    fn packed_type_def(&self, name: &str) -> Option<Rc<TypeDef>> {
+        if let Some(Value::Type(def)) = self.scope.lookup(name) {
+            return Some(def);
+        }
+        let cl = self.reg().resolve_fielded(name)?;
+        if cl.kind != noeta_stdlib::FieldedKind::Struct {
+            return None;
+        }
+        Some(Rc::new(TypeDef {
+            name: cl.name.to_string(),
+            fields: cl
+                .fields
+                .iter()
+                .map(|f| FieldSpec {
+                    name: f.name.to_string(),
+                })
+                .collect(),
+            methods: HashMap::new(),
+            destructor: None,
+            is_struct: true,
+            structural_eq: true,
+            key_capable: std::cell::Cell::new(false),
+            derives_comparable: false,
+            derives_tojson: false,
+            opaque: false,
+            field_defaults: Vec::new(),
+        }))
+    }
+
     /// (nested) type name is not a struct in scope, the field sets disagree, or the layout is empty.
     fn resolve_packed_schema(
         &self,
@@ -2251,10 +2302,11 @@ impl Interpreter {
             }));
         }
 
-        let def = match self.scope.lookup(&layout.type_name) {
-            Some(Value::Type(def)) => def,
-            _ => return None,
-        };
+        // Scope for a source struct (bound by its unqualified name); the registry for a native
+        // `@packed` struct, whose **qualified** layout name is never scope-bound (an import binds only
+        // its short name). Registry-awareness lets the from-scratch producer (`make_packed`, Slice E2)
+        // — and a native `List<Pt>` literal — resolve a native element's schema and pack it flat.
+        let def = self.packed_type_def(&layout.type_name)?;
         if def.fields.len() != layout.fields.len() {
             return None;
         }

@@ -57,7 +57,28 @@ pub fn reference_run_traced(
     // the same annotated IR (Phase 5).
     let ir = noeta_ir_passes::thread_reuse(&ir);
     let deserialize_recipes = sites.deserialize_recipes.iter().cloned().collect();
-    IrRefBackend::new().run_ir_traced(program, &ir, sites.type_of_sites, deserialize_recipes)
+    let packed_type_layouts = packed_layouts_by_name(&sites);
+    IrRefBackend::new().run_ir_traced(
+        program,
+        &ir,
+        sites.type_of_sites,
+        deserialize_recipes,
+        packed_type_layouts,
+    )
+}
+
+/// The checker's `@packed` layouts keyed by type name — the tree-walker's `make_packed` resolves a
+/// produced list's element schema through this map (Slice E2), the twin of the VM interning the same
+/// layouts into `packed_schemas`. Built from the same [`Sites::packed_type_layouts`] the compiler
+/// interns, so both backends see identical schemas by construction.
+fn packed_layouts_by_name(
+    sites: &noeta_check::Sites,
+) -> std::collections::HashMap<String, noeta_ast::reflect::PackedLayout> {
+    sites
+        .packed_type_layouts
+        .iter()
+        .map(|l| (l.type_name.clone(), l.clone()))
+        .collect()
 }
 
 /// As [`reference_run`], but against a caller-provided [`noeta_stdlib::Host`] — the telemetry
@@ -77,12 +98,14 @@ pub fn reference_run_with_host(
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&to_relevance(&sites.destructor_relevance)));
     let ir = noeta_ir_passes::thread_reuse(&ir);
     let deserialize_recipes = sites.deserialize_recipes.iter().cloned().collect();
+    let packed_type_layouts = packed_layouts_by_name(&sites);
     IrRefBackend::new().run_ir_with_host(
         program,
         &ir,
         host,
         sites.type_of_sites,
         deserialize_recipes,
+        packed_type_layouts,
     )
 }
 

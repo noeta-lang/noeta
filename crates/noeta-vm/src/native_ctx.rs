@@ -647,6 +647,41 @@ impl NativeCtx for VmCtx<'_, '_> {
         Ok(self.insert(Value::packed_list(schema, bytes)))
     }
 
+    fn make_packed(&mut self, type_name: &str, bytes: Vec<u8>) -> CtxResult<Slot> {
+        // Resolve the element schema BY NAME — the same interned-schema scan `packed_element_fields`
+        // uses, matching the (qualified) `type_name` against a schema's element shape name. Every
+        // `@packed` struct's layout is interned unconditionally (the checker's schema-availability
+        // channel), so a native `@packed` struct resolves here even with no source `List<T>` literal.
+        let Some(schema) = self
+            .vm
+            .persist
+            .packed_schemas
+            .iter()
+            .copied()
+            .find(|s| s.shape.is_some_and(|sh| sh.name == type_name))
+        else {
+            return Err(CtxError::Std(noeta_stdlib::StdError {
+                kind: noeta_stdlib::ErrorKind::UnknownName,
+                message: format!(
+                    "make_packed: no interned packed schema for `{type_name}` — it must be a \
+                     `@packed` struct reachable in the compiled unit, named by its qualified identity"
+                ),
+            }));
+        };
+        if schema.byte_size == 0 || !bytes.len().is_multiple_of(schema.byte_size) {
+            return Err(CtxError::Std(noeta_stdlib::StdError {
+                kind: noeta_stdlib::ErrorKind::ArgType,
+                message: format!(
+                    "make_packed: buffer of {} bytes is not a whole number of `{type_name}` \
+                     elements ({} bytes each)",
+                    bytes.len(),
+                    schema.byte_size
+                ),
+            }));
+        }
+        Ok(self.insert(Value::packed_list(schema, bytes)))
+    }
+
     fn object_scalars_at(
         &mut self,
         list: Slot,
