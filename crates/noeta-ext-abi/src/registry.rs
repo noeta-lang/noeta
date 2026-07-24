@@ -1097,10 +1097,8 @@ pub enum FieldedKind {
 /// pairs are legal at assembly (the native analogue of the AST placement gate E0054), since a native
 /// type bypasses the source-level site check.
 ///
-/// **Reserved for a later slice — deliberately not a variant yet:** `@packed` (flat value-struct
-/// layout, native-extensibility Slice E). It slots in here when its seeding + reader land; the
-/// ABI-coverage gate rejects a variant that has no reader, so it is added only alongside its
-/// implementation. (`@role` shipped in Slice D3 as [`ExtTypeDirective::Role`].)
+/// (`@role` shipped in Slice D3 as [`ExtTypeDirective::Role`]; `@packed` in Slice E1 as
+/// [`ExtTypeDirective::Packed`].)
 #[derive(Debug, Clone, Copy)]
 pub enum ExtTypeDirective {
     /// `@validated` — bar bare literal / record-update construction of this type outside its own
@@ -1136,6 +1134,35 @@ pub enum ExtTypeDirective {
     /// `reflect::build` joining the tags against the in-program attribute applications, so
     /// [`Registry::native_roles`] projects the tags into the plain-data table that builder now accepts.
     Role(&'static [ExtRoleTag]),
+    /// `@packed` — lay a `List` of this **value struct** out as one flat, contiguous raw-primitive
+    /// buffer (native-extensibility Slice E1, the native twin of a `.noe` `@packed struct`). Struct-only.
+    /// Seeds the checker's `packed_structs` membership (and `column_structs` for
+    /// [`PackedLayoutKind::Column`]) keyed on the type's **qualified** identity, so a source `List<Pt>`
+    /// literal (`Pt` native) hits `note_packed_list` → `packed_layout` and packs flat on both backends,
+    /// exactly like a `.noe` `@packed` struct's list. A *single* `@packed` value is always boxed (flat
+    /// storage is a property of the *list*, keyed by construction-site span), so a native constructor
+    /// returning a `NativeOut::Instance` yields the same boxed `Object` a source `Pt{..}` literal does.
+    /// [`Registry::validate`] enforces the native analogue of the checker's **E0038** all-packable-field
+    /// rule: every [`ExtField::ty`] must be [`SigType::Int`]/[`SigType::Float`]/[`SigType::F32`]/
+    /// [`SigType::Bool`], or a [`SigType::Named`] resolving to another `@packed` struct in the same unit
+    /// set — anything heap-shaped (a `string`/`List`/class/enum/`dyn`) refuses to assemble.
+    Packed(PackedLayoutKind),
+}
+
+/// The storage **axis** a native [`ExtTypeDirective::Packed`] struct's list takes — the ABI twin of a
+/// `.noe` `@packed(Layout.Row|Column)`. A local [`Copy`] enum (mirroring [`FieldedKind`]), *not* the
+/// [`ConstraintLayout`] a [`PackedConstraint`] carries: that has a meaningless-here `Any` arm (a bundle
+/// accepts either layout), whereas a declaration commits to exactly one. The per-field packed *kinds*
+/// are derived from the struct's [`ExtField`] primitive types at seed time; this payload carries only
+/// the row-vs-column axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackedLayoutKind {
+    /// Row-major (array-of-structs): each element's fields are contiguous, elements back to back — the
+    /// default, matching a bare `.noe` `@packed`.
+    Row,
+    /// Column-major (struct-of-arrays): each field's values are contiguous across all elements — the
+    /// `.noe` `@packed(Layout.Column)` layout, seeding `column_structs` in addition to `packed_structs`.
+    Column,
 }
 
 /// One `@role(Enum.Variant)` tag on a native `@attribute` struct — the ABI mirror of the AST
@@ -3227,6 +3254,31 @@ fn check_role_tag(
     }
 }
 
+/// Whether `ty` can be a field of a native `@packed` struct (Slice E1, the native twin of the
+/// checker's [`is_packable_type`](https://docs.rs/noeta-check) / E0038). The packable set is the
+/// primitives [`SigType`] can spell — `Int`/`Float`/`F32`/`Bool` — plus a [`SigType::Named`] that
+/// resolves to another `@packed` struct in the assembled `units` (so a nested packed field flattens
+/// inline). Everything else — `String`/`Bytes`/`List`/`Map`/`Option`/`Result`/`Dyn`/a class or enum
+/// or non-packed struct — is heap-shaped and cannot lay out flat. Note [`SigType`] has no `IntN`/`F64`
+/// variant, so a native `@packed` struct's fixed-width fields are limited to `F32`; the wider-primitive
+/// set a `.noe` `@packed` admits (`i8..i64`, `f64`) is simply unspellable natively (a scope bound, not
+/// a soundness gap).
+fn packable_field(units: &[&'static (dyn Extension + Sync)], ty: &SigType) -> bool {
+    match ty {
+        SigType::Int | SigType::Float | SigType::F32 | SigType::Bool => true,
+        SigType::Named(n) => units
+            .iter()
+            .flat_map(|u| u.structs())
+            .filter(|s| s.name == *n || s.is_qualified(n))
+            .any(|s| {
+                s.directives
+                    .iter()
+                    .any(|d| matches!(d, ExtTypeDirective::Packed(_)))
+            }),
+        _ => false,
+    }
+}
+
 fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
     for (i, unit) in units.iter().enumerate() {
         for other in &units[i + 1..] {
@@ -3468,6 +3520,37 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                         check_role_tag(units, tag, t, unit.name())?;
                     }
                 }
+                // `@packed` (Slice E1): struct-only, and every field must be packable — the native
+                // analogue of the checker's E0038. A class is a reference type (heap identity, no flat
+                // list layout), so `@packed` on it refuses to assemble; a field that cannot lay out flat
+                // (`string`/`List`/class/enum/`dyn`, or a `Named` that is not itself a `@packed` struct)
+                // does too. A native type bypasses the source-level gate, so this is enforced here.
+                if let ExtTypeDirective::Packed(_) = d {
+                    if t.kind == FieldedKind::Class {
+                        return Err(format!(
+                            "native class `{}.{}` of unit `{}` carries `@packed`, which applies only \
+                             to a struct (a flat packed list is a value-type layout, not a reference \
+                             class)",
+                            t.namespace,
+                            t.name,
+                            unit.name()
+                        ));
+                    }
+                    for f in t.fields {
+                        if !packable_field(units, &f.ty) {
+                            return Err(format!(
+                                "native `@packed` struct `{}.{}` of unit `{}` has field `{}` whose \
+                                 type is not packable — a `@packed` struct's fields must be `int`, \
+                                 `float`, `f32`, `bool`, or another `@packed` struct (a \
+                                 string/list/map/class/enum/dyn cannot lay out flat)",
+                                t.namespace,
+                                t.name,
+                                unit.name(),
+                                f.name
+                            ));
+                        }
+                    }
+                }
             }
         }
         for t in unit.enums() {
@@ -3496,6 +3579,17 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     return Err(format!(
                         "native enum `{}.{}` of unit `{}` carries `@role`, which applies only to a \
                          struct (an enum is a role vocabulary via `@semantic`, not a role bearer)",
+                        t.namespace,
+                        t.name,
+                        unit.name()
+                    ));
+                }
+                // `@packed` is a flat value-struct layout — never an enum (a sum has no single flat
+                // shape). Struct-only, like `@attribute`/`@role`.
+                if matches!(d, ExtTypeDirective::Packed(_)) {
+                    return Err(format!(
+                        "native enum `{}.{}` of unit `{}` carries `@packed`, which applies only to a \
+                         struct (an enum is a sum type with no single flat layout)",
                         t.namespace,
                         t.name,
                         unit.name()
@@ -4490,6 +4584,160 @@ mod runtime_registry_tests {
         assert!(
             validate(&[&U]).is_err(),
             "`@validated` applies only to a struct/class — an enum carrying it must refuse to assemble"
+        );
+    }
+
+    // --- native @packed site validity + packable-field rule (Slice E1) ---
+    //
+    // `@packed` is struct-only, and every field must be packable — the native analogue of the checker's
+    // E0038. A native type bypasses the source gate, so `validate` enforces both at assembly.
+
+    /// A well-formed `@packed(Row)` value struct: all-primitive fields.
+    const PACKED_PT: ExtStruct = ExtStruct {
+        name: "Pt",
+        namespace: "cfg",
+        fields: &[
+            ExtField {
+                name: "x",
+                ty: SigType::Int,
+                is_public: true,
+                is_mut: false,
+            },
+            ExtField {
+                name: "y",
+                ty: SigType::Float,
+                is_public: true,
+                is_mut: false,
+            },
+        ],
+        directives: &[ExtTypeDirective::Packed(PackedLayoutKind::Row)],
+        ..ExtStruct::STRUCT_DEFAULTS
+    };
+
+    #[test]
+    fn native_packed_struct_with_primitive_fields_assembles() {
+        static U: DirUnit = DirUnit("cfg.core", &[], &[PACKED_PT], &[]);
+        validate(&[&U])
+            .expect("a `@packed` struct with all-primitive (int/float) fields is well-formed");
+    }
+
+    #[test]
+    fn native_packed_struct_with_a_nested_packed_field_assembles() {
+        // A `Named` field resolving to another `@packed` struct in the same unit is packable (it
+        // flattens inline), exactly like a `.noe` nested packed field.
+        const SEGMENT: ExtStruct = ExtStruct {
+            name: "Segment",
+            namespace: "cfg",
+            fields: &[
+                ExtField {
+                    name: "start",
+                    ty: SigType::Named("Pt"),
+                    is_public: true,
+                    is_mut: false,
+                },
+                ExtField {
+                    name: "end",
+                    ty: SigType::Named("Pt"),
+                    is_public: true,
+                    is_mut: false,
+                },
+            ],
+            directives: &[ExtTypeDirective::Packed(PackedLayoutKind::Row)],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[], &[PACKED_PT, SEGMENT], &[]);
+        validate(&[&U]).expect(
+            "a `@packed` field naming another `@packed` struct is packable (nested flatten)",
+        );
+    }
+
+    #[test]
+    fn native_packed_struct_with_a_non_packable_field_is_rejected() {
+        // A `string` field cannot lay out flat — the native E0038 analogue must refuse assembly.
+        const BAD: ExtStruct = ExtStruct {
+            name: "Nope",
+            namespace: "cfg",
+            fields: &[ExtField {
+                name: "label",
+                ty: SigType::String,
+                is_public: true,
+                is_mut: false,
+            }],
+            directives: &[ExtTypeDirective::Packed(PackedLayoutKind::Row)],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[], &[BAD], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "a `@packed` struct with a `string` field is not flat-layoutable — it must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn native_packed_struct_naming_a_non_packed_struct_is_rejected() {
+        // A `Named` field resolving to a NON-`@packed` struct is heap-shaped — reject it.
+        const PLAIN: ExtStruct = ExtStruct {
+            name: "Plain",
+            namespace: "cfg",
+            fields: &[ExtField {
+                name: "n",
+                ty: SigType::Int,
+                is_public: true,
+                is_mut: false,
+            }],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        const BAD: ExtStruct = ExtStruct {
+            name: "Holder",
+            namespace: "cfg",
+            fields: &[ExtField {
+                name: "inner",
+                ty: SigType::Named("Plain"),
+                is_public: true,
+                is_mut: false,
+            }],
+            directives: &[ExtTypeDirective::Packed(PackedLayoutKind::Row)],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[], &[PLAIN, BAD], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "a `@packed` field naming a NON-`@packed` struct is heap-shaped — it must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn native_packed_on_a_class_is_rejected() {
+        const BAD: ExtClass = ExtClass {
+            name: "Nope",
+            namespace: "cfg",
+            directives: &[ExtTypeDirective::Packed(PackedLayoutKind::Row)],
+            ..ExtClass::DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[], &[], &[BAD]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "`@packed` applies only to a value struct — a reference class carrying it must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn native_packed_on_an_enum_is_rejected() {
+        const BAD: ExtEnum = ExtEnum {
+            name: "Nope",
+            namespace: "cfg",
+            variants: &[ExtVariant {
+                name: "A",
+                fields: &[],
+                value: VariantValue::None,
+            }],
+            directives: &[ExtTypeDirective::Packed(PackedLayoutKind::Row)],
+            ..ExtEnum::DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[BAD], &[], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "`@packed` applies only to a struct — an enum carrying it must refuse to assemble"
         );
     }
 

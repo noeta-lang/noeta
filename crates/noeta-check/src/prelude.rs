@@ -321,6 +321,18 @@ impl Checker {
                     // against in-program attribute applications, not by a checker membership write.
                     // `Registry::validate` enforces its couplings at assembly.
                     noeta_ext_abi::ExtTypeDirective::Role(_) => {}
+                    // `@packed` (Slice E1) → the same `packed_structs` (and `column_structs` for a
+                    // column layout) membership a `.noe` `@packed` struct seeds in `collect.rs`, keyed
+                    // on the **qualified** identity (a native record is qualified-keyed in `records`, so
+                    // `packed_layout` resolves its fields there and a source `List<Pt>` literal packs
+                    // flat on both backends). `Registry::validate` has already enforced struct-only + the
+                    // all-packable-field rule (the native E0038 analogue), so this is a pure table write.
+                    noeta_ext_abi::ExtTypeDirective::Packed(layout) => {
+                        self.symbols.packed_structs.insert(qualified.clone());
+                        if let noeta_ext_abi::PackedLayoutKind::Column = layout {
+                            self.symbols.column_structs.insert(qualified.clone());
+                        }
+                    }
                 }
             }
         }
