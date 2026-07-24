@@ -398,7 +398,7 @@ impl<'m> Vm<'m> {
             let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
                 args.iter().map(|a| a.to_native_deep()).collect()
             } else {
-                args.iter().map(|a| marshal_native_arg(*a)).collect()
+                args.iter().map(|a| marshal_native_arg(*a, reg)).collect()
             };
             return match reg.dispatch(module, func, &mut *self.persist.host, &nargs) {
                 // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
@@ -482,13 +482,16 @@ impl<'m> Vm<'m> {
         // container argument to a full `NativeValue` tree; every other type uses the cheap shallow
         // projection (containers → `Opaque`).
         let deep = ext.is_some_and(|t| t.deep_marshal);
+        // `&'static`, Copy — bound before the host borrow so the struct-arg marshal can consult the
+        // registry (native value-struct → `Instance`).
+        let reg = self.reg();
         let nargs: Vec<noeta_stdlib::NativeValue> = args
             .iter()
             .map(|a| {
                 if deep {
                     a.to_native_deep()
                 } else {
-                    marshal_native_arg(*a)
+                    marshal_native_arg(*a, reg)
                 }
             })
             .collect();
@@ -525,23 +528,41 @@ impl<'m> Vm<'m> {
     ) -> Result<Value, Abort> {
         // Bound once (`&'static`, Copy), so it survives the `&mut self` host borrow below (IR3).
         let reg = self.reg();
-        let class = recv.shape().and_then(|s| reg.resolve_class(&s.name));
+        // Resolve over BOTH classes and structs (fielded unification) — a value-struct method
+        // dispatches through the same seam; only in-place mutation (`InstanceUpdate`) is class-only.
+        let class = recv.shape().and_then(|s| reg.resolve_fielded(&s.name));
         let Some(class) = class else {
             return Err(self.error(
                 DiagnosticCode::UnknownName,
                 span,
-                format!("no native class method `{method}`"),
+                format!("no native fielded-type method `{method}`"),
             ));
         };
-        let recv_native = marshal_native_arg(recv);
+        let recv_native = marshal_native_arg(recv, reg);
         let nargs: Vec<noeta_stdlib::NativeValue> =
-            args.iter().map(|a| marshal_native_arg(*a)).collect();
+            args.iter().map(|a| marshal_native_arg(*a, reg)).collect();
         let host = &mut *self.persist.host;
         match (class.dispatch)(&recv_native, method, host, &nargs) {
-            // Boundary 1: an in-place instance mutation. Apply each write to the LIVE receiver's slot
-            // in place (`replace_slot` retains the new occupant and returns the displaced one, whose
-            // destructor fires now), so every alias sees the change and identity is preserved. Mirrors
-            // the tree-walker's `call_native_class_method`.
+            // A **struct** (value type) has no in-place mutation: reject an `InstanceUpdate` from a
+            // struct dispatch as a runtime error rather than silently mutating a value. Mirrors the
+            // tree-walker's guard, so both backends agree.
+            Ok(noeta_stdlib::NativeOut::InstanceUpdate { .. })
+                if class.kind == noeta_stdlib::FieldedKind::Struct =>
+            {
+                Err(self.error(
+                    DiagnosticCode::ImmutableField,
+                    span,
+                    format!(
+                        "native struct method `{method}` returned an in-place mutation, but a \
+                         struct `{}` is a value type — return a new value instead",
+                        class.name
+                    ),
+                ))
+            }
+            // Boundary 1: an in-place instance mutation (class only). Apply each write to the LIVE
+            // receiver's slot in place (`replace_slot` retains the new occupant and returns the
+            // displaced one, whose destructor fires now), so every alias sees the change and identity
+            // is preserved. Mirrors the tree-walker's `call_native_class_method`.
             Ok(noeta_stdlib::NativeOut::InstanceUpdate { writes, ret }) => {
                 for (field, value) in writes {
                     // A write must target a declared `mut` field — the ABI mirrors the source-level

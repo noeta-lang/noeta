@@ -1805,7 +1805,10 @@ impl Interpreter {
                 let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
                     arg_vals.iter().map(crate::value_to_native_deep).collect()
                 } else {
-                    arg_vals.iter().map(crate::marshal_native_arg).collect()
+                    arg_vals
+                        .iter()
+                        .map(|a| crate::marshal_native_arg(a, reg))
+                        .collect()
                 };
                 match typed_dispatch(func, &mut *self.host, &nargs, &recipe) {
                     Ok(out) => {
@@ -1870,14 +1873,17 @@ impl Interpreter {
                     ));
                 };
                 let identity = cell.borrow().type_identity();
-                let deep = self
-                    .reg()
+                let reg = self.reg();
+                let deep = reg
                     .find_type_qualified(identity)
                     .is_some_and(|t| t.deep_marshal);
                 let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
                     arg_vals.iter().map(crate::value_to_native_deep).collect()
                 } else {
-                    arg_vals.iter().map(crate::marshal_native_arg).collect()
+                    arg_vals
+                        .iter()
+                        .map(|a| crate::marshal_native_arg(a, reg))
+                        .collect()
                 };
                 let out = self.reg().dispatch_typed_method(
                     &mut **cell.borrow_mut(),

@@ -29,6 +29,7 @@ use noeta_ast::{
     BinaryOp, Expr, FnDecl, ForPattern as AstForPattern, Param, Program as AstProgram,
     Stmt as AstStmt, StrPart, TypeRef,
 };
+use noeta_ext_abi::NominalType;
 use noeta_span::Span;
 
 use crate::{

@@ -27,8 +27,8 @@ use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
 use noeta_stdlib::registry::{
-    ExtClass, ExtField, ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy,
-    Scalar, SigType,
+    ExtClass, ExtField, ExtFn, ExtModule, ExtType, Extension, FieldedKind, NativeOut, NativeValue,
+    RetTy, Scalar, SigType,
 };
 use noeta_stdlib::{ExternBox, ExternValue, Host, StdError};
 use noeta_vm::VmBackend;
@@ -410,6 +410,7 @@ fn kit_dispatch(
                     ("label".to_string(), NativeOut::Str(label)),
                     ("peer".to_string(), NativeOut::Unit),
                 ],
+                kind: FieldedKind::Class,
             })
         }
         "sum" => {
@@ -445,6 +446,7 @@ fn kit_dispatch(
                     ),
                     ("tag".to_string(), NativeOut::Str(tag)),
                 ],
+                kind: FieldedKind::Class,
             })
         }
         "tag" => {
