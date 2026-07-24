@@ -227,15 +227,17 @@
     },
 
     "interpolation": {
-      "name": "meta.interpolation.noeta",
+      "comment": "A ${…} hole inside a string. The scope names deliberately mirror the JavaScript/TypeScript template-string convention (meta.template.expression + punctuation.definition.template-expression.begin/end) rather than an .interpolation.* naming of our own: every theme already ships two rules keyed on those names — one coloring the ${ } delimiters, and — critically — `meta.template.expression` which RESETS the region's foreground off the enclosing string color. Without that reset, the whole hole inherits string.quoted.*'s color and only tokens the theme styles more specifically (self, a call name) punch through, so bare identifiers and the delimiters read as string. The contentName meta.embedded.line.noeta flips the region's standard token type to Other so the code brackets inside a hole are counted/colorized as code, exactly as JS/TS do.",
+      "name": "meta.template.expression.noeta",
       "begin": "\\$\\{",
       "end": "\\}",
       "beginCaptures": {
-        "0": { "name": "punctuation.section.interpolation.begin.noeta" }
+        "0": { "name": "punctuation.definition.template-expression.begin.noeta" }
       },
       "endCaptures": {
-        "0": { "name": "punctuation.section.interpolation.end.noeta" }
+        "0": { "name": "punctuation.definition.template-expression.end.noeta" }
       },
+      "contentName": "meta.embedded.line.noeta",
       "patterns": [
         { "include": "#comments" },
         { "include": "#strings" },

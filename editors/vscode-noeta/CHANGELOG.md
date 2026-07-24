@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.14.2
+
+Fixes **`${...}` interpolation inside strings** rendering in the enclosing string's color. The
+grammar did split each hole into tokens, but they kept `string.quoted.*` as an ancestor scope and
+used bespoke scope names (`meta.interpolation.*`, `punctuation.section.interpolation.*`) that no
+theme targets — so only tokens a theme styled more specifically than `string` (`self`, a call name)
+punched through, while the `${` `}` delimiters and every bare identifier (`${self.id}`, `${i}`,
+`${total(items)}`) fell back to the string color. The hole now uses the JavaScript/TypeScript
+template-string convention every theme already ships rules for: `${`/`}` are
+`punctuation.definition.template-expression.begin/end.noeta`, and the hole is
+`meta.template.expression.noeta` (content `meta.embedded.line.noeta`), whose `meta.template.expression`
+rule resets the region's foreground off the string color. Adds a theme-resolution regression suite
+(`test/grammar-interpolation.test.js`) that pins the resolved colors, not just the scope names.
+
 ## 0.14.1
 
 Fixes auto-indent after a **multi-line tier block** (`@doc { ... }`, `@sql { ... }`, ...): pressing
