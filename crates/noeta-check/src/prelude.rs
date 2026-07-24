@@ -37,6 +37,7 @@ impl Checker {
         self.seed_native_builtin_traits();
         self.seed_ext_enums();
         self.seed_ext_fielded();
+        self.seed_ext_directives();
     }
 
     /// Seed every installed extension's declared **native classes** (native-extensibility S2) into
@@ -259,6 +260,54 @@ impl Checker {
             self.symbols
                 .type_kinds
                 .insert(qualified, noeta_types::TypeKind::Enum);
+        }
+    }
+
+    /// Seed the **built-in directives** native fielded + enum types carry (native type-declaration
+    /// unification, Slice D) into the same `Symbols` tables the checker's collect pass writes from a
+    /// `.noe` type's `Decorators`. A native type bypasses the AST placement gate (E0054), so
+    /// (kind, directive) legality is enforced at assembly by [`Registry::validate`]; this pass trusts
+    /// that and performs only the table write:
+    ///
+    /// - [`ExtTypeDirective::Validated`] (struct/class) → `validated_types`, keyed by **qualified**
+    ///   identity — a native record is qualified-keyed, and the E0060 construction gate compares the
+    ///   constructed type's *resolved* name, which is qualified for a native type (so this matches
+    ///   what the gate sees, unlike collect.rs's short user key). This installs only the static
+    ///   construction ban; validation *runs* iff the type also advertises `traits:["Validate"]`
+    ///   (seeded by [`Checker::seed_native_builtin_traits`], so `satisfies(Validate)` is true) and
+    ///   carries a reachable `validate` method — both on the type's existing channels.
+    /// - [`ExtTypeDirective::Semantic`] (enum) → `semantic_enums`, keyed by qualified identity, so a
+    ///   native enum is a legal role vocabulary for `@role(Enum.Variant)` exactly like a `.noe`
+    ///   `@semantic` enum.
+    ///
+    /// Runs at prelude time after the fielded/enum seeders (whose records this keys against) and after
+    /// [`Checker::seed_native_builtin_traits`] (so a `@validated` type is already `satisfies(Validate)`).
+    pub(crate) fn seed_ext_directives(&mut self) {
+        // Snapshot the qualified declarations + their directives under the immutable registry borrow,
+        // then release it before the `&mut self` symbol-table writes (every native seeder's shape).
+        let fielded: Vec<(String, &'static [noeta_ext_abi::ExtTypeDirective])> = self
+            .reg()
+            .fielded()
+            .map(|f| (f.qualified(), f.directives))
+            .collect();
+        let enums: Vec<(String, &'static [noeta_ext_abi::ExtTypeDirective])> = self
+            .reg()
+            .enums()
+            .map(|en| (en.qualified(), en.directives))
+            .collect();
+        for (qualified, directives) in fielded {
+            for d in directives {
+                if let noeta_ext_abi::ExtTypeDirective::Validated = d {
+                    self.symbols.validated_types.insert(qualified.clone());
+                }
+            }
+        }
+        for (qualified, directives) in enums {
+            for d in directives {
+                if let noeta_ext_abi::ExtTypeDirective::Semantic = d {
+                    self.symbols.semantic_enums.insert(qualified.clone());
+                }
+            }
         }
     }
 

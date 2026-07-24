@@ -112,6 +112,7 @@ const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforce
 const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
 const CONFORMANCE_STRUCT_SEAM: &str = "crates/noeta-conformance/tests/ext_struct_seam.rs";
 const CONFORMANCE_TRAIT_SEAM: &str = "crates/noeta-conformance/tests/ext_trait_seam.rs";
+const CONFORMANCE_DIRECTIVE_SEAM: &str = "crates/noeta-conformance/tests/ext_directive_seam.rs";
 const LOADER_EXPAND: &str = "crates/noeta-loader/src/expand.rs";
 
 use Verdict::{Constraint, Data, Prose};
@@ -343,6 +344,23 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // `directives` (native type-declaration unification, Slice D): the built-in directives this enum
+    // carries — the `.noe` `Decorators` twin, uniform across native fielded + enum kinds. The only
+    // one legal on an enum is `@semantic` (→ `semantic_enums`); `seed_ext_directives` performs the
+    // table write and `Registry::validate` refuses a struct/class-only directive here. The
+    // `ext_directive_seam` fixture's native `@semantic` enum (usable as a `roles_of` vocabulary, which
+    // a non-`@semantic` enum is not) is the exerciser.
+    Row(
+        "ExtEnum",
+        "directives",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "fn seed_ext_directives("),
+            Anchor(
+                CONFORMANCE_DIRECTIVE_SEAM,
+                "fn native_semantic_enum_is_a_role_vocabulary(",
+            ),
+        ),
+    ),
     Row(
         "ExtVariant",
         "name",
@@ -451,6 +469,23 @@ const TABLE: &[Row] = &[
             Anchor(
                 CONFORMANCE_STRUCT_SEAM,
                 "fn native_structs_have_value_semantics(",
+            ),
+        ),
+    ),
+    // `directives` (native type-declaration unification, Slice D): the built-in directives this
+    // fielded type carries. On a struct/class the legal one is `@validated` (→ `validated_types`,
+    // barring bare literal construction — E0060). `seed_ext_directives` performs the table write and
+    // `Registry::validate` refuses `@semantic` (enum-only) here. The `ext_directive_seam` fixture's
+    // native `@validated` struct (bare construction is E0060; a recipe door runs its validator) is the
+    // exerciser.
+    Row(
+        "ExtFielded",
+        "directives",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "fn seed_ext_directives("),
+            Anchor(
+                CONFORMANCE_DIRECTIVE_SEAM,
+                "fn native_validated_struct_bars_construction_and_validates_at_a_door(",
             ),
         ),
     ),
