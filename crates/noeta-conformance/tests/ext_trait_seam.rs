@@ -27,8 +27,8 @@ use std::any::Any;
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
 use noeta_stdlib::registry::{
-    ExtClass, ExtField, ExtFn, ExtModule, ExtTrait, ExtTraitMethod, ExtType, Extension, NativeOut,
-    NativeValue, RetTy, SigType,
+    ExtClass, ExtField, ExtFn, ExtModule, ExtTrait, ExtTraitMethod, ExtType, Extension,
+    FieldedKind, NativeOut, NativeValue, RetTy, SigType,
 };
 use noeta_stdlib::{ExternBox, ExternValue, Host, StdError};
 use noeta_vm::VmBackend;
@@ -155,6 +155,7 @@ const PANEL: ExtClass = ExtClass {
     }],
     dispatch: panel_dispatch,
     traits: &["Widget"],
+    kind: FieldedKind::Class,
 };
 
 /// `Panel`'s native method dispatch — the native implementation of `Widget.describe()` for a class
@@ -224,6 +225,7 @@ fn kit_dispatch(
             Ok(NativeOut::Instance {
                 class: "Panel".to_string(),
                 fields: vec![("label".to_string(), NativeOut::Str(label))],
+                kind: FieldedKind::Class,
             })
         }
         _ => Err(StdError {
@@ -333,7 +335,11 @@ fn check_diagnostics(program: &str) -> Vec<String> {
     let source = Source::new(SourceId::FIRST, "ext_trait_check.noe", program);
     let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
     let checked = noeta_db::checked(&db, src);
-    checked.diagnostics.iter().map(|d| d.message.clone()).collect()
+    checked
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect()
 }
 
 // --- Tests ---------------------------------------------------------------------------------------

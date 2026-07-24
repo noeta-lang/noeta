@@ -110,6 +110,7 @@ const VM_NATIVE_CTX: &str = "crates/noeta-vm/src/native_ctx.rs";
 const CLI_SERVE: &str = "crates/noeta-cli/src/cmd/serve.rs";
 const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforcement.rs";
 const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
+const CONFORMANCE_STRUCT_SEAM: &str = "crates/noeta-conformance/tests/ext_struct_seam.rs";
 const LOADER_EXPAND: &str = "crates/noeta-loader/src/expand.rs";
 
 use Verdict::{Constraint, Data, Prose};
@@ -201,12 +202,12 @@ const TABLE: &[Row] = &[
     Row(
         "ExtType",
         "name",
-        Data(Anchor(REGISTRY, "pub fn qualified(")),
+        Data(Anchor(REGISTRY, "trait NominalType")),
     ),
     Row(
         "ExtType",
         "namespace",
-        Data(Anchor(REGISTRY, "pub fn qualified(")),
+        Data(Anchor(REGISTRY, "trait NominalType")),
     ),
     Row(
         "ExtType",
@@ -280,12 +281,12 @@ const TABLE: &[Row] = &[
     Row(
         "ExtEnum",
         "name",
-        Data(Anchor(REGISTRY, "pub fn qualified(")),
+        Data(Anchor(REGISTRY, "trait NominalType")),
     ),
     Row(
         "ExtEnum",
         "namespace",
-        Data(Anchor(REGISTRY, "pub fn qualified(")),
+        Data(Anchor(REGISTRY, "trait NominalType")),
     ),
     Row(
         "ExtEnum",
@@ -324,39 +325,39 @@ const TABLE: &[Row] = &[
     ),
     // --- ExtClass / ExtField (native-extensibility S2) ------------------------------------------
     Row(
-        "ExtClass",
+        "ExtFielded",
         "name",
-        Data(Anchor(REGISTRY, "pub fn qualified(")),
+        Data(Anchor(REGISTRY, "trait NominalType")),
     ),
     Row(
-        "ExtClass",
+        "ExtFielded",
         "namespace",
-        Data(Anchor(REGISTRY, "pub fn qualified(")),
+        Data(Anchor(REGISTRY, "trait NominalType")),
     ),
     Row(
-        "ExtClass",
+        "ExtFielded",
         "fields",
-        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_classes(")),
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_fielded(")),
     ),
     Row(
         "ExtField",
         "name",
-        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_classes(")),
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_fielded(")),
     ),
     Row(
         "ExtField",
         "ty",
-        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_classes(")),
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_fielded(")),
     ),
     // `is_public` states the RULE the checker enforces on field access: a private field read/set
-    // from outside its class is E0035. `seed_ext_classes` reads it into `symbols.private_fields`
+    // from outside its class is E0035. `seed_ext_fielded` reads it into `symbols.private_fields`
     // (the enforced table `field_visible`/`report_private_field` consult); no shipped extension
     // declares a native class, so a fixture is the only exerciser. Both directions matter.
     Row(
         "ExtField",
         "is_public",
         Constraint(
-            Anchor(CHECK_PRELUDE, "fn seed_ext_classes("),
+            Anchor(CHECK_PRELUDE, "fn seed_ext_fielded("),
             Anchor(
                 EMBED_CONSTRAINTS,
                 "fn a_native_class_field_visibility_is_enforced(",
@@ -364,13 +365,13 @@ const TABLE: &[Row] = &[
         ),
     ),
     // `is_mut` states the RULE the checker enforces on field assignment: writing a non-`mut` field
-    // is E0033. `seed_ext_classes` reads it into `symbols.mut_fields` (the enforced table the
+    // is E0033. `seed_ext_fielded` reads it into `symbols.mut_fields` (the enforced table the
     // field-assignment check consults); a fixture is the only exerciser.
     Row(
         "ExtField",
         "is_mut",
         Constraint(
-            Anchor(CHECK_PRELUDE, "fn seed_ext_classes("),
+            Anchor(CHECK_PRELUDE, "fn seed_ext_fielded("),
             Anchor(
                 EMBED_CONSTRAINTS,
                 "fn a_native_class_field_mutability_is_enforced(",
@@ -381,35 +382,52 @@ const TABLE: &[Row] = &[
     // by `find_class_method` (which the checker's `method_return`/`method_params` and both backends'
     // CallMethod Object arm consult to route a native-class method call to `dispatch`).
     Row(
-        "ExtClass",
+        "ExtFielded",
         "methods",
         Data(Anchor(REGISTRY, "pub fn find_class_method(")),
     ),
     // `dispatch`: the one shared native-class instance-method dispatch, invoked by both backends'
     // `call_native_class_method` (`(class.dispatch)(...)`).
     Row(
-        "ExtClass",
+        "ExtFielded",
         "dispatch",
         Data(Anchor(EVAL_LIB, "fn call_native_class_method(")),
     ),
-    // `traits` (native-extensibility S3 / Pass 2b): the traits this class advertises. Read by
-    // `seed_ext_traits`, which records `user_trait_impls[class_qualified][trait]` so a native class
-    // value coerces to `dyn Trait` (the ExtType.traits twin for a class receiver).
+    // `traits` (native-extensibility S3 / Pass 2b): the traits this fielded type advertises. Read by
+    // `seed_ext_traits`, which records `user_trait_impls[qualified][trait]` so a native fielded value
+    // coerces to `dyn Trait` (the ExtType.traits twin for a fielded receiver).
     Row(
-        "ExtClass",
+        "ExtFielded",
         "traits",
         Data(Anchor(CHECK_PRELUDE, "fn seed_ext_traits(")),
+    ),
+    // `kind` states the RULE distinguishing a reference **class** from a value **struct**: a struct
+    // is seeded as `TypeKind::Struct` (value semantics — structural `==`, copy-on-assign) and both
+    // backends materialize it with a struct-kind shape (`structural_eq = true`), whereas a class is a
+    // reference type with identity + in-place mutation. `seed_ext_fielded` reads `kind` into the
+    // seeded `TypeKind` (the enforcer that fixes the checker-side semantics); no shipped extension
+    // declares a native struct, so the `ext_struct_seam` value-semantics test is the only exerciser.
+    Row(
+        "ExtFielded",
+        "kind",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "fn seed_ext_fielded("),
+            Anchor(
+                CONFORMANCE_STRUCT_SEAM,
+                "fn native_structs_have_value_semantics(",
+            ),
+        ),
     ),
     // --- ExtTrait / ExtTraitMethod (native-extensibility S3) ------------------------------------
     Row(
         "ExtTrait",
         "name",
-        Data(Anchor(REGISTRY, "pub fn qualified(")),
+        Data(Anchor(REGISTRY, "trait NominalType")),
     ),
     Row(
         "ExtTrait",
         "namespace",
-        Data(Anchor(REGISTRY, "pub fn qualified(")),
+        Data(Anchor(REGISTRY, "trait NominalType")),
     ),
     // `methods` states the RULE the trait contract enforces on an implementor: every non-default
     // method must be present with matching arity/types or the `impl` is E0015 (`check_user_trait_impl`).
@@ -765,7 +783,7 @@ const SCANNED: &[(&str, &[&str])] = &[
             "ExtType",
             "ExtEnum",
             "ExtVariant",
-            "ExtClass",
+            "ExtFielded",
             "ExtField",
             "ExtTrait",
             "ExtTraitMethod",
