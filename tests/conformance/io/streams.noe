@@ -1,0 +1,30 @@
+// std.io (CLI-completion slice 1): the program's two observable output streams. `io.out`/`io.outln`
+// write to the SAME stdout buffer the `echo` keyword uses (so they interleave in program order);
+// `io.err`/`io.errln` write to stderr. Both streams are observable output routed through the
+// backends' buffers, so the differential oracle pins BOTH — the tree-walker and the VM (and, under
+// `--features jit`, tier 0 vs tier 1) must produce byte-identical stdout AND stderr here. The split
+// between the two streams is asserted directly via `// expect: stdout` / `// expect: stderr`.
+// expect: stdout "e1"
+// expect: stdout "out"
+// expect: stdout "42"
+// expect: stdout "e2"
+// expect: stderr "warn"
+// expect: stderr "second"
+// expect: exit 0
+use std.io
+
+// An `echo` line and `io.out` fragments share one stdout buffer, in order.
+echo "e1"
+io.out("o")
+io.out("ut")
+io.outln("")
+
+// `io.outln` renders any value the way `echo` does — here an int, no quotes.
+io.outln(42)
+
+// stderr is its own buffer: these do not appear on stdout.
+io.errln("warn")
+io.err("sec")
+io.errln("ond")
+
+echo "e2"

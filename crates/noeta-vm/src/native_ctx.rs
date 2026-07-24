@@ -174,6 +174,44 @@ impl NativeCtx for VmCtx<'_, '_> {
         &mut *self.vm.persist.host
     }
 
+    fn write_stdout(&mut self, text: &str) {
+        // The same buffer `Op::Echo` appends to — an `io.out` and an `echo` interleave in order.
+        self.vm.out.stdout.push_str(text);
+    }
+
+    fn write_stderr(&mut self, text: &str) {
+        self.vm.out.stderr.push_str(text);
+    }
+
+    fn render(&mut self, slot: Slot) -> CtxResult<String> {
+        let v = self.get(slot)?;
+        // A user object/enum that defines `to_string` renders through it — re-entering the VM to
+        // run the method's bytecode, exactly as `Op::Stringify` (and thus `echo`) does. Identity
+        // `display` for every other value. This is the sole render path; the std native holds no
+        // display logic of its own.
+        if (v.is_object() || v.is_enum())
+            && let Some(shape) = v.shape()
+            && self.vm.method_proto(&shape.name, "to_string").is_some()
+        {
+            // `run_method_handle` consumes its owned receiver argument (empty `ty` resolves the
+            // method through the receiver's shape — the bound-method path).
+            retain(v);
+            match self
+                .vm
+                .run_method_handle("", "to_string", false, vec![v], self.span)
+            {
+                Ok(result) => {
+                    let text = result.display();
+                    self.vm.release_value(result);
+                    Ok(text)
+                }
+                Err(Abort) => Err(CtxError::Abort),
+            }
+        } else {
+            Ok(v.display())
+        }
+    }
+
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {
         Ok(self.get(slot)?.to_native_deep())
     }

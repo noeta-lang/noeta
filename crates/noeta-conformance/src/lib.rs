@@ -68,10 +68,11 @@ impl Stage {
     }
 }
 
-/// What actually happened when a case ran: its captured stdout, exit code, and the
+/// What actually happened when a case ran: its captured stdout and stderr, exit code, and the
 /// `(code, line, col)` of every diagnostic, in order.
 struct Outcome {
     stdout: String,
+    stderr: String,
     exit_code: i32,
     errors: Vec<ErrorExpectation>,
 }
@@ -102,6 +103,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     let mut diagnostics = lexed.diagnostics.clone();
 
     let mut stdout = String::new();
+    let mut stderr = String::new();
     let mut exit_code;
 
     if stage == Stage::Lexer {
@@ -134,6 +136,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         if stage == Stage::Eval && diagnostics.is_empty() {
             let result = reference::reference_run(&parsed.program, sites);
             stdout = result.stdout;
+            stderr = result.stderr;
             diagnostics.extend(result.diagnostics);
             exit_code = result.exit_code;
         } else {
@@ -148,6 +151,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
 
     Outcome {
         stdout,
+        stderr,
         exit_code,
         errors: errors_of(&source, &diagnostics),
     }
@@ -227,6 +231,21 @@ fn compare(name: &str, expected: &Expectations, actual: &Outcome, stage: Stage) 
                 ));
             }
         }
+
+        if let Some(expected_lines) = &expected.stderr_lines {
+            let actual_lines: Vec<&str> = actual.stderr.lines().collect();
+            if actual_lines
+                != expected_lines
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            {
+                failures.push(format!(
+                    "stderr: expected {:?}, got {:?}",
+                    expected_lines, actual_lines
+                ));
+            }
+        }
     }
 
     for expected_error in &expected.errors {
@@ -273,6 +292,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
                 .collect();
             return Outcome {
                 stdout: String::new(),
+                stderr: String::new(),
                 exit_code: 1,
                 errors,
             };
@@ -280,6 +300,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
         Err(err) => {
             return Outcome {
                 stdout: format!("could not read: {err}"),
+                stderr: String::new(),
                 exit_code: 1,
                 errors: Vec::new(),
             };
@@ -290,6 +311,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     if stage != Stage::Eval {
         return Outcome {
             stdout: String::new(),
+            stderr: String::new(),
             exit_code: 0,
             errors: Vec::new(),
         };
@@ -302,6 +324,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     if !checked.diagnostics.is_empty() {
         return Outcome {
             stdout: String::new(),
+            stderr: String::new(),
             exit_code: 1,
             errors: errors_of_mapped(&linked.sources, &checked.diagnostics),
         };
@@ -310,6 +333,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     Outcome {
         errors: errors_of_mapped(&linked.sources, &result.diagnostics),
         stdout: result.stdout,
+        stderr: result.stderr,
         exit_code: result.exit_code,
     }
 }

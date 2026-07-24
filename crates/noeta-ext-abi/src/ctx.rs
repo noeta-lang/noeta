@@ -143,6 +143,29 @@ pub trait NativeCtx {
     /// The host capability seam — filesystem, clock, network, … (what a plain dispatch receives).
     fn host(&mut self) -> &mut dyn Host;
 
+    /// Write raw text to the program's standard output (the compared [`crate::RunResult`] stdout).
+    ///
+    /// The seam that lets an ordinary native (`std.io`'s `out`/`outln`) reach the compared output
+    /// buffer without a lowerer intrinsic or bytecode change — the same buffer the `echo` keyword
+    /// writes to. Both backends push straight to their own stdout accumulator, so the differential
+    /// oracle stays byte-identical by construction.
+    fn write_stdout(&mut self, text: &str);
+
+    /// Write raw text to the program's standard error (the compared [`crate::RunResult`] stderr).
+    ///
+    /// The stderr twin of [`NativeCtx::write_stdout`] (`std.io`'s `err`/`errln`). stderr is
+    /// *observable output*, routed through the backends' buffers just like stdout — not a host
+    /// effect — so the two backends are held byte-identical on it.
+    fn write_stderr(&mut self, text: &str);
+
+    /// Render a slot's value to its display string through the backend's **own** `Value::display`
+    /// path — the exact one `echo` / `Op::Stringify` use, including a re-entry into a user
+    /// `to_string` for a `Display` object or enum. The single canonical rendering: `std.io`'s
+    /// `out`/`outln`/`err`/`errln` call this so `io.outln(x)` is a byte-for-byte twin of `echo x`
+    /// (there is no second copy of display logic in the std native). An abort inside a user
+    /// `to_string` propagates as [`CtxError::Abort`] (recorded backend-side).
+    fn render(&mut self, slot: Slot) -> CtxResult<String>;
+
     /// Marshal a slot's value into the neutral argument view (the deep projection — these are
     /// orchestration paths, never hot loops; elements that stay opaque ride as slots instead).
     /// Errs on a freed/invalid slot (dispatch misuse).

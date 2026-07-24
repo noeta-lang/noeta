@@ -132,6 +132,8 @@ impl<'m> Vm<'m> {
 #[derive(Debug, Clone)]
 pub struct SessionOutput {
     pub stdout: String,
+    /// This entry's standard-error output (`std.io`'s `err`/`errln`), the stderr twin of `stdout`.
+    pub stderr: String,
     pub diagnostics: Vec<Diagnostic>,
     pub value: Option<String>,
     /// The abort traceback if this entry panicked (empty otherwise), innermost frame first. A frame
@@ -255,6 +257,7 @@ impl VmSession {
         let mut vm = Vm::load_seeded(module, state);
         vm.run_top();
         let stdout = std::mem::take(&mut vm.out.stdout);
+        let stderr = std::mem::take(&mut vm.out.stderr);
         let diagnostics = std::mem::take(&mut vm.out.diagnostics);
         let trace = std::mem::take(&mut vm.out.abort_trace);
         let session = VmSession {
@@ -266,6 +269,7 @@ impl VmSession {
             session,
             SessionOutput {
                 stdout,
+                stderr,
                 diagnostics,
                 value: None,
                 trace,
@@ -434,11 +438,13 @@ impl VmSession {
         };
 
         let stdout = std::mem::take(&mut vm.out.stdout);
+        let stderr = std::mem::take(&mut vm.out.stderr);
         let diagnostics = std::mem::take(&mut vm.out.diagnostics);
         let trace = std::mem::take(&mut vm.out.abort_trace);
         self.state = Some(vm.into_state());
         SessionOutput {
             stdout,
+            stderr,
             diagnostics,
             value,
             trace,
@@ -549,6 +555,7 @@ impl VmSession {
         };
         let output = SessionOutput {
             stdout: std::mem::take(&mut vm.out.stdout),
+            stderr: std::mem::take(&mut vm.out.stderr),
             diagnostics: std::mem::take(&mut vm.out.diagnostics),
             value: None,
             trace: std::mem::take(&mut vm.out.abort_trace),
@@ -614,12 +621,14 @@ impl VmSession {
             }
         };
         let stdout = std::mem::take(&mut vm.out.stdout);
+        let stderr = std::mem::take(&mut vm.out.stderr);
         let diagnostics = std::mem::take(&mut vm.out.diagnostics);
         self.state = Some(vm.into_state());
         (
             found,
             SessionOutput {
                 stdout,
+                stderr,
                 diagnostics,
                 value: None,
                 trace: Vec::new(),
@@ -692,6 +701,7 @@ impl SessionOutput {
     fn empty() -> SessionOutput {
         SessionOutput {
             stdout: String::new(),
+            stderr: String::new(),
             diagnostics: Vec::new(),
             value: None,
             trace: Vec::new(),

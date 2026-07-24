@@ -16,6 +16,9 @@ pub struct ErrorExpectation {
 pub struct Expectations {
     /// Expected stdout, one entry per line, in order. `Some(vec![])` asserts no output.
     pub stdout_lines: Option<Vec<String>>,
+    /// Expected stderr (`std.io`'s `err`/`errln`), one entry per line, in order. `Some(vec![])`
+    /// asserts nothing was written to stderr.
+    pub stderr_lines: Option<Vec<String>>,
     pub exit: Option<i32>,
     pub errors: Vec<ErrorExpectation>,
 }
@@ -47,6 +50,11 @@ fn parse_directive(directive: &str, into: &mut Expectations) -> Result<(), Strin
         "stdout" => {
             let value = parse_quoted(tail)?;
             into.stdout_lines.get_or_insert_with(Vec::new).push(value);
+            Ok(())
+        }
+        "stderr" => {
+            let value = parse_quoted(tail)?;
+            into.stderr_lines.get_or_insert_with(Vec::new).push(value);
             Ok(())
         }
         "exit" => {
@@ -139,6 +147,18 @@ mod tests {
         let e = Expectations::parse(text).unwrap();
         assert_eq!(e.stdout_lines, Some(vec!["a".to_string(), "b".to_string()]));
         assert_eq!(e.exit, Some(0));
+    }
+
+    #[test]
+    fn parses_stderr_lines_independently_of_stdout() {
+        let text =
+            "// expect: stdout \"out\"\n// expect: stderr \"warn\"\n// expect: stderr \"oops\"\n";
+        let e = Expectations::parse(text).unwrap();
+        assert_eq!(e.stdout_lines, Some(vec!["out".to_string()]));
+        assert_eq!(
+            e.stderr_lines,
+            Some(vec!["warn".to_string(), "oops".to_string()])
+        );
     }
 
     #[test]

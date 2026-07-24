@@ -41,8 +41,8 @@ pub use ctx::{
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
-    ReadSource, RealP2pConfig, Rng, SyncStatus,
+    Clock, Console, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
+    ReadSource, RealP2pConfig, Rng, Stream, SyncStatus,
 };
 pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{

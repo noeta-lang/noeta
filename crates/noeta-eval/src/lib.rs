@@ -165,6 +165,7 @@ impl Session {
     /// execution model, the canonical one.
     pub fn eval(&mut self, program: &Program) -> SessionOutput {
         self.interp.stdout.clear();
+        self.interp.stderr.clear();
         self.interp.diagnostics.clear();
         // Per-entry trace state: the interpreter persists across entries, and the trace's
         // first-abort-wins rule would otherwise let entry 1's panic mask entry 2's.
@@ -193,6 +194,7 @@ impl Session {
     /// object reclaimed interactively; any destructor output lands in the returned [`SessionOutput`].
     pub fn drop_binding(&mut self, name: &str) -> (bool, SessionOutput) {
         self.interp.stdout.clear();
+        self.interp.stderr.clear();
         self.interp.diagnostics.clear();
         let found = match self.interp.scope.remove(name) {
             Some(value) => {
@@ -227,6 +229,7 @@ impl Session {
     /// Shared by [`Session::eval`] and [`Session::type_of`]; clears stdout/diagnostics first.
     fn run_batch(&mut self, program: &Program) -> Option<Value> {
         self.interp.stdout.clear();
+        self.interp.stderr.clear();
         self.interp.diagnostics.clear();
         // A trailing bare expression is rewritten to a binding of a reserved sentinel name, so its
         // value is captured in scope (and read back) while it is evaluated exactly once on the IR
@@ -262,6 +265,7 @@ impl Session {
     fn take_output(&mut self, value: Option<String>) -> SessionOutput {
         SessionOutput {
             stdout: std::mem::take(&mut self.interp.stdout),
+            stderr: std::mem::take(&mut self.interp.stderr),
             diagnostics: std::mem::take(&mut self.interp.diagnostics),
             value,
             trace: std::mem::take(&mut self.interp.abort_trace),
@@ -294,6 +298,8 @@ impl Default for Session {
 #[derive(Debug, Clone)]
 pub struct SessionOutput {
     pub stdout: String,
+    /// This entry's standard-error output (`std.io`'s `err`/`errln`), the stderr twin of `stdout`.
+    pub stderr: String,
     pub diagnostics: Vec<Diagnostic>,
     pub value: Option<String>,
     /// The abort traceback if this entry panicked (empty otherwise) — innermost frame first. A frame
@@ -1209,6 +1215,10 @@ pub(crate) fn collect_producer_channels(root: &Value) -> Vec<usize> {
 /// One program's worth of evaluation state.
 struct Interpreter {
     stdout: String,
+    /// The program's standard-error accumulator — `std.io`'s `err`/`errln` push here through
+    /// [`noeta_ext_abi::NativeCtx::write_stderr`], the stderr twin of `stdout`. Observable output,
+    /// drained into the [`RunResult`]/[`SessionOutput`] and compared by the differential oracle.
+    stderr: String,
     diagnostics: Vec<Diagnostic>,
     /// A deliberate `os.exit(code)` (stdlib-gaps): the requested exit code, set when the
     /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly
@@ -1377,6 +1387,7 @@ impl Interpreter {
         );
         Interpreter {
             stdout: String::new(),
+            stderr: String::new(),
             diagnostics: Vec::new(),
             requested_exit: None,
             packed_fields: std::collections::HashMap::new(),

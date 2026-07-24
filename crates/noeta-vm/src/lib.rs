@@ -285,6 +285,10 @@ struct IsolateState {
 /// `os.exit`, and the abort traceback. Drained into the [`RunResult`] at teardown.
 struct RunOutput {
     stdout: String,
+    /// The program's standard-error accumulator — `std.io`'s `err`/`errln` push here through
+    /// [`noeta_ext_abi::NativeCtx::write_stderr`], the stderr twin of `stdout`. Observable output,
+    /// drained into the [`RunResult`] at teardown and compared by the differential oracle.
+    stderr: String,
     diagnostics: Vec<Diagnostic>,
     /// A deliberate `os.exit(code)` (stdlib-gaps): the requested exit code, set when the
     /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly
