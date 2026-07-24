@@ -77,3 +77,36 @@ Generated overlay: an undeclared tier still parses as a code decorator
               function: (identifier)
               arguments: (arguments
                 (boolean_literal)))))))))
+
+==================
+Generated overlay: an expression tier body is text with code holes
+==================
+
+echo @greet { hi ${name}! }
+
+---
+
+(source_file
+  (echo_statement
+    (expr_tier_block
+      name: (identifier)
+      (text_segment)
+      (interpolation
+        (identifier))
+      (text_segment))))
+
+==================
+Generated overlay: a text tier stays fully verbatim next to an expr tier
+==================
+
+@query {
+  select ${verbatim} from t
+}
+
+---
+
+(source_file
+  (text_tier_block
+    name: (identifier)
+    body: (text_block
+      (text_body))))

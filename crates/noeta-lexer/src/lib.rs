@@ -1011,6 +1011,58 @@ pub fn declared_tier_languages_in(source: &Source, tokens: &[Token]) -> Vec<(Str
     out
 }
 
+/// The names of every **expression tier** declared in `source` — `@tier(<name>, …, expr: <Type>)`.
+/// An expression tier's body is verbatim text interrupted by `${ … }` code holes (the expr-tiers
+/// arc), which the tree-sitter generator needs to tell apart from a fully-verbatim text tier: a
+/// `${` in a text tier is literal, in an expression tier it opens a hole. The `expr:` marker is the
+/// discriminant (a tier may also carry a `text:` language for its *between-holes* prose, but the
+/// presence of `expr:` makes it an expression tier). Same fixed lexical shape as
+/// [`declared_tier_languages_in`], so it needs no parse.
+pub fn declared_expr_tier_names_in(source: &Source, tokens: &[Token]) -> Vec<String> {
+    let text = source.text();
+    let ident = |t: &Token| -> Option<&str> {
+        (t.kind == TokenKind::Ident).then(|| &text[t.span.start as usize..t.span.end as usize])
+    };
+    let mut out = Vec::new();
+    for (i, window) in tokens.windows(4).enumerate() {
+        let [at, kw, open, name_tok] = window else {
+            unreachable!()
+        };
+        if !(at.kind == TokenKind::At
+            && ident(kw) == Some("tier")
+            && open.kind == TokenKind::LParen)
+        {
+            continue;
+        }
+        let Some(name) = ident(name_tok) else {
+            continue;
+        };
+        let mut depth = 1u32;
+        let mut rest = tokens[i + 4..].iter().peekable();
+        while let Some(tok) = rest.next() {
+            match tok.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Ident
+                    if depth == 1
+                        && ident(tok) == Some("expr")
+                        && rest.peek().is_some_and(|t| t.kind == TokenKind::Colon) =>
+                {
+                    out.push(name.to_string());
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// Find the `}` that closes a text-tier body whose opening `{` ends at `open_end`, returning its
 /// byte offset. Braces nest (a `{` in the body must be matched by a `}` before the block closes),
 /// so a balanced code snippet inside prose is fine; an unbalanced `}` is treated as the closer and
