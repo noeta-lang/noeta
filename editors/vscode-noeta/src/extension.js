@@ -261,8 +261,15 @@ function registerMcp(context) {
 function activate(context) {
   /** @type {import("vscode-languageclient/node").LanguageClientOptions} */
   const clientOptions = {
-    // Only drive the server for on-disk `.noe` documents in the `noeta` language mode.
-    documentSelector: [{ scheme: "file", language: "noeta" }],
+    // Drive the server for `noeta`-mode documents whether they are on-disk `.noe` files (`file`)
+    // or unsaved buffers (`untitled`). VS Code sends no LSP request — no diagnostics, hover,
+    // completion, or inlay hints — for a scheme the selector omits, so leaving `untitled` out made
+    // a brand-new "Noeta"-mode buffer inert until its first save. The server already keys such a
+    // document into its own single-file (`lone:`) workspace, so nothing server-side needs the path.
+    documentSelector: [
+      { scheme: "file", language: "noeta" },
+      { scheme: "untitled", language: "noeta" },
+    ],
     synchronize: {
       // Notify the server when `.noe` files change on disk (e.g. a sibling module edited outside the
       // editor), so its workspace view stays current.
