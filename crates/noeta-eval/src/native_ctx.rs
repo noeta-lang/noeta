@@ -492,6 +492,43 @@ impl NativeCtx for EvalCtx<'_> {
         Ok(self.insert(Value::List(ListRepr::Packed(list))))
     }
 
+    fn make_packed(&mut self, type_name: &str, bytes: Vec<u8>) -> CtxResult<Slot> {
+        // Resolve the element schema BY NAME — the tree-walker twin of the VM's interned
+        // `packed_schemas` scan. The layout is the checker's, threaded in at `run_ir` start; the def
+        // is registry-or-scope (`resolve_packed_schema` → `packed_type_def`), so a native `@packed`
+        // struct's qualified name resolves even though only its short name is scope-bound.
+        let Some(layout) = self.interp.packed_type_layouts.get(type_name).cloned() else {
+            return Err(CtxError::Std(StdError {
+                kind: noeta_stdlib::ErrorKind::UnknownName,
+                message: format!(
+                    "make_packed: no interned packed schema for `{type_name}` — it must be a \
+                     `@packed` struct reachable in the compiled unit, named by its qualified identity"
+                ),
+            }));
+        };
+        let Some(schema) = self.interp.resolve_packed_schema(&layout) else {
+            return Err(CtxError::Std(StdError {
+                kind: noeta_stdlib::ErrorKind::UnknownName,
+                message: format!(
+                    "make_packed: the packed layout for `{type_name}` did not resolve to a packable \
+                     element schema"
+                ),
+            }));
+        };
+        if schema.byte_size == 0 || !bytes.len().is_multiple_of(schema.byte_size) {
+            return Err(CtxError::Std(StdError {
+                kind: noeta_stdlib::ErrorKind::ArgType,
+                message: format!(
+                    "make_packed: buffer of {} bytes is not a whole number of `{type_name}` \
+                     elements ({} bytes each)",
+                    bytes.len(),
+                    schema.byte_size
+                ),
+            }));
+        }
+        Ok(self.insert(Value::packed_list_from(schema, bytes)))
+    }
+
     fn object_scalars_at(
         &mut self,
         list: Slot,

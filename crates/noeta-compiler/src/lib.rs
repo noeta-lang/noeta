@@ -520,6 +520,16 @@ fn compile_to_mc(
     for layout in &sites.bundle_schema_layouts {
         module.intern_packed_schema(layout);
     }
+    // Intern EVERY `@packed` struct's layout unconditionally (native type-declaration unification,
+    // Slice E2) — the from-scratch producer's schema-availability channel. A native fn's
+    // `NativeCtx::make_packed(type_name, …)` resolves the produced `List<packed>`'s element schema by
+    // matching the interned schema's shape name, so a native `@packed` struct must be present even
+    // when it never appears in a source `List<T>` literal (the `like`-less case). Deduplicated by
+    // `intern_packed_schema` (a type already interned by a list literal or a bundle binding adds
+    // nothing) and pre-sorted by name upstream, so the table stays deterministic.
+    for layout in &sites.packed_type_layouts {
+        module.intern_packed_schema(layout);
+    }
     Ok((module, map_packed_sites))
 }
 

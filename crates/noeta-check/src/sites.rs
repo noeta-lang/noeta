@@ -72,6 +72,17 @@ pub struct Sites {
     /// scalars; the interned schema recovers them, matching the tree-walker's per-type field index).
     /// Not a construction site — purely a schema-availability channel.
     pub bundle_schema_layouts: Vec<noeta_ast::reflect::PackedLayout>,
+    /// **Every** `@packed` struct's flat [`PackedLayout`](noeta_ast::reflect::PackedLayout) (source
+    /// *and* native), by type name in a deterministic order — the from-scratch producer's
+    /// schema-availability channel (native type-declaration unification, Slice E2). The compiler
+    /// interns each into the module's `packed_schemas` **unconditionally**, so a native fn calling
+    /// [`NativeCtx::make_packed`](noeta_ext_abi::NativeCtx::make_packed) can resolve a produced
+    /// `List<packed>`'s element schema BY (qualified) name even when the type never appears in a
+    /// source `List<T>` literal (the case a `like`-borrowing producer cannot cover). A superset of
+    /// [`Sites::bundle_schema_layouts`] deduplicated by the interner; not a construction site. The
+    /// tree-walker reference reads it too, keyed by name, so its `make_packed` resolves the same
+    /// layouts. A pure function of the program.
+    pub packed_type_layouts: Vec<noeta_ast::reflect::PackedLayout>,
     /// Member-access spans (`list[i].field`) lowering fuses into a single `Rvalue::IndexField`, so a
     /// packed list element's field is read without materializing the element (P-PACK 2.5+). A pure
     /// function of the program, like the other site maps; the fusion is invisible to `RunResult`.
@@ -301,6 +312,10 @@ impl SiteMaps {
             decode_typed_sites: self.decode_typed_sites,
             map_packed_sites: self.map_packed_sites,
             bundle_schema_layouts: self.bundle_schema_layouts,
+            // Seeded by the `Checked` producers from `packed_layouts_public` (which reads `symbols`,
+            // out of reach here); `into_sites` projects only the accumulator's own maps, so this
+            // stays empty until the producer fills it. See [`Sites::packed_type_layouts`].
+            packed_type_layouts: Vec::new(),
             index_field_sites: self.index_field_sites,
             arg_orders: self.arg_orders,
             for_stream_sites: self.for_stream_sites,

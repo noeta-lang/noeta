@@ -386,6 +386,19 @@ pub trait NativeCtx {
     /// when `like` does not hold a packed list.
     fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot>;
 
+    /// Build a packed list from a raw byte buffer, its element schema resolved **by (qualified)
+    /// type name** — the from-scratch producer twin of [`NativeCtx::make_packed_like`] (native
+    /// type-declaration unification, Slice E2). Where `make_packed_like` clones the schema of an
+    /// existing packed input slot, this needs no such slot: it looks the interned packed schema up
+    /// by matching `type_name` against a schema's element shape name, so a native fn can produce a
+    /// `List<packed>` with no input list to borrow a layout from. `type_name` is the element
+    /// struct's **qualified** identity (`"geo.Pt"`), exactly the name a native `@packed` struct's
+    /// directive seeds. `bytes.len()` must be a whole number of `byte_size`-wide elements. Errs when
+    /// the named type has no interned packed schema — the type must be a `@packed` struct reachable
+    /// in the compiled unit (every `@packed` struct's layout is interned unconditionally, so this
+    /// only fires for a misspelled/unqualified name or a non-packed type).
+    fn make_packed(&mut self, type_name: &str, bytes: Vec<u8>) -> CtxResult<Slot>;
+
     /// Read `list[index]`'s primitive fields in slot (declared) order into `out` (cleared first —
     /// pass the same buffer around a loop and the whole element-wise fallback of a bulk kernel
     /// allocates nothing per element). `Ok(true)` = filled; `Ok(false)` = the element is not an
@@ -520,6 +533,8 @@ pub trait PackedBuffers {
     ) -> CtxResult<Option<Slot>>;
     /// [`NativeCtx::make_packed_like`].
     fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot>;
+    /// [`NativeCtx::make_packed`].
+    fn make_packed(&mut self, type_name: &str, bytes: Vec<u8>) -> CtxResult<Slot>;
     /// [`NativeCtx::object_scalars_at`].
     fn object_scalars_at(
         &mut self,
@@ -553,6 +568,9 @@ impl<C: NativeCtx + ?Sized> PackedBuffers for C {
     }
     fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot> {
         NativeCtx::make_packed_like(self, like, bytes)
+    }
+    fn make_packed(&mut self, type_name: &str, bytes: Vec<u8>) -> CtxResult<Slot> {
+        NativeCtx::make_packed(self, type_name, bytes)
     }
     fn object_scalars_at(
         &mut self,
