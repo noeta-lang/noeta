@@ -1,0 +1,4 @@
+// `\x` requires exactly two hex digits; `G` is not hex — a malformed escape (E0064).
+// expect: error E0064 at 4:7
+// expect: exit 1
+echo "\xG0"

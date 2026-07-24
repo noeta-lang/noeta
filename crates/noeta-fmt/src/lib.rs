@@ -1373,4 +1373,25 @@ mod tests {
     fn broken_input_is_a_parse_error() {
         assert!(matches!(fmt("fn ("), Err(FmtError::Parse(_))));
     }
+
+    #[test]
+    fn control_char_escapes_round_trip_and_are_idempotent() {
+        // `\n`/`\t`/`\r` keep their shorthand; any other control char (here ESC 0x1b, written as
+        // a numeric escape) canonicalizes to the general `\u{…}` form. Formatting is idempotent.
+        let once = fmt("echo \"\\u{1b}[31m\\tred\\r\\n\"").unwrap();
+        assert_eq!(
+            once, "echo \"\\u{1b}[31m\\tred\\r\\n\"\n",
+            "canonical escapes"
+        );
+        let twice = fmt(&once).unwrap();
+        assert_eq!(once, twice, "control-char formatting is not idempotent");
+    }
+
+    #[test]
+    fn literal_esc_byte_formats_to_unicode_escape() {
+        // A raw ESC (0x1b) control byte sitting in the source has no printable form; fmt must render
+        // it as `\u{1b}` so the output is printable and re-parses to the same scalar.
+        let out = fmt("echo \"\u{1b}[0m\"").unwrap();
+        assert_eq!(out, "echo \"\\u{1b}[0m\"\n");
+    }
 }

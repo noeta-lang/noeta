@@ -3151,7 +3151,14 @@ fn escape(value: &str) -> String {
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
             '$' if chars.peek() == Some(&'{') => out.push_str("\\$"),
+            // Any other control character (`< 0x20`, plus DEL `0x7f`) has no printable form and no
+            // shorthand escape, so canonicalize it to the general `\u{…}` — an ESC byte in the
+            // source thus round-trips as `"\u{1b}"`, keeping `noeta fmt` output printable and stable.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32));
+            }
             _ => out.push(ch),
         }
     }

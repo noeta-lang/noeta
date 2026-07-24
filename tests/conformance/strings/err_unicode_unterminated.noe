@@ -1,0 +1,4 @@
+// A `\u{…}` escape must be closed by `}`; this one runs to the end of the string (E0064).
+// expect: error E0064 at 4:7
+// expect: exit 1
+echo "\u{1b"

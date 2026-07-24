@@ -1,0 +1,4 @@
+// A `\u{…}` escape may contain only hex digits; `zz` is not hex (E0064).
+// expect: error E0064 at 4:7
+// expect: exit 1
+echo "\u{zz}"

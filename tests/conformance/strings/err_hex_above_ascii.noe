@@ -1,0 +1,4 @@
+// `\x` encodes only ASCII (0x00–0x7F); `\x80` is above it — use `\u{…}` instead (E0064).
+// expect: error E0064 at 4:7
+// expect: exit 1
+echo "\x80"

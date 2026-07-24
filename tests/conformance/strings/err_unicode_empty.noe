@@ -1,0 +1,4 @@
+// `\u{}` names no scalar — at least one hex digit is required (E0064).
+// expect: error E0064 at 4:7
+// expect: exit 1
+echo "\u{}"
