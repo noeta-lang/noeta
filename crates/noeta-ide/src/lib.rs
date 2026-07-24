@@ -755,38 +755,66 @@ impl DocumentStore {
         };
 
         // The identifier token under the cursor — the callable's name, and the range to underline.
-        let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|t| {
-            t.kind == TokenKind::Ident
-                && t.span.source == source
-                && t.span.start <= offset
-                && offset <= t.span.end
-        })?;
+        let token = ident_token_at(&noeta_db::tokens(db, doc).0.tokens, offset)?;
 
-        let def_use = resolve::DefUse::build(program);
-        let decl = if let Some((receiver_span, member)) = def_use.member_at(offset, source) {
-            // `recv.m` or `Type.f`: name the owning type, then find the method/associated fn on it.
-            let type_name =
-                self.receiver_type_name(program, cache.workspace, doc, text, receiver_span);
-            type_method(program, type_name.as_deref()?, member)?
-        } else {
-            // A bare name: a free function (call site or its own declaration name), an **imported**
-            // function (the entry's `use` binds the local name — alias included — to the qualified
-            // identity the linker rewrote the merged declaration to), else — if the cursor is on a
-            // method's declaration name — that method.
-            let name = &text[token.span.range()];
-            match top_level_fn(program, name).or_else(|| {
-                let qualified = resolve::import_targets(&entry_ast.0.program).remove(name)?;
-                top_level_fn(program, &qualified)
-            }) {
-                Some(decl) => decl,
-                None => method_decl_at(program, offset, source)?,
-            }
-        };
-        Some((render_fn_signature(decl), index.range(token.span, encoding)))
+        // The signature is one facet of "the callable under the cursor" — resolved once, the same
+        // way `hover_doc` resolves it for prose, so the two never drift.
+        let callable = self.resolved_callable_at(program, cache, doc, source, text, offset)?;
+        Some((callable.signature(), index.range(token.span, encoding)))
     }
 
-    /// The nominal type name a member-access receiver refers to, for [`hover_signature`]. A receiver
-    /// that is itself a declared type name (`Point.origin`) names that type directly — an associated
+    /// The callable the cursor resolves to — a source function/method or a native stdlib function —
+    /// resolved **once** for every hover facet ([`Self::hover_signature`] renders its signature,
+    /// [`Self::hover_doc`] its prose). Centralizing it is what keeps those facets in agreement: the
+    /// bug this fixes was each hover re-resolving the callee with different reach, so a native or
+    /// namespaced callee kept its doc at a call site but lost its signature.
+    ///
+    /// Order: a `recv.m` / `Type.f` member call resolved through the receiver's type; then a bare
+    /// name as a free function, an **imported** function (via the `use`-bound qualified identity the
+    /// linker rewrote the declaration to), the definition a reference resolves to by name-span (the
+    /// [`resolve::DefUse`] path — this reaches a namespaced or cross-module callee whose merged name
+    /// is linker-qualified and whose call token is therefore not a top-level name), or a method's
+    /// own declaration name; else a native function looked up in the registry (it has no AST node).
+    fn resolved_callable_at<'a>(
+        &self,
+        program: &'a noeta_ast::Program,
+        cache: &WorkspaceCache,
+        doc: SourceProgram,
+        source: SourceId,
+        text: &str,
+        offset: u32,
+    ) -> Option<ResolvedCallable<'a>> {
+        let def_use = resolve::DefUse::build(program);
+        if let Some((receiver_span, member)) = def_use.member_at(offset, source) {
+            let type_name =
+                self.receiver_type_name(program, cache.workspace, doc, text, receiver_span)?;
+            return type_method(program, &type_name, member).map(ResolvedCallable::Source);
+        }
+
+        let entry_ast = noeta_db::ast(&self.db, doc);
+        let token = ident_token_at(&noeta_db::tokens(&self.db, doc).0.tokens, offset)?;
+        let name = &text[token.span.range()];
+        let source_decl = top_level_fn(program, name)
+            .or_else(|| {
+                let qualified = resolve::import_targets(&entry_ast.0.program).remove(name)?;
+                top_level_fn(program, &qualified)
+            })
+            .or_else(|| fn_decl_by_name_span(program, def_use.definition_at(offset, source)?))
+            .or_else(|| method_decl_at(program, offset, source));
+        if let Some(decl) = source_decl {
+            return Some(ResolvedCallable::Source(decl));
+        }
+
+        // A native stdlib function: its `use` target (`abs` → `std.math.abs`) split into module
+        // prefix and leaf, looked up in the registry — the call-site counterpart of the `use`-site
+        // hover's native branch.
+        let qualified = resolve::import_targets(&entry_ast.0.program).remove(name)?;
+        let (prefix, leaf) = qualified.rsplit_once('.')?;
+        api::function(prefix, leaf).map(ResolvedCallable::Native)
+    }
+
+    /// The nominal type name a member-access receiver refers to, for [`Self::resolved_callable_at`].
+    /// A receiver that is itself a declared type name (`Point.origin`) names that type directly — an associated
     /// function call; any other receiver is a value whose nominal type comes from the workspace type
     /// index (`p.manhattan` where `p: Point`). `None` if the receiver has no nominal type.
     fn receiver_type_name(
@@ -992,7 +1020,8 @@ impl DocumentStore {
     pub fn hover_doc(&self, uri: &str, position: Position, encoding: Encoding) -> Option<String> {
         let (cache, doc, source) = self.doc_cache(uri)?;
         let db = &self.db;
-        let def_span = self.definition_name_span(cache, doc, source, position, encoding)?;
+        let text = doc.text(db);
+        let offset = LineIndex::new(text).offset(position, encoding);
 
         let linked = noeta_db::linked_from(db, cache.workspace, doc);
         let entry_ast = noeta_db::ast(db, doc);
@@ -1001,7 +1030,20 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
 
-        doc_prose_at(program, def_span)
+        // A source symbol's `@doc` prose, resolved by name-span (a call site or the declaration
+        // itself) — this covers callables, types, and bindings alike.
+        if let Some(prose) = self
+            .definition_name_span(cache, doc, source, position, encoding)
+            .and_then(|def_span| doc_prose_at(program, def_span))
+        {
+            return Some(prose);
+        }
+
+        // Otherwise the prose is a facet of the callable under the cursor — the same resolution
+        // `hover_signature` renders. This reaches a native stdlib function (no AST `@doc` node; its
+        // prose is the registry's) and any callee `definition_name_span` did not resolve.
+        self.resolved_callable_at(program, cache, doc, source, text, offset)?
+            .doc(program)
     }
 
     /// A hover for any element of a **`use` statement** — none of which is a typed expression, so
@@ -2916,12 +2958,46 @@ fn module_members(program: &noeta_ast::Program, prefix: &str) -> Vec<String> {
     members.into_iter().map(|m| format!("`{m}`")).collect()
 }
 
+/// A callable the cursor resolves to, independent of how it was declared — a source function or
+/// method (an AST [`FnDecl`](noeta_ast::FnDecl)), or a native stdlib function (a registry entry).
+/// Its signature and its doc prose are both facets of one resolution, so [`DocumentStore::
+/// hover_signature`] and [`DocumentStore::hover_doc`] render the *same* callable instead of each
+/// re-resolving it and drifting apart — the drift that let a native or namespaced callee keep its
+/// doc at a call site while losing its signature.
+enum ResolvedCallable<'a> {
+    Source(&'a noeta_ast::FnDecl),
+    Native(api::ApiFn),
+}
+
+impl ResolvedCallable<'_> {
+    /// The signature line, e.g. `fn abs(dyn): int | float`.
+    fn signature(&self) -> String {
+        match self {
+            ResolvedCallable::Source(decl) => render_fn_signature(decl),
+            ResolvedCallable::Native(f) => f.signature.clone(),
+        }
+    }
+
+    /// The doc prose, if any: a source callable's from the merged program's `@doc` attachment, a
+    /// native's from the registry. `program` must be the same merged program the callable came from.
+    fn doc(&self, program: &noeta_ast::Program) -> Option<String> {
+        match self {
+            ResolvedCallable::Source(decl) => doc_prose_at(program, decl.name_span),
+            ResolvedCallable::Native(f) => (!f.doc.is_empty()).then(|| f.doc.clone()),
+        }
+    }
+}
+
 /// Render a function/method declaration in Noeta surface syntax for a signature hover:
 /// `fn manhattan(): int`, `fn bump(by: int): void`, or `fn origin()` when the return type is
 /// unannotated. Parameters use the same `name: T` spelling as signature help and symbol detail.
+/// Only the callable's own name is shown: a merged declaration the linker qualified
+/// (`geo.area`, `App.Hot.simulate`) renders under its leaf (`area`, `simulate`), the name the
+/// caller wrote — an identifier never contains a `.`, so the qualifier is unambiguously the prefix.
 fn render_fn_signature(decl: &noeta_ast::FnDecl) -> String {
+    let name = decl.name.rsplit('.').next().unwrap_or(&decl.name);
     let params: Vec<String> = decl.params.iter().map(symbols::param_detail).collect();
-    let head = format!("fn {}({})", decl.name, params.join(", "));
+    let head = format!("fn {}({})", name, params.join(", "));
     match &decl.ret {
         Some(ret) => format!("{head}: {}", symbols::render_type_ref(ret)),
         None => head,
@@ -3057,6 +3133,36 @@ fn is_declared_type(program: &noeta_ast::Program, name: &str) -> bool {
 /// scanning every type's methods — so a signature hover works on a method's declaration name
 /// (`fn manhattan` in `struct Point`), not only at call sites. `None` if no method name is under the
 /// cursor.
+/// The identifier token covering `offset` in a single document's token stream (from
+/// [`noeta_db::tokens`], which holds only that document's tokens — position alone locates it).
+///
+/// Deliberately does **not** filter by [`SourceId`]: a document's own parse numbers it
+/// [`SourceId::FIRST`], but in a multi-file workspace [`DocumentStore::doc_cache`] reports the
+/// document's *linked* SourceId — siblings shift the numbering — so a `span.source == linked`
+/// guard rejects every token and the lookup silently fails (a cross-module callee then loses its
+/// hover). The DefUse/definition lookups still take the linked source; their spans live in the
+/// merged program. Only this raw-token lookup must not.
+fn ident_token_at(tokens: &[noeta_lexer::Token], offset: u32) -> Option<&noeta_lexer::Token> {
+    tokens
+        .iter()
+        .find(|t| t.kind == TokenKind::Ident && t.span.start <= offset && offset <= t.span.end)
+}
+
+/// The [`FnDecl`](noeta_ast::FnDecl) whose name-span is exactly `span` — a top-level function or a
+/// type's method. Lets a hover that has resolved a reference to its definition's name-span (via
+/// [`resolve::DefUse`], the resolver `hover_doc` uses) recover the declaration to render, so a
+/// namespaced or cross-module callee is found even when its merged name is linker-qualified and its
+/// bare call token is not itself a top-level name.
+fn fn_decl_by_name_span(program: &noeta_ast::Program, span: Span) -> Option<&noeta_ast::FnDecl> {
+    program.stmts.iter().find_map(|stmt| match stmt {
+        noeta_ast::Stmt::Fn(d) if d.name_span == span => Some(d),
+        noeta_ast::Stmt::Struct(d) => d.methods.iter().find(|m| m.name_span == span),
+        noeta_ast::Stmt::Class(d) => d.methods.iter().find(|m| m.name_span == span),
+        noeta_ast::Stmt::Enum(d) => d.methods.iter().find(|m| m.name_span == span),
+        _ => None,
+    })
+}
+
 fn method_decl_at(
     program: &noeta_ast::Program,
     offset: u32,
@@ -4060,6 +4166,103 @@ mod tests {
                 .any(|(line, label)| *line == 7 && label == ": dyn"),
             "uninferred closure param must not hint: {hints:?}"
         );
+    }
+
+    #[test]
+    fn hover_signature_resolves_callables_across_declaration_kinds_at_call_sites() {
+        // Regression: a call site's hover must show the callee's SIGNATURE, not just the call's
+        // result type — for a native stdlib import, a `namespace` function, and a cross-module
+        // import, the same as a plain local function. Each used to fall through to the type hover
+        // (`int`) because `hover_signature` resolved callees more weakly than `hover_doc`; the
+        // shared `resolved_callable_at` fixes the divergence (and the multi-file token-source
+        // mismatch that hid the cross-module callee).
+        let sig = |store: &DocumentStore, uri: &str, line: u32, ch: u32| {
+            store
+                .hover_signature(
+                    uri,
+                    Position {
+                        line,
+                        character: ch,
+                    },
+                    Encoding::Utf8,
+                )
+                .map(|(s, _)| s)
+        };
+        let md = |store: &DocumentStore, uri: &str, line: u32, ch: u32| {
+            store
+                .hover_markdown(
+                    uri,
+                    Position {
+                        line,
+                        character: ch,
+                    },
+                    Encoding::Utf8,
+                )
+                .map(|(s, _)| s)
+        };
+
+        // (1) Native import (image #5): the registry signature AND its prose, matching the
+        // `use`-site hover — where a bare `int` used to be all a call site showed.
+        {
+            let mut store = test_store();
+            store.open(
+                "file:///nat.noe",
+                "use std.math.abs\nx = abs(-3)\n".to_string(),
+            );
+            assert_eq!(
+                sig(&store, "file:///nat.noe", 1, 4).as_deref(),
+                Some("fn abs(dyn): int | float")
+            );
+            let hover = md(&store, "file:///nat.noe", 1, 4).expect("hover on native call");
+            assert!(
+                hover.contains("fn abs(dyn): int | float"),
+                "native call shows its signature: {hover}"
+            );
+            assert!(
+                hover.contains("absolute value"),
+                "native call appends the registry doc: {hover}"
+            );
+        }
+        // (2) A `namespace` function: rendered under its leaf name (`area`), not the merged
+        // linker-qualified `geo.area`.
+        {
+            let mut store = test_store();
+            store.open(
+                "file:///ns.noe",
+                "namespace geo;\nfn area(): int { return 4 }\nr = area()\n".to_string(),
+            );
+            assert_eq!(
+                sig(&store, "file:///ns.noe", 2, 4).as_deref(),
+                Some("fn area(): int")
+            );
+        }
+        // (3) A cross-module import: resolved through the merged program despite the multi-file
+        // source renumbering that made the raw-token lookup miss the call.
+        {
+            let dir = temp_workspace(
+                "sig_xmod",
+                &[(
+                    "hot.noe",
+                    "namespace App.Hot;\n@doc {\n  The profile root.\n}\npub fn simulate(n: int): int { return n * 2 }\n",
+                )],
+            );
+            let entry = path_to_uri(&dir.join("main.noe"));
+            let mut store = test_store();
+            store.open(
+                &entry,
+                "use App.Hot.simulate\nr = simulate(3)\n".to_string(),
+            );
+            assert_eq!(
+                sig(&store, &entry, 1, 4).as_deref(),
+                Some("fn simulate(n: int): int")
+            );
+        }
+        // (4) Control: a value binding is not a callable — the type hover still owns it.
+        {
+            let mut store = test_store();
+            store.open("file:///v.noe", "x = 1\ny = x\n".to_string());
+            assert_eq!(sig(&store, "file:///v.noe", 1, 4), None);
+        }
     }
 
     /// Create a fresh temp directory with the given `(filename, content)` files on disk, for the
