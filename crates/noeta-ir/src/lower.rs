@@ -666,6 +666,15 @@ fn try_conversion_match(operand: &Expr, target: &str, span: Span) -> Expr {
     }
 }
 
+/// Whether a statement is a `fn` declaration eligible for the runtime declaration-hoist
+/// ([`Lowerer::lower_stmts_hoisting_fns`]): a named `fn` with **no captures**. A capturing nested fn
+/// (`fn f() use (x) { … }`) is excluded — its upvalues are sourced from the enclosing frame's local
+/// slots at closure construction, so it must not move above the binding of a captured local. A
+/// module-top-level `fn` always has empty captures, so this is exactly `matches!(_, Fn)` there.
+fn is_hoistable_fn(stmt: &AstStmt) -> bool {
+    matches!(stmt, AstStmt::Fn(decl) if decl.captures.is_empty())
+}
+
 fn module_global_names(program: &AstProgram) -> HashSet<String> {
     program
         .stmts
@@ -772,40 +781,72 @@ impl Lowerer<'_> {
         t
     }
 
-    /// Lower a statement-position block of statements (no value), in the current frame.
+    /// Lower a statement list **hoisting every CAPTURELESS `fn` declaration ahead of the rest** into
+    /// `out`, preserving the relative order within each group. This is the ONE hoisting rule that
+    /// covers every ordinary lexical scope — the module top level and every nested block body (fn
+    /// bodies, `if`/`while`/`for` bodies, statement-`match` arms) all funnel through it — so a
+    /// statement may call a `fn` declared textually later in the SAME scope. It is the runtime
+    /// counterpart of the checker's forward-reference hoist (`collect.rs` pass 1), and makes a
+    /// **direct call before the declaration** resolve, which the backends' scope-sharing
+    /// forward-capture (a later block-local `fn` becomes visible to an *already-constructed* sibling
+    /// closure, so mutual recursion and closures-invoked-later already worked) does not cover.
+    ///
+    /// Only a `fn` DECLARATION with **no captures** hoists (see [`is_hoistable_fn`]). Two exclusions:
+    ///
+    /// * A value binding (`x = 5`, including a closure bound to a name — that is an `AstStmt::Binding`,
+    ///   not `AstStmt::Fn`) stays in source order, so using a value before its assignment is still a
+    ///   runtime E0005. Hoisting a captureless named `fn` past a value binding is sound precisely
+    ///   because a named fn is **sealed** (sealed-fns arc): with no `use (…)` clause its body reads
+    ///   only its params/statics, globals, and sibling fns — never a surrounding value binding — so
+    ///   moving its declaration earlier cannot change what it observes.
+    ///
+    /// * A nested `fn` that DOES capture (`fn bump() use (count) { … }`) is left in source order. Its
+    ///   `use (…)` upvalues are sourced from the enclosing frame's already-bound local slots when the
+    ///   closure is constructed, so hoisting it *above* the binding of a captured local would leave
+    ///   the capture unsourceable (the VM compiler rejects it outright). The existing scope-sharing
+    ///   forward-capture already makes mutual recursion and later-invocation of capturing fns work
+    ///   (both fns are declared before either is called), so leaving them ordered loses nothing that
+    ///   worked before. At the module top level every `fn` is captureless (no enclosing frame), so
+    ///   this gate is a no-op there and the top-level behavior is unchanged.
+    ///
+    /// Class/enum/struct declarations do NOT hoist here either (their forward references are settled
+    /// by the type-registration fixpoint, not by statement order). The relative order of the hoisted
+    /// fns is preserved, as is the relative order of everything else, so destructor-bearing value
+    /// bindings destruct in their original reverse-binding order (only a function value's own —
+    /// unobservable — teardown moves). Both backends consume this one reordered stream, so they stay
+    /// differential-identical by construction; the compiler's slot numbering carries no semantics
+    /// (destruction order is tracked from runtime binding order by the post-lowering drop-insertion
+    /// pass, which reads this same reordered stream).
+    fn lower_stmts_hoisting_fns(
+        &mut self,
+        stmts: &[AstStmt],
+        out: &mut Vec<Stmt>,
+    ) -> Result<(), Unsupported> {
+        for stmt in stmts {
+            if is_hoistable_fn(stmt) {
+                self.lower_stmt(stmt, out)?;
+            }
+        }
+        for stmt in stmts {
+            if !is_hoistable_fn(stmt) {
+                self.lower_stmt(stmt, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower a statement-position block of statements (no value), in the current frame, applying the
+    /// shared fn-declaration hoist ([`Self::lower_stmts_hoisting_fns`]).
     fn lower_body(&mut self, stmts: &[AstStmt]) -> Result<Block, Unsupported> {
         let mut out = Vec::new();
-        for stmt in stmts {
-            self.lower_stmt(stmt, &mut out)?;
-        }
+        self.lower_stmts_hoisting_fns(stmts, &mut out)?;
         Ok(Block::stmts(out))
     }
 
-    /// Lower the module's top-level statement stream, **hoisting every top-level `fn` declaration
-    /// ahead of the rest** so a top-level statement may call a `fn` declared textually later — the
-    /// runtime counterpart of the checker's forward-reference hoist (`collect.rs` pass 1), and
-    /// consistent with fn-body/mutual-recursion behavior where forward references already resolve.
-    ///
-    /// Only `fn` DECLARATIONS hoist. A value binding (`x = 5`, including a closure bound to a name)
-    /// stays in source order, so using a value before its assignment is still a runtime error. The
-    /// relative order of the hoisted fns is preserved, as is the relative order of everything else,
-    /// so destructor-bearing value bindings destruct in their original reverse-binding order (only a
-    /// function value's own — unobservable — teardown moves). Both backends consume this one
-    /// reordered stream, so they stay differential-identical by construction; the compiler's global
-    /// slot numbering carries no semantics (destruction order is tracked from runtime binding order).
+    /// Lower the module's top-level statement stream. Unified with block-body lowering: the top
+    /// level is just another scope with the same fn-declaration hoist ([`Self::lower_body`]).
     fn lower_top_level(&mut self, stmts: &[AstStmt]) -> Result<Block, Unsupported> {
-        let mut out = Vec::new();
-        for stmt in stmts {
-            if matches!(stmt, AstStmt::Fn(_)) {
-                self.lower_stmt(stmt, &mut out)?;
-            }
-        }
-        for stmt in stmts {
-            if !matches!(stmt, AstStmt::Fn(_)) {
-                self.lower_stmt(stmt, &mut out)?;
-            }
-        }
-        Ok(Block::stmts(out))
+        self.lower_body(stmts)
     }
 
     fn lower_stmt(&mut self, stmt: &AstStmt, out: &mut Vec<Stmt>) -> Result<(), Unsupported> {
@@ -933,9 +974,10 @@ impl Lowerer<'_> {
                         let elem = format!("$for{}", self.fresh().0);
                         let mut body_stmts = Vec::new();
                         self.destructure_into(&elem, names, &mut body_stmts);
-                        for s in body {
-                            self.lower_stmt(s, &mut body_stmts)?;
-                        }
+                        // The synthetic tuple-projection prelude runs first; the user body then
+                        // lowers through the shared fn-hoist so a fn called before its decl in the
+                        // loop body resolves, exactly as a `Single`-pattern body does via `lower_body`.
+                        self.lower_stmts_hoisting_fns(body, &mut body_stmts)?;
                         out.push(Stmt::For {
                             pattern: AstForPattern::Single {
                                 name: elem,
@@ -2162,9 +2204,9 @@ impl Lowerer<'_> {
                         noeta_ast::ClosureBody::Expr(e) => self.lower_value_block(e)?,
                         noeta_ast::ClosureBody::Block(stmts) => {
                             let mut out = Vec::new();
-                            for stmt in stmts {
-                                self.lower_stmt(stmt, &mut out)?;
-                            }
+                            // Same shared fn-hoist as any other block body (a statement-`match` arm
+                            // is a scope): a fn called before its decl in the arm resolves.
+                            self.lower_stmts_hoisting_fns(stmts, &mut out)?;
                             // A block arm's value is `unit` — an explicit tail atom, so both
                             // backends' "arm writes the match result" paths stay uniform.
                             Block {
