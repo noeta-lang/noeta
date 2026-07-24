@@ -3,9 +3,10 @@
 use para.cli.{Command, Arg, run, dispatch}
 use std.io
 use std.os
+use std.env
 
 #[Command(about: "Print a message a number of times")]
-fn say(msg: string, #[Arg(short: "n", help: "how many times")] times: int = 1): int {
+fn say(msg: string, #[Arg(short: "n", help: "how many times", env: "PARA_SAY_TIMES")] times: int = 1): int {
     mut i = 0
     while i < times {
         io.outln(msg)
@@ -47,5 +48,40 @@ os.exit(run())
     // `--help` prints usage and exits cleanly (0).
     fn single_help(): void {
         assert(dispatch(["--help"]) == 0)
+    }
+
+    // ---- F1: env-var fallback (single-command mode) --------------------------
+    // `times` carries `#[Arg(env: "PARA_SAY_TIMES")]`. Per-test environments are isolated.
+
+    // No `--times` on the line: the env value (a valid int) is sourced and bound; say returns 0.
+    fn single_env_fallback_used(): void {
+        env.set("PARA_SAY_TIMES", "3")
+        assert(dispatch(["hi"]) == 0)
+    }
+
+    // A non-numeric env value is still SOURCED, then fails coercion -> usage error (2). This proves
+    // the env fallback actually fed the binder (a plain default would have succeeded).
+    fn single_env_bad_value_coerces(): void {
+        env.set("PARA_SAY_TIMES", "not-a-number")
+        assert(dispatch(["hi"]) == 2)
+    }
+
+    // An explicit argv value outranks the env fallback — even a bad env value is ignored.
+    fn single_env_overridden_by_argv(): void {
+        env.set("PARA_SAY_TIMES", "not-a-number")
+        assert(dispatch(["hi", "--times", "2"]) == 0)
+    }
+
+    // Env unset and no `--times`: the parameter default (1) fills in.
+    fn single_env_absent_uses_default(): void {
+        assert(dispatch(["hi"]) == 0)
+    }
+
+    // ---- F4: shell completions (single-command mode) -------------------------
+    fn single_completions_bash(): void {
+        assert(dispatch(["--completions", "bash"]) == 0)
+    }
+    fn single_completions_bad_shell(): void {
+        assert(dispatch(["--completions", "nushell"]) == 2)
     }
 }

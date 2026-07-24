@@ -22,23 +22,30 @@ namespace para.cli
 
 use std.io
 use std.args
+use std.env
 
 // ---- Public surface -------------------------------------------------------
 
 /// Marks a function (or method) as an invokable command. `about` is its one-line help summary.
+/// `name` overrides the command name derived from the function name; it MAY contain spaces to
+/// define a nested path (e.g. `#[Command(name: "remote add")]`), and command selection matches the
+/// longest command-name token-prefix of `argv`.
 @attribute(Function, Method)
 pub struct Command {
     about: string = ""
+    name: string = ""
 }
 
-/// Per-parameter metadata: `help` text for `--help`, and optional `short`/`long` spellings that
-/// override the defaults (a parameter's long spelling defaults to its name; it has no short by
-/// default). Attach with `#[Arg(...)]` on the parameter.
+/// Per-parameter metadata: `help` text for `--help`, optional `short`/`long` spellings that override
+/// the defaults (a parameter's long spelling defaults to its name; it has no short by default), and
+/// an `env` fallback — when the parameter is not supplied on the command line and `env` names a set
+/// environment variable, that variable's value is used. Attach with `#[Arg(...)]` on the parameter.
 @attribute(Param)
 pub struct Arg {
     help: string = ""
     short: string = ""
     long: string = ""
+    env: string = ""
 }
 
 /// Discover the program's `#[Command]` functions, parse the real `argv`, dispatch, and return the
@@ -60,6 +67,12 @@ pub fn dispatch(argv: List<string>): int {
     }
     single = cmds.len() == 1
 
+    // Shell-completion generation is framework-level, spelled `--completions <shell>` so it can never
+    // collide with a user command name. It prints a sourceable script to stdout and exits cleanly.
+    if argv.len() > 0 && argv[0] == "--completions" {
+        return run_completions(cmds, argv.slice(1, argv.len()))
+    }
+
     // Top-level help: `--help`/`-h` as the first token, or (multi-command) an empty argv.
     if argv.len() > 0 && is_help(argv[0]) || !single && argv.len() == 0 {
         io.outln(top_help_text(cmds))
@@ -67,32 +80,31 @@ pub fn dispatch(argv: List<string>): int {
     }
 
     // Select the command and the slice of tokens that belong to it.
-    mut name = ""
-    mut tokens: List<string> = []
     if single {
         // Single-command mode: no subcommand token — every argv token is this command's argument.
-        name = cmds[0].name
-        tokens = argv
-    } else {
-        // Multi-command mode: the first token selects the subcommand.
-        sel = argv[0]
-        if !command_exists(cmds, sel) {
-            io.errln("error: unknown command '${sel}'")
-            io.errln(top_help_text(cmds))
-            return 2
-        }
-        name = sel
-        tokens = argv.slice(1, argv.len())
+        return run_command(cmds[0].target, cmds[0].name, argv)
     }
+    // Multi-command mode: the longest command-name token-prefix of `argv` selects the subcommand.
+    return match select_command(cmds, argv) {
+        Ok(sel) => run_command(sel.cmd.target, sel.cmd.name, sel.tokens),
+        Err(msg) => selection_error(cmds, msg),
+    }
+}
 
-    return run_command(name, tokens)
+// Report a command-selection failure: the message, then the top-level help, then exit code 2.
+fn selection_error(cmds: List<Cmd>, msg: string): int {
+    io.errln("error: ${msg}")
+    io.errln(top_help_text(cmds))
+    return 2
 }
 
 // ---- Command dispatch -----------------------------------------------------
 
-/// Parse a single command's tokens against its signature, bind the arguments, and invoke it.
-fn run_command(name: string, tokens: List<string>): int {
-    params = params_of(name)
+/// Parse a single command's tokens against its signature, bind the arguments, and invoke it. `target`
+/// is the reflection key (`params_of`/`invoke` take it); `display` is the command name shown in help
+/// and usage, which for a nested command differs from `target` (the underlying function name).
+fn run_command(target: string, display: string, tokens: List<string>): int {
+    params = params_of(target)
 
     // `--help`/`-h` anywhere before a `--` prints this command's usage and exits cleanly.
     for t in tokens {
@@ -100,17 +112,17 @@ fn run_command(name: string, tokens: List<string>): int {
             break
         }
         if is_help(t) {
-            io.outln(command_help_text(name, params))
+            io.outln(command_help_text(display, params))
             return 0
         }
     }
 
     return match parse_tokens(tokens, params) {
         Ok(sources) => match bind_args(params, sources) {
-            Ok(bound) => do_invoke(name, bound),
-            Err(msg) => usage_error(name, params, msg),
+            Ok(bound) => do_invoke(target, bound),
+            Err(msg) => usage_error(display, params, msg),
         },
-        Err(msg) => usage_error(name, params, msg),
+        Err(msg) => usage_error(display, params, msg),
     }
 }
 
@@ -309,7 +321,7 @@ fn take_positional(positional_names: List<string>, pos_index: int, t: string): R
 fn bind_args(params: List<ParamInfo>, sources: Map<string, string>): Result<List<dyn>, string> {
     mut bound: List<dyn> = []
     for p in params {
-        match sources.get(p.name) {
+        match resolve_source(p, sources) {
             some(raw) => {
                 match coerce(p.type, raw) {
                     Ok(v) => {
@@ -331,6 +343,28 @@ fn bind_args(params: List<ParamInfo>, sources: Map<string, string>): Result<List
         }
     }
     return Ok(bound)
+}
+
+// Source a parameter's raw string. Precedence: an explicit argv token (positional/named/short) wins;
+// otherwise, if the parameter carries `#[Arg(env: "NAME")]` and that environment variable is set, its
+// value is used; otherwise the parameter has no source (a missing optional omits, a missing required
+// errors — see `bind_args`).
+fn resolve_source(p: ParamInfo, sources: Map<string, string>): ?string {
+    match sources.get(p.name) {
+        some(raw) => {
+            return some(raw)
+        },
+        none => {},
+    }
+    match arg_of(p) {
+        some(x) => {
+            if x.env != "" {
+                return env.get(x.env)
+            }
+        },
+        none => {},
+    }
+    return none
 }
 
 // Coerce a raw token to a value of the declared type. Unknown/compound types pass the raw string
@@ -368,8 +402,11 @@ fn parse_bool(raw: string): ?bool {
 // ---- Command discovery ----------------------------------------------------
 
 // A discovered command, flattened out of the reflection view so the rest of the module never has to
-// name `Attributed<Command>`.
+// name `Attributed<Command>`. `target` is the reflection key (the function name) that `params_of`
+// and `invoke` take; `name` is the selectable command name, which defaults to `target` but may be
+// overridden by `#[Command(name: ...)]` and may contain spaces to define a nested path.
 struct Cmd {
+    target: string
     name: string
     about: string
 }
@@ -377,34 +414,154 @@ struct Cmd {
 fn commands(): List<Cmd> {
     mut out: List<Cmd> = []
     for c in attributes_of::<Command>() {
-        out = out ~ [Cmd { name: c.target, about: c.value.about }]
+        selected = if c.value.name == "" then c.target else c.value.name
+        out = out ~ [Cmd { target: c.target, name: selected, about: c.value.about }]
     }
     return out
 }
 
-fn command_exists(cmds: List<Cmd>, name: string): bool {
+// The tokens of a command name, split on spaces (a single-token name yields a one-element list).
+fn name_tokens(name: string): List<string> {
+    return name.split(" ")
+}
+
+// Is `prefix` a whole-token prefix of `argv`? Used for nested-command selection.
+fn is_token_prefix(prefix: List<string>, argv: List<string>): bool {
+    if prefix.len() > argv.len() {
+        return false
+    }
+    mut i = 0
+    while i < prefix.len() {
+        if prefix[i] != argv[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// The result of command selection: which command, and the argv slice that is its own arguments.
+struct Selected {
+    cmd: Cmd
+    tokens: List<string>
+}
+
+// Select the command whose name is the LONGEST whole-token prefix of `argv` (so `remote add …`
+// picks `remote add` over a bare `remote`). Returns the match and the remaining argument tokens, or
+// an error listing the valid continuations when no command name is a prefix of `argv`.
+fn select_command(cmds: List<Cmd>, argv: List<string>): Result<Selected, string> {
+    mut best = -1
+    mut best_len = -1
+    mut i = 0
+    while i < cmds.len() {
+        toks = name_tokens(cmds[i].name)
+        if is_token_prefix(toks, argv) && toks.len() > best_len {
+            best = i
+            best_len = toks.len()
+        }
+        i = i + 1
+    }
+    if best < 0 {
+        return Err(unknown_command_message(cmds, argv))
+    }
+    chosen = cmds[best]
+    rest = argv.slice(best_len, argv.len())
+    return Ok(Selected { cmd: chosen, tokens: rest })
+}
+
+// A helpful "unknown command" message: if `argv` starts down a valid nested path, list the concrete
+// commands that continue it; otherwise fall back to naming the offending token.
+fn unknown_command_message(cmds: List<Cmd>, argv: List<string>): string {
+    if argv.len() == 0 {
+        return "no command given"
+    }
+    // Commands whose name begins with the token(s) the user did type — the valid continuations.
+    mut continuations: List<string> = []
     for c in cmds {
-        if c.name == name {
-            return true
+        toks = name_tokens(c.name)
+        if toks.len() > argv.len() && is_token_prefix(argv, toks) {
+            continuations = continuations ~ [c.name]
         }
     }
-    return false
+    if continuations.len() > 0 {
+        typed = argv.join(" ")
+        options = continuations.join(", ")
+        return "incomplete command '${typed}'; did you mean: ${options}"
+    }
+    return "unknown command '${argv[0]}'"
 }
 
 // ---- Help text ------------------------------------------------------------
 
+// Top-level help, grouped hierarchically: commands that share a first name-token (nested paths like
+// `remote add`, `remote remove`) are listed under one group header, and standalone commands appear
+// as flat lines. Section headers are bold on a terminal; command summaries are dimmed.
 fn top_help_text(cmds: List<Cmd>): string {
-    mut lines: List<string> = ["Commands:"]
+    header = bold("Commands:")
+    mut lines: List<string> = [header]
+
+    // Distinct first tokens, in first-seen order — one per command group.
+    mut groups: List<string> = []
     for c in cmds {
-        line = if c.about == "" then "  ${c.name}" else "  ${c.name}    ${c.about}"
-        lines = lines ~ [line]
+        g = name_tokens(c.name)[0]
+        if !list_contains(groups, g) {
+            groups = groups ~ [g]
+        }
+    }
+
+    for g in groups {
+        mut members: List<Cmd> = []
+        for c in cmds {
+            if name_tokens(c.name)[0] == g {
+                members = members ~ [c]
+            }
+        }
+        // A group of one standalone (single-token) command is a flat line; anything else prints a
+        // group header (bold) and its member subcommands indented one level deeper, each shown by
+        // its trailing sub-path. A group root — a command named exactly the group token — rides on
+        // the header line with its own summary.
+        if members.len() == 1 && name_tokens(members[0].name).len() == 1 {
+            lines = lines ~ [command_line("  ", members[0].name, members[0].about)]
+        } else {
+            mut root_about = ""
+            for m in members {
+                if m.name == g {
+                    root_about = m.about
+                }
+            }
+            lines = lines ~ [command_line("  ", bold(g), root_about)]
+            for m in members {
+                if m.name != g {
+                    lines = lines ~ [command_line("    ", sub_path(m.name), m.about)]
+                }
+            }
+        }
     }
     return lines.join("\n")
 }
 
+// The tokens of a nested command name after its leading group token, rejoined (e.g. `remote add` ->
+// `add`). A single-token name yields the empty string.
+fn sub_path(name: string): string {
+    toks = name_tokens(name)
+    mut rest: List<string> = []
+    mut i = 1
+    while i < toks.len() {
+        rest = rest ~ [toks[i]]
+        i = i + 1
+    }
+    return rest.join(" ")
+}
+
+// One command row: the (indented) command name, and its dimmed `about` summary when present.
+fn command_line(indent: string, name: string, about: string): string {
+    return if about == "" then indent ~ name else indent ~ name ~ "    " ~ dim(about)
+}
+
 // A single brief usage line, e.g. `usage: greet <name> [--loud]`.
 fn command_usage_text(name: string, params: List<ParamInfo>): string {
-    mut parts: List<string> = ["usage: ${name}"]
+    lead = bold("usage:")
+    mut parts: List<string> = ["${lead} ${name}"]
     for p in params {
         if is_bool_type(p.type) {
             parts = parts ~ [if p.optional then "[--${p.name}]" else "--${p.name}"]
@@ -416,11 +573,12 @@ fn command_usage_text(name: string, params: List<ParamInfo>): string {
 }
 
 // The full per-command help: the usage line plus one detail line per parameter, showing its type, a
-// short spelling if it has one, whether it is optional, and its `#[Arg(help)]` text.
+// short spelling if it has one, whether it is optional, its `#[Arg(env)]` fallback, and its
+// `#[Arg(help)]` text. Types and annotations are dimmed on a terminal.
 fn command_help_text(name: string, params: List<ParamInfo>): string {
     mut lines: List<string> = [command_usage_text(name, params)]
     if params.len() > 0 {
-        lines = lines ~ ["", "Arguments:"]
+        lines = lines ~ ["", bold("Arguments:")]
         for p in params {
             a = arg_of(p)
             help = match a {
@@ -431,12 +589,19 @@ fn command_help_text(name: string, params: List<ParamInfo>): string {
                 some(x) => x.short,
                 none => "",
             }
-            mut label = "  ${p.name}: ${type_name(p.type)}"
+            envvar = match a {
+                some(x) => x.env,
+                none => "",
+            }
+            mut label = "  ${p.name}: ${dim(type_name(p.type))}"
             if short != "" {
-                label = label ~ " (-${short})"
+                label = label ~ " " ~ dim("(-${short})")
             }
             if p.optional {
-                label = label ~ " [optional]"
+                label = label ~ " " ~ dim("[optional]")
+            }
+            if envvar != "" {
+                label = label ~ " " ~ dim("[env: ${envvar}]")
             }
             if help != "" {
                 label = label ~ " - ${help}"
@@ -447,10 +612,202 @@ fn command_help_text(name: string, params: List<ParamInfo>): string {
     return lines.join("\n")
 }
 
+// ---- Shell completion -----------------------------------------------------
+
+// `--completions <shell>` prints a sourceable completion script for bash, zsh, or fish to stdout and
+// exits 0. It is spelled as a framework flag (not a `completions` subcommand) so it can never shadow
+// a user command name. The script completes the program's command-name tokens (nested paths
+// included) and every command's flag names (`--long`/`-short`), all derived from the command model
+// and `params_of` — pure string generation, no user code is invoked.
+fn run_completions(cmds: List<Cmd>, rest: List<string>): int {
+    if rest.len() != 1 {
+        io.errln("error: usage: --completions <bash|zsh|fish>")
+        return 2
+    }
+    shell = rest[0]
+    if shell != "bash" && shell != "zsh" && shell != "fish" {
+        io.errln("error: unknown shell '${shell}' (expected bash, zsh, or fish)")
+        return 2
+    }
+    prog = program_name()
+    script = match shell {
+        "bash" => bash_completions(prog, cmds),
+        "zsh" => zsh_completions(prog, cmds),
+        _ => fish_completions(prog, cmds),
+    }
+    io.outln(script)
+    return 0
+}
+
+// The flat completion vocabulary shared by the bash/zsh scripts: every distinct command-name token
+// followed by every distinct flag spelling.
+fn completion_words(cmds: List<Cmd>): List<string> {
+    mut words: List<string> = []
+    for t in command_tokens(cmds) {
+        words = push_unique(words, t)
+    }
+    for f in all_flags(cmds) {
+        words = push_unique(words, f)
+    }
+    return words
+}
+
+// Every distinct token across all command names (so a nested path like `remote add` contributes both
+// `remote` and `add`).
+fn command_tokens(cmds: List<Cmd>): List<string> {
+    mut out: List<string> = []
+    for c in cmds {
+        for t in name_tokens(c.name) {
+            out = push_unique(out, t)
+        }
+    }
+    return out
+}
+
+// Every distinct flag spelling (`--long` and `-short`) across all commands' parameters.
+fn all_flags(cmds: List<Cmd>): List<string> {
+    mut out: List<string> = []
+    for c in cmds {
+        for p in params_of(c.target) {
+            out = push_unique(out, long_flag(p))
+            match short_flag(p) {
+                some(s) => {
+                    out = push_unique(out, s)
+                },
+                none => {},
+            }
+        }
+    }
+    return out
+}
+
+// A parameter's long flag spelling, `--name` (or `--<override>` when `#[Arg(long: ...)]` is set).
+fn long_flag(p: ParamInfo): string {
+    long = match arg_of(p) {
+        some(x) => if x.long == "" then p.name else x.long,
+        none => p.name,
+    }
+    return "--${long}"
+}
+
+// A parameter's short flag spelling `-s`, if it declared one.
+fn short_flag(p: ParamInfo): ?string {
+    match arg_of(p) {
+        some(x) => {
+            if x.short != "" {
+                return some("-${x.short}")
+            }
+        },
+        none => {},
+    }
+    return none
+}
+
+fn bash_completions(prog: string, cmds: List<Cmd>): string {
+    words = completion_words(cmds).join(" ")
+    fnname = "_${prog}_complete"
+    mut lines: List<string> = []
+    lines = lines ~ ["${fnname}() {"]
+    lines = lines ~ ["    local cur=\"\${COMP_WORDS[COMP_CWORD]}\""]
+    lines = lines ~ ["    local words=\"${words}\""]
+    lines = lines ~ ["    COMPREPLY=( $(compgen -W \"\${words}\" -- \"\${cur}\") )"]
+    lines = lines ~ ["}"]
+    lines = lines ~ ["complete -F ${fnname} ${prog}"]
+    return lines.join("\n")
+}
+
+fn zsh_completions(prog: string, cmds: List<Cmd>): string {
+    words = completion_words(cmds).join(" ")
+    fnname = "_${prog}"
+    mut lines: List<string> = []
+    lines = lines ~ ["#compdef ${prog}"]
+    lines = lines ~ ["${fnname}() {"]
+    lines = lines ~ ["    compadd -- ${words}"]
+    lines = lines ~ ["}"]
+    lines = lines ~ ["${fnname} \"$@\""]
+    return lines.join("\n")
+}
+
+fn fish_completions(prog: string, cmds: List<Cmd>): string {
+    tokens = command_tokens(cmds).join(" ")
+    mut lines: List<string> = []
+    lines = lines ~ ["complete -c ${prog} -f -a \"${tokens}\""]
+    for c in cmds {
+        for p in params_of(c.target) {
+            long = match arg_of(p) {
+                some(x) => if x.long == "" then p.name else x.long,
+                none => p.name,
+            }
+            lines = lines ~ ["complete -c ${prog} -l ${long}"]
+            match short_flag(p) {
+                some(s) => {
+                    letter = s.slice(1, s.len())
+                    lines = lines ~ ["complete -c ${prog} -s ${letter}"]
+                },
+                none => {},
+            }
+        }
+    }
+    return lines.join("\n")
+}
+
+// The program's own name for the generated script: the basename of `argv[0]`, or `prog` when unknown
+// (e.g. under `dispatch` in tests, where the name is irrelevant to the exit code).
+fn program_name(): string {
+    all = args.all()
+    if all.len() == 0 {
+        return "prog"
+    }
+    parts = all[0].split("/")
+    base = parts[parts.len() - 1]
+    return if base == "" then "prog" else base
+}
+
 // ---- Small helpers --------------------------------------------------------
 
 fn is_help(t: string): bool {
     return t == "--help" || t == "-h"
+}
+
+fn list_contains(xs: List<string>, x: string): bool {
+    for e in xs {
+        if e == x {
+            return true
+        }
+    }
+    return false
+}
+
+fn push_unique(xs: List<string>, x: string): List<string> {
+    return if list_contains(xs, x) then xs else xs ~ [x]
+}
+
+// ---- ANSI styling ---------------------------------------------------------
+//
+// `--help`/usage output is colorized only when stdout is a terminal (`io.is_tty()`); piped output is
+// plain, so a captured help text carries no escape codes and diffs stay readable. Every sequence is
+// built from the single escape byte in `esc()`, so color is one toggle.
+//
+// LANGUAGE NOTE: Noeta string escapes cover `\n`/`\t`/`\r`/`\"`/`\\`/`\$` but NOT `\x1b`/`\u{1b}`, and
+// there is no char-from-code-point primitive (`from_bytes` needs a `bytes` value, unconstructible
+// from ints at the surface). So the ESC (0x1b) in `esc()` is a literal control byte in the source —
+// the only available mechanism. `noeta fmt` preserves it verbatim.
+fn esc(): string {
+    return ""
+}
+
+fn styled(): bool {
+    return io.is_tty()
+}
+
+// A bold section header on a terminal; the plain string otherwise.
+fn bold(s: string): string {
+    return if styled() then "${esc()}[1m${s}${esc()}[0m" else s
+}
+
+// Dimmed detail — types, defaults, `[optional]`/`[env: …]` annotations — on a terminal; plain otherwise.
+fn dim(s: string): string {
+    return if styled() then "${esc()}[2m${s}${esc()}[0m" else s
 }
 
 fn is_bool_type(t: Type): bool {
