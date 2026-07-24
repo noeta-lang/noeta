@@ -11,12 +11,17 @@
 use noeta_ast::Program;
 use noeta_diagnostics::Diagnostic;
 
-/// The observable outcome of running a program: everything it wrote to stdout, its
+/// The observable outcome of running a program: everything it wrote to stdout and stderr, its
 /// process exit code, and any runtime diagnostics it produced. This is the unit the
 /// conformance harness compares and the unit two backends are checked to agree on.
+///
+/// `stderr` is *observable output* (`std.io`'s `err`/`errln`), routed through the backends' own
+/// buffers exactly like `stdout` — not a host effect — so the differential oracle compares it too
+/// and the two backends are held byte-identical on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
     pub stdout: String,
+    pub stderr: String,
     pub exit_code: i32,
     pub diagnostics: Vec<Diagnostic>,
 }

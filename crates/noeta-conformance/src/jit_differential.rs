@@ -251,6 +251,9 @@ fn describe_difference(interp: &RunResult, jit: &RunResult) -> String {
     if interp.stdout != jit.stdout {
         return format!("stdout: interp {:?}, jit {:?}", interp.stdout, jit.stdout);
     }
+    if interp.stderr != jit.stderr {
+        return format!("stderr: interp {:?}, jit {:?}", interp.stderr, jit.stderr);
+    }
     if interp.exit_code != jit.exit_code {
         return format!("exit: interp {}, jit {}", interp.exit_code, jit.exit_code);
     }

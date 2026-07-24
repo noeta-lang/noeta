@@ -407,6 +407,7 @@ impl<'m> Vm<'m> {
             },
             out: RunOutput {
                 stdout: String::new(),
+                stderr: String::new(),
                 diagnostics: Vec::new(),
                 requested_exit: None,
                 abort_trace: Vec::new(),
@@ -655,6 +656,7 @@ impl<'m> Vm<'m> {
             });
         RunResult {
             stdout: std::mem::take(&mut self.out.stdout),
+            stderr: std::mem::take(&mut self.out.stderr),
             exit_code,
             diagnostics: std::mem::take(&mut self.out.diagnostics),
         }

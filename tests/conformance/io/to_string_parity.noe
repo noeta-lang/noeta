@@ -1,0 +1,35 @@
+// `io.*` renders through the backend's canonical `Value::display` path (the `NativeCtx::render`
+// seam), the SAME one `echo` uses — including the re-entry into a user `to_string`. So a `Display`
+// object renders identically whether echoed or written via `io.outln`/`io.errln`; there is no second
+// copy of display logic in the std native that could drift. This is the exact case that diverged
+// before the render seam existed (a custom `to_string` object rendered structurally through `io`).
+// Both lines below are `Point(1, 2)` — the `to_string` output, not the structural `Point {x: 1, y: 2}`.
+// expect: stdout "Point(1, 2)"
+// expect: stdout "Point(1, 2)"
+// expect: stderr "Point(1, 2)"
+// expect: exit 0
+use std.io
+
+class Point {
+    x: int
+    y: int
+
+    fn new(x: int, y: int): Point {
+        return Point { x: x, y: y };
+    }
+
+    impl Display {
+        fn to_string(): string {
+            return "Point(${self.x}, ${self.y})";
+        }
+    }
+}
+
+p = Point.new(1, 2)
+
+// `echo` and `io.outln` must produce the identical `to_string` rendering.
+echo p
+io.outln(p)
+
+// stderr renders through the same path.
+io.errln(p)

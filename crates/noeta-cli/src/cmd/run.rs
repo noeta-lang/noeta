@@ -32,6 +32,10 @@ pub(crate) fn run_program(loaded: &Loaded, args: Vec<String>) -> i32 {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
+            // The program's stderr stream (`std.io`'s `err`/`errln`) goes to real stderr, after
+            // stdout is flushed and before any diagnostics/traceback the run produced.
+            eprint!("{}", result.stderr);
+            let _ = io::stderr().flush();
             emit_diagnostics_mapped(&loaded.sources, result.diagnostics.iter());
             // An abort's stack trace, after the diagnostic it belongs to. Only when there is a call
             // chain to show — a single-frame trace repeats what the diagnostic's span already says.

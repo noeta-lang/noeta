@@ -90,6 +90,8 @@ pub(crate) fn repl_bootstrap(
     let (session, out) = VmSession::adopted(&module, compiler, real_repl_env());
     print!("{}", out.stdout);
     let _ = io::stdout().flush();
+    eprint!("{}", out.stderr);
+    let _ = io::stderr().flush();
     if !out.diagnostics.is_empty() {
         // A bootstrap that aborts is a broken app context — fail fast, exactly like `noeta run`.
         emit_diagnostics_mapped(&loaded.sources, out.diagnostics.iter());
@@ -282,6 +284,8 @@ pub(crate) fn repl_meta(
                 let (found, out) = session.drop_binding(arg);
                 print!("{}", out.stdout);
                 let _ = io::stdout().flush();
+                eprint!("{}", out.stderr);
+                let _ = io::stderr().flush();
                 if found {
                     eprintln!("(dropped `{arg}`)");
                 } else {
@@ -315,6 +319,8 @@ pub(crate) fn repl_type(session: &mut VmSession, expr: &str, sources: &[Source])
     let out = session.type_of(&fragment.program);
     print!("{}", out.stdout);
     let _ = io::stdout().flush();
+    eprint!("{}", out.stderr);
+    let _ = io::stderr().flush();
     // Render diagnostics / any abort trace against all entries plus this `:type` source.
     let mut map_sources = sources.to_vec();
     map_sources.push(fragment.source);
@@ -498,6 +504,9 @@ pub(crate) fn emit_session(sources: &[Source], out: SessionOutput) {
         println!("{value}");
     }
     let _ = io::stdout().flush();
+    // The entry's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout flushes.
+    eprint!("{}", out.stderr);
+    let _ = io::stderr().flush();
     let map = SourceMap::new(sources.to_vec());
     emit_diagnostics_mapped(&map, out.diagnostics.iter());
     emit_trace(&out.trace, &map);

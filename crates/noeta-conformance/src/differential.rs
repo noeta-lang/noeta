@@ -266,6 +266,9 @@ fn describe_difference(tree: &RunResult, vm: &RunResult) -> String {
     if tree.stdout != vm.stdout {
         return format!("stdout: tree-walker {:?}, vm {:?}", tree.stdout, vm.stdout);
     }
+    if tree.stderr != vm.stderr {
+        return format!("stderr: tree-walker {:?}, vm {:?}", tree.stderr, vm.stderr);
+    }
     if tree.exit_code != vm.exit_code {
         return format!("exit: tree-walker {}, vm {}", tree.exit_code, vm.exit_code);
     }
