@@ -149,6 +149,22 @@ macro_rules! __delegate_host_capability {
             }
         }
     };
+    ($ty:ty, $field:ident, Console) => {
+        impl $crate::Console for $ty {
+            fn stdin_read_line(&mut self) -> Option<String> {
+                self.$field.stdin_read_line()
+            }
+            fn stdin_read_all(&mut self) -> String {
+                self.$field.stdin_read_all()
+            }
+            fn is_tty(&self, stream: $crate::Stream) -> bool {
+                self.$field.is_tty(stream)
+            }
+            fn prompt(&mut self, msg: &str) -> Option<String> {
+                self.$field.prompt(msg)
+            }
+        }
+    };
     ($ty:ty, $field:ident, Os) => {
         impl $crate::Os for $ty {
             fn os_platform(&self) -> String {

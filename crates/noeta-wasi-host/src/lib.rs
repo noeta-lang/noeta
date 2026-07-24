@@ -21,7 +21,7 @@
 
 use compact_str::CompactString;
 use noeta_stdlib::{
-    AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
+    AttrValue, Clock, Console, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
     InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue,
     Metrics, NetError, NetErrorKind, NetRequest, NetResponse, Network, Os, ReadSource, Rng, SpanId,
     SpanKind, SpanStatus, SpanTracker, StdError, TraceContext, Tracing,
@@ -351,6 +351,52 @@ impl Env for WasiHost {
 
     fn args(&self) -> Vec<String> {
         self.args.clone()
+    }
+}
+
+impl Console for WasiHost {
+    // Real WASI stdin + terminal probing (the wasm sandbox routes these through WASI's stdio). The
+    // deterministic differential uses `SandboxHost`; this is the runner-side real path, like `Env`.
+    fn stdin_read_line(&mut self) -> Option<String> {
+        use std::io::BufRead;
+        let mut line = String::new();
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) => None,
+            Ok(_) => {
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                Some(line)
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn stdin_read_all(&mut self) -> String {
+        use std::io::Read;
+        let mut all = String::new();
+        let _ = std::io::stdin().lock().read_to_string(&mut all);
+        all
+    }
+
+    fn is_tty(&self, stream: noeta_stdlib::Stream) -> bool {
+        use std::io::IsTerminal;
+        match stream {
+            noeta_stdlib::Stream::Stdin => std::io::stdin().is_terminal(),
+            noeta_stdlib::Stream::Stdout => std::io::stdout().is_terminal(),
+            noeta_stdlib::Stream::Stderr => std::io::stderr().is_terminal(),
+        }
+    }
+
+    fn prompt(&mut self, msg: &str) -> Option<String> {
+        use std::io::Write;
+        let mut err = std::io::stderr();
+        let _ = err.write_all(msg.as_bytes());
+        let _ = err.flush();
+        self.stdin_read_line()
     }
 }
 

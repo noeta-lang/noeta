@@ -1,0 +1,18 @@
+// std.io `prompt` + `stdin_all` (CLI-completion slice 2). `io.prompt(msg)` is the single interactive
+// path that survives batch-captured output: on `RealHost` it writes `msg` to the real terminal NOW
+// (bypassing the batch buffer) and reads one line; in the deterministic sandbox it writes nothing
+// observable and returns the next scripted stdin line — so both backends agree (the prompt text never
+// reaches the compared buffers). `io.stdin_all()` then drains the REST of stdin to EOF as one string
+// (here the two remaining fixture lines, joined by a newline → two physical stdout lines).
+// expect: stdout "prompted: line one"
+// expect: stdout "line two"
+// expect: stdout "line three"
+// expect: exit 0
+use std.io
+
+// `prompt` consumes the first scripted line; its message is not observable in the sandbox.
+name = io.prompt("your name? ") ?? "<eof>"
+echo "prompted: ${name}"
+
+// `stdin_all` drains everything left ("line two\nline three").
+echo io.stdin_all()

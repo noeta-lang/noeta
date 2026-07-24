@@ -3959,6 +3959,31 @@ const IO_DOCS: &[(&str, &str)] = &[
         "errln",
         "Write a value's display form to standard error, followed by a newline.",
     ),
+    (
+        "stdin_line",
+        "The next line of standard input (without its trailing newline), or `none` at end of input \
+         — pair it with `while let` to consume piped stdin a line at a time.",
+    ),
+    (
+        "stdin_all",
+        "All remaining standard input, read to end-of-input as one string.",
+    ),
+    (
+        "is_tty",
+        "Whether standard output is connected to an interactive terminal — the \"should I colorize?\" \
+         check. Always `false` in the deterministic sandbox.",
+    ),
+    (
+        "stdin_is_tty",
+        "Whether standard input is a terminal rather than a pipe or file. Always `false` in the \
+         sandbox.",
+    ),
+    (
+        "prompt",
+        "Write `msg` to the terminal immediately (bypassing the batch output buffer) and read one \
+         line of response — the single interactive path that survives batch-captured output. \
+         `none` at end of input.",
+    ),
 ];
 
 const CELL_DOCS: &[(&str, &str)] = &[(
@@ -5569,8 +5594,15 @@ const CORE_MODULES: &[ExtModule] = &[
     // the same stdout buffer the `echo` keyword uses; `err`/`errln` write to stderr. Both are
     // *observable output* routed through the backends' buffers (via the `NativeCtx` write seam), so
     // they are ctx functions and the differential oracle holds them byte-identical across backends.
+    // The `io` module carries BOTH dispatch tables: the ctx `out`/`outln`/`err`/`errln` reach the
+    // backends' output buffers, while the host-backed `stdin_*`/`is_tty`/`prompt` (CLI-completion
+    // slice 2) are plain `Console`-capability effects (sandbox fixture / real stdin). The two name
+    // sets are disjoint (assembly enforces it), and the backends resolve plain `functions` before
+    // `ctx_functions`, so each call reaches the table that declares it.
     ExtModule {
         name: "io",
+        functions: crate::io::IO_FNS,
+        dispatch: crate::io::io_dispatch,
         ctx_functions: crate::io::IO_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::io::io_ctx_dispatch(func, ctx, args)),
         docs: IO_DOCS,
