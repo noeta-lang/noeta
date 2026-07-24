@@ -276,6 +276,20 @@ pub enum Rvalue {
         args: Vec<Atom>,
         span: Span,
     },
+    /// A **trait default-body** method call (ExtBundle→ExtTrait convergence, slice 2):
+    /// `receiver.name(args)` where the checker statically resolved that the method is a native
+    /// trait's *defaulted* method, the trait carries a native default-body dispatch
+    /// ([`noeta_ext_abi::ExtTrait::dispatch`]), and the receiver's type provides no override. The
+    /// route is baked in — dispatch goes straight to the registered trait's shared ctx dispatch with
+    /// the receiver as slot 0, no runtime discovery. The trait twin of [`Rvalue::BundleMethod`];
+    /// `trait_name` is the trait's qualified identity (`"fx.Gadget"`).
+    TraitMethod {
+        receiver: Atom,
+        trait_name: String,
+        name: String,
+        args: Vec<Atom>,
+        span: Span,
+    },
     /// Bare member access: `receiver.name`. Resolves to a field load, an enum-variant
     /// constructor reference, or an associated-function reference, exactly as the
     /// tree-walker's `Member` evaluation does.

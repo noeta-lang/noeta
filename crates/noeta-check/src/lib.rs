@@ -892,6 +892,15 @@ struct Symbols {
     /// an instantiated bound `T: Keyed<int>`) and UT4 `dyn Trait` coercion. Populated in pass 1;
     /// coherence (one impl per trait per type) keeps a single entry per pair honest.
     user_trait_impls: HashMap<String, HashMap<String, Vec<Type>>>,
+    /// Trait default-body call routes (ExtBundle→ExtTrait convergence, slice 2): `(type, method)` →
+    /// `(trait-qualified, trait-short)` for every method that a **native** trait carrying a
+    /// default-body dispatch ([`noeta_ext_abi::ExtTrait::dispatch`]) answers on `type` — i.e. a
+    /// defaulted method the type neither declares (native inherent) nor overrides (impl body). Computed
+    /// at collect time from the AST impl bodies (where "provided vs omitted" is decidable), so the
+    /// call site is a pure lookup: a hit records a `trait_call_sites` route (source 2) and types the
+    /// call from the trait's synthesized decl. Excludes overrides and inherent methods by construction
+    /// (source 1 wins), and never holds a `.noe` trait (its default hoists — source 3).
+    native_trait_default_sites: HashMap<(String, String), (String, String)>,
     /// Associated-type bindings per implementor (ExtBundle→ExtTrait convergence, slice 1a):
     /// `(type, trait)` → `assoc-name → concrete Type`. Populated at collect from each impl's
     /// `type Name = Concrete;` bindings merged over the trait's defaulted associated types. The basis

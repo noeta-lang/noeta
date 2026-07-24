@@ -80,6 +80,7 @@ const REDUCE: ExtTrait = ExtTrait {
             derivation: AssocDerivation::FloatPromote,
         },
     ],
+    dispatch: None,
 };
 
 // --- The native @packed struct that implements it ------------------------------------------------

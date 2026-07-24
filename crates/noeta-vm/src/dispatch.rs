@@ -1012,6 +1012,35 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    Op::TraitMethod {
+                        dst,
+                        recv,
+                        trait_name: trait_id,
+                        method: method_id,
+                        args,
+                        span,
+                    } => {
+                        // A trait default-body call (ExtBundle→ExtTrait convergence, slice 2): the
+                        // (trait, method) route was baked at compile time — straight to the trait's
+                        // shared ctx dispatch, receiver as slot 0. Values are copied out of the
+                        // registers first (borrowed by the ctx seed; the seam owns the refcount).
+                        let trait_qname = module.name(*trait_id);
+                        let method_name = module.name(*method_id);
+                        let recv_value = regs[fbase + *recv as usize];
+                        let mut arg_values = Vec::with_capacity(args.len());
+                        for r in args.iter() {
+                            arg_values.push(regs[fbase + *r as usize]);
+                        }
+                        let result = self.call_trait_method(
+                            trait_qname,
+                            method_name,
+                            recv_value,
+                            &arg_values,
+                            *span,
+                        )?;
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::PackedListPush {
                         dst, list, value, ..
                     } => {

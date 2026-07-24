@@ -728,14 +728,36 @@ impl Checker {
                 _ => {}
             }
         }
+        // Trait default-body routes (ExtBundle→ExtTrait convergence, slice 2): before the UT5
+        // fallback below, record which `(type, method)` pairs a NATIVE trait's default-body dispatch
+        // answers — a defaulted method the type neither declares nor overrides. Done here, with the AST
+        // impl bodies in reach, because "omitted vs provided" is not decidable from `symbols.methods`.
+        self.seed_native_trait_defaults(program);
         // Default-method fallback (UT5): a trait method the implementor omits falls back to the
         // trait's default body (the backends hoist it via `hoist_standalone_impl_methods`), so its
         // SIGNATURE registers here — member calls on the implementing type resolve and type it. A
         // method the type provides itself wins (already registered above); a generic trait's
         // defaults are excluded (per-implementor substitution — deferred with generic-trait
-        // derivation).
+        // derivation). A **native** trait carrying a default-body dispatch (slice 2) is also excluded:
+        // its omitted defaults route through `native_trait_default_sites` (a native body, no hoisted
+        // `.noe` signature to register — a synth one would misclassify a no-`self` body as an
+        // associated fn), and a native/user override resolves through its own real method instead.
+        let native_default_traits: HashSet<String> = self
+            .imports
+            .extern_types
+            .iter()
+            .filter(|(_, q)| {
+                self.reg()
+                    .find_trait_qualified(q)
+                    .is_some_and(|t| t.dispatch.is_some())
+            })
+            .map(|(local, _)| local.clone())
+            .collect();
         for (type_name, trait_names) in self.symbols.user_trait_impls.clone() {
             for trait_name in trait_names.into_keys() {
+                if native_default_traits.contains(&trait_name) {
+                    continue;
+                }
                 let Some(decl) = self.symbols.user_traits.get(&trait_name).cloned() else {
                     continue;
                 };
@@ -963,6 +985,86 @@ impl Checker {
                     .or_default()
                     .push((d.name.clone(), via.clone()));
             }
+        }
+    }
+
+    /// Populate [`Symbols::native_trait_default_sites`] (ExtBundle→ExtTrait convergence, slice 2): for
+    /// every `(type, trait)` where the trait is a **native** trait carrying a default-body dispatch,
+    /// record each defaulted method the type does not itself provide — a native inherent method
+    /// (resolved through `method_return`, covering every native kind) or an `impl` override body
+    /// (gathered from the AST here) both count as provided and are excluded, so source (1) wins by
+    /// construction. A `.noe` trait's local name is never in `imports.extern_types`, so it never enters
+    /// this table — its defaults hoist (source 3) untouched.
+    fn seed_native_trait_defaults(&mut self, program: &Program) {
+        // The method names each type PROVIDES a real body for, from the AST — a type's own methods, its
+        // in-body `impl` blocks, and standalone `impl`s targeting it. (A native type has no AST here;
+        // its inherent methods are caught by the `method_return` probe below.)
+        let mut ast_provided: HashSet<(String, String)> = HashSet::new();
+        let mut note = |ty: &str, methods: &[FnDecl]| {
+            for m in methods {
+                ast_provided.insert((ty.to_string(), m.name.clone()));
+            }
+        };
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Struct(d) => {
+                    note(&d.name, &d.methods);
+                    for b in &d.impls {
+                        note(&d.name, &b.methods);
+                    }
+                }
+                Stmt::Class(d) => {
+                    note(&d.name, &d.methods);
+                    for b in &d.impls {
+                        note(&d.name, &b.methods);
+                    }
+                }
+                Stmt::Enum(d) => {
+                    note(&d.name, &d.methods);
+                    for b in &d.impls {
+                        note(&d.name, &b.methods);
+                    }
+                }
+                Stmt::Impl(d) => note(&d.target, &d.methods),
+                _ => {}
+            }
+        }
+        // Resolve the routes under the immutable registry/import borrows, then write them in.
+        let impls = self.symbols.user_trait_impls.clone();
+        let mut routes: Vec<((String, String), (String, String))> = Vec::new();
+        for (type_name, traits) in &impls {
+            for local in traits.keys() {
+                // Native traits only (a `use`-imported extern-type alias); `.noe` traits resolve nothing.
+                let Some(qualified) = self.imports.extern_types.get(local).cloned() else {
+                    continue;
+                };
+                let Some(tr) = self.reg().find_trait_qualified(&qualified) else {
+                    continue;
+                };
+                if tr.dispatch.is_none() {
+                    continue;
+                }
+                for m in tr.methods.iter().filter(|m| m.has_default) {
+                    let method = m.sig.name;
+                    let provided = ast_provided.contains(&(type_name.clone(), method.to_string()))
+                        || crate::stdlib::method_return(
+                            self.reg(),
+                            &Type::Named(type_name.clone(), Vec::new()),
+                            method,
+                        )
+                        .is_some();
+                    if provided {
+                        continue;
+                    }
+                    routes.push((
+                        (type_name.clone(), method.to_string()),
+                        (qualified.clone(), local.clone()),
+                    ));
+                }
+            }
+        }
+        for (key, route) in routes {
+            self.symbols.native_trait_default_sites.insert(key, route);
         }
     }
 

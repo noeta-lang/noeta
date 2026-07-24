@@ -893,6 +893,35 @@ impl<'m> Vm<'m> {
         )
     }
 
+    /// Call a **trait default-body** method (ExtBundle→ExtTrait convergence, slice 2): the compiler
+    /// baked the `(trait, method)` route at the call site, so this goes straight to the trait's shared
+    /// ctx dispatch — the trait twin of [`Vm::call_bundle_method`], receiver as slot 0. `trait_q` is
+    /// the trait's qualified identity.
+    pub(crate) fn call_trait_method(
+        &mut self,
+        trait_q: &str,
+        method: &str,
+        recv: Value,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        // Bound before the closures so they capture the registry, not `self` (IR3).
+        let reg = self.reg();
+        self.ctx_receiver_call(
+            recv,
+            args,
+            span,
+            || format!("trait {trait_q}.{method}"),
+            |ctx, arg_slots| reg.dispatch_trait_method(trait_q, method, ctx, 0, arg_slots),
+            || {
+                reg.find_trait_qualified(trait_q)
+                    .and_then(|t| t.methods.iter().find(|m| m.sig.name == method))
+                    .map(|m| m.sig.ret)
+                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
+            },
+        )
+    }
+
     /// The shared receiver-seeded ctx-call shape (extern-type ctx methods + bundle methods):
     /// seed the table directly — receiver as slot 0, arguments after it — index the argument
     /// slots from a stack buffer (a hot `set(v)` loop builds no vectors; the table is pooled),

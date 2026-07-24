@@ -131,6 +131,14 @@ pub struct Sites {
     /// bundle method is not reachable through a `dyn` receiver — `dyn` stays the escape hatch;
     /// a runtime binding table would be an additive later extension.)
     pub bundle_call_sites: HashMap<Span, (String, String)>,
+    /// Trait default-body call sites (ExtBundle→ExtTrait convergence, slice 2) → the statically
+    /// resolved route `(trait qualified identity, method)`. Recorded when a method call resolves to a
+    /// native trait's *defaulted* method whose trait carries a native default-body dispatch
+    /// ([`noeta_ext_abi::ExtTrait::dispatch`]) and whose receiver type provides no override — lowering
+    /// bakes it into an [`Rvalue::TraitMethod`], dispatched through the trait's ctx dispatch with the
+    /// receiver as slot 0. The trait twin of [`Sites::bundle_call_sites`]; like it, `dyn` receivers are
+    /// the documented escape hatch (only statically-known concrete receivers route here).
+    pub trait_call_sites: HashMap<Span, (String, String)>,
     /// Namespace-group member-access sites (`http.client`, `use std.http`) → the concrete
     /// **root-qualified module identity** the chain resolves to (`std.http.client`). Lowering emits
     /// an [`Rvalue::NativeModule`] at these `Member` spans instead of a field load — so the leaf
@@ -276,6 +284,9 @@ pub(crate) struct SiteMaps {
     pub(crate) f32_literal_sites: HashSet<Span>,
     /// Method-bundle call sites (kernel-methods K2) — see [`Sites::bundle_call_sites`].
     pub(crate) bundle_call_sites: HashMap<Span, (String, String)>,
+    /// Trait default-body call sites (ExtBundle→ExtTrait convergence, slice 2) — see
+    /// [`Sites::trait_call_sites`].
+    pub(crate) trait_call_sites: HashMap<Span, (String, String)>,
     /// Namespace-group member-access sites — see [`Sites::namespace_module_sites`].
     pub(crate) namespace_module_sites: HashMap<Span, String>,
     /// `?`-conversion sites (error-ergonomics) — see [`Sites::try_conversion_sites`].
@@ -326,6 +337,7 @@ impl SiteMaps {
             member_method_call_sites: self.member_method_call_sites,
             f32_literal_sites: self.f32_literal_sites,
             bundle_call_sites: self.bundle_call_sites,
+            trait_call_sites: self.trait_call_sites,
             namespace_module_sites: self.namespace_module_sites,
             try_conversion_sites: self.try_conversion_sites,
             type_arg_table: self.type_arg_table,

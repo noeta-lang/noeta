@@ -1307,6 +1307,19 @@ impl Interpreter {
                 let values = self.eval_ir_atoms(args, frame)?;
                 self.call_bundle_method(module, bundle, name, recv, &values, *span)
             }
+            // A trait default-body call (ExtBundle→ExtTrait convergence, slice 2): the route was baked
+            // at the call site — straight to the trait's shared ctx dispatch, receiver as slot 0.
+            noeta_ir::Rvalue::TraitMethod {
+                receiver,
+                trait_name,
+                name,
+                args,
+                span,
+            } => {
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                let values = self.eval_ir_atoms(args, frame)?;
+                self.call_trait_method(trait_name, name, recv, &values, *span)
+            }
             noeta_ir::Rvalue::Field {
                 receiver,
                 name,

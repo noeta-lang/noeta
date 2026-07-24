@@ -133,6 +133,9 @@ const WIDGET: ExtTrait = ExtTrait {
     }],
     // No associated types (the native-derived assoc path is exercised by `ext_assoc_seam.rs`).
     assoc_types: &[],
+    // No native default-body dispatch — `describe` is required (has_default: false); the trait-default
+    // path (slice 2) is exercised by `ext_trait_default_seam.rs`.
+    dispatch: None,
 };
 
 // --- The OTHER native value kind: a native CLASS that implements the trait (Pass 2b) --------------
