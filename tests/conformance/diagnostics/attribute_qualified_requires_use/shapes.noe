@@ -1,0 +1,5 @@
+// The module owning the attribute; the entry references it by FQN without importing it.
+namespace shapes;
+
+@attribute
+pub struct Marker {}

@@ -742,8 +742,9 @@ fn mandatory_attribute_field_is_still_required() {
 fn builtin_skip_reason_is_optional() {
     // The built-in `Skip` attribute's `reason` defaults to `""`, so both `#[Skip]` and
     // `#[Skip("…")]` construct it (slice 6i). A `@test` fn is stripped on a normal check, so this
-    // exercises the construction gate via an ordinary declaration.
-    let src = "#[Skip]\nstruct A { id: int }\n#[Skip(\"flaky\")]\nstruct B { id: int }\n";
+    // exercises the construction gate via an ordinary declaration. `Skip` lives under `std.test`
+    // (D2b — no global attribute namespace), so it is imported like any attribute.
+    let src = "use std.test.{Skip}\n#[Skip]\nstruct A { id: int }\n#[Skip(\"flaky\")]\nstruct B { id: int }\n";
     assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 

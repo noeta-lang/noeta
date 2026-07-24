@@ -29,8 +29,17 @@ impl Checker {
                 );
                 continue;
             }
+            // Resolve the written name to the attribute's **qualified identity** — the same
+            // `use`/qualified projection any type reference gets (`imports.extern_types`, populated
+            // by `classify_use`). A `use pkg.Route` binds `Route → pkg.Route`; a same-file
+            // `#[Route]` (or a name the linker already qualified) misses the map and stays as
+            // written. `symbols.attributes`/`attachable`/`records`/`attribute_optional_fields` are
+            // all keyed by this identity, so every lookup below uses `key`, not the raw name.
+            // There is no global attribute namespace: even std's `#[Skip]` resolves here through
+            // `use std.test`.
+            let key = self.attr_key(&attr.name);
             // The capability gate: only a struct marked `@attribute` may be used as `#[Foo(...)]`.
-            if !self.symbols.attributes.contains(&attr.name) {
+            if !self.symbols.attributes.contains(&key) {
                 self.error(
                     DiagnosticCode::NotAnAttribute,
                     attr.name_span,
@@ -38,13 +47,13 @@ impl Checker {
                 )
                 .help(
                     "an attribute is a record marked `@attribute`; declare the record with that \
-                         directive",
+                         directive, and `use` it (or qualify it) if it lives in another module",
                 );
                 continue;
             }
             // Placement gate (P2.5): when `Foo` declared `@attribute(Kind, …)`, this use site's kind
             // must be among the permitted ones, else `E0030`.
-            if let Some(allowed) = self.symbols.attachable.get(&attr.name)
+            if let Some(allowed) = self.symbols.attachable.get(&key)
                 && !allowed.contains(&target)
             {
                 let permitted = allowed
@@ -64,8 +73,22 @@ impl Checker {
                 .help("change the target, or widen the `@attribute(...)` directive");
                 continue;
             }
-            self.check_attribute_construction(attr);
+            self.check_attribute_construction(attr, &key);
         }
+    }
+
+    /// Resolve an attribute's written name to its **qualified identity**, reusing the same
+    /// `imports.extern_types` projection every type annotation resolves through (`classify_use`
+    /// binds `use pkg.Route` → `Route → pkg.Route`, and a `use pkg` namespace binds `pkg.Route`).
+    /// A name with no import binding — a same-file attribute, or one the linker already qualified —
+    /// is returned unchanged. This is the single point that makes `#[Foo]` namespace-aware; there is
+    /// no parallel resolver and no global attribute namespace.
+    fn attr_key(&self, name: &str) -> String {
+        self.imports
+            .extern_types
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Validate the `#[...]` attributes on each of a callable's declared parameters.
@@ -87,13 +110,8 @@ impl Checker {
     /// (unset → `E0009`, unknown/overflowing → `E0005`) and each literal value must be assignable
     /// to its field's type (`E0007`). An identifier argument carries no static type, so its value
     /// is not type-checked (only its field binding is).
-    fn check_attribute_construction(&mut self, attr: &Attribute) {
-        let fields = self
-            .symbols
-            .records
-            .get(&attr.name)
-            .cloned()
-            .unwrap_or_default();
+    fn check_attribute_construction(&mut self, attr: &Attribute, key: &str) {
+        let fields = self.symbols.records.get(key).cloned().unwrap_or_default();
         let mut filled = vec![false; fields.len()];
         let mut next_positional = 0usize;
         for arg in &attr.args {
@@ -134,7 +152,7 @@ impl Checker {
         }
         for (i, (fname, fty)) in fields.iter().enumerate() {
             // A field with a default (`name: T = …`) is optional — it may be omitted (slice 6i).
-            if !filled[i] && !self.is_optional_attribute_field(&attr.name, fname) {
+            if !filled[i] && !self.is_optional_attribute_field(key, fname) {
                 self.error(
                     DiagnosticCode::MissingField,
                     attr.span,

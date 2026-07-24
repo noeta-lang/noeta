@@ -204,9 +204,11 @@ fn test_unknown_tier_is_e0036() {
 
 // --- test metadata attributes (object-model slice 6h) ------------------------------
 
-/// A program exercising `#[Skip]` / `#[Name(...)]` / `#[Group(...)]` on `@test` fns (built-in
-/// prelude attributes, no user definition). The attributes lead the annotation, one per line.
-const ATTR_TESTS: &str = "fn add(a: int, b: int): int { return a + b }\n\
+/// A program exercising `#[Skip]` / `#[Name(...)]` / `#[Group(...)]` on `@test` fns (the tier
+/// metadata attributes live under `std.test`, D2b — imported like any attribute). The attributes
+/// lead the annotation, one per line.
+const ATTR_TESTS: &str = "use std.test.{Skip, Name, Group}\n\
+     fn add(a: int, b: int): int { return a + b }\n\
      #[Skip]\n\
      @test fn not_ready(): void { assert(false) }\n\
      #[Name(\"adds two numbers\")]\n\
@@ -237,7 +239,7 @@ fn test_skip_reason_is_shown() {
     // both work) shows the reason after the skipped test's name.
     let file = temp_program(
         "test_skip_reason",
-        "#[Skip(\"flaky on CI\")]\n@test fn flaky(): void { assert(false) }\n",
+        "use std.test.{Skip}\n#[Skip(\"flaky on CI\")]\n@test fn flaky(): void { assert(false) }\n",
     );
     lang().arg("test").arg(&file).assert().success().stdout(
         predicate::str::contains("skip  flaky (flaky on CI)")
@@ -282,7 +284,8 @@ fn test_data_runs_once_per_row() {
     // base. The `total` counts cases (4 rows + 1 row = 5), not annotations.
     let file = temp_program(
         "test_data",
-        "fn ok(n: int): bool { return n > 0 }\n\
+        "use std.test.{Data, Name}\n\
+         fn ok(n: int): bool { return n > 0 }\n\
          #[Data([1, 2, 0])]\n\
          @test fn positive(n: int): void { assert(ok(n)) }\n\
          #[Name(\"lengths\")]\n\
@@ -311,7 +314,7 @@ fn test_data_type_mismatched_row_fails_that_case() {
     // not the whole run.
     let file = temp_program(
         "test_data_mismatch",
-        "#[Data([1, \"two\"])]\n@test fn t(n: int): void { assert(n > 0) }\n",
+        "use std.test.{Data}\n#[Data([1, \"two\"])]\n@test fn t(n: int): void { assert(n > 0) }\n",
     );
     lang()
         .arg("test")

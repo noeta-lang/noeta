@@ -37,7 +37,10 @@ pub const TIERS: &[ExtTier] = &[
     ExtTier {
         name: "bench",
         sites: &[TierSite::Function, TierSite::Method],
-        config: Some("Bench"),
+        // The **qualified** identity of the knob attribute the `@bench(…)` block desugar stamps —
+        // it must match `TIER_ATTR_BENCH` and the seeded `symbols.attributes` key (D2b). The stamped
+        // FQN passes the gate with no `use` (a synthesized, already-qualified application).
+        config: Some("std.bench.Bench"),
         text: None,
         expr: None,
         handler: None,
@@ -173,13 +176,16 @@ fn json_reindent(
     Some(format!("{base}{}", out.trim()))
 }
 
-/// The prelude attributes the built-in tiers own: the test runner's metadata quartet
-/// (`Skip`/`Name`/`Group`/`Data`), `bench`'s knob (`Bench { iterations }`), and the doc tier's
-/// stamped text carrier (`Doc { text }` — written by activation from an adjacency-attached
-/// `@doc { … }` block, never by hand).
+/// The attributes the built-in tiers own, each under its **tier's namespace** (D2 — no global
+/// attribute namespace): the test runner's metadata quartet under `std.test`
+/// (`Skip`/`Name`/`Group`/`Data`), `bench`'s knob under `std.bench` (`Bench { iterations }`), and
+/// the doc tier's stamped text carrier under `std.doc` (`Doc { text }` — written by `@doc` activation
+/// with its qualified name, never by hand). A consumer imports them like any attribute:
+/// `use std.test.{Skip, Name}` then `#[Skip]`, or qualified `#[std.test.Skip]`.
 pub const ATTRIBUTES: &[ExtAttribute] = &[
     ExtAttribute {
         name: "Skip",
+        namespace: "std.test",
         fields: &[ExtAttrField {
             name: "reason",
             ty: AttrFieldType::Str,
@@ -189,6 +195,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
     },
     ExtAttribute {
         name: "Name",
+        namespace: "std.test",
         fields: &[ExtAttrField {
             name: "value",
             ty: AttrFieldType::Str,
@@ -197,6 +204,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
     },
     ExtAttribute {
         name: "Group",
+        namespace: "std.test",
         fields: &[ExtAttrField {
             name: "value",
             ty: AttrFieldType::Str,
@@ -205,6 +213,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
     },
     ExtAttribute {
         name: "Data",
+        namespace: "std.test",
         fields: &[ExtAttrField {
             name: "rows",
             ty: AttrFieldType::Dyn,
@@ -213,6 +222,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
     },
     ExtAttribute {
         name: "Bench",
+        namespace: "std.bench",
         fields: &[ExtAttrField {
             name: "iterations",
             ty: AttrFieldType::Int,
@@ -221,6 +231,7 @@ pub const ATTRIBUTES: &[ExtAttribute] = &[
     },
     ExtAttribute {
         name: "Doc",
+        namespace: "std.doc",
         fields: &[ExtAttrField {
             name: "text",
             ty: AttrFieldType::Str,

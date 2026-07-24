@@ -1520,12 +1520,29 @@ where
     P: Parser<'src, I, Expr, Extra<'src>> + Clone + 'src,
 {
     let id = ident_parser(ctx);
+    // The attribute's **name** may be dotted — `#[pkg.Route]`, the qualified form that names an
+    // attribute in another module directly (the annotation-position analog of a dotted type name).
+    // The segments join into one qualified string the checker resolves through the same import map
+    // any type reference uses; a single-segment `#[Route]` is the one-segment case, resolved via a
+    // `use`. `name_span` covers the whole dotted run.
+    let dotted_name = id
+        .clone()
+        .then(just(T::Dot).ignore_then(id).repeated().collect::<Vec<_>>())
+        .map_with(move |parts: ((String, Span), Vec<(String, Span)>), e| {
+            let ((first, _first), rest) = parts;
+            let mut name = first;
+            for (seg, _) in rest {
+                name.push('.');
+                name.push_str(&seg);
+            }
+            (name, ctx.to_span(e.span()))
+        });
     // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
     // the bare [`Attribute`]. A struct instance attached as metadata, consumed via the manifest;
     // it carries no codegen meaning (codegen is `@derive`). Arguments are literals.
     just(T::Hash)
         .ignore_then(just(T::LBracket))
-        .ignore_then(id)
+        .ignore_then(dotted_name)
         .then(
             attr_arg_parser(ctx, expr)
                 .separated_by(just(T::Comma))
@@ -5138,6 +5155,27 @@ mod tests {
         assert_eq!(attr_names, ["Skip", "Group"]);
         // The trailing `#[Route(...)] struct` still parses via the decorator path.
         assert!(matches!(&parsed.program.stmts[1], Stmt::Struct(_)));
+    }
+
+    #[test]
+    fn attribute_name_may_be_dotted() {
+        // Namespace-aware attributes (D2): an attribute's name may be a **dotted path**
+        // `#[pkg.Route]` — the qualified form the checker resolves through the same import map any
+        // type reference uses. The segments join into one qualified string; a bare `#[Skip]` is the
+        // one-segment case. The `name_span` covers the whole dotted run.
+        let parsed = parse_str("#[pkg.mod.Route(\"/x\")] struct R { id: int }\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Struct(decl) = &parsed.program.stmts[0] else {
+            panic!("expected a struct, got {:?}", parsed.program.stmts[0]);
+        };
+        assert_eq!(decl.decorators.attrs.len(), 1);
+        assert_eq!(decl.decorators.attrs[0].name, "pkg.mod.Route");
+        // The single-segment form is unchanged.
+        let bare = parse_str("#[Route] struct S { id: int }\n");
+        let Stmt::Struct(bdecl) = &bare.program.stmts[0] else {
+            panic!("expected a struct");
+        };
+        assert_eq!(bdecl.decorators.attrs[0].name, "Route");
     }
 
     #[test]

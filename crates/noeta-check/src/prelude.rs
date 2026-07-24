@@ -297,8 +297,25 @@ impl Checker {
             .collect();
         for (qualified, directives) in fielded {
             for d in directives {
-                if let noeta_ext_abi::ExtTypeDirective::Validated = d {
-                    self.symbols.validated_types.insert(qualified.clone());
+                match d {
+                    noeta_ext_abi::ExtTypeDirective::Validated => {
+                        self.symbols.validated_types.insert(qualified.clone());
+                    }
+                    // `@attribute` on a native fielded struct → the same `attributes` opt-in (E0029)
+                    // and, when placement is restricted, the same `attachable` gate (E0030) a `.noe`
+                    // `@attribute(Kind, …)` struct seeds — keyed on the qualified identity, with the
+                    // struct's fields (seeded by the fielded seeder) as its construction contract. One
+                    // enforcement path: a native `@attribute` is indistinguishable from a `.noe` one.
+                    noeta_ext_abi::ExtTypeDirective::Attribute(targets) => {
+                        self.symbols.attributes.insert(qualified.clone());
+                        if !targets.is_empty() {
+                            self.symbols.attachable.insert(
+                                qualified.clone(),
+                                targets.iter().map(|t| attr_target_kind(*t)).collect(),
+                            );
+                        }
+                    }
+                    noeta_ext_abi::ExtTypeDirective::Semantic => {}
                 }
             }
         }
@@ -360,18 +377,23 @@ impl Checker {
     /// artifact at compile time.
     pub(crate) fn register_extension_attributes(&mut self) {
         for attr in self.reg().ext_attributes() {
+            // Key every table on the attribute's **qualified identity** (`std.test.Skip`), the same
+            // identity it projects under through `nominal_types` — so a consumer's `use std.test.Skip`
+            // resolves `Skip → std.test.Skip` and D2a's gate binds it, while a bare `#[Skip]` with no
+            // `use` is the checker's E0029 (there is no global attribute namespace).
+            let qualified = attr.qualified();
             let fields: Vec<(String, Type)> = attr
                 .fields
                 .iter()
                 .map(|f| (f.name.to_string(), attr_field_type(f.ty)))
                 .collect();
-            self.symbols.types.insert(attr.name.to_string());
-            self.symbols.records.insert(attr.name.to_string(), fields);
+            self.symbols.types.insert(qualified.clone());
+            self.symbols.records.insert(qualified.clone(), fields);
             self.symbols
                 .type_kinds
-                .insert(attr.name.to_string(), noeta_types::TypeKind::Struct);
+                .insert(qualified.clone(), noeta_types::TypeKind::Struct);
             // Mark `@attribute` (bare — attachable anywhere) so the E0029 capability gate passes.
-            self.record_attribute(attr.name, Some(&[]));
+            self.record_attribute(&qualified, Some(&[]));
             let optional: HashSet<String> = attr
                 .fields
                 .iter()
@@ -381,7 +403,7 @@ impl Checker {
             if !optional.is_empty() {
                 self.symbols
                     .attribute_optional_fields
-                    .insert(attr.name.to_string(), optional);
+                    .insert(qualified.clone(), optional);
             }
         }
     }

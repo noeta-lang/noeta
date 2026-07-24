@@ -753,6 +753,23 @@ impl TargetKind {
     }
 }
 
+/// Map a native [`noeta_ext_abi::AttrTarget`] to the checker's [`TargetKind`] — the two are the same
+/// closed placement vocabulary either side of the ABI (the ABI cannot name a syntax-crate type), so a
+/// native `@attribute`'s placement restriction seeds the E0030 gate exactly as a `.noe` one's does.
+fn attr_target_kind(t: noeta_ext_abi::AttrTarget) -> TargetKind {
+    use noeta_ext_abi::AttrTarget;
+    match t {
+        AttrTarget::Struct => TargetKind::Struct,
+        AttrTarget::Class => TargetKind::Class,
+        AttrTarget::Enum => TargetKind::Enum,
+        AttrTarget::Function => TargetKind::Function,
+        AttrTarget::Method => TargetKind::Method,
+        AttrTarget::Field => TargetKind::Field,
+        AttrTarget::Variant => TargetKind::Variant,
+        AttrTarget::Param => TargetKind::Param,
+    }
+}
+
 /// The tier attachment site of a declaration `TargetKind` — the registry's site vocabulary. A
 /// `struct`/`class`/`enum` all map to `Type`; a field or variant is never a tier site (`None`).
 fn target_sites(target: TargetKind) -> noeta_ast::Sites {
