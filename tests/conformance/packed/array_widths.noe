@@ -1,0 +1,37 @@
+// Array-programming across the *narrow* widths (array-ops arc): the element-wise `+`/`-`/`*` and the
+// `scale`/`abs`/`neg`/`clamp` methods used to be ten near-identical per-width macros; they are now one
+// generic body per op over the shared `Scalar` element trait, monomorphized per width. This fixture
+// pins widths the older array-ops fixtures never exercised (`u16`, `i8`, `i16`, `u8`) so the single
+// generic path is proven for each: integer ops WRAP at the element width exactly as the macros did,
+// and one shared kernel keeps both backends byte-identical.
+// expect: stdout "[4464, 300]"
+// expect: stdout "[-106, 106]"
+// expect: stdout "[30, -60, 90]"
+// expect: stdout "[56, 156]"
+// expect: stdout "[0, 0, 5, 6]"
+// expect: stdout "[1, 2, 3]"
+// expect: exit 0
+
+// --- Packed `List<u16>`: element-wise `+` wraps at 16 bits (max 65535). 60000 + 10000 = 70000,
+// which overflows to 70000 - 65536 = 4464; 100 + 200 = 300. ---
+us = [60000u16, 100u16]
+vs = [10000u16, 200u16]
+echo (us + vs)                            // [4464, 300]
+
+// --- Packed `List<i8>`: element-wise `+` wraps at 8 bits (range -128..=127). 100 + 50 = 150 wraps to
+// -106; -100 + -50 = -150 wraps to 106. ---
+bs = [100i8, -100i8]
+cs = [50i8, -50i8]
+echo (bs + cs)                            // [-106, 106]
+
+// `scale` over a narrow signed width wraps like `*`. 10*3=30, -20*3=-60, 30*3=90 all fit i16.
+echo [10i16, -20i16, 30i16].scale(3)      // [30, -60, 90]
+
+// `neg` over an unsigned width is a two's-complement wrapping negate: 200 -> 56, 100 -> 156.
+echo [200u8, 100u8].neg()                 // [56, 156]
+
+// `clamp` follows the field's signed ordering (total even if lo > hi); no wrap needed.
+echo [-5i8, 0i8, 5i8, 10i8].clamp(0i8, 6i8)  // [0, 0, 5, 6]
+
+// `abs` over a signed width; already non-negative results are unchanged.
+echo [1i8, -2i8, 3i8].abs()               // [1, 2, 3]
