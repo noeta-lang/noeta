@@ -969,6 +969,14 @@ pub struct ExtEnum {
     /// unregistered-method misuse. An enum is an immutable value type: a dispatch returning
     /// [`NativeOut::InstanceUpdate`] is a runtime error (mirrors the [`FieldedKind::Struct`] guard).
     pub dispatch: NativeMethodDispatch,
+    /// The **traits this enum declares** (native-extensibility S3 / Slice C) — the [`ExtEnum`] twin
+    /// of [`ExtFielded::traits`] and [`ExtType::traits`]. A name matching a native [`ExtTrait`] makes
+    /// the enum satisfy that trait: `seed_ext_traits` records it into
+    /// `user_trait_impls[qualified][trait]`, so a native enum value coerces to `dyn Trait` and its
+    /// trait-method call dispatches to the enum's native method (via `call_native_enum_method`). A
+    /// built-in name (e.g. `"Comparable"`) is picked up by `seed_native_builtin_traits`
+    /// (`record_trait_impls` filters to built-in names). Default empty.
+    pub traits: &'static [&'static str],
 }
 
 /// One variant of an [`ExtEnum`]: its case name plus **either** a positional payload (an algebraic
@@ -1005,6 +1013,7 @@ impl ExtEnum {
                 ),
             })
         },
+        traits: &[],
     };
 
     /// The variant named `variant`, with its declaration index, if any.
@@ -2564,7 +2573,8 @@ impl Registry {
 
     /// Every registered native trait (native-extensibility S3), across all units — what
     /// `Checker::seed_ext_traits` walks to pre-populate the user-trait tables at prelude time, and
-    /// what `seed_extern_type_traits` matches an [`ExtType::traits`] name against.
+    /// what `seed_native_builtin_traits` matches an [`ExtType::traits`] / [`ExtFielded::traits`] /
+    /// [`ExtEnum::traits`] name against.
     pub fn traits(&self) -> impl Iterator<Item = &'static ExtTrait> + '_ {
         self.units.iter().flat_map(|e| e.traits())
     }

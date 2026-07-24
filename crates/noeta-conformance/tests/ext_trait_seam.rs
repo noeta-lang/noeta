@@ -27,8 +27,9 @@ use std::any::Any;
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
 use noeta_stdlib::registry::{
-    ExtClass, ExtField, ExtFn, ExtModule, ExtTrait, ExtTraitMethod, ExtType, Extension,
-    FieldedKind, NativeOut, NativeValue, RetTy, SigType,
+    EnumBacking, ExtClass, ExtEnum, ExtField, ExtFn, ExtModule, ExtStruct, ExtTrait,
+    ExtTraitMethod, ExtType, ExtVariant, Extension, FieldedKind, NativeOut, NativeValue, RetTy,
+    SigType, VariantValue,
 };
 use noeta_stdlib::{ExternBox, ExternValue, Host, StdError};
 use noeta_vm::VmBackend;
@@ -188,6 +189,120 @@ fn panel_dispatch(
     }
 }
 
+// --- The THIRD native value kind: a native ENUM that implements the trait (Slice C) ---------------
+
+/// A native **enum** `Mode` — the third native value kind behind a `dyn Widget` (native-extensibility
+/// Slice C). It advertises `Widget` via its new `ExtEnum::traits` (seeded into `user_trait_impls`
+/// exactly like a class/struct) and implements the trait method `describe()` as a native enum method,
+/// dispatched through `call_native_enum_method` (Slice B). Proves `dyn Widget` dispatch reaches a
+/// native enum value — routed by runtime value-kind, not the static `dyn` type.
+const MODE: ExtEnum = ExtEnum {
+    name: "Mode",
+    namespace: "fx",
+    variants: &[
+        ExtVariant {
+            name: "Dark",
+            fields: &[],
+            value: VariantValue::None,
+        },
+        ExtVariant {
+            name: "Light",
+            fields: &[],
+            value: VariantValue::None,
+        },
+    ],
+    backing: EnumBacking::None,
+    methods: &[ExtFn {
+        name: "describe",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    }],
+    dispatch: mode_dispatch,
+    traits: &["Widget"],
+};
+
+/// `Mode`'s native enum-method dispatch — the native implementation of `Widget.describe()` for an
+/// enum receiver. Reads the case off the marshalled `NativeValue::Variant`.
+fn mode_dispatch(
+    recv: &NativeValue,
+    method: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let NativeValue::Variant { variant, .. } = recv else {
+        return Err(StdError {
+            kind: noeta_stdlib::ErrorKind::ArgType,
+            message: "enum method called on a non-variant receiver".to_string(),
+        });
+    };
+    match method {
+        "describe" => Ok(NativeOut::Str(format!("mode:{}", variant.to_lowercase()))),
+        _ => Err(StdError {
+            kind: noeta_stdlib::ErrorKind::UnknownName,
+            message: format!("no method `{method}`"),
+        }),
+    }
+}
+
+// --- The FOURTH native value kind: a native STRUCT that implements the trait + a BUILT-IN trait ----
+
+/// A native **struct** `Badge` — a value-kind fielded object behind a `dyn Widget` (Slice C). It
+/// advertises **two** traits through one `ExtStruct::traits` list: the native `Widget` (routed to the
+/// native-`ExtTrait` channel `seed_ext_traits`) AND the **built-in** `Comparable` (routed to
+/// `seed_native_builtin_traits`, which `record_trait_impls` filters to). The mixed list proves the
+/// two channels split a single `traits` declaration cleanly, and `Comparable` is the latent-bug-fix
+/// proof: before Slice C the built-in seeding walked `types()` only, so a struct/class/enum declaring
+/// a built-in trait satisfied *nothing*; now a `T: Comparable` bound accepts a `Badge`.
+const BADGE: ExtStruct = ExtStruct {
+    name: "Badge",
+    namespace: "fx",
+    fields: &[ExtField {
+        name: "label",
+        ty: SigType::String,
+        is_public: true,
+        is_mut: false,
+    }],
+    methods: &[ExtFn {
+        name: "describe",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    }],
+    dispatch: badge_dispatch,
+    traits: &["Widget", "Comparable"],
+    kind: FieldedKind::Struct,
+};
+
+/// `Badge`'s native method dispatch — the native implementation of `Widget.describe()` for a struct
+/// receiver. Reads the instance's `label` field off the marshalled `NativeValue::Instance`, exactly
+/// like `panel_dispatch` (a struct and a class share the fielded dispatch seam).
+fn badge_dispatch(
+    recv: &NativeValue,
+    method: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match method {
+        "describe" => {
+            let label = match recv {
+                NativeValue::Instance { fields, .. } => fields
+                    .iter()
+                    .find(|(k, _)| k == "label")
+                    .and_then(|(_, v)| match v {
+                        NativeValue::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            Ok(NativeOut::Str(format!("badge:{label}")))
+        }
+        _ => Err(StdError {
+            kind: noeta_stdlib::ErrorKind::UnknownName,
+            message: format!("no method `{method}`"),
+        }),
+    }
+}
+
 // --- The module that constructs the native values -------------------------------------------------
 
 const KIT_FNS: &[ExtFn] = &[
@@ -200,6 +315,16 @@ const KIT_FNS: &[ExtFn] = &[
         name: "panel",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named("Panel")),
+    },
+    ExtFn {
+        name: "mode",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Named("Mode")),
+    },
+    ExtFn {
+        name: "badge",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named("Badge")),
     },
 ];
 
@@ -228,6 +353,27 @@ fn kit_dispatch(
                 kind: FieldedKind::Class,
             })
         }
+        "mode" => {
+            // A real native enum variant (Slice C): `Mode.Dark`, its declaration index.
+            Ok(NativeOut::Variant {
+                enum_name: "Mode".to_string(),
+                variant: "Dark".to_string(),
+                variant_index: 0,
+                fields: vec![],
+            })
+        }
+        "badge" => {
+            let label = match args.first() {
+                Some(NativeValue::Str(s)) => s.clone(),
+                _ => String::new(),
+            };
+            // A real native struct instance (value-kind object), field in declared slot order.
+            Ok(NativeOut::Instance {
+                class: "Badge".to_string(),
+                fields: vec![("label".to_string(), NativeOut::Str(label))],
+                kind: FieldedKind::Struct,
+            })
+        }
         _ => Err(StdError {
             kind: noeta_stdlib::ErrorKind::UnknownName,
             message: format!("no function `{func}`"),
@@ -254,6 +400,12 @@ impl Extension for FxExtension {
     }
     fn classes(&self) -> &'static [ExtClass] {
         &[PANEL]
+    }
+    fn structs(&self) -> &'static [ExtStruct] {
+        &[BADGE]
+    }
+    fn enums(&self) -> &'static [ExtEnum] {
+        &[MODE]
     }
     fn traits(&self) -> &'static [ExtTrait] {
         &[WIDGET]
@@ -393,6 +545,27 @@ echo render(p)
 
 // Directly-typed native class method call, for parity.
 echo p.describe()
+
+// 3b (ExtEnum receiver, Slice C): a NATIVE enum `Mode` — the THIRD native value kind — behind the
+// SAME `dyn Widget` dispatches `describe()` to its native enum method (`call_native_enum_method`).
+m = kit.mode()
+echo render(m)
+echo m.describe()
+
+// 3b (ExtStruct receiver, Slice C): a NATIVE struct `Badge` — the FOURTH native value kind — behind
+// the SAME `dyn Widget` dispatches `describe()` to its native struct method (the fielded seam).
+bg = kit.badge("v")
+echo render(bg)
+echo bg.describe()
+
+// Built-in-trait latent-bug fix (Slice C): `Badge` also declares the BUILT-IN `Comparable` in its
+// mixed `traits` list. Before Slice C the built-in seeding walked `types()` only, so this struct
+// satisfied NOTHING and the `<T: Comparable>` bound below was E0025. Now `seed_native_builtin_traits`
+// records it, so the bound accepts `Badge` — observable as this program checking + running clean.
+fn ranked<T: Comparable>(x: T): string {
+    return "ranked"
+}
+echo ranked(bg)
 "#;
 
 #[test]
@@ -400,7 +573,8 @@ fn native_trait_contract_and_dynamic_dispatch_agree_on_both_backends() {
     let stdout = run_both_agree(PROGRAM);
     assert_eq!(
         stdout,
-        "card:hi\ncard:hi\nbutton:go\nbutton:go\npanel:cls\npanel:cls\n"
+        "card:hi\ncard:hi\nbutton:go\nbutton:go\npanel:cls\npanel:cls\n\
+         mode:dark\nmode:dark\nbadge:v\nbadge:v\nranked\n"
     );
 }
 

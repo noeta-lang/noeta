@@ -34,7 +34,7 @@ impl Checker {
         self.register_semantic_prelude();
         self.register_tier_prelude();
         self.register_extension_attributes();
-        self.seed_extern_type_traits();
+        self.seed_native_builtin_traits();
         self.seed_ext_enums();
         self.seed_ext_fielded();
     }
@@ -169,13 +169,14 @@ impl Checker {
                 let tr = reg.find_trait_qualified(qualified)?;
                 let decl = synth_trait_decl(reg, tr, local);
                 // Native declarations advertising this trait — a non-built-in name in `ExtType.traits`
-                // (Pass 1) OR `ExtFielded.traits` (Pass 2b, a class OR a struct) matching the trait
-                // (short or qualified spelling). `record_trait_impls` drops non-built-in names (they
-                // can't satisfy a built-in bound), so this is the one channel that records a native
-                // declaration's native-trait impl. Written over every kind so an ExtType, a class,
-                // and a struct advertiser seed the same `user_trait_impls[qualified][trait]`
-                // uniformly — the coercion channel is representation-agnostic (its receiver is an
-                // extern value OR a fielded object).
+                // (Pass 1), `ExtFielded.traits` (Pass 2b, a class OR a struct), OR `ExtEnum.traits`
+                // (Slice C) matching the trait (short or qualified spelling). `record_trait_impls`
+                // drops non-built-in names (they can't satisfy a built-in bound), so this is the one
+                // channel that records a native declaration's native-trait impl. Written over every
+                // kind so an ExtType, a class, a struct, and an enum advertiser seed the same
+                // `user_trait_impls[qualified][trait]` uniformly — the coercion channel is
+                // representation-agnostic (its receiver is an extern value, a fielded object, OR an
+                // enum value, each dispatched by its own native seam at runtime).
                 let advertises =
                     |traits: &[&str]| traits.iter().any(|t| *t == tr.name || tr.is_qualified(t));
                 let type_impls = reg
@@ -188,7 +189,12 @@ impl Checker {
                     .fielded()
                     .filter(|cl| advertises(cl.traits))
                     .map(|cl| cl.qualified());
-                let impls: Vec<String> = type_impls.chain(fielded_impls).collect();
+                let enum_impls = reg
+                    .enums()
+                    .filter(|en| advertises(en.traits))
+                    .map(|en| en.qualified());
+                let impls: Vec<String> =
+                    type_impls.chain(fielded_impls).chain(enum_impls).collect();
                 Some(TraitSeed {
                     local: local.clone(),
                     decl,
@@ -256,22 +262,40 @@ impl Checker {
         }
     }
 
-    /// Seed the built-in traits that **extern types** declare through the extension registry (p2p
-    /// P2) into the trait-impl table — the extern-type analogue of processing a user type's
-    /// `@derive`/`impl`. This is what makes `satisfies(GCounter, Mergeable)` true, so a
-    /// `T: Mergeable` bound accepts a CRDT. Runs at prelude time, once, from every construction
-    /// path; only registry-declared (intrinsic) traits appear here, so it cannot let a user type
-    /// masquerade as one.
-    pub(crate) fn seed_extern_type_traits(&mut self) {
-        for ext in self.reg().extensions() {
-            for ty in ext.types() {
-                if !ty.traits.is_empty() {
-                    // Keyed by the **qualified identity** (`para.crdt.GCounter` once the para-p2p
-                    // package is installed) the checker stores in `Type::Named`, so a `T: Mergeable`
-                    // bound resolves against the same string.
-                    self.record_trait_impls(&ty.qualified(), ty.traits.iter().copied());
-                }
-            }
+    /// Seed the built-in traits that **native declarations** advertise through the extension registry
+    /// (p2p P2; unified across kinds in native-extensibility Slice C) into the trait-impl table — the
+    /// native analogue of processing a user type's `@derive`/`impl`. This is what makes
+    /// `satisfies(GCounter, Mergeable)` true, so a `T: Mergeable` bound accepts a CRDT. Iterates
+    /// **every** native kind — extern types, fielded (class/struct), and enums — so a native class,
+    /// struct, or enum declaring a built-in trait (`traits: ["Comparable"]`) actually satisfies it,
+    /// not only an [`ExtType`] (the pre-Slice-C latent gap). Runs at prelude time, once, from every
+    /// construction path; only registry-declared (intrinsic) traits appear here, so it cannot let a
+    /// user type masquerade as one. [`Checker::record_trait_impls`] filters its input to the closed
+    /// `BuiltinTrait` set, so feeding it a mixed `traits` list is safe — a non-built-in name (a
+    /// native [`ExtTrait`]) is dropped here and recorded by [`Checker::seed_ext_traits`] instead.
+    pub(crate) fn seed_native_builtin_traits(&mut self) {
+        // Snapshot (qualified identity, declared traits) over every native kind while the immutable
+        // registry borrow is live, then release it before the `&mut self` `record_trait_impls`
+        // writes. Keyed by the **qualified identity** (`para.crdt.GCounter` once the para-p2p package
+        // is installed) the checker stores in `Type::Named`, so a `T: Mergeable` bound resolves
+        // against the same string.
+        let decls: Vec<(String, &'static [&'static str])> = {
+            let reg = self.reg();
+            let types = reg
+                .extensions()
+                .iter()
+                .flat_map(|ext| ext.types())
+                .map(|ty| (ty.qualified(), ty.traits));
+            let fielded = reg.fielded().map(|f| (f.qualified(), f.traits));
+            let enums = reg.enums().map(|en| (en.qualified(), en.traits));
+            types
+                .chain(fielded)
+                .chain(enums)
+                .filter(|(_, traits)| !traits.is_empty())
+                .collect()
+        };
+        for (qualified, traits) in decls {
+            self.record_trait_impls(&qualified, traits.iter().copied());
         }
     }
 
