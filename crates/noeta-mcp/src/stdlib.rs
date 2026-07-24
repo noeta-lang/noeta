@@ -232,6 +232,7 @@ fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtBundle) -> 
             ConstraintField::IntN { bits, signed } => {
                 format!("{}{bits}", if *signed { 'i' } else { 'u' })
             }
+            ConstraintField::AnyNumeric => "numeric".to_string(),
         })
         .collect::<Vec<_>>()
         .join(", ");

@@ -170,6 +170,55 @@ fn cols_dispatch(
     }))
 }
 
+/// A bundle over a **uniform numeric field of any (kind, width, signedness)** whose method returns
+/// are **element-relative** — the scalar-unification ABI under test. `ConstraintField::AnyNumeric`
+/// binds an i16 vector AND an f32 vector with the SAME bundle (the mechanism that later collapses
+/// `vec.Kernels`/`IntKernels`/`ColorKernels` into one), and the checker resolves each method's
+/// return against the bound shape's concrete element type:
+/// - `dot() -> RetTy::ElemWide`  — the widened accumulator: `int` for i16, `f32` for f32.
+/// - `length() -> RetTy::ElemFloat` — the float promotion: `float` for i16, `f32` for f32.
+/// - `sum() -> RetTy::Elem` — the element itself: `i16` for i16, `f32` for f32.
+///
+/// No shipped bundle declares `AnyNumeric` or an element-relative return, so a fixture is the only
+/// exerciser (the same rationale as the rest of this file). The methods never run — a binding is
+/// inert until a call, and `Session::load` only checks — so what is under test is purely the
+/// checker's impl-site binding + element-relative return resolution.
+const NUM_BUNDLE: ExtBundle = ExtBundle {
+    name: "Num",
+    constraint: PackedConstraint {
+        fields: &[ConstraintField::AnyNumeric],
+        layout: ConstraintLayout::Any,
+        arity: ConstraintArity::Uniform { min: 2 },
+    },
+    methods: &[
+        BundleFn {
+            sig: ExtFn {
+                name: "dot",
+                params: &[SigType::Dyn],
+                ret: RetTy::ElemWide,
+            },
+            receiver: BundleReceiver::Element,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "length",
+                params: &[],
+                ret: RetTy::ElemFloat,
+            },
+            receiver: BundleReceiver::Element,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "sum",
+                params: &[],
+                ret: RetTy::Elem,
+            },
+            receiver: BundleReceiver::Element,
+        },
+    ],
+    ctx_dispatch: cols_dispatch,
+};
+
 /// The derive validator under test: a type deriving `Checked` must declare a field named `id`.
 ///
 /// A validator is an *arbitrary* author predicate, so what matters is that the checker calls it at
@@ -232,7 +281,7 @@ impl Extension for FxExtension {
             name: "kern",
             functions: KERN_FNS,
             dispatch: kern_dispatch,
-            bundles: &[COLS_BUNDLE],
+            bundles: &[COLS_BUNDLE, NUM_BUNDLE],
             ..ExtModule::DEFAULTS
         }]
     }
@@ -424,5 +473,141 @@ fn a_bundle_field_constraint_is_enforced_at_the_impl_site() {
          impl kern.Cols for C3 {}\n\
          echo 1\n",
         "requires fields",
+    );
+}
+
+// --- ConstraintField::AnyNumeric + element-relative RetTy (scalar-unification ABI) ---------------
+
+/// `ConstraintField::AnyNumeric` binds a **uniform numeric field of any (kind, width, signedness)**
+/// — the generalization that lets ONE bundle serve every numeric width. Both directions matter: it
+/// accepts an i16 vector *and* an f32 vector (widths a fixed `IntN{32}`/`F32` constraint could not
+/// both take), and still rejects a non-uniform / non-numeric shape.
+#[test]
+fn an_any_numeric_constraint_binds_every_numeric_width() {
+    // The SAME bundle binds an i16 vector and an f32 vector — the whole point of `AnyNumeric`.
+    accepts(
+        "use fx.{kern}\n\
+         @packed struct I16v2 { x: i16; y: i16 }\n\
+         @packed struct F32v3 { x: f32; y: f32; z: f32 }\n\
+         impl kern.Num for I16v2 {}\n\
+         impl kern.Num for F32v3 {}\n\
+         echo 1\n",
+    );
+    // A `bool` field is not numeric — `AnyNumeric` still rejects it at the impl site (E0015).
+    rejects(
+        "use fx.{kern}\n\
+         @packed struct Flags2 { a: bool; b: bool }\n\
+         impl kern.Num for Flags2 {}\n\
+         echo 1\n",
+        "requires at least 2 `numeric` fields",
+    );
+    // `Uniform { min: 2 }` still enforces arity: a single-field shape is too few.
+    rejects(
+        "use fx.{kern}\n\
+         @packed struct One { x: i32 }\n\
+         impl kern.Num for One {}\n\
+         echo 1\n",
+        "requires at least 2 `numeric` fields",
+    );
+}
+
+/// The linchpin the whole slice exists for: `dot() -> RetTy::ElemWide` resolves to the bound
+/// shape's element **widened accumulator** — `int` for an i16 vector, `f32` for an f32 vector — so
+/// one bundle signature types correctly for every element width. The method never runs (`load`
+/// only checks); the return TYPE is the whole point, asserted by where it does and does not assign.
+#[test]
+fn elem_wide_resolves_dot_to_the_widened_accumulator() {
+    // i16 vector: `dot` widens to `int`. Assigning to an `int` binding checks clean…
+    accepts(
+        "use fx.{kern}\n\
+         @packed struct I16v2 { x: i16; y: i16 }\n\
+         impl kern.Num for I16v2 {}\n\
+         fn probe(v: I16v2, w: I16v2): void { n: int = v.dot(w); echo n }\n\
+         echo 1\n",
+    );
+    // …and NOT to `f32`: an integer vector's `dot` is `int`, not the element or a float.
+    rejects(
+        "use fx.{kern}\n\
+         @packed struct I16v2 { x: i16; y: i16 }\n\
+         impl kern.Num for I16v2 {}\n\
+         fn probe(v: I16v2, w: I16v2): void { n: f32 = v.dot(w); echo n }\n\
+         echo 1\n",
+        "expected `f32`, found `int`",
+    );
+    // f32 vector: the SAME `dot` signature resolves to `f32` (its own `Wide`), not `int`.
+    accepts(
+        "use fx.{kern}\n\
+         @packed struct F32v2 { x: f32; y: f32 }\n\
+         impl kern.Num for F32v2 {}\n\
+         fn probe(v: F32v2, w: F32v2): void { n: f32 = v.dot(w); echo n }\n\
+         echo 1\n",
+    );
+    rejects(
+        "use fx.{kern}\n\
+         @packed struct F32v2 { x: f32; y: f32 }\n\
+         impl kern.Num for F32v2 {}\n\
+         fn probe(v: F32v2, w: F32v2): void { n: int = v.dot(w); echo n }\n\
+         echo 1\n",
+        "expected `int`, found `f32`",
+    );
+}
+
+/// `length() -> RetTy::ElemFloat` resolves to the element **float promotion** — `float` (f64) for
+/// an integer vector, `f32` for an f32 vector — matching `Scalar::Float`.
+#[test]
+fn elem_float_resolves_length_to_the_float_promotion() {
+    // i16 vector: `length` promotes to `float`.
+    accepts(
+        "use fx.{kern}\n\
+         @packed struct I16v2 { x: i16; y: i16 }\n\
+         impl kern.Num for I16v2 {}\n\
+         fn probe(v: I16v2): void { n: float = v.length(); echo n }\n\
+         echo 1\n",
+    );
+    rejects(
+        "use fx.{kern}\n\
+         @packed struct I16v2 { x: i16; y: i16 }\n\
+         impl kern.Num for I16v2 {}\n\
+         fn probe(v: I16v2): void { n: int = v.length(); echo n }\n\
+         echo 1\n",
+        "expected `int`, found `float`",
+    );
+    // f32 vector: `length` stays `f32`.
+    accepts(
+        "use fx.{kern}\n\
+         @packed struct F32v2 { x: f32; y: f32 }\n\
+         impl kern.Num for F32v2 {}\n\
+         fn probe(v: F32v2): void { n: f32 = v.length(); echo n }\n\
+         echo 1\n",
+    );
+}
+
+/// `sum() -> RetTy::Elem` resolves to the **element type itself** — `i16` for an i16 vector, `f32`
+/// for an f32 vector — the scalar-returning / `scale(s: Elem)` case.
+#[test]
+fn elem_resolves_to_the_element_type_itself() {
+    // i16 vector: `sum` is `i16`, which does NOT widen to `int` (fixed-width, no implicit widening).
+    accepts(
+        "use fx.{kern}\n\
+         @packed struct I16v2 { x: i16; y: i16 }\n\
+         impl kern.Num for I16v2 {}\n\
+         fn probe(v: I16v2): void { n: i16 = v.sum(); echo n }\n\
+         echo 1\n",
+    );
+    rejects(
+        "use fx.{kern}\n\
+         @packed struct I16v2 { x: i16; y: i16 }\n\
+         impl kern.Num for I16v2 {}\n\
+         fn probe(v: I16v2): void { n: int = v.sum(); echo n }\n\
+         echo 1\n",
+        "expected `int`, found `i16`",
+    );
+    // f32 vector: `sum` is `f32`.
+    accepts(
+        "use fx.{kern}\n\
+         @packed struct F32v2 { x: f32; y: f32 }\n\
+         impl kern.Num for F32v2 {}\n\
+         fn probe(v: F32v2): void { n: f32 = v.sum(); echo n }\n\
+         echo 1\n",
     );
 }
