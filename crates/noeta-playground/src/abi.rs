@@ -2,9 +2,9 @@
 //!
 //! Deliberately **no wasm-bindgen**: three string→string exports do not justify a codegen tool
 //! whose CLI must stay in version lock-step with the crate. The embedder's glue is ~30 lines of
-//! JS (see `web/playground/`): write UTF-8 source into a buffer from [`noeta_alloc`], call an
-//! entry point, read the **length-prefixed** result (`[len: u32 LE][bytes]`), then release it
-//! with [`noeta_free_result`].
+//! JS (the frontend lives in the separate noeta-playground repo — `src/lib/engine-client.ts`):
+//! write UTF-8 source into a buffer from [`noeta_alloc`], call an entry point, read the
+//! **length-prefixed** result (`[len: u32 LE][bytes]`), then release it with [`noeta_free_result`].
 //!
 //! This module is the crate's whole `unsafe` surface (with the getrandom hook below), and it is
 //! exactly the seam miri cannot cover — the caller is JavaScript. The wasm differential/browser
