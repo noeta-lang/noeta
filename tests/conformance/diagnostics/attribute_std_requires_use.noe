@@ -1,0 +1,8 @@
+// A std tier attribute is namespace-scoped now (D2b): applying `#[Skip]` on a declaration WITHOUT
+// `use std.test` is the ordinary unknown-attribute error (E0029) — there is no global attribute
+// namespace, so even std's attributes must be imported. (`#[Skip]` on a struct, not a `@test` fn, so
+// it is not stripped and actually reaches the capability gate.)
+// expect: error E0029 at 7:3
+// expect: exit 1
+#[Skip]
+struct Thing { id: int }

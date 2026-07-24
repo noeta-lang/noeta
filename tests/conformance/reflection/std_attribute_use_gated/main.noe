@@ -1,0 +1,16 @@
+// A migrated std attribute (`std.test.Skip`) is imported and applied like any attribute (D2b — no
+// global attribute namespace): `use std.test.{Skip}` then `#[Skip]`. The loader rewrites the
+// application to its qualified identity, so `attributes_of::<Skip>()` — whose turbofish resolves to
+// the same FQN — materializes it from the reflection manifest. This exercises the whole
+// consumer-side path (use projection → loader FQN rewrite → qualified manifest) end to end.
+// expect: stdout "flaky"
+// expect: exit 0
+use std.test.{Skip}
+
+#[Skip("flaky")]
+struct Thing { id: int }
+
+attrs = attributes_of::<Skip>();
+for a in attrs {
+    echo a.value.reason;
+}

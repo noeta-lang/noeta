@@ -409,7 +409,9 @@ pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
     use noeta_ext_abi::registry as ext;
     ext::ext_attributes()
         .map(|attr| noeta_ast::reflect::TypeInfo {
-            name: attr.name.to_string(),
+            // The **qualified** identity (`std.test.Skip`) — the manifest shape `attributes_of`
+            // matches must key on the same FQN the loader rewrites applications to (D2b).
+            name: attr.qualified(),
             kind: noeta_ast::reflect::TypeKind::Struct,
             fields: attr.fields.iter().map(|f| f.name.to_string()).collect(),
             field_defaults: attr
@@ -1521,7 +1523,7 @@ mod tests {
         );
         assert_eq!(
             reg.config_attribute_for("bench", &none).as_deref(),
-            Some("Bench")
+            Some("std.bench.Bench")
         );
         // Explicit std: same.
         let std_sel = std::collections::BTreeMap::from([("bench".into(), "std".into())]);
@@ -1560,8 +1562,10 @@ mod tests {
             TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TIER_ATTR_BENCH,
             TIER_ATTR_DOC,
         };
-        let declared: Vec<&str> = noeta_stdlib::registry::ext_attributes()
-            .map(|a| a.name)
+        // The contract is the **qualified** identity now (D2b): the reflect constants are FQNs, so
+        // pin them against each declaration's `qualified()`, not its short `name`.
+        let declared: Vec<String> = noeta_stdlib::registry::ext_attributes()
+            .map(|a| a.qualified())
             .collect();
         for name in [
             TEST_ATTR_SKIP,
@@ -1572,7 +1576,7 @@ mod tests {
             TIER_ATTR_DOC,
         ] {
             assert!(
-                declared.contains(&name),
+                declared.iter().any(|d| d == name),
                 "`{name}` missing from std's declarations"
             );
         }
@@ -1723,13 +1727,15 @@ mod tests {
 
     /// A `@bench(iterations: N)` block's directive args are stamped onto each contained fn as the
     /// `Bench` config attribute (the desugar), and a fn that already carries its own `#[Bench(…)]`
-    /// keeps it — the per-fn attribute wins over the block's.
+    /// keeps it — the per-fn attribute wins over the block's. The per-fn override is written by its
+    /// **qualified** identity here (`std.bench.Bench`), the form the loader rewrites `#[Bench]` to
+    /// after `use std.bench.Bench` — `activate_tiers` runs post-loader, so it sees the FQN (D2b).
     #[test]
     fn bench_block_args_stamp_the_config_attribute() {
         let program = parse_program(
             "@bench(iterations: 1000) {\n\
                  fn plain(): void { return; }\n\
-                 #[Bench(iterations: 5)]\n\
+                 #[std.bench.Bench(iterations: 5)]\n\
                  fn tuned(): void { return; }\n\
              }\n",
         );

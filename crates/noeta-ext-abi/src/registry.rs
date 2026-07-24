@@ -1476,15 +1476,34 @@ pub struct ExtAttrField {
     pub default: Option<AttrFieldDefault>,
 }
 
-/// An extension-declared prelude **attribute** — the extension counterpart of an `@attribute`
-/// struct (tier-extensions port). The checker registers each installed extension's attributes
-/// exactly as it registers a program-declared one (construction gate, reflection, shadowable by a
-/// user declaration); std ships the tier knob/metadata attributes (`Bench`, `Doc`, `Skip`, `Name`,
-/// `Group`, `Data`) this way.
+/// An extension-declared **attribute** — the extension counterpart of an `@attribute` struct
+/// (tier-extensions port). An attribute *is* a struct, so it carries a `namespace` and projects
+/// through the one [`Registry::nominal_types`] stream as a [`NominalKind::Struct`] nominal exactly
+/// like any native fielded type: a consumer resolves `use std.test.{Skip}` / `use std.test` /
+/// `#[std.test.Skip]` through the same `classify_use`/`namespace_types` machinery, and the checker
+/// keys `symbols.attributes` on the [`ExtAttribute::qualified`] identity (D2). There is no global
+/// attribute namespace — std's tier attributes live under `std.test` (`Skip`/`Name`/`Group`/`Data`),
+/// `std.bench` (`Bench`), and `std.doc` (`Doc`), imported like any attribute.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtAttribute {
     pub name: &'static str,
+    /// The namespace this attribute lives under (`std.test`) — its qualified identity is
+    /// `namespace.name`, mirroring [`ExtType::namespace`] / [`ExtFielded::namespace`].
+    pub namespace: &'static str,
     pub fields: &'static [ExtAttrField],
+}
+
+impl ExtAttribute {
+    /// The **qualified identity** (`std.test.Skip`) — `namespace.name`, the string the checker keys
+    /// `symbols.attributes`/`records` on and reflection carries. Mirrors [`ExtType::qualified`].
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace, self.name)
+    }
+    /// Whether `q` is this attribute's qualified identity — allocation-free, mirroring
+    /// [`Nominal::is_qualified`].
+    pub fn is_qualified(&self, q: &str) -> bool {
+        qualified_matches(self.namespace, self.name, q)
+    }
 }
 
 /// Where a dev-tier directive may **attach** (the directive attachment-site model). A tier declares
@@ -2111,6 +2130,10 @@ impl Registry {
                 .any(|m| format!("{root}.{}", m.name).starts_with(&dotted))
                 || e.types().iter().any(|t| t.qualified().starts_with(&dotted))
                 || e.enums().iter().any(|t| t.qualified().starts_with(&dotted))
+                // A namespace may contain *only* attributes (`std.test`, `std.bench`, `std.doc`),
+                // so they count toward recognizing it as navigable — else `use std.test` would be
+                // rejected and the F5 Module-arm projection never runs.
+                || e.attributes().iter().any(|a| a.qualified().starts_with(&dotted))
         })
     }
 
@@ -2143,6 +2166,11 @@ impl Registry {
             }
             for t in e.enums() {
                 if let Some(rest) = t.qualified().strip_prefix(&dotted) {
+                    push_seg(rest, &mut out);
+                }
+            }
+            for a in e.attributes() {
+                if let Some(rest) = a.qualified().strip_prefix(&dotted) {
                     push_seg(rest, &mut out);
                 }
             }
@@ -2228,7 +2256,20 @@ impl Registry {
                 namespace: t.namespace,
                 kind: NominalKind::Trait,
             });
-            types.chain(enums).chain(fielded).chain(traits)
+            // An attribute is a struct, so it projects as a [`NominalKind::Struct`] nominal — this is
+            // the whole of its consumer-side resolution: `namespace_types`/`classify_use`/
+            // `resolve_namespace_child` walk this one stream, so `use std.test.{Skip}` binds
+            // `Skip → std.test.Skip` and a `use std.test` group surfaces it, identical to a type.
+            let attributes = e.attributes().iter().map(|a| Nominal {
+                name: a.name,
+                namespace: a.namespace,
+                kind: NominalKind::Struct,
+            });
+            types
+                .chain(enums)
+                .chain(fielded)
+                .chain(traits)
+                .chain(attributes)
         })
     }
 
@@ -2469,6 +2510,15 @@ impl Registry {
     /// The installed extension attribute named `name`, if any.
     pub fn find_ext_attribute(&self, name: &str) -> Option<&'static ExtAttribute> {
         self.ext_attributes().find(|a| a.name == name)
+    }
+
+    /// Whether `qualified` (`std.test.Skip`) is a registered extension attribute's identity. The
+    /// linker consults this to fold **only attribute** imports into a module's rewrite map (so a
+    /// `#[Skip]`/`attributes_of::<Skip>()` resolves to its FQN like the checker's gate does), leaving
+    /// every other native import to the checker's `extern_types` — the rewrite blast radius stays on
+    /// attribute names.
+    pub fn is_ext_attribute(&self, qualified: &str) -> bool {
+        self.ext_attributes().any(|a| a.is_qualified(qualified))
     }
 
     /// Find a registered extern type by its short display name (extern-types X1) — first match in
@@ -3146,6 +3196,20 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     t.name,
                     unit.name(),
                     t.namespace
+                ));
+            }
+        }
+        // An attribute is a namespaced nominal too (D2b) — same namespace-under-root rule, so a
+        // forgotten `namespace:` (defaulting to nothing) or a cross-root claim is caught at assembly
+        // rather than silently squatting a reserved namespace.
+        for a in unit.attributes() {
+            if a.namespace != root && !a.namespace.starts_with(&format!("{root}.")) {
+                return Err(format!(
+                    "native attribute `{}` of unit `{}` declares namespace `{}`, outside the \
+                     unit's root `{root}`",
+                    a.name,
+                    unit.name(),
+                    a.namespace
                 ));
             }
         }

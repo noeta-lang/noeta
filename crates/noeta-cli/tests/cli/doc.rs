@@ -37,6 +37,7 @@ fn doc_attaches_to_the_following_declaration() {
         "doc_attach",
         "@doc { The module. }\n\
          use std.math.sqrt\n\
+         use std.doc.Doc\n\
          @doc { Adds two ints. }\n\
          fn add(a: int, b: int): int { return a + b }\n\
          for d in attributes_of::<Doc>() { echo d.target; echo d.value.text }\n\
