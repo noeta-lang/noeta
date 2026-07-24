@@ -407,26 +407,43 @@ pub fn synthesized_config_attr(attr_name: &str, args: &[AttrArg], tier_span: Spa
 /// fallback is gone).
 pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
     use noeta_ext_abi::registry as ext;
-    ext::ext_attributes()
-        .map(|attr| noeta_ast::reflect::TypeInfo {
-            // The **qualified** identity (`std.test.Skip`) — the manifest shape `attributes_of`
-            // matches must key on the same FQN the loader rewrites applications to (D2b).
-            name: attr.qualified(),
-            kind: noeta_ast::reflect::TypeKind::Struct,
-            fields: attr.fields.iter().map(|f| f.name.to_string()).collect(),
-            field_defaults: attr
-                .fields
-                .iter()
-                .map(|f| {
-                    f.default.map(|d| match d {
-                        ext::AttrFieldDefault::Str(s) => noeta_ast::AttrValue::Str(s.to_string()),
-                        ext::AttrFieldDefault::Int(n) => noeta_ast::AttrValue::Int(n),
-                    })
+    let data_only = ext::ext_attributes().map(|attr| noeta_ast::reflect::TypeInfo {
+        // The **qualified** identity (`std.test.Skip`) — the manifest shape `attributes_of`
+        // matches must key on the same FQN the loader rewrites applications to (D2b).
+        name: attr.qualified(),
+        kind: noeta_ast::reflect::TypeKind::Struct,
+        fields: attr.fields.iter().map(|f| f.name.to_string()).collect(),
+        field_defaults: attr
+            .fields
+            .iter()
+            .map(|f| {
+                f.default.map(|d| match d {
+                    ext::AttrFieldDefault::Str(s) => noeta_ast::AttrValue::Str(s.to_string()),
+                    ext::AttrFieldDefault::Int(n) => noeta_ast::AttrValue::Int(n),
                 })
-                .collect(),
-            variants: Vec::new(),
-        })
-        .collect()
+            })
+            .collect(),
+        variants: Vec::new(),
+    });
+    // A native **fielded** `@attribute` struct (D2) — a real `ExtFielded` carrying
+    // `ExtTypeDirective::Attribute` — is an attribute to every consumer, so its shape must reach the
+    // same reflection manifest the data-only `ExtAttribute`s do. Without this, `attribute_shape`
+    // finds no `TypeInfo` for the fielded attribute and `attributes_of::<Route>()` materializes an
+    // empty instance. Assembly guarantees a fielded `@attribute` is `Struct`-kind. `ExtField` carries
+    // no literal default, so every field is mandatory (`None`) — the E0009 construction check ensures
+    // each is supplied at the application site, exactly as for a data-only attribute's mandatory field.
+    let fielded = ext::ext_fielded_attributes().map(|f| noeta_ast::reflect::TypeInfo {
+        name: f.qualified(),
+        kind: noeta_ast::reflect::TypeKind::Struct,
+        fields: f
+            .fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect(),
+        field_defaults: f.fields.iter().map(|_| None).collect(),
+        variants: Vec::new(),
+    });
+    data_only.chain(fielded).collect()
 }
 
 /// Embed the installed extensions' attribute shapes into a freshly built reflection artifact —
