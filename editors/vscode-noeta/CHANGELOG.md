@@ -1,5 +1,11 @@
 # Changelog
 
+> **Versioning realigned to the Noeta toolchain (2026-07).** From here on the extension shares the
+> toolchain's version and is published straight from the release tag, so the extension version
+> always matches the `noeta` you're running. That resets the number from the extension's independent
+> 0.14.x line down to the toolchain's current version; the entries below are the pre-realignment
+> history, kept for provenance.
+
 ## 0.14.4
 
 Two grammar-fidelity fixes, found by a drift sweep against the tree-sitter grammar and the compiler

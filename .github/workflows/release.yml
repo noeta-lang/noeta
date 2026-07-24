@@ -129,3 +129,74 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/noeta-lang/${{ matrix.repo }}/dispatches" \
             -d "{\"event_type\":\"release-published\",\"client_payload\":{\"tag\":\"$TAG\"}}"
+
+  # Build the VS Code extension .vsix and attach it to the GitHub release. Its version is NOT read
+  # from package.json — the git tag is the single source of truth, so the extension always ships at
+  # the same version as the toolchain (`vX.Y.Z` is stamped in at package time, never committed).
+  # This runs for EVERY tag, prereleases included, so an rc build is always a downloadable artifact
+  # even when registry publishing is skipped. Depends on `release` so the release exists to attach to.
+  package-extension:
+    name: Package VS Code extension
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Runtime deps only: the extension is not bundled (src/extension.js loads
+      # vscode-languageclient from node_modules at runtime), and devDeps are test-only. This mirrors
+      # the recipe documented in .vscodeignore.
+      - name: Install runtime dependencies
+        working-directory: editors/vscode-noeta
+        run: npm ci --omit=dev
+
+      # Stamp the tag into package.json (X.Y.Z from vX.Y.Z). --no-git-tag-version keeps it a
+      # working-tree-only edit — no commit, no tag — so the tag stays the source of truth.
+      # No --no-dependencies on package: that flag drops node_modules from the .vsix, but this
+      # extension is unbundled and must ship its production deps.
+      - name: Package
+        working-directory: editors/vscode-noeta
+        run: |
+          npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
+          npx --yes @vscode/vsce package -o "noeta-${GITHUB_REF_NAME#v}.vsix"
+
+      - name: Upload as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension
+          path: editors/vscode-noeta/*.vsix
+
+      - name: Attach to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: editors/vscode-noeta/*.vsix
+
+  # Publish the packaged extension to the registries. Open VSX is the primary channel (it serves
+  # VSCodium/Cursor, which the Microsoft Marketplace does not). Each step self-skips when its token
+  # secret is absent, so this job stays green while the Marketplace PAT is still being sorted out —
+  # the .vsix is already attached to the release regardless. Prereleases are skipped: the stable
+  # channels reject `-rc`/`-alpha` version suffixes.
+  publish-extension:
+    name: Publish VS Code extension
+    needs: [build, package-extension]
+    if: needs.build.outputs.is_prerelease != 'true'
+    runs-on: ubuntu-latest
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: vscode-extension
+          path: dist
+
+      - name: Publish to Open VSX
+        if: ${{ env.OVSX_PAT != '' }}
+        run: npx --yes ovsx publish dist/*.vsix --pat "$OVSX_PAT"
+
+      - name: Publish to the Visual Studio Marketplace
+        if: ${{ env.VSCE_PAT != '' }}
+        run: npx --yes @vscode/vsce publish --packagePath dist/*.vsix -p "$VSCE_PAT"

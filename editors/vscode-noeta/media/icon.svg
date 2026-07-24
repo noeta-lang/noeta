@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Marketplace tile. Palette taken from the Noeta brand theme (noeta-theme/css/theme.css):
+       background #0b0d10, brand-blue accent #4f8ff7, atmospheric-mint accent #4fe0a8. The glyph is
+       the Noeta architecture mark — an entry node fanning out into the graph — so the entry node is
+       the brand blue (the interactive/brand voice) and the graph it fans into is the mint
+       (the atmospheric voice), matching the theme's two-accent split. The activity-bar icon
+       (noeta-activity.svg) stays monochrome; this full-color tile reads on any marketplace bg. -->
+  <rect width="128" height="128" rx="28" fill="#0b0d10"/>
+  <g transform="translate(28 28) scale(3)" fill="none"
+     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#4fe0a8">
+      <path d="M7 6.4 L16.9 9.3" stroke-opacity="0.6"/>
+      <path d="M5.9 7.3 L8.4 16.9" stroke-opacity="0.6"/>
+      <path d="M11.1 19 L16.9 19" stroke-opacity="0.6"/>
+      <path d="M19 12.1 L19 16.9" stroke-opacity="0.6"/>
+      <circle cx="19" cy="10" r="2.1" fill="#0b0d10"/>
+      <circle cx="9" cy="19" r="2.1" fill="#0b0d10"/>
+      <circle cx="19" cy="19" r="2.1" fill="#0b0d10"/>
+    </g>
+    <circle cx="5" cy="5" r="2.4" fill="#4f8ff7" stroke="#4f8ff7"/>
+  </g>
+</svg>
