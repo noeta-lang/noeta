@@ -572,8 +572,8 @@ mod tests {
         // 2-component grouping.
         let c = buf(&[1, 2, 3, 4]);
         let d = buf(&[10, 20, 30, 40]);
-        // dot per 2-group: [1·10+2·20, 3·30+4·40] = [210, 250]
-        assert_eq!(dot_buffers(&c, &d, 2), [210, 250]);
+        // dot per 2-group: [1·10+2·20, 3·30+4·40] = [50, 250]
+        assert_eq!(dot_buffers(&c, &d, 2), [50, 250]);
         // in-place scale matches.
         let mut m = buf(&[1, 2, 3, 4, 5, 6]);
         scale_buffer_in_place(&mut m, 3);
