@@ -33,6 +33,17 @@ pub fn sandbox_args() -> Vec<String> {
     vec!["noeta".to_string(), "run".to_string()]
 }
 
+/// The deterministic stdin the sandbox presents (CLI-completion slice 2) — a small fixed script of
+/// lines so a read-loop program (`io.stdin_line()` / `io.stdin_all()` / `io.prompt(..)`) has
+/// something to consume, terminates in-oracle, and reads identically on both backends. Three lines,
+/// the stdin analogue of the `env`/`args` fixtures.
+pub fn sandbox_stdin() -> std::collections::VecDeque<String> {
+    ["line one", "line two", "line three"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 /// The default `.env` path `env.load()` reads when the argument is omitted — the cross-ecosystem
 /// convention (Node `dotenv.config()`, python-dotenv `load_dotenv()`).
 pub const DEFAULT_DOTENV_PATH: &str = ".env";

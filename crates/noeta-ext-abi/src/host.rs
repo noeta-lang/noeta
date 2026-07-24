@@ -256,6 +256,36 @@ pub trait Env {
     fn args(&self) -> Vec<String>;
 }
 
+/// Which of the program's three standard streams a query refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
+/// **Console** capability (CLI-completion slice 2) — the program's standard input and terminal-ness.
+/// A host effect (fixture in the sandbox, real I/O on `RealHost`), so the backend differential stays
+/// deterministic — the mirror of [`Env`]: program *output* is batch-captured and compared, but stdin
+/// and TTY-ness are ambient effects that belong on a capability, not in the compared buffers.
+///
+/// The sandbox presents a scripted stdin fixture and reports every stream non-interactive
+/// (`is_tty` = false), so a read-loop program terminates in-oracle and both backends agree by
+/// construction. `RealHost` reads real stdin and probes the real terminals.
+pub trait Console {
+    /// Read the next line of stdin (without the trailing newline), or `None` at EOF.
+    fn stdin_read_line(&mut self) -> Option<String>;
+    /// Read all remaining stdin to EOF as one string.
+    fn stdin_read_all(&mut self) -> String;
+    /// Whether `stream` is connected to an interactive terminal.
+    fn is_tty(&self, stream: Stream) -> bool;
+    /// Write `msg` to the real terminal IMMEDIATELY (bypassing the batch output buffer) and read
+    /// one line of response — the single interactive path that survives batch-captured output.
+    /// `None` at EOF. In the sandbox this is deterministic: it returns the next scripted stdin line
+    /// and does not write anywhere observable.
+    fn prompt(&mut self, msg: &str) -> Option<String>;
+}
+
 /// **Operating system** capability (stdlib-gaps) — process execution and system introspection,
 /// the effect seam behind `std.os`. The introspection leaves are fixed fixtures in the sandbox
 /// (`"sandbox"`/`"wasm32"`-style constants, pid 1, cwd `/`) and real values on `RealHost`;
@@ -565,6 +595,7 @@ pub trait Host:
     + Rng
     + Clock
     + Env
+    + Console
     + Os
     + Entropy
     + Ids
@@ -580,6 +611,7 @@ impl<
         + Rng
         + Clock
         + Env
+        + Console
         + Os
         + Entropy
         + Ids

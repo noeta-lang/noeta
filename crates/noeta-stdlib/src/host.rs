@@ -6,8 +6,8 @@
 //! it stays with the modules ([`crate::fs`], [`crate::random`], [`crate::net`]) whose state it holds.
 
 pub use noeta_ext_abi::host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
-    ReadSource, RealP2pConfig, Rng,
+    Clock, Console, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
+    ReadSource, RealP2pConfig, Rng, Stream,
 };
 pub use noeta_ext_abi::{Logging, Metrics, Tracing};
 
@@ -20,7 +20,7 @@ use noeta_ext_abi::{
     AttrValue, InstrumentId, InstrumentKind, LogRecord, MetricData, MetricStore, MetricValue,
     SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// The sandbox's fixed wall-clock epoch: 2026-01-01T00:00:00Z in unix milliseconds.
@@ -172,6 +172,12 @@ pub struct SandboxHost {
     clock: DeterministicClock,
     env: BTreeMap<String, String>,
     args: Vec<String>,
+    /// The scripted stdin fixture (CLI-completion slice 2): the lines a read-loop program consumes,
+    /// seeded with a small deterministic default (see [`env::sandbox_stdin`]). `stdin_read_line`
+    /// pops the front, `stdin_read_all` drains the rest, `prompt` consumes one line — deterministic
+    /// and identical across backends, the stdin analogue of the `env`/`args` fixtures. `is_tty` is
+    /// always false here, so the fixture never has to model an interactive terminal.
+    stdin: VecDeque<String>,
     /// Scripted spawned processes (process-handle arc): id → the pre-computed instant-complete
     /// outcome plus a stdout read cursor (process-streaming arc, for `read_line`). A sandbox
     /// "child" runs to completion at spawn (the scripted `os_exec`), so `wait` returns its stored
@@ -293,6 +299,7 @@ impl SandboxHost {
             clock: DeterministicClock::new(SANDBOX_EPOCH_MS),
             env: env::sandbox_vars(),
             args: env::sandbox_args(),
+            stdin: env::sandbox_stdin(),
             procs: BTreeMap::new(),
             next_proc: 1,
             inbound: None,
@@ -563,6 +570,33 @@ impl Env for SandboxHost {
 
     fn args(&self) -> Vec<String> {
         self.args.clone()
+    }
+}
+
+impl Console for SandboxHost {
+    fn stdin_read_line(&mut self) -> Option<String> {
+        self.stdin.pop_front()
+    }
+
+    fn stdin_read_all(&mut self) -> String {
+        // Drain the remaining fixture lines, joined by `\n` (no trailing newline) — the whole-stdin
+        // read after any line-by-line consumption.
+        let rest: Vec<String> = self.stdin.drain(..).collect();
+        rest.join("\n")
+    }
+
+    fn is_tty(&self, _stream: Stream) -> bool {
+        // The sandbox is non-interactive by construction: reporting every stream non-interactive
+        // keeps the differential deterministic (a program that branches on `is_tty` takes the same
+        // arm on both backends and every run).
+        false
+    }
+
+    fn prompt(&mut self, _msg: &str) -> Option<String> {
+        // `msg` writes to nothing observable in the sandbox (it never reaches the compared buffers),
+        // so a prompt is just the next scripted stdin line — identical to `stdin_read_line`, which
+        // keeps `RealHost`'s prompt-then-read and the sandbox's scripted read agreeing.
+        self.stdin.pop_front()
     }
 }
 
@@ -955,7 +989,7 @@ mod tests {
 
         // Everything else forwards — one line per capability, provided methods included.
         noeta_ext_abi::delegate_host!(EngineHost => base :
-            FileReader, FileSystem, Rng, Clock, Os, Entropy, Ids, Network, P2pProvider,
+            FileReader, FileSystem, Rng, Clock, Console, Os, Entropy, Ids, Network, P2pProvider,
             Tracing, Metrics, Logging);
 
         // The blanket impl makes the overlay a full Host — the boxed form every backend holds.

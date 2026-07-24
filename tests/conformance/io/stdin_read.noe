@@ -1,0 +1,32 @@
+// std.io stdin + TTY (CLI-completion slice 2): stdin and terminal-ness are host effects over the
+// `Console` capability — a scripted fixture in the sandbox (`["line one", "line two", "line three"]`),
+// real stdin on `RealHost` — so the differential stays deterministic. `io.is_tty()` /
+// `io.stdin_is_tty()` are ALWAYS false in the non-interactive sandbox, and `io.stdin_line()` yields
+// the fixture lines in order then `none` at EOF. Both backends drive the SAME fixture, so the
+// tree-walker and the VM (and, under `--features jit`, tier 0 vs tier 1) agree by construction.
+// expect: stdout "stdout tty? false"
+// expect: stdout "stdin tty? false"
+// expect: stdout "got: line one"
+// expect: stdout "got: line two"
+// expect: stdout "got: line three"
+// expect: stdout "done"
+// expect: exit 0
+use std.io
+
+// TTY-ness is deterministically false in the sandbox — the "should I colorize?" check.
+echo "stdout tty? ${io.is_tty()}"
+echo "stdin tty? ${io.stdin_is_tty()}"
+
+// Read the scripted stdin a line at a time until EOF, echoing each with a prefix.
+mut running = true
+while running {
+    (line, keep) = match io.stdin_line() {
+        some(s) => (s, true),
+        none => ("", false),
+    }
+    if keep {
+        echo "got: ${line}"
+    }
+    running = keep
+}
+echo "done"

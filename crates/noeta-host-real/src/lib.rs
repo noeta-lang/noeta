@@ -51,11 +51,11 @@ mod ws;
 use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, ExternBox, ExternIo, FileReader,
-    FileSystem, Ids, InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore,
-    MetricValue, Metrics, NativeOut, NetError, NetErrorKind, NetRequest, NetResponse, Network, Os,
-    ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, StdError,
-    TraceContext, Tracing,
+    AttrValue, Clock, Console, Entropy, Env, ErrorKind, ExecResult, ExternBox, ExternIo,
+    FileReader, FileSystem, Ids, InstrumentId, InstrumentKind, LogRecord, Logging, MetricData,
+    MetricStore, MetricValue, Metrics, NativeOut, NetError, NetErrorKind, NetRequest, NetResponse,
+    Network, Os, ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus,
+    StdError, TraceContext, Tracing,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1727,6 +1727,58 @@ impl Os for RealHost {
         // Dropping the `ChildStdin` closes the pipe (EOF to the child). Idempotent.
         proc.stdin = None;
         Ok(())
+    }
+}
+
+impl Console for RealHost {
+    // Real stdin and real terminal probing — the CLI-only side of the Console capability. The
+    // sandbox's scripted fixture is what keeps the differential deterministic; here we do live I/O.
+    fn stdin_read_line(&mut self) -> Option<String> {
+        use std::io::BufRead;
+        let mut line = String::new();
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) => None, // EOF.
+            Ok(_) => {
+                // Strip the trailing newline (and a preceding `\r`), like the sandbox's fixture lines.
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                Some(line)
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn stdin_read_all(&mut self) -> String {
+        use std::io::Read;
+        let mut all = String::new();
+        // A read error (e.g. non-UTF-8) yields whatever was read so far — best-effort, like `os.exec`
+        // captures with `from_utf8_lossy`.
+        let _ = std::io::stdin().lock().read_to_string(&mut all);
+        all
+    }
+
+    fn is_tty(&self, stream: noeta_stdlib::Stream) -> bool {
+        use std::io::IsTerminal;
+        match stream {
+            noeta_stdlib::Stream::Stdin => std::io::stdin().is_terminal(),
+            noeta_stdlib::Stream::Stdout => std::io::stdout().is_terminal(),
+            noeta_stdlib::Stream::Stderr => std::io::stderr().is_terminal(),
+        }
+    }
+
+    fn prompt(&mut self, msg: &str) -> Option<String> {
+        use std::io::Write;
+        // Write the prompt to the REAL terminal now (stderr, so it never pollutes the batch-captured
+        // stdout the oracle compares), flush it, then read one line — the single interactive path
+        // that survives batch-captured output.
+        let mut err = std::io::stderr();
+        let _ = err.write_all(msg.as_bytes());
+        let _ = err.flush();
+        self.stdin_read_line()
     }
 }
 

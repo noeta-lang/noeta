@@ -26,10 +26,10 @@ use std::collections::HashMap;
 
 use noeta_stdlib::fs::Vfs;
 use noeta_stdlib::{
-    AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
+    AttrValue, Clock, Console, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
     InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue,
     Metrics, NetError, NetErrorKind, NetRequest, NetResponse, Network, Os, ReadSource, Rng, SpanId,
-    SpanKind, SpanStatus, SpanTracker, StdError, TraceContext, Tracing,
+    SpanKind, SpanStatus, SpanTracker, StdError, Stream, TraceContext, Tracing,
 };
 use serde_json::json;
 
@@ -289,6 +289,26 @@ impl Env for BrowserHost {
 
     fn args(&self) -> Vec<String> {
         vec![crate::SOURCE_NAME.to_string()]
+    }
+}
+
+impl Console for BrowserHost {
+    // The browser has no console stdin: reads report EOF and every stream is non-interactive, the
+    // same non-interactive shape the sandbox presents (a playground program never blocks on input).
+    fn stdin_read_line(&mut self) -> Option<String> {
+        None
+    }
+
+    fn stdin_read_all(&mut self) -> String {
+        String::new()
+    }
+
+    fn is_tty(&self, _stream: Stream) -> bool {
+        false
+    }
+
+    fn prompt(&mut self, _msg: &str) -> Option<String> {
+        None
     }
 }
 
