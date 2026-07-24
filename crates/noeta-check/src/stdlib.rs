@@ -425,6 +425,18 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
                 _ => Type::Dyn,
             })
         }
+        // A registered native **enum**'s instance methods (native-extensibility S1 / Slice B) come
+        // from its `ExtEnum` signature table (resolved by `find_enum_method`), the enum twin of the
+        // fielded-method arm above. A native enum is not generic, so there are no receiver
+        // type-variable bindings; it is consulted before the built-in `value()` accessor below (a
+        // declared method name is disjoint from `value`).
+        Type::Named(n, _) if reg.find_enum_method(n, name).is_some() => {
+            let sig = reg.find_enum_method(n, name)?;
+            Some(match sig.ret {
+                registry::RetTy::Concrete(s) => sig_to_type(reg, &s),
+                _ => Type::Dyn,
+            })
+        }
         // A native **backed** enum's `.value()` accessor (native-extensibility S1): the constraint
         // `ExtEnum.backing` states the accessor's type — a `String`-backed enum's `.value()` is
         // `string`, an `Int`-backed one's is `int`. A non-backed enum has NO `.value()` (returns
@@ -736,6 +748,13 @@ pub(super) fn method_params(
             let sig = reg.find_class_method(n, name)?;
             Some(sig.params.iter().map(|p| sig_to_type(reg, p)).collect())
         }
+        // A native **enum**'s method parameters come from its `ExtEnum` signature table
+        // (native-extensibility S1 / Slice B, resolved by `find_enum_method`), like `method_return`;
+        // a native enum is not generic.
+        Type::Named(n, _) if reg.find_enum_method(n, name).is_some() => {
+            let sig = reg.find_enum_method(n, name)?;
+            Some(sig.params.iter().map(|p| sig_to_type(reg, p)).collect())
+        }
         _ => None,
     }
 }
@@ -769,6 +788,12 @@ pub(super) fn method_required(
     // A native class's method required-arg count (native-extensibility S3 / Pass 2a).
     if let Type::Named(n, _) = receiver
         && let Some(sig) = reg.find_class_method(n, name)
+    {
+        return Some(registry::SigType::required_count(sig.params));
+    }
+    // A native enum's method required-arg count (native-extensibility S1 / Slice B).
+    if let Type::Named(n, _) = receiver
+        && let Some(sig) = reg.find_enum_method(n, name)
     {
         return Some(registry::SigType::required_count(sig.params));
     }

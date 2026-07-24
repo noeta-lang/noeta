@@ -307,6 +307,23 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // `methods` (native-extensibility S1 / Slice B): the enum's instance-method signatures. Read by
+    // `find_enum_method` (which the checker's `method_return`/`method_params` and both backends' enum
+    // method-call arm consult to route a native-enum method call to `dispatch`) — the `ExtFielded`
+    // `methods` twin for an enum receiver.
+    Row(
+        "ExtEnum",
+        "methods",
+        Data(Anchor(REGISTRY, "pub fn find_enum_method(")),
+    ),
+    // `dispatch`: the one shared native-enum instance-method dispatch (reusing the neutral
+    // `NativeMethodDispatch` seam), invoked by both backends' `call_native_enum_method`
+    // (`(en.dispatch)(...)`) and exercised by the `ext_enum_seam` native-enum-method test.
+    Row(
+        "ExtEnum",
+        "dispatch",
+        Data(Anchor(EVAL_LIB, "fn call_native_enum_method(")),
+    ),
     Row(
         "ExtVariant",
         "name",
