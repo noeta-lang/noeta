@@ -6230,6 +6230,36 @@ fn materialize_ext(
 }
 
 /// Lift a native-extension [`noeta_stdlib::NativeOut`] result back into a tree-walker `Value`.
+/// Build a native-declared **fielded-type** instance (native-extensibility S2, unified) as a REAL
+/// `Object`: a `Class` gets a class `TypeDef` (identity `==`, `is_struct = false`), a `Struct` a
+/// value `TypeDef` (structural `==`, value semantics). Fields are in declared slot order, already
+/// materialized. The one place both the ordinary [`NativeOut::Instance`] materialization AND the
+/// `json.parse::<T>` recipe door (for a native `@validated` struct, whose qualified recipe name has
+/// no `.noe` def `construct_object` can resolve) build the same struct-kind shape — so a
+/// recipe-decoded native struct is differential-identical to a natively-constructed one, and its
+/// method dispatch (`call_method` → `find_class_method`) reaches the type's native `dispatch`.
+pub(crate) fn fielded_object(name: String, is_struct: bool, fields: Vec<(String, Value)>) -> Value {
+    let field_specs = fields
+        .iter()
+        .map(|(n, _)| FieldSpec { name: n.clone() })
+        .collect();
+    let slots: Vec<Value> = fields.into_iter().map(|(_, v)| v).collect();
+    let def = Rc::new(TypeDef {
+        name,
+        fields: field_specs,
+        methods: HashMap::new(),
+        destructor: None,
+        is_struct,
+        structural_eq: is_struct,
+        key_capable: std::cell::Cell::new(false),
+        derives_comparable: false,
+        derives_tojson: false,
+        opaque: false,
+        field_defaults: Vec::new(),
+    });
+    Value::Object(Rc::new(ObjectValue::new(def, slots)))
+}
+
 pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
     use noeta_stdlib::{NativeOut, Scalar};
     match out {
@@ -6300,28 +6330,11 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             kind,
         } => {
             let is_struct = matches!(kind, noeta_stdlib::FieldedKind::Struct);
-            let field_specs = fields
-                .iter()
-                .map(|(n, _)| FieldSpec { name: n.clone() })
-                .collect();
-            let slots: Vec<Value> = fields
+            let fields = fields
                 .into_iter()
-                .map(|(_, out)| materialize_native(out))
+                .map(|(n, out)| (n, materialize_native(out)))
                 .collect();
-            let def = Rc::new(TypeDef {
-                name: class,
-                fields: field_specs,
-                methods: HashMap::new(),
-                destructor: None,
-                is_struct,
-                structural_eq: is_struct,
-                key_capable: std::cell::Cell::new(false),
-                derives_comparable: false,
-                derives_tojson: false,
-                opaque: false,
-                field_defaults: Vec::new(),
-            });
-            Value::Object(Rc::new(ObjectValue::new(def, slots)))
+            fielded_object(class, is_struct, fields)
         }
         // An in-place instance mutation (boundary 1) has no receiver here to write into — the
         // class-method call site (`call_native_class_method`) intercepts it, applies the write-set,

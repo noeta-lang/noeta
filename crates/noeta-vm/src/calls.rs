@@ -911,13 +911,28 @@ impl<'m> Vm<'m> {
             }
         };
         let Some(proto) = self.method_proto(&type_name, method) else {
+            let recv = args[0];
+            // A **native fielded-type** instance method (native-extensibility S3 / Pass 2a): no user
+            // proto by this name, but the receiver's shape names a registered native class OR struct
+            // that declares it — route to its native `dispatch`, mirroring the `Op::CallMethod`
+            // opcode's Object-arm fallthrough (`find_class_method` → `call_native_class_method`) and
+            // the tree-walker's `call_method`. This is the path the `@validated` recipe door's
+            // `validate` re-entry takes for a native struct: `run_method_handle` is how both
+            // `validate_message` (validation arc) and a stored method handle dispatch, so without it
+            // a native struct materialized by `json.parse::<T>` could never run its validator.
+            if self.reg().find_class_method(&type_name, method).is_some() {
+                let result = self.call_native_class_method(recv, method, &args[1..], span);
+                for a in args {
+                    release(a);
+                }
+                return result;
+            }
             // Not a user method — a **built-in** receiver (`list.len`, `string.upper`, MH.2):
             // dispatch through the same `call_builtin_method` the `Op::CallMethod` opcode uses, so a
             // handle call and a direct call agree by construction (this mirrors the tree-walker,
             // whose handle arm reuses its ordinary `call_method`). The helper borrows; the owned
             // arguments are released after (the result is a fresh value, so this is safe even when
             // it aliases an argument's content).
-            let recv = args[0];
             let result = self.call_builtin_method(recv, recv.heap_kind(), method, &args[1..], span);
             for a in args {
                 release(a);

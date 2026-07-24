@@ -2107,7 +2107,21 @@ impl Interpreter {
                 }
                 // A `json.parse::<T>` result carries no reflected tag (R2) — its concrete type is
                 // recovered head-only from the shape; untagged.
-                let value = self.construct_object(&name, span, field_values, None, None, span)?;
+                //
+                // A NATIVE fielded struct (native type-declaration unification) has no `.noe` def in
+                // scope — it is scope-bound only under its short name, while the recipe carries the
+                // QUALIFIED identity `type_to_recipe` keyed against `symbols.records` — so
+                // `construct_object` (a scope lookup) cannot build it. Build the native struct-kind
+                // Object directly instead, the same value-`TypeDef` shape `materialize_native` gives a
+                // `NativeOut::Instance{kind:Struct}` (reused via `fielded_object`), keyed by the
+                // qualified identity so the `has_validator` re-entry below dispatches `validate` to the
+                // type's native `dispatch` (`call_method` → `find_class_method` → the fielded seam).
+                let value = if self.reg().resolve_fielded(&name).is_some() {
+                    let fields = field_values.into_iter().map(|(n, _, v)| (n, v)).collect();
+                    crate::fielded_object(name.clone(), true, fields)
+                } else {
+                    self.construct_object(&name, span, field_values, None, None, span)?
+                };
                 // Bottom-up: every field is materialized and validated above, so the type's own
                 // `validate` sees an already-valid value. A rejection short-circuits before this
                 // node becomes a `Value`.
