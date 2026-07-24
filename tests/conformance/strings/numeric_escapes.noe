@@ -1,0 +1,33 @@
+// `\xHH` (ASCII/control, 0x00–0x7F) and `\u{H…H}` (any non-surrogate Unicode scalar, UTF-8) escapes.
+// The escape is decoded at parse time and folded into the AST literal, so both backends see the
+// same bytes and agree by construction. Decoding is proven via the string↔bytes bridge: `to_bytes()`
+// is the UTF-8 encoding, `to_hex()` renders it, string `len()` is chars, bytes `len()` is bytes.
+// expect: stdout "A"
+// expect: stdout "1b"
+// expect: stdout "1b"
+// expect: stdout "7f"
+// expect: stdout "true"
+// expect: stdout "f09f9880"
+// expect: stdout "1"
+// expect: stdout "4"
+// expect: stdout "1b"
+// expect: stdout "1b"
+// expect: exit 0
+
+// `\x41` is the ASCII letter `A`.
+echo "\x41";
+// ESC (0x1b) written two ways — same byte.
+echo "\x1b".to_bytes().to_hex();
+echo "\u{1b}".to_bytes().to_hex();
+// DEL (0x7f), the top of the `\x` range and a lone control char.
+echo "\u{7f}".to_bytes().to_hex();
+echo ("\x1b" == "\u{1b}");
+// A multi-byte scalar 😀 (U+1F600) encodes to four UTF-8 bytes but is one char.
+echo "\u{1F600}".to_bytes().to_hex();
+echo "\u{1F600}".len();
+echo "\u{1F600}".to_bytes().len();
+// A numeric escape inside a `${…}` interpolation hole decodes and does not confuse the hole
+// scanner — both directly on a nested string and when that nested string is a call argument (the
+// `"${ f("\u{1b}") }"` shape: a `\u{…}` whose braces must not be read as the hole's `${`/`}`).
+echo "${ "\u{1b}".to_bytes().to_hex() }";
+echo "${ "-".replace("-", "\u{1b}").to_bytes().to_hex() }";

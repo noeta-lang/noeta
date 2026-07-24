@@ -1,0 +1,4 @@
+// A Unicode scalar must be <= 0x10FFFF; `\u{110000}` is one past the maximum (E0064).
+// expect: error E0064 at 4:7
+// expect: exit 1
+echo "\u{110000}"

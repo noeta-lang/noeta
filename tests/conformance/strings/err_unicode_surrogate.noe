@@ -1,0 +1,4 @@
+// Surrogate code points (0xD800–0xDFFF) are not Unicode scalars and can't be encoded (E0064).
+// expect: error E0064 at 4:7
+// expect: exit 1
+echo "\u{D800}"

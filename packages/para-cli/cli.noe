@@ -872,13 +872,8 @@ fn push_unique(xs: List<string>, x: string): List<string> {
 // `--help`/usage output is colorized only when stdout is a terminal (`io.is_tty()`); piped output is
 // plain, so a captured help text carries no escape codes and diffs stay readable. Every sequence is
 // built from the single escape byte in `esc()`, so color is one toggle.
-//
-// LANGUAGE NOTE: Noeta string escapes cover `\n`/`\t`/`\r`/`\"`/`\\`/`\$` but NOT `\x1b`/`\u{1b}`, and
-// there is no char-from-code-point primitive (`from_bytes` needs a `bytes` value, unconstructible
-// from ints at the surface). So the ESC (0x1b) in `esc()` is a literal control byte in the source —
-// the only available mechanism. `noeta fmt` preserves it verbatim.
 fn esc(): string {
-    return ""
+    return "\u{1b}"
 }
 
 fn styled(): bool {

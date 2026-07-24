@@ -4676,7 +4676,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noeta_ast::Pretty;
+    use noeta_ast::{Pretty, StrPart};
     use noeta_lexer::lex;
     use noeta_span::SourceId;
 
@@ -6012,6 +6012,92 @@ mod tests {
             parsed.diagnostics.is_empty(),
             "exactly the limit should be accepted: {:?}",
             parsed.diagnostics
+        );
+    }
+
+    /// Parse `echo "<body>"` and return the decoded literal value, asserting no diagnostics.
+    fn echoed_str(body: &str) -> String {
+        let src = format!("echo \"{body}\"\n");
+        let parsed = parse_str(&src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{body:?}: {:?}",
+            parsed.diagnostics
+        );
+        match &parsed.program.stmts[0] {
+            Stmt::Echo {
+                value: Expr::Str { value, .. },
+                ..
+            } => value.clone(),
+            other => panic!("expected `echo <string>`, got {other:?}"),
+        }
+    }
+
+    /// The E0064 codes produced by parsing `echo "<body>"` (empty when the escape is well-formed).
+    fn escape_error_codes(body: &str) -> Vec<String> {
+        let src = format!("echo \"{body}\"\n");
+        parse_str(&src)
+            .diagnostics
+            .iter()
+            .map(|d| d.code.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn numeric_escapes_decode_to_control_scalars() {
+        assert_eq!(echoed_str("\\x41"), "A");
+        assert_eq!(echoed_str("\\x1b"), "\u{1b}");
+        assert_eq!(echoed_str("\\x00"), "\u{0}");
+        assert_eq!(echoed_str("\\x7f"), "\u{7f}");
+        assert_eq!(echoed_str("\\u{1b}"), "\u{1b}");
+        assert_eq!(echoed_str("\\u{7f}"), "\u{7f}");
+        assert_eq!(echoed_str("\\u{1F600}"), "\u{1f600}");
+        // `\u{1b}` and `\x1b` name the same scalar.
+        assert_eq!(echoed_str("\\x1b"), echoed_str("\\u{1b}"));
+        // Existing escapes and an unknown escape (`\q` -> `q`) are unchanged.
+        assert_eq!(echoed_str("a\\tb\\r\\n\\q"), "a\tb\r\nq");
+    }
+
+    #[test]
+    fn malformed_numeric_escapes_report_e0064() {
+        for bad in [
+            "\\xG0",        // non-hex
+            "\\x8",         // fewer than two digits (closing quote follows)
+            "\\x80",        // above ASCII
+            "\\u1b",        // missing brace
+            "\\u{}",        // empty
+            "\\u{zz}",      // non-hex
+            "\\u{1b",       // unterminated
+            "\\u{110000}",  // above 0x10FFFF
+            "\\u{D800}",    // surrogate
+            "\\u{1234567}", // overlong (7 digits)
+        ] {
+            assert_eq!(
+                escape_error_codes(bad),
+                vec!["E0064".to_string()],
+                "expected one E0064 for {bad:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_escapes_work_inside_interpolation_holes() {
+        // `\u{…}` inside a hole's nested string must decode and not confuse the hole scanner.
+        let parsed = parse_str("echo \"${ \"\\u{1b}\".to_bytes().to_hex() }\"\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        // A `\u{…}` literal segment sitting beside a hole stays a decoded literal part.
+        let parsed = parse_str("echo \"\\u{1b}${1}\"\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Echo {
+            value: Expr::Interp { parts, .. },
+            ..
+        } = &parsed.program.stmts[0]
+        else {
+            panic!("expected an interpolation");
+        };
+        assert!(
+            matches!(&parts[0], StrPart::Literal(s) if s == "\u{1b}"),
+            "leading literal should decode to ESC: {parts:?}",
         );
     }
 }

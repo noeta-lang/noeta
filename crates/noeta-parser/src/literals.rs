@@ -4,8 +4,12 @@
 //! f32 / `IntN` numeric forms. Split out of the grammar module so the combinator file holds only
 //! the grammar; these are ordinary functions over a [`Ctx`] and `&str`, not chumsky parsers.
 
+use std::iter::Peekable;
+use std::str::CharIndices;
+
 use chumsky::prelude::*;
 use noeta_ast::{Expr, StrPart};
+use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_lexer::lex_in;
 use noeta_span::{Source, SourceId, Span};
 
@@ -228,21 +232,27 @@ fn build_interpolated(ctx: Ctx<'_>, inner: &str, base: u32, span: Span) -> Expr 
 
     while let Some((offset, c)) = chars.next() {
         match c {
-            '\\' => {
-                let escaped = match chars.next() {
-                    Some((_, 'n')) => '\n',
-                    Some((_, 't')) => '\t',
-                    Some((_, 'r')) => '\r',
-                    Some((_, '"')) => '"',
-                    Some((_, '\\')) => '\\',
-                    // `\$` is a literal `$` — the one escape interpolation needs, so a literal
-                    // `${` is written `\${`. Bare `{`/`}`/`$` are already literal (no escaping).
-                    Some((_, '$')) => '$',
-                    Some((_, other)) => other,
-                    None => '\\',
-                };
-                literal.push(escaped);
-            }
+            '\\' => match chars.next() {
+                Some((_, 'n')) => literal.push('\n'),
+                Some((_, 't')) => literal.push('\t'),
+                Some((_, 'r')) => literal.push('\r'),
+                Some((_, '"')) => literal.push('"'),
+                Some((_, '\\')) => literal.push('\\'),
+                // `\$` is a literal `$` — the one escape interpolation needs, so a literal
+                // `${` is written `\${`. Bare `{`/`}`/`$` are already literal (no escaping).
+                Some((_, '$')) => literal.push('$'),
+                // `\xHH` — exactly two hex digits, an ASCII/control scalar `0x00..=0x7F`.
+                Some((_, 'x')) => {
+                    decode_hex_escape(ctx, &mut chars, inner, base, offset, &mut literal)
+                }
+                // `\u{H…H}` — 1–6 hex digits in braces, any non-surrogate Unicode scalar.
+                Some((_, 'u')) => {
+                    decode_unicode_escape(ctx, &mut chars, inner, base, offset, &mut literal)
+                }
+                // An unknown escape (`\q`) is the escaped char verbatim — long-standing behavior.
+                Some((_, other)) => literal.push(other),
+                None => literal.push('\\'),
+            },
             // `${ expr }` is the only interpolation trigger; a bare `{`, `}`, or `$` is literal.
             '$' if chars.peek().map(|(_, c)| *c) == Some('{') => {
                 chars.next(); // consume the `{`
@@ -280,6 +290,191 @@ fn build_interpolated(ctx: Ctx<'_>, inner: &str, base: u32, span: Span) -> Expr 
         parts.push(StrPart::Literal(literal));
     }
     Expr::Interp { parts, span }
+}
+
+/// Report a malformed numeric string escape (E0064) at the escape's span. The span runs from the
+/// backslash at `bs_offset` to the iterator's current position (the char just past the last one
+/// consumed, or the end of `inner`), both relative to `inner` and rebased by `base` to absolute
+/// source offsets — so the diagnostic points at the offending `\x…`/`\u{…}`.
+fn escape_error(
+    ctx: Ctx<'_>,
+    chars: &mut Peekable<CharIndices<'_>>,
+    inner: &str,
+    base: u32,
+    bs_offset: usize,
+    message: impl Into<String>,
+) {
+    let end = chars.peek().map_or(inner.len(), |(i, _)| *i);
+    let span = Span::new_in(ctx.source.id(), base + bs_offset as u32, base + end as u32);
+    ctx.diags.borrow_mut().push(Diagnostic::error(
+        DiagnosticCode::InvalidStringEscape,
+        span,
+        message,
+    ));
+}
+
+/// Decode a `\xHH` escape (the backslash and `x` already consumed): exactly two hex digits naming
+/// an ASCII/control scalar `0x00..=0x7F`. A value `> 0x7F` is rejected — a lone non-ASCII byte
+/// cannot sit in a UTF-8 string — pointing the user at `\u{…}`. On any error nothing is pushed and
+/// the diagnostic carries the escape's span.
+fn decode_hex_escape(
+    ctx: Ctx<'_>,
+    chars: &mut Peekable<CharIndices<'_>>,
+    inner: &str,
+    base: u32,
+    bs_offset: usize,
+    out: &mut String,
+) {
+    let mut value: u32 = 0;
+    for _ in 0..2 {
+        match chars.peek() {
+            Some((_, c)) if c.is_ascii_hexdigit() => {
+                let digit = c.to_digit(16).unwrap();
+                chars.next();
+                value = value * 16 + digit;
+            }
+            _ => {
+                escape_error(
+                    ctx,
+                    chars,
+                    inner,
+                    base,
+                    bs_offset,
+                    "`\\x` needs exactly two hex digits, e.g. `\\x1b`",
+                );
+                return;
+            }
+        }
+    }
+    if value > 0x7F {
+        escape_error(
+            ctx,
+            chars,
+            inner,
+            base,
+            bs_offset,
+            "`\\x` only encodes ASCII (`\\x00`–`\\x7F`); use `\\u{…}` for U+0080 and above",
+        );
+        return;
+    }
+    // `value <= 0x7F`, so it is a valid single-byte scalar.
+    out.push(char::from(value as u8));
+}
+
+/// Decode a `\u{H…H}` escape (the backslash and `u` already consumed): 1–6 hex digits in braces
+/// naming a Unicode scalar (`<= 0x10FFFF`, not a surrogate `0xD800..=0xDFFF`), pushed as UTF-8. On
+/// any error nothing is pushed and the diagnostic carries the escape's span.
+fn decode_unicode_escape(
+    ctx: Ctx<'_>,
+    chars: &mut Peekable<CharIndices<'_>>,
+    inner: &str,
+    base: u32,
+    bs_offset: usize,
+    out: &mut String,
+) {
+    if chars.peek().map(|(_, c)| *c) == Some('{') {
+        chars.next();
+    } else {
+        escape_error(
+            ctx,
+            chars,
+            inner,
+            base,
+            bs_offset,
+            "`\\u` must be followed by a braced scalar, e.g. `\\u{1b}`",
+        );
+        return;
+    }
+    let mut value: u32 = 0;
+    let mut digits = 0u32;
+    loop {
+        match chars.peek() {
+            Some((_, '}')) => {
+                chars.next();
+                break;
+            }
+            Some((_, c)) if c.is_ascii_hexdigit() => {
+                let digit = c.to_digit(16).unwrap();
+                chars.next();
+                digits += 1;
+                if digits > 6 {
+                    // Overlong: consume any remaining hex + the closing brace for a clean span.
+                    while matches!(chars.peek(), Some((_, d)) if d.is_ascii_hexdigit()) {
+                        chars.next();
+                    }
+                    if chars.peek().map(|(_, c)| *c) == Some('}') {
+                        chars.next();
+                    }
+                    escape_error(
+                        ctx,
+                        chars,
+                        inner,
+                        base,
+                        bs_offset,
+                        "`\\u{…}` takes at most 6 hex digits",
+                    );
+                    return;
+                }
+                value = value * 16 + digit;
+            }
+            Some((_, _)) => {
+                escape_error(
+                    ctx,
+                    chars,
+                    inner,
+                    base,
+                    bs_offset,
+                    "`\\u{…}` may contain only hex digits",
+                );
+                return;
+            }
+            None => {
+                escape_error(
+                    ctx,
+                    chars,
+                    inner,
+                    base,
+                    bs_offset,
+                    "unterminated `\\u{…}` escape — expected a closing `}`",
+                );
+                return;
+            }
+        }
+    }
+    if digits == 0 {
+        escape_error(
+            ctx,
+            chars,
+            inner,
+            base,
+            bs_offset,
+            "`\\u{}` is empty — supply 1–6 hex digits, e.g. `\\u{1b}`",
+        );
+        return;
+    }
+    if value > 0x10FFFF {
+        escape_error(
+            ctx,
+            chars,
+            inner,
+            base,
+            bs_offset,
+            "`\\u{…}` is above the maximum Unicode scalar `0x10FFFF`",
+        );
+        return;
+    }
+    match char::from_u32(value) {
+        Some(c) => out.push(c),
+        // `char::from_u32` rejects exactly the surrogate range once `<= 0x10FFFF` is established.
+        None => escape_error(
+            ctx,
+            chars,
+            inner,
+            base,
+            bs_offset,
+            "`\\u{…}` is a surrogate code point (`0xD800`–`0xDFFF`), which is not a Unicode scalar",
+        ),
+    }
 }
 
 /// Turn a single-quoted *raw* string token into a plain [`Expr::Str`]. There is no

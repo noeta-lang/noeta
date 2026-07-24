@@ -300,6 +300,13 @@ pub enum DiagnosticCode {
     /// `List<i32>` are exempt (packed element widths are distinct). The fix is to test the base type
     /// (`x is int` / `x is float`). Advisory, not an error: the program still compiles.
     ErasedWidthNarrow,
+    /// A string escape is malformed. Covers the numeric escapes added for control characters: a
+    /// `\xHH` that lacks two hex digits, is non-hex, or exceeds `0x7F` (the ASCII range — a lone
+    /// non-ASCII byte can't live in a UTF-8 string, so `\u{…}` is the fix); and a `\u{H…H}` that
+    /// omits the `{`, is empty, is non-hex, is unterminated, exceeds `0x10FFFF`, or names a
+    /// surrogate (`0xD800`–`0xDFFF`). The other escapes (`\n \t \r \" \\ \$`) and an unknown
+    /// escape (`\q` → `q`) are never this error. Reported at parse time against the escape's span.
+    InvalidStringEscape,
 }
 
 impl DiagnosticCode {
@@ -369,6 +376,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidArgument,
         DiagnosticCode::DirectiveExpansionFailed,
         DiagnosticCode::ErasedWidthNarrow,
+        DiagnosticCode::InvalidStringEscape,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -438,6 +446,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidArgument => "E0061",
             DiagnosticCode::DirectiveExpansionFailed => "E0062",
             DiagnosticCode::ErasedWidthNarrow => "E0063",
+            DiagnosticCode::InvalidStringEscape => "E0064",
         }
     }
 
