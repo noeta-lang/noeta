@@ -133,6 +133,7 @@ const FX_ENUMS: &[ExtEnum] = &[ExtEnum {
         },
     ],
     backing: EnumBacking::Str,
+    ..ExtEnum::DEFAULTS
 }];
 
 /// A bundle requiring **column** layout — the [`ConstraintLayout`] arm no shipped bundle declares

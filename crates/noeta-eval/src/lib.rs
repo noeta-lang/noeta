@@ -2621,6 +2621,16 @@ impl Interpreter {
         {
             return Ok(Value::Str(value_to_json(&receiver)));
         }
+        // A **native enum**'s instance method (native-extensibility S1 / Slice B): no `.noe`
+        // `EnumDef` method by this name and not the built-in `value()`/`to_json` accessor, but the
+        // value's (short) enum name resolves to a registered native enum that declares it — route to
+        // the enum's native `dispatch`. The enum twin of the Object arm's `find_class_method` →
+        // `call_native_class_method` fall-through above.
+        if let Value::Enum(e) = &receiver
+            && self.reg().find_enum_method(&e.enum_name, name).is_some()
+        {
+            return self.call_native_enum_method(&receiver, name, args, span);
+        }
         // `x.compare(y)` — the `Ordering` of two primitives. This is the value a `Comparable`
         // impl returns (typically by delegating to a field's `compare`); it lights up nothing on
         // its own, but `Comparable` dispatch reads the variant to derive `< <= > >=`.
@@ -3441,6 +3451,55 @@ impl Interpreter {
                 }
                 Ok(materialize_native(*ret))
             }
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
+        }
+    }
+
+    /// Dispatch a **native enum**'s instance method (native-extensibility S1 / Slice B) — the
+    /// [`ExtEnum`] analogue of [`Self::call_native_class_method`], reusing the shared
+    /// [`NativeMethodDispatch`] seam. The receiver is an enum value; it crosses to the native
+    /// `dispatch` as a [`NativeValue::Variant`] (its case + declaration index + positional payload),
+    /// the same shape an enum value takes arg-IN, so the method reads its payload off it. Host
+    /// threaded in, result materialized — mirrors the VM's `call_native_enum_method`, so the two
+    /// backends agree by construction. An enum is an **immutable value type**: a dispatch returning
+    /// [`NativeOut::InstanceUpdate`] is a runtime error, exactly as it is for a value struct.
+    fn call_native_enum_method(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        // Bound once (IR3): `&'static`, so it survives the `&mut self` host borrow below.
+        let reg = self.reg();
+        let en = match recv {
+            Value::Enum(e) => reg.resolve_enum(&e.enum_name),
+            _ => None,
+        };
+        let Some(en) = en else {
+            return Err(self.runtime_error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("no native enum method `{name}`"),
+            ));
+        };
+        let recv_native = marshal_native_arg(recv, reg);
+        let nargs: Vec<noeta_stdlib::NativeValue> =
+            args.iter().map(|a| marshal_native_arg(a, reg)).collect();
+        match (en.dispatch)(&recv_native, name, &mut *self.host, &nargs) {
+            // An enum is a value type — it has no in-place mutation. Reject an `InstanceUpdate` from
+            // an enum dispatch as a runtime error rather than silently mutating a value, mirroring
+            // the struct guard in `call_native_class_method` (and the VM's enum guard).
+            Ok(noeta_stdlib::NativeOut::InstanceUpdate { .. }) => Err(self.runtime_error(
+                DiagnosticCode::ImmutableField,
+                span,
+                format!(
+                    "native enum method `{name}` returned an in-place mutation, but an enum `{}` is \
+                     an immutable value type — return a new value instead",
+                    en.name
+                ),
+            )),
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
         }

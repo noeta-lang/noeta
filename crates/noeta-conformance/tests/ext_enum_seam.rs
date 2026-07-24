@@ -44,6 +44,14 @@ const HUE: ExtEnum = ExtEnum {
         },
     ],
     backing: EnumBacking::None,
+    // A **fieldless-variant** instance method (Slice B): reads the case off the marshalled
+    // `Variant` and lower-cases it (`Hue.Red.name()` → "red").
+    methods: &[ExtFn {
+        name: "name",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    }],
+    dispatch: shade_enum_dispatch,
 };
 
 const TONE: ExtEnum = ExtEnum {
@@ -62,6 +70,10 @@ const TONE: ExtEnum = ExtEnum {
         },
     ],
     backing: EnumBacking::Str,
+    // A method-less enum still routes `.value()` through the built-in accessor (unchanged): a
+    // native enum method call never shadows it. `dispatch` is inert here (no `methods`).
+    methods: &[],
+    dispatch: shade_enum_dispatch,
 };
 
 const LEVEL: ExtEnum = ExtEnum {
@@ -80,6 +92,8 @@ const LEVEL: ExtEnum = ExtEnum {
         },
     ],
     backing: EnumBacking::Int,
+    methods: &[],
+    dispatch: shade_enum_dispatch,
 };
 
 const TAG: ExtEnum = ExtEnum {
@@ -98,6 +112,14 @@ const TAG: ExtEnum = ExtEnum {
         },
     ],
     backing: EnumBacking::None,
+    // A **payload-carrying-variant** instance method (Slice B): reads the payload off the
+    // marshalled `Variant` — `Tag.Labeled("hi").describe()` → "labeled:hi", `Tag.Plain` → "plain".
+    methods: &[ExtFn {
+        name: "describe",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    }],
+    dispatch: shade_enum_dispatch,
 };
 
 const FX_ENUMS: &[ExtEnum] = &[HUE, TONE, LEVEL, TAG];
@@ -190,6 +212,47 @@ fn palette_dispatch(
         _ => Err(StdError {
             kind: noeta_stdlib::ErrorKind::UnknownName,
             message: format!("no function `{func}`"),
+        }),
+    }
+}
+
+/// The four enums' shared **instance-method** dispatch (Slice B) — the [`ExtEnum`] twin of a
+/// fielded type's `dispatch`, reusing the neutral `NativeMethodDispatch` seam. The receiver crosses
+/// as a [`NativeValue::Variant`] (case + payload); routing (`find_enum_method`) has already ensured
+/// the method belongs to the receiver's enum, so matching on the method name alone is sufficient and
+/// robust to the short-vs-qualified spelling of the receiver's `enum_name`.
+fn shade_enum_dispatch(
+    recv: &NativeValue,
+    method: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let NativeValue::Variant {
+        variant, fields, ..
+    } = recv
+    else {
+        return Err(StdError {
+            kind: noeta_stdlib::ErrorKind::ArgType,
+            message: "enum method called on a non-variant receiver".to_string(),
+        });
+    };
+    match method {
+        // A fieldless-variant method: the case name, lower-cased.
+        "name" => Ok(NativeOut::Str(variant.to_lowercase())),
+        // A payload-carrying-variant method: reads the payload off the marshalled `Variant`.
+        "describe" => {
+            let out = match variant.as_str() {
+                "Labeled" => match fields.first() {
+                    Some(NativeValue::Str(s)) => format!("labeled:{s}"),
+                    _ => "labeled:?".to_string(),
+                },
+                _ => "plain".to_string(),
+            };
+            Ok(NativeOut::Str(out))
+        }
+        _ => Err(StdError {
+            kind: noeta_stdlib::ErrorKind::UnknownName,
+            message: format!("no enum method `{method}`"),
         }),
     }
 }
@@ -379,6 +442,105 @@ fn native_enum_source_construction_round_trips_identically_on_both_backends() {
         reference.diagnostics
     );
     assert_eq!(reference.stdout, CONSTRUCT_EXPECTED_STDOUT);
+}
+
+/// **Native enum instance methods** (native-extensibility S1 / Slice B): a native enum declares
+/// instance methods dispatched to native code, exactly like a fielded type — reusing the shared
+/// dispatch seam. A fieldless-variant method (`Hue.name()`) and a payload-carrying-variant method
+/// (`Tag.describe()`, which reads the payload off the marshalled `Variant`) both route to the enum's
+/// native `dispatch`, and the two backends must materialize the identical result. The program also
+/// re-exercises S1's `.value()`, `match`, and source construction alongside the new methods, so this
+/// one differential run proves the method path does not disturb any of them.
+const METHOD_PROGRAM: &str = r#"
+use shade.palette
+use shade.Hue
+use shade.Tag
+
+// A fieldless-variant instance method on a native-returned value and a source-constructed one.
+h = palette.pick()
+echo h.name()
+echo Hue.Red.name()
+echo Hue.Blue.name()
+
+// A method call never shadows a `match` over the same value (S1 still works).
+echo match Hue.Red {
+    Hue.Red => "matched-red",
+    Hue.Green => "matched-green",
+    Hue.Blue => "matched-blue",
+}
+
+// A payload-carrying-variant method reads the payload off the marshalled `Variant`.
+t = palette.make_tag("hi")
+echo t.describe()
+echo Tag.Labeled("built").describe()
+echo Tag.Plain.describe()
+
+// The built-in backed-enum `.value()` accessor is untouched by the method path.
+echo palette.default_tone().value()
+echo palette.default_level().value()
+"#;
+
+const METHOD_EXPECTED_STDOUT: &str =
+    "green\nred\nblue\nmatched-red\nlabeled:hi\nlabeled:built\nplain\nwarm\n9\n";
+
+#[test]
+fn native_enum_instance_methods_dispatch_identically_on_both_backends() {
+    ensure_installed();
+
+    let db = LangDatabase::default();
+    let source = Source::new(SourceId::FIRST, "ext_enum_methods.noe", METHOD_PROGRAM);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
+
+    let parsed = noeta_db::ast(&db, src);
+    assert!(
+        parsed.0.diagnostics.is_empty(),
+        "method program must parse cleanly: {:?}",
+        parsed.0.diagnostics
+    );
+    // The native enum's methods type-check off its `ExtEnum::methods` signature table: `h.name()`
+    // is `string`, `t.describe()` is `string` — the enum twin of a fielded type's method typing.
+    let checked = noeta_db::checked(&db, src);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "method program must check cleanly: {:?}",
+        checked.diagnostics
+    );
+
+    // Leak oracle (mirrors `ext_class_seam.rs`'s `run_both_agree`): each backend must return heap
+    // residency to baseline across the run, so a native-enum method that marshals a payload-carrying
+    // `Variant` in and a string out leaks nothing.
+    let eval_before = noeta_eval::live_count();
+    let reference =
+        noeta_conformance::reference::reference_run(&parsed.0.program, checked.sites.clone());
+    let eval_after = noeta_eval::live_count();
+    assert_eq!(
+        eval_before, eval_after,
+        "tree-walker leak oracle: heap residency must return to baseline"
+    );
+
+    let module = noeta_db::bytecode(&db, src)
+        .0
+        .as_ref()
+        .expect("method program compiles to bytecode")
+        .clone();
+    let vm_before = noeta_value::live_count() as i64;
+    let vm = VmBackend::new().run_module(&module);
+    let vm_after = noeta_value::live_count() as i64;
+    assert_eq!(
+        vm_before, vm_after,
+        "VM leak oracle: heap residency must return to baseline"
+    );
+
+    assert_eq!(
+        reference, vm,
+        "backends must agree on the native-enum instance-method program"
+    );
+    assert_eq!(
+        reference.exit_code, 0,
+        "diagnostics: {:?}",
+        reference.diagnostics
+    );
+    assert_eq!(reference.stdout, METHOD_EXPECTED_STDOUT);
 }
 
 /// A non-exhaustive `match` over a native enum is E0011, exactly as it is for a `.noe` enum — the

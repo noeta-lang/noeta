@@ -1712,6 +1712,24 @@ impl<'m> Vm<'m> {
                                 )?;
                                 continue 'reload;
                             }
+                            // A native enum's instance method (native-extensibility S1 / Slice B):
+                            // no user proto and not the built-in `value()`/`to_json`, but the shape
+                            // names a registered native enum that declares it — route to the enum's
+                            // native `dispatch`, the enum twin of the Object arm's `find_class_method`
+                            // → `call_native_class_method` fall-through above. Left uncached like the
+                            // value/field paths.
+                            if self.reg().find_enum_method(&shape.name, method).is_some() {
+                                let arg_values = ArgBuf::collect(args, regs, fbase);
+                                let result = self.call_native_enum_method(
+                                    v,
+                                    method,
+                                    arg_values.as_slice(),
+                                    *span,
+                                )?;
+                                set_reg(regs, fbase, *dst, result);
+                                pc += 1;
+                                continue;
+                            }
                         }
                         // Everything below the object/enum dispatch is a built-in method on a
                         // non-object receiver — value-in/value-out, factored into

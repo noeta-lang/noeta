@@ -706,6 +706,17 @@ pub type FieldedDispatch = fn(
 /// this alias keeps every `ClassDispatch` reference compiling unchanged.
 pub type ClassDispatch = FieldedDispatch;
 
+/// The **neutral** spelling of the shared native instance-method dispatch signature, used by BOTH
+/// fielded types ([`ExtFielded`]) and enums ([`ExtEnum`], native-extensibility S1 / Slice B). It is
+/// identical to [`FieldedDispatch`] — the whole point is **one** dispatch shape across kinds, so a
+/// native enum method routes through the exact same seam a native class/struct method does. The one
+/// representational difference is arg-IN: a fielded receiver crosses as a [`NativeValue::Instance`]
+/// (fields by name), an enum receiver as a [`NativeValue::Variant`] (case + declaration index +
+/// positional payload); the method reads whichever off `recv`. An enum is an **immutable value
+/// type**, so a dispatch returning [`NativeOut::InstanceUpdate`] is a runtime error for an enum,
+/// exactly as it is for a [`FieldedKind::Struct`].
+pub type NativeMethodDispatch = FieldedDispatch;
+
 /// A type's **higher-order** method dispatch (higher-order-abi H4): like [`TypeDispatch`], but
 /// the receiver and arguments arrive as opaque ctx slots and the body may re-enter the backend —
 /// call closures, reach per-run state, read/write the retained arena. What `Cell.update(f)` and
@@ -943,6 +954,21 @@ pub struct ExtEnum {
     /// checker enforces on the `.value()` accessor's type: a `String`-backed enum's `.value()` is
     /// `string`, an `Int`-backed one's is `int`, and a non-backed enum has no `.value()` at all.
     pub backing: EnumBacking,
+    /// Instance-method signatures (native-extensibility S1 / Slice B) — the [`ExtEnum`] twin of
+    /// [`ExtFielded::methods`], same vocabulary as an [`ExtType`]'s `methods`. A call `color.name()`
+    /// on a native enum value routes to [`ExtEnum::dispatch`]; the checker types the call off these
+    /// signatures. Default empty (a data-only enum, the S1 shape). A method name is disjoint from the
+    /// built-in `value()`/`to_json` accessors and from a variant's case name.
+    pub methods: &'static [ExtFn],
+    /// The one shared instance-method dispatch (native-extensibility S1 / Slice B) — the [`ExtEnum`]
+    /// twin of [`ExtFielded::dispatch`], reusing the neutral [`NativeMethodDispatch`] signature so a
+    /// native enum method dispatches through the **same** seam a fielded method does. Receives the
+    /// enum value marshalled to a [`NativeValue::Variant`] (its case + payload) plus the host seam;
+    /// both backends route a native enum method call here after the user-proto and built-in
+    /// `value()`/`to_json` paths miss. A data-only enum never reaches it, so the default reports an
+    /// unregistered-method misuse. An enum is an immutable value type: a dispatch returning
+    /// [`NativeOut::InstanceUpdate`] is a runtime error (mirrors the [`FieldedKind::Struct`] guard).
+    pub dispatch: NativeMethodDispatch,
 }
 
 /// One variant of an [`ExtEnum`]: its case name plus **either** a positional payload (an algebraic
@@ -970,6 +996,15 @@ impl ExtEnum {
         namespace: "std",
         variants: &[],
         backing: EnumBacking::None,
+        methods: &[],
+        dispatch: |_, method, _, _| {
+            Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!(
+                    "internal: no enum-method dispatch registered (method `{method}`)"
+                ),
+            })
+        },
     };
 
     /// The variant named `variant`, with its declaration index, if any.
@@ -2509,6 +2544,19 @@ impl Registry {
     /// [`ExtFielded::dispatch`]. Resolves over both classes and structs.
     pub fn find_class_method(&self, name: &str, method: &str) -> Option<&'static ExtFn> {
         self.resolve_fielded(name)?
+            .methods
+            .iter()
+            .find(|m| m.name == method)
+    }
+
+    /// Find a native **enum**'s instance-method signature (native-extensibility S1 / Slice B) — the
+    /// [`ExtEnum`] twin of [`Registry::find_class_method`]. `name` is the runtime shape name (the
+    /// **short** name a native enum value carries) or a qualified identity. What both backends' enum
+    /// method-call arm consults to decide a native enum method call routes to [`ExtEnum::dispatch`],
+    /// and what the checker types the call off — the enum mirror of `find_class_method` →
+    /// `call_native_class_method`.
+    pub fn find_enum_method(&self, name: &str, method: &str) -> Option<&'static ExtFn> {
+        self.resolve_enum(name)?
             .methods
             .iter()
             .find(|m| m.name == method)

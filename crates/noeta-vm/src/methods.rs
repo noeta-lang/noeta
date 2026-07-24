@@ -608,6 +608,54 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Dispatch a **native enum**'s instance method (native-extensibility S1 / Slice B) — the
+    /// [`noeta_stdlib::ExtEnum`] analogue of [`Self::call_native_class_method`], reusing the shared
+    /// [`noeta_stdlib::NativeMethodDispatch`] seam. The receiver is an enum value; it crosses to the
+    /// native `dispatch` as a [`noeta_stdlib::NativeValue::Variant`] (its case + declaration index +
+    /// positional payload), the same shape an enum value takes arg-IN, so the method reads its
+    /// payload off it. Host threaded in, result materialized — mirrors the tree-walker's
+    /// `call_native_enum_method`, so the two backends agree. An enum is an **immutable value type**:
+    /// a dispatch returning [`noeta_stdlib::NativeOut::InstanceUpdate`] is a runtime error, exactly
+    /// as it is for a value struct.
+    pub(crate) fn call_native_enum_method(
+        &mut self,
+        recv: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        // Bound once (`&'static`, Copy), so it survives the `&mut self` host borrow below (IR3).
+        let reg = self.reg();
+        let en = recv.shape().and_then(|s| reg.resolve_enum(&s.name));
+        let Some(en) = en else {
+            return Err(self.error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("no native enum method `{method}`"),
+            ));
+        };
+        let recv_native = marshal_native_arg(recv, reg);
+        let nargs: Vec<noeta_stdlib::NativeValue> =
+            args.iter().map(|a| marshal_native_arg(*a, reg)).collect();
+        let host = &mut *self.persist.host;
+        match (en.dispatch)(&recv_native, method, host, &nargs) {
+            // An enum is a value type — it has no in-place mutation. Reject an `InstanceUpdate` from
+            // an enum dispatch as a runtime error rather than silently mutating a value, mirroring
+            // the struct guard in `call_native_class_method` (and the tree-walker's enum guard).
+            Ok(noeta_stdlib::NativeOut::InstanceUpdate { .. }) => Err(self.error(
+                DiagnosticCode::ImmutableField,
+                span,
+                format!(
+                    "native enum method `{method}` returned an in-place mutation, but an enum `{}` \
+                     is an immutable value type — return a new value instead",
+                    en.name
+                ),
+            )),
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+        }
+    }
+
     /// Dispatch an iterator method (Track I). Mirrors the tree-walker's `call_iter_method`. `next`/
     /// `collect`/`count` consume the cursor; `take`/`drop`/`chain` build a new adapter that retains
     /// the receiver (and `chain`'s argument) — the same retain pattern as `iter()`, leak-verified.
