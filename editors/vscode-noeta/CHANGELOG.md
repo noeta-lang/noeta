@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.3
+
+Fixes the language server not engaging on **unsaved (untitled) buffers** in Noeta mode: a new file
+with the language set to "Noeta" showed no diagnostics, hover, completion, or **inlay type hints**
+until its first save. The LSP client's `documentSelector` matched only the `file` scheme, and VS Code
+sends no request for a scheme the selector omits; it now also matches `untitled`. The server already
+places such a buffer in its own single-file workspace, so nothing else was needed. (Path-bound
+features — the architecture view, docs browser, debugger, and run/build tasks — still require a saved
+file, by nature.)
+
 ## 0.14.2
 
 Fixes **`${...}` interpolation inside strings** rendering in the enclosing string's color. The
