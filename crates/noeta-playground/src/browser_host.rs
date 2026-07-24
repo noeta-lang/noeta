@@ -2,7 +2,8 @@
 //!
 //! Where the playground's default `SandboxHost` is the deterministic conformance world, this
 //! host backs the real-world capabilities with **wasm imports the embedding worker supplies**
-//! (module `noeta_host`, see `web/playground/worker.js`):
+//! (module `noeta_host`; the embedding worker lives in the separate noeta-playground repo —
+//! `src/workers/engine.worker.ts`):
 //!
 //! - **Entropy** ← `js_entropy_u64` (`crypto.getRandomValues`) — real uuids.
 //! - **Wall clock** ← `js_now_ms` (`Date.now`) — real `clock_unix_ms`.
