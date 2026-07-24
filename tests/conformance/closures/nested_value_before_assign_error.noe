@@ -1,0 +1,13 @@
+// Regression guard: only `fn` DECLARATIONS hoist within a block. A VALUE binding (`total = 5`) stays
+// strictly in source order even when nested, so referencing it before its assignment inside a fn body
+// is still a runtime E0005 (unknown name) on both backends. This is what keeps hoisting fns past value
+// bindings sound: fns are sealed and never read a surrounding value, so only the value's own
+// order-dependence must be preserved.
+// expect: error E0005 at 9:9
+// expect: exit 1
+fn outer(): int {
+    x = total;   // used before its assignment below — still an error
+    total = 5;
+    return x;
+}
+echo outer();

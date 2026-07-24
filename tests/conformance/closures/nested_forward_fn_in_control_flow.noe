@@ -1,0 +1,18 @@
+// The fn-declaration hoist applies to EVERY block scope, not just a fn body: an `if` body and a
+// `for` body each call a `fn` declared textually later in the SAME block. The hoist emits those
+// declarations before the block's other statements, so the forward call resolves on both backends.
+// expect: stdout "24"
+// expect: exit 0
+fn compute(): int {
+    mut total = 0;
+    if true {
+        total = total + doubled(3);   // calls a fn declared below, in this if-body
+        fn doubled(n: int): int { return n * 2; }
+    }
+    for i in [1, 2, 3] {
+        total = total + tripled(i);   // calls a fn declared below, in this for-body
+        fn tripled(n: int): int { return n * 3; }
+    }
+    return total;
+}
+echo compute();

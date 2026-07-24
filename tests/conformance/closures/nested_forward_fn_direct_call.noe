@@ -1,0 +1,13 @@
+// A direct call to a nested `fn` BEFORE its declaration in the same fn body. The checker hoists the
+// nested declaration (collect.rs pass 1), so this type-checks; the runtime must agree by binding the
+// block's `fn` declarations before the block's other statements run. Previously this aborted with a
+// runtime E0005 ("cannot find `g`") — a checker/runtime hoisting mismatch, now fixed in the shared IR
+// lowering (the same fn-hoist the module top level already applies), so both backends agree.
+// expect: stdout "7"
+// expect: exit 0
+fn outer(): int {
+    x = g();
+    fn g(): int { return 7; }
+    return x;
+}
+echo outer();

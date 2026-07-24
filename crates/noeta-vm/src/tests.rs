@@ -1088,7 +1088,7 @@ fn destructor_runs_on_collected_cycle_capture() {
     // captured `Res`'s `destruct` (its last reference died with the cycle). So `drop 7` prints at
     // program-exit collection, after `make()`'s own `7`.
     let r = run(
-        "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; }\n}\nfn make(): int {\n  r = Res.new(7);\n  fn rec(n: int): int { if n <= 0 { return r.id; } return rec(n - 1); }\n  return rec(2);\n}\necho make();\n",
+        "class Res {\n  pub id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; }\n}\nfn make(): int {\n  r = Res.new(7);\n  fn rec(n: int) use (r): int { if n <= 0 { return r.id; } return rec(n - 1); }\n  return rec(2);\n}\necho make();\n",
     );
     assert_eq!(r.stdout, "7\ndrop 7\n");
     assert_eq!(r.exit_code, 0);
