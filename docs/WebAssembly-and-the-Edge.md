@@ -114,14 +114,14 @@ Per request, the program gets a fresh deterministic-by-default world with the re
 
 ## The browser playground
 
-The playground (`web/playground/` in the repository) is not a transpiler or a service — it is the **real toolchain compiled to WebAssembly**, running in the visitor's tab:
+The playground (the separate `noeta-playground` repo, live at play.noeta.dev) is not a transpiler or a service — it is the **real toolchain compiled to WebAssembly**, running in the visitor's tab. It embeds this repo's `noeta-playground` engine crate (the wasm cdylib + its `(ptr, len)` ABI), which it builds from a lang checkout:
 
 - **Check / Run / Format** through the same lexer → parser → type checker → compiler → VM as `noeta run`, executing on the deterministic sandbox — playground output is oracle-grade.
 - **The language smarts are the LSP's**: hover types (with `@packed` layout notes), completion, go-to-definition, and signature help come from the same engine `noeta lsp` adapts over, running client-side with no server.
 - **A "real host" mode** backs entropy, wall clock, and `std.http` fetches with the browser's own APIs; on browsers with JSPI (stack switching), concurrent `*_async` fan-out genuinely overlaps.
 - The engine runs in a Web Worker; an infinite loop is stopped by terminating the worker — the page stays responsive.
 
-Serving it needs any static file server — three static files plus the engine artifact, no bundler, no CDN.
+Serving it needs only static hosting plus the engine artifact — the toolchain runs entirely client-side, with no backend.
 
 ## Limits, plainly
 
