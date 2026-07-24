@@ -912,6 +912,7 @@ impl<'m> Vm<'m> {
                 module: self.module,
                 frames: &frames[..],
                 regs: &regs[..],
+                globals: &self.persist.globals,
                 strand,
             };
             prof.on_jit_enter(&view, proto as u32);
@@ -944,6 +945,7 @@ impl<'m> Vm<'m> {
                 module: self.module,
                 frames: &frames[..],
                 regs: &regs[..],
+                globals: &self.persist.globals,
                 strand,
             };
             prof.on_jit_exit(&view);

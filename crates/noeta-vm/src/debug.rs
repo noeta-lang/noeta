@@ -316,7 +316,7 @@ pub fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
             }
             None => (None, 0, 0),
         };
-        let locals = frame
+        let mut locals: Vec<VarInfo> = frame
             .locals()
             .filter(|(_, def_span, _)| local_in_scope(*def_span, line_span, sources))
             .map(|(name, _, value)| VarInfo {
@@ -327,6 +327,17 @@ pub fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
                 ty: value.type_display(),
             })
             .collect();
+        // The top-level (`main`, proto 0) frame's scope also holds the program's top-level value
+        // bindings, which are stored in the globals tier rather than this frame's registers (a named
+        // function is sealed and cannot see them, so they appear on no other frame). Only the main
+        // frame carries them; an isolate worker's bottom frame is its own entry fn, not proto 0.
+        if view.proto_at(i) == 0 {
+            locals.extend(view.top_level_bindings().map(|(name, value)| VarInfo {
+                name: name.to_string(),
+                value: value.display(),
+                ty: value.type_display(),
+            }));
+        }
         frames.push(FrameInfo {
             name: frame.name().unwrap_or("<anonymous>").to_string(),
             path,

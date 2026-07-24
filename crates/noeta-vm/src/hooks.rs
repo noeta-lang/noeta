@@ -264,6 +264,10 @@ pub struct DebugView<'a> {
     pub(crate) module: &'a Module,
     pub(crate) frames: &'a [Frame],
     pub(crate) regs: &'a [Value],
+    /// The per-run global slots (`SessionState::globals`), so the debugger can read top-level value
+    /// bindings — they live in the globals tier, not any frame's registers (a named function is
+    /// sealed and never sees them), yet lexically they belong to the top-level (`main`) frame.
+    pub(crate) globals: &'a [Value],
     /// The **strand** currently executing (DAP worker debugging): the main program is strand `1`,
     /// each `isolate f(args)` a fresh id. The debugger reports this as the stopped `threadId`, so a
     /// breakpoint inside a worker isolate surfaces against that worker's thread. `1` on every
@@ -296,6 +300,22 @@ impl<'a> DebugView<'a> {
     /// line (via the prototype's line table) after the run.
     pub fn pc_at(&self, i: usize) -> usize {
         self.frames[i].pc
+    }
+
+    /// The top-level **value bindings** currently in scope, as `(name, value)` — the `x = 1`s of the
+    /// program, read from the globals tier where they are stored. Only slots the compiler tagged as
+    /// user bindings ([`Module::global_bindings`], debug compiles only), and only those already
+    /// **bound**: top-level execution is linear, so an unbound slot is a binding the program has not
+    /// reached yet — the same "not in scope before its declaration" rule the register-locals view
+    /// applies by `def_span`, obtained here for free from the value's boundness. Empty in a release
+    /// module. The DAP's `capture` attaches these to the `main` frame (proto 0) alone, because that
+    /// is the only frame whose lexical scope they are in (named functions are sealed).
+    pub fn top_level_bindings(&self) -> impl Iterator<Item = (&'a str, Value)> + '_ {
+        self.module.global_bindings.iter().filter_map(move |slot| {
+            let value = *self.globals.get(slot.0 as usize)?;
+            (!value.is_unbound())
+                .then(|| (self.module.global_names[slot.0 as usize].as_str(), value))
+        })
     }
 
     /// The frame at call-stack index `i` (`0` = bottom `main`, `depth()-1` = innermost).

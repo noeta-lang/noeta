@@ -511,6 +511,7 @@ impl<'m> Vm<'m> {
                 module: self.module,
                 frames,
                 regs,
+                globals: &self.persist.globals,
                 strand: self.sched.current_strand,
             };
             let Some(view_idx) = view.depth().checked_sub(frame + 1) else {

@@ -1147,6 +1147,107 @@ mod tests {
         session.disconnect_and_join();
     }
 
+    #[test]
+    fn top_level_bindings_show_on_the_main_frame_but_not_inside_a_sealed_function() {
+        // `x`/`y` are top-level value bindings; the breakpoint is inside `add` (line 5). By then
+        // `x`/`y` are bound but `z` (still being computed) is not, and `add` is a top-level *fn*, not
+        // a value binding. The `main` frame's Locals must show `x`/`y` — top-level bindings live in
+        // the globals tier, but they are `main`'s lexical scope — while `add`'s own frame must NOT
+        // (a named function is sealed; it sees only its params/locals).
+        let path = fixture(
+            "toplevel_locals",
+            "x = 10\n\
+             y = 20\n\
+             fn add(a: int, b: int): int {\n    \
+             mut s = a + b\n    \
+             echo s\n    \
+             return s\n}\n\
+             z = add(x, y)\n\
+             echo z\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 5 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+
+        let stopped = session.wait_stopped();
+        assert_eq!(stopped["body"]["reason"], "breakpoint");
+
+        session.send("stackTrace", json!({ "threadId": MAIN_THREAD_ID }));
+        let frames = session.response("stackTrace");
+        let frames = frames["body"]["stackFrames"].as_array().unwrap();
+        assert_eq!(frames.len(), 2, "add + main: {frames:#?}");
+        assert_eq!(frames[0]["name"], "add");
+        assert_eq!(frames[1]["name"], "main");
+
+        // Collect a frame's variable names+values as a helper.
+        let vars_of = |session: &mut Session, frame: &Value| {
+            session.send("scopes", json!({ "frameId": frame["id"].clone() }));
+            let scopes = session.response("scopes");
+            let var_ref = scopes["body"]["scopes"][0]["variablesReference"].clone();
+            session.send("variables", json!({ "variablesReference": var_ref }));
+            let variables = session.response("variables");
+            variables["body"]["variables"].as_array().unwrap().clone()
+        };
+        let has = |vars: &[Value], name: &str| vars.iter().any(|v| v["name"] == name);
+        let value_of = |vars: &[Value], name: &str| {
+            vars.iter()
+                .find(|v| v["name"] == name)
+                .unwrap_or_else(|| panic!("no {name:?} in {vars:#?}"))["value"]
+                .clone()
+        };
+
+        let main_frame = frames[1].clone();
+        let add_frame = frames[0].clone();
+
+        // The `main` frame shows the top-level value bindings that are already bound.
+        let main_vars = vars_of(&mut session, &main_frame);
+        assert_eq!(
+            value_of(&main_vars, "x"),
+            "10",
+            "main shows x: {main_vars:#?}"
+        );
+        assert_eq!(
+            value_of(&main_vars, "y"),
+            "20",
+            "main shows y: {main_vars:#?}"
+        );
+        // `z` is still being computed (unbound), and `add` is a function, not a value binding.
+        assert!(!has(&main_vars, "z"), "z is not bound yet: {main_vars:#?}");
+        assert!(
+            !has(&main_vars, "add"),
+            "a top-level fn is not a variable: {main_vars:#?}"
+        );
+
+        // The sealed function's own frame shows its params/locals, and NOT the top-level bindings.
+        let add_vars = vars_of(&mut session, &add_frame);
+        assert!(
+            has(&add_vars, "a") && has(&add_vars, "s"),
+            "add's own locals: {add_vars:#?}"
+        );
+        assert!(
+            !has(&add_vars, "x"),
+            "a sealed fn does not see top-level x: {add_vars:#?}"
+        );
+        assert!(
+            !has(&add_vars, "y"),
+            "a sealed fn does not see top-level y: {add_vars:#?}"
+        );
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
     /// U2 (tooling-unification): a console `mut` binding persists across console entries — it is a
     /// SESSION global, not a closure-local — and a name colliding with a frame local is refused.
     #[test]

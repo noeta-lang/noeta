@@ -569,6 +569,7 @@ mod tests {
             type_reprs: Vec::new(),
             names,
             global_names: Vec::new(),
+            global_bindings: Vec::new(),
         }
     }
 
