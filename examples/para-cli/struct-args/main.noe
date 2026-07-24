@@ -1,0 +1,93 @@
+// F5 — a command parameter whose type is a STRUCT has its fields expanded into CLI flags. `serve`
+// takes one `ServerOpts` parameter; `para.cli` reads the struct's field schema (`field_specs_of`),
+// parses `--port`/`--host`/`--verbose` against each field's declared type, and builds the struct at
+// runtime (`construct`) — so the function signature stays the spec, and a nested options struct is
+// just another parameter. An omitted field with a default is filled by the struct; a missing required
+// field or a bad value is a usage error (exit 2).
+use para.cli.{Command, run, dispatch}
+use std.io
+use std.os
+
+// The options struct: `port` is required; `host` and `verbose` carry defaults, so their flags may be
+// omitted. Each field's declared type drives coercion (`--port` wants an int, `--verbose` is a bool
+// presence-flag).
+struct ServerOpts {
+    port: int
+    host: string = "localhost"
+    verbose: bool = false
+}
+
+#[Command(about: "Start the server")]
+fn serve(opts: ServerOpts): int {
+    if opts.verbose {
+        io.outln("serving ${opts.host}:${opts.port} (verbose)")
+    } else {
+        io.outln("serving ${opts.host}:${opts.port}")
+    }
+    // A port outside the valid range is a command-level error (exit 1), distinct from a usage error.
+    if opts.port <= 0 {
+        return 1
+    }
+    return 0
+}
+
+// Real entry: dispatch the actual argv and exit with the command's code. `noeta test` skips top-level
+// statements, so this runs only under `noeta run`.
+os.exit(run())
+
+@test {
+    // Every field supplied by flag: the struct is built from `--port`/`--host`/`--verbose` and serve
+    // returns 0.
+    fn all_fields_from_flags(): void {
+        assert(dispatch(["--port", "8080", "--host", "example.com", "--verbose"]) == 0)
+    }
+
+    // The `--long=value` form binds struct fields too.
+    fn fields_eq_form(): void {
+        assert(dispatch(["--port=9090", "--host=example.com"]) == 0)
+    }
+
+    // A defaulted field omitted: only `--port` is given; `host`/`verbose` fall to the struct's own
+    // defaults, and serve still succeeds (proving `construct` filled the defaults).
+    fn defaulted_field_omitted(): void {
+        assert(dispatch(["--port", "8080"]) == 0)
+    }
+
+    // `verbose` is a bool presence-flag: `--verbose` alone sets it true (it takes no value token).
+    fn bool_field_presence(): void {
+        assert(dispatch(["--port", "8080", "--verbose"]) == 0)
+    }
+
+    // The middle defaulted field is omitted while a LATER field is supplied — the sparse, any-order
+    // case a positional list could not express. Named construction fills `host` from its default.
+    fn middle_field_gap(): void {
+        assert(dispatch(["--port", "8080", "--verbose"]) == 0)
+    }
+
+    // A missing REQUIRED field (`--port`) is a usage error (exit 2), even though `host`/`verbose` are
+    // optional.
+    fn missing_required_field(): void {
+        assert(dispatch(["--host", "example.com"]) == 2)
+    }
+
+    // A bad value for a typed field (`--port` wants an int) is a usage error (exit 2).
+    fn bad_field_value(): void {
+        assert(dispatch(["--port", "notanumber"]) == 2)
+    }
+
+    // An unknown flag that is neither a field nor a framework flag is a usage error (exit 2).
+    fn unknown_flag(): void {
+        assert(dispatch(["--port", "8080", "--nope", "x"]) == 2)
+    }
+
+    // A command-level failure (a non-positive port passes coercion but serve returns 1) is exit 1,
+    // distinct from a usage error.
+    fn command_level_error(): void {
+        assert(dispatch(["--port", "0"]) == 1)
+    }
+
+    // `--help` still prints usage and exits cleanly (0).
+    fn help_exits_clean(): void {
+        assert(dispatch(["--help"]) == 0)
+    }
+}

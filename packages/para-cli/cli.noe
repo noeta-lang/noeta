@@ -161,24 +161,40 @@ fn parse_tokens(tokens: List<string>, params: List<ParamInfo>): Result<Map<strin
     mut positional_names: List<string> = [] // non-bool params, declaration order
 
     for p in params {
-        a = arg_of(p)
-        long_key = match a {
-            some(x) => if x.long == "" then p.name else x.long,
-            none => p.name,
-        }
-        long_to_name[long_key] = p.name
-        match a {
-            some(x) => {
-                if x.short != "" {
-                    short_to_name[x.short] = p.name
+        // A struct-typed parameter (F5) is bound not as one positional but by expanding its FIELDS
+        // into flags: `fn serve(opts: ServerOpts)` with `ServerOpts { port: int, host: string }` takes
+        // `--port`/`--host`. Each field becomes a long flag (a bool field is a presence-flag); struct
+        // fields are never positional. The field schema comes from the runtime `field_specs_of(name)`
+        // — the type name is a runtime string off `Type.Struct(name, _)`, so the static turbofish form
+        // could not be used here.
+        match struct_type_name(p.type) {
+            some(sname) => {
+                for fs in field_specs_of(sname) {
+                    long_to_name[fs.name] = fs.name
+                    bool_of[fs.name] = is_bool_type(fs.type)
                 }
             },
-            none => {},
-        }
-        is_bool = is_bool_type(p.type)
-        bool_of[p.name] = is_bool
-        if !is_bool {
-            positional_names = positional_names ~ [p.name]
+            none => {
+                a = arg_of(p)
+                long_key = match a {
+                    some(x) => if x.long == "" then p.name else x.long,
+                    none => p.name,
+                }
+                long_to_name[long_key] = p.name
+                match a {
+                    some(x) => {
+                        if x.short != "" {
+                            short_to_name[x.short] = p.name
+                        }
+                    },
+                    none => {},
+                }
+                is_bool = is_bool_type(p.type)
+                bool_of[p.name] = is_bool
+                if !is_bool {
+                    positional_names = positional_names ~ [p.name]
+                }
+            },
         }
     }
 
@@ -321,9 +337,13 @@ fn take_positional(positional_names: List<string>, pos_index: int, t: string): R
 fn bind_args(params: List<ParamInfo>, sources: Map<string, string>): Result<List<dyn>, string> {
     mut bound: List<dyn> = []
     for p in params {
-        match resolve_source(p, sources) {
-            some(raw) => {
-                match coerce(p.type, raw) {
+        // A struct-typed parameter (F5) is built from its own `--field` flags and passed as one
+        // argument. It always produces a value (missing optional fields fall to the struct's own
+        // defaults via `construct`), so — unlike a missing optional scalar — it never short-circuits
+        // the build.
+        match struct_type_name(p.type) {
+            some(sname) => {
+                match build_struct_arg(sname, sources) {
                     Ok(v) => {
                         bound = bound ~ [v]
                     },
@@ -333,16 +353,81 @@ fn bind_args(params: List<ParamInfo>, sources: Map<string, string>): Result<List
                 }
             },
             none => {
-                if !p.optional {
-                    return Err("missing required argument '${p.name}'")
+                match resolve_source(p, sources) {
+                    some(raw) => {
+                        match coerce(p.type, raw) {
+                            Ok(v) => {
+                                bound = bound ~ [v]
+                            },
+                            Err(e) => {
+                                return Err(e)
+                            },
+                        }
+                    },
+                    none => {
+                        if !p.optional {
+                            return Err("missing required argument '${p.name}'")
+                        }
+                        return Ok(bound)
+                    },
+                    // A missing optional stops the build: leave the list short so the callee fills the
+                    // trailing default (defaults are trailing-only, so the rest are optional too).
                 }
-                return Ok(bound)
             },
-            // A missing optional stops the build: leave the list short so the callee fills the
-            // trailing default (defaults are trailing-only, so the rest are optional too).
         }
     }
     return Ok(bound)
+}
+
+// Build a struct-typed argument (F5) from the parsed `--field` sources: coerce each supplied field to
+// its declared type, require every non-defaulted field, and hand the collected `field -> value` map to
+// `construct`, which fills the omitted (defaulted) fields — including a middle one, which a positional
+// list could not express. The type name is a runtime string, so both `field_specs_of` and `construct`
+// are used in their string-keyed (dynamic) form. Returns the built struct value, or a usage message.
+fn build_struct_arg(sname: string, sources: Map<string, string>): Result<dyn, string> {
+    mut fields: Map<string, dyn> = {}
+    for fs in field_specs_of(sname) {
+        match sources.get(fs.name) {
+            some(raw) => {
+                match coerce(fs.type, raw) {
+                    Ok(v) => {
+                        fields[fs.name] = v
+                    },
+                    Err(e) => {
+                        return Err(e)
+                    },
+                }
+            },
+            none => {
+                if !fs.optional {
+                    return Err("missing required argument '--${fs.name}'")
+                }
+            },
+        }
+    }
+    return construct(sname, fields)
+}
+
+// The struct/class type name a parameter is declared with, if its fields are to be expanded into
+// flags (F5) — `some(name)` for a nominal type that has a field schema, `none` for everything else.
+//
+// `params_of` reports a declared nominal type *kind-agnostically* as `Type.Named(name, _)` — by
+// design (its result doubles as the `x is T` narrow reference), so a struct parameter does NOT arrive
+// as `Type.Struct`. So the nominal name is taken off `Type.Named` (and the precise-kind `Type.Struct`
+// / `Type.Class`, should a future path surface those), then confirmed to be constructible by probing
+// `field_specs_of(name)`: a struct or class has a non-empty field schema, while an enum, an unknown
+// name, or a fieldless type has none and is left as an ordinary positional.
+fn struct_type_name(t: Type): ?string {
+    name = match t {
+        Type.Named(n, _) => some(n),
+        Type.Struct(n, _) => some(n),
+        Type.Class(n, _) => some(n),
+        _ => none,
+    }
+    return match name {
+        some(n) => if field_specs_of(n).len() > 0 then some(n) else none,
+        none => none,
+    }
 }
 
 // Source a parameter's raw string. Precedence: an explicit argv token (positional/named/short) wins;
