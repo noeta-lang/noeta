@@ -977,6 +977,12 @@ pub struct ExtEnum {
     /// built-in name (e.g. `"Comparable"`) is picked up by `seed_native_builtin_traits`
     /// (`record_trait_impls` filters to built-in names). Default empty.
     pub traits: &'static [&'static str],
+    /// The **built-in directives** this enum carries (native type-declaration unification, Slice D) —
+    /// the [`ExtEnum`] twin of [`ExtFielded::directives`], the same crosscutting channel. The only
+    /// directive legal on an enum is [`ExtTypeDirective::Semantic`] (marking its fieldless variants as
+    /// role names → `semantic_enums`); [`Registry::validate`] refuses a struct/class-only directive
+    /// here. Default empty.
+    pub directives: &'static [ExtTypeDirective],
 }
 
 /// One variant of an [`ExtEnum`]: its case name plus **either** a positional payload (an algebraic
@@ -1014,6 +1020,7 @@ impl ExtEnum {
             })
         },
         traits: &[],
+        directives: &[],
     };
 
     /// The variant named `variant`, with its declaration index, if any.
@@ -1077,6 +1084,40 @@ pub enum FieldedKind {
     Struct,
 }
 
+/// A **built-in directive** a native-declared fielded or enum type carries — the ABI twin of the
+/// closed [`noeta_ast::BuiltinDirective`](https://docs.rs/noeta-ast) set that a `.noe` type gets from
+/// its `Decorators`. Unlike an [`ExtDirective`] (the `@openapi`-style codegen-*expansion* hook, whose
+/// meaning is the source it produces), these directives have **checker/backend semantics**: each
+/// reduces to a single `Symbols` membership insert keyed by the declaring type, exactly mirroring the
+/// `.noe` translations the checker's collect pass performs from a `Decorators`.
+///
+/// Carried on the crosscutting [`ExtFielded::directives`] / [`ExtEnum::directives`] channel — one
+/// field per kind, never four parallel fields. The checker's `seed_ext_directives` pass translates
+/// each variant into its table write, and [`Registry::validate`] enforces which (kind, directive)
+/// pairs are legal at assembly (the native analogue of the AST placement gate E0054), since a native
+/// type bypasses the source-level site check.
+///
+/// **Reserved for later slices — deliberately not variants yet:** `@attribute` and `@role` (their
+/// resolution is being redesigned to be namespace-aware across `.noe` too, not the current flat
+/// short-name model) and `@packed` (flat value-struct layout, native-extensibility Slice E). Each
+/// will slot in here when its seeding + reader land; the ABI-coverage gate rejects a variant that has
+/// no reader, so they are added only alongside their implementation.
+#[derive(Debug, Clone, Copy)]
+pub enum ExtTypeDirective {
+    /// `@validated` — bar bare literal / record-update construction of this type outside its own
+    /// `impl` (the checker's **E0060** construction gate, keyed purely on membership in
+    /// `validated_types`). Legal on a **struct or class**. Note this only installs the static
+    /// construction ban: validation actually *runs* iff the type additionally advertises
+    /// [`ExtFielded::traits`] `["Validate"]` (making it `satisfies(Validate)`, so a recipe door's
+    /// materialization gains a validator) and carries a reachable `validate` method its dispatch
+    /// answers — both of which ride the type's existing trait + method channels, not this directive.
+    Validated,
+    /// `@semantic` — mark this **enum**'s fieldless variants as role names (the checker's
+    /// `semantic_enums` membership). Enum-only. A `@semantic` enum is the vocabulary a `@role` tag
+    /// draws its variants from.
+    Semantic,
+}
+
 /// A first-class **fielded type** contributed by an extension (native-extensibility S2, unified): a
 /// real language type with language-visible named fields the language reads, mutates (class only),
 /// and constructs. One struct with a [`FieldedKind`] discriminant covers both a reference **class**
@@ -1133,6 +1174,12 @@ pub struct ExtFielded {
     /// [`FieldedKind`]. Defaults to [`FieldedKind::Class`] so pre-unification `ExtClass` fixtures
     /// keep their meaning; a struct sets it via [`ExtFielded::STRUCT_DEFAULTS`].
     pub kind: FieldedKind,
+    /// The **built-in directives** this type carries (native type-declaration unification, Slice D) —
+    /// the `.noe` `Decorators` twin, uniform across native fielded + enum kinds. `seed_ext_directives`
+    /// translates each into its `Symbols` insert (e.g. [`ExtTypeDirective::Validated`] →
+    /// `validated_types`); [`Registry::validate`] rejects a directive illegal for this type's
+    /// [`FieldedKind`] (`@semantic` is enum-only, so it is refused here). Default empty.
+    pub directives: &'static [ExtTypeDirective],
 }
 
 /// The pre-unification name for [`ExtFielded`], defaulting (via [`ExtFielded::DEFAULTS`]) to a
@@ -1184,6 +1231,7 @@ impl ExtFielded {
         },
         traits: &[],
         kind: FieldedKind::Class,
+        directives: &[],
     };
 
     /// Literal-shortening defaults for a value **struct** (`..ExtStruct::STRUCT_DEFAULTS`) — the
@@ -3128,6 +3176,37 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                 ));
             }
         }
+        // Built-in-directive site validity (native type-declaration unification, Slice D): a native
+        // type seeds its directives straight into `Symbols`, bypassing the AST placement gate (E0054),
+        // so the (kind, directive) legality the source-level gate enforces is enforced here instead.
+        // `@semantic` is enum-only; `@validated` is struct-or-class-only. A mis-placed directive would
+        // silently seed the wrong table — refuse it loudly at assembly.
+        for t in unit.classes().iter().chain(unit.structs().iter()) {
+            for d in t.directives {
+                if let ExtTypeDirective::Semantic = d {
+                    return Err(format!(
+                        "native fielded type `{}.{}` of unit `{}` carries `@semantic`, which \
+                         applies only to an enum",
+                        t.namespace,
+                        t.name,
+                        unit.name()
+                    ));
+                }
+            }
+        }
+        for t in unit.enums() {
+            for d in t.directives {
+                if let ExtTypeDirective::Validated = d {
+                    return Err(format!(
+                        "native enum `{}.{}` of unit `{}` carries `@validated`, which applies only \
+                         to a struct or a class",
+                        t.namespace,
+                        t.name,
+                        unit.name()
+                    ));
+                }
+            }
+        }
     }
     // The remaining registration axes are first-wins at lookup, so a collision would silently
     // shadow: refuse each at assembly instead (the registry's philosophy — a mis-assembled binary
@@ -4011,6 +4090,111 @@ mod runtime_registry_tests {
     fn shared_root_across_units_is_fine() {
         // The std pattern: six units all rooted `std`. Distinct names, distinct modules.
         validate(&[&A, &A2]).expect("shared roots across distinctly-named units are valid");
+    }
+
+    // --- native built-in-directive site validity (Slice D) ---
+    //
+    // A native type seeds its `@semantic`/`@validated` directive straight into `Symbols`, bypassing
+    // the source-level placement gate (E0054), so the (kind, directive) legality is enforced at
+    // assembly here: `@semantic` is enum-only, `@validated` is struct-or-class-only.
+
+    /// A unit carrying directive-bearing native types under root `cfg`.
+    struct DirUnit(
+        &'static str,
+        &'static [ExtEnum],
+        &'static [ExtStruct],
+        &'static [ExtClass],
+    );
+    impl Extension for DirUnit {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn root(&self) -> &'static str {
+            "cfg"
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            &[]
+        }
+        fn enums(&self) -> &'static [ExtEnum] {
+            self.1
+        }
+        fn structs(&self) -> &'static [ExtStruct] {
+            self.2
+        }
+        fn classes(&self) -> &'static [ExtClass] {
+            self.3
+        }
+    }
+
+    const STAGE: ExtEnum = ExtEnum {
+        name: "Stage",
+        namespace: "cfg",
+        variants: &[ExtVariant {
+            name: "Alpha",
+            fields: &[],
+            value: VariantValue::None,
+        }],
+        directives: &[ExtTypeDirective::Semantic],
+        ..ExtEnum::DEFAULTS
+    };
+    const VALIDATED_STRUCT: ExtStruct = ExtStruct {
+        name: "Conf",
+        namespace: "cfg",
+        directives: &[ExtTypeDirective::Validated],
+        ..ExtStruct::STRUCT_DEFAULTS
+    };
+    const VALIDATED_CLASS: ExtClass = ExtClass {
+        name: "Handle",
+        namespace: "cfg",
+        directives: &[ExtTypeDirective::Validated],
+        ..ExtClass::DEFAULTS
+    };
+
+    #[test]
+    fn native_directive_legal_placements_assemble() {
+        // `@semantic` on an enum, `@validated` on a struct AND on a class — every legal pair.
+        static U: DirUnit = DirUnit(
+            "cfg.core",
+            &[STAGE],
+            &[VALIDATED_STRUCT],
+            &[VALIDATED_CLASS],
+        );
+        validate(&[&U]).expect("@semantic on an enum and @validated on a struct/class are legal");
+    }
+
+    #[test]
+    fn native_semantic_on_a_struct_is_rejected() {
+        const BAD: ExtStruct = ExtStruct {
+            name: "Nope",
+            namespace: "cfg",
+            directives: &[ExtTypeDirective::Semantic],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[], &[BAD], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "`@semantic` applies only to an enum — a struct carrying it must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn native_validated_on_an_enum_is_rejected() {
+        const BAD: ExtEnum = ExtEnum {
+            name: "Nope",
+            namespace: "cfg",
+            variants: &[ExtVariant {
+                name: "A",
+                fields: &[],
+                value: VariantValue::None,
+            }],
+            directives: &[ExtTypeDirective::Validated],
+            ..ExtEnum::DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[BAD], &[], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "`@validated` applies only to a struct/class — an enum carrying it must refuse to assemble"
+        );
     }
 
     // --- author-contract checks (audit-2 F4) ---

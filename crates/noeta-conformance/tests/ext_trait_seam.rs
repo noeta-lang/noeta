@@ -157,6 +157,7 @@ const PANEL: ExtClass = ExtClass {
     dispatch: panel_dispatch,
     traits: &["Widget"],
     kind: FieldedKind::Class,
+    directives: &[],
 };
 
 /// `Panel`'s native method dispatch — the native implementation of `Widget.describe()` for a class
@@ -219,6 +220,7 @@ const MODE: ExtEnum = ExtEnum {
     }],
     dispatch: mode_dispatch,
     traits: &["Widget"],
+    directives: &[],
 };
 
 /// `Mode`'s native enum-method dispatch — the native implementation of `Widget.describe()` for an
@@ -270,6 +272,7 @@ const BADGE: ExtStruct = ExtStruct {
     dispatch: badge_dispatch,
     traits: &["Widget", "Comparable"],
     kind: FieldedKind::Struct,
+    directives: &[],
 };
 
 /// `Badge`'s native method dispatch — the native implementation of `Widget.describe()` for a struct
