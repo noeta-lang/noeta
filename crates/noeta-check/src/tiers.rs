@@ -509,6 +509,9 @@ fn sig_type_to_repr(sig: &noeta_ext_abi::registry::SigType) -> noeta_ast::reflec
         SigType::Optional(inner) => sig_type_to_repr(inner),
         // A signature-level type variable has no declaration-site type — a permissive hole.
         SigType::Var(_) | SigType::BoundedVar(_, _) => TypeRepr::Dyn,
+        // A trait associated-type projection (`Self::Wide`, slice 1b) is resolved per-implementor by
+        // the checker, not at the declaration site — a permissive hole in a reflected signature.
+        SigType::Assoc(_) => TypeRepr::Dyn,
     }
 }
 

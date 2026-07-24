@@ -145,6 +145,14 @@ pub(crate) fn sig_to_typeref(
         ),
         // A signature-level variable has no concrete declaration-site meaning — a permissive hole.
         SigType::Var(_) | SigType::BoundedVar(_, _) => named("dyn"),
+        // A trait associated-type projection (slice 1b): the ABI twin of the AST
+        // `TypeRef::AssocProjection` — `synth_trait_decl` carries it into the synthesized
+        // `TraitDecl`'s method signatures, where the user-trait machinery resolves `Self::Name`
+        // per-implementor exactly as it does for a `.noe` trait's associated type (slice 1a).
+        SigType::Assoc(n) => TypeRef::AssocProjection {
+            name: (*n).to_string(),
+            span: sp,
+        },
     }
 }
 
@@ -231,6 +239,10 @@ fn sig_to_type_bound(
                 .map(|a| sig_to_type_bound(reg, a, bindings))
                 .collect(),
         ),
+        // A trait associated-type projection (`Self::Wide`, slice 1b) has no declaration-site lattice
+        // type — it is resolved per-implementor against `trait_assoc` at the concrete call site
+        // (`Checker::native_method_assoc_return`), so here it is a gradual hole.
+        SigType::Assoc(_) => Type::Unknown,
     }
 }
 
@@ -1146,17 +1158,85 @@ pub(super) fn bundle_method_return(
         RetTy::SameAsArg(0) => recv.clone(),
         RetTy::SameAsArg(i) => args.get(i - 1).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
-        RetTy::Elem => elem.cloned().unwrap_or(Type::Unknown),
-        RetTy::ElemWide => elem.map(elem_wide).unwrap_or(Type::Unknown),
-        RetTy::ElemFloat => elem.map(elem_float).unwrap_or(Type::Unknown),
+        // The element-relative returns resolve through the SHARED derivation abstraction (slice 1b):
+        // `RetTy::Elem*` is exactly what an [`registry::AssocDerivation`] expresses, so the bundle path
+        // and the native-trait associated-type path (`seed_ext_traits`) run one code path. This is the
+        // de-risking proof the ExtBundle→ExtTrait convergence rests on.
+        RetTy::Elem => elem
+            .map(|e| registry::AssocDerivation::Element.apply(e))
+            .unwrap_or(Type::Unknown),
+        RetTy::ElemWide => elem
+            .map(|e| registry::AssocDerivation::Widen.apply(e))
+            .unwrap_or(Type::Unknown),
+        RetTy::ElemFloat => elem
+            .map(|e| registry::AssocDerivation::FloatPromote.apply(e))
+            .unwrap_or(Type::Unknown),
         // The bulk twins: a `List` of the widened / float-promoted element (`dot_all`/`length_all`).
         RetTy::ListElemWide => Type::List(Box::new(
-            elem.map(elem_wide).unwrap_or(Type::Unknown),
+            elem.map(|e| registry::AssocDerivation::Widen.apply(e))
+                .unwrap_or(Type::Unknown),
         )),
         RetTy::ListElemFloat => Type::List(Box::new(
-            elem.map(elem_float).unwrap_or(Type::Unknown),
+            elem.map(|e| registry::AssocDerivation::FloatPromote.apply(e))
+                .unwrap_or(Type::Unknown),
         )),
         RetTy::TypeArg(_) => Type::Unknown,
+    }
+}
+
+/// The **shared element-derivation abstraction** (ExtBundle→ExtTrait convergence, slice 1b): applies
+/// a native trait's [`registry::AssocDerivation`] to a `@packed` shape's uniform element type,
+/// producing the associated type's concrete `Type`. The ONE code path both halves of the convergence
+/// use — the native-trait `trait_assoc` population (`seed_ext_traits`) and the bundle ABI's
+/// element-relative returns ([`bundle_method_return`]) — proving the derivation enum expresses exactly
+/// what `RetTy::Elem`/`ElemWide`/`ElemFloat` did. The ABI cannot itself produce a `Type` (it cannot
+/// see `noeta_types::Type`), so the interpretation lives here, on a local extension trait.
+pub(crate) trait DeriveApply {
+    fn apply(&self, elem: &Type) -> Type;
+}
+
+impl DeriveApply for registry::AssocDerivation {
+    fn apply(&self, elem: &Type) -> Type {
+        use registry::AssocDerivation;
+        match self {
+            AssocDerivation::Element => elem.clone(),
+            AssocDerivation::Widen => elem_wide(elem),
+            AssocDerivation::FloatPromote => elem_float(elem),
+        }
+    }
+}
+
+/// The associated-type shape a native (fielded or extern) method's return names, if any (slice 1b):
+/// `Self::Name` ([`AssocRet::Bare`]) or `List<Self::Name>` ([`AssocRet::List`], the `ListElemWide`
+/// analog). Read straight off the method's registry signature — the checker then resolves the named
+/// associated type against `trait_assoc` at the concrete receiver
+/// ([`crate::Checker::native_method_assoc_return`]). A method whose return is not an associated-type
+/// projection yields `None` (it types through the ordinary [`method_return`] path).
+pub(super) enum AssocRet {
+    Bare(&'static str),
+    List(&'static str),
+}
+
+/// Detect that native `receiver`'s method `name` returns a trait associated-type projection (slice
+/// 1b), reading the method's registry signature off the fielded (class/struct) or extern-type tables.
+/// The concrete `Type` is resolved by the caller against `trait_assoc`.
+pub(super) fn native_method_assoc_ret(
+    reg: &registry::Registry,
+    receiver: &Type,
+    name: &str,
+) -> Option<AssocRet> {
+    use registry::{RetTy, SigType};
+    let Type::Named(n, _) = receiver else {
+        return None;
+    };
+    let sig = reg
+        .find_class_method(n, name)
+        .or_else(|| reg.find_type_method_sig(n, name))?;
+    match sig.ret {
+        RetTy::Concrete(SigType::Assoc(a)) => Some(AssocRet::Bare(a)),
+        // `List<Self::Name>` — the `RetTy::ListElemWide` analog; nests through the concrete resolution.
+        RetTy::Concrete(SigType::List(SigType::Assoc(a))) => Some(AssocRet::List(a)),
+        _ => None,
     }
 }
 

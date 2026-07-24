@@ -112,6 +112,7 @@ const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforce
 const EMBED_INSTANCE: &str = "crates/noeta-embed/tests/instance_registry.rs";
 const CONFORMANCE_STRUCT_SEAM: &str = "crates/noeta-conformance/tests/ext_struct_seam.rs";
 const CONFORMANCE_TRAIT_SEAM: &str = "crates/noeta-conformance/tests/ext_trait_seam.rs";
+const CONFORMANCE_ASSOC_SEAM: &str = "crates/noeta-conformance/tests/ext_assoc_seam.rs";
 const CONFORMANCE_DIRECTIVE_SEAM: &str = "crates/noeta-conformance/tests/ext_directive_seam.rs";
 const LOADER_EXPAND: &str = "crates/noeta-loader/src/expand.rs";
 
@@ -545,6 +546,44 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // `assoc_types` (ExtBundle→ExtTrait convergence, slice 1b): the trait's native-derived associated
+    // types. States a RULE — each `Self::Name` a method returns resolves, on a concrete receiver, to
+    // the type the implementing type's `AssocDerivation` computes. `seed_ext_traits` reads it and
+    // folds every derivation into `trait_assoc[(type, trait)]`; no shipped extension declares a native
+    // trait with associated types, so the assoc-seam fixture is the only exerciser.
+    Row(
+        "ExtTrait",
+        "assoc_types",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "fn seed_ext_traits("),
+            Anchor(
+                CONFORMANCE_ASSOC_SEAM,
+                "fn native_derived_associated_type_resolves_on_both_backends(",
+            ),
+        ),
+    ),
+    // `ExtAssocType.name` — the associated type's name, read by `seed_ext_traits` to key
+    // `trait_assoc[(type, trait)]` under it (and named from a method sig as `SigType::Assoc(name)`).
+    Row(
+        "ExtAssocType",
+        "name",
+        Data(Anchor(CHECK_PRELUDE, "fn seed_ext_traits(")),
+    ),
+    // `ExtAssocType.derivation` states the RULE for how the associated type is computed from the
+    // implementing type's element (`Element`/`Widen`/`FloatPromote`). `seed_ext_traits` applies it
+    // (`derivation.apply`) into `trait_assoc`; the assoc-seam fixture's `type Wide` (Widen over an i32
+    // element → `int`) watches the rule fire on both backends.
+    Row(
+        "ExtAssocType",
+        "derivation",
+        Constraint(
+            Anchor(CHECK_PRELUDE, "fn seed_ext_traits("),
+            Anchor(
+                CONFORMANCE_ASSOC_SEAM,
+                "fn native_derived_associated_type_resolves_on_both_backends(",
+            ),
+        ),
+    ),
     Row(
         "ExtTraitMethod",
         "sig",
@@ -896,6 +935,7 @@ const SCANNED: &[(&str, &[&str])] = &[
             "ExtRoleTag",
             "ExtTrait",
             "ExtTraitMethod",
+            "ExtAssocType",
             "PackedConstraint",
             "BundleFn",
             "ExtBundle",

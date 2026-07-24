@@ -294,6 +294,15 @@ pub enum SigType {
     /// value reflects as its bare nominal name, exactly as the reactive handles it generalizes
     /// reflected as `dyn`.)
     Generic(&'static str, &'static [SigType]),
+    /// A **trait associated-type projection** `Self::Name` (ExtBundle→ExtTrait convergence, slice 1b)
+    /// — the ABI form of the AST [`noeta_ast::TypeRef::AssocProjection`]. A native trait method names
+    /// its element-relative return as `SigType::Assoc("Wide")`; the checker maps it onto the trait's
+    /// [`ExtAssocType`] and, on a **concrete** receiver, resolves it through the same `trait_assoc`
+    /// table a `.noe` `trait`'s `Self::Name` uses (slice 1a) — the type the implementing type's
+    /// [`AssocDerivation`] computes from its element. `List<Self::Name>` (`SigType::List(&Assoc)`) is
+    /// the `ListElemWide` analog and nests through the concrete resolution. Under `dyn`/no binding it
+    /// degrades to a gradual hole, never a wrong concrete type.
+    Assoc(&'static str),
 }
 
 impl SigType {
@@ -357,6 +366,7 @@ impl SigType {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            SigType::Assoc(name) => format!("Self::{name}"),
         }
     }
 }
@@ -1379,6 +1389,48 @@ pub struct ExtTrait {
     /// ([`ExtTraitMethod::has_default`] `false`) must be present in an `impl` or it is E0015; a
     /// default-carrying one is optional for an implementor.
     pub methods: &'static [ExtTraitMethod],
+    /// The trait's **native-derived associated types** (ExtBundle→ExtTrait convergence, slice 1b) —
+    /// the native twin of a `.noe` `trait`'s `type Item;`. Each names an associated type and the
+    /// [`AssocDerivation`] that computes its concrete `Type` from the **implementing type's element**
+    /// (rather than a per-impl `type Name = …` binding). `seed_ext_traits` reads this and, for every
+    /// implementing native type, folds each derivation over the type's packed element into the same
+    /// `trait_assoc[(type, trait)]` table slice 1a populates — so a method naming `Self::Name`
+    /// ([`SigType::Assoc`]) resolves on a concrete receiver exactly as a `.noe` associated type does.
+    /// This is the mechanism that generalizes the bundle ABI's element-relative returns
+    /// ([`RetTy::ElemWide`]/[`RetTy::ElemFloat`]) to a first-class trait contract.
+    pub assoc_types: &'static [ExtAssocType],
+}
+
+/// One **native-derived associated type** on an [`ExtTrait`] (slice 1b): a name and the
+/// [`AssocDerivation`] that computes its concrete `Type` from the implementing type's element. The
+/// derivation is a closed vocabulary the checker interprets — noeta-stdlib cannot see
+/// `noeta_types::Type` (the very reason the type tables live in `noeta-check`), so this mirrors the
+/// [`TypeRecipe`] indirection: a neutral, self-contained enum the checker maps onto a `Type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtAssocType {
+    /// The associated type's name (`Wide`), named from a method signature as
+    /// [`SigType::Assoc`]`("Wide")` and keyed into `trait_assoc[(type, trait)]` under this string.
+    pub name: &'static str,
+    /// How the associated type is derived from the implementing type's element (see [`AssocDerivation`]).
+    pub derivation: AssocDerivation,
+}
+
+/// How a native associated type is **derived from the implementing type's element** (slice 1b) — the
+/// closed vocabulary that expresses exactly what the bundle ABI's element-relative returns
+/// ([`RetTy::Elem`]/[`RetTy::ElemWide`]/[`RetTy::ElemFloat`]) did, now as a trait associated type.
+/// The checker interprets each against the bound `@packed` shape's uniform element kind; the ABI
+/// cannot itself produce a `Type`, so this stays a neutral enum (mirroring [`TypeRecipe`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssocDerivation {
+    /// The element scalar itself (`type Elem` — the [`RetTy::Elem`] analog).
+    Element,
+    /// The element's **widened accumulator** (`type Wide` — the [`RetTy::ElemWide`] analog): an
+    /// integer element (`int`, any `iN`/`uN`) widens to `int` (i64), `f32` stays `f32`, `f64`/`float`
+    /// unchanged. The type a cross-lane reduction cannot let silently wrap.
+    Widen,
+    /// The element's **float promotion** (`type Float` — the [`RetTy::ElemFloat`] analog): an integer
+    /// element promotes to `float` (f64), `f32` stays `f32`, `f64`/`float` unchanged. A magnitude/sqrt op.
+    FloatPromote,
 }
 
 /// One method in an [`ExtTrait`]: an ordinary [`ExtFn`] signature (the receiver is `self`, not in
@@ -1403,6 +1455,7 @@ impl ExtTrait {
         name: "",
         namespace: "std",
         methods: &[],
+        assoc_types: &[],
     };
 }
 
