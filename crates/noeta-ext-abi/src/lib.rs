@@ -51,10 +51,10 @@ pub use net::{
 pub use os::{ExecIo, ExecResult, Process};
 pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
 pub use registry::{
-    ArenaGetter, BundleFn, BundleReceiver, ClassDispatch, ConstraintArity, ConstraintField,
-    ConstraintLayout, CtxTypeDispatch, EnumBacking, ExtBundle, ExtCapability, ExtClass, ExtEnum,
-    ExtField, ExtFielded, ExtFn, ExtModule, ExtStruct, ExtTrait, ExtTraitMethod, ExtType,
-    ExtTypeDirective, ExtVariant, Extension, FieldedDispatch, FieldedKind, HiddenArg,
+    ArenaGetter, AttrTarget, BundleFn, BundleReceiver, ClassDispatch, ConstraintArity,
+    ConstraintField, ConstraintLayout, CtxTypeDispatch, EnumBacking, ExtBundle, ExtCapability,
+    ExtClass, ExtEnum, ExtField, ExtFielded, ExtFn, ExtModule, ExtStruct, ExtTrait, ExtTraitMethod,
+    ExtType, ExtTypeDirective, ExtVariant, Extension, FieldedDispatch, FieldedKind, HiddenArg,
     ModuleDispatch, NativeOut, NativeValue, Nominal, NominalKind, NominalType, PackedConstraint,
     RetTy, Scalar, ScalarVec, SigType, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch,
     TypedTypeDispatch, VariantValue,

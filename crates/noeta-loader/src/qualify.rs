@@ -703,7 +703,11 @@ fn q_derive(spec: &mut noeta_ast::DeriveSpec, visit: &mut NameVisitor) {
 /// Walk a `#[Attr(...)]` data attribute: its name is a `@attribute` struct, and its literal
 /// arguments may themselves name nominal types (a struct/enum/type-ref literal).
 fn q_attr(a: &mut Attribute, visit: &mut NameVisitor) {
-    visit(&mut a.name, NameKind::Type, None);
+    // Pass the name's span so a **qualified** attribute (`#[pkg.Route]`) whose module was never
+    // imported is collected as a dotted-miss → E0019 "qualified reference requires an import",
+    // exactly as a qualified type reference is. A bare `#[Route]` carries no `.`, so it never
+    // becomes a dotted-miss; an unresolved bare attribute stays the checker's E0029.
+    visit(&mut a.name, NameKind::Type, Some(a.name_span));
     for arg in &mut a.args {
         q_attr_value(&mut arg.value, visit);
     }

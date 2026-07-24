@@ -27,8 +27,9 @@
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
 use noeta_stdlib::registry::{
-    EnumBacking, ExtEnum, ExtField, ExtFn, ExtModule, ExtStruct, ExtTypeDirective, ExtVariant,
-    Extension, FieldedKind, NativeOut, NativeValue, RetTy, Scalar, SigType, VariantValue,
+    AttrTarget, EnumBacking, ExtEnum, ExtField, ExtFn, ExtModule, ExtStruct, ExtTypeDirective,
+    ExtVariant, Extension, FieldedKind, NativeOut, NativeValue, RetTy, Scalar, SigType,
+    VariantValue,
 };
 use noeta_stdlib::{Host, StdError};
 use noeta_vm::VmBackend;
@@ -109,6 +110,27 @@ const CONFIG: ExtStruct = ExtStruct {
     dispatch: config_dispatch,
     traits: &["Validate"],
     directives: &[ExtTypeDirective::Validated],
+    ..ExtStruct::STRUCT_DEFAULTS
+};
+
+/// A native `@attribute` value struct — the native analogue of a `.noe` `@attribute(Function, Method)
+/// struct Route { path: string }`. Carries the directive through [`ExtFielded::directives`] with a
+/// placement list; the checker seeds it into `attributes` (E0029 opt-in) + `attachable` (E0030
+/// placement) keyed on `cfg.Route`, and its field is its construction contract — so `#[Route("/x")]`
+/// on a fn is accepted and reflected exactly as a `.noe` `@attribute` struct.
+const ROUTE: ExtStruct = ExtStruct {
+    name: "Route",
+    namespace: "cfg",
+    fields: &[ExtField {
+        name: "path",
+        ty: SigType::String,
+        is_public: true,
+        is_mut: false,
+    }],
+    directives: &[ExtTypeDirective::Attribute(&[
+        AttrTarget::Function,
+        AttrTarget::Method,
+    ])],
     ..ExtStruct::STRUCT_DEFAULTS
 };
 
@@ -218,7 +240,7 @@ impl Extension for CfgExtension {
         &[STAGE, PLAIN]
     }
     fn structs(&self) -> &'static [ExtStruct] {
-        &[CONFIG, LOOSE]
+        &[CONFIG, LOOSE, ROUTE]
     }
 }
 
@@ -369,5 +391,47 @@ fn native_validated_struct_bars_construction_and_validates_at_a_door() {
         lines,
         vec!["ok: 8080", "bad: port 70000 out of range"],
         "the native validator must run and reject a bad value identically on both backends"
+    );
+}
+
+// --- @attribute ----------------------------------------------------------------------------------
+
+#[test]
+fn native_attribute_struct_gates_application_and_placement() {
+    let _guard = SERIAL.lock().unwrap();
+
+    // The directive's opt-in: `#[Route(...)]` is accepted on a fn only because the native `Route`
+    // struct carries `@attribute` — resolved through the same `use` machinery a `.noe` attribute is
+    // (`use cfg.Route` binds `Route -> cfg.Route`, the checker's gate keys on it). Construction is the
+    // struct's fields, so a well-formed `#[Route("/x")]` checks clean.
+    let ok = check_codes("use cfg.Route\n#[Route(\"/x\")]\nfn handler(): void { return }\n");
+    assert!(
+        ok.is_empty(),
+        "a native @attribute applied at a permitted site must check clean; got {ok:?}"
+    );
+
+    // No `use`: there is no global attribute namespace, so a bare `#[Route]` is the unknown-attribute
+    // error (E0029) — the native attribute is namespace-scoped exactly like a `.noe` one.
+    let bare = check_codes("#[Route(\"/x\")]\nfn handler(): void { return }\n");
+    assert!(
+        bare.iter().any(|c| c == "E0029"),
+        "a native @attribute applied WITHOUT its `use` must be E0029; got {bare:?}"
+    );
+
+    // Placement: `Route` declared `@attribute(Function, Method)`, so applying it to a **struct** is
+    // E0030. This is the AttrTarget payload doing its job — the native placement list seeds the same
+    // gate a `.noe` `@attribute(Function, Method)` does.
+    let misplaced = check_codes("use cfg.Route\n#[Route(\"/x\")]\nstruct S { id: int }\n");
+    assert!(
+        misplaced.iter().any(|c| c == "E0030"),
+        "a native @attribute at a forbidden site must be E0030; got {misplaced:?}"
+    );
+
+    // The construction contract is the struct's fields: a wrong-typed argument is E0007, identical to
+    // a `.noe` `@attribute` struct's construction gate.
+    let badarg = check_codes("use cfg.Route\n#[Route(42)]\nfn handler(): void { return }\n");
+    assert!(
+        badarg.iter().any(|c| c == "E0007"),
+        "a wrong-typed native @attribute argument must be E0007; got {badarg:?}"
     );
 }

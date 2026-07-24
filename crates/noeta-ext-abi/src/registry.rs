@@ -1097,10 +1097,9 @@ pub enum FieldedKind {
 /// pairs are legal at assembly (the native analogue of the AST placement gate E0054), since a native
 /// type bypasses the source-level site check.
 ///
-/// **Reserved for later slices — deliberately not variants yet:** `@attribute` and `@role` (their
-/// resolution is being redesigned to be namespace-aware across `.noe` too, not the current flat
-/// short-name model) and `@packed` (flat value-struct layout, native-extensibility Slice E). Each
-/// will slot in here when its seeding + reader land; the ABI-coverage gate rejects a variant that has
+/// **Reserved for a later slice — deliberately not a variant yet:** `@role` (rides on an
+/// `@attribute` struct; D3) and `@packed` (flat value-struct layout, native-extensibility Slice E).
+/// Each slots in here when its seeding + reader land; the ABI-coverage gate rejects a variant that has
 /// no reader, so they are added only alongside their implementation.
 #[derive(Debug, Clone, Copy)]
 pub enum ExtTypeDirective {
@@ -1116,6 +1115,30 @@ pub enum ExtTypeDirective {
     /// `semantic_enums` membership). Enum-only. A `@semantic` enum is the vocabulary a `@role` tag
     /// draws its variants from.
     Semantic,
+    /// `@attribute` — mark this **fielded struct** usable as a `#[...]` data attribute, the native
+    /// analogue of a `.noe` `@attribute struct`. Struct-only. Seeds the checker's `attributes` opt-in
+    /// (E0029) keyed on the type's qualified identity, and — when the placement list is non-empty —
+    /// its `attachable` restriction (E0030), exactly as a `.noe` `@attribute(Kind, …)` does. An empty
+    /// slice is a bare `@attribute` (attachable anywhere). The struct's fields (already seeded by the
+    /// fielded seeder) are its construction contract, so a native `@attribute` and a `.noe` one behave
+    /// identically to every consumer, including reflection.
+    Attribute(&'static [AttrTarget]),
+}
+
+/// Where a native `@attribute` fielded struct may be **applied** — the ABI mirror of the checker's
+/// `TargetKind`, carried in [`ExtTypeDirective::Attribute`]. A `.noe` `@attribute(Method, Function)`
+/// lists these by name; a native declaration lists them as this closed enum. The checker maps each to
+/// its `TargetKind` when seeding the placement gate (E0030).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrTarget {
+    Struct,
+    Class,
+    Enum,
+    Function,
+    Method,
+    Field,
+    Variant,
+    Param,
 }
 
 /// A first-class **fielded type** contributed by an extension (native-extensibility S2, unified): a
@@ -1476,15 +1499,34 @@ pub struct ExtAttrField {
     pub default: Option<AttrFieldDefault>,
 }
 
-/// An extension-declared prelude **attribute** — the extension counterpart of an `@attribute`
-/// struct (tier-extensions port). The checker registers each installed extension's attributes
-/// exactly as it registers a program-declared one (construction gate, reflection, shadowable by a
-/// user declaration); std ships the tier knob/metadata attributes (`Bench`, `Doc`, `Skip`, `Name`,
-/// `Group`, `Data`) this way.
+/// An extension-declared **attribute** — the extension counterpart of an `@attribute` struct
+/// (tier-extensions port). An attribute *is* a struct, so it carries a `namespace` and projects
+/// through the one [`Registry::nominal_types`] stream as a [`NominalKind::Struct`] nominal exactly
+/// like any native fielded type: a consumer resolves `use std.test.{Skip}` / `use std.test` /
+/// `#[std.test.Skip]` through the same `classify_use`/`namespace_types` machinery, and the checker
+/// keys `symbols.attributes` on the [`ExtAttribute::qualified`] identity (D2). There is no global
+/// attribute namespace — std's tier attributes live under `std.test` (`Skip`/`Name`/`Group`/`Data`),
+/// `std.bench` (`Bench`), and `std.doc` (`Doc`), imported like any attribute.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtAttribute {
     pub name: &'static str,
+    /// The namespace this attribute lives under (`std.test`) — its qualified identity is
+    /// `namespace.name`, mirroring [`ExtType::namespace`] / [`ExtFielded::namespace`].
+    pub namespace: &'static str,
     pub fields: &'static [ExtAttrField],
+}
+
+impl ExtAttribute {
+    /// The **qualified identity** (`std.test.Skip`) — `namespace.name`, the string the checker keys
+    /// `symbols.attributes`/`records` on and reflection carries. Mirrors [`ExtType::qualified`].
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace, self.name)
+    }
+    /// Whether `q` is this attribute's qualified identity — allocation-free, mirroring
+    /// [`Nominal::is_qualified`].
+    pub fn is_qualified(&self, q: &str) -> bool {
+        qualified_matches(self.namespace, self.name, q)
+    }
 }
 
 /// Where a dev-tier directive may **attach** (the directive attachment-site model). A tier declares
@@ -2111,6 +2153,10 @@ impl Registry {
                 .any(|m| format!("{root}.{}", m.name).starts_with(&dotted))
                 || e.types().iter().any(|t| t.qualified().starts_with(&dotted))
                 || e.enums().iter().any(|t| t.qualified().starts_with(&dotted))
+                // A namespace may contain *only* attributes (`std.test`, `std.bench`, `std.doc`),
+                // so they count toward recognizing it as navigable — else `use std.test` would be
+                // rejected and the F5 Module-arm projection never runs.
+                || e.attributes().iter().any(|a| a.qualified().starts_with(&dotted))
         })
     }
 
@@ -2143,6 +2189,11 @@ impl Registry {
             }
             for t in e.enums() {
                 if let Some(rest) = t.qualified().strip_prefix(&dotted) {
+                    push_seg(rest, &mut out);
+                }
+            }
+            for a in e.attributes() {
+                if let Some(rest) = a.qualified().strip_prefix(&dotted) {
                     push_seg(rest, &mut out);
                 }
             }
@@ -2228,7 +2279,20 @@ impl Registry {
                 namespace: t.namespace,
                 kind: NominalKind::Trait,
             });
-            types.chain(enums).chain(fielded).chain(traits)
+            // An attribute is a struct, so it projects as a [`NominalKind::Struct`] nominal — this is
+            // the whole of its consumer-side resolution: `namespace_types`/`classify_use`/
+            // `resolve_namespace_child` walk this one stream, so `use std.test.{Skip}` binds
+            // `Skip → std.test.Skip` and a `use std.test` group surfaces it, identical to a type.
+            let attributes = e.attributes().iter().map(|a| Nominal {
+                name: a.name,
+                namespace: a.namespace,
+                kind: NominalKind::Struct,
+            });
+            types
+                .chain(enums)
+                .chain(fielded)
+                .chain(traits)
+                .chain(attributes)
         })
     }
 
@@ -2469,6 +2533,15 @@ impl Registry {
     /// The installed extension attribute named `name`, if any.
     pub fn find_ext_attribute(&self, name: &str) -> Option<&'static ExtAttribute> {
         self.ext_attributes().find(|a| a.name == name)
+    }
+
+    /// Whether `qualified` (`std.test.Skip`) is a registered extension attribute's identity. The
+    /// linker consults this to fold **only attribute** imports into a module's rewrite map (so a
+    /// `#[Skip]`/`attributes_of::<Skip>()` resolves to its FQN like the checker's gate does), leaving
+    /// every other native import to the checker's `extern_types` — the rewrite blast radius stays on
+    /// attribute names.
+    pub fn is_ext_attribute(&self, qualified: &str) -> bool {
+        self.ext_attributes().any(|a| a.is_qualified(qualified))
     }
 
     /// Find a registered extern type by its short display name (extern-types X1) — first match in
@@ -3149,6 +3222,20 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                 ));
             }
         }
+        // An attribute is a namespaced nominal too (D2b) — same namespace-under-root rule, so a
+        // forgotten `namespace:` (defaulting to nothing) or a cross-root claim is caught at assembly
+        // rather than silently squatting a reserved namespace.
+        for a in unit.attributes() {
+            if a.namespace != root && !a.namespace.starts_with(&format!("{root}.")) {
+                return Err(format!(
+                    "native attribute `{}` of unit `{}` declares namespace `{}`, outside the \
+                     unit's root `{root}`",
+                    a.name,
+                    unit.name(),
+                    a.namespace
+                ));
+            }
+        }
         // The two author-facing hooks are the same underlying type distinguished only by
         // `ExtFielded::kind`; a mismatched entry (a `Struct` in `classes()` or a `Class` in
         // `structs()`) would silently seed the wrong semantics. Catch it loudly at assembly.
@@ -3192,6 +3279,17 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                         unit.name()
                     ));
                 }
+                // `@attribute` is struct-only — an attribute is a struct (one canonical all-fields
+                // construction), never a reference class.
+                if matches!(d, ExtTypeDirective::Attribute(_)) && t.kind == FieldedKind::Class {
+                    return Err(format!(
+                        "native class `{}.{}` of unit `{}` carries `@attribute`, which applies \
+                         only to a struct (an attribute is a value struct, not a class)",
+                        t.namespace,
+                        t.name,
+                        unit.name()
+                    ));
+                }
             }
         }
         for t in unit.enums() {
@@ -3200,6 +3298,15 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     return Err(format!(
                         "native enum `{}.{}` of unit `{}` carries `@validated`, which applies only \
                          to a struct or a class",
+                        t.namespace,
+                        t.name,
+                        unit.name()
+                    ));
+                }
+                if matches!(d, ExtTypeDirective::Attribute(_)) {
+                    return Err(format!(
+                        "native enum `{}.{}` of unit `{}` carries `@attribute`, which applies only \
+                         to a struct",
                         t.namespace,
                         t.name,
                         unit.name()

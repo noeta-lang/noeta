@@ -638,6 +638,14 @@ const TABLE: &[Row] = &[
         "fields",
         Data(Anchor(CHECK_TIERS, "ext_attributes()")),
     ),
+    // The attribute's namespace is its qualified identity's prefix: it projects through the one
+    // `nominal_types` stream as a Struct-kind nominal, which is what makes `use std.test.{Skip}`
+    // resolve on the consumer side exactly like a native type (D2).
+    Row(
+        "ExtAttribute",
+        "namespace",
+        Data(Anchor(REGISTRY, "let attributes = e.attributes()")),
+    ),
     // --- ExtTier: the original instance of this bug class -----------------------------------------
     Row(
         "ExtTier",

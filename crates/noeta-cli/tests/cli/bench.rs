@@ -256,7 +256,8 @@ fn bench_per_fn_attribute_overrides_block_arg() {
     // `#[Bench(…)]` keeps it — the per-fn knob wins.
     let file = temp_program(
         "bench_override",
-        "fn work(n: int): int { return n }\n\
+        "use std.bench.Bench\n\
+         fn work(n: int): int { return n }\n\
          @bench(iterations: 4) {\n\
              fn inherits(): void { work(1) }\n\
              #[Bench(iterations: 2)]\n\

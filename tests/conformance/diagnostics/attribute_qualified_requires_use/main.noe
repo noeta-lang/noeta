@@ -1,0 +1,9 @@
+// A **qualified** attribute reference (`#[shapes.Marker]`) with no `use` bringing the module in
+// is the same unresolved-import error a qualified type reference is (E0019): D2 made attribute
+// names resolve through the same import machinery as types, so a spelled-out FQN needs its `use`.
+// expect: error E0019 at 8:3
+// expect: exit 1
+namespace app;
+
+#[shapes.Marker]
+struct Thing { id: int }

@@ -1,0 +1,15 @@
+// The **group** import form of a namespaced native attribute (D2b): `use std.test` brings the
+// namespace into scope, and the attribute is applied and reflected by its qualified-through-the-group
+// spelling `#[test.Skip]` / `attributes_of::<test.Skip>()`. The loader projects the namespace's
+// attributes (`test.Skip -> std.test.Skip`) exactly as it does its types, so both resolve to the one
+// FQN identity — the same machinery a `use std.http` group uses for `http.Response`.
+// expect: stdout "grouped"
+// expect: exit 0
+use std.test
+
+#[test.Skip("grouped")]
+struct Thing { id: int }
+
+for a in attributes_of::<test.Skip>() {
+    echo a.value.reason;
+}

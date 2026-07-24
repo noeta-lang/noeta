@@ -1198,23 +1198,27 @@ pub const PARAM_INFO: &str = "ParamInfo";
 /// `#[Name("…")]` (display name), `#[Group("…")]` (category for `--group` filtering), `#[Data([…])]`
 /// (parameterized rows). The single source of truth shared by the checker's prelude registration and
 /// the runner that interprets them.
-pub const TEST_ATTR_SKIP: &str = "Skip";
-pub const TEST_ATTR_NAME: &str = "Name";
-pub const TEST_ATTR_GROUP: &str = "Group";
-pub const TEST_ATTR_DATA: &str = "Data";
+// D2b — the tier attributes live under their tier's namespace (no global attribute namespace), so
+// these constants are the **qualified identity** every path shares: the loader rewrites a
+// user-written `#[Skip]` (after `use std.test.{Skip}`) to this FQN, the reflection manifest carries
+// it, and the runner reads it. A user must `use std.test` to apply them.
+pub const TEST_ATTR_SKIP: &str = "std.test.Skip";
+pub const TEST_ATTR_NAME: &str = "std.test.Name";
+pub const TEST_ATTR_GROUP: &str = "std.test.Group";
+pub const TEST_ATTR_DATA: &str = "std.test.Data";
 
 /// The **tier-knob attribute** of the `bench` tier: `#[Bench(iterations: N)]` on a bench fn sets its
 /// iteration count. A `@bench(iterations: N) { … }` block directive is distribution sugar — it
 /// stamps this attribute onto each contained fn that does not already carry one (a per-fn attribute
 /// wins over the block's). One mandatory `iterations: int` field; validated by the ordinary
 /// attribute construction gate, read by the bench runner.
-pub const TIER_ATTR_BENCH: &str = "Bench";
+pub const TIER_ATTR_BENCH: &str = "std.bench.Bench";
 
 /// The `doc` tier's attribute: activation with the `doc` tier live stamps `#[Doc("…")]` onto the
 /// declaration a `@doc { … }` block documents (adjacency-resolved), giving runtime docstrings via
 /// `attributes_of`. On a normal build the doc blocks strip at lowering and nothing is stamped, so
 /// production carries no doc text. One mandatory `text: string` field.
-pub const TIER_ATTR_DOC: &str = "Doc";
+pub const TIER_ATTR_DOC: &str = "std.doc.Doc";
 
 /// The prelude struct a declared tier's runner receives its roots as (tier-providers T2):
 /// `TierRoot { name: string, run: () -> void }` — one per activated fn. The checker registers it

@@ -1203,13 +1203,13 @@ fn link_core(
         import_targets.extend(native_roots.iter().cloned());
     }
 
-    let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views);
+    let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views, reg);
     let module_maps: std::collections::HashMap<Vec<String>, qualify::QMap> = module_views
         .iter()
         .map(|mv| {
             (
                 mv.namespace.clone(),
-                build_module_map(&mv.namespace, mv.stmts, &module_views),
+                build_module_map(&mv.namespace, mv.stmts, &module_views, reg),
             )
         })
         .collect();
@@ -1807,6 +1807,7 @@ fn build_module_map(
     own_ns: &[String],
     own_stmts: &[Stmt],
     modules: &[ModuleView],
+    reg: &noeta_ext_abi::registry::Registry,
 ) -> qualify::QMap {
     let mut map = qualify::QMap::new();
     // Identity entries (`App.Models.User` → itself) look like no-ops but are load-bearing: the
@@ -1846,7 +1847,56 @@ fn build_module_map(
             }
         }
     }
+    add_native_attribute_aliases(&mut map, own_stmts, reg);
     map
+}
+
+/// Fold a module's native **attribute** imports into its rewrite map, so a `#[Skip]` /
+/// `attributes_of::<Skip>()` written after `use std.test.{Skip}` rewrites to its qualified identity
+/// `std.test.Skip` — the one FQN the checker's gate keys on, the reflection manifest carries, and the
+/// test/bench/mcp/doc runners read (D2b: one identity everywhere). Mirrors the checker's `use`
+/// classification (`classify_use`), but keeps **only** attribute-kind imports (`is_ext_attribute`):
+/// every other native import stays the checker's `extern_types` job, so this rewrite never touches a
+/// type or value name — its blast radius is attribute names alone. A leaf `use std.test.{Skip}` binds
+/// `Skip`; a group `use std.test` / concrete `use std.test.mod` binds the projected `test.Skip` form.
+fn add_native_attribute_aliases(
+    map: &mut qualify::QMap,
+    own_stmts: &[Stmt],
+    reg: &noeta_ext_abi::registry::Registry,
+) {
+    use noeta_ext_abi::registry::UseKind;
+    let mut alias = |local: String, qualified: String| {
+        map.insert(qualified.clone(), qualified.clone());
+        map.insert(local, qualified);
+    };
+    for stmt in own_stmts {
+        let Stmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        for n in names {
+            let local = n.local();
+            match reg.classify_use(path, &n.name) {
+                UseKind::ExtStruct(qualified) if reg.is_ext_attribute(&qualified) => {
+                    alias(local.to_string(), qualified);
+                }
+                UseKind::Namespace(prefix) => {
+                    for (rel, q) in reg.namespace_types(&prefix) {
+                        if reg.is_ext_attribute(&q) {
+                            alias(format!("{local}.{rel}"), q);
+                        }
+                    }
+                }
+                UseKind::Module(qualified) => {
+                    for (rel, q) in reg.namespace_types(&qualified) {
+                        if reg.is_ext_attribute(&q) {
+                            alias(format!("{local}.{rel}"), q);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Split a dotted reference candidate into `(module path, declaration name)` when its prefix is a
