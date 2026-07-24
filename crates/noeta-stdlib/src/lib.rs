@@ -61,6 +61,10 @@ pub mod random;
 pub mod reactive;
 pub mod bulk;
 pub mod reductions;
+/// The `Scalar` element trait — one source of truth for per-element-type numeric behaviour, consumed
+/// by the reduction / element-wise / vector kernels. Exported as `scalar::Scalar` (not re-exported at
+/// the crate root, where `Scalar` already names the boxed-runtime-value enum from `noeta-ext-abi`).
+pub mod scalar;
 /// The `std.regex` engine surface (Ring 3), gated behind the default-on `ring-regex` feature so a
 /// footprint-tailored build can shed the engine and its Unicode tables.
 #[cfg(feature = "ring-regex")]
