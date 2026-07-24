@@ -378,6 +378,22 @@ pub enum RetTy {
     SameAsArg(usize),
     /// `int` if every argument is concretely `int`, else `float` (`math.abs`/`min`/`max`).
     NumericPreserving,
+    /// The constrained shape's **element scalar type** itself — resolved by the checker at the
+    /// `impl <module>.<Bundle> for T {}` site from `T`'s uniform numeric field kind (`scale(s:
+    /// Elem)`, an element-returning op). Only meaningful on a [`BundleFn`] whose bundle constraint
+    /// binds a uniform numeric field ([`ConstraintField::AnyNumeric`]); the checker resolves it
+    /// against the bound struct's concrete field type, so ONE bundle serves every element width.
+    Elem,
+    /// The element's **widened accumulator** (`dot() -> ElemWide`): an integer element (`int`, any
+    /// `iN`/`uN`) widens to `int` (i64), `f32` stays `f32`, `f64` stays `f64`, `float` stays
+    /// `float`. Matches the `Scalar::Wide` associated type — the accumulator a cross-lane reduction
+    /// cannot let silently wrap. Element-relative, like [`RetTy::Elem`].
+    ElemWide,
+    /// The element's **float promotion** (`length() -> ElemFloat`): an integer element (`int`, any
+    /// `iN`/`uN`) promotes to `float` (f64), `f32` stays `f32`, `f64` stays `f64`, `float` stays
+    /// `float`. Matches the `Scalar::Float` associated type — the result of a magnitude/`sqrt` op.
+    /// Element-relative, like [`RetTy::Elem`].
+    ElemFloat,
     /// The result type is named at the call site by a turbofish (`json.parse::<T>(): T`). The
     /// concrete `T` arrives as a [`TypeRecipe`] the checker records at the call site and the backend
     /// threads into the [`ExtModule::typed_dispatch`] (call-site-typed construction). The
@@ -418,6 +434,11 @@ impl RetTy {
                 .unwrap_or_else(|| "dyn".to_string()),
             // `int` when every argument is concretely `int`, else `float`.
             RetTy::NumericPreserving => "int | float".to_string(),
+            // Element-relative: the concrete element type is only known at the bundle's `impl`
+            // site, so a bare signature renders the symbolic element form (like `Var` → `T`).
+            RetTy::Elem => "Elem".to_string(),
+            RetTy::ElemWide => "ElemWide".to_string(),
+            RetTy::ElemFloat => "ElemFloat".to_string(),
             // Named at the call site by a turbofish, in its declared wrapper.
             RetTy::TypeArg(TypeArgWrap::Plain) => {
                 "T /* call-site type: name it with ::<T> */".to_string()
@@ -1152,6 +1173,14 @@ pub enum ConstraintField {
         bits: u8,
         signed: bool,
     },
+    /// A **uniform numeric field of any (kind, width, signedness)** — `int`, `float`, `f32`, `f64`,
+    /// and every `i8..i64`/`u8..u64`, but never `bool` or a nested packed struct. The generalized
+    /// form that lets ONE bundle bind every numeric vector width at once (the three fixed
+    /// `vec.Kernels`/`IntKernels`/`ColorKernels` copies collapse to one). Paired with a
+    /// [`ConstraintArity::Uniform`], the checker captures the bound shape's concrete element type so
+    /// it can resolve the element-relative returns [`RetTy::Elem`]/[`RetTy::ElemWide`]/
+    /// [`RetTy::ElemFloat`]. The specific forms above stay exact — this is additive.
+    AnyNumeric,
 }
 
 /// The storage layout a [`PackedConstraint`] requires of the bound type.
@@ -3894,5 +3923,52 @@ mod runtime_registry_tests {
         // An explicit install after anything is installed is a hard error.
         let result = std::panic::catch_unwind(|| install(vec![&A2]));
         assert!(result.is_err(), "install after install_default must panic");
+    }
+}
+
+#[cfg(test)]
+mod elem_retty {
+    //! The scalar-unification ABI additions (element-relative return types + the `AnyNumeric`
+    //! constraint). The *resolution* of `Elem`/`ElemWide`/`ElemFloat` against a concrete element
+    //! type is the checker's job (exercised end-to-end in
+    //! `noeta-embed/tests/ext_constraint_enforcement.rs`); these pin the ABI-level contract this
+    //! crate owns — that the variants exist, render symbolically, and stay distinct.
+
+    use super::*;
+
+    #[test]
+    fn element_relative_returns_render_symbolically() {
+        // No params are referenced — the element type is only known at the bundle's impl site, so a
+        // bare signature renders the symbolic element form (like `Var(0)` → `T`).
+        assert_eq!(RetTy::Elem.render(&[]), "Elem");
+        assert_eq!(RetTy::ElemWide.render(&[]), "ElemWide");
+        assert_eq!(RetTy::ElemFloat.render(&[]), "ElemFloat");
+    }
+
+    #[test]
+    fn any_numeric_is_distinct_from_the_specific_forms() {
+        // `AnyNumeric` is additive: it is a new, distinct constraint field, not an alias of any
+        // pinned form — the specific `IntN`/`F32`/… keep their exact identity.
+        assert_ne!(ConstraintField::AnyNumeric, ConstraintField::F32);
+        assert_ne!(ConstraintField::AnyNumeric, ConstraintField::Int);
+        assert_ne!(
+            ConstraintField::AnyNumeric,
+            ConstraintField::IntN {
+                bits: 16,
+                signed: true
+            }
+        );
+    }
+
+    #[test]
+    fn an_element_relative_bundle_signature_renders() {
+        // A whole `dot(dyn): ElemWide` bundle method renders end-to-end — the signature surface a
+        // unified `vec.Kernels` will expose.
+        let f = ExtFn {
+            name: "dot",
+            params: &[SigType::Dyn],
+            ret: RetTy::ElemWide,
+        };
+        assert_eq!(f.render(), "fn dot(dyn): ElemWide");
     }
 }

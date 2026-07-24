@@ -979,6 +979,10 @@ pub(super) fn module_return(
         RetTy::Concrete(s) => sig_to_type_bound(reg, &s, &bind_params(f.params, args)),
         RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
+        // Element-relative returns are a bundle-method concern (they reference a bound `@packed`
+        // shape's element); a plain module function has no such shape, so a hole is the safe
+        // fallback — no shipped module function declares one.
+        RetTy::Elem | RetTy::ElemWide | RetTy::ElemFloat => Type::Unknown,
         // A call-site-typed function is never reached through the plain-call return path — its
         // result is named by the turbofish and typed in the `Expr::TypedModuleCall` arm (via
         // `typed_module_result`), so a hole is the safe fallback here.
@@ -1088,11 +1092,19 @@ pub(super) fn bundle_method_params(
 /// A bundle method's return type under the receiver-at-0 convention (kernel-methods K2):
 /// `SameAsArg(0)` is **the receiver's type** (`xs.add_all(ys)` returns `xs`'s own `List<T>`),
 /// `SameAsArg(i > 0)` the call's argument `i - 1`.
+///
+/// The **element-relative** returns (scalar-unification ABI) resolve against `elem` — the bound
+/// `@packed` shape's uniform element type, captured by the checker at the call site from the
+/// receiver's concrete field kind. `Elem` is that element itself, `ElemWide` its widened
+/// accumulator ([`elem_wide`]), `ElemFloat` its float promotion ([`elem_float`]); a `None` `elem`
+/// (a non-uniform shape reaching an element-relative method — never true for a well-formed
+/// `AnyNumeric` binding) degrades to a gradual hole rather than a wrong concrete type.
 pub(super) fn bundle_method_return(
     reg: &registry::Registry,
     f: &registry::ExtFn,
     recv: &Type,
     args: &[Type],
+    elem: Option<&Type>,
 ) -> Type {
     use registry::RetTy;
     match f.ret {
@@ -1100,8 +1112,62 @@ pub(super) fn bundle_method_return(
         RetTy::SameAsArg(0) => recv.clone(),
         RetTy::SameAsArg(i) => args.get(i - 1).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
+        RetTy::Elem => elem.cloned().unwrap_or(Type::Unknown),
+        RetTy::ElemWide => elem.map(elem_wide).unwrap_or(Type::Unknown),
+        RetTy::ElemFloat => elem.map(elem_float).unwrap_or(Type::Unknown),
         RetTy::TypeArg(_) => Type::Unknown,
     }
+}
+
+/// The **widened accumulator** of a numeric element (`Scalar::Wide`) — the type an
+/// [`registry::RetTy::ElemWide`] bundle method (`dot`) returns. Integer elements (`int` and every
+/// `iN`/`uN`) widen to `int` (the i64 the seam's `Scalar::Int` carries — an unsigned `uN`'s u64
+/// accumulator crosses the ABI in the same 64-bit lane); `f32` stays `f32`, `f64` stays `f64`,
+/// `float` stays `float`. Kept in lock-step with the `noeta-stdlib` `Scalar` trait's `Wide`.
+pub(super) fn elem_wide(elem: &Type) -> Type {
+    match elem {
+        Type::Int | Type::IntN { .. } => Type::Int,
+        Type::F32 => Type::F32,
+        Type::F64 => Type::F64,
+        Type::Float => Type::Float,
+        _ => Type::Unknown,
+    }
+}
+
+/// The **float promotion** of a numeric element (`Scalar::Float`) — the type an
+/// [`registry::RetTy::ElemFloat`] bundle method (`length`) returns. Integer elements (`int` and
+/// every `iN`/`uN`) promote to `float` (f64); `f32` stays `f32`, `f64` stays `f64`, `float` stays
+/// `float`. Kept in lock-step with the `noeta-stdlib` `Scalar` trait's `Float`.
+pub(super) fn elem_float(elem: &Type) -> Type {
+    match elem {
+        Type::Int | Type::IntN { .. } | Type::Float => Type::Float,
+        Type::F32 => Type::F32,
+        Type::F64 => Type::F64,
+        _ => Type::Unknown,
+    }
+}
+
+/// The **uniform element type** of a bound `@packed` shape — the concrete field kind an
+/// element-relative bundle return resolves against (scalar-unification ABI). Returns the type of
+/// `layout.fields[0]` (a uniform-numeric binding's fields are all one kind, validated at the impl
+/// site), or `None` for an empty layout. A `bool` field maps through faithfully; the element-
+/// relative returns only ever pair with an `AnyNumeric` constraint, which excludes `bool`.
+pub(super) fn packed_elem_type(layout: &noeta_ast::reflect::PackedLayout) -> Option<Type> {
+    use noeta_ast::reflect::PackedKind;
+    let kind = &layout.fields.first()?.kind;
+    Some(match kind {
+        PackedKind::Int => Type::Int,
+        PackedKind::Float => Type::Float,
+        PackedKind::F32 => Type::F32,
+        PackedKind::F64 => Type::F64,
+        PackedKind::Bool => Type::Bool,
+        PackedKind::IntN { bits, signed } => Type::IntN {
+            bits: *bits,
+            signed: *signed,
+        },
+        // A nested packed struct is not a scalar element — the element-relative returns don't apply.
+        PackedKind::Struct(_) => return None,
+    })
 }
 
 /// Kind-preserving numeric result (`math.abs`/`min`/`max`): `int` if every argument is concretely
