@@ -90,7 +90,12 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// element can carry *no* shape (it materializes to a bare `int`/`f32`, not an object). postcard prefixes
 /// an `Option` with a present/absent discriminant byte, so the field's encoding — and every byte after it
 /// in the schema table — shifts; a version-5 reader would misread the leading `u32` as an `Option` tag.
-pub const FORMAT_VERSION: u8 = 6;
+///
+/// Bumped to 7 by the debugger top-level-locals arc: `Module` gained a trailing `global_bindings:
+/// Vec<GlobalId>` (the top-level value-binding slots the debugger shows on the `main` frame). It is
+/// empty in a release bundle, but postcard appends the (zero-length) sequence unconditionally, so
+/// the payload grows by one byte and a version-6 reader would run off the end of the previous field.
+pub const FORMAT_VERSION: u8 = 7;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a
