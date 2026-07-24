@@ -169,11 +169,12 @@ async function main() {
   }
 
   {
-    // Backtick template strings and single-quoted strings share the same #interpolation rule.
+    // Backtick template strings interpolate (like double quotes); single-quoted strings are RAW
+    // (lexer `RawStr`) — `${…}` in a single-quoted string is literal text, not a hole.
     const bt = analyze('    x = `sum is ${n}`');
     check('backtick-string hole content resolves to code color', bt.colorAtIdx(bt.at('${n}', 2)), CODE);
     const sq = analyze("    x = 'v=${v}'");
-    check('single-quoted-string hole content resolves to code color', sq.colorAtIdx(sq.at('${v}', 2)), CODE);
+    check('single-quoted (raw) string does NOT interpolate — hole stays string', sq.colorAtIdx(sq.at('${v}', 2)), STRING);
   }
 
   {

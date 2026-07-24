@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.4
+
+Two grammar-fidelity fixes, found by a drift sweep against the tree-sitter grammar and the compiler
+lexer:
+
+- **Single-quoted strings are raw** and no longer highlight `${…}` as interpolated code. The lexer
+  (`RawStr`) treats a `'…'` string as literal — no interpolation, only `\'` and `\\` escapes, with
+  `{`/`$`/`\n` literal (ideal for regex, paths, JSON). The grammar had them sharing the
+  double-quote rule (interpolation + `\u{…}`/`\x` escapes); now the single-quote rule matches only
+  the two raw escapes. Double-quoted and backtick strings still interpolate.
+- **`fields_of` and `params_of`** are now highlighted as reflection keywords, alongside `type_of` /
+  `attributes_of` / `roles_of` / `from_bytes` / `invoke`.
+
 ## 0.14.3
 
 Fixes the language server not engaging on **unsaved (untitled) buffers** in Noeta mode: a new file
