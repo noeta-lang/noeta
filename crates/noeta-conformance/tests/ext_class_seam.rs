@@ -22,7 +22,7 @@
 //! registry — once per process — the single-registry path the CLI uses.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
@@ -90,6 +90,85 @@ impl ExternValue for GuardBox {
 
 const GUARD: ExtType = ExtType {
     name: "Guard",
+    namespace: "fx",
+    ..ExtType::DEFAULTS
+};
+
+// --- The BALANCED native-state handle (boundary 2: by-value arg-IN of a native-state class) --------
+//
+// `GuardBox` above is deliberately *unbalanced* (its `Drop` counts a destructor firing; its
+// `clone_box` fabricates a fresh box that does NOT count) so the destructor tests read an exact
+// firing count with no clone noise. That same asymmetry is what made a native-state class crossing
+// **arg-IN** unobservable: marshalling the instance `clone_box`es its extern-handle field into the
+// seam, and the clone drops when the marshalled `NativeValue` drops — with `GuardBox` the drop would
+// register as a spurious destructor. `BalancedGuard` closes that gap: EVERY live box (a born one or a
+// `clone_box`ed one) increments [`BAL_LIVE`]; every `Drop` decrements it. So the clone/drop pair a
+// by-value arg-IN performs is Rc/Arc-balanced and nets zero — residency returns to baseline AND
+// `BAL_LIVE` returns to zero, which is exactly the round-trip proof the arg-IN of a state-holding
+// class was missing. [`BAL_CLONES`] separately records that the `clone_box` actually fired, so the
+// test proves it *exercised* the extern-field marshalling rather than trivially passing.
+
+/// Net live `BalancedGuard` boxes: `+1` on birth, `+1` on `clone_box`, `-1` on `Drop`. Zero at a
+/// clean run's end (every clone matched by a drop, every construction by its destructor).
+static BAL_LIVE: AtomicIsize = AtomicIsize::new(0);
+/// How many times `clone_box` fired — the arg-IN marshalling of the extern-handle field. Nonzero
+/// proves the by-value cross actually cloned the native state (not that it was skipped).
+static BAL_CLONES: AtomicUsize = AtomicUsize::new(0);
+
+/// A balanced native-state handle: reference-counted-style bookkeeping so a clone/drop pair nets
+/// zero. Unlike [`GuardBox`], a clone is a *live* box that must be dropped, so [`BAL_LIVE`] tracks
+/// residency rather than a one-way destructor tally.
+#[derive(Debug)]
+struct BalancedGuard;
+
+impl BalancedGuard {
+    /// A freshly *constructed* guard (native construction, `kit.open_res`) — counts as one live box.
+    fn born() -> BalancedGuard {
+        BAL_LIVE.fetch_add(1, Ordering::SeqCst);
+        BalancedGuard
+    }
+}
+
+impl Drop for BalancedGuard {
+    fn drop(&mut self) {
+        BAL_LIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl ExternValue for BalancedGuard {
+    fn type_identity(&self) -> &'static str {
+        "fx.BGuard"
+    }
+    fn eq_value(&self, other: &dyn ExternValue) -> bool {
+        other.as_any().downcast_ref::<BalancedGuard>().is_some()
+    }
+    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<std::cmp::Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0
+    }
+    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        write!(out, "<bguard>")
+    }
+    // A clone is a real, live box (Rc/Arc-style): bump the live count AND record the clone. Its
+    // matching `Drop` will decrement `BAL_LIVE`, so the pair balances. (Constructed inline rather
+    // than via `born()` so the two accounting paths stay explicit — birth vs clone.)
+    fn clone_box(&self) -> Box<dyn ExternValue> {
+        BAL_CLONES.fetch_add(1, Ordering::SeqCst);
+        BAL_LIVE.fetch_add(1, Ordering::SeqCst);
+        Box::new(BalancedGuard)
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+const BGUARD: ExtType = ExtType {
+    name: "BGuard",
     namespace: "fx",
     ..ExtType::DEFAULTS
 };
@@ -188,7 +267,33 @@ const POINT: ExtClass = ExtClass {
     ..ExtClass::DEFAULTS
 };
 
-const FX_CLASSES: &[ExtClass] = &[HANDLE, POINT];
+/// A state-holding class built to cross **arg-IN** (boundary 2): a native-state `bguard` (private —
+/// the [`BalancedGuard`] whose clone/drop is balanced) plus a public `tag`. `kit.open_res`
+/// constructs it natively; `kit.tag` receives the WHOLE instance by value and reads `tag` off the
+/// marshalled receiver — the marshalling `clone_box`es `bguard` into the seam, the exact path
+/// `Handle` (unbalanced) could not observe. Distinct from `Handle` so the destructor tests' exact
+/// firing count is untouched.
+const RES: ExtClass = ExtClass {
+    name: "Res",
+    namespace: "fx",
+    fields: &[
+        ExtField {
+            name: "bguard",
+            ty: SigType::Named("BGuard"),
+            is_public: false,
+            is_mut: false,
+        },
+        ExtField {
+            name: "tag",
+            ty: SigType::String,
+            is_public: true,
+            is_mut: false,
+        },
+    ],
+    ..ExtClass::DEFAULTS
+};
+
+const FX_CLASSES: &[ExtClass] = &[HANDLE, POINT, RES];
 
 // --- The module that constructs and consumes them ------------------------------------------------
 
@@ -204,6 +309,21 @@ const KIT_FNS: &[ExtFn] = &[
         name: "sum",
         params: &[SigType::Named("Point")],
         ret: RetTy::Concrete(SigType::Int),
+    },
+    // Native constructor for the state-holding `Res` (return-OUT of a class carrying a balanced
+    // extern-handle field).
+    ExtFn {
+        name: "open_res",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named("Res")),
+    },
+    // **Boundary 2:** takes a state-holding `Res` BY VALUE (arg-IN) and reads its `tag` off the
+    // marshalled instance. The marshalling `clone_box`es the `bguard` extern-handle field into the
+    // seam; with `BalancedGuard` the clone/drop nets zero, so this round-trips leak-free.
+    ExtFn {
+        name: "tag",
+        params: &[SigType::Named("Res")],
+        ret: RetTy::Concrete(SigType::String),
     },
 ];
 
@@ -250,6 +370,40 @@ fn kit_dispatch(
             };
             Ok(NativeOut::Scalar(Scalar::Int(field("x") + field("y"))))
         }
+        "open_res" => {
+            let tag = match args.first() {
+                Some(NativeValue::Str(s)) => s.clone(),
+                _ => String::new(),
+            };
+            // A state-holding class instance: the balanced native-state `bguard` (born → one live
+            // box, balanced by its `Drop`) plus a public `tag`. Field order matches the declaration.
+            Ok(NativeOut::Instance {
+                class: "Res".to_string(),
+                fields: vec![
+                    (
+                        "bguard".to_string(),
+                        NativeOut::Extern(ExternBox::new(BalancedGuard::born())),
+                    ),
+                    ("tag".to_string(), NativeOut::Str(tag)),
+                ],
+            })
+        }
+        "tag" => {
+            // **Boundary 2:** the WHOLE state-holding instance crosses arg-IN as `NativeValue::Instance`,
+            // its `bguard` extern-handle field `clone_box`ed into the seam. Read the public `tag`.
+            let tag = match args.first() {
+                Some(NativeValue::Instance { fields, .. }) => fields
+                    .iter()
+                    .find(|(k, _)| k == "tag")
+                    .and_then(|(_, v)| match v {
+                        NativeValue::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            Ok(NativeOut::Str(tag))
+        }
         _ => Err(StdError {
             kind: noeta_stdlib::ErrorKind::UnknownName,
             message: format!("no function `{func}`"),
@@ -272,7 +426,7 @@ impl Extension for FxExtension {
         }]
     }
     fn types(&self) -> &'static [ExtType] {
-        &[GUARD]
+        &[GUARD, BGUARD]
     }
     fn classes(&self) -> &'static [ExtClass] {
         FX_CLASSES
@@ -474,6 +628,49 @@ echo \"done\"
             "[{backend}] both cyclic Handles' destructors must fire on reclamation"
         );
     }
+}
+
+/// **Boundary 2 — by-value arg-IN of a native-state class round-trips leak-free.** A `Res` (holding a
+/// native `bguard` extern handle) is constructed natively, then passed BY VALUE into `kit.tag`, which
+/// reads a public field off the marshalled instance. Marshalling `clone_box`es the `bguard` field into
+/// the seam; with the balanced (Rc/Arc-style) guard the clone/drop nets zero, so residency returns to
+/// baseline on both backends. The unbalanced `GuardBox` could not *observe* this (a clone drop reads as
+/// a spurious destructor) — `BalancedGuard` makes the round-trip measurable. Asserts:
+///   * both backends agree + leak oracle zero (via `run_both_agree`),
+///   * `BAL_LIVE` returns to zero — every cloned handle was dropped (no leak of the marshalled field),
+///   * `BAL_CLONES > 0` — the extern-handle field was actually marshalled (the cross was exercised,
+///     not trivially skipped).
+#[test]
+fn native_state_class_crosses_arg_in_by_value_leak_free() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_installed();
+    BAL_LIVE.store(0, Ordering::SeqCst);
+    BAL_CLONES.store(0, Ordering::SeqCst);
+
+    const PROGRAM: &str = r#"
+use fx.kit
+use fx.Res
+
+r = kit.open_res("held")
+echo r.tag
+// Boundary 2: the whole native-state instance crosses arg-IN by value.
+echo kit.tag(r)
+"#;
+
+    let stdout = run_both_agree(PROGRAM);
+    assert_eq!(stdout, "held\nheld\n");
+
+    // Every born/cloned balanced guard was dropped — the marshalled extern-handle field did not leak.
+    assert_eq!(
+        BAL_LIVE.load(Ordering::SeqCst),
+        0,
+        "balanced native state must return to zero residency after the by-value arg-IN round-trip"
+    );
+    // The cross actually marshalled the extern-handle field (across both backends' runs of the arg-IN).
+    assert!(
+        BAL_CLONES.load(Ordering::SeqCst) > 0,
+        "the by-value arg-IN must have clone_box'd the native-state field (cross exercised, not skipped)"
+    );
 }
 
 /// Run one program on one backend, returning `(stdout, exit_code, heap_residency_delta)`. The delta
