@@ -694,37 +694,10 @@ impl Interpreter {
         )
     }
 
-    /// Call a bound method-bundle method (kernel-methods K3) — the tree-walker twin of the VM's
-    /// `call_bundle_method`: the compiler baked the route, receiver rides as slot 0.
-    pub(crate) fn call_bundle_method(
-        &mut self,
-        module: &str,
-        bundle: &str,
-        method: &str,
-        recv: Value,
-        args: &[Value],
-        span: Span,
-    ) -> Eval<Value> {
-        // Bound before the closures so they capture the registry, not `self` (IR3).
-        let reg = self.reg();
-        self.ctx_receiver_call(
-            recv,
-            args,
-            span,
-            || format!("{module}::{bundle}.{method}"),
-            |ctx, arg_slots| reg.dispatch_bundle_method(module, bundle, method, ctx, 0, arg_slots),
-            || {
-                reg.find_bundle(module, bundle)
-                    .and_then(|b| b.method(method))
-                    .map(|m| m.sig.ret)
-                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
-            },
-        )
-    }
-
-    /// Call a **trait default-body** method (ExtBundle→ExtTrait convergence, slice 2) — the
-    /// tree-walker twin of the VM's `call_trait_method`: the compiler baked the `(trait, method)`
-    /// route, receiver rides as slot 0. `trait_q` is the trait's qualified identity.
+    /// Call a **trait** method (a native default body, slice 2; or a kernel-trait method since the
+    /// ExtBundle→ExtTrait fold-in, slice 4) — the tree-walker twin of the VM's `call_trait_method`:
+    /// the compiler baked the `(trait, method)` route, receiver rides as slot 0. `trait_q` is the
+    /// trait's qualified identity.
     pub(crate) fn call_trait_method(
         &mut self,
         trait_q: &str,

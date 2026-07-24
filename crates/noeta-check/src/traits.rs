@@ -4,6 +4,7 @@
 //! `Checker` methods moved verbatim out of the crate root purely to shrink `lib.rs`.
 
 use super::*;
+use crate::stdlib::DeriveApply;
 
 impl Checker {
     // ----- traits: impl coherence and derive validation (M1.8) -----
@@ -224,6 +225,10 @@ impl Checker {
         if decl.trait_name.contains('.') && !self.symbols.user_traits.contains_key(&decl.trait_name)
         {
             self.check_bundle_impl(decl);
+            // Override bodies are now permitted (ExtBundle→ExtTrait fold-in, slice 4): a kernel binding
+            // may provide a method to override the trait's native default, so its bodies are checked
+            // like any standalone-impl body (was forbidden — "empty body required" — under the bundle).
+            self.check_standalone_impl_bodies(decl, env);
             return;
         }
         if !self.symbols.records.contains_key(&decl.target)
@@ -324,10 +329,41 @@ impl Checker {
         methods: &[FnDecl],
         assoc_bindings: &[(String, noeta_ast::TypeRef)],
     ) {
+        // A **native-derived** associated type (slice 1b) is **auto-supplied** at the user impl site
+        // (slice 4): it is computed from the implementing type's element, not written per-impl, so the
+        // coherence "must bind" check below treats it as if defaulted. Fold each derivation over the
+        // target's `@packed` element into `trait_assoc[(target, trait)]` — so `Self::Name` in a native
+        // trait method resolves for this concrete `T` exactly as an advertised native type's does — and
+        // collect the names to exclude from the required set. (An empty `impl vec.Kernels for V3 {}`
+        // stays empty AND `v.dot(w)` types as the derived `Wide`.)
+        let derived: Vec<(String, noeta_ext_abi::AssocDerivation)> = self
+            .symbols
+            .native_derived_assoc
+            .get(&decl.name)
+            .cloned()
+            .unwrap_or_default();
+        if !derived.is_empty()
+            && let Some(elem) = self
+                .packed_layout(&Type::Named(target.to_string(), Vec::new()))
+                .and_then(|layout| stdlib::packed_elem_type(&layout))
+        {
+            let map: HashMap<String, Type> = derived
+                .iter()
+                .map(|(name, d)| (name.clone(), d.apply(&elem)))
+                .collect();
+            self.symbols
+                .trait_assoc
+                .insert((target.to_string(), decl.name.clone()), map);
+        }
         // Associated-type coherence (slice 1a): every associated type WITHOUT a default must be bound
-        // by this impl. A defaulted associated type may be omitted (it falls back to its default).
+        // by this impl. A defaulted associated type — or a native-derived one (auto-supplied above) —
+        // may be omitted.
         for a in &decl.assoc_types {
-            if a.default.is_none() && !assoc_bindings.iter().any(|(n, _)| n == &a.name) {
+            let auto_supplied = derived.iter().any(|(n, _)| n == &a.name);
+            if a.default.is_none()
+                && !auto_supplied
+                && !assoc_bindings.iter().any(|(n, _)| n == &a.name)
+            {
                 self.error(
                     DiagnosticCode::InvalidImpl,
                     trait_span,
@@ -615,17 +651,9 @@ impl Checker {
             );
             return;
         };
-        if !decl.methods.is_empty() {
-            self.error(
-                DiagnosticCode::InvalidImpl,
-                decl.span,
-                "a bundle binding takes an empty body — its methods are native",
-            )
-            .help(format!(
-                "`impl {} for {} {{}}` acquires the bundle's methods as the extension declares them",
-                decl.trait_name, decl.target
-            ));
-        }
+        // The empty-body requirement was relaxed in the fold-in (slice 4): a kernel binding may now
+        // carry an override body (checked by `check_standalone_impl_bodies` at the caller). The methods
+        // are still native defaults — an empty `impl vec.Kernels for T {}` adopts every one.
         self.check_bundle_binding(
             &decl.target,
             decl.target_span,
@@ -653,9 +681,14 @@ impl Checker {
         target_span: Span,
         binding_span: Span,
         trait_name: &str,
-        bundle: &'static noeta_ext_abi::ExtBundle,
+        bundle: &'static noeta_ext_abi::ExtTrait,
     ) {
-        if !self.check_packed_self_constraint(target, target_span, trait_name, &bundle.constraint) {
+        // The structural `Self`-constraint now lives on the trait (slice 3, `ExtTrait::self_constraint`)
+        // — the same `PackedConstraint` the `ExtBundle` carried, checked by the same core with the same
+        // E0015 diagnostics. Every kernel trait declares one; a trait without one binds any type.
+        if let Some(constraint) = &bundle.self_constraint
+            && !self.check_packed_self_constraint(target, target_span, trait_name, constraint)
+        {
             return;
         }
         // Conflicts, reported on the binding (the textually-later party). Receiver-aware: an
@@ -708,7 +741,12 @@ impl Checker {
                 continue;
             }
             for m in bundle.methods {
-                if earlier.bundle.method(m.sig.name).is_some() {
+                if earlier
+                    .bundle
+                    .methods
+                    .iter()
+                    .any(|em| em.sig.name == m.sig.name)
+                {
                     conflicts.push(format!(
                         "`{target}` already acquires `{}` from bundle `{}`",
                         m.sig.name, earlier.bundle.name
@@ -723,6 +761,18 @@ impl Checker {
                 format!("{conflict} — binding `{trait_name}` would make the name ambiguous"),
             );
         }
+        // Unify the binding with the general trait machinery (guardrail): record it in
+        // `user_trait_impls` too, so coherence/dedup see the kernel trait as implemented for `target`
+        // exactly like a `.noe` trait — the typing index stays `bundle_impls` (the `List<Self>` dual
+        // receiver), but the trait *identity* is recorded uniformly. Native-derived assoc types
+        // (`Self::Wide`/`Self::Float`) are resolved directly from the trait at the call site
+        // (`bundle_method_return`), so no `trait_assoc` fold is needed on this path.
+        self.symbols
+            .user_trait_impls
+            .entry(target.to_string())
+            .or_default()
+            .entry(bundle.name.to_string())
+            .or_default();
     }
 
     /// The **packed-`Self` shape check** shared by the two structural constraints in the

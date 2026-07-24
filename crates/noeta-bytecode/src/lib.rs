@@ -934,24 +934,11 @@ pub enum Op {
         err_shape: u32,
         span: Span,
     },
-    /// A **method-bundle** method call (kernel-methods K2/K3): `recv.method(args)` statically
-    /// routed to a registered bundle (`impl <module>.<Bundle> for T {}` — the checker verified the
-    /// binding and baked the route). Dispatches through the bundle's shared ctx dispatch with the
-    /// receiver as slot 0; no runtime discovery, so an empty list receiver works.
-    BundleMethod {
-        dst: Reg,
-        recv: Reg,
-        module: NameId,
-        bundle: NameId,
-        method: NameId,
-        args: Box<[Reg]>,
-        span: Span,
-    },
-    /// A **trait default-body** method call (ExtBundle→ExtTrait convergence, slice 2):
-    /// `recv.method(args)` statically routed to a native trait's defaulted method whose trait carries
-    /// a native default-body dispatch and whose implementing type provides no override (the checker
-    /// verified this and baked the `(trait, method)` route). Dispatches through the trait's shared ctx
-    /// dispatch with the receiver as slot 0; the trait twin of [`Op::BundleMethod`].
+    /// A **trait** method call with a baked-in route: `recv.method(args)` statically routed to a native
+    /// trait's shared ctx dispatch, receiver as slot 0, no runtime discovery (so an empty list receiver
+    /// works for the bulk kernels). Two producers: a native trait's defaulted method with a trait-level
+    /// dispatch and no override (slice 2); and — since the ExtBundle→ExtTrait fold-in (slice 4) — every
+    /// kernel-trait method (`impl vec.Kernels for T {}`), whose bundle route was unified onto this one.
     TraitMethod {
         dst: Reg,
         recv: Reg,
@@ -1967,24 +1954,6 @@ fn op_repr(
         Op::DecodeTyped {
             dst, name, text, ..
         } => format!("DecodeTyped r{dst} <- json.decode_typed(r{name}, r{text})"),
-        Op::BundleMethod {
-            dst,
-            recv,
-            module,
-            bundle,
-            method,
-            args,
-            ..
-        } => {
-            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
-            format!(
-                "BundleMethod r{dst} <- r{recv}.{}({}) via {}::{}",
-                n(method),
-                args.join(", "),
-                n(module),
-                n(bundle)
-            )
-        }
         Op::TraitMethod {
             dst,
             recv,

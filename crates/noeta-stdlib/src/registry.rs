@@ -115,7 +115,33 @@ std_unit!(
 );
 // The `vec`/`quat` packed-3D-math pair, split into its own unit to **prep extraction** into an
 // out-of-tree geometry package (native-extensions; Phase 3). No extern types — pure value math.
-std_unit!(VecExtension, "std.vec", modules = VEC_MODULES, types = &[]);
+// Written out (not `std_unit!`) because it declares the two kernel `ExtTrait`s (ExtBundle→ExtTrait
+// fold-in, slice 4): the `impl vec.Kernels for T {}` / `impl vec.SatKernels for T {}` binding surface.
+#[derive(Debug, Clone, Copy)]
+pub struct VecExtension;
+/// The two migrated kernel traits (`vec.Kernels`, `vec.SatKernels`). Namespaced `std.vec` so the
+/// module-qualified `impl` spelling and the runtime dispatch route resolve one identity.
+static VEC_TRAITS: &[noeta_ext_abi::registry::ExtTrait] = &[
+    crate::vec_kernels::VEC_KERNELS,
+    crate::vec_kernels::VEC_SAT_KERNELS,
+];
+impl Extension for VecExtension {
+    fn name(&self) -> &'static str {
+        "std.vec"
+    }
+    fn root(&self) -> &'static str {
+        "std"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        VEC_MODULES
+    }
+    fn types(&self) -> &'static [ExtType] {
+        &[]
+    }
+    fn traits(&self) -> &'static [noeta_ext_abi::registry::ExtTrait] {
+        VEC_TRAITS
+    }
+}
 // The p2p/local-first stack (`crdt`/`p2p`/`synced`) left `std` for the first-party non-default
 // `para` namespace — it now lives in the `noeta-para-p2p` crate (`ParaP2pExtension`, root `para`),
 // installed only when a program depends on the `para-p2p` package. See the para-namespace arc.
@@ -769,23 +795,16 @@ pub fn commands() -> impl Iterator<Item = &'static noeta_ext_abi::ExtCommand> {
     noeta_ext_abi::registry::commands()
 }
 
-/// See [`noeta_ext_abi::registry::find_bundle`] (kernel-methods K0).
-pub fn find_bundle(module: &str, bundle: &str) -> Option<&'static ExtBundle> {
-    ensure();
-    noeta_ext_abi::registry::find_bundle(module, bundle)
-}
+// (`find_bundle` / `dispatch_bundle_method` were removed in the ExtBundle→ExtTrait fold-in (slice 4):
+// a kernel bundle is now a native `ExtTrait`, dispatched through `dispatch_trait_method` below.)
 
-/// See [`noeta_ext_abi::registry::dispatch_bundle_method`] (kernel-methods K0).
-pub fn dispatch_bundle_method(
-    module: &str,
-    bundle: &str,
-    method: &str,
-    ctx: &mut dyn crate::NativeCtx,
-    recv: crate::Slot,
-    args: &[crate::Slot],
-) -> Result<crate::CtxOut, crate::CtxError> {
+/// See [`noeta_ext_abi::registry::find_trait_in_module`] (ExtBundle→ExtTrait fold-in, slice 4).
+pub fn find_trait_in_module(
+    qualified_module: &str,
+    name: &str,
+) -> Option<&'static noeta_ext_abi::ExtTrait> {
     ensure();
-    noeta_ext_abi::registry::dispatch_bundle_method(module, bundle, method, ctx, recv, args)
+    noeta_ext_abi::registry::find_trait_in_module(qualified_module, name)
 }
 
 /// See [`noeta_ext_abi::registry::dispatch_trait_method`] (ExtBundle→ExtTrait convergence, slice 2).
@@ -5777,18 +5796,11 @@ const VEC_MODULES: &[ExtModule] = &[
         // intercepts, migrated.
         ctx_functions: crate::vec3::VEC_CTX_FNS,
         ctx_dispatch: Some(crate::vec3::vec_ctx_dispatch),
-        // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`, kernel-methods K1). The
-        // f32 vector bundle plus the array-ops integer (`IVec2`/`IVec3`) and `Color` shapes — one
-        // bundle per shape family, since each has a distinct method set and result types (an integer
-        // `dot` returns `int`, a `Color` has no `dot`/`length`).
-        // The TWO unified bundles (scalar-unification slice 3), generic over the element type:
-        // `vec.Kernels` (default arithmetic, every numeric width incl. f64) and `vec.SatKernels`
-        // (saturating, integer/`Color`). They replace the three per-type bundles the array-ops arc
-        // shipped — one generic kernel body per op serves every width.
-        bundles: &[
-            crate::vec_kernels::VEC_KERNELS,
-            crate::vec_kernels::VEC_SAT_KERNELS,
-        ],
+        // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`). Since the ExtBundle→ExtTrait
+        // fold-in (slice 4) they are native `ExtTrait`s — [`VEC_TRAITS`], registered through
+        // `VecExtension::traits()` — not a module `bundles` field. The TWO unified traits generic over
+        // the element type: `vec.Kernels` (default arithmetic, every numeric width incl. f64) and
+        // `vec.SatKernels` (saturating, integer/`Color`); one generic kernel body per op serves every width.
         docs: VEC_DOCS,
         ..ExtModule::DEFAULTS
     },

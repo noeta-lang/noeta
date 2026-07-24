@@ -124,20 +124,13 @@ pub struct Sites {
     /// instead of a native `Rvalue::TypedModuleCall`. A pure function of the program, like the
     /// other site maps.
     pub member_method_call_sites: HashSet<Span>,
-    /// Method-bundle call sites (kernel-methods K2): each bound bundle-method call span → the
-    /// statically resolved route `(module qualified identity, bundle name)`. Lowering bakes the
-    /// route into the call, so runtime dispatch is **call-site-resolved** — no shape-keyed
-    /// discovery, and an empty list receiver dispatches fine. (The flip side, documented: a
-    /// bundle method is not reachable through a `dyn` receiver — `dyn` stays the escape hatch;
-    /// a runtime binding table would be an additive later extension.)
-    pub bundle_call_sites: HashMap<Span, (String, String)>,
-    /// Trait default-body call sites (ExtBundle→ExtTrait convergence, slice 2) → the statically
-    /// resolved route `(trait qualified identity, method)`. Recorded when a method call resolves to a
-    /// native trait's *defaulted* method whose trait carries a native default-body dispatch
-    /// ([`noeta_ext_abi::ExtTrait::dispatch`]) and whose receiver type provides no override — lowering
-    /// bakes it into an [`Rvalue::TraitMethod`], dispatched through the trait's ctx dispatch with the
-    /// receiver as slot 0. The trait twin of [`Sites::bundle_call_sites`]; like it, `dyn` receivers are
-    /// the documented escape hatch (only statically-known concrete receivers route here).
+    /// Trait method call sites → the statically resolved route `(trait qualified identity, method)`.
+    /// Recorded (a) when a call resolves to a native trait's *defaulted* method answered by the trait's
+    /// native default-body dispatch (slice 2), and (b) — since the ExtBundle→ExtTrait fold-in (slice 4)
+    /// — for **every kernel-trait method** (`impl vec.Kernels for T {}`): the bundle runtime route was
+    /// unified onto the trait route, so lowering bakes it into an [`Rvalue::TraitMethod`] dispatched
+    /// through the trait's ctx dispatch with the receiver as slot 0. `dyn` receivers are the documented
+    /// escape hatch (only statically-known concrete receivers route here).
     pub trait_call_sites: HashMap<Span, (String, String)>,
     /// Namespace-group member-access sites (`http.client`, `use std.http`) → the concrete
     /// **root-qualified module identity** the chain resolves to (`std.http.client`). Lowering emits
@@ -282,9 +275,7 @@ pub(crate) struct SiteMaps {
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — lowering reads this (via
     /// [`Checked::f32_literal_sites`]) to emit a narrow `Const::F32` for the literal.
     pub(crate) f32_literal_sites: HashSet<Span>,
-    /// Method-bundle call sites (kernel-methods K2) — see [`Sites::bundle_call_sites`].
-    pub(crate) bundle_call_sites: HashMap<Span, (String, String)>,
-    /// Trait default-body call sites (ExtBundle→ExtTrait convergence, slice 2) — see
+    /// Trait method call sites (slice 2 default bodies + slice 4 kernel traits) — see
     /// [`Sites::trait_call_sites`].
     pub(crate) trait_call_sites: HashMap<Span, (String, String)>,
     /// Namespace-group member-access sites — see [`Sites::namespace_module_sites`].
@@ -336,7 +327,6 @@ impl SiteMaps {
             field_call_sites: self.field_call_sites,
             member_method_call_sites: self.member_method_call_sites,
             f32_literal_sites: self.f32_literal_sites,
-            bundle_call_sites: self.bundle_call_sites,
             trait_call_sites: self.trait_call_sites,
             namespace_module_sites: self.namespace_module_sites,
             try_conversion_sites: self.try_conversion_sites,

@@ -1,0 +1,24 @@
+// ExtBundle→ExtTrait fold-in (slice 4). Two properties the fold-in adds over the old bundle bind:
+//   - slice 6: a kernel binding may now carry an OVERRIDE BODY — the old "a bundle binding takes an
+//     empty body" E0015 is gone; a provided method is an ordinary inherent method on the target.
+//   - slice 5: an empty binding is still enough, and `v.dot(w)` resolves to the derived `Self::Wide`
+//     (the native-derived associated type — `f32` for an f32 element), auto-supplied at the impl site.
+// expect: stdout "10.0"
+// expect: stdout "v3"
+// expect: exit 0
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+// A binding with a body — permitted since the fold-in (was E0015). `describe` is an inherent method
+// alongside the native kernel methods the binding adopts.
+impl vec.Kernels for V3 { fn describe(): string { return "v3" } }
+
+v = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
+w = V3 { x: 3.0f32, y: 2.0f32, z: 1.0f32 }
+
+// `Self::Wide` of an f32 element is `f32` — the derived associated type resolves at the call site,
+// so assigning `v.dot(w)` to an `f32` binding checks clean (an `int` binding would not).
+n: f32 = v.dot(w)
+echo n
+echo v.describe()

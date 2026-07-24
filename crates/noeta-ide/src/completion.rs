@@ -711,17 +711,17 @@ fn push_derived(
 }
 
 /// Append each method as a `Method` candidate carrying its signature.
-/// The methods a **bundle binding** contributes to a receiver (kernel-methods K4): resolve each
-/// of the type's recorded `(module, bundle)` bindings against the registry and list the methods
-/// matching the receiver kind (`Element` on a `T` receiver, `Bulk` on a `List<T>`), with the
-/// declared signature as detail.
+/// The methods a **kernel-trait binding** contributes to a receiver (ExtBundle→ExtTrait fold-in,
+/// slice 4): resolve each of the type's recorded `(qualified module, trait name)` bindings to its
+/// native `ExtTrait` and list the methods matching the receiver kind (`Element` on a `T` receiver,
+/// `Bulk` on a `List<T>`), with the declared signature as detail.
 pub fn bundle_members(
     bindings: &[(String, String)],
     receiver: noeta_stdlib::BundleReceiver,
 ) -> Vec<Candidate> {
     let mut members = Vec::new();
     for (module, bundle) in bindings {
-        let Some(bundle) = noeta_stdlib::registry::find_bundle(module, bundle) else {
+        let Some(bundle) = noeta_stdlib::registry::find_trait_in_module(module, bundle) else {
             continue;
         };
         for m in bundle.methods.iter().filter(|m| m.receiver == receiver) {

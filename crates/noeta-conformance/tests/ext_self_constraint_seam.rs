@@ -54,6 +54,7 @@ const LANES: ExtTrait = ExtTrait {
             ret: RetTy::Concrete(SigType::Assoc("Wide")),
         },
         has_default: false,
+        ..ExtTraitMethod::DEFAULTS
     }],
     assoc_types: &[ExtAssocType {
         name: "Wide",

@@ -810,13 +810,23 @@ fn target_sites(target: TargetKind) -> noeta_ast::Sites {
     }
 }
 
-/// One method-bundle binding (kernel-methods K1): which registered bundle a type acquired via
-/// `impl <module>.<Bundle> for T {}`, and through which module identity runtime dispatch routes.
+/// One kernel-trait binding: which native kernel **trait** a type acquired via
+/// `impl <module>.<Trait> for T {}`, and through which module identity runtime dispatch routes.
+///
+/// **Surface adapter, NOT a second mechanism** (ExtBundle→ExtTrait fold-in, slice 4). The kernel
+/// traits were `ExtBundle`s until the fold-in; `bundle_impls` (the `HashMap` of these) survives purely
+/// as the **typing index** the checker's `bundle_method_call` reads to type a method on the bound `T`
+/// (element receiver) and on `List<T>` (bulk receiver — the accepted `List<Self>` asymmetry a general
+/// trait has no notion of). Everything else — the trait's identity, `self_constraint`, native-derived
+/// `assoc_types`, and default-body `dispatch` — is the one `ExtTrait`, checked and dispatched through
+/// the ordinary trait machinery; a binding is *also* recorded in `user_trait_impls` so bounds,
+/// coherence, and associated-type resolution unify. Merging this index into `user_trait_impls` would
+/// force the `List<Self>` receiver logic into the general trait path, i.e. a genuine second mechanism.
 #[derive(Clone)]
 struct BoundBundle {
-    /// The owning module's root-qualified identity (`"std.vec"`).
+    /// The owning module's root-qualified identity (`"std.vec"`) — the trait's `namespace`.
     module: String,
-    bundle: &'static noeta_ext_abi::ExtBundle,
+    bundle: &'static noeta_ext_abi::ExtTrait,
     /// The binding's trait span — conflict reporting orders by it (the textually-later binding
     /// carries the diagnostic).
     span: Span,
@@ -919,6 +929,15 @@ struct Symbols {
     /// E0015) — the same shape check `check_bundle_binding` runs for a bundle. Empty for a `.noe` trait
     /// or a native trait with no constraint.
     native_trait_self_constraints: HashMap<String, noeta_ext_abi::PackedConstraint>,
+    /// A native trait's **native-derived** associated types (slice 1b) — its local name → the
+    /// `(assoc name, derivation)` pairs. Populated by [`Checker::seed_ext_traits`] only when the native
+    /// trait won the `user_traits` slot. Read at the user `impl` site
+    /// ([`Checker::check_user_trait_impl`]): these are **auto-supplied** — a `impl <trait> for T {}`
+    /// must not be required to bind them (they are computed from `T`'s element, not written per-impl),
+    /// so the coherence "must bind non-default assoc" check skips them and the impl site folds each
+    /// derivation over `T`'s `@packed` element into `trait_assoc[(T, trait)]` so `Self::Name` resolves.
+    /// Empty for a `.noe` trait or a native trait with no associated types (ExtBundle→ExtTrait fold-in).
+    native_derived_assoc: HashMap<String, Vec<(String, noeta_ext_abi::AssocDerivation)>>,
     /// Declared `From` conversions (error-ergonomics): target type name → the source types its
     /// in-body `impl From<Source>` blocks declare, resolved at collection so a `?` site can consult
     /// them regardless of statement order. Coherence allows at most one `From` impl per type (the

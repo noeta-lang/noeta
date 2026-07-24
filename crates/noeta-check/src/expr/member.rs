@@ -153,20 +153,29 @@ impl Checker {
             _ => return None,
         };
         let bindings = self.symbols.bundle_impls.get(type_name)?;
-        let (route, method) = bindings.iter().find_map(|b| {
+        // Resolve the bound kernel **trait** + method (the surface adapter reads `bundle_impls`, the
+        // typing index; the identity is the one `ExtTrait`). `trait_q` is the trait's qualified identity
+        // (`std.vec.Kernels`) — the runtime dispatch key — and `assoc_types` resolves `Self::Wide` /
+        // `Self::Float` returns from the bound element (ExtBundle→ExtTrait fold-in, slice 4).
+        let (trait_q, method, assoc_types) = bindings.iter().find_map(|b| {
             b.bundle
-                .method(name)
-                .filter(|m| m.receiver == receiver_kind)
-                .map(|m| ((b.module.clone(), b.bundle.name.to_string()), m))
+                .methods
+                .iter()
+                .find(|m| m.sig.name == name && m.receiver == receiver_kind)
+                .map(|m| (b.bundle.qualified(), m, b.bundle.assoc_types))
         })?;
         let params = stdlib::bundle_method_params(self.reg(), &method.sig, args);
         let required = noeta_ext_abi::SigType::required_count(method.sig.params);
         self.check_args(&params, required, args, &[], span, name);
-        self.sites.bundle_call_sites.insert(call_span, route);
-        // Resolve the bound shape's uniform element type (scalar-unification ABI), so an
-        // element-relative return (`Elem`/`ElemWide`/`ElemFloat`) types against the concrete field
-        // kind of the struct this bundle was `impl`-bound to — `dot` → `int` for an i16 vector,
-        // `f32` for an f32 vector. The bound struct is the receiver's own `@packed` type.
+        // Record the `(trait, method)` route: the fold-in unified the bundle runtime route onto the
+        // trait route, so every kernel method dispatches through `Registry::dispatch_trait_method`.
+        self.sites
+            .trait_call_sites
+            .insert(call_span, (trait_q, name.to_string()));
+        // Resolve the bound shape's uniform element type, so a `Self::Wide` / `Self::Float` return
+        // types against the concrete field kind of the struct this trait was `impl`-bound to — `dot`
+        // → `int` for an i16 vector, `f32` for an f32 vector. The bound struct is the receiver's own
+        // `@packed` type; `SameAsArg(0)` returns are `Self` (element) / `List<Self>` (bulk).
         let elem = self
             .packed_layout(&Type::Named(type_name.clone(), vec![]))
             .and_then(|layout| stdlib::packed_elem_type(&layout));
@@ -175,6 +184,7 @@ impl Checker {
             &method.sig,
             recv,
             args,
+            assoc_types,
             elem.as_ref(),
         ))
     }

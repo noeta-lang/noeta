@@ -199,10 +199,13 @@ fn render_module(qname: String, m: &noeta_stdlib::ExtModule) -> ModuleApi {
         .chain(m.ctx_functions.iter())
         .map(render_fn)
         .collect();
-    let bundles = m
-        .bundles
-        .iter()
-        .map(|b| render_bundle(&qname, m.name, b))
+    // The kernel "bundles" (`vec.Kernels`, `vec.SatKernels`) are native `ExtTrait`s since the
+    // ExtBundle→ExtTrait fold-in (slice 4): namespaced to the qualified module and carrying a
+    // structural `self_constraint`. Scanned from the registry (traits are extension-level, not a
+    // module field), so the agent-facing surface is unchanged.
+    let bundles = module_kernel_traits(&qname)
+        .into_iter()
+        .map(|t| render_bundle(&qname, m.name, t))
         .collect();
     ModuleApi {
         module: qname,
@@ -212,16 +215,28 @@ fn render_module(qname: String, m: &noeta_stdlib::ExtModule) -> ModuleApi {
     }
 }
 
-fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtBundle) -> BundleApi {
+/// The kernel **traits** a module contributes (`vec.Kernels`, `vec.SatKernels`) — native traits
+/// namespaced to the qualified module and carrying a structural `self_constraint` (slice 4).
+fn module_kernel_traits(qname: &str) -> Vec<&'static noeta_stdlib::ExtTrait> {
+    registry::extensions()
+        .iter()
+        .flat_map(|e| e.traits())
+        .filter(|t| t.namespace == qname && t.self_constraint.is_some())
+        .collect()
+}
+
+fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtTrait) -> BundleApi {
     use noeta_stdlib::{BundleReceiver, ConstraintField, ConstraintLayout};
-    // The impl site names the bundle through the module *binding* (`use std.{vec}` then
+    // The impl site names the trait through the module *binding* (`use std.{vec}` then
     // `impl vec.Kernels for T {}`), so the short module name is the one to show.
     let impl_syntax = format!(
         "use {qualified} … impl {module}.{} for YourType {{}}",
         b.name
     );
-    let fields = b
-        .constraint
+    let constraint = b
+        .self_constraint
+        .expect("a kernel trait always carries a self_constraint");
+    let fields = constraint
         .fields
         .iter()
         .map(|f| match f {
@@ -237,13 +252,13 @@ fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtBundle) -> 
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let layout = match b.constraint.layout {
+    let layout = match constraint.layout {
         ConstraintLayout::Any => "any layout",
         ConstraintLayout::Row => "row layout",
         ConstraintLayout::Column => "column layout",
     };
     // A `Uniform` constraint reads only `fields[0]` — every field must be that kind, `min` or more.
-    let fields = match b.constraint.arity {
+    let fields = match constraint.arity {
         noeta_stdlib::ConstraintArity::Exact => fields,
         noeta_stdlib::ConstraintArity::Uniform { min } => {
             format!("{min}+ uniform {fields}")

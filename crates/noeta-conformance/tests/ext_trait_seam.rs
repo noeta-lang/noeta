@@ -130,6 +130,7 @@ const WIDGET: ExtTrait = ExtTrait {
             ret: RetTy::Concrete(SigType::String),
         },
         has_default: false,
+        ..ExtTraitMethod::DEFAULTS
     }],
     // No associated types (the native-derived assoc path is exercised by `ext_assoc_seam.rs`).
     assoc_types: &[],
