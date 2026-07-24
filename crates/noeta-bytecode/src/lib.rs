@@ -1402,6 +1402,13 @@ pub struct Module {
     /// what `LoadGlobal`/`StoreGlobal`/`TakeGlobal` carry ([`GlobalId`]); the name here is only for
     /// the unbound-global diagnostic and disassembly, never the hot path.
     pub global_names: Vec<String>,
+    /// The slots that are top-level **value bindings** (`x = 1`) — not `fn` names or imported native
+    /// values, which also occupy global slots. **Debug compiles only** (empty otherwise), like
+    /// [`Chunk::debug_locals`]: the debugger surfaces these as the top-level (`main`) frame's locals,
+    /// since top-level bindings are that frame's lexical scope even though they are *stored* in the
+    /// globals tier (a named function is sealed and cannot see them — see the DAP's `capture`). Empty
+    /// in a production/differential compile, so goldens and release bundles are byte-identical.
+    pub global_bindings: Vec<GlobalId>,
 }
 
 impl Module {

@@ -291,6 +291,7 @@ impl<'m> Vm<'m> {
                         module,
                         frames: &frames[..],
                         regs: &regs[..],
+                        globals: &self.persist.globals,
                         strand,
                     };
                     prof.before_op(&view);
@@ -314,6 +315,7 @@ impl<'m> Vm<'m> {
                                 module,
                                 frames: &frames[..],
                                 regs: &regs[..],
+                                globals: &self.persist.globals,
                                 strand,
                             };
                             dbg.before_op(proto as u32, pc, &view)
@@ -400,6 +402,7 @@ impl<'m> Vm<'m> {
                                         module,
                                         frames: &frames[..],
                                         regs: &regs[..],
+                                        globals: &self.persist.globals,
                                         strand,
                                     };
                                     dbg.after_side_effect(&view);

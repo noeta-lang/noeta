@@ -1,0 +1,30 @@
+// A `${…}` interpolation hole may contain a nested string literal. The scanner treats the hole's
+// contents as code, so a nested string's quotes and braces are opaque: a nested double-quoted
+// string, a nested string with an escaped `"`, a `??` between two nested strings, and a nested
+// string inside a backtick template hole all evaluate correctly.
+// expect: stdout "value: hi"
+// expect: stdout "quote: a\"b"
+// expect: stdout "coalesce: fallback"
+// expect: stdout "present: here"
+// expect: stdout "template: v=X"
+// expect: exit 0
+fn wrap(s: string): string {
+    return s;
+}
+
+// A nested double-quoted string as a call argument inside a hole.
+echo "value: ${wrap("hi")}";
+
+// A nested string carrying an escaped quote.
+echo "quote: ${wrap("a\"b")}";
+
+// `??` between two nested strings: the left is `none`, so the right nested string is taken.
+missing: ?string = none;
+echo "coalesce: ${missing ?? "fallback"}";
+
+// `??` where the left is present: the left nested string is unwrapped, the right is skipped.
+present: ?string = some("here");
+echo "present: ${present ?? "unused"}";
+
+// A nested double-quoted string inside a backtick template hole.
+echo `template: v=${wrap("X")}`;

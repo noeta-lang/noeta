@@ -298,6 +298,18 @@ fn compile_inner(
         reflection,
         type_reprs: module.type_reprs,
         names: module.names,
+        // Map each top-level value binding to its slot — debug compiles only, so a release module
+        // carries none (goldens/bundles unchanged). Its slot exists because the binding emits a
+        // `StoreGlobal`; a binding the checker proved dead and elided simply has no slot and drops.
+        global_bindings: if module.debug {
+            module
+                .module_binding_names
+                .iter()
+                .filter_map(|name| module.global_slots.get(name).copied().map(GlobalId))
+                .collect()
+        } else {
+            Vec::new()
+        },
         global_names: module.global_names,
     })
 }
@@ -460,6 +472,7 @@ fn compile_to_mc(
         types: HashMap::new(),
         module_globals: HashMap::new(),
         module_fns: HashSet::new(),
+        module_binding_names: Vec::new(),
         type_of_sites: sites.type_of_sites,
         cache_slots: 0,
         type_reprs: Vec::new(),
@@ -572,6 +585,7 @@ impl SessionCompiler {
             types: HashMap::new(),
             module_globals: HashMap::new(),
             module_fns: HashSet::new(),
+            module_binding_names: Vec::new(),
             type_of_sites: HashMap::new(),
             cache_slots: 0,
             type_reprs: Vec::new(),
@@ -770,6 +784,15 @@ impl SessionCompiler {
             reflection: self.reflection.clone(),
             type_reprs: self.mc.type_reprs.clone(),
             names: self.mc.names.clone(),
+            global_bindings: if self.mc.debug {
+                self.mc
+                    .module_binding_names
+                    .iter()
+                    .filter_map(|name| self.mc.global_slots.get(name).copied().map(GlobalId))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             global_names: self.mc.global_names.clone(),
         }
     }
@@ -882,6 +905,11 @@ struct ModuleCompiler {
     /// closure. A call whose callee resolves to one of these lowers to a direct [`Op::CallGlobal`]
     /// instead of `LoadGlobal` + `Op::Call` (perf A). Populated in [`Self::register_globals`].
     module_fns: HashSet<String>,
+    /// Top-level **value binding** names (`x = 1`) in source order — the subset of globals the
+    /// debugger shows on the `main` frame. Distinct from `module_fns` (function names) and from the
+    /// native values a `use` imports, both of which also occupy globals but are not user variables.
+    /// Mapped to slots to build [`Module::global_bindings`] (debug compiles only).
+    module_binding_names: Vec<String>,
     /// The concrete static type the checker resolved for each `type_of(value)` site (keyed by the
     /// `Expr::TypeOf` span), harvested from the *same* program the tree-walker harvests, so both
     /// backends bake identical full-fidelity `Type` constants (`type_of` fidelity A, P2.3). A site
@@ -963,6 +991,8 @@ impl ModuleCompiler {
             match stmt {
                 noeta_ast::Stmt::Binding { mut_decl, name, .. } => {
                     self.module_globals.insert(name.clone(), *mut_decl);
+                    // A user value binding — the only global kind the debugger shows on `main`.
+                    self.module_binding_names.push(name.clone());
                 }
                 noeta_ast::Stmt::Fn(decl) => {
                     self.module_globals.insert(decl.name.clone(), false);
