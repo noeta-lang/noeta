@@ -496,7 +496,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
-        Op::TypeOf { dst, src } | Op::FieldsOf { dst, src } => {
+        Op::TypeOf { dst, src } | Op::FieldsOf { dst, src } | Op::FieldSpecsOf { dst, src } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -520,6 +520,13 @@ fn op_facts(op: &Op) -> OpFacts {
             }
             f.uses.push(*name);
             f.uses.push(*args);
+        }
+        Op::Construct {
+            dst, name, fields, ..
+        } => {
+            f.def = Some(*dst);
+            f.uses.push(*name);
+            f.uses.push(*fields);
         }
         Op::MatchInt { src, fail, .. } => {
             f.uses.push(*src);
@@ -1011,7 +1018,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(src);
         }
-        Op::TypeOf { dst, src } | Op::FieldsOf { dst, src } => {
+        Op::TypeOf { dst, src } | Op::FieldsOf { dst, src } | Op::FieldSpecsOf { dst, src } => {
             m(dst);
             m(src);
         }
@@ -1034,6 +1041,13 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             }
             m(name);
             m(args);
+        }
+        Op::Construct {
+            dst, name, fields, ..
+        } => {
+            m(dst);
+            m(name);
+            m(fields);
         }
         Op::MatchInt { src, .. } => m(src),
         Op::MatchStr { src, .. } => m(src),

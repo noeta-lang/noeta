@@ -414,6 +414,16 @@ pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
             name: attr.qualified(),
             kind: noeta_ast::reflect::TypeKind::Struct,
             fields: attr.fields.iter().map(|f| f.name.to_string()).collect(),
+            field_types: attr
+                .fields
+                .iter()
+                .map(|f| match f.ty {
+                    ext::AttrFieldType::Int => noeta_ast::reflect::TypeRepr::Int,
+                    ext::AttrFieldType::Str => noeta_ast::reflect::TypeRepr::Str,
+                    ext::AttrFieldType::Dyn => noeta_ast::reflect::TypeRepr::Dyn,
+                })
+                .collect(),
+            field_optional: attr.fields.iter().map(|f| f.default.is_some()).collect(),
             field_defaults: attr
                 .fields
                 .iter()

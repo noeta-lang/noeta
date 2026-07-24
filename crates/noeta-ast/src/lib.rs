@@ -1690,6 +1690,30 @@ pub enum Expr {
         args: Box<Expr>,
         span: Span,
     },
+    /// The reflection query `field_specs_of::<T>()` / `field_specs_of(name)` — a declared struct or
+    /// class TYPE's field schema, returned as a `List<FieldSpec>` (each
+    /// `{ name: string, type: Type, optional: bool }`, declaration order). The **type-level** twin of
+    /// [`Expr::FieldsOf`]: `fields_of(v)` reflects an *instance*'s field *values*, this reflects the
+    /// *declaration*, so each `type` is the field's precise declared type and `optional` reports
+    /// whether it declared a default. `name` is a runtime `string` naming the type — the same
+    /// string-keyed shape [`Expr::ParamsOf`] takes — so a framework holding a type name only as a
+    /// runtime string (`Type.Struct(name, _)`) can query it. The turbofish surface
+    /// `field_specs_of::<T>()` is sugar the parser lowers to this node with `T`'s name as the string.
+    FieldSpecsOf { name: Box<Expr>, span: Span },
+    /// The reflection constructor `construct::<T>(fields)` / `construct(name, fields)` — build a
+    /// struct value from field values at runtime, reusing the SAME construction path as a `T { … }`
+    /// literal (field defaults and full-initialization honored). `name` is a runtime `string` naming
+    /// the struct/class type; `fields` is a runtime `List<dyn>` of field values in declaration order
+    /// (a list shorter than the field count fills the remaining fields from their defaults). Evaluates
+    /// to a `Result<dyn, string>` — `Ok(value)` on success, `Err(msg)` for an unknown type, an
+    /// arity/type-mismatch, or a missing non-defaulted field — recoverable like [`Expr::Invoke`]. The
+    /// turbofish surface `construct::<T>(fields)` is sugar the parser lowers to this node with `T`'s
+    /// name as the string.
+    Construct {
+        name: Box<Expr>,
+        fields: Box<Expr>,
+        span: Span,
+    },
     /// The type-test operator: `expr is T` is a `bool` — `true` if the runtime value is a `T`.
     /// Shares the runtime matcher with [`Expr::As`] (head-constructor match, generics erased) but
     /// yields a plain `bool` rather than `?T`. `ty` is the type written after `is`.
@@ -2016,6 +2040,8 @@ impl Expr {
             | Expr::RolesOf { span, .. }
             | Expr::ParamsOf { span, .. }
             | Expr::Invoke { span, .. }
+            | Expr::FieldSpecsOf { span, .. }
+            | Expr::Construct { span, .. }
             | Expr::TypeTest { span, .. }
             | Expr::FieldSet { span, .. }
             | Expr::TierExpr { span, .. }
@@ -2107,8 +2133,12 @@ impl Expr {
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
+            | Expr::FieldSpecsOf { name: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
+            Expr::Construct {
+                name: n, fields, ..
+            } => n.mentions(name) || fields.mentions(name),
             Expr::Invoke {
                 recv,
                 name: n,
@@ -2207,8 +2237,10 @@ impl Expr {
             | Expr::TypeOf { value: expr, .. }
             | Expr::FieldsOf { value: expr, .. }
             | Expr::ParamsOf { target: expr, .. }
+            | Expr::FieldSpecsOf { name: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
+            Expr::Construct { name, fields, .. } => name.has_await() || fields.has_await(),
             Expr::Invoke {
                 recv, name, args, ..
             } => {

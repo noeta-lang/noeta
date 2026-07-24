@@ -380,12 +380,17 @@ fn bound_in_expr(e: &Expr, names: &mut HashSet<String>) {
         | Expr::TypeOf { value: inner, .. }
         | Expr::FieldsOf { value: inner, .. }
         | Expr::ParamsOf { target: inner, .. }
+        | Expr::FieldSpecsOf { name: inner, .. }
         | Expr::As { expr: inner, .. }
         | Expr::TypeTest { expr: inner, .. }
         | Expr::FromBytes { blob: inner, .. }
         | Expr::Channel {
             capacity: inner, ..
         } => bound_in_expr(inner, names),
+        Expr::Construct { name, fields, .. } => {
+            bound_in_expr(name, names);
+            bound_in_expr(fields, names);
+        }
         Expr::Binary { lhs: a, rhs: b, .. }
         | Expr::Pipeline {
             left: a, right: b, ..
@@ -903,6 +908,13 @@ fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
         Expr::FieldsOf { value, .. } => q_expr(value, visit),
         // The target is a runtime string, not a type, so nothing to qualify beyond the operand expr.
         Expr::ParamsOf { target, .. } => q_expr(target, visit),
+        // The type name is already a string operand (the turbofish desugar captured the written name),
+        // so there is no `TypeRef` to qualify — just walk the operand expressions.
+        Expr::FieldSpecsOf { name, .. } => q_expr(name, visit),
+        Expr::Construct { name, fields, .. } => {
+            q_expr(name, visit);
+            q_expr(fields, visit);
+        }
         Expr::Invoke {
             recv, name, args, ..
         } => {

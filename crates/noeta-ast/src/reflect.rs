@@ -130,6 +130,27 @@ impl ReflectionInfo {
         self.types.iter().find(|t| t.name == name)
     }
 
+    /// The **type-level field schema** of the declared struct/class `type_name` — one
+    /// [`FieldSpecData`] per field in declaration order — the data `field_specs_of::<T>()` /
+    /// `field_specs_of(name)` materialize. An unknown type (or an enum) yields the empty list, the
+    /// same "nothing to report" answer `params_of` gives an unknown target, so a framework can probe
+    /// a type name without a guard. Both backends read this one accessor, so the materialized
+    /// `List<FieldSpec>` agrees across the differential by construction.
+    pub fn field_specs(&self, type_name: &str) -> Vec<FieldSpecData<'_>> {
+        let Some(info) = self.type_named(type_name) else {
+            return Vec::new();
+        };
+        info.fields
+            .iter()
+            .enumerate()
+            .map(|(i, name)| FieldSpecData {
+                name,
+                ty: info.field_types.get(i).unwrap_or(&TypeRepr::Dyn),
+                optional: info.field_optional.get(i).copied().unwrap_or(false),
+            })
+            .collect()
+    }
+
     /// The reflection [`TypeRepr`] of a **type reference** — a type name used as a value
     /// (`#[Encode(codec: JsonCodec)]`, `#[Builds(target: List<int>)]`), given its head `name` and
     /// its generic `args`. Reports the same precise constructor a `type_of` over a value of that
@@ -285,6 +306,18 @@ pub struct TypeInfo {
     pub kind: TypeKind,
     /// Field names in declaration order (records/classes; empty for enums).
     pub fields: Vec<String>,
+    /// Each field's declared type as a reflection [`TypeRepr`], parallel to `fields` (empty for
+    /// enums). Captured from the DECLARATION, so — unlike the runtime-erased `type_of` on a value —
+    /// it is precise (a `List<int>` field is `TypeRepr::List(Int)`, not `List(Dyn)`). An unannotated
+    /// field is [`TypeRepr::Dyn`]. Surfaced by the type-level `field_specs_of` query; the value-level
+    /// `fields_of` deliberately does not use it (it reflects values, not declared types).
+    pub field_types: Vec<TypeRepr>,
+    /// Whether each field declared a default, parallel to `fields` (empty for enums). `true` iff
+    /// [`FieldDecl::default`] is `Some` — i.e. the runtime can fill the field when it is omitted, the
+    /// exact condition a dynamic `construct` uses to decide a missing field is allowed. Distinct from
+    /// `field_defaults` below, which carries only the *literal* subset an attribute materializer can
+    /// fold; this flag covers any default expression.
+    pub field_optional: Vec<bool>,
     /// Each field's **literal default** (object-model slice 6i), parallel to `fields`: `Some` when
     /// the field declared `name: T = <literal>`, `None` for a mandatory field or a non-literal
     /// default. Used to fill an omitted optional field when materializing an attribute instance, so
@@ -359,6 +392,8 @@ pub fn build(
                     name: decl.name.clone(),
                     kind: TypeKind::Struct,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
+                    field_types: field_types(&decl.fields),
+                    field_optional: field_optional(&decl.fields),
                     field_defaults: field_defaults(&decl.fields),
                     variants: Vec::new(),
                 });
@@ -382,6 +417,8 @@ pub fn build(
                     name: decl.name.clone(),
                     kind: TypeKind::Class,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
+                    field_types: field_types(&decl.fields),
+                    field_optional: field_optional(&decl.fields),
                     field_defaults: field_defaults(&decl.fields),
                     variants: Vec::new(),
                 });
@@ -443,6 +480,8 @@ pub fn build(
                     name: decl.name.clone(),
                     kind: TypeKind::Enum,
                     fields: Vec::new(),
+                    field_types: Vec::new(),
+                    field_optional: Vec::new(),
                     field_defaults: Vec::new(),
                     variants: decl
                         .variants
@@ -538,6 +577,23 @@ fn param_sigs(params: &[crate::Param]) -> Vec<ParamSig> {
             optional: p.is_optional(),
         })
         .collect()
+}
+
+/// Each field's declared type as a reflection [`TypeRepr`], parallel to the field list — an
+/// unannotated field is [`TypeRepr::Dyn`]. The type-level twin of [`param_sigs`]'s type capture, so
+/// a field schema and a parameter schema report a declared type the same way.
+fn field_types(fields: &[FieldDecl]) -> Vec<TypeRepr> {
+    fields
+        .iter()
+        .map(|f| f.ty.as_ref().map(typeref_to_repr).unwrap_or(TypeRepr::Dyn))
+        .collect()
+}
+
+/// Whether each field declared a default, parallel to the field list — the optionality a dynamic
+/// constructor reads. Any default expression counts (not only a literal one), matching the runtime
+/// default thunks both backends compile per field.
+fn field_optional(fields: &[FieldDecl]) -> Vec<bool> {
+    fields.iter().map(|f| f.default.is_some()).collect()
 }
 
 /// Compute each field's literal default (object-model slice 6i), parallel to the field list: `Some`
@@ -643,6 +699,144 @@ pub fn materialize_args(
                 .unwrap_or(AttrValue::Bool(false))
         })
         .collect()
+}
+
+/// One field of a type-level schema — the borrowed view [`ReflectionInfo::field_specs`] returns,
+/// which both backends materialize into a prelude `FieldSpec { name, type, optional }` value.
+#[derive(Debug)]
+pub struct FieldSpecData<'a> {
+    pub name: &'a str,
+    pub ty: &'a TypeRepr,
+    pub optional: bool,
+}
+
+/// A concrete-scalar field type as a friendly lowercase name (`int`/`float`/`bool`/`string`/`bytes`),
+/// or `None` when the field type is not an enforced scalar — a `dyn`, a collection, or a nominal
+/// type, all of which a dynamic [`construct`](fn@crate::reflect::plan_construct) accepts without a
+/// runtime type-check (the callee's own typing is the backstop, mirroring how `para/cli`'s `coerce`
+/// passes an unknown type through). Widths erase: `iN`/`f32`/`f64` check as `int`/`float`, matching
+/// how a runtime scalar value classifies.
+fn enforced_scalar(ty: &TypeRepr) -> Option<&'static str> {
+    match ty {
+        TypeRepr::Int | TypeRepr::IntN { .. } => Some("int"),
+        TypeRepr::Float | TypeRepr::F32 | TypeRepr::F64 => Some("float"),
+        TypeRepr::Bool => Some("bool"),
+        TypeRepr::Str => Some("string"),
+        TypeRepr::Bytes => Some("bytes"),
+        _ => None,
+    }
+}
+
+/// The friendly lowercase name of a value's runtime head-repr, for a construct type-mismatch
+/// message. Computed from the [`TypeRepr`] both backends' classifiers agree on, so the message is
+/// byte-identical across the differential (rather than each backend's own `type_name`).
+fn value_repr_name(ty: &TypeRepr) -> String {
+    match enforced_scalar(ty) {
+        Some(name) => name.to_string(),
+        None => match ty {
+            TypeRepr::Str => "string".to_string(),
+            TypeRepr::List(_) => "list".to_string(),
+            TypeRepr::Set(_) => "set".to_string(),
+            TypeRepr::Map(_, _) => "map".to_string(),
+            TypeRepr::Option(_) => "option".to_string(),
+            TypeRepr::Unit => "unit".to_string(),
+            TypeRepr::Enum(n, _)
+            | TypeRepr::Struct(n, _)
+            | TypeRepr::Class(n, _)
+            | TypeRepr::Named(n, _) => n.clone(),
+            other => other.variant_name().to_lowercase(),
+        },
+    }
+}
+
+/// Plan a dynamic struct construction: validate a positional value list (in declaration order)
+/// against a type's field `specs`, given each supplied value's runtime head-repr `value_reprs` (which
+/// both backends compute with their own `type_of` classifier — the differential guarantees they
+/// agree, so this shared decision yields identical outcomes and identical error strings). On success
+/// returns the field name for each slot to fill — the pairing a backend feeds into its existing
+/// struct-literal construction path — leaving every omitted-but-defaulted field for that path to
+/// fill from its default thunk. Errors (returned as a ready-to-surface message, no leading `error:`):
+///   * more values than fields;
+///   * a value whose runtime scalar kind disagrees with a concrete-scalar field type;
+///   * a missing field that declared no default.
+///
+/// Because a missing field is rejected here unless it is optional, the construction path this feeds
+/// never hits its own missing-field abort — so the two error surfaces do not overlap.
+pub fn plan_construct<'a>(
+    type_name: &str,
+    specs: &[FieldSpecData<'a>],
+    value_reprs: &[TypeRepr],
+) -> Result<Vec<&'a str>, String> {
+    if value_reprs.len() > specs.len() {
+        return Err(format!(
+            "`{type_name}` has {} field(s), but {} value(s) were given",
+            specs.len(),
+            value_reprs.len()
+        ));
+    }
+    let mut fill: Vec<&str> = Vec::new();
+    for (i, spec) in specs.iter().enumerate() {
+        if i < value_reprs.len() {
+            if let Some(expected) = enforced_scalar(spec.ty) {
+                let got = value_repr_name(&value_reprs[i]);
+                if got != expected {
+                    return Err(format!(
+                        "field `{}` of `{type_name}` expects {expected}, got {got}",
+                        spec.name
+                    ));
+                }
+            }
+            fill.push(spec.name);
+        } else if !spec.optional {
+            return Err(format!(
+                "missing required field `{}` of `{type_name}`",
+                spec.name
+            ));
+        }
+    }
+    Ok(fill)
+}
+
+/// Validate a **named** dynamic construction: a set of `provided` field values, each `(field name,
+/// runtime value head-repr)`, against a type's field `specs`. The named counterpart of
+/// [`plan_construct`] — the form a framework uses when it binds fields by name (a CLI expanding a
+/// struct parameter into `--field` flags, which arrive sparsely and in any order). Unlike the
+/// positional form there is no gap problem: a field is supplied or it is not, so a middle field can
+/// be omitted while a later one is supplied. Errors (ready-to-surface messages):
+///   * a provided name that is not a field of the type;
+///   * a provided value whose runtime scalar kind disagrees with a concrete-scalar field type;
+///   * a field that is neither provided nor defaulted.
+///
+/// On success the caller builds the object from the provided `(name, value)` pairs; the construction
+/// path fills every unprovided field from its default (this validated that each such field has one).
+pub fn plan_construct_named(
+    type_name: &str,
+    specs: &[FieldSpecData<'_>],
+    provided: &[(String, TypeRepr)],
+) -> Result<(), String> {
+    for (name, repr) in provided {
+        let Some(spec) = specs.iter().find(|s| s.name == name) else {
+            return Err(format!("`{type_name}` has no field `{name}`"));
+        };
+        if let Some(expected) = enforced_scalar(spec.ty) {
+            let got = value_repr_name(repr);
+            if got != expected {
+                return Err(format!(
+                    "field `{name}` of `{type_name}` expects {expected}, got {got}"
+                ));
+            }
+        }
+    }
+    for spec in specs {
+        let supplied = provided.iter().any(|(n, _)| n == spec.name);
+        if !supplied && !spec.optional {
+            return Err(format!(
+                "missing required field `{}` of `{type_name}`",
+                spec.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A backend-agnostic descriptor of the prelude `Type` ADT — the shared vocabulary `type_of`
@@ -1277,6 +1471,15 @@ pub const ATTRIBUTE_TARGET_KINDS: &[&str] = &[
 /// declaration order. Registered like `ParamInfo`; both backends materialize the matching shape.
 pub const FIELD_ENTRY: &str = "FieldEntry";
 
+/// The prelude `FieldSpec` struct — the element type of the **type-level** field query
+/// `field_specs_of::<T>()` / `field_specs_of(name)`: `{ name: string, type: Type, optional: bool }`,
+/// one per declared field of a struct/class TYPE, in declaration order. Unlike [`FIELD_ENTRY`]
+/// (which reflects an *instance*'s field *values*) this reflects the *declaration*, so `type` is the
+/// field's declared type — **precise**, not the runtime-erased head `type_of` yields on a value —
+/// and `optional` reports whether the field declared a default (so a dynamic constructor knows it
+/// may omit it). Registered like `ParamInfo`; both backends materialize the matching shape.
+pub const FIELD_SPEC: &str = "FieldSpec";
+
 /// The prelude `Layout` enum's name — the storage-layout vocabulary `@packed` takes
 /// (`@packed(Layout.Column)`). Like [`SEMANTIC_ENUM`] it is directive vocabulary, not a runtime
 /// value: the parser resolves the argument syntactically, and the prelude registers the enum so
@@ -1499,6 +1702,8 @@ mod tests {
                 name: name.to_string(),
                 kind: TypeKind::Struct,
                 fields: Vec::new(),
+                field_types: Vec::new(),
+                field_optional: Vec::new(),
                 field_defaults: Vec::new(),
                 variants: Vec::new(),
             }],

@@ -579,6 +579,13 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::MaskWidth { operand, .. } => f(operand),
         // `params_of(target)` reads its runtime target-string operand.
         Rvalue::ParamsOf { target, .. } => f(target),
+        // `field_specs_of(name)` reads its runtime type-name operand.
+        Rvalue::FieldSpecsOf { name, .. } => f(name),
+        // `construct(name, fields)` reads its type-name and field-list operands.
+        Rvalue::Construct { name, fields, .. } => {
+            f(name);
+            f(fields);
+        }
         // `decode_typed(name, text)` reads its runtime type-name and JSON-text operands.
         Rvalue::DecodeTyped { name, text, .. } => {
             f(name);

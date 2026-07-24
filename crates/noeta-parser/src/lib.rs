@@ -85,6 +85,20 @@ fn is_decorator_directive(name: &str) -> bool {
     BuiltinDirective::from_name(name).is_some()
 }
 
+/// The head name of a turbofish type argument, for lowering `field_specs_of::<T>()` /
+/// `construct::<T>(…)` to the string-keyed node both forms share. A nominal `T` (the only meaningful
+/// argument to these type-level queries) yields its written name — including a dotted qualified name
+/// like `vec.Vec2`, which is exactly the key the reflection registry stores it under. A non-nominal
+/// argument (a container, `?T`, a union) has no single type name; it yields the empty string, so the
+/// runtime query answers with the honest empty result rather than a spurious match.
+fn type_ref_head_name(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Named { name, .. } => name.clone(),
+        TypeRef::DynTrait { trait_name, .. } => trait_name.clone(),
+        _ => String::new(),
+    }
+}
+
 /// The chumsky "extra" type used throughout: rich errors over [`TokenKind`](T) tokens
 /// with [`SimpleSpan`]s. Side state is threaded out-of-band via [`Ctx`], so the default
 /// (empty) parser state and context suffice here.
@@ -2564,6 +2578,68 @@ where
                 }
             });
 
+        // `field_specs_of::<T>()` / `field_specs_of(name)` — the TYPE-level field-schema query. Two
+        // disjoint surfaces under one keyword, told apart by the token after it: `::` opens the
+        // turbofish (a static type), `(` opens the dynamic string operand. The turbofish is pure
+        // sugar — its `T` is lowered HERE to the type's name as a string literal, so both forms carry
+        // the same runtime node (a name operand), exactly the string-keyed shape `params_of` takes.
+        let field_specs_of = just(T::FieldSpecsOfKw)
+            .ignore_then(choice((
+                just(T::ColonColon)
+                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .then_ignore(just(T::LParen))
+                    .then_ignore(just(T::RParen))
+                    .map(move |ty| {
+                        let span = ty.span();
+                        Expr::Str {
+                            value: type_ref_head_name(&ty),
+                            span,
+                        }
+                    }),
+                sub.clone().delimited_by(just(T::LParen), just(T::RParen)),
+            )))
+            .map_with(move |name, e| Expr::FieldSpecsOf {
+                name: Box::new(name),
+                span: ctx.to_span(e.span()),
+            });
+
+        // `construct::<T>(fields)` / `construct(name, fields)` — the dynamic struct constructor. The
+        // turbofish carries the type name (lowered here to a string, like `field_specs_of`) plus a
+        // single `fields` operand; the string form takes the type name and the fields list as two
+        // operands. Both converge on one node `{ name, fields }`.
+        let construct = just(T::ConstructKw)
+            .ignore_then(choice((
+                just(T::ColonColon)
+                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+                    .map(move |(ty, fields)| {
+                        let span = ty.span();
+                        (
+                            Expr::Str {
+                                value: type_ref_head_name(&ty),
+                                span,
+                            },
+                            fields,
+                        )
+                    }),
+                sub.clone()
+                    .separated_by(just(T::Comma))
+                    .at_least(2)
+                    .at_most(2)
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .map(|mut operands| {
+                        let fields = operands.pop().expect("two operands");
+                        let name = operands.pop().expect("two operands");
+                        (name, fields)
+                    }),
+            )))
+            .map_with(move |(name, fields), e| Expr::Construct {
+                name: Box::new(name),
+                fields: Box::new(fields),
+                span: ctx.to_span(e.span()),
+            });
+
         let atom = choice((
             int,
             f32_lit,
@@ -2585,8 +2661,11 @@ where
             from_bytes,
             channel,
             roles_of,
-            params_of,
-            invoke,
+            // The tuple is at its arity cap, so each keyword-led reflection query shares a slot with
+            // a disjoint sibling: `params_of(target)` with the type-level `field_specs_of`, and the
+            // by-name `invoke` with the by-name `construct`. All four commit on their leading keyword.
+            params_of.or(field_specs_of),
+            invoke.or(construct),
             // One choice-tuple slot for the two user turbofish forms (the tuple is at its arity
             // cap): the module form (`json.parse::<T>(s)`, needs a `.`) wins over the free-function
             // form (`f::<T>(args)`).

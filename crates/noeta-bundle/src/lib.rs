@@ -95,7 +95,16 @@ pub const MAGIC: &[u8; 4] = b"NOEB";
 /// Vec<GlobalId>` (the top-level value-binding slots the debugger shows on the `main` frame). It is
 /// empty in a release bundle, but postcard appends the (zero-length) sequence unconditionally, so
 /// the payload grows by one byte and a version-6 reader would run off the end of the previous field.
-pub const FORMAT_VERSION: u8 = 7;
+///
+/// Bumped to 8 by the struct-reflection arc: `reflect::TypeInfo` (in `Module::reflection`) gained two
+/// trailing `Vec`s parallel to `fields` — `field_types: Vec<TypeRepr>` and `field_optional:
+/// Vec<bool>` — so the type-level `field_specs_of` query can report each field's precise declared type
+/// and optionality. Same non-self-describing-encoding reasoning as the bumps before it: postcard
+/// writes the two sequences back to back after the existing fields with no tag, so a version-7 reader
+/// decoding a version-8 payload would read their length prefixes as the next `TypeInfo`'s bytes and
+/// desynchronise the manifest. (`field_specs_of` / `construct` add new `Op` variants too, but those
+/// only appear in bundles this reader also produced.)
+pub const FORMAT_VERSION: u8 = 8;
 
 /// The runtime version stamped into and checked against artifacts — the building crate's
 /// package version. Any release that changes the serialized [`Module`] layout bumps this, so a

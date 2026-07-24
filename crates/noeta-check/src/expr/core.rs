@@ -1297,6 +1297,42 @@ impl Checker {
                     Vec::new(),
                 )))
             }
+            Expr::FieldSpecsOf { name, span } => {
+                // The type-level field schema, surfaced as `List<FieldSpec>`. The `name` operand is a
+                // runtime `string` naming a declared struct/class type (a turbofish `::<T>()` was
+                // already lowered to that name by the parser). Lenient like `params_of`: an unknown
+                // type is a runtime empty list, not a static error.
+                let name_ty = self.synth(name, env);
+                if !matches!(name_ty, Type::String) && !name_ty.defers_to_runtime() {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`field_specs_of` expects a `string` type name, found `{name_ty}`"),
+                    )
+                    .help("pass a struct or class type name, or use the turbofish `field_specs_of::<T>()`");
+                }
+                Type::List(Box::new(Type::Named(
+                    noeta_ast::reflect::FIELD_SPEC.to_string(),
+                    Vec::new(),
+                )))
+            }
+            Expr::Construct { name, fields, span } => {
+                // The dynamic struct constructor: build a value of the type `name` from `fields`, a
+                // runtime `List<dyn>` of field values in declaration order. Fallible by construction
+                // (unknown type / arity / type-mismatch / missing required field are runtime `Err`),
+                // so both operands are synthesized leniently and the result is `Result<dyn, string>`.
+                let name_ty = self.synth(name, env);
+                if !matches!(name_ty, Type::String) && !name_ty.defers_to_runtime() {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`construct` expects a `string` type name, found `{name_ty}`"),
+                    )
+                    .help("pass a struct or class type name, or use the turbofish `construct::<T>(fields)`");
+                }
+                self.synth(fields, env);
+                Type::Result(Box::new(Type::Dyn), Box::new(Type::String))
+            }
             Expr::FromBytes { ty, blob, span } => {
                 // The operand must be a `bytes` buffer (gradual holes tolerated).
                 let blob_ty = self.synth(blob, env);

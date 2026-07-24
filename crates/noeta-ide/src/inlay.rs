@@ -327,6 +327,11 @@ impl Walker<'_> {
             Expr::TypeOf { value, .. } => self.expr(value),
             Expr::FieldsOf { value, .. } => self.expr(value),
             Expr::ParamsOf { target, .. } => self.expr(target),
+            Expr::FieldSpecsOf { name, .. } => self.expr(name),
+            Expr::Construct { name, fields, .. } => {
+                self.expr(name);
+                self.expr(fields);
+            }
             Expr::FromBytes { blob, .. } => self.expr(blob),
             Expr::Channel { capacity, .. } => self.expr(capacity),
             Expr::TypedModuleCall { recv, args, .. } => {

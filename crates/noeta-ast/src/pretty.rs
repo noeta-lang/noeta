@@ -1062,6 +1062,22 @@ impl Pretty for Expr {
                 target.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::FieldSpecsOf { name, span: s } => {
+                out.push_str(&format!("(field_specs_of {}\n", span(*s)));
+                name.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::Construct {
+                name,
+                fields,
+                span: s,
+            } => {
+                out.push_str(&format!("(construct {}\n", span(*s)));
+                name.pretty(out, level + 1);
+                out.push('\n');
+                fields.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::TypedModuleCall {
                 recv,
                 func,

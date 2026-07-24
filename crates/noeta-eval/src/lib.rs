@@ -2020,6 +2020,119 @@ impl Interpreter {
         Value::list(items)
     }
 
+    /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional }`,
+    /// declaration order) — the type-level reflection `field_specs_of`. An unknown or non-fielded type
+    /// yields the empty list. Each `type` is the field's declared type (precise, from the reflection
+    /// artifact), unlike `fields_of`'s value-level erasure. The VM builds the matching shape the same
+    /// way, so the values agree across the differential by construction.
+    fn materialize_field_specs(&self, type_name: &str) -> Value {
+        let spec_def = Rc::new(fresh_type_def(
+            noeta_ast::reflect::FIELD_SPEC,
+            &[
+                "name".to_string(),
+                "type".to_string(),
+                "optional".to_string(),
+            ],
+            true,
+        ));
+        let items: Vec<Value> = self
+            .reflection
+            .field_specs(type_name)
+            .into_iter()
+            .map(|spec| {
+                let slots = vec![
+                    Value::Str(spec.name.to_string()),
+                    build_type_value(spec.ty),
+                    Value::Bool(spec.optional),
+                ];
+                Value::Object(Rc::new(ObjectValue::new(spec_def.clone(), slots)))
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// `construct(name, fields)` — build a struct/class value of the type named by `name_val` from the
+    /// field values `fields_val` (declaration order), reusing the SAME construction path as a
+    /// `T { … }` literal so defaults and full-initialization are honored identically. Returns a
+    /// `Result<dyn, string>`: an unknown type, a non-list `fields`, an arity/scalar-type mismatch, or a
+    /// missing non-defaulted field is a recoverable `Err(message)`; success is `Ok(value)`. Validation
+    /// runs through the shared `plan_construct` (so the VM agrees on every accept/reject and every
+    /// message), then the accepted values feed `construct_object`, which fills the remaining
+    /// defaulted fields — so the two never both report a missing field.
+    fn construct_dynamic(&mut self, name_val: Value, fields_val: Value, span: Span) -> Eval<Value> {
+        let Value::Str(type_name) = &name_val else {
+            return Ok(invoke_err(format!(
+                "construct type name must be a string, found {}",
+                name_val.type_name()
+            )));
+        };
+        let type_name = type_name.clone();
+        // Only a declared struct/class is constructible; an enum or an unknown name is a clean `Err`
+        // (checked before field validation, so an unknown type reports as such, not "no field X").
+        match self.reflection.type_named(&type_name).map(|t| t.kind) {
+            Some(noeta_ast::reflect::TypeKind::Struct | noeta_ast::reflect::TypeKind::Class) => {}
+            _ => {
+                return Ok(invoke_err(format!(
+                    "`{type_name}` is not a constructible struct or class"
+                )));
+            }
+        }
+        // The `fields` argument is either a `List<dyn>` (positional, declaration order) or a
+        // `Map<string, dyn>` (named — the sparse, any-order form a framework binding `--field` flags
+        // produces). Both converge on the name-keyed `field_values` that `construct_object` consumes;
+        // both are validated by a shared planner, so the two backends and the two forms all agree.
+        let (field_values, plan): ConstructResolve = match &fields_val {
+            Value::List(items) => {
+                let values: Vec<Value> = (*items.to_rc_vec()).clone();
+                let value_reprs: Vec<noeta_ast::reflect::TypeRepr> =
+                    values.iter().map(eval_type_repr).collect();
+                let specs = self.reflection.field_specs(&type_name);
+                match noeta_ast::reflect::plan_construct(&type_name, &specs, &value_reprs) {
+                    Ok(fill) => {
+                        let fv = fill
+                            .iter()
+                            .zip(values)
+                            .map(|(name, value)| ((*name).to_string(), span, value))
+                            .collect();
+                        (fv, Ok(()))
+                    }
+                    Err(msg) => (Vec::new(), Err(msg)),
+                }
+            }
+            Value::Map(entries, _) => {
+                let provided: Vec<(String, Value)> = entries
+                    .iter()
+                    .filter_map(|(k, v)| match k {
+                        noeta_stdlib::MapKey::Str(s) => Some((s.as_str().to_owned(), v.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                let reprs: Vec<(String, noeta_ast::reflect::TypeRepr)> = provided
+                    .iter()
+                    .map(|(n, v)| (n.clone(), eval_type_repr(v)))
+                    .collect();
+                let specs = self.reflection.field_specs(&type_name);
+                let plan = noeta_ast::reflect::plan_construct_named(&type_name, &specs, &reprs);
+                let fv = provided
+                    .into_iter()
+                    .map(|(name, value)| (name, span, value))
+                    .collect();
+                (fv, plan)
+            }
+            _ => {
+                return Ok(invoke_err(format!(
+                    "construct fields must be a list or a map, found {}",
+                    fields_val.type_name()
+                )));
+            }
+        };
+        if let Err(msg) = plan {
+            return Ok(invoke_err(msg));
+        }
+        let object = self.construct_object(&type_name, span, field_values, None, None, span)?;
+        Ok(builtin_enum("Result", "Ok", vec![object]))
+    }
+
     /// One parameter's `#[...]` attributes, materialized into a `List<dyn>` of attribute-struct
     /// instances. Each instance is built exactly as `attributes_of` builds it — same
     /// `attribute_shape`, same `materialize_args` field resolution — so the value a consumer reads
@@ -5546,6 +5659,11 @@ impl Interpreter {
 fn invoke_err(message: String) -> Value {
     builtin_enum("Result", "Err", vec![Value::Str(message)])
 }
+
+/// What a `construct` field-source (a `List` or a `Map`) resolves to before the object is built: the
+/// name-keyed field values `construct_object` consumes, paired with the shared planner's validation
+/// outcome (deferred so the type-kind check and the plan error surface as one `Result.Err`).
+type ConstructResolve = (Vec<(String, Span, Value)>, Result<(), String>);
 
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.

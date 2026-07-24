@@ -1074,12 +1074,17 @@ fn collect_nested_fns_in_expr(e: &Expr, out: &mut HashSet<String>) {
         | Expr::TypeOf { value: inner, .. }
         | Expr::FieldsOf { value: inner, .. }
         | Expr::ParamsOf { target: inner, .. }
+        | Expr::FieldSpecsOf { name: inner, .. }
         | Expr::As { expr: inner, .. }
         | Expr::TypeTest { expr: inner, .. }
         | Expr::FromBytes { blob: inner, .. }
         | Expr::Channel {
             capacity: inner, ..
         } => collect_nested_fns_in_expr(inner, out),
+        Expr::Construct { name, fields, .. } => {
+            collect_nested_fns_in_expr(name, out);
+            collect_nested_fns_in_expr(fields, out);
+        }
         Expr::Binary { lhs: a, rhs: b, .. }
         | Expr::Pipeline {
             left: a, right: b, ..

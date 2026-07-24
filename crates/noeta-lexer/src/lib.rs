@@ -154,6 +154,21 @@ pub enum TokenKind {
     /// surfaces and so the one surviving runtime-dispatch site is lexically visible.
     #[token("invoke")]
     InvokeKw,
+    /// The reflection keyword `field_specs_of` — a struct/class TYPE's field schema as
+    /// `List<FieldSpec>` (`{ name: string, type: Type, optional: bool }`). Two disjoint surfaces
+    /// under one keyword: the static turbofish `field_specs_of::<T>()` (the parser desugars `T` to its
+    /// name string) and the dynamic `field_specs_of(name)` a framework uses when the type is only
+    /// known as a runtime string. The type-level counterpart of the value-level `fields_of` (whose
+    /// argument is an instance and whose result carries values, not declared types).
+    #[token("field_specs_of")]
+    FieldSpecsOfKw,
+    /// The reflection keyword `construct` — build a struct value from field values at runtime, reusing
+    /// the same construction path as a `T { … }` literal (defaults + full-initialization honored).
+    /// Two surfaces: the static turbofish `construct::<T>(fields)` (desugared to the type name) and
+    /// the dynamic `construct(name, fields)`. Returns `Result<T, string>` (static) /
+    /// `Result<dyn, string>` (dynamic) — a recoverable outcome, mirroring `invoke`.
+    #[token("construct")]
+    ConstructKw,
     // `channel::<T>(capacity)` — the bounded-channel constructor (isolates I.1) — is deliberately NOT a
     // keyword: `channel` is a very common identifier (a field/variable name), and the construct only
     // ever appears in turbofish position. The parser recognizes it *contextually* (a `channel` ident
@@ -410,6 +425,8 @@ impl TokenKind {
             TokenKind::RolesOfKw => "RolesOfKw",
             TokenKind::ParamsOfKw => "ParamsOfKw",
             TokenKind::InvokeKw => "InvokeKw",
+            TokenKind::FieldSpecsOfKw => "FieldSpecsOfKw",
+            TokenKind::ConstructKw => "ConstructKw",
             TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
@@ -519,6 +536,8 @@ impl TokenKind {
             TokenKind::RolesOfKw => "`roles_of`",
             TokenKind::ParamsOfKw => "`params_of`",
             TokenKind::InvokeKw => "`invoke`",
+            TokenKind::FieldSpecsOfKw => "`field_specs_of`",
+            TokenKind::ConstructKw => "`construct`",
             TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",

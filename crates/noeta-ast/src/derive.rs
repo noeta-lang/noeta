@@ -871,7 +871,13 @@ fn visit_expr_types(expr: &mut Expr, f: &mut impl FnMut(&mut TypeRef)) {
             }
         }
         Expr::TypeOf { value, .. } | Expr::FieldsOf { value, .. } => visit_expr_types(value, f),
-        Expr::ParamsOf { target, .. } => visit_expr_types(target, f),
+        Expr::ParamsOf { target, .. } | Expr::FieldSpecsOf { name: target, .. } => {
+            visit_expr_types(target, f)
+        }
+        Expr::Construct { name, fields, .. } => {
+            visit_expr_types(name, f);
+            visit_expr_types(fields, f);
+        }
         Expr::TierExpr { holes, .. } => holes.iter_mut().for_each(|h| visit_expr_types(h, f)),
         Expr::Ident { .. }
         | Expr::Str { .. }

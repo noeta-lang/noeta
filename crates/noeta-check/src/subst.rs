@@ -38,6 +38,8 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     "RoleBinding",
     // The parameter-list element `params_of()` returns (`{ name: string, type: Type }`).
     "ParamInfo",
+    // The field-schema element `field_specs_of()` returns (`{ name: string, type: Type, optional }`).
+    "FieldSpec",
     // The roots-list element a declared tier's runner receives (tier-providers T2).
     "TierRoot",
     // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and

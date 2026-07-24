@@ -513,6 +513,29 @@ impl Checker {
                 ("value".to_string(), Type::Dyn),
             ],
         );
+        // `FieldSpec { name: string, type: Type, optional: bool }` — the element type of the
+        // TYPE-level `field_specs_of::<T>()` / `field_specs_of(name)` query. The type-level twin of
+        // `FieldEntry`: `type` is the field's declared type as the same `Type` ADT `type_of` returns
+        // (precise, from the declaration — not a value's erased head), and `optional` reports whether
+        // the field declared a default. Registered like `ParamInfo`; shadowable like any prelude type.
+        self.symbols.type_kinds.insert(
+            noeta_ast::reflect::FIELD_SPEC.to_string(),
+            noeta_types::TypeKind::Struct,
+        );
+        self.symbols
+            .types
+            .insert(noeta_ast::reflect::FIELD_SPEC.to_string());
+        self.symbols.records.insert(
+            noeta_ast::reflect::FIELD_SPEC.to_string(),
+            vec![
+                ("name".to_string(), Type::String),
+                (
+                    "type".to_string(),
+                    Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new()),
+                ),
+                ("optional".to_string(), Type::Bool),
+            ],
+        );
         // `Layout { Row, Column }` — the storage-layout vocabulary `@packed(Layout.…)` names.
         // Directive vocabulary like `Semantic` (the parser resolves the argument syntactically);
         // registered so hover/completion/docs see one authoritative enum, and shadowable like any

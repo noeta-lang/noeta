@@ -787,6 +787,28 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `field_specs_of::<T>()` / `field_specs_of(name)`: `dst = List<FieldSpec>` — the declared field
+    /// schema (`{ name, type, optional }`, declaration order) of the struct/class named by the runtime
+    /// string in `src`; the empty list for an unknown or non-fielded type. The type-level twin of
+    /// `FieldsOf`.
+    FieldSpecsOf {
+        dst: Reg,
+        src: Reg,
+    },
+    /// `construct::<T>(fields)` / `construct(name, fields)`: `dst = Result<dyn, string>` — build a
+    /// struct/class value of the type named by the runtime string in `name` from the `List<dyn>` in
+    /// `fields` (declaration order), reusing the same construction path as a `MakeStruct` literal
+    /// (defaults + full-initialization honored). An unknown type, arity/type-mismatch, or missing
+    /// non-defaulted field builds `Result.Err(string)` (via `err_shape`); success wraps the object in
+    /// `Result.Ok` (via `ok_shape`), exactly as `Op::Invoke` wraps its outcome.
+    Construct {
+        dst: Reg,
+        name: Reg,
+        fields: Reg,
+        ok_shape: u32,
+        err_shape: u32,
+        span: Span,
+    },
     /// `type_of(value)`: `dst = Type` — the runtime [`noeta_ast::reflect`] head-constructor descriptor
     /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
     /// runtime, so element/argument types collapse to `Dyn` at this fidelity.
@@ -1875,6 +1897,12 @@ fn op_repr(
             None => format!("RolesOf     r{dst} <- roles_of()"),
         },
         Op::ParamsOf { dst, src } => format!("ParamsOf    r{dst} <- params_of(r{src})"),
+        Op::FieldSpecsOf { dst, src } => {
+            format!("FieldSpecsOf r{dst} <- field_specs_of(r{src})")
+        }
+        Op::Construct {
+            dst, name, fields, ..
+        } => format!("Construct   r{dst} <- construct(r{name}, r{fields})"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FieldsOf { dst, src } => format!("FieldsOf    r{dst} <- fields_of(r{src})"),
         Op::FromBytes {
