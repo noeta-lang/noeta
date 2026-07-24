@@ -723,6 +723,8 @@ fn synth_trait_decl(
         is_public: true,
         type_params: Vec::new(),
         methods,
+        // Native traits declare no associated types yet (a later slice of the ExtBundle→ExtTrait arc).
+        assoc_types: Vec::new(),
         decorators: Decorators::default(),
         span: sp,
     }

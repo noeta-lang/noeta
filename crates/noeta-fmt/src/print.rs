@@ -1190,27 +1190,61 @@ impl Printer<'_> {
         ]))
     }
 
+    /// One `type Name = Concrete` associated-type binding in an impl body (slice 1a).
+    fn assoc_binding(&self, name: &str, ty: &TypeRef) -> Result<Doc, FmtError> {
+        Ok(Doc::concat([
+            Doc::text(format!("type {name} = ")),
+            self.type_ref(ty)?,
+        ]))
+    }
+
+    /// The brace-wrapped body of an impl block: its associated-type bindings first (each on its own
+    /// line), then its methods (blank-line separated), in that canonical order (slice 1a). `{}` when
+    /// the impl is empty.
+    fn impl_body(
+        &self,
+        assoc_bindings: &[(String, TypeRef)],
+        methods: &[FnDecl],
+    ) -> Result<Doc, FmtError> {
+        let mut binds = Vec::new();
+        for (name, ty) in assoc_bindings {
+            binds.push(self.assoc_binding(name, ty)?);
+        }
+        let mut ms = Vec::new();
+        for m in methods {
+            ms.push(self.fn_decl(m)?);
+        }
+        if binds.is_empty() && ms.is_empty() {
+            return Ok(Doc::text("{}"));
+        }
+        // Bindings pack line-by-line; methods separate with a blank line; a blank line divides the
+        // two groups when both are present.
+        let mut groups = Vec::new();
+        if !binds.is_empty() {
+            groups.push(Doc::join(binds, Doc::hardline()));
+        }
+        if !ms.is_empty() {
+            groups.push(Doc::join(
+                ms,
+                Doc::concat([Doc::hardline(), Doc::hardline()]),
+            ));
+        }
+        let inner = Doc::join(groups, Doc::concat([Doc::hardline(), Doc::hardline()]));
+        Ok(Doc::concat([
+            Doc::text("{"),
+            Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
+            Doc::hardline(),
+            Doc::text("}"),
+        ]))
+    }
+
     fn impl_block(&self, b: &ImplBlock) -> Result<Doc, FmtError> {
         let head = Doc::concat([
             Doc::text(format!("impl {}", b.trait_name)),
             self.trait_args_doc(&b.trait_args)?,
             Doc::text(" "),
         ]);
-        let mut ms = Vec::new();
-        for m in &b.methods {
-            ms.push(self.fn_decl(m)?);
-        }
-        let body = if ms.is_empty() {
-            Doc::text("{}")
-        } else {
-            let inner = Doc::join(ms, Doc::concat([Doc::hardline(), Doc::hardline()]));
-            Doc::concat([
-                Doc::text("{"),
-                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
-                Doc::hardline(),
-                Doc::text("}"),
-            ])
-        };
+        let body = self.impl_body(&b.assoc_bindings, &b.methods)?;
         Ok(Doc::concat([head, body]))
     }
 
@@ -1220,21 +1254,7 @@ impl Printer<'_> {
             self.trait_args_doc(&d.trait_args)?,
             Doc::text(format!(" for {} ", d.target)),
         ]);
-        let body = if d.methods.is_empty() {
-            Doc::text("{}")
-        } else {
-            let mut ms = Vec::new();
-            for m in &d.methods {
-                ms.push(self.fn_decl(m)?);
-            }
-            let inner = Doc::join(ms, Doc::concat([Doc::hardline(), Doc::hardline()]));
-            Doc::concat([
-                Doc::text("{"),
-                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
-                Doc::hardline(),
-                Doc::text("}"),
-            ])
-        };
+        let body = self.impl_body(&d.assoc_bindings, &d.methods)?;
         Ok(Doc::concat([head, body]))
     }
 
@@ -1250,14 +1270,19 @@ impl Printer<'_> {
         parts.push(Doc::text(d.name.clone()));
         parts.push(self.type_params(&d.type_params)?);
         parts.push(Doc::text(" "));
-        let body = if d.methods.is_empty() {
+        // The body lists associated types first (`type Name;` / `type Name = Default;`), then method
+        // signatures — the canonical order (slice 1a). Members separate with a single hardline.
+        let mut items = Vec::new();
+        for a in &d.assoc_types {
+            items.push(self.assoc_type_decl(a)?);
+        }
+        for m in &d.methods {
+            items.push(self.trait_method(m)?);
+        }
+        let body = if items.is_empty() {
             Doc::text("{}")
         } else {
-            let mut ms = Vec::new();
-            for m in &d.methods {
-                ms.push(self.trait_method(m)?);
-            }
-            let inner = Doc::join(ms, Doc::hardline());
+            let inner = Doc::join(items, Doc::hardline());
             Doc::concat([
                 Doc::text("{"),
                 Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
@@ -1267,6 +1292,14 @@ impl Printer<'_> {
         };
         parts.push(body);
         Ok(Doc::concat(parts))
+    }
+
+    /// One associated-type declaration in a trait body: `type Name;` or `type Name = Default;` (slice 1a).
+    fn assoc_type_decl(&self, a: &noeta_ast::AssocTypeDecl) -> Result<Doc, FmtError> {
+        Ok(match &a.default {
+            Some(ty) => Doc::concat([Doc::text(format!("type {} = ", a.name)), self.type_ref(ty)?]),
+            None => Doc::text(format!("type {};", a.name)),
+        })
     }
 
     /// A trait method: a bodiless required signature (`fn f(...): T`) or a default with a body.
@@ -1645,6 +1678,7 @@ impl Printer<'_> {
                 }
             }
             TypeRef::DynTrait { trait_name, .. } => Doc::text(format!("dyn {trait_name}")),
+            TypeRef::AssocProjection { name, .. } => Doc::text(format!("Self::{name}")),
             TypeRef::Optional { inner, .. } => Doc::concat([Doc::text("?"), self.type_ref(inner)?]),
             TypeRef::Union { members, .. } => {
                 let ds: Result<Vec<_>, _> = members.iter().map(|m| self.type_ref(m)).collect();

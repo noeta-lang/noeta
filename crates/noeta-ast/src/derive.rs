@@ -652,7 +652,8 @@ fn substitute_ref(ty: &mut TypeRef, map: &std::collections::HashMap<String, Type
                 substitute_ref(a, map);
             }
         }
-        TypeRef::DynTrait { .. } => {}
+        // `Self::Name` has no substitutable children — `Self` is not a type parameter (slice 1a).
+        TypeRef::DynTrait { .. } | TypeRef::AssocProjection { .. } => {}
         TypeRef::Optional { inner, .. } => substitute_ref(inner, map),
         TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| substitute_ref(m, map)),
         TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| substitute_ref(e, map)),

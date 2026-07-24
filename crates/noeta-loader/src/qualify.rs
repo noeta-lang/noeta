@@ -79,6 +79,9 @@ fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
         TypeRef::DynTrait { trait_name, .. } => {
             visit(trait_name, NameKind::Type, None);
         }
+        // `Self::Name` has no nominal leaf to qualify — the associated-type name resolves per-impl
+        // at the checker, not through the import map (slice 1a).
+        TypeRef::AssocProjection { .. } => {}
         TypeRef::Optional { inner, .. } => q_typeref(inner, visit),
         TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
         TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_typeref(e, visit)),

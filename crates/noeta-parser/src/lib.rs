@@ -31,11 +31,11 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use noeta_ast::{
-    AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl, ClosureBody, Decorators,
-    DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm,
-    MethodDirective, ObjectLit, PackedDirective, PackedLayout, Param, Pattern, Program, RoleTag,
-    Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeParam, TypeRef, UnaryOp,
-    UseName, VariantDecl,
+    AssocTypeDecl, AttrArg, AttrValue, Attribute, BinaryOp, BuiltinDirective, ClassDecl,
+    ClosureBody, Decorators, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
+    ImplBlock, MatchArm, MethodDirective, ObjectLit, PackedDirective, PackedLayout, Param, Pattern,
+    Program, RoleTag, Stmt, StructDecl, TierDecl, TraitBound, TraitDecl, TraitMethod, TypeParam,
+    TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -187,6 +187,49 @@ enum EnumMember {
     Variant(VariantDecl),
     Method(FnDecl),
     Impl(ImplBlock),
+}
+
+/// One member of an `impl` body (class-body `impl Trait { … }` or standalone `impl Trait for T { … }`):
+/// a method, or a `type Name = Concrete;` associated-type binding (slice 1a). Partitioned into the
+/// impl's `methods`/`assoc_bindings` after the body is parsed.
+enum ImplMember {
+    // Boxed: a bare `FnDecl` dwarfs the binding tuple (clippy::large_enum_variant).
+    Method(Box<FnDecl>),
+    AssocBinding((String, TypeRef)),
+}
+
+/// Partition a parsed `impl` body's members into its methods and associated-type bindings (slice 1a).
+fn split_impl_members(members: Vec<ImplMember>) -> (Vec<FnDecl>, Vec<(String, TypeRef)>) {
+    let mut methods = Vec::new();
+    let mut assoc_bindings = Vec::new();
+    for member in members {
+        match member {
+            ImplMember::Method(m) => methods.push(*m),
+            ImplMember::AssocBinding(b) => assoc_bindings.push(b),
+        }
+    }
+    (methods, assoc_bindings)
+}
+
+/// One member of a `trait` body: an associated-type declaration (`type Name;` / `type Name = T;`) or
+/// a method signature (slice 1a). Partitioned into [`TraitDecl`]'s `assoc_types`/`methods`.
+enum TraitBodyMember {
+    // Boxed: a `TraitMethod` dwarfs the assoc-type declaration (clippy::large_enum_variant).
+    Method(Box<TraitMethod>),
+    AssocType(AssocTypeDecl),
+}
+
+/// Partition a parsed `trait` body's members into its methods and associated types (slice 1a).
+fn split_trait_members(members: Vec<TraitBodyMember>) -> (Vec<TraitMethod>, Vec<AssocTypeDecl>) {
+    let mut methods = Vec::new();
+    let mut assoc_types = Vec::new();
+    for member in members {
+        match member {
+            TraitBodyMember::Method(m) => methods.push(*m),
+            TraitBodyMember::AssocType(a) => assoc_types.push(a),
+        }
+    }
+    (methods, assoc_types)
 }
 
 /// A leading decorator on a type declaration: either a `@derive(...)` codegen directive or a
@@ -1476,6 +1519,18 @@ where
                 span: ctx.to_span(e.span()),
             })
             .boxed();
+        // `Self::Name` — a projection through an associated type on the receiver (slice 1a). `Self`
+        // is an ordinary identifier (not a keyword) followed by `::` and the associated-type name;
+        // legal only in a trait/impl method signature. Tried before `named` so `Self::Item` is not
+        // mis-parsed as a bare `Self` type; a bare `Self` (no `::`) still falls through to `named`.
+        let assoc_projection = ident_parser(ctx)
+            .filter(|(name, _): &(String, Span)| name == "Self")
+            .ignore_then(just(T::ColonColon))
+            .ignore_then(ident_parser(ctx))
+            .map_with(move |(name, _), e| TypeRef::AssocProjection {
+                name,
+                span: ctx.to_span(e.span()),
+            });
         // A "base" type binds `?` tighter than `|`, so `?A | B` is `(?A) | B`. The inner recursion
         // lets `?` nest (`??A`); generic arguments still use the full `type_`, so a union can appear
         // inside them (`List<A | B>`).
@@ -1490,6 +1545,7 @@ where
                 optional,
                 fn_type.clone(),
                 tuple_type.clone(),
+                assoc_projection.clone(),
                 dyn_trait.clone(),
                 named.clone(),
             ))
@@ -3564,11 +3620,24 @@ where
             .delimited_by(just(T::Lt), just(T::Gt))
             .or_not()
             .map(Option::unwrap_or_default);
+        // `type Name = Concrete` — an associated-type binding in an `impl` body (slice 1a). Binds an
+        // associated type the trait declared, pinning `Self::Name` for this implementor.
+        let assoc_binding = just(T::TypeKw)
+            .ignore_then(id.clone())
+            .then_ignore(just(T::Eq))
+            .then(type_parser(ctx))
+            .map(|((name, _name_span), ty)| (name, ty));
+        // One member of an `impl` body: an associated-type binding or a method. The binding is tried
+        // first so a leading `type` opens a binding, not a (malformed) method.
+        let impl_member = choice((
+            assoc_binding.clone().map(ImplMember::AssocBinding),
+            method.clone().map(|m| ImplMember::Method(Box::new(m))),
+        ));
         let class_impl = just(T::ImplKw)
             .ignore_then(trait_path.clone())
             .then(trait_args.clone())
             .then(
-                method
+                impl_member
                     .clone()
                     // Absorb the woven hard-boundary `;` between members on separate lines
                     // (object-model slice 7); a type/impl body is newline-separated, not `;`-ended.
@@ -3578,12 +3647,14 @@ where
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
             .map_with(
-                move |(((trait_name, trait_span), trait_args), methods), e| {
+                move |(((trait_name, trait_span), trait_args), members), e| {
+                    let (methods, assoc_bindings) = split_impl_members(members);
                     ClassMember::Impl(ImplBlock {
                         trait_name,
                         trait_span,
                         trait_args,
                         methods,
+                        assoc_bindings,
                         span: ctx.to_span(e.span()),
                     })
                 },
@@ -3658,7 +3729,7 @@ where
             .then_ignore(just(T::ForKw))
             .then(id.clone())
             .then(
-                method
+                impl_member
                     .clone()
                     // Absorb the woven hard-boundary `;` between members on separate lines
                     // (object-model slice 7); a type/impl body is newline-separated, not `;`-ended.
@@ -3670,9 +3741,10 @@ where
             .map_with(
                 move |(
                     (((trait_name, trait_span), trait_args), (target, target_span)),
-                    methods,
+                    members,
                 ),
                       e| {
+                    let (methods, assoc_bindings) = split_impl_members(members);
                     Stmt::Impl(noeta_ast::ImplDecl {
                         trait_name,
                         trait_span,
@@ -3680,6 +3752,7 @@ where
                         target,
                         target_span,
                         methods,
+                        assoc_bindings,
                         span: ctx.to_span(e.span()),
                     })
                 },
@@ -3726,28 +3799,50 @@ where
                     }
                 },
             );
-        // `trait Name<T> { method-sigs }` — a user-defined trait declaration (L1). Names a contract
-        // of method signatures a type `impl`s; usable as a `<T: Name>` bound and a `dyn Name` trait
-        // object. The bare body only — leading `pub` and `#[...]`/`@role`/… decorators are applied by
-        // `attributed_type_decl` (UT6), the same uniform path structs/classes/enums take.
+        // `type Name;` / `type Name = Default;` — an associated-type declaration in a trait body
+        // (slice 1a). Bodiless is a *required* associated type (every impl must bind it); a `= T`
+        // provides a *default* an impl may omit. Referred to from a method signature as `Self::Name`.
+        let assoc_type_decl = just(T::TypeKw)
+            .ignore_then(id.clone())
+            .then(just(T::Eq).ignore_then(type_parser(ctx)).or_not())
+            .map_with(move |((name, name_span), default), e| AssocTypeDecl {
+                name,
+                name_span,
+                default,
+                span: ctx.to_span(e.span()),
+            });
+        // One member of a trait body: an associated-type declaration or a method signature. The
+        // `type`-led binding is tried first so a leading `type` opens an associated type, not a
+        // (malformed) method.
+        let trait_body_member = choice((
+            assoc_type_decl.map(TraitBodyMember::AssocType),
+            trait_method.map(|m| TraitBodyMember::Method(Box::new(m))),
+        ));
+        // `trait Name<T> { assoc-types; method-sigs }` — a user-defined trait declaration (L1). Names
+        // a contract of associated types and method signatures a type `impl`s; usable as a `<T: Name>`
+        // bound and a `dyn Name` trait object. The bare body only — leading `pub` and `#[...]`/`@role`/…
+        // decorators are applied by `attributed_type_decl` (UT6), the same uniform path structs/classes/
+        // enums take.
         let trait_decl = just(T::TraitKw)
             .ignore_then(id.clone())
             .then(type_params.clone())
             .then(
-                trait_method
+                trait_body_member
                     // Absorb the synthetic `;` between members on separate lines (slice 7).
                     .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(move |((name_pair, type_params), methods), e| {
+            .map_with(move |((name_pair, type_params), members), e| {
+                let (methods, assoc_types) = split_trait_members(members);
                 Stmt::Trait(TraitDecl {
                     name: name_pair.0,
                     name_span: name_pair.1,
                     is_public: false,
                     type_params,
                     methods,
+                    assoc_types,
                     decorators: Decorators::default(),
                     span: ctx.to_span(e.span()),
                 })

@@ -517,6 +517,7 @@ fn pattern_str(pattern: &crate::Pattern) -> String {
 fn type_ref(ty: &TypeRef) -> String {
     match ty {
         TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
+        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
         TypeRef::Named { name, args, .. } => {
             if args.is_empty() {
                 name.clone()

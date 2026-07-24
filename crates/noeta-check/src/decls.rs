@@ -373,6 +373,10 @@ impl Checker {
                 self.check_type_ref(ret);
             }
             TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
+            // `Self::Name` — an associated-type projection (slice 1a). It names no nominal type to
+            // resolve here; the checker projects it per-impl at each typing site (an unbound name
+            // degrades to a gradual hole rather than an E0013), so there is nothing to reject.
+            TypeRef::AssocProjection { .. } => {}
             // `dyn Trait` — the trait must resolve to a built-in or user-defined trait (L1, UT4).
             TypeRef::DynTrait { trait_name, span } => {
                 if BuiltinTrait::from_name(trait_name).is_none()

@@ -12,11 +12,15 @@ impl Checker {
     /// block must provide the trait's required method with the right arity. The impl's method
     /// *bodies* are checked separately (they are flattened into `ClassDecl::methods`).
     pub(crate) fn check_impl(&mut self, block: &ImplBlock) {
+        // The implementor is the type whose body this block sits in — the current coloring type.
+        let target = self.coloring.current_type.clone().unwrap_or_default();
         self.check_trait_impl(
+            &target,
             &block.trait_name,
             &block.trait_args,
             block.trait_span,
             &block.methods,
+            &block.assoc_bindings,
         );
     }
 
@@ -26,10 +30,12 @@ impl Checker {
     /// restriction are enforced by the caller, [`Self::check_standalone_impl`].)
     pub(crate) fn check_trait_impl(
         &mut self,
+        target: &str,
         trait_name: &str,
         trait_args: &[noeta_ast::TypeRef],
         trait_span: Span,
         methods: &[FnDecl],
+        assoc_bindings: &[(String, noeta_ast::TypeRef)],
     ) {
         // A user-defined trait (L1, UT2): validate conformance against its declared contract —
         // instantiated at the impl's type arguments when the trait is generic (`impl
@@ -39,9 +45,11 @@ impl Checker {
             match noeta_ast::derive::instantiate_trait(&decl, trait_args) {
                 Ok(instantiated) => {
                     self.check_user_trait_impl(
+                        target,
                         instantiated.as_ref().unwrap_or(&decl),
                         trait_span,
                         methods,
+                        assoc_bindings,
                     );
                 }
                 Err(e) => {
@@ -250,10 +258,12 @@ impl Checker {
             );
         }
         self.check_trait_impl(
+            &decl.target,
             &decl.trait_name,
             &decl.trait_args,
             decl.trait_span,
             &decl.methods,
+            &decl.assoc_bindings,
         );
         self.check_standalone_impl_bodies(decl, env);
     }
@@ -308,10 +318,30 @@ impl Checker {
     /// E0015 `InvalidImpl` code with the built-in path.
     fn check_user_trait_impl(
         &mut self,
+        target: &str,
         decl: &noeta_ast::TraitDecl,
         trait_span: Span,
         methods: &[FnDecl],
+        assoc_bindings: &[(String, noeta_ast::TypeRef)],
     ) {
+        // Associated-type coherence (slice 1a): every associated type WITHOUT a default must be bound
+        // by this impl. A defaulted associated type may be omitted (it falls back to its default).
+        for a in &decl.assoc_types {
+            if a.default.is_none() && !assoc_bindings.iter().any(|(n, _)| n == &a.name) {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    trait_span,
+                    format!(
+                        "`impl {} for {}` must bind `type {}`",
+                        decl.name, target, a.name
+                    ),
+                )
+                .help(format!(
+                    "the `{}` trait declares an associated `type {};` with no default",
+                    decl.name, a.name
+                ));
+            }
+        }
         for tm in &decl.methods {
             if tm.has_default {
                 continue; // a default method is optional for an implementor
@@ -344,8 +374,10 @@ impl Checker {
                 continue;
             }
             for (i, (tp, ip)) in tm.sig.params.iter().zip(&m.params).enumerate() {
-                let want = field_type(&tp.ty, &self.imports.extern_types);
-                let got = field_type(&ip.ty, &self.imports.extern_types);
+                // Resolve a `Self::Name` on either side against this impl's binding (slice 1a) so the
+                // contract compares concrete types (`int` vs `int`), not two opaque projections.
+                let want = self.assoc_resolved_type(&tp.ty, target, &decl.name);
+                let got = self.assoc_resolved_type(&ip.ty, target, &decl.name);
                 if !Self::sig_types_compatible(&want, &got) {
                     self.error(
                         DiagnosticCode::InvalidImpl,
@@ -359,8 +391,8 @@ impl Checker {
                     );
                 }
             }
-            let want_ret = field_type(&tm.sig.ret, &self.imports.extern_types);
-            let got_ret = field_type(&m.ret, &self.imports.extern_types);
+            let want_ret = self.assoc_resolved_type(&tm.sig.ret, target, &decl.name);
+            let got_ret = self.assoc_resolved_type(&m.ret, target, &decl.name);
             if !Self::sig_types_compatible(&want_ret, &got_ret) {
                 self.error(
                     DiagnosticCode::InvalidImpl,
@@ -381,6 +413,41 @@ impl Checker {
         matches!(want, Type::Unknown | Type::Dyn)
             || matches!(got, Type::Unknown | Type::Dyn)
             || want == got
+    }
+
+    /// Resolve an associated type on an implementor (slice 1a): the concrete `Type` that `type_name`'s
+    /// `impl trait_name` bound `assoc` to (its default when the impl omitted it), or `None` when there
+    /// is no such binding. Reads `trait_assoc`, the collect-time table — the trait analogue of a
+    /// bundle's element resolution.
+    pub(crate) fn resolve_assoc(
+        &self,
+        type_name: &str,
+        trait_name: &str,
+        assoc: &str,
+    ) -> Option<Type> {
+        self.symbols
+            .trait_assoc
+            .get(&(type_name.to_string(), trait_name.to_string()))?
+            .get(assoc)
+            .cloned()
+    }
+
+    /// The concrete `Type` of a signature annotation, projecting a top-level `Self::Name` through the
+    /// implementor's binding (slice 1a). A projection with no resolvable binding — or under `dyn`, or
+    /// nested inside a composite — degrades to `Type::Unknown` (a gradual hole that defers), so a
+    /// conformance comparison never falsely rejects on an unresolved projection.
+    fn assoc_resolved_type(
+        &self,
+        ty: &Option<noeta_ast::TypeRef>,
+        target: &str,
+        trait_name: &str,
+    ) -> Type {
+        if let Some(noeta_ast::TypeRef::AssocProjection { name, .. }) = ty {
+            return self
+                .resolve_assoc(target, trait_name, name)
+                .unwrap_or(Type::Unknown);
+        }
+        field_type(ty, &self.imports.extern_types)
     }
 
     /// Validate a user-defined `trait` declaration (L1, UT1). The declaration was registered in

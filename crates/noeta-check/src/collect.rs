@@ -310,6 +310,7 @@ impl Checker {
                     for m in methods {
                         self.collect_method_sig(&r.name, m, &tps, &struct_generics);
                     }
+                    self.bake_impl_assoc(&r.name, &r.impls, &tps, &struct_generics);
                 }
                 Stmt::Class(c) => {
                     let fields = c
@@ -402,6 +403,7 @@ impl Checker {
                     for m in methods {
                         self.collect_method_sig(&c.name, m, &tps, &class_generics);
                     }
+                    self.bake_impl_assoc(&c.name, &c.impls, &tps, &class_generics);
                 }
                 Stmt::Enum(e) => {
                     let variants = e
@@ -473,6 +475,7 @@ impl Checker {
                     for m in &e.methods {
                         self.collect_method_sig(&e.name, m, &tps, &enum_generics);
                     }
+                    self.bake_impl_assoc(&e.name, &e.impls, &tps, &enum_generics);
                 }
                 Stmt::Fn(f) => {
                     // The registered signature is **erased** (generic parameters → `dyn`): the
@@ -611,6 +614,33 @@ impl Checker {
                 }
             }
         }
+        // Associated-type bindings per implementor (slice 1a): fold each impl's `type Name = T;`
+        // bindings over the trait's defaulted associated types into `trait_assoc[(type, trait)]`.
+        // Done after the `user_trait_impls` walk so every trait is registered; the basis for
+        // projecting `Self::Name` in a method signature to the implementor's concrete type.
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Impl(d) => {
+                    self.record_assoc_bindings(&d.target, &d.trait_name, &d.assoc_bindings)
+                }
+                Stmt::Struct(d) => {
+                    for b in &d.impls {
+                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                    }
+                }
+                Stmt::Class(d) => {
+                    for b in &d.impls {
+                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                    }
+                }
+                Stmt::Enum(d) => {
+                    for b in &d.impls {
+                        self.record_assoc_bindings(&d.name, &b.trait_name, &b.assoc_bindings);
+                    }
+                }
+                _ => {}
+            }
+        }
         // Derive bridging/delegation (layers 1+2): a derive's *planned* methods — required-member
         // bridges, `via:` forwards, builtin `via:` templates — register their signatures, from
         // the same shared planner the backends' hoist materializes, so what the checker types and
@@ -747,7 +777,11 @@ impl Checker {
                 let Some((module, bundle)) = self.resolve_bundle_ref(trait_name) else {
                     continue;
                 };
-                let bindings = self.symbols.bundle_impls.entry(target.to_string()).or_default();
+                let bindings = self
+                    .symbols
+                    .bundle_impls
+                    .entry(target.to_string())
+                    .or_default();
                 // A duplicate binding of the same bundle is a coherence error (reported there);
                 // don't double-record it, or method typing would see each method twice. This also
                 // dedups a type that writes BOTH `@derive(vec.Kernels)` and `impl vec.Kernels for
@@ -838,6 +872,67 @@ impl Checker {
                 generic: None,
             },
         );
+    }
+
+    /// Record an impl's associated-type bindings (slice 1a): fold its `type Name = Concrete;` entries
+    /// over the trait's defaulted associated types into `trait_assoc[(type, trait)]`. A non-user trait
+    /// (or one declaring no associated types and receiving no bindings) records nothing.
+    fn record_assoc_bindings(
+        &mut self,
+        type_name: &str,
+        trait_name: &str,
+        bindings: &[(String, TypeRef)],
+    ) {
+        let Some(decl) = self.symbols.user_traits.get(trait_name).cloned() else {
+            return;
+        };
+        if decl.assoc_types.is_empty() && bindings.is_empty() {
+            return;
+        }
+        let mut map: HashMap<String, Type> = HashMap::new();
+        // Defaults first, so an explicit binding below overrides.
+        for a in &decl.assoc_types {
+            if let Some(default) = &a.default {
+                map.insert(
+                    a.name.clone(),
+                    from_ref_q(default, &self.imports.extern_types),
+                );
+            }
+        }
+        for (name, ty) in bindings {
+            map.insert(name.clone(), from_ref_q(ty, &self.imports.extern_types));
+        }
+        self.symbols
+            .trait_assoc
+            .insert((type_name.to_string(), trait_name.to_string()), map);
+    }
+
+    /// Concrete-receiver projection bake (slice 1a): re-register each in-body impl block's methods with
+    /// every `Self::Name` in their signatures replaced by the impl's binding for `Name`, so a call on a
+    /// concrete receiver types against the implementor's associated type. Overwrites the flattened
+    /// (unresolved) registration from the main method walk. A block with no bindings is skipped (there
+    /// is nothing to resolve).
+    fn bake_impl_assoc(
+        &mut self,
+        type_name: &str,
+        impls: &[ImplBlock],
+        type_tps: &HashSet<String>,
+        type_generics: &[(String, Vec<BoundReq>)],
+    ) {
+        for b in impls {
+            if b.assoc_bindings.is_empty() {
+                continue;
+            }
+            let map: HashMap<&str, &TypeRef> = b
+                .assoc_bindings
+                .iter()
+                .map(|(n, t)| (n.as_str(), t))
+                .collect();
+            for m in &b.methods {
+                let resolved = subst_self_assoc_in_fn(m, &map);
+                self.collect_method_sig(type_name, &resolved, type_tps, type_generics);
+            }
+        }
     }
 
     /// Record that user type `name` satisfies each of `traits` (its `@derive`/`impl` names). Only
@@ -1200,4 +1295,63 @@ impl noeta_ast::derive::DeriveContext for CheckerDeriveContext<'_> {
                 .collect(),
         )
     }
+}
+
+/// Rewrite every `Self::Name` projection inside a [`TypeRef`] to its bound concrete type (slice 1a),
+/// recursing through composite types so `List<Self::Item>` / `?Self::Item` are covered. A projection
+/// whose name has no binding is left as-is (it later degrades to `Type::Unknown` via `Type::from_ref`).
+fn subst_self_assoc(ty: &TypeRef, bindings: &HashMap<&str, &TypeRef>) -> TypeRef {
+    match ty {
+        TypeRef::AssocProjection { name, .. } => bindings
+            .get(name.as_str())
+            .map(|t| (*t).clone())
+            .unwrap_or_else(|| ty.clone()),
+        TypeRef::Named { name, args, span } => TypeRef::Named {
+            name: name.clone(),
+            args: args.iter().map(|a| subst_self_assoc(a, bindings)).collect(),
+            span: *span,
+        },
+        TypeRef::Optional { inner, span } => TypeRef::Optional {
+            inner: Box::new(subst_self_assoc(inner, bindings)),
+            span: *span,
+        },
+        TypeRef::Union { members, span } => TypeRef::Union {
+            members: members
+                .iter()
+                .map(|m| subst_self_assoc(m, bindings))
+                .collect(),
+            span: *span,
+        },
+        TypeRef::Tuple { elements, span } => TypeRef::Tuple {
+            elements: elements
+                .iter()
+                .map(|e| subst_self_assoc(e, bindings))
+                .collect(),
+            span: *span,
+        },
+        TypeRef::Fn { params, ret, span } => TypeRef::Fn {
+            params: params
+                .iter()
+                .map(|p| subst_self_assoc(p, bindings))
+                .collect(),
+            ret: Box::new(subst_self_assoc(ret, bindings)),
+            span: *span,
+        },
+        TypeRef::DynTrait { .. } => ty.clone(),
+    }
+}
+
+/// A method signature with every `Self::Name` in its parameter and return annotations resolved to the
+/// impl's binding (slice 1a). The body is untouched — projection is a typing concern, not a runtime one.
+fn subst_self_assoc_in_fn(m: &FnDecl, bindings: &HashMap<&str, &TypeRef>) -> FnDecl {
+    let mut out = m.clone();
+    for p in &mut out.params {
+        if let Some(ty) = &p.ty {
+            p.ty = Some(subst_self_assoc(ty, bindings));
+        }
+    }
+    if let Some(ret) = &out.ret {
+        out.ret = Some(subst_self_assoc(ret, bindings));
+    }
+    out
 }

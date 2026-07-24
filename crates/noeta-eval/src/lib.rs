@@ -6027,6 +6027,9 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         // Narrowing to a trait object matches any value (the permissive over-approximation, matching
         // the VM's `NarrowTarget::Dyn`); a precise implementor test is future work.
         TypeRef::DynTrait { .. } => true,
+        // A `Self::Name` projection has no static runtime head; narrowing to one is permissive like a
+        // trait object, matching the VM's `NarrowTarget::Dyn` (slice 1a).
+        TypeRef::AssocProjection { .. } => true,
         // A tuple target matches any tuple value — head-constructor only, arity/elements erased
         // (object-model slice 4), exactly like `List` ignoring its element type.
         TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),

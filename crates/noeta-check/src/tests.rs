@@ -2723,3 +2723,114 @@ fn container_of_erased_width_does_not_warn() {
     assert!(codes("fn f(x: dyn): bool { return x is List<i32>; }\n").is_empty());
     assert!(codes("fn f(x: dyn): bool { return x is List<f64>; }\n").is_empty());
 }
+
+// ----- associated types on traits (ExtBundle→ExtTrait convergence, slice 1a) -----
+
+#[test]
+fn assoc_type_projects_per_impl() {
+    // `Self::Item` in a trait method signature resolves, on a concrete receiver, to the impl's
+    // bound associated type — independently per implementor (int for Boxx, string for Tagg).
+    let src = "\
+trait Container {
+  type Item
+  fn get(): Self::Item
+}
+class Boxx {
+  v: int
+  impl Container {
+    type Item = int
+    fn get(): Self::Item { return self.v; }
+  }
+}
+class Tagg {
+  s: string
+  impl Container {
+    type Item = string
+    fn get(): Self::Item { return self.s; }
+  }
+}
+fn f(b: Boxx): int { return b.get(); }
+fn g(t: Tagg): string { return t.get(); }
+";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn assoc_type_projection_is_concrete_not_a_hole() {
+    // Proves the projection resolves to the impl's bound type (int) rather than degrading to a
+    // gradual hole: using `Boxx::get()` where a string is expected is a real mismatch (E0007).
+    let src = "\
+trait Container {
+  type Item
+  fn get(): Self::Item
+}
+class Boxx {
+  v: int
+  impl Container {
+    type Item = int
+    fn get(): Self::Item { return self.v; }
+  }
+}
+fn bad(b: Boxx): string { return b.get(); }
+";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn assoc_type_under_dyn_degrades_to_hole() {
+    // Under `dyn Container` the implementor is unknown, so `Self::Item` cannot resolve statically;
+    // it degrades to a gradual hole (`Unknown`) — no error at either use, whatever the expected type.
+    let as_int = "\
+trait Container {
+  type Item
+  fn get(): Self::Item
+}
+fn h(c: dyn Container): int { return c.get(); }
+";
+    let as_string = "\
+trait Container {
+  type Item
+  fn get(): Self::Item
+}
+fn h(c: dyn Container): string { return c.get(); }
+";
+    assert!(codes(as_int).is_empty(), "{:?}", codes(as_int));
+    assert!(codes(as_string).is_empty(), "{:?}", codes(as_string));
+}
+
+#[test]
+fn assoc_type_unbound_non_default_is_coherence_error() {
+    // An impl that omits an associated type with NO default fails coherence (E0015).
+    let src = "\
+trait Container {
+  type Item
+  fn get(): Self::Item
+}
+class Boxx {
+  v: int
+  impl Container {
+    fn get(): int { return self.v; }
+  }
+}
+";
+    assert_eq!(codes(src), ["E0015"]);
+}
+
+#[test]
+fn assoc_type_defaulted_binding_is_omittable() {
+    // A defaulted associated type may be left unbound — no coherence error, and the type still checks.
+    let src = "\
+trait Container {
+  type Item = int
+  fn get(): Self::Item
+}
+class Boxx {
+  v: int
+  impl Container {
+    fn get(): int { return self.v; }
+  }
+}
+fn f(b: Boxx): int { return b.get(); }
+";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
