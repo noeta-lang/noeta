@@ -49,11 +49,13 @@ pub struct ResolvedGraph {
     /// composed-toolchain build (N3.2) compiles in. Empty for a pure-Noeta graph, which is the
     /// signal that no composition is needed. Sorted by identity (deterministic compose key).
     pub native_crates: Vec<NativeCrate>,
-    /// The **namespace root segments** of the native packages the root app authorized to contribute
-    /// CLI commands (`[trust].commands`, package-manager Phase 4). The composer bakes these into the
-    /// shim so `run_cli` registers a dependency's `noeta <cmd>` only when its package is
-    /// command-trusted; std's own commands (root `"std"`) are always allowed. Sorted + deduped.
-    pub trusted_command_roots: Vec<String>,
+    /// The **package identities** (`company/package`) of the native packages the root app authorized
+    /// to contribute CLI commands (`[trust].commands`, package-manager Phase 4). The composer ties
+    /// command registration to these entries' extension units in the shim, so `run_cli` registers a
+    /// dependency's `noeta <cmd>` only when its *package* is command-trusted — never by namespace-root
+    /// name matching, which would over-trust every package sharing a scope root (trusting `para/db`
+    /// must not trust all of `para/*`). std's own commands are always allowed. Sorted + deduped.
+    pub trusted_command_identities: Vec<String>,
     /// scope (`company`) → the trust root established for it during the walk (provenance, Phase 4
     /// #2 / Phase 5) — a registry-served Ed25519 key or a keyless-verified OIDC identity — to be
     /// **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency carried
@@ -199,7 +201,7 @@ fn resolve_graph_impl(
             packages: Vec::new(),
             locked: Vec::new(),
             native_crates: Vec::new(),
-            trusted_command_roots: Vec::new(),
+            trusted_command_identities: Vec::new(),
             scope_trust: BTreeMap::new(),
             root_edition: crate::edition::Edition::DEFAULT,
             log_trust: None,
@@ -1561,8 +1563,11 @@ fn assemble(
     let mut locked = Vec::with_capacity(instances.len());
     let mut native_crates = Vec::new();
     // A native package's commands register only if the root app command-trusts its identity; record
-    // the namespace root segment the composer/`run_cli` filters on (Phase 4).
-    let mut trusted_command_roots: Vec<String> = Vec::new();
+    // the trusted identities so the composer can tie command registration to exactly those packages'
+    // extension units (Phase 4). Identity — never the root segment: a scope-keyed package's segment
+    // (`db` for `para/db`) is not what its extensions report as root, and root-name matching would
+    // over-trust every package sharing a scope root.
+    let mut trusted_command_identities: Vec<String> = Vec::new();
     for (identity, inst) in &instances {
         let key = global[identity].clone();
         // A local dependency key re-roots to the global segment of the package it resolves to. A
@@ -1603,20 +1608,20 @@ fn assemble(
             });
             // Commands only exist inside a native package; grant its commands only if command-trusted.
             if trusted_commands.contains(identity) {
-                trusted_command_roots.push(inst.root_segment.clone());
+                trusted_command_identities.push(identity.clone());
             }
         }
     }
     // Sort by global segment so the loader's SourceId assignment and the startup-cache key are
     // deterministic regardless of walk order.
     packages.sort_by(|a, b| a.key.cmp(&b.key));
-    trusted_command_roots.sort();
-    trusted_command_roots.dedup();
+    trusted_command_identities.sort();
+    trusted_command_identities.dedup();
     ResolvedGraph {
         packages,
         locked,
         native_crates,
-        trusted_command_roots,
+        trusted_command_identities,
         scope_trust,
         root_edition,
         log_trust: None,
@@ -2172,9 +2177,9 @@ mod tests {
     }
 
     #[test]
-    fn command_trust_gates_which_native_roots_may_add_commands() {
-        // A native dep trusted for native but NOT for commands contributes no trusted command root;
-        // adding it to `[trust].commands` surfaces its namespace root for the composer's filter.
+    fn command_trust_gates_which_native_packages_may_add_commands() {
+        // A native dep trusted for native but NOT for commands contributes no trusted command
+        // identity; adding it to `[trust].commands` surfaces its package identity for the composer.
         let base = std::env::temp_dir().join("noeta_graph_test_cmd_trust");
         let make = |commands_trust: bool| -> Vec<String> {
             let _ = std::fs::remove_dir_all(&base);
@@ -2214,12 +2219,14 @@ mod tests {
             .unwrap();
             resolve_graph(&app.join("main.noe"))
                 .expect("resolves")
-                .trusted_command_roots
+                .trusted_command_identities
         };
-        // Native-trusted but not command-trusted → the package composes, but no command root.
+        // Native-trusted but not command-trusted → the package composes, but no command identity.
         assert!(make(false).is_empty());
-        // Command-trusted → its namespace root (`imgfx`) is surfaced for the command filter.
-        assert_eq!(make(true), vec!["imgfx".to_string()]);
+        // Command-trusted → its package IDENTITY (not its root segment) is surfaced, so the shim
+        // ties command registration to exactly this package's extension units — a scope-keyed
+        // package (`para/db`) must not be matched (or over-matched) by root-name strings.
+        assert_eq!(make(true), vec!["acme/imgfx".to_string()]);
     }
 
     #[test]

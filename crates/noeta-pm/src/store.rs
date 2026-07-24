@@ -82,6 +82,12 @@ impl Store {
 /// lockfile pins and a fetch verifies. Every file under `dir` is folded in **sorted by relative
 /// path**, each as `(relative path, bytes)`, so the hash is independent of directory-walk order and
 /// of where the tree is rooted. Reuses [`KeyBuilder`]'s length-prefixed, domain-separated hashing.
+///
+/// `noeta.lock` files (at any depth) are **excluded**: a lockfile is machine-written derived state,
+/// never package source, and a consumer resolves with its own root lock — a dependency's is inert.
+/// Folding one in creates a feedback loop for a package whose example app lives *inside* its tree
+/// (`examples/<app>/noeta.lock` records the package's tree hash → each resolve rewrites the lock →
+/// the tree hash changes → the next resolve re-pins and, downstream, every compose is a cache miss).
 pub fn hash_tree(dir: &Path) -> io::Result<String> {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_files(dir, &mut files)?;
@@ -96,7 +102,8 @@ pub fn hash_tree(dir: &Path) -> io::Result<String> {
 }
 
 /// Recursively gather every file under `dir` into `out` (a `.git` directory, if present, is skipped
-/// — the checked-out working tree is what a package *is*, not its VCS metadata).
+/// — the checked-out working tree is what a package *is*, not its VCS metadata; `noeta.lock` files
+/// are skipped as derived state — see [`hash_tree`]).
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -106,6 +113,12 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
             }
             collect_files(&path, out)?;
         } else if path.is_file() {
+            if path
+                .file_name()
+                .is_some_and(|n| n == crate::lock::LOCK_NAME)
+            {
+                continue;
+            }
             out.push(path);
         }
     }
@@ -198,5 +211,41 @@ mod tests {
             .publish("c", |s| fs::write(s.join("top.noe"), "echo 2;\n"))
             .unwrap();
         assert_ne!(hash_tree(&a).unwrap(), hash_tree(&c).unwrap());
+    }
+
+    #[test]
+    fn hash_tree_ignores_lockfiles_at_any_depth() {
+        // A lockfile is derived state, not package source: its presence or content must not move
+        // the tree hash. Without this, a package whose example app lives inside its own tree
+        // (`examples/<app>/noeta.lock` recording the package's tree hash) never converges — every
+        // resolve rewrites the lock, changes the hash, and recomposes downstream.
+        let store = tmp_store("store_hash_lockfiles");
+        let bare = store
+            .publish("bare", |s| {
+                fs::create_dir_all(s.join("examples/demo"))?;
+                fs::write(s.join("pkg.noe"), "namespace p;\n")
+            })
+            .unwrap();
+        let locked = store
+            .publish("locked", |s| {
+                fs::create_dir_all(s.join("examples/demo"))?;
+                fs::write(s.join("pkg.noe"), "namespace p;\n")?;
+                fs::write(s.join(crate::lock::LOCK_NAME), "# lock v1\n")?;
+                fs::write(
+                    s.join("examples/demo").join(crate::lock::LOCK_NAME),
+                    "hash = \"abc\"\n",
+                )
+            })
+            .unwrap();
+        assert_eq!(hash_tree(&bare).unwrap(), hash_tree(&locked).unwrap());
+
+        // …while any real source file still moves it.
+        let edited = store
+            .publish("edited", |s| {
+                fs::create_dir_all(s.join("examples/demo"))?;
+                fs::write(s.join("pkg.noe"), "namespace q;\n")
+            })
+            .unwrap();
+        assert_ne!(hash_tree(&bare).unwrap(), hash_tree(&edited).unwrap());
     }
 }

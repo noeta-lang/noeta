@@ -1,7 +1,8 @@
 //! `noeta` — the user-facing toolchain, as a **library** with a thin binary shim (`src/main.rs`
-//! is `run_cli(&[])`). The library form exists for package-manager Phase 3: a composed toolchain
-//! (an app with native extension dependencies) is a generated crate depending on this one, whose
-//! `main` passes the extra extension units into [`run_cli`].
+//! is `run_cli(&[], &[])`). The library form exists for package-manager Phase 3: a composed
+//! toolchain (an app with native extension dependencies) is a generated crate depending on this
+//! one, whose `main` passes the extra extension units (and the command-trusted subset of them)
+//! into [`run_cli`].
 //!
 //! Exposes `run` (execute a file), `test` (run a program's `@test` blocks), `dump` (disassemble to
 //! VM bytecode — a debugging aid), and `repl` (interactive); all drive the same pipeline crates, so
@@ -776,7 +777,7 @@ enum CacheAction {
 /// toolchain, not a runner.
 pub fn run_cli(
     extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
-    trusted_command_roots: &[&str],
+    command_extras: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
 ) -> ExitCode {
     // First-party toolchain extensions that ship with every binary (stock or composed), in their own
     // namespaces — the HTML body formatter (`noeta-html`) which reflows `@html` bodies under
@@ -787,14 +788,17 @@ pub fn run_cli(
     units.extend_from_slice(extra);
     noeta_stdlib::registry::install_with_extras(&units);
     // Phase 4: a dependency's `ExtCommand`s reach the CLI only if the root app command-trusts its
-    // package (`[trust].commands`, whose namespace roots the composer baked in here). std's own
-    // commands (root `"std"`) are always available. The stock binary passes an empty list — it has
-    // only std units, so nothing is filtered.
-    let command_trusted = |root: &str| root == "std" || trusted_command_roots.contains(&root);
+    // PACKAGE (`[trust].commands`). The composer passes the trusted packages' extension units here
+    // (`command_extras` ⊆ `extra`), so trust is keyed by the providing package's identity — never
+    // by matching root-name strings, which would over-trust every package sharing a scope root
+    // (trusting `para/db`'s commands must not trust all of `para/*`) and, for a scope-keyed
+    // dependency, didn't even match its extensions' actual root. std's own commands (root `"std"`)
+    // are always available. The stock binary passes an empty list — it has only std units.
     let trusted_commands: Vec<_> = noeta_stdlib::registry::extensions()
         .iter()
-        .filter(|ext| command_trusted(ext.root()))
+        .filter(|ext| ext.root() == "std")
         .flat_map(|ext| ext.commands().iter())
+        .chain(command_extras.iter().flat_map(|ext| ext.commands().iter()))
         .collect();
     // P-AOT L2: if this executable is a `noeta build --exe` artifact (a bundle stapled onto a copy
     // of the runtime), run the embedded program directly — the shipped app is not the toolchain, so

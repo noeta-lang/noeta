@@ -68,7 +68,7 @@ fn every_example_still_compiles() {
 
     // Scope: examples whose directory declares package dependencies (a `noeta.toml`) are NOT
     // checked here. Checking one composes a toolchain — a real cargo build of the composed binary
-    // ("first build of this dependency set"), which costs minutes cold and is heavy enough to fail
+    // (the "composing the toolchain" path), which costs minutes cold and is heavy enough to fail
     // under load. That cost belongs to the package that owns them (each `para` package repo gates
     // its own examples), not to a blanket sweep here.
     //
