@@ -1209,6 +1209,7 @@ pub(crate) fn type_ref_str(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Optional { inner, .. } => format!("?{}", type_ref_str(inner)),
         TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
+        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
         TypeRef::Named { name, args, .. } if args.is_empty() => name.clone(),
         TypeRef::Named { name, args, .. } => {
             let args: Vec<String> = args.iter().map(type_ref_str).collect();

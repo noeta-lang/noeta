@@ -892,6 +892,14 @@ struct Symbols {
     /// an instantiated bound `T: Keyed<int>`) and UT4 `dyn Trait` coercion. Populated in pass 1;
     /// coherence (one impl per trait per type) keeps a single entry per pair honest.
     user_trait_impls: HashMap<String, HashMap<String, Vec<Type>>>,
+    /// Associated-type bindings per implementor (ExtBundle→ExtTrait convergence, slice 1a):
+    /// `(type, trait)` → `assoc-name → concrete Type`. Populated at collect from each impl's
+    /// `type Name = Concrete;` bindings merged over the trait's defaulted associated types. The basis
+    /// for resolving a `Self::Name` projection ([`TypeRef::AssocProjection`]) in a trait/impl method
+    /// signature to the implementor's concrete type — the trait analogue of a bundle's element
+    /// resolution. An associated type never enters the [`Type`] lattice; it is projected at each
+    /// typing site (or degrades to `Type::Unknown` under `dyn`, where the impl is unknown).
+    trait_assoc: HashMap<(String, String), HashMap<String, Type>>,
     /// Declared `From` conversions (error-ergonomics): target type name → the source types its
     /// in-body `impl From<Source>` blocks declare, resolved at collection so a `?` site can consult
     /// them regardless of statement order. Coherence allows at most one `From` impl per type (the

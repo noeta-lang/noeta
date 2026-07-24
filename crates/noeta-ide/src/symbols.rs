@@ -258,6 +258,7 @@ pub fn render_type_ref(ty: &TypeRef) -> String {
             }
         }
         TypeRef::DynTrait { trait_name, .. } => format!("dyn {}", type_leaf(trait_name)),
+        TypeRef::AssocProjection { name, .. } => format!("Self::{name}"),
         TypeRef::Optional { inner, .. } => format!("?{}", render_type_ref(inner)),
         TypeRef::Union { members, .. } => members
             .iter()

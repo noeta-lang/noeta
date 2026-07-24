@@ -4991,6 +4991,9 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // Narrowing to a trait object reduces to the dynamic top (a permissive over-approximation;
         // `x.as<dyn Trait>()` is a rare corner and a precise implementor test is future work).
         TypeRef::DynTrait { .. } => NarrowTarget::Dyn,
+        // A `Self::Name` projection has no static runtime head (resolution is per-impl at the checker);
+        // narrowing to one reduces to the permissive dynamic top, like a trait object (slice 1a).
+        TypeRef::AssocProjection { .. } => NarrowTarget::Dyn,
         TypeRef::Tuple { .. } => NarrowTarget::Tuple,
         // Function types are erased: narrowing to one is a head-constructor "is callable" test
         // (params/return dropped), matching any function/closure value — like `List` ignoring its

@@ -1310,6 +1310,9 @@ fn typeref_repr_with(ty: &TypeRef, nominal: &NominalResolver<'_>, top: bool) -> 
         // reflection can recover which trait a parameter is bound to (service injection by interface).
         TypeRef::DynTrait { trait_name, .. } => TypeRepr::DynTrait(trait_name.clone()),
         TypeRef::Tuple { .. } => TypeRepr::Dyn,
+        // A `Self::Name` projection is not statically a concrete type here (resolution is per-impl at
+        // the checker); reflect it as the dynamic top, like a tuple (slice 1a).
+        TypeRef::AssocProjection { .. } => TypeRepr::Dyn,
         TypeRef::Fn { params, ret, .. } => {
             TypeRepr::Fn(params.iter().map(recur).collect(), Box::new(recur(ret)))
         }

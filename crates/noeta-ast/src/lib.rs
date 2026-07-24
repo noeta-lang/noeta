@@ -1058,6 +1058,10 @@ pub struct ImplBlock {
     /// per-implementor; empty for the common non-generic trait.
     pub trait_args: Vec<TypeRef>,
     pub methods: Vec<FnDecl>,
+    /// The `type Name = Concrete;` associated-type bindings this impl provides (slice 1a). Each names
+    /// an associated type declared by the trait and pins it to a concrete type, resolving `Self::Name`
+    /// in the trait's method signatures for this implementor.
+    pub assoc_bindings: Vec<(String, TypeRef)>,
     pub span: Span,
 }
 
@@ -1073,6 +1077,11 @@ pub struct TraitDecl {
     pub type_params: Vec<TypeParam>,
     /// The trait's method contract, in source order.
     pub methods: Vec<TraitMethod>,
+    /// The trait's **associated types** (ExtBundle→ExtTrait convergence, slice 1a): each `type Name;`
+    /// (a required associated type an implementor must bind) or `type Name = Default;` (a bindable
+    /// default), in source order. Referenced from a method signature as `Self::Name`
+    /// ([`TypeRef::AssocProjection`]); resolved per-impl by the checker, never a lattice type.
+    pub assoc_types: Vec<AssocTypeDecl>,
     /// Every `@`-decorator and `#[...]` attribute written on this trait. See [`Decorators`].
     ///
     /// Most are misplacements the checker reports (`E0053`) — a trait is not a data type — but
@@ -1089,6 +1098,19 @@ pub struct TraitDecl {
 pub struct TraitMethod {
     pub sig: FnDecl,
     pub has_default: bool,
+}
+
+/// One associated type declared in a trait body (slice 1a): `type Name;` (required — every impl
+/// must bind it) or `type Name = Default;` (a bindable default an impl may omit). A method
+/// signature refers to it as `Self::Name` ([`TypeRef::AssocProjection`]); the checker resolves that
+/// projection per-impl from the impl's binding, so an associated type never enters the type lattice.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssocTypeDecl {
+    pub name: String,
+    pub name_span: Span,
+    /// The `= Default` type, when the declaration provides one; `None` for a required associated type.
+    pub default: Option<TypeRef>,
+    pub span: Span,
 }
 
 /// A standalone `impl Trait for Type { ... }` declaration (top-level, not inside a class body).
@@ -1109,6 +1131,8 @@ pub struct ImplDecl {
     /// a non-empty body is parsed but only validated for arity in pass 1 (runtime dispatch of
     /// standalone-impl methods is a later slice).
     pub methods: Vec<FnDecl>,
+    /// The `type Name = Concrete;` associated-type bindings (slice 1a); see [`ImplBlock::assoc_bindings`].
+    pub assoc_bindings: Vec<(String, TypeRef)>,
     pub span: Span,
 }
 
@@ -1409,6 +1433,11 @@ pub enum TypeRef {
         ret: Box<TypeRef>,
         span: Span,
     },
+    /// A projection through an associated type on the receiver: `Self::Name` (slice 1a). Legal only
+    /// in a trait/impl method signature; the checker resolves it per-impl to the impl's binding for
+    /// `Name` (a concrete receiver bakes it at collect; a `dyn` receiver has no static impl, so it
+    /// degrades to `Type::Unknown`). It never becomes a persistent lattice type.
+    AssocProjection { name: String, span: Span },
 }
 
 impl TypeRef {
@@ -1419,6 +1448,7 @@ impl TypeRef {
             | TypeRef::Optional { span, .. }
             | TypeRef::Union { span, .. }
             | TypeRef::Tuple { span, .. }
+            | TypeRef::AssocProjection { span, .. }
             | TypeRef::Fn { span, .. } => *span,
         }
     }
