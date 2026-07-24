@@ -200,7 +200,8 @@ impl Interpreter {
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
         // Arm the safepoint-GC trigger for this run (the eval mirror of the VM's arm).
         crate::leak::safepoint_arm(crate::leak::safepoint_step());
-        self.reflection = noeta_ast::reflect::build(ast);
+        let native_roles = self.reg().native_roles();
+        self.reflection = noeta_ast::reflect::build(ast, &native_roles);
         // Extension attribute shapes ride the artifact (tier-extensions port) — same embed the
         // bytecode path does, so the differential stays green by construction.
         noeta_check::extend_reflection(&mut self.reflection);

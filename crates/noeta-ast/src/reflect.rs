@@ -301,10 +301,22 @@ pub struct VariantInfo {
     pub fields: Vec<String>,
 }
 
-/// Build the reflection info for a program. **Pure and deterministic**: the same AST always yields
-/// the same [`ReflectionInfo`], so both backends calling this on the same [`Program`] agree without
-/// any cross-backend coordination — the property the differential oracle depends on.
-pub fn build(program: &Program) -> ReflectionInfo {
+/// Build the reflection info for a program. **Pure and deterministic**: the same AST + `native_roles`
+/// always yields the same [`ReflectionInfo`], so both backends calling this on the same [`Program`]
+/// agree without any cross-backend coordination — the property the differential oracle depends on.
+///
+/// `native_roles` is the plain-data projection of any **native** `@role`-bearing `@attribute` structs
+/// (native type-declaration unification, Slice D3): `(attribute FQN, [(enum, variant)])` pairs a caller
+/// assembles from the registry via [`crate`]-external `Registry::native_roles`. This crate cannot see
+/// the extension registry, so a native role reaches the join as this table. Merged into the same
+/// `role_of` the `.noe` `@role` tags populate, keyed by the **qualified** attribute identity a linked
+/// native attribute application carries — so an in-program application of a native role-bearing
+/// attribute confers the role exactly as a `.noe` one does. Pass `&[]` for the pure `.noe` path; the
+/// result is then byte-identical to before this parameter existed.
+pub fn build(
+    program: &Program,
+    native_roles: &[(String, Vec<(String, String)>)],
+) -> ReflectionInfo {
     let mut manifest = Vec::new();
     let mut types = Vec::new();
     // Every callable's declared parameter list, keyed by target (bare fn name or `Type.method`) — the
@@ -443,6 +455,15 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 });
             }
             _ => {}
+        }
+    }
+    // Native `@role`-bearing attributes (Slice D3): merge the registry-assembled tags into `role_of`
+    // keyed by the attribute's qualified identity — the identity a linked native attribute application
+    // carries in the manifest — so the join below treats a native role-bearing attribute exactly like a
+    // `.noe` one. Empty for the pure `.noe` path (byte-identical result).
+    for (attr, tags) in native_roles {
+        for (enum_name, variant) in tags {
+            role_of.push((attr.clone(), (enum_name.clone(), variant.clone())));
         }
     }
     // Join the manifest with the role tags: every declaration bearing a role-tagged attribute is

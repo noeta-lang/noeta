@@ -83,7 +83,8 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
     let checked = noeta_db::linked_checked_ide(&p.db, p.ws);
     let texts: Vec<&str> = p.sources.iter().map(|s| s.text()).collect();
     let graph = callgraph::build(program, &checked.expr_types, &texts);
-    let info = noeta_ast::reflect::build(program);
+    let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
+    let info = noeta_ast::reflect::build(program, &native_roles);
 
     let (roots, note): (Vec<usize>, Option<String>) =
         match engine::resolve_roots(&graph, &info, from) {

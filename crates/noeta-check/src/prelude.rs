@@ -316,6 +316,11 @@ impl Checker {
                         }
                     }
                     noeta_ext_abi::ExtTypeDirective::Semantic => {}
+                    // `@role` (Slice D3) seeds **no** `Symbols` table: a native role is surfaced purely
+                    // by `reflect::build` joining the tags (projected via `Registry::native_roles`)
+                    // against in-program attribute applications, not by a checker membership write.
+                    // `Registry::validate` enforces its couplings at assembly.
+                    noeta_ext_abi::ExtTypeDirective::Role(_) => {}
                 }
             }
         }

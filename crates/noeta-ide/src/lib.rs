@@ -2591,7 +2591,8 @@ impl DocumentStore {
             .map(|s| s.text(db))
             .collect();
         let graph = callgraph::build(program, &ide.expr_types, &texts);
-        (graph, noeta_ast::reflect::build(program))
+        let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
+        (graph, noeta_ast::reflect::build(program, &native_roles))
     }
 
     /// Resolve graph function `idx` to a located [`HierarchyItem`] (roles joined by declaration

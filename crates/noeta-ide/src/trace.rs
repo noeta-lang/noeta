@@ -317,7 +317,8 @@ fn save(n: int): int {
         );
         let checked = noeta_check::check_all_with_types(&parsed.program);
         let graph = crate::callgraph::build(&parsed.program, &checked.expr_types, &[src]);
-        let info = noeta_ast::reflect::build(&parsed.program);
+        // A pure checker-test fixture with no installed extensions — no native roles to thread.
+        let info = noeta_ast::reflect::build(&parsed.program, &[]);
         (graph, info)
     }
 

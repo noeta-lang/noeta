@@ -489,6 +489,35 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // --- ExtRoleTag (native type-declaration unification, Slice D3) -----------------------------
+    // A native `@role` tag inside `ExtTypeDirective::Role`. Both fields state a RULE the enforcer
+    // `check_role_tag` (called from `Registry::validate`) checks at assembly — `enum_name` must
+    // resolve to a `@semantic` enum, `variant` must exist on it and be fieldless — AND they are the
+    // data `Registry::native_roles` projects into `reflect::build`, which materializes each into a
+    // `RoleBinding { target, role }`. The seam fixture's native `@attribute` + `@role` struct, applied
+    // in a linked module so `roles_of()` surfaces the binding on both backends, is the exerciser.
+    Row(
+        "ExtRoleTag",
+        "enum_name",
+        Constraint(
+            Anchor(REGISTRY, "fn check_role_tag("),
+            Anchor(
+                CONFORMANCE_DIRECTIVE_SEAM,
+                "fn native_role_binding_surfaces_on_both_backends(",
+            ),
+        ),
+    ),
+    Row(
+        "ExtRoleTag",
+        "variant",
+        Constraint(
+            Anchor(REGISTRY, "fn check_role_tag("),
+            Anchor(
+                CONFORMANCE_DIRECTIVE_SEAM,
+                "fn native_role_binding_surfaces_on_both_backends(",
+            ),
+        ),
+    ),
     // --- ExtTrait / ExtTraitMethod (native-extensibility S3) ------------------------------------
     Row(
         "ExtTrait",
@@ -864,6 +893,7 @@ const SCANNED: &[(&str, &[&str])] = &[
             "ExtVariant",
             "ExtFielded",
             "ExtField",
+            "ExtRoleTag",
             "ExtTrait",
             "ExtTraitMethod",
             "PackedConstraint",

@@ -155,7 +155,8 @@ pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
     let mut roles_by_source: std::collections::HashMap<u32, Vec<ModuleRole>> =
         std::collections::HashMap::new();
     if let Ok(program) = &linked.program {
-        for r in &noeta_ast::reflect::build(program).roles {
+        let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
+        for r in &noeta_ast::reflect::build(program, &native_roles).roles {
             roles_by_source
                 .entry(r.target_span.source.0)
                 .or_default()
@@ -263,7 +264,8 @@ pub fn reflect(p: &Prepared, role: Option<&str>) -> ReflectOutput {
         Ok(prog) => prog,
         Err(_) => &entry.0.program,
     };
-    let info = noeta_ast::reflect::build(program);
+    let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
+    let info = noeta_ast::reflect::build(program, &native_roles);
 
     let want = role.map(|r| r.trim().to_ascii_lowercase());
     let roles = info
