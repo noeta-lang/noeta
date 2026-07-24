@@ -1,0 +1,7 @@
+// Regression guard: only `fn` DECLARATIONS hoist to the top of the module. A top-level VALUE
+// binding stays strictly in source order, so referencing one before its assignment is still a
+// runtime E0005 (unknown name) on both backends — order-dependence for values is preserved.
+// expect: error E0005 at 6:6
+// expect: exit 1
+echo total
+total = 5

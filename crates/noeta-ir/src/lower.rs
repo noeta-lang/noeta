@@ -550,7 +550,7 @@ pub fn lower_with_sites_opts(
         registry,
         module_globals: module_global_names(program),
     };
-    let top = lowerer.lower_body(&program.stmts)?;
+    let top = lowerer.lower_top_level(&program.stmts)?;
     Ok(Program {
         top,
         temp_count: lowerer.temps,
@@ -782,6 +782,33 @@ impl Lowerer<'_> {
         let mut out = Vec::new();
         for stmt in stmts {
             self.lower_stmt(stmt, &mut out)?;
+        }
+        Ok(Block::stmts(out))
+    }
+
+    /// Lower the module's top-level statement stream, **hoisting every top-level `fn` declaration
+    /// ahead of the rest** so a top-level statement may call a `fn` declared textually later — the
+    /// runtime counterpart of the checker's forward-reference hoist (`collect.rs` pass 1), and
+    /// consistent with fn-body/mutual-recursion behavior where forward references already resolve.
+    ///
+    /// Only `fn` DECLARATIONS hoist. A value binding (`x = 5`, including a closure bound to a name)
+    /// stays in source order, so using a value before its assignment is still a runtime error. The
+    /// relative order of the hoisted fns is preserved, as is the relative order of everything else,
+    /// so destructor-bearing value bindings destruct in their original reverse-binding order (only a
+    /// function value's own — unobservable — teardown moves). Both backends consume this one
+    /// reordered stream, so they stay differential-identical by construction; the compiler's global
+    /// slot numbering carries no semantics (destruction order is tracked from runtime binding order).
+    fn lower_top_level(&mut self, stmts: &[AstStmt]) -> Result<Block, Unsupported> {
+        let mut out = Vec::new();
+        for stmt in stmts {
+            if matches!(stmt, AstStmt::Fn(_)) {
+                self.lower_stmt(stmt, &mut out)?;
+            }
+        }
+        for stmt in stmts {
+            if !matches!(stmt, AstStmt::Fn(_)) {
+                self.lower_stmt(stmt, &mut out)?;
+            }
         }
         Ok(Block::stmts(out))
     }
