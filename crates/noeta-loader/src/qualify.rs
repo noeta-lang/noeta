@@ -635,6 +635,14 @@ fn q_param(p: &mut Param, visit: &mut NameVisitor) {
     if let Some(d) = &mut p.default {
         q_expr(d, visit);
     }
+    // A parameter's `#[Arg(...)]` data attributes qualify exactly like a field's (`q_field`) — this
+    // walk was missing, so a param attribute imported from another module (`use pkg.Arg`) never had
+    // its name rewritten to the qualified identity, and the checker rejected it as E0029 "cannot be
+    // used as an attribute". Without this, a signature-driven framework in one package (a CLI, a
+    // router) could not annotate a consumer's parameters at all.
+    for a in &mut p.attrs {
+        q_attr(a, visit);
+    }
 }
 
 fn q_field(f: &mut FieldDecl, visit: &mut NameVisitor) {
@@ -1225,5 +1233,28 @@ mod tests {
         assert!(
             matches!(&arms[1].pattern, Pattern::IsType { ty: TypeRef::Named { name, .. }, .. } if name == "geo.Shape")
         );
+    }
+
+    /// A **parameter's** `#[Arg(...)]` data attribute qualifies exactly like a function-level or
+    /// field-level one. Regression: `q_param` walked the type and default but never the param's
+    /// `attrs`, so an imported param attribute (`use pkg.Arg`) kept its bare name after linking and
+    /// the checker rejected it as E0029 — which made a signature-driven framework in one package
+    /// unable to annotate a consumer's parameters. Both the fn-level `#[Command]` and the param-level
+    /// `#[Arg]` must land on their qualified identities.
+    #[test]
+    fn param_and_fn_attributes_qualify() {
+        let m = map(&[("Command", "para.cli.Command"), ("Arg", "para.cli.Arg")]);
+        let mut stmts =
+            parse_one("#[Command] fn greet(#[Arg(short: \"l\")] loud: bool): int { return 0; }\n");
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        let Stmt::Fn(decl) = &stmts[0] else {
+            panic!("fn")
+        };
+        // The function's own attribute qualified (this already worked, via `q_fn`).
+        assert_eq!(decl.attrs[0].name, "para.cli.Command");
+        // The parameter's attribute qualified (the fix — previously left bare as `Arg`).
+        assert_eq!(decl.params[0].attrs[0].name, "para.cli.Arg");
     }
 }
