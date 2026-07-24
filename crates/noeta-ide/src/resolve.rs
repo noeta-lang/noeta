@@ -824,6 +824,11 @@ impl Resolver {
             Expr::TypeOf { value, .. } => self.walk_expr(value),
             Expr::FieldsOf { value, .. } => self.walk_expr(value),
             Expr::ParamsOf { target, .. } => self.walk_expr(target),
+            Expr::FieldSpecsOf { name, .. } => self.walk_expr(name),
+            Expr::Construct { name, fields, .. } => {
+                self.walk_expr(name);
+                self.walk_expr(fields);
+            }
             Expr::FromBytes { blob, .. } => self.walk_expr(blob),
             Expr::Channel { capacity, .. } => self.walk_expr(capacity),
             Expr::TypedModuleCall { recv, args, .. } => {

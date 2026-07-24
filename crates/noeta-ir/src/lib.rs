@@ -545,6 +545,20 @@ pub enum Rvalue {
     /// `params_of(target)` — the declared parameter list of the fn/method named by the runtime
     /// `target` string, materialized as `List<ParamInfo>`.
     ParamsOf { target: Atom, span: Span },
+    /// `field_specs_of::<T>()` / `field_specs_of(name)` — the declared field schema of the struct/class
+    /// named by the runtime `name` string, materialized as `List<FieldSpec>` (empty for an unknown or
+    /// non-fielded type). The turbofish form reaches here identically — the parser lowered `T` to its
+    /// name string — so there is only ever a runtime name operand.
+    FieldSpecsOf { name: Atom, span: Span },
+    /// `construct::<T>(fields)` / `construct(name, fields)` — build a struct value of the type named by
+    /// the runtime `name` string from `fields` (a runtime `List<dyn>` of field values in declaration
+    /// order), reusing the same construction path as a `T { … }` literal. Materializes a
+    /// `Result<dyn, string>` — `Ok(value)` or a recoverable `Err(message)`.
+    Construct {
+        name: Atom,
+        fields: Atom,
+        span: Span,
+    },
     /// `invoke(recv, name, args)` / `invoke(name, args)` — fallible by-name dispatch. `recv` is
     /// `None` for the free-function form, where `name` resolves in the top-level function namespace
     /// instead of a type's method table.

@@ -1140,6 +1140,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::TypeOf { value: expr, .. }
         | Expr::FieldsOf { value: expr, .. }
         | Expr::ParamsOf { target: expr, .. }
+        | Expr::FieldSpecsOf { name: expr, .. }
         | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr),
         Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr),
         Expr::Invoke {
@@ -1150,6 +1151,10 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
             }
             hoist_in_expr(name, pre, ctr);
             hoist_in_expr(args, pre, ctr);
+        }
+        Expr::Construct { name, fields, .. } => {
+            hoist_in_expr(name, pre, ctr);
+            hoist_in_expr(fields, pre, ctr);
         }
         Expr::TypedModuleCall { recv, args, .. } => {
             hoist_in_expr(recv, pre, ctr);

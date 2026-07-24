@@ -425,6 +425,7 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
         | Expr::TypeOf { value: e, .. }
         | Expr::FieldsOf { value: e, .. }
         | Expr::ParamsOf { target: e, .. }
+        | Expr::FieldSpecsOf { name: e, .. }
         | Expr::FromBytes { blob: e, .. }
         | Expr::Channel { capacity: e, .. }
         | Expr::TupleIndex { receiver: e, .. }
@@ -501,6 +502,10 @@ fn walk_expr(expr: &Expr, cx: &WalkCx<'_>, mark: &mut dyn FnMut(Type, bool)) {
             }
             rec!(name);
             rec!(args);
+        }
+        Expr::Construct { name, fields, .. } => {
+            rec!(name);
+            rec!(fields);
         }
         Expr::FieldSet {
             receiver, value, ..

@@ -9,6 +9,11 @@ use crate::*;
 
 use crate::scheduler::SchedState;
 
+/// What a `construct` field-source (a `List` or a `Map`) resolves to before the object is built: the
+/// `field -> value` pairs, the owned realized list to release afterward (only for the positional list
+/// form; `None` for the map form), and the shared planner's validation outcome.
+type ConstructResolve = (Vec<(String, Value)>, Option<Value>, Result<(), String>);
+
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
 /// `RealHost` + `RealExecutor`), so `noeta-vm` stays free of `noeta-host-real`/tokio. `Send + Sync` so the
 /// worker closure can carry a clone across the thread boundary.
@@ -1030,6 +1035,206 @@ impl<'m> Vm<'m> {
             })
             .collect();
         Value::list(items)
+    }
+
+    /// Materialize a declared type's field schema into a `List<FieldSpec>` (`{ name, type, optional }`,
+    /// declaration order) — the type-level reflection `field_specs_of`. An unknown or non-fielded type
+    /// yields the empty list. Each `type` is the field's declared type (precise, from the reflection
+    /// artifact). The shape is built fresh; structural shape equality matches the tree-walker's, so the
+    /// materialized values agree across the differential by construction.
+    pub(crate) fn materialize_field_specs(&self, type_name: &str) -> Value {
+        let spec_shape = noeta_object::intern_shape(Shape::object(
+            ShapeKind::Struct,
+            noeta_ast::reflect::FIELD_SPEC,
+            vec![
+                "name".to_string(),
+                "type".to_string(),
+                "optional".to_string(),
+            ],
+        ));
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .field_specs(type_name)
+            .into_iter()
+            .map(|spec| {
+                Value::object(
+                    spec_shape,
+                    vec![
+                        Value::string(spec.name),
+                        build_type_value(spec.ty),
+                        Value::bool(spec.optional),
+                    ],
+                )
+            })
+            .collect();
+        Value::list(items)
+    }
+
+    /// `construct(name, fields)` — build a struct/class value of the type named by `name_val` from the
+    /// field values `fields_val` (declaration order), reusing the SAME slot/defaults construction path
+    /// `Op::MakeStruct` uses so defaults and full-initialization are honored identically. Returns a
+    /// `Result<dyn, string>`: an unknown type, a non-list `fields`, an arity/scalar-type mismatch, or a
+    /// missing non-defaulted field is a recoverable `Err(message)` (via `err_shape`); success wraps the
+    /// object in `Ok` (via `ok_shape`). Validation runs through the shared `plan_construct` — the same
+    /// one the tree-walker uses — so both backends agree on every accept/reject and every message.
+    pub(crate) fn construct_dynamic(
+        &mut self,
+        name_val: Value,
+        fields_val: Value,
+        ok_shape: u32,
+        err_shape: u32,
+        _span: Span,
+    ) -> Result<Value, Abort> {
+        let err_of = |vm: &Self, msg: String| {
+            let shape = vm.persist.shapes[err_shape as usize];
+            Value::enum_value(shape, vec![Value::string(&msg)])
+        };
+        let Some(type_name) = name_val.as_string() else {
+            return Ok(err_of(
+                self,
+                format!(
+                    "construct type name must be a string, found {}",
+                    name_val.type_name()
+                ),
+            ));
+        };
+        // Only a declared struct/class is constructible; check before field validation so an unknown
+        // type reports as such rather than "no field X".
+        match self
+            .module
+            .reflection
+            .type_named(&type_name)
+            .map(|t| t.kind)
+        {
+            Some(noeta_ast::reflect::TypeKind::Struct | noeta_ast::reflect::TypeKind::Class) => {}
+            _ => {
+                return Ok(err_of(
+                    self,
+                    format!("`{type_name}` is not a constructible struct or class"),
+                ));
+            }
+        }
+        // The `fields` argument is a `List<dyn>` (positional, declaration order) or a
+        // `Map<string, dyn>` (named — the sparse, any-order form a framework binding `--field` flags
+        // produces). Both converge on `named: Vec<(field, value)>` and a shared plan validation, so the
+        // two backends and the two forms agree. `realize_list`/`map_values` hand back values that share
+        // their container's references (not retained), so each value placed into the object is
+        // retained and the realized list (if any) released after — the `Op::Invoke` protocol.
+        let (named, to_release, plan): ConstructResolve = if fields_val.is_list() {
+            let realized = fields_val.realize_list();
+            let values = realized.list_items().expect("checked is_list");
+            let value_reprs: Vec<noeta_ast::reflect::TypeRepr> =
+                values.iter().map(vm_type_repr).collect();
+            let info = &self.module.reflection;
+            let specs = info.field_specs(&type_name);
+            match noeta_ast::reflect::plan_construct(&type_name, &specs, &value_reprs) {
+                Ok(fill) => {
+                    let named = fill.iter().map(|s| s.to_string()).zip(values).collect();
+                    (named, Some(realized), Ok(()))
+                }
+                Err(msg) => {
+                    realized.release();
+                    return Ok(err_of(self, msg));
+                }
+            }
+        } else if fields_val.is_map() {
+            let keys = fields_val.map_keys().expect("checked is_map");
+            let vals = fields_val.map_values().expect("checked is_map");
+            let named: Vec<(String, Value)> = keys
+                .iter()
+                .zip(vals)
+                .filter_map(|(k, v)| match k {
+                    noeta_stdlib::MapKey::Str(s) => Some((s.as_str().to_owned(), v)),
+                    _ => None,
+                })
+                .collect();
+            let reprs: Vec<(String, noeta_ast::reflect::TypeRepr)> = named
+                .iter()
+                .map(|(n, v)| (n.clone(), vm_type_repr(v)))
+                .collect();
+            let info = &self.module.reflection;
+            let specs = info.field_specs(&type_name);
+            let plan = noeta_ast::reflect::plan_construct_named(&type_name, &specs, &reprs);
+            (named, None, plan)
+        } else {
+            return Ok(err_of(
+                self,
+                format!(
+                    "construct fields must be a list or a map, found {}",
+                    fields_val.type_name()
+                ),
+            ));
+        };
+        if let Err(msg) = plan {
+            if let Some(list) = to_release {
+                list.release();
+            }
+            return Ok(err_of(self, msg));
+        }
+        // Build via the same slot/defaults path `MakeStruct` uses: find the interned shape by name,
+        // place each provided value into its declaration-order slot, then fill unset slots from field
+        // defaults (run in global scope). The plan guaranteed every unset slot is defaulted.
+        //
+        // A type constructed ONLY dynamically (no `T { … }` literal anywhere in the program) has no
+        // compiled shape in `module.shapes`, so the shape is rebuilt from the reflection artifact —
+        // same kind, name, and field order the compiler would have interned, and shape interning is
+        // structural, so a dynamically built instance and a literal one share the one shape.
+        let shape =
+            match self.module.shapes.iter().find(|s| {
+                s.name == type_name && matches!(s.kind, ShapeKind::Struct | ShapeKind::Class)
+            }) {
+                Some(shape) => noeta_object::intern_shape(shape.clone()),
+                None => {
+                    let info = self
+                        .module
+                        .reflection
+                        .type_named(&type_name)
+                        .expect("validated type is in the reflection artifact");
+                    let kind = match info.kind {
+                        noeta_ast::reflect::TypeKind::Class => ShapeKind::Class,
+                        _ => ShapeKind::Struct,
+                    };
+                    noeta_object::intern_shape(Shape::object(kind, &type_name, info.fields.clone()))
+                }
+            };
+        let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
+        for (name, value) in &named {
+            if let Some(idx) = shape.fields.iter().position(|f| f == name) {
+                retain(*value);
+                slots[idx] = Some(*value);
+            }
+        }
+        if let Some(list) = to_release {
+            list.release();
+        }
+        for i in 0..shape.fields.len() {
+            if slots[i].is_some() {
+                continue;
+            }
+            let field = shape.fields[i].clone();
+            if let Some(&proto) = self
+                .field_defaults
+                .get(&(shape.name.clone(), field.clone()))
+            {
+                match self.run_thunk(proto, &[]) {
+                    Ok(v) => slots[i] = Some(v),
+                    Err(abort) => {
+                        for slot in slots.into_iter().flatten() {
+                            release(slot);
+                        }
+                        return Err(abort);
+                    }
+                }
+            }
+        }
+        let slots: Vec<Value> = slots
+            .into_iter()
+            .map(|s| s.unwrap_or_else(Value::unit))
+            .collect();
+        let object = Value::object(shape, slots);
+        let ok = self.persist.shapes[ok_shape as usize];
+        Ok(Value::enum_value(ok, vec![object]))
     }
 
     /// Record a runtime diagnostic and produce the unwind token.

@@ -1,0 +1,137 @@
+// `field_specs_of::<T>()` (TYPE-level field schema) and `construct::<T>(fields)` (dynamic struct
+// construction) — the two struct-reflection primitives. `field_specs_of` reports each field's
+// declared `{ name, type, optional }` from the DECLARATION (so `type` is precise, unlike the
+// value-erased `fields_of`); `construct` builds a struct value from field values in declaration
+// order, reusing the SAME construction path as a `T { … }` literal (a short list fills the rest from
+// defaults). Both agree across the differential by construction. `construct` is fallible: a missing
+// required field or a scalar type-mismatch is a recoverable `Result.Err`.
+// expect: stdout "spec port: Type.Int optional=false"
+// expect: stdout "spec host: Type.String optional=true"
+// expect: stdout "spec verbose: Type.Bool optional=true"
+// expect: stdout "full: 9090/example.com/true"
+// expect: stdout "short: 8080/localhost/false"
+// expect: stdout "roundtrip port = 8080"
+// expect: stdout "roundtrip host = localhost"
+// expect: stdout "roundtrip verbose = false"
+// expect: stdout "missing: missing required field `port` of `ServerOpts`"
+// expect: stdout "badtype: field `port` of `ServerOpts` expects int, got string"
+// expect: stdout "named: 3000/localhost/true"
+// expect: stdout "named-badfield: `ServerOpts` has no field `nope`"
+// expect: stdout "widget id = 7"
+// expect: stdout "widget label = w"
+// expect: exit 0
+struct ServerOpts {
+    port: int
+    host: string = "localhost"
+    verbose: bool = false
+}
+
+// --- field schema (type-level) --------------------------------------------------------------
+for spec in field_specs_of::<ServerOpts>() {
+    echo "spec ${spec.name}: ${spec.type} optional=${spec.optional}"
+}
+
+// --- construction from a full field list ----------------------------------------------------
+mut full_args: List<dyn> = []
+full_args = full_args ~ [9090]
+full_args = full_args ~ ["example.com"]
+full_args = full_args ~ [true]
+match construct::<ServerOpts>(full_args) {
+    Ok(v) => {
+        o = v.as<ServerOpts>() ?? ServerOpts { port: 0 }
+        echo "full: ${o.port}/${o.host}/${o.verbose}"
+    },
+    Err(e) => {
+        echo "full ERR: ${e}"
+    },
+}
+
+// --- construction from a short list (defaults fill host/verbose) ----------------------------
+mut short_args: List<dyn> = []
+short_args = short_args ~ [8080]
+match construct::<ServerOpts>(short_args) {
+    Ok(v) => {
+        o = v.as<ServerOpts>() ?? ServerOpts { port: 0 }
+        echo "short: ${o.port}/${o.host}/${o.verbose}"
+        for f in fields_of(v) {
+            // Round-trip: read the constructed instance's fields back with the value-level `fields_of`.
+            echo "roundtrip ${f.name} = ${f.value}"
+        }
+    },
+    Err(e) => {
+        echo "short ERR: ${e}"
+    },
+}
+
+// --- error: a missing required field ---------------------------------------------------------
+mut empty_args: List<dyn> = []
+match construct::<ServerOpts>(empty_args) {
+    Ok(_) => {
+        echo "missing: unexpectedly ok"
+    },
+    Err(e) => {
+        echo "missing: ${e}"
+    },
+}
+
+// --- error: a scalar type-mismatch (string where `port: int` is required) --------------------
+mut bad_args: List<dyn> = []
+bad_args = bad_args ~ ["notaport"]
+match construct::<ServerOpts>(bad_args) {
+    Ok(_) => {
+        echo "badtype: unexpectedly ok"
+    },
+    Err(e) => {
+        echo "badtype: ${e}"
+    },
+}
+
+// --- named construction from a Map (sparse, any-order — the form para/cli's F5 uses) ----------
+// `port` and `verbose` are supplied by name; the omitted middle field `host` fills from its default
+// (a positional short list could not express this "gap"). Named construction takes a `Map<string,dyn>`.
+mut named_fields: Map<string, dyn> = {}
+named_fields["port"] = 3000
+named_fields["verbose"] = true
+match construct::<ServerOpts>(named_fields) {
+    Ok(v) => {
+        o = v.as<ServerOpts>() ?? ServerOpts { port: 0 }
+        echo "named: ${o.port}/${o.host}/${o.verbose}"
+    },
+    Err(e) => {
+        echo "named ERR: ${e}"
+    },
+}
+
+// --- named construction rejects an unknown field name ----------------------------------------
+mut bad_field: Map<string, dyn> = {}
+bad_field["port"] = 1
+bad_field["nope"] = 2
+match construct::<ServerOpts>(bad_field) {
+    Ok(_) => {
+        echo "named-badfield: unexpectedly ok"
+    },
+    Err(e) => {
+        echo "named-badfield: ${e}"
+    },
+}
+
+// --- construct a type with NO literal anywhere (the shape is rebuilt from reflection) ---------
+// `Widget` is never written as a `Widget { … }` literal, so the VM has no compiled shape for it; both
+// backends must still build it (the VM rebuilds the shape from the reflection artifact, the
+// tree-walker resolves the always-registered type). Read the result back with `fields_of`.
+struct Widget {
+    id: int
+    label: string = "w"
+}
+mut widget_fields: Map<string, dyn> = {}
+widget_fields["id"] = 7
+match construct::<Widget>(widget_fields) {
+    Ok(v) => {
+        for f in fields_of(v) {
+            echo "widget ${f.name} = ${f.value}"
+        }
+    },
+    Err(e) => {
+        echo "widget ERR: ${e}"
+    },
+}

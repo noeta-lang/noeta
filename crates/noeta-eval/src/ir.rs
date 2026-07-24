@@ -1775,6 +1775,21 @@ impl Interpreter {
                 };
                 Ok(self.materialize_params(&target))
             }
+            noeta_ir::Rvalue::FieldSpecsOf { name, .. } => {
+                // The runtime name string names a declared type; materialize its field schema.
+                let name = match self.eval_ir_atom(name, frame)? {
+                    Value::Str(s) => s,
+                    _ => String::new(),
+                };
+                Ok(self.materialize_field_specs(&name))
+            }
+            noeta_ir::Rvalue::Construct {
+                name, fields, span, ..
+            } => {
+                let name_val = self.eval_ir_atom(name, frame)?;
+                let fields_val = self.eval_ir_atom(fields, frame)?;
+                self.construct_dynamic(name_val, fields_val, *span)
+            }
             noeta_ir::Rvalue::Invoke {
                 recv,
                 name,

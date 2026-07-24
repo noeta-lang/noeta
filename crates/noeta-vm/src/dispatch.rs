@@ -2817,6 +2817,29 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
+                    Op::FieldSpecsOf { dst, src } => {
+                        // The runtime name string names a declared type; materialize its field schema.
+                        let name = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_field_specs(&name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::Construct {
+                        dst,
+                        name,
+                        fields,
+                        ok_shape,
+                        err_shape,
+                        span,
+                    } => {
+                        let name_val = regs[fbase + *name as usize];
+                        let fields_val = regs[fbase + *fields as usize];
+                        let result = self.construct_dynamic(
+                            name_val, fields_val, *ok_shape, *err_shape, *span,
+                        )?;
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
                     Op::TypeOf { dst, src } => {
                         let repr = vm_type_repr(&regs[fbase + *src as usize]);
                         let result = build_type_value(&repr);

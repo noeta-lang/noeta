@@ -2442,6 +2442,23 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            Expr::FieldSpecsOf { name, span } => {
+                let name = self.lower_expr(name, out)?;
+                Ok(self.emit(out, Rvalue::FieldSpecsOf { name, span: *span }, *span))
+            }
+            Expr::Construct { name, fields, span } => {
+                let name = self.lower_expr(name, out)?;
+                let fields = self.lower_expr(fields, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Construct {
+                        name,
+                        fields,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::Invoke {
                 recv,
                 name,

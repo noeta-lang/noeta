@@ -3740,6 +3740,32 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::ParamsOf { dst, src });
                 Ok(())
             }
+            Rvalue::FieldSpecsOf { name, .. } => {
+                // The name is a runtime string; the VM reads the type's field schema from
+                // `Module::reflection` and materializes them. Load the operand into a register.
+                let src = self.atom_reg(name)?;
+                self.code.push(Op::FieldSpecsOf { dst, src });
+                Ok(())
+            }
+            Rvalue::Construct {
+                name, fields, span, ..
+            } => {
+                let name = self.atom_reg(name)?;
+                let fields = self.atom_reg(fields)?;
+                // The `Result<dyn, string>` wrapper shapes, interned exactly as `Op::Invoke` interns
+                // them — the VM builds `Ok(value)` / `Err(message)` from the same two shapes.
+                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
+                let err_shape = self.module.builtin_enum_shape("Result", "Err");
+                self.code.push(Op::Construct {
+                    dst,
+                    name,
+                    fields,
+                    ok_shape,
+                    err_shape,
+                    span: *span,
+                });
+                Ok(())
+            }
             Rvalue::Invoke {
                 recv,
                 name,
