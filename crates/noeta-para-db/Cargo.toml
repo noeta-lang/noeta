@@ -20,6 +20,9 @@ noeta-reactive-abi = { workspace = true }
 # The migration engine checksums each migration file's contents (sha256) to detect edited history.
 # Always linked (the engine is driver-agnostic and rides no ring).
 sha2 = { workspace = true }
+# `noeta migrate new` (the extension-contributed command, para-extraction) stamps a UTC-timestamp
+# filename prefix.
+time = { version = "0.3", default-features = false, features = ["std"] }
 # The SQLite driver, behind the `ring-sqlite` ring. `bundled` compiles SQLite from source, so a
 # consumer needs no system libsqlite3 (the amalgamation reuses the workspace's existing
 # libsqlite3-sys build). Optional + gated exactly like para-p2p's `ring-p2p`: a pure/loopback build

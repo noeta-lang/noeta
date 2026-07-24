@@ -20,6 +20,21 @@ pub enum ArgKind {
     Int { default: i64 },
     /// An optional string flag with a default (`--host 0.0.0.0`, server-hmr S0).
     Str { default: &'static str },
+    /// A boolean `--flag` (para-extraction: `noeta migrate --status`). Always parsed: present is
+    /// `true`, absent `false` — read it with [`ParsedArgs::bool`].
+    Bool,
+    /// An optional string flag with **no** default (`--db <dsn>`): when absent, nothing is
+    /// recorded and [`ParsedArgs::get_str`] returns `None` — the command supplies its own
+    /// fallback chain (env var, manifest, …).
+    OptStr,
+    /// An optional path flag with **no** default (`--dir <path>`); absent means
+    /// [`ParsedArgs::get_path`] returns `None` — see [`ArgKind::OptStr`].
+    OptPath,
+    /// An **optional positional word**, filled left-to-right in declaration order
+    /// (`noeta migrate [new] [<name>]`). Absent means [`ParsedArgs::get_str`] returns `None`;
+    /// the command body validates the combination (which words go together is grammar the
+    /// command owns, not the parser).
+    Word,
 }
 
 /// One argument a command declares; the CLI builds the real parser (help text, validation)
@@ -37,6 +52,7 @@ pub struct ParsedArgs {
     paths: Vec<(&'static str, PathBuf)>,
     ints: Vec<(&'static str, i64)>,
     strs: Vec<(&'static str, String)>,
+    bools: Vec<(&'static str, bool)>,
 }
 
 impl ParsedArgs {
@@ -48,6 +64,9 @@ impl ParsedArgs {
     }
     pub fn push_str(&mut self, name: &'static str, value: String) {
         self.strs.push((name, value));
+    }
+    pub fn push_bool(&mut self, name: &'static str, value: bool) {
+        self.bools.push((name, value));
     }
     /// The parsed [`ArgKind::Str`] argument `name`, or `None` when no string argument of that
     /// name was declared/parsed — the honest probe behind [`ParsedArgs::str`].
@@ -67,6 +86,11 @@ impl ParsedArgs {
     /// The parsed [`ArgKind::Int`] argument `name`, or `None` — see [`ParsedArgs::get_str`].
     pub fn get_int(&self, name: &str) -> Option<i64> {
         self.ints.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+    }
+    /// The parsed [`ArgKind::Bool`] argument `name`, or `None` when no boolean flag of that name
+    /// was declared/parsed — see [`ParsedArgs::get_str`].
+    pub fn get_bool(&self, name: &str) -> Option<bool> {
+        self.bools.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
     }
 
     // The panicking accessors below are the ergonomic form for a command body reading its OWN
@@ -109,6 +133,18 @@ impl ParsedArgs {
             )
         })
     }
+    /// The declared [`ArgKind::Bool`] argument `name` (the CLI always parses a declared flag —
+    /// present is `true`, absent `false`). Panics when `name` was never declared as a boolean
+    /// flag — see [`ParsedArgs::str`].
+    #[track_caller]
+    pub fn bool(&self, name: &str) -> bool {
+        self.get_bool(name).unwrap_or_else(|| {
+            panic!(
+                "command argument `{name}` was not declared as a boolean flag (ArgKind::Bool) — \
+                 add it to the ExtCommand's ArgSpecs, or use ParsedArgs::get_bool"
+            )
+        })
+    }
 }
 
 /// An argument of a synthesized [`EntryCall`].
@@ -141,6 +177,17 @@ pub struct EntryCall {
 /// process exit code (0 ok, 1 program error, 2 unreadable file).
 pub trait CommandCtx {
     fn run_file(&mut self, file: &Path, entry: Option<&EntryCall>, banner: Option<&str>) -> u8;
+
+    /// A string value from the consumer project's manifest — `manifest_str("db", "url")` reads
+    /// `[db] url` from the nearest `noeta.toml` (para-extraction). Deliberately a **generic
+    /// string-valued lookup**, not a typed per-table surface: a command reads its own convention
+    /// keys without this ABI learning any package's schema. `None` when there is no manifest,
+    /// the table/key is absent, or the value is not a string. Default: no manifest (a bare test
+    /// driver need not implement it).
+    fn manifest_str(&self, table: &str, key: &str) -> Option<String> {
+        let _ = (table, key);
+        None
+    }
 
     /// Serve `file`'s handler across `workers` worker isolates on `host:port` (server-hmr S1
     /// multi-core). The driver binds the listener once and gives each worker a cloned fd; the

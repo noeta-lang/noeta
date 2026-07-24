@@ -1,6 +1,6 @@
 # Noeta
 
-[![CI](https://github.com/nsrosenqvist/noeta/actions/workflows/ci.yml/badge.svg)](https://github.com/nsrosenqvist/noeta/actions/workflows/ci.yml)
+[![CI](https://github.com/noeta-lang/noeta/actions/workflows/ci.yml/badge.svg)](https://github.com/noeta-lang/noeta/actions/workflows/ci.yml)
 
 > **AI-native, human-first.**
 > A general-purpose language that makes machine-written code checkable and human-readable — strong static types, an agent-native toolchain, single-binary output.

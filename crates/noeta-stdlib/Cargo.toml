@@ -13,7 +13,6 @@ noeta-reactive = { workspace = true }
 # `ReactiveSource` capability and reads foreign view-source extractors through this crate. A foreign
 # reactive extension (`para.synced`) depends on the same crate and nothing of `noeta-stdlib`.
 noeta-reactive-abi = { workspace = true }
-noeta-crdt = { workspace = true }
 serde_json = { workspace = true }
 bytemuck = { workspace = true }
 uuid = { workspace = true }

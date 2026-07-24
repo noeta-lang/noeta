@@ -34,6 +34,23 @@ pub(crate) fn ext_command_clap(ext: &'static noeta_stdlib::ExtCommand) -> clap::
                 .long(spec.name)
                 .help(spec.help)
                 .value_parser(clap::value_parser!(String)),
+            noeta_stdlib::ArgKind::Bool => clap::Arg::new(spec.name)
+                .long(spec.name)
+                .help(spec.help)
+                .action(clap::ArgAction::SetTrue),
+            noeta_stdlib::ArgKind::OptStr => clap::Arg::new(spec.name)
+                .long(spec.name)
+                .help(spec.help)
+                .value_parser(clap::value_parser!(String)),
+            noeta_stdlib::ArgKind::OptPath => clap::Arg::new(spec.name)
+                .long(spec.name)
+                .help(spec.help)
+                .value_parser(clap::value_parser!(PathBuf)),
+            // An optional positional word: no `.long`, not required — clap fills declared
+            // positionals left-to-right, matching `ArgKind::Word`'s declaration-order contract.
+            noeta_stdlib::ArgKind::Word => clap::Arg::new(spec.name)
+                .help(spec.help)
+                .value_parser(clap::value_parser!(String)),
         });
     }
     cmd
@@ -111,6 +128,19 @@ pub(crate) fn ext_command_dispatch(
                     .cloned()
                     .unwrap_or_else(|| default.to_string()),
             ),
+            noeta_stdlib::ArgKind::Bool => parsed.push_bool(spec.name, matches.get_flag(spec.name)),
+            // The default-less kinds record nothing when absent — the command's `get_*` probe
+            // returns `None` and its own fallback chain (env, manifest, …) takes over.
+            noeta_stdlib::ArgKind::OptStr | noeta_stdlib::ArgKind::Word => {
+                if let Some(value) = matches.get_one::<String>(spec.name) {
+                    parsed.push_str(spec.name, value.clone());
+                }
+            }
+            noeta_stdlib::ArgKind::OptPath => {
+                if let Some(value) = matches.get_one::<PathBuf>(spec.name) {
+                    parsed.push_path(spec.name, value.clone());
+                }
+            }
         }
     }
     ExitCode::from((ext.run)(&mut CliCommandCtx, &parsed))
@@ -124,6 +154,25 @@ pub(crate) fn ext_command_dispatch(
 pub(crate) struct CliCommandCtx;
 
 impl noeta_stdlib::CommandCtx for CliCommandCtx {
+    /// A string value from the nearest `noeta.toml`'s `[<table>] <key>` (para-extraction) — how an
+    /// extension command reads its convention keys (`[db] url/migrations/seeds` for
+    /// `noeta migrate`) without depending on `noeta-pm`. A raw toml lookup, deliberately lenient:
+    /// a missing/unparsable manifest or a non-string value is `None` (the command's flag/env
+    /// layers still apply); a genuinely malformed manifest surfaces through the verbs that parse
+    /// it strictly.
+    fn manifest_str(&self, table: &str, key: &str) -> Option<String> {
+        let cwd = std::env::current_dir().ok()?;
+        let path = manifest::find(&cwd)?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        let parsed: toml::Table = text.parse().ok()?;
+        parsed
+            .get(table)?
+            .as_table()?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
+    }
+
     fn run_file(
         &mut self,
         file: &std::path::Path,

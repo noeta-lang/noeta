@@ -4103,7 +4103,6 @@ dependencies = [
  "noeta-loader",
  "noeta-lsp",
  "noeta-mcp",
- "noeta-para-db",
  "noeta-para-p2p",
  "noeta-parser",
  "noeta-pm",
@@ -4119,7 +4118,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "similar",
- "time",
  "tokio",
  "toml",
 ]
@@ -4516,6 +4514,7 @@ dependencies = [
  "rusqlite",
  "rustls",
  "sha2 0.10.9",
+ "time",
  "tokio-postgres-rustls",
  "webpki-roots",
 ]
@@ -4694,7 +4693,6 @@ dependencies = [
  "hmac 0.12.1",
  "jiff",
  "md-5 0.10.6",
- "noeta-crdt",
  "noeta-ext-abi",
  "noeta-reactive",
  "noeta-reactive-abi",

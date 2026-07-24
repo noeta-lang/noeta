@@ -458,7 +458,7 @@ gh = client.new("https://api.github.com")
     .bearer(env.get("GITHUB_TOKEN") ?? "")
     .timeout(30_000)
 
-repo = gh.get("/repos/nsrosenqvist/noeta")?
+repo = gh.get("/repos/noeta-lang/noeta")?
 ```
 
 A `Client` carries a base URL, headers applied to every request, an auth scheme, and a per-request

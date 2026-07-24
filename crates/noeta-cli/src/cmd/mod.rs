@@ -9,7 +9,6 @@ pub(crate) mod expand;
 pub(crate) mod fmt;
 pub(crate) mod grammar;
 pub(crate) mod init;
-pub(crate) mod migrate;
 pub(crate) mod native;
 pub(crate) mod pm;
 pub(crate) mod repl;

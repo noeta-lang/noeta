@@ -56,7 +56,6 @@ use cmd::expand::cmd_expand;
 use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
 use cmd::init::cmd_init;
-use cmd::migrate::cmd_migrate;
 use cmd::pm::{
     cmd_add, cmd_advisory_promote, cmd_advisory_publish, cmd_advisory_report, cmd_advisory_reports,
     cmd_audit, cmd_claim, cmd_key, cmd_publish, cmd_scope, cmd_update, cmd_watch_scope,
@@ -578,64 +577,10 @@ enum Command {
         #[arg(long)]
         state: Option<PathBuf>,
     },
-    /// Apply the project's SQL migrations (para/db). With no flags, applies every pending migration
-    /// under the migrations directory (default `migrations/`), each in its own transaction, printing
-    /// each file. The database connection string is resolved from `--db`, else `DATABASE_URL`, else
-    /// the `[db] url` in `noeta.toml`. Forward-only: there are no down migrations — use `--reset` in
-    /// development. `--seed` also runs the project's seed files (re-runnable dev data under `seeds/`)
-    /// after migrating; `noeta migrate seed` runs seeds only.
-    Migrate {
-        /// `noeta migrate new <name>` — scaffold the next migration (or seed) file; `noeta migrate
-        /// seed` — run seeds only. When omitted, the flags below select apply / status / dry-run /
-        /// reset (optionally with `--seed`).
-        #[command(subcommand)]
-        action: Option<MigrateAction>,
-        /// The database connection string (overrides `DATABASE_URL` and `[db] url`).
-        #[arg(long, value_name = "DSN")]
-        db: Option<String>,
-        /// The migrations directory (overrides `[db] migrations`; default `migrations`).
-        #[arg(long, value_name = "PATH")]
-        dir: Option<PathBuf>,
-        /// The seeds directory (overrides `[db] seeds`; default `seeds`).
-        #[arg(long = "seeds-dir", value_name = "PATH")]
-        seeds_dir: Option<PathBuf>,
-        /// Show which migrations are applied and which are pending, then exit.
-        #[arg(long)]
-        status: bool,
-        /// List the migrations that would be applied without touching the database.
-        #[arg(long = "dry-run")]
-        dry_run: bool,
-        /// DESTRUCTIVE: drop the whole schema and re-apply every migration from zero. Requires `--yes`
-        /// (or an interactive confirmation).
-        #[arg(long)]
-        reset: bool,
-        /// After applying migrations (or after `--reset`), run the project's seed files — re-runnable
-        /// development data under the seeds directory.
-        #[arg(long)]
-        seed: bool,
-        /// Skip the interactive confirmation for `--reset` (for scripts/CI).
-        #[arg(long)]
-        yes: bool,
-    },
-}
-
-/// The `noeta migrate` sub-actions that are not plain flags.
-#[derive(Subcommand)]
-enum MigrateAction {
-    /// Scaffold the next migration file — or a seed file with `--seed`.
-    New {
-        /// A short description, slugified into the filename (e.g. "add users table").
-        name: String,
-        /// The directory to create the file in (default `migrations`, or `seeds` with `--seed`).
-        #[arg(long, value_name = "PATH")]
-        dir: Option<PathBuf>,
-        /// Scaffold a **seed** file (under the seeds directory) instead of a migration.
-        #[arg(long)]
-        seed: bool,
-    },
-    /// Run the project's seed files only, against an already-migrated schema (errors if any
-    /// migration is still pending — use `noeta migrate --seed` to migrate first, then seed).
-    Seed,
+    // `noeta migrate` is NOT a core verb: it is an `ExtCommand` the `para/db` package contributes
+    // (para-extraction) — a consumer that depends on `para/db` and trusts its commands
+    // (`[trust] commands = ["para/db"]`) gets it through the composed toolchain, same as any
+    // extension-contributed subcommand.
 }
 
 #[derive(Subcommand)]
@@ -1172,37 +1117,6 @@ pub fn run_cli(
             ),
         },
         Command::WatchScope { scope, state } => cmd_watch_scope(&scope, state.as_deref()),
-        Command::Migrate {
-            action,
-            db,
-            dir,
-            seeds_dir,
-            status,
-            dry_run,
-            reset,
-            seed,
-            yes,
-        } => {
-            let (new, seed_only) = match action {
-                Some(MigrateAction::New { name, dir, seed }) => {
-                    (Some(cmd::migrate::NewArgs { name, dir, seed }), false)
-                }
-                Some(MigrateAction::Seed) => (None, true),
-                None => (None, false),
-            };
-            cmd_migrate(cmd::migrate::MigrateArgs {
-                new,
-                seed_only,
-                db,
-                dir,
-                seeds_dir,
-                status,
-                dry_run,
-                reset,
-                seed,
-                yes,
-            })
-        }
     }
 }
 

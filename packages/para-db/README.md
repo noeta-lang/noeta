@@ -15,9 +15,10 @@ repository / unit-of-work, and a typed `@sql` block tier.
 
 ## Migrations — evolve the schema over time
 
-`para/db` ships a migration engine, surfaced as the `noeta migrate` CLI verb and the programmatic
-`conn.migrate(dir)` method. There is one engine (in `noeta-para-db`); the CLI and the Noeta method are
-thin callers, so both drivers migrate through the same code.
+`para/db` ships a migration engine, surfaced as the `noeta migrate` command **this package
+contributes to the CLI** (trust it with `[trust] commands = ["para/db"]`) and the programmatic
+`conn.migrate(dir)` method. There is one engine (in `noeta-para-db`); the command and the Noeta
+method are thin callers, so both drivers migrate through the same code.
 
 **Migrations are plain SQL files** in a project `migrations/` directory, one statement or many per
 file, applied in the order their filenames sort. `noeta migrate new <name>` scaffolds the next file

@@ -15,6 +15,7 @@
 //! program depends on the `para/db` package, and registered through the fixed native-extension
 //! convention ([`NOETA_EXTENSIONS`], re-exported by the package's `native` entry crate).
 
+pub mod command;
 pub mod conn;
 pub mod driver;
 pub mod migrate;
@@ -50,6 +51,12 @@ impl Extension for ParaDbExtension {
     /// beside `para.synced`'s extractor when both are installed).
     fn capabilities(&self) -> &'static [noeta_ext_abi::registry::ExtCapability] {
         watch::DB_CAPABILITIES
+    }
+    /// `noeta migrate` (para-extraction) — the migration verb travels with the package: a consumer
+    /// that trusts this package's commands (`[trust] commands = ["para/db"]`) gets it from the
+    /// composed toolchain; nothing db-specific stays in the core CLI.
+    fn commands(&self) -> &'static [noeta_ext_abi::ExtCommand] {
+        &[crate::command::MIGRATE_COMMAND]
     }
 }
 

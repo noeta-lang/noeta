@@ -997,14 +997,14 @@ mod tests {
         let toml = shim_cargo_toml(
             &entries(),
             &ToolchainSource::GitTag {
-                repo: "https://github.com/nsrosenqvist/noeta".to_string(),
+                repo: "https://github.com/noeta-lang/noeta".to_string(),
                 tag: "v0.1.0".to_string(),
             },
             ShimKind::Toolchain,
         );
         assert!(
             toml.contains(
-                "noeta-cli = { git = \"https://github.com/nsrosenqvist/noeta\", tag = \"v0.1.0\" }"
+                "noeta-cli = { git = \"https://github.com/noeta-lang/noeta\", tag = \"v0.1.0\" }"
             ),
             "{toml}"
         );
