@@ -525,9 +525,7 @@ impl<'m> Vm<'m> {
     ) -> Result<Value, Abort> {
         // Bound once (`&'static`, Copy), so it survives the `&mut self` host borrow below (IR3).
         let reg = self.reg();
-        let class = recv
-            .shape()
-            .and_then(|s| reg.resolve_class(&s.name));
+        let class = recv.shape().and_then(|s| reg.resolve_class(&s.name));
         let Some(class) = class else {
             return Err(self.error(
                 DiagnosticCode::UnknownName,
@@ -540,6 +538,50 @@ impl<'m> Vm<'m> {
             args.iter().map(|a| marshal_native_arg(*a)).collect();
         let host = &mut *self.persist.host;
         match (class.dispatch)(&recv_native, method, host, &nargs) {
+            // Boundary 1: an in-place instance mutation. Apply each write to the LIVE receiver's slot
+            // in place (`replace_slot` retains the new occupant and returns the displaced one, whose
+            // destructor fires now), so every alias sees the change and identity is preserved. Mirrors
+            // the tree-walker's `call_native_class_method`.
+            Ok(noeta_stdlib::NativeOut::InstanceUpdate { writes, ret }) => {
+                for (field, value) in writes {
+                    // A write must target a declared `mut` field — the ABI mirrors the source-level
+                    // E0022-family rule; an unknown or non-`mut` field is a runtime error.
+                    let slot = match class.fields.iter().find(|f| f.name == field) {
+                        Some(spec) if spec.is_mut => recv.shape().and_then(|s| s.slot_of(&field)),
+                        Some(_) => {
+                            return Err(self.error(
+                                DiagnosticCode::ImmutableField,
+                                span,
+                                format!(
+                                    "native method `{method}` cannot write immutable field \
+                                     `{field}` of class `{}`",
+                                    class.name
+                                ),
+                            ));
+                        }
+                        None => {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                span,
+                                format!(
+                                    "native method `{method}` writes unknown field `{field}` of \
+                                     class `{}`",
+                                    class.name
+                                ),
+                            ));
+                        }
+                    };
+                    // The field is declared, so its slot resolves; defensively skip if not.
+                    let Some(slot) = slot else { continue };
+                    // Materialize the new occupant (refcount 1, mine), install it in place (the slot
+                    // takes its own reference), then release my temporary so only the slot owns it.
+                    let fresh = materialize_native(value);
+                    let old = recv.replace_slot(slot, fresh);
+                    self.release_value(fresh);
+                    self.release_value(old);
+                }
+                Ok(materialize_native(*ret))
+            }
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
         }

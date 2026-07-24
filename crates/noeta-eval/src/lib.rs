@@ -2540,7 +2540,11 @@ impl Interpreter {
             // that declares it — route to the class's native `dispatch` (the Object-arm twin of the
             // extern-method seam). A user class always resolves through the method table above, so
             // only a genuine native class reaches this branch.
-            if self.reg().find_class_method(object.def.name(), name).is_some() {
+            if self
+                .reg()
+                .find_class_method(object.def.name(), name)
+                .is_some()
+            {
                 return self.call_native_class_method(&receiver, name, args, span);
             }
             // The runtime member-call fallback (the field-access-then-call desugar's `dyn`
@@ -3352,10 +3356,51 @@ impl Interpreter {
         let recv_native = marshal_native_arg(recv);
         let nargs: Vec<noeta_stdlib::NativeValue> = args.iter().map(marshal_native_arg).collect();
         match (class.dispatch)(&recv_native, name, &mut *self.host, &nargs) {
-            Ok(out) => Ok(materialize_native(out)),
-            Err(error) => {
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            // Boundary 1: an in-place instance mutation. Apply each write to the LIVE receiver's slot
+            // (in-place, so aliases see it; the displaced value drops → its destructor fires), then
+            // materialize the method's own `ret`. Mirrors the VM's `call_native_class_method`.
+            Ok(noeta_stdlib::NativeOut::InstanceUpdate { writes, ret }) => {
+                let obj = match recv {
+                    Value::Object(obj) => obj,
+                    // Unreachable: `class` resolved from this receiver's shape above.
+                    _ => unreachable!("a native class method's receiver is a class object"),
+                };
+                for (field, value) in writes {
+                    // A write must target a declared `mut` field — the ABI mirrors the source-level
+                    // E0022-family rule; an unknown or non-`mut` field is a runtime error.
+                    match class.fields.iter().find(|f| f.name == field) {
+                        Some(spec) if spec.is_mut => {}
+                        Some(_) => {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::ImmutableField,
+                                span,
+                                format!(
+                                    "native method `{name}` cannot write immutable field `{field}` \
+                                     of class `{}`",
+                                    class.name
+                                ),
+                            ));
+                        }
+                        None => {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::UnknownName,
+                                span,
+                                format!(
+                                    "native method `{name}` writes unknown field `{field}` of \
+                                     class `{}`",
+                                    class.name
+                                ),
+                            ));
+                        }
+                    }
+                    // In-place overwrite; the displaced old value drops here (its `Drop`/destructor
+                    // fires), so swapping a native-state handle releases the prior resource.
+                    let _old = obj.set_field_value(&field, materialize_native(value));
+                }
+                Ok(materialize_native(*ret))
             }
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
         }
     }
 
@@ -5022,7 +5067,9 @@ impl Interpreter {
         let a: Vec<_> = self.list_scalars(list, method, 0, span)?.collect();
         let out = match method {
             "scale" => noeta_stdlib::scale_num_scalars(&a, arg_scalar(self, 0)?),
-            "clamp" => noeta_stdlib::clamp_num_scalars(&a, arg_scalar(self, 0)?, arg_scalar(self, 1)?),
+            "clamp" => {
+                noeta_stdlib::clamp_num_scalars(&a, arg_scalar(self, 0)?, arg_scalar(self, 1)?)
+            }
             _ => {
                 let op = noeta_stdlib::ElemMap::from_name(method)
                     .expect("the caller gates this to a bulk method name");
@@ -5041,7 +5088,12 @@ impl Interpreter {
                 let view = p.seam_view();
                 noeta_stdlib::checked_sum_packed(&view.fields[0], p.raw())
             }
-            _ => noeta_stdlib::checked_sum_scalars(self.list_scalars(list, "checked_sum", 0, span)?),
+            _ => noeta_stdlib::checked_sum_scalars(self.list_scalars(
+                list,
+                "checked_sum",
+                0,
+                span,
+            )?),
         }
         .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
         Ok(match folded {
@@ -6029,6 +6081,11 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             });
             Value::Object(Rc::new(ObjectValue::new(def, slots)))
         }
+        // An in-place instance mutation (boundary 1) has no receiver here to write into — the
+        // class-method call site (`call_native_class_method`) intercepts it, applies the write-set,
+        // and materializes `ret` there. Reaching this generic path means a non-class dispatch returned
+        // it, which has no `self` to mutate, so the writes are a no-op and only `ret` materializes.
+        NativeOut::InstanceUpdate { ret, .. } => materialize_native(*ret),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
         // work is ticketed at the dispatch return (extern-types X5), never materialized.
