@@ -77,6 +77,9 @@ pub fn run_compiled_module(
         run_module_real_host(Arc::clone(&module), args, app_id, jit_stats);
     print!("{}", result.stdout);
     let _ = std::io::stdout().flush();
+    // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout is
+    // flushed and before any diagnostics/traceback/report — the same ordering `noeta run` uses.
+    let _ = std::io::stderr().write_all(result.stderr.as_bytes());
     let _ =
         std::io::stderr().write_all(render_mapped(sources, result.diagnostics.iter()).as_bytes());
     if trace.len() >= 2 {

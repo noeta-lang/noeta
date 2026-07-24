@@ -242,6 +242,7 @@ impl Interpreter {
         (
             RunResult {
                 stdout: self.stdout,
+                stderr: self.stderr,
                 exit_code,
                 diagnostics: self.diagnostics,
             },

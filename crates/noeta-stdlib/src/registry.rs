@@ -3940,6 +3940,27 @@ const ARGS_DOCS: &[(&str, &str)] = &[(
      convention), followed by the arguments passed after it.",
 )];
 
+const IO_DOCS: &[(&str, &str)] = &[
+    (
+        "out",
+        "Write a value's display form to standard output, with no trailing newline. The stdout \
+         buffer is the same one the `echo` keyword writes to.",
+    ),
+    (
+        "outln",
+        "Write a value's display form to standard output, followed by a newline — the \
+         programmatic twin of `echo`.",
+    ),
+    (
+        "err",
+        "Write a value's display form to standard error, with no trailing newline.",
+    ),
+    (
+        "errln",
+        "Write a value's display form to standard error, followed by a newline.",
+    ),
+];
+
 const CELL_DOCS: &[(&str, &str)] = &[(
     "new",
     "Create a mutable `Cell<T>` holding `value` — a single-slot interior-mutable container. Read \
@@ -5542,6 +5563,17 @@ const CORE_MODULES: &[ExtModule] = &[
         ctx_functions: crate::metrics::METRICS_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::metrics::metrics_ctx_dispatch(func, ctx, args)),
         docs: METRICS_DOCS,
+        ..ExtModule::DEFAULTS
+    },
+    // `io` (CLI-completion slice 1) — the program's stdout/stderr streams. `out`/`outln` write to
+    // the same stdout buffer the `echo` keyword uses; `err`/`errln` write to stderr. Both are
+    // *observable output* routed through the backends' buffers (via the `NativeCtx` write seam), so
+    // they are ctx functions and the differential oracle holds them byte-identical across backends.
+    ExtModule {
+        name: "io",
+        ctx_functions: crate::io::IO_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::io::io_ctx_dispatch(func, ctx, args)),
+        docs: IO_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {

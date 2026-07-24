@@ -486,6 +486,9 @@ pub(crate) fn run_worker(
         .run_module_with_host_and_executor_parallel(module, host, executor, factory, false);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
+    // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout flushes.
+    eprint!("{}", result.stderr);
+    let _ = io::stderr().flush();
     if trace.len() >= 2 {
         eprintln!("[worker] aborted");
     }
@@ -595,6 +598,9 @@ pub(crate) fn run_worker_hot(
         VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
+    // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout flushes.
+    eprint!("{}", result.stderr);
+    let _ = io::stderr().flush();
     if trace.len() >= 2 {
         eprintln!("[worker] aborted");
     }
@@ -664,6 +670,9 @@ pub(crate) fn run_program_hot(entry_path: &std::path::Path, loaded: &Loaded) -> 
         VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
+    // The program's stderr stream (`std.io`'s `err`/`errln`) to real stderr, after stdout flushes.
+    eprint!("{}", result.stderr);
+    let _ = io::stderr().flush();
     emit_diagnostics_mapped(&loaded.sources, result.diagnostics.iter());
     if trace.len() >= 2 {
         eprint!("{}", noeta_vm::render_trace(&trace, &loaded.sources));

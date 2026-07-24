@@ -165,6 +165,7 @@ impl Session {
     /// execution model, the canonical one.
     pub fn eval(&mut self, program: &Program) -> SessionOutput {
         self.interp.stdout.clear();
+        self.interp.stderr.clear();
         self.interp.diagnostics.clear();
         // Per-entry trace state: the interpreter persists across entries, and the trace's
         // first-abort-wins rule would otherwise let entry 1's panic mask entry 2's.
@@ -193,6 +194,7 @@ impl Session {
     /// object reclaimed interactively; any destructor output lands in the returned [`SessionOutput`].
     pub fn drop_binding(&mut self, name: &str) -> (bool, SessionOutput) {
         self.interp.stdout.clear();
+        self.interp.stderr.clear();
         self.interp.diagnostics.clear();
         let found = match self.interp.scope.remove(name) {
             Some(value) => {
@@ -227,6 +229,7 @@ impl Session {
     /// Shared by [`Session::eval`] and [`Session::type_of`]; clears stdout/diagnostics first.
     fn run_batch(&mut self, program: &Program) -> Option<Value> {
         self.interp.stdout.clear();
+        self.interp.stderr.clear();
         self.interp.diagnostics.clear();
         // A trailing bare expression is rewritten to a binding of a reserved sentinel name, so its
         // value is captured in scope (and read back) while it is evaluated exactly once on the IR
@@ -261,6 +264,7 @@ impl Session {
     fn take_output(&mut self, value: Option<String>) -> SessionOutput {
         SessionOutput {
             stdout: std::mem::take(&mut self.interp.stdout),
+            stderr: std::mem::take(&mut self.interp.stderr),
             diagnostics: std::mem::take(&mut self.interp.diagnostics),
             value,
             trace: std::mem::take(&mut self.interp.abort_trace),
@@ -293,6 +297,8 @@ impl Default for Session {
 #[derive(Debug, Clone)]
 pub struct SessionOutput {
     pub stdout: String,
+    /// This entry's standard-error output (`std.io`'s `err`/`errln`), the stderr twin of `stdout`.
+    pub stderr: String,
     pub diagnostics: Vec<Diagnostic>,
     pub value: Option<String>,
     /// The abort traceback if this entry panicked (empty otherwise) — innermost frame first. A frame
@@ -1208,6 +1214,10 @@ pub(crate) fn collect_producer_channels(root: &Value) -> Vec<usize> {
 /// One program's worth of evaluation state.
 struct Interpreter {
     stdout: String,
+    /// The program's standard-error accumulator — `std.io`'s `err`/`errln` push here through
+    /// [`noeta_ext_abi::NativeCtx::write_stderr`], the stderr twin of `stdout`. Observable output,
+    /// drained into the [`RunResult`]/[`SessionOutput`] and compared by the differential oracle.
+    stderr: String,
     diagnostics: Vec<Diagnostic>,
     /// A deliberate `os.exit(code)` (stdlib-gaps): the requested exit code, set when the
     /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly
@@ -1376,6 +1386,7 @@ impl Interpreter {
         );
         Interpreter {
             stdout: String::new(),
+            stderr: String::new(),
             diagnostics: Vec::new(),
             requested_exit: None,
             packed_fields: std::collections::HashMap::new(),
@@ -2208,10 +2219,7 @@ impl Interpreter {
     /// field type names (`packed_fields`), so it covers every declared `@packed` struct, not only those
     /// materialized into a packed list. `None` if `name` is not a `@packed` struct or any field is not
     /// a simple numeric/`bool` primitive (such a type never binds a `vec` bundle).
-    pub(crate) fn packed_field_kinds(
-        &self,
-        name: &str,
-    ) -> Option<Vec<noeta_stdlib::PackedField>> {
+    pub(crate) fn packed_field_kinds(&self, name: &str) -> Option<Vec<noeta_stdlib::PackedField>> {
         let fields = self.packed_fields.get(name)?;
         fields
             .iter()
@@ -5556,14 +5564,38 @@ fn parse_packed_field(name: &str) -> Option<noeta_stdlib::PackedField> {
         "f32" => PF::F32,
         "f64" => PF::F64,
         "bool" => PF::Bool,
-        "i8" => PF::IntN { bits: 8, signed: true },
-        "i16" => PF::IntN { bits: 16, signed: true },
-        "i32" => PF::IntN { bits: 32, signed: true },
-        "i64" => PF::IntN { bits: 64, signed: true },
-        "u8" => PF::IntN { bits: 8, signed: false },
-        "u16" => PF::IntN { bits: 16, signed: false },
-        "u32" => PF::IntN { bits: 32, signed: false },
-        "u64" => PF::IntN { bits: 64, signed: false },
+        "i8" => PF::IntN {
+            bits: 8,
+            signed: true,
+        },
+        "i16" => PF::IntN {
+            bits: 16,
+            signed: true,
+        },
+        "i32" => PF::IntN {
+            bits: 32,
+            signed: true,
+        },
+        "i64" => PF::IntN {
+            bits: 64,
+            signed: true,
+        },
+        "u8" => PF::IntN {
+            bits: 8,
+            signed: false,
+        },
+        "u16" => PF::IntN {
+            bits: 16,
+            signed: false,
+        },
+        "u32" => PF::IntN {
+            bits: 32,
+            signed: false,
+        },
+        "u64" => PF::IntN {
+            bits: 64,
+            signed: false,
+        },
         _ => return None,
     })
 }

@@ -89,6 +89,27 @@ impl NativeCtx for EvalCtx<'_> {
         &mut *self.interp.host
     }
 
+    fn write_stdout(&mut self, text: &str) {
+        // The same buffer `Stmt::Echo` appends to — an `io.out` and an `echo` interleave in order.
+        self.interp.stdout.push_str(text);
+    }
+
+    fn write_stderr(&mut self, text: &str) {
+        self.interp.stderr.push_str(text);
+    }
+
+    fn render(&mut self, slot: Slot) -> CtxResult<String> {
+        // Delegate to the interpreter's `display_value` — the one place `to_string` is consulted for
+        // `echo` / interpolation — so `io.outln(x)` renders byte-identically to `echo x`, with no
+        // second copy of display logic in the std native. An abort in a user `to_string` becomes the
+        // propagation token (the diagnostic is recorded on the interpreter).
+        let value = self.get(slot)?.clone();
+        match self.interp.display_value(&value, self.span) {
+            Ok(text) => Ok(text),
+            Err(_) => Err(CtxError::Abort),
+        }
+    }
+
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {
         Ok(value_to_native_deep(self.get(slot)?))
     }
@@ -525,7 +546,10 @@ impl NativeCtx for EvalCtx<'_> {
         Ok(self.insert(built))
     }
 
-    fn packed_element_fields(&mut self, slot: Slot) -> CtxResult<Option<Vec<noeta_stdlib::PackedField>>> {
+    fn packed_element_fields(
+        &mut self,
+        slot: Slot,
+    ) -> CtxResult<Option<Vec<noeta_stdlib::PackedField>>> {
         // The element bundle methods' width source (scalar-unification slice 3), the tree-walker twin
         // of the VM's `packed_schemas` scan: the interpreter records every `@packed` struct's field
         // type names, so the value's own `def` name recovers the exact kinds a single struct value's
