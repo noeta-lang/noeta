@@ -5079,6 +5079,33 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_hole_carries_nested_strings() {
+        // A hole may contain a nested string literal — including one carrying a `}` that must not
+        // close the hole early, and a `??` between two nested strings. These parse without error
+        // (the lexer keeps the whole thing one string token; `find_hole_end` skips nested strings).
+        for src in [
+            r#"echo "${f("x")}";"#,
+            r#"echo "${m.get("key") ?? "default"}";"#,
+            r#"echo "${m.get("a}b") ?? "z"}";"#,
+        ] {
+            let parsed = parse_str(src);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "parse errors for {src}: {:?}",
+                parsed.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn find_hole_end_skips_a_brace_in_a_nested_string() {
+        // Unit-level: the closing `}` inside the nested string `"a}b"` must not be mistaken for the
+        // hole's close — the hole ends at the final `}` (index 12), not the one inside the string.
+        let inner = r#"f("a}b")}"#; // the body of a `${ … }` hole (without the leading `${`)
+        assert_eq!(crate::literals::find_hole_end(inner, 0), inner.len() - 1);
+    }
+
+    #[test]
     fn enum_declaration_and_match() {
         insta::assert_snapshot!(pretty(
             "enum E { Empty; Code(n: int); } echo match x { E.Empty => 0, E.Code(n) => n, _ => -1 };"

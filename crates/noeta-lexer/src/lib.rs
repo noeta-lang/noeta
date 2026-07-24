@@ -826,6 +826,28 @@ fn lex_pass(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Le
                     });
                 }
             }
+            Ok(kind @ (TokenKind::StringLit | TokenKind::TemplateStr)) => {
+                // An interpolating string (`"…"` or `` `…` ``) whose logos match stopped at a quote
+                // *inside* a `${…}` hole is truncated — the plain regex can't see that the quote is
+                // nested. Re-scan from the opening quote with the interpolation-aware scanner; when
+                // it finds a later true end, extend the token and fast-forward the lexer past it so
+                // the hole's nested string is not re-lexed as separate tokens.
+                let start = span.start as usize;
+                let quote = text[start..].chars().next().unwrap();
+                match interpolated_string_end(text, start, quote) {
+                    Some(end) if end as u32 > span.end => {
+                        let corrected = Span::new(span.start, end as u32);
+                        lexer.bump(end - span.end as usize);
+                        tokens.push(Token {
+                            kind,
+                            span: corrected,
+                        });
+                    }
+                    // The logos span is already correct (no nested-string truncation), or the
+                    // extended scan is unterminated — keep the original match either way.
+                    _ => tokens.push(Token { kind, span }),
+                }
+            }
             Ok(kind) => tokens.push(Token { kind, span }),
             Err(()) => diagnostics.push(lex_error(source, span)),
         }
@@ -998,6 +1020,70 @@ fn matching_brace(text: &str, open_end: u32) -> Option<u32> {
                 i += 1;
             }
             _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Find the byte offset just past the closing quote of a string literal that opens at byte
+/// `open` (the opening quote — `"`, `` ` ``, or `'`). The plain logos regex for a string stops at
+/// the first *unescaped* quote, which is wrong when that quote lives inside a `${…}` interpolation
+/// hole: `"${f("x")}"` would truncate at the `"` before `x`. This scanner treats a `${…}` hole's
+/// contents as *code*, so a nested string literal inside a hole is opaque — its quotes and braces
+/// don't terminate the outer string — and only a quote at the top level of the string body closes
+/// it. Double-quoted (`"`) and template (`` ` ``) strings interpolate, so `${…}` is scanned;
+/// single-quoted *raw* strings (`'`) do not, so their `${` is ordinary text. Returns `None` if the
+/// string is unterminated. Byte-offset arithmetic on ASCII delimiters is UTF-8-safe: every non-ASCII
+/// character is advanced by its full `len_utf8`, and only ASCII bytes are ever matched.
+fn interpolated_string_end(text: &str, open: usize, quote: char) -> Option<usize> {
+    let interpolated = quote != '\'';
+    let mut i = open + quote.len_utf8(); // just past the opening quote (all quotes are ASCII)
+    while i < text.len() {
+        let rest = &text[i..];
+        let c = rest.chars().next().unwrap();
+        if c == '\\' {
+            // A backslash escapes the next character (so `\"` does not close the string, and `\${`
+            // is a literal `$`); skip both. Advance past the escaped char by its full width.
+            i += 1;
+            if let Some(next) = text[i..].chars().next() {
+                i += next.len_utf8();
+            }
+        } else if c == quote {
+            return Some(i + 1); // the closing quote (ASCII, one byte)
+        } else if interpolated && c == '$' && rest.as_bytes().get(1) == Some(&b'{') {
+            // Enter a `${…}` hole: scan its balanced braces, skipping nested strings.
+            i = interpolation_hole_end(text, i + 2)?;
+        } else {
+            i += c.len_utf8();
+        }
+    }
+    None
+}
+
+/// From byte offset `start` (just past a `${`), scan to the matching `}` and return the byte offset
+/// just past it. Braces nest (a map literal in the hole is fine), and — the point of this scanner —
+/// a nested string literal is opaque: its braces and quotes are skipped whole via
+/// [`interpolated_string_end`], so `${ f("}") }` closes at the correct `}`. A nested template with
+/// its own `${…}` balances through the mutual recursion. Returns `None` if unterminated.
+fn interpolation_hole_end(text: &str, start: usize) -> Option<usize> {
+    let mut i = start;
+    let mut depth = 1usize;
+    while i < text.len() {
+        let c = text[i..].chars().next().unwrap();
+        match c {
+            '{' => {
+                depth += 1;
+                i += 1;
+            }
+            '}' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            '"' | '\'' | '`' => i = interpolated_string_end(text, i, c)?,
+            _ => i += c.len_utf8(),
         }
     }
     None
@@ -1392,6 +1478,80 @@ mod tests {
             ]
         );
         assert_eq!(source.slice(lexed.tokens[1].span), r#""say \"hi\"""#);
+    }
+
+    #[test]
+    fn string_spans_a_nested_string_inside_an_interpolation_hole() {
+        // The bug: the plain regex stops at the `"` before `x`, splitting one interpolating string
+        // into `"${f("`, `x`, `")}"`. The interpolation-aware scanner keeps it one token.
+        let (source, lexed) = lex_str(r#"echo "${f("x")}";"#);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::EchoKw,
+                TokenKind::StringLit,
+                TokenKind::Semicolon
+            ]
+        );
+        assert_eq!(source.slice(lexed.tokens[1].span), r#""${f("x")}""#);
+    }
+
+    #[test]
+    fn nested_string_in_a_hole_may_carry_braces_quotes_and_a_coalesce() {
+        // A nested string containing `}` and an escaped `"`, and a `??` between two nested strings —
+        // all opaque to the outer string's close scan; the whole thing stays one token.
+        for src in [
+            r#""${x ?? "y"}""#,            // ?? between two nested strings
+            r#""${m.get("a}b")}""#,        // nested string carrying a brace
+            r#""${m.get("q\"z") ?? ""}""#, // nested string with an escaped quote
+        ] {
+            let text = format!("echo {src};");
+            let (source, lexed) = lex_str(&text);
+            assert!(
+                lexed.diagnostics.is_empty(),
+                "{src}: {:?}",
+                lexed.diagnostics
+            );
+            assert_eq!(
+                source.slice(lexed.tokens[1].span),
+                src,
+                "string token must span the whole interpolating literal for {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_string_hole_carries_a_nested_string() {
+        // Backtick templates interpolate too — a nested string in a template hole stays opaque.
+        let text = "echo `v=${f(\"x\")}`;";
+        let (source, lexed) = lex_str(text);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        assert_eq!(lexed.tokens[1].kind, TokenKind::TemplateStr);
+        assert_eq!(source.slice(lexed.tokens[1].span), "`v=${f(\"x\")}`");
+    }
+
+    #[test]
+    fn a_nested_template_hole_inside_a_double_quoted_hole_balances() {
+        // Recursion: a double-quoted string whose hole holds a template whose *own* hole holds a
+        // double-quoted string. Every level must close correctly for the outer token to span it.
+        let src = "\"${ `n=${g(\"z\")}` }\"";
+        let text = format!("echo {src};");
+        let (source, lexed) = lex_str(&text);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        assert_eq!(lexed.tokens[1].kind, TokenKind::StringLit);
+        assert_eq!(source.slice(lexed.tokens[1].span), src);
+    }
+
+    #[test]
+    fn a_raw_single_quoted_string_still_takes_no_interpolation() {
+        // A raw string's `${` is literal, and a `"` inside it must not be treated as a hole's
+        // nested string. `'a"b${c'` is one raw string ending at its own `'`.
+        let (source, lexed) = lex_str("echo 'a\"b${c';");
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        assert_eq!(lexed.tokens[1].kind, TokenKind::RawStr);
+        assert_eq!(source.slice(lexed.tokens[1].span), "'a\"b${c'");
     }
 
     #[test]

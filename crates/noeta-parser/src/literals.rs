@@ -14,20 +14,59 @@ use noeta_span::{Source, SourceId, Span};
 use crate::{Ctx, expr_parser, rich_to_diag, statement_parser};
 
 /// Find the byte offset of the `}` that closes a hole opened at `start`, tracking brace
-/// depth so nested braces (e.g. a map literal inside the hole) are handled. Returns the
-/// end of the string if unterminated.
-fn find_hole_end(inner: &str, start: usize) -> usize {
+/// depth so nested braces (e.g. a map literal inside the hole) are handled. A nested string
+/// literal (`"…"`, `'…'`, `` `…` ``) is opaque — its braces and quotes are skipped whole, so
+/// `${ map.get("key") ?? "}" }` closes at the right `}` — matching the lexer, which already
+/// keeps such a hole in one string token. Returns the end of the string if unterminated.
+pub(crate) fn find_hole_end(inner: &str, start: usize) -> usize {
+    let mut i = start;
     let mut depth = 1usize;
-    for (offset, c) in inner[start..].char_indices() {
+    while i < inner.len() {
+        let c = inner[i..].chars().next().unwrap();
         match c {
-            '{' => depth += 1,
+            '{' => {
+                depth += 1;
+                i += 1;
+            }
             '}' => {
                 depth -= 1;
+                i += 1;
                 if depth == 0 {
-                    return start + offset;
+                    return i - 1;
                 }
             }
-            _ => {}
+            // A nested string is opaque: skip to just past its closing quote so an inner `}`
+            // (or `${…}`) never counts against the hole's brace balance.
+            '"' | '\'' | '`' => i = nested_string_end(inner, i, c),
+            _ => i += c.len_utf8(),
+        }
+    }
+    inner.len()
+}
+
+/// From the opening quote of a nested string at byte offset `open`, return the offset just past
+/// its closing quote (or the end of `inner` if unterminated). Backslash escapes the next
+/// character; interpolating strings (`"`/`` ` ``) recurse through their own `${…}` holes so a
+/// nested template's braces balance, while a raw `'…'` string takes no interpolation.
+fn nested_string_end(inner: &str, open: usize, quote: char) -> usize {
+    let interpolated = quote != '\'';
+    let mut i = open + quote.len_utf8();
+    while i < inner.len() {
+        let rest = &inner[i..];
+        let c = rest.chars().next().unwrap();
+        if c == '\\' {
+            i += 1;
+            if let Some(next) = inner[i..].chars().next() {
+                i += next.len_utf8();
+            }
+        } else if c == quote {
+            return i + 1;
+        } else if interpolated && c == '$' && rest.as_bytes().get(1) == Some(&b'{') {
+            i = find_hole_end(inner, i + 2);
+            // `find_hole_end` returns the offset *of* the closing `}`; step past it.
+            i += inner[i..].chars().next().map_or(0, char::len_utf8);
+        } else {
+            i += c.len_utf8();
         }
     }
     inner.len()
