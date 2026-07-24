@@ -1,0 +1,53 @@
+// Scalar-unification slice 3 — every integer width now binds the ONE `vec.Kernels` bundle (before,
+// only i32 had an integer vector). i16, u32, and i8 vectors all get add/sub/scale/min/max/abs/dot,
+// wrapping at their own width and widening `dot` to `int` — one generic kernel monomorphized per
+// width. Both backends run it, so the differential pins the results.
+// expect: stdout "I16v3 {x: 11, y: 22, z: 33}"
+// expect: stdout "140"
+// expect: stdout "I16v3 {x: -32768, y: 0, z: 0}"
+// expect: stdout "25"
+// expect: stdout "U32v2 {x: 6, y: 8}"
+// expect: stdout "I8v3 {x: -106, y: 30, z: -15}"
+// expect: stdout "I8v3 {x: 100, y: 10, z: 5}"
+// expect: stdout "5250"
+// expect: stdout "[I16v3 {x: 11, y: 12, z: 13}, I16v3 {x: 5, y: 6, z: 7}]"
+// expect: stdout "[60, 15]"
+// expect: stdout "[I16v3 {x: 1, y: 2, z: 3}, I16v3 {x: 1, y: 1, z: 1}]"
+// expect: stdout "[I16v3 {x: 10, y: 10, z: 10}, I16v3 {x: 4, y: 5, z: 6}]"
+// expect: exit 0
+use std.{vec}
+
+@packed struct I16v3 { x: i16; y: i16; z: i16 }
+@packed struct U32v2 { x: u32; y: u32 }
+@packed struct I8v3 { x: i8; y: i8; z: i8 }
+
+impl vec.Kernels for I16v3 {}
+impl vec.Kernels for U32v2 {}
+impl vec.Kernels for I8v3 {}
+
+// --- i16: element add, widened dot, and wrap at 16-bit width ---
+a = I16v3 { x: 1i16, y: 2i16, z: 3i16 }
+b = I16v3 { x: 10i16, y: 20i16, z: 30i16 }
+echo a.add(b)                        // {11, 22, 33}
+echo a.dot(b)                        // 1·10 + 2·20 + 3·30 = 140 (widened to int)
+echo I16v3 { x: 32767i16, y: 0i16, z: 0i16 }.add(I16v3 { x: 1i16, y: 0i16, z: 0i16 })  // MAX+1 wraps → MIN
+
+// --- u32: dot and scale, no false negatives from the unsigned width ---
+u = U32v2 { x: 3u32, y: 4u32 }
+echo u.dot(u)                        // 9 + 16 = 25
+echo u.scale(2u32)                   // {6, 8}
+
+// --- i8: wrap at 8-bit width, abs, and a dot that would overflow i8 but widens to int ---
+p = I8v3 { x: 100i8, y: 10i8, z: -5i8 }
+q = I8v3 { x: 50i8, y: 20i8, z: -10i8 }
+echo p.add(q)                        // 100+50 = 150 → -106 (i8 wrap); -5 + -10 = -15
+echo p.abs()                         // {100, 10, 5}
+echo p.dot(q)                        // 100·50 + 10·20 + (-5)·(-10) = 5250 (widened, no i8 overflow)
+
+// --- bulk over a packed `List<I16v3>` ---
+xs = [I16v3 { x: 1i16, y: 2i16, z: 3i16 }, I16v3 { x: 4i16, y: 5i16, z: 6i16 }]
+ys = [I16v3 { x: 10i16, y: 10i16, z: 10i16 }, I16v3 { x: 1i16, y: 1i16, z: 1i16 }]
+echo xs.add_all(ys)                  // [{11,12,13}, {5,6,7}]
+echo xs.dot_all(ys)                  // [60, 15]
+echo xs.min_all(ys)                  // [{1,2,3}, {1,1,1}]
+echo xs.max_all(ys)                  // [{10,10,10}, {4,5,6}]

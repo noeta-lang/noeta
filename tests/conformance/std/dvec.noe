@@ -1,0 +1,38 @@
+// Scalar-unification slice 3 — the HEADLINE new capability: an **f64** vector binds the unified
+// `vec.Kernels` bundle, where before the three fixed bundles (f32/i32/u8) had no f64 path at all.
+// `add`/`sub`/`scale`/`min`/`max` return a same-shape `DVec3`; `dot` is the widened accumulator (f64
+// stays f64) and `length` the float promotion (f64 → f64). Bulk `*_all` streams over a packed
+// `List<DVec3>`. Both backends run the ONE generic kernel monomorphized at f64, so the differential
+// pins it. Values are exact f64 arithmetic.
+// expect: stdout "DVec3 {x: 5.0, y: 7.0, z: 9.0}"
+// expect: stdout "DVec3 {x: -3.0, y: -3.0, z: -3.0}"
+// expect: stdout "DVec3 {x: 2.0, y: 4.0, z: 6.0}"
+// expect: stdout "32.0"
+// expect: stdout "5.0"
+// expect: stdout "DVec3 {x: 1.0, y: 2.0, z: 3.0}"
+// expect: stdout "[DVec3 {x: 11.0, y: 12.0, z: 13.0}, DVec3 {x: 5.0, y: 6.0, z: 7.0}]"
+// expect: stdout "[60.0, 15.0]"
+// expect: stdout "[5.0, 13.0]"
+// expect: exit 0
+use std.{vec}
+
+@packed struct DVec3 { x: f64; y: f64; z: f64 }
+
+impl vec.Kernels for DVec3 {}
+
+a = DVec3 { x: 1.0f64, y: 2.0f64, z: 3.0f64 }
+b = DVec3 { x: 4.0f64, y: 5.0f64, z: 6.0f64 }
+
+echo a.add(b)
+echo a.sub(b)
+echo a.scale(2.0f64)
+echo a.dot(b)                        // 1·4 + 2·5 + 3·6 = 32.0 (f64, not int)
+echo DVec3 { x: 3.0f64, y: 4.0f64, z: 0.0f64 }.length()   // 5.0
+echo DVec3 { x: -1.0f64, y: 2.0f64, z: -3.0f64 }.abs()
+
+// Bulk over a packed `List<DVec3>` — same kernel as the element ops.
+xs = [DVec3 { x: 1.0f64, y: 2.0f64, z: 3.0f64 }, DVec3 { x: 4.0f64, y: 5.0f64, z: 6.0f64 }]
+ys = [DVec3 { x: 10.0f64, y: 10.0f64, z: 10.0f64 }, DVec3 { x: 1.0f64, y: 1.0f64, z: 1.0f64 }]
+echo xs.add_all(ys)
+echo xs.dot_all(ys)                  // [1·10+2·10+3·10, 4+5+6] = [60.0, 15.0]
+echo [DVec3 { x: 3.0f64, y: 4.0f64, z: 0.0f64 }, DVec3 { x: 5.0f64, y: 12.0f64, z: 0.0f64 }].length_all()

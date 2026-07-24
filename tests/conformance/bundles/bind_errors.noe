@@ -8,8 +8,8 @@
 // expect: exit 1
 use std.{vec}
 struct Plain { x: f32; y: f32; z: f32 }
-@packed struct Wide { x: f32; y: f32; z: f32; w: f32 }
+@packed struct Flags { a: bool; b: bool }
 impl nope.Kernels for Plain {}
 impl vec.Nope for Plain {}
 impl vec.Kernels for Plain {}
-impl vec.Kernels for Wide {}
+impl vec.Kernels for Flags {}

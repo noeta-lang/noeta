@@ -491,6 +491,12 @@ fn compile_to_mc(
             .map(|(span, layout)| (span, module.intern_packed_schema(layout)))
             .collect()
     };
+    // Intern every `vec`-bundle-bound type's schema (scalar-unification slice 3) so the VM has the
+    // element width even for a type that never appears in a `List<T>`; deduplicated by
+    // `intern_packed_schema`, so a type already used in a packed list adds nothing.
+    for layout in &sites.bundle_schema_layouts {
+        module.intern_packed_schema(layout);
+    }
     Ok((module, map_packed_sites))
 }
 

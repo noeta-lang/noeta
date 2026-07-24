@@ -569,6 +569,13 @@ impl Checker {
             );
             return;
         }
+        // The bound type satisfies the constraint. Register its flat layout so the compiler interns a
+        // packed schema for it (scalar-unification slice 3): the bundle's *element* methods recover the
+        // element width from that schema even when the type never appears in a `List<T>` — a single
+        // struct value erases its field widths to boxed scalars at the seam, so without this an integer
+        // vector's element `add` would not wrap at its width on the VM (the tree-walker's per-type field
+        // index already covers it, so this keeps the two backends' results identical).
+        self.sites.bundle_schema_layouts.push(layout.clone());
         // Conflicts, reported on the binding (the textually-later party). Receiver-aware: an
         // Element method lives on `T` — it may not collide with the target's own methods or
         // fields; a Bulk method lives on `List<T>` — it may not shadow a built-in list method

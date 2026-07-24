@@ -1,21 +1,22 @@
-// Array-ops arc: the integer/`Color` bundle constraints reject a mismatched target at the `impl`
-// site (E0015), the compile-time twin of the runtime shape check. `IntKernels` wants a UNIFORM
-// vector of ≥2 `i32` fields — an f32 vector (wrong kind) and a 1-field struct (too few) are both
-// rejected; `ColorKernels` wants EXACTLY 4 `u8` fields — a 3×u8 (wrong arity) and a 4×i32 (wrong
-// kind) are both rejected.
-// expect: error E0015 at 18:25
-// expect: error E0015 at 19:25
-// expect: error E0015 at 20:27
-// expect: error E0015 at 21:27
+// Scalar-unification: the TWO unified bundle constraints reject a mismatched target at the `impl`
+// site (E0015), the compile-time twin of the runtime shape check. `vec.Kernels` (AnyNumeric,
+// Uniform {min: 2}) rejects a `bool` vector and a 1-field struct; `vec.SatKernels` (AnyInteger)
+// additionally rejects a FLOAT vector — saturating math is integer-only, so a float shape has no
+// saturating mode. (Under the old three-bundle world an f32 vector, a 4×i32 shape, and a 3×u8 shape
+// were all impl-site errors; now they bind — the whole point of the collapse — so the surviving
+// rejections are these genuinely-invalid shapes.)
+// expect: error E0015 at 19:22
+// expect: error E0015 at 20:22
+// expect: error E0015 at 21:25
+// expect: error E0015 at 22:25
 // expect: exit 1
 use std.{vec}
 
-@packed struct FVec3 { x: f32; y: f32; z: f32 }
 @packed struct One { x: i32 }
-@packed struct RGB { r: u8; g: u8; b: u8 }
-@packed struct IColor { r: i32; g: i32; b: i32; a: i32 }
+@packed struct Flags { a: bool; b: bool }
+@packed struct FVec3 { x: f32; y: f32; z: f32 }
 
-impl vec.IntKernels for FVec3 {}
-impl vec.IntKernels for One {}
-impl vec.ColorKernels for RGB {}
-impl vec.ColorKernels for IColor {}
+impl vec.Kernels for One {}
+impl vec.Kernels for Flags {}
+impl vec.SatKernels for FVec3 {}
+impl vec.SatKernels for One {}

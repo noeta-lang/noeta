@@ -2197,6 +2197,22 @@ impl Interpreter {
     /// packed element unpacks into the same `Value::Object` the boxed path would build), recursing
     /// into nested packed structs. The schema's field order follows `def.fields` (the slot/
     /// materialization order); each field's kind is read from the layout by name. Returns `None` if a
+    /// The packed field kinds of a `@packed` struct named `name`, in declared order — the element
+    /// bundle methods' width source (scalar-unification slice 3). Resolved from the recorded per-type
+    /// field type names (`packed_fields`), so it covers every declared `@packed` struct, not only those
+    /// materialized into a packed list. `None` if `name` is not a `@packed` struct or any field is not
+    /// a simple numeric/`bool` primitive (such a type never binds a `vec` bundle).
+    pub(crate) fn packed_field_kinds(
+        &self,
+        name: &str,
+    ) -> Option<Vec<noeta_stdlib::PackedField>> {
+        let fields = self.packed_fields.get(name)?;
+        fields
+            .iter()
+            .map(|f| f.as_deref().and_then(parse_packed_field))
+            .collect()
+    }
+
     /// (nested) type name is not a struct in scope, the field sets disagree, or the layout is empty.
     fn resolve_packed_schema(
         &self,
@@ -5443,6 +5459,30 @@ fn invoke_err(message: String) -> Value {
 /// Map a bare-scalar element's checker [`PackedKind`](noeta_ast::reflect::PackedKind) to the eval
 /// [`SlotKind`] (packed-widths bare-scalar arc). A scalar element is a single primitive — a nested
 /// `Struct` is not a scalar, so it returns `None` (the caller stays boxed) defensively.
+/// Parse a `@packed` field's declared type name into the seam's [`noeta_stdlib::PackedField`] kind
+/// (scalar-unification slice 3) — the width source for the element bundle methods, keyed off the
+/// per-type field-name index. Only the numeric primitives (and `bool`) are recognised; anything else
+/// (a nested struct name, a generic) yields `None`, which bars the type from a `vec` bundle.
+fn parse_packed_field(name: &str) -> Option<noeta_stdlib::PackedField> {
+    use noeta_stdlib::PackedField as PF;
+    Some(match name {
+        "int" => PF::Int,
+        "float" => PF::Float,
+        "f32" => PF::F32,
+        "f64" => PF::F64,
+        "bool" => PF::Bool,
+        "i8" => PF::IntN { bits: 8, signed: true },
+        "i16" => PF::IntN { bits: 16, signed: true },
+        "i32" => PF::IntN { bits: 32, signed: true },
+        "i64" => PF::IntN { bits: 64, signed: true },
+        "u8" => PF::IntN { bits: 8, signed: false },
+        "u16" => PF::IntN { bits: 16, signed: false },
+        "u32" => PF::IntN { bits: 32, signed: false },
+        "u64" => PF::IntN { bits: 64, signed: false },
+        _ => return None,
+    })
+}
+
 fn scalar_slot_kind(kind: &noeta_ast::reflect::PackedKind) -> Option<SlotKind> {
     use noeta_ast::reflect::PackedKind;
     Some(match kind {
