@@ -29,6 +29,7 @@ if (!fs.existsSync(treeSitter)) {
 const OVERLAY = {
   $comment: "test overlay",
   textTiers: ["doc", "query", "spec"],
+  exprTiers: ["greet"],
 };
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "noeta-ts-project-"));

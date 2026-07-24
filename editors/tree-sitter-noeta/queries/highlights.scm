@@ -62,6 +62,12 @@
 (attribute (identifier) @attribute)
 "#" @attribute
 
+; An expression tier `@name { text ${hole} }`: the `@name` reads like a decorator, its prose runs
+; are string-like, and each `${…}` hole is highlighted as code by the string-interpolation rules
+; above (the `interpolation` node is shared).
+(expr_tier_block "@" @attribute name: (identifier) @attribute)
+(expr_tier_block (text_segment) @string)
+
 ; --------------------------------------------------------------------- keywords
 [
   "fn" "mut" "struct" "class" "enum" "impl" "trait" "destruct"

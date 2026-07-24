@@ -1,7 +1,7 @@
 #include "tree_sitter/parser.h"
 #include <stdbool.h>
 
-// External scanner for Noeta. Three tokens:
+// External scanner for Noeta. Four tokens:
 //   * BLOCK_COMMENT   — `/* ... */`, *nestable* (a plain regex token cannot express nesting).
 //   * NEWLINE         — an automatic statement terminator. Noeta terminates a statement at a
 //                       newline, EXCEPT when the statement is syntactically incomplete: a trailing
@@ -22,11 +22,16 @@
 //                       `matching_brace` — braces nest, `\{`/`\}` are literal braces (not counted)
 //                       and `\\` a literal backslash; every other backslash is plain prose. The
 //                       closing `}` is left for the grammar.
+//   * TEXT_SEGMENT    — one verbatim run of an EXPRESSION-tier body (`@greet { … ${hole} … }`):
+//                       like TEXT_BODY, but it also stops at `${` so the grammar's `interpolation`
+//                       rule parses each hole as real code, and `\$` escapes a literal dollar. One
+//                       body is a sequence of TEXT_SEGMENTs and holes.
 
 enum TokenType {
   BLOCK_COMMENT,
   NEWLINE,
   TEXT_BODY,
+  TEXT_SEGMENT,
 };
 
 void *tree_sitter_noeta_external_scanner_create(void) { return NULL; }
@@ -82,6 +87,54 @@ bool tree_sitter_noeta_external_scanner_scan(void *payload, TSLexer *lexer,
     }
     if (!consumed) return false; // empty body — `optional(text_body)` lets `}` close directly
     lexer->result_symbol = TEXT_BODY;
+    lexer->mark_end(lexer);
+    return true;
+  }
+
+  // Text-with-holes segment — one verbatim run between `${ … }` holes in an EXPRESSION tier's body
+  // (`@greet { text ${hole} more }`). Like TEXT_BODY (brace-depth counting; `\{`/`\}`/`\\` literal),
+  // but it also STOPS at `${` so the grammar's `interpolation` rule can parse the hole as real code,
+  // and `\$` escapes a literal dollar (so a raw `${` can be written). Only valid right after the
+  // expr block's `{` or a hole's closing `}`; the NEWLINE guard is the same error-recovery exclusion
+  // as TEXT_BODY.
+  if (valid_symbols[TEXT_SEGMENT] && !valid_symbols[NEWLINE]) {
+    unsigned depth = 1;
+    bool consumed = false;
+    for (;;) {
+      if (lexer->eof(lexer)) return false; // unterminated block — let recovery handle it
+      int32_t c = lexer->lookahead;
+      if (c == '\\') {
+        advance(lexer);
+        int32_t n = lexer->lookahead;
+        if (n == '{' || n == '}' || n == '\\' || n == '$') advance(lexer);
+        consumed = true;
+        continue;
+      }
+      if (c == '$') {
+        lexer->mark_end(lexer); // a hole may start here — the segment would end before the `$`
+        advance(lexer);
+        if (lexer->lookahead == '{') {
+          // A `${` hole opens. The grammar's `interpolation` rule consumes it; end the text segment
+          // just before the `$` (already marked). A hole right after the block's `{` (no leading
+          // prose) yields no segment — `interpolation` follows the `{` directly.
+          if (!consumed) return false;
+          lexer->result_symbol = TEXT_SEGMENT;
+          return true;
+        }
+        consumed = true; // a lone `$` is literal prose — keep scanning past it
+        continue;
+      }
+      if (c == '}') {
+        if (depth == 1) break; // the block's own closer — not part of the body
+        depth--;
+      } else if (c == '{') {
+        depth++;
+      }
+      advance(lexer);
+      consumed = true;
+    }
+    if (!consumed) return false; // empty run (a hole or `}` follows directly)
+    lexer->result_symbol = TEXT_SEGMENT;
     lexer->mark_end(lexer);
     return true;
   }
