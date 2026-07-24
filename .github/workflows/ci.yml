@@ -94,7 +94,6 @@ jobs:
           cargo check -p noeta-vm --no-default-features --features jit,aot --locked
           cargo check -p noeta-host-real --no-default-features --locked
           cargo check -p noeta-stdlib --no-default-features --locked
-          cargo check -p noeta-para-p2p --features ring-p2p --locked
 
   docs:
     name: Documentation samples (docs/*.md ```noeta blocks)
@@ -141,25 +140,9 @@ jobs:
       # The shipped examples are code users copy and the docs link to by path, so a language change
       # must not be able to invalidate them unnoticed — it twice did (the sealed-fn and no-shadowing
       # rules each broke a LiveView example, and both sat broken because the only tests referencing
-      # an example were `#[ignore]`d socket tests). The core sweep runs with the suite above; the
-      # PACKAGE examples are their own step because each composes a toolchain (a real cargo build)
-      # and must run serially — `--ignored` selects exactly that test, not the non-hermetic
-      # real-socket/real-network ones.
-      - name: Shipped package examples still compile
-        run: cargo test -p noeta-cli --locked --test examples -- --ignored
-      # Checking a package proves only that it parses. Nothing in CI ever *ran* a line of a shipped
-      # `packages/` module until this gate: the conformance corpus covers the language, not the
-      # packages built on it, so a package whose whole surface is composition (an onion's layer
-      # order, a cache that never hits, a paginator that stops a page early) could type-check
-      # perfectly and be wrong in every behaviour it claimed. `para.api.middleware.Mock` makes
-      # running them hermetic — no socket, no fixture server, no network.
-      #
-      # Named separately from the suite above even though `cargo test -p noeta-cli` also picks it
-      # up, because a behavioural gate over shipped packages should be legible as one in the log.
-      # It is deliberately NOT `--ignored`: it skips examples depending on a native package, which
-      # is the only thing that made the check step above expensive, so it costs under a second.
-      - name: Shipped package examples' tests pass
-        run: cargo test -p noeta-cli --locked --test package_tests
+      # an example were `#[ignore]`d socket tests). The core sweep runs with the suite above. The
+      # `para` packages (and their examples) live in their own repos under github.com/noeta-lang,
+      # each gated by its own CI.
 
   clippy:
     name: Clippy (deny warnings)

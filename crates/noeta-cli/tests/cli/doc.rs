@@ -221,35 +221,36 @@ fn published_docs_round_trip_through_the_registry() {
 }
 
 #[test]
-fn para_html_publishes_and_resolves_from_the_registry() {
-    // The para-namespace arc's registry round-trip: the first-party `para-html` (pure Noeta source)
-    // package publishes to a `LocalIndex`, and a **fresh consumer resolves it FROM the index** — a
-    // registry dep (`{ version, package }`), not a path — locking the git source + sha + content
-    // hash, so `use para.html.*` resolves from the registry-fetched package. The native `para-p2p`
-    // twin's registry-from-index distribution awaits the physical split (its entry crate path-deps
-    // workspace crates absent from a standalone clone); its `[trust]` gate is covered elsewhere.
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/para-html");
-    if !src.join("noeta.toml").is_file() {
-        return; // the package isn't present in this checkout — nothing to exercise.
-    }
-    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("para_html_registry");
+fn pure_source_package_publishes_and_resolves_from_the_registry() {
+    // The registry round-trip for a pure-source (no native crates) package: a standalone git repo
+    // publishes to a `LocalIndex` via a `file://` URL, and a **fresh consumer resolves it FROM the
+    // index** — a registry dep (`{ version, package }`), not a path — locking the git source + sha
+    // + content hash, so `use view.page.*` resolves from the registry-fetched package. (This
+    // coverage was first proven with the in-tree `para-html` package before the `para` family moved
+    // to its own repos; the synthetic package below keeps the round-trip gated without it.)
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pure_source_registry");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
-    let repo = base.join("para-html-repo");
+    let repo = base.join("view-repo");
     let reg = base.join("registry");
     let cache = base.join("cache");
     let cons = base.join("consumer");
+    std::fs::create_dir_all(&repo).unwrap();
     std::fs::create_dir_all(&cons).unwrap();
 
-    // 1. A standalone git repo of the package (its `noeta.toml` is already at its root).
-    assert!(
-        std::process::Command::new("cp")
-            .args(["-r".as_ref(), src.as_os_str(), repo.as_os_str()])
-            .status()
-            .expect("cp runs")
-            .success(),
-        "copy the package into a standalone repo"
-    );
+    // 1. A standalone git repo of the package (its `noeta.toml` at its root).
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/view\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("page.noe"),
+        "namespace view.page;\n\
+         pub struct Page { title: string }\n\
+         pub fn render(p: Page): string { return \"<h1>\" ~ p.title ~ \"</h1>\" }\n",
+    )
+    .unwrap();
     let git = |args: &[&str]| {
         assert!(
             std::process::Command::new("git")
@@ -283,23 +284,20 @@ fn para_html_publishes_and_resolves_from_the_registry() {
         .args(["publish", "--git", &url, "--tag", "v0.1.0"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("published `para/html` 0.1.0"));
+        .stdout(predicate::str::contains("published `acme/view` 0.1.0"));
 
     // 3. A fresh consumer depends on it via the REGISTRY (version + package), not a path.
     std::fs::write(
         cons.join("noeta.toml"),
         "[package]\nname = \"noeta/reg_consumer\"\nversion = \"0.1.0\"\n\n\
-         [dependencies]\npara = { version = \"^0.1\", package = \"para/html\" }\n",
+         [dependencies]\nview = { version = \"^0.1\", package = \"acme/view\" }\n",
     )
     .unwrap();
     std::fs::write(
         cons.join("main.noe"),
-        "use para.html.{render, Html, handle}\n\
-         use std.reactive.signal\n\
-         use std.http.{Request, Response}\n\
-         c = signal(1)\n\
-         fn page() use (c): Html { return @html { <h1>${c.get()}</h1> } }\n\
-         fn fetch(req: Request): Response { return handle(req, \"t\", page) }\n",
+        "use view.page.{render, Page}\n\
+         fn banner(title: string): string { return render(Page { title: title }) }\n\
+         echo banner(\"hi\")\n",
     )
     .unwrap();
 
@@ -313,7 +311,7 @@ fn para_html_publishes_and_resolves_from_the_registry() {
         .success();
     let lock = std::fs::read_to_string(cons.join("noeta.lock")).unwrap();
     for needle in [
-        "name = \"para/html\"",
+        "name = \"acme/view\"",
         "source = \"git\"",
         "tag = \"v0.1.0\"",
         "sha = ",
@@ -322,7 +320,7 @@ fn para_html_publishes_and_resolves_from_the_registry() {
         assert!(lock.contains(needle), "lock missing `{needle}`:\n{lock}");
     }
 
-    // 5. `use para.html.*` resolves and type-checks against the registry-fetched package.
+    // 5. `use view.page.*` resolves and type-checks against the registry-fetched package.
     lang()
         .current_dir(&cons)
         .env("NOETA_REGISTRY_DIR", &reg)

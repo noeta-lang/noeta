@@ -1,17 +1,16 @@
 //! The shipped `examples/` are a CI gate, not decoration.
 //!
-//! They are the code users copy, and the docs link to them by path (`docs/LiveView.md`,
-//! `docs/Reactivity.md`, `docs/Edge-Deployment.md`, the package READMEs). Nothing ran them, so they
+//! They are the code users copy, and the docs link to them by path (`docs/Reactivity.md`,
+//! `docs/Edge-Deployment.md`). Nothing ran them, so they
 //! drifted: the sealed-fn rule (a named `fn` no longer sees the file's top-level bindings) and the
 //! no-shadowing rule (E0059) each invalidated a LiveView example, and both sat broken in the tree.
 //! The tests that *did* reference an example were `#[ignore]`d — they bind real sockets — so CI
 //! never touched them.
 //!
 //! These gates drive the **real `noeta` binary**, like the doc-sample gate does, because that is
-//! what fidelity requires here: these examples depend on packages resolved through `noeta.toml`
-//! scope deps (`para.html`, `para.db`, aether), which a bare loader+checker call does not do. A
-//! gate that checks them any other way tests a pipeline users never run — the same trap that let
-//! two obsolete corpus fixtures pass for months while failing through the CLI.
+//! what fidelity requires here: an example runs exactly as a user standing in its directory would
+//! run it. A gate that checks them any other way tests a pipeline users never run — the same trap
+//! that let two obsolete corpus fixtures pass for months while failing through the CLI.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,12 +66,11 @@ fn every_example_still_compiles() {
     noe_files(&examples_root(), &mut examples);
     assert!(!examples.is_empty(), "examples/ has no .noe files to check");
 
-    // Scope: examples whose directory declares a `para` package dependency are NOT checked here.
-    // Checking one composes a toolchain — a real cargo build of the composed binary ("first build
-    // of this dependency set"), which costs minutes cold and is heavy enough to fail under load;
-    // fanning several out concurrently corrupts their shared cache outright. That cost belongs to
-    // the package that owns them, next to the toolchain it already builds, not to a blanket sweep
-    // here. See `packages/*/examples/`.
+    // Scope: examples whose directory declares package dependencies (a `noeta.toml`) are NOT
+    // checked here. Checking one composes a toolchain — a real cargo build of the composed binary
+    // ("first build of this dependency set"), which costs minutes cold and is heavy enough to fail
+    // under load. That cost belongs to the package that owns them (each `para` package repo gates
+    // its own examples), not to a blanket sweep here.
     //
     // What stays is the core-language set — and that is where the rot actually was: the sealed-fn
     // and no-shadowing rules broke `liveview_counter.noe` and `liveview_html_counter.noe`, both
@@ -138,8 +136,8 @@ fn examples_with_expected_stdout_produce_it() {
     let mut examples = Vec::new();
     noe_files(&examples_root(), &mut examples);
 
-    // Same scoping as the check sweep: a package example's `noeta.toml` would compose a toolchain
-    // to run it, which is its package's cost to pay, not this gate's.
+    // Same scoping as the check sweep: an example with a `noeta.toml` would compose a toolchain
+    // to run it, which is its owning package's cost to pay, not this gate's.
     let core: Vec<PathBuf> = examples
         .into_iter()
         .filter(|path| {
@@ -203,65 +201,5 @@ fn examples_with_expected_stdout_produce_it() {
         failures.is_empty(),
         "an example's documented output no longer matches what it produces:\n{}",
         failures.join("\n")
-    );
-}
-
-/// The **package** examples (`examples/para-*/`), checked serially.
-///
-/// Separate from the core sweep, and `#[ignore]`d, because each of these declares a `para` scope
-/// dependency: checking one composes a toolchain — a real cargo build of the composed binary,
-/// cached only afterwards. That costs minutes on a cold machine, and several running concurrently
-/// corrupt the cache they share, so this runs strictly one at a time. CI invokes it as its own
-/// step (see `.github/workflows/ci.yml`); locally, run it explicitly:
-///
-/// ```text
-/// cargo test -p noeta-cli --test examples -- --ignored
-/// ```
-///
-/// These are grouped by owning package rather than living inside `packages/<pkg>/`, which was the
-/// obvious home but does not work: a package has no manifest key to exclude a subdirectory from its
-/// own sources, so an example that depends on its parent package drags in every *sibling* example
-/// as package source. Grouping under `examples/<pkg>/` gives the same ownership story with no
-/// absorption — and it is the right shape for where the para packages are heading anyway, since
-/// each is moving to its own repository, taking its examples with it. No manifest `exclude` key is
-/// needed for that; the split repo makes the question moot.
-#[test]
-#[ignore = "composes a toolchain per package (a real cargo build); run explicitly or via CI's own step"]
-fn every_package_example_still_compiles() {
-    let mut examples = Vec::new();
-    noe_files(&examples_root(), &mut examples);
-    let packaged: Vec<PathBuf> = examples
-        .into_iter()
-        .filter(|path| {
-            let dir = path.parent().expect("an example has a parent directory");
-            dir.join("noeta.toml").is_file()
-        })
-        .collect();
-    assert!(
-        !packaged.is_empty(),
-        "no package examples found — this gate would assert nothing"
-    );
-
-    let mut broken = Vec::new();
-    for path in &packaged {
-        let output = noeta("check", path);
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let detail = stderr
-                .lines()
-                .chain(stdout.lines())
-                .find(|l| l.trim_start().starts_with('['))
-                .or_else(|| stderr.lines().find(|l| !l.trim().is_empty()))
-                .unwrap_or("(no output)")
-                .trim()
-                .to_string();
-            broken.push(format!("  {}: {detail}", path.display()));
-        }
-    }
-    assert!(
-        broken.is_empty(),
-        "these package examples no longer compile:\n{}",
-        broken.join("\n")
     );
 }

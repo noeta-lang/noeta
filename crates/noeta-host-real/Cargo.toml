@@ -34,8 +34,8 @@ reqwest = { workspace = true, optional = true }
 # telemetry build adds no protobuf/gRPC tree. Optional so a non-telemetry build links none of it.
 serde_json = { workspace = true, optional = true }
 # (para-namespace F2b) noeta-host-real no longer carries any p2p transport: `RealHost` dropped its
-# `P2p` impl, so the p2panda node + its whole iroh/QUIC tree left this crate entirely — it now lives
-# in `noeta-para-p2p-net`, owned by the `para.p2p` extension. This crate keeps only the `p2p_app_id`
+# `P2p` impl, so the p2panda node + its whole iroh/QUIC tree left this crate entirely — it now ships
+# with the out-of-tree para-p2p package, owned by the `para.p2p` extension. This crate keeps only the `p2p_app_id`
 # config it surfaces to that extension via `P2pProvider::real_p2p`.
 
 [features]

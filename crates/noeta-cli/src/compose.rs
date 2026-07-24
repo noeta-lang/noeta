@@ -961,7 +961,7 @@ mod tests {
         }]
     }
 
-    /// A crate declaring a footprint ring (like `para-p2p-native`'s `ring-p2p`).
+    /// A crate declaring a footprint ring (like the para-p2p package's native `ring-p2p`).
     fn ring_entries() -> Vec<Entry> {
         vec![Entry {
             identity: "acme/imgfx".to_string(),
@@ -1017,7 +1017,7 @@ mod tests {
         // that git-deps the noeta repo unifies its `noeta_ext_abi::Extension` with the shim's.
         let root = std::env::temp_dir().join(format!("noeta_patch_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for c in ["noeta-ext-abi", "noeta-crdt"] {
+        for c in ["noeta-ext-abi", "noeta-vm"] {
             let d = root.join("crates").join(c);
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{c}\"\n")).unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
             )),
             "each crate redirected to its path:\n{toml}"
         );
-        assert!(toml.contains("noeta-crdt = { path ="), "{toml}");
+        assert!(toml.contains("noeta-vm = { path ="), "{toml}");
 
         // A git-tag (out-of-workspace) toolchain emits NO patch — it unifies by pinning the same tag,
         // and Cargo forbids patching a git source with itself.

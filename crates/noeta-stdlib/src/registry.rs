@@ -143,8 +143,9 @@ impl Extension for VecExtension {
     }
 }
 // The p2p/local-first stack (`crdt`/`p2p`/`synced`) left `std` for the first-party non-default
-// `para` namespace — it now lives in the `noeta-para-p2p` crate (`ParaP2pExtension`, root `para`),
-// installed only when a program depends on the `para-p2p` package. See the para-namespace arc.
+// `para` namespace — it now lives in the standalone para-p2p package repo
+// (github.com/noeta-lang/para-p2p), installed only when a program depends on it. See the
+// para-namespace arc.
 
 /// The `http` unit — the only one contributing a CLI subcommand (`noeta serve`), so it can't use the
 /// `std_unit!` shorthand.
@@ -5828,7 +5829,7 @@ pub fn static_dispatch_ctx<C: crate::NativeCtx + ?Sized>(
     args: &[crate::Slot],
 ) -> Option<Result<crate::CtxOut, crate::CtxError>> {
     if !has_static_ctx_route(module) {
-        // `para.synced` is out-of-`std` (noeta-para-p2p) — it has no compiled-in fast route here
+        // `para.synced` is out-of-`std` (the para-p2p package) — it has no compiled-in fast route here
         // and dispatches through the registered ExtModule's dyn `ctx_dispatch` instead. Nor does
         // an out-of-std module that merely *ends* in `.cell`/`.reactive` (a session extension):
         // only std's own identities take the compiled-in route.
@@ -6208,7 +6209,7 @@ mod tests {
             ("Effect", "std.reactive.Effect"),
             ("View", "std.reactive.View"),
             // The CRDT/synced types (`GCounter`/`PnCounter`/`GSet`/`SyncedSignal`) left `std` for the
-            // `para` namespace (noeta-para-p2p); they are covered by that crate's own tests now.
+            // `para` namespace (the out-of-tree para-p2p package); its own repo's tests cover them.
         ];
         for (short, qualified) in expected {
             let t = find_type(short).expect("registered type");

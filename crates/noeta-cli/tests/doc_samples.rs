@@ -76,50 +76,14 @@ fn extract(file: &str, text: &str) -> Vec<Sample> {
 
 /// Run one sample in its own isolated directory (the module loader scans sibling `.noe` files, and
 /// an `fs`-writing sample must not touch the repo), returning `Err(message)` on the wrong outcome.
-/// Type-check a sample in-process (session mode) and return whether it produced any diagnostic.
-/// Used for `para.*` samples, whose extension the single-file `noeta run`/`check` subprocess does
-/// not have — the doc-samples process installs it (see `doc_samples_compile_and_run`) so these are
-/// validated against the real `para` signatures.
-fn session_has_diagnostics(code: &str) -> bool {
-    let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "sample.noe", code);
-    let lexed = noeta_lexer::lex(&source);
-    let parsed = noeta_parser::parse(&source, &lexed.tokens);
-    let mut diags = lexed.diagnostics.clone();
-    diags.extend(parsed.diagnostics);
-    diags.extend(noeta_check::SessionChecker::new().check_entry(&parsed.program));
-    !diags.is_empty()
-}
-
 fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     if sample.tag == "ignore" {
         return Ok(());
     }
 
-    // A `para.*` sample needs the non-default `para.p2p`/`para.html` extension, which a bare
-    // single-file `noeta run` subprocess does not have. The doc-samples process installs it, so
-    // these are validated **in-process** (session mode): an `error` sample must produce a real
-    // diagnostic (the genuine Mergeable/type error, not just "unknown module"), any other must
-    // type-check cleanly.
-    if sample.code.contains("use para.") {
-        let has_diag = session_has_diagnostics(&sample.code);
-        return if sample.tag == "error" {
-            if has_diag {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{}:{} (tag \"error\") was expected to fail but type-checked cleanly",
-                    sample.file, sample.line
-                ))
-            }
-        } else if has_diag {
-            Err(format!(
-                "{}:{} (tag {:?}) uses `para.*` but did not type-check cleanly",
-                sample.file, sample.line, sample.tag
-            ))
-        } else {
-            Ok(())
-        };
-    }
+    // This gate runs with **zero extensions beyond std** — the `para` packages live in their own
+    // repos (github.com/noeta-lang/para-*) and their docs (with `para.*` samples) moved with them,
+    // gated by each package's own CI.
     // A `check`-tagged sample type-checks without executing (it would bind sockets / never exit,
     // or it is a page fragment referencing names defined elsewhere). A doc fragment is a
     // REPL-like snippet, so it is checked in **session mode** — parse + type-check, with unknown
@@ -199,10 +163,11 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
 
 #[test]
 fn doc_samples_compile_and_run() {
-    // Install the non-default `para.p2p` extension into this process's registry so `para.*` doc
-    // samples type-check against real signatures (additive over std; std samples are unaffected).
-    // Must precede any session check, which lazily seeds the std-only default otherwise.
-    noeta_stdlib::registry::install_with_extras(&[&noeta_para_p2p::ParaP2pExtension]);
+    // Seed the process registry with the std set (and nothing else): the in-process session checks
+    // below (`check`-tagged samples) need a registry, and referencing noeta-stdlib here is what
+    // links its load-time default provider into this test binary at all. The gate runs with ZERO
+    // extensions beyond std — the `para` packages' docs are gated in their own repos.
+    noeta_stdlib::registry::default_seeded();
 
     let dir = docs_dir();
     let mut samples = Vec::new();

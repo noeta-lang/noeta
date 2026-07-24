@@ -91,7 +91,6 @@ The exhaustive reference for syntax, semantics, and the stdlib.
 - [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
-- [Local-First & P2P](Local-First-and-P2P)
 - [Standard Library](Standard-Library)
 - [Standard-Library Modules](Standard-Library-Modules)
 

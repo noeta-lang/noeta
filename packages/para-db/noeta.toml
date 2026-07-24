@@ -1,8 +1,0 @@
-[package]
-name = "para/db"
-version = "0.1.0"
-# This package ships a native Rust extension crate (the `para.db` surface — the swappable-driver
-# database layer, SQLite first). A consumer must authorize it under `[trust] native = ["para/db"]`.
-# It also contributes the `noeta migrate` CLI command (para-extraction), which a consumer opts into
-# with `[trust] commands = ["para/db"]`.
-native = "native"

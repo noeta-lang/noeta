@@ -1,6 +1,0 @@
-[package]
-name = "noeta/cli_single"
-version = "0.1.0"
-
-[dependencies]
-para = { path = "../../../packages/para-cli" }

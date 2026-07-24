@@ -251,9 +251,11 @@ Server-side reactivity ([Reactivity](Reactivity)): `signal(v: T) -> Signal<T>` (
 
 The concurrency combinators ([Concurrency](Concurrency)): `sleep(ms) -> Future<void>`, `all(List<Future<T>>) -> List<T>`, `race(List<Future<T>>) -> T` (losers cancelled), `map_bounded(items, n, f) -> List<B>` (≤ n in flight). Named `task` — `async` is a keyword and cannot appear in a `use` path.
 
-## `para.crdt`, `para.p2p`, `para.synced` — *(the non-default `para-p2p` package, not `std`)*
+## Packages in the `para` namespace — *(not `std`)*
 
-The local-first / peer-to-peer stack ([Local-First & P2P](Local-First-and-P2P)) is **not** part of `std` — it is the first-party but non-default **`para-p2p` package** under the `para` namespace (add it to `[dependencies]` and authorize it in `[trust] native`). `para.crdt` builds conflict-free replicated values (`gcounter`/`pncounter`/`gset`) that `.merge` to convergence; `para.p2p` publishes/receives messages over topics (`publish`, `receive(topic) -> Future<?bytes>`) and reports this node's stable identity (`identity() -> ?string`, the hex public key); `para.synced` fuses them with reactivity — `synced_signal(initial, topic)` where `initial: Mergeable` is a [reactive](Reactivity) signal holding a CRDT, converging over p2p (`.get`/`.merge`/`.sync`). Misuse maps onto E0007/E0025 as noted on that page.
+The first-party but non-default packages live under the `para` namespace in their own repositories (github.com/noeta-lang/para-*): `para/html` (LiveView), `para/api` (HTTP middleware, mocking, pagination), `para/db` + `para/aether_db` (database drivers and stores), `para/cli`, `para/aether` (the web framework), and `para/p2p` (the local-first / peer-to-peer stack). Add one to `[dependencies]` (and authorize a native one in `[trust]`) to use it; each repo documents its own surface.
+
+For example, the `para/p2p` package (add it to `[dependencies]` and authorize it in `[trust] native`) provides the local-first stack: `para.crdt` builds conflict-free replicated values (`gcounter`/`pncounter`/`gset`) that `.merge` to convergence; `para.p2p` publishes/receives messages over topics (`publish`, `receive(topic) -> Future<?bytes>`) and reports this node's stable identity (`identity() -> ?string`, the hex public key); `para.synced` fuses them with reactivity — `synced_signal(initial, topic)` where `initial: Mergeable` is a [reactive](Reactivity) signal holding a CRDT, converging over p2p (`.get`/`.merge`/`.sync`). Misuse maps onto E0007/E0025 as noted in that repo's docs.
 
 ## `cell`
 
@@ -974,5 +976,4 @@ For bulk work, a `List<Vec3>` is stored as a flat packed buffer, and the `*_all`
 - [Standard Library](Standard-Library) — the always-available Ring 1 surface.
 - [Concurrency](Concurrency) — `sleep`, futures, channels.
 - [Reactivity](Reactivity) — `signal`/`computed`/`effect`.
-- [Local-First & P2P](Local-First-and-P2P) — CRDTs, peer-to-peer messaging, synced signals.
 - [Native Extensions](Native-Extensions) — how these modules are registered, and how you could add your own.

@@ -59,7 +59,7 @@ Nothing here is a correctness gap in shipped behavior unless explicitly marked *
 
 | Item | Source / trigger |
 |---|---|
-| **Publish the toolchain + registry repos** — the step that makes out-of-tree packages truly portable (in-tree copies stay path deps until a committed git-dep can resolve against a public repo). Note: local `main` is hundreds of commits ahead of `origin/main`; publishing is a deliberate user decision | para out-of-tree follow-on *(the keystone item)* |
+| **Publish the toolchain + registry repos** — ✅ the para half is DONE locally: all 7 `para` packages extracted to standalone repos at `/home/niklas/Code/para/` (para-html, para-cli, para-api, para-db, para-aether, para-aether-db, para-p2p; each tagged v0.1.0, pre-publish `file://` git-dep form) and removed from the monorepo. The remaining half: publish the toolchain repo (local `main` is hundreds of commits ahead of `origin/main`; publishing is a deliberate user decision) and flip the packages' git URLs from local paths to public repos | para out-of-tree follow-on *(the keystone item)* |
 | Dynamic extension loading (the dyn dispatch tables exist; every compiled-in extension monomorphizes past them) | higher-order-abi. Trigger: a plugin that can't be compiled in |
 | TUF-based Sigstore trust-root refresh (today: build-time-embedded root + env override); registry-side keyless *requirement* is a policy flag away | keyless-signing v-next |
 | Per-dependency **capability enforcement** (a dep's `[trust]` grant actually bounding what it can reach) — research phase; static effect analysis is the tractable first step | package-manager phase-4 L3 |

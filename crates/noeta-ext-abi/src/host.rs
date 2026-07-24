@@ -536,7 +536,7 @@ pub struct RealP2pConfig {
 /// whether real networking is allowed and with what config. A real host returns `Some`; the
 /// deterministic sandbox and the minimal hosts keep the default `None`, which the extension reads as
 /// "use the loopback broker" (oracle-safe). The `P2p` impls now live entirely on the extension side
-/// (the loopback [`crate::P2pBroker`] here, the real node in `noeta-para-p2p-net`).
+/// (the loopback [`crate::P2pBroker`] here, the real node in the out-of-tree para-p2p package).
 pub trait P2pProvider {
     /// The real-networking config for this host, or `None` (the default) to use the deterministic
     /// loopback broker. Only a real host overrides it.

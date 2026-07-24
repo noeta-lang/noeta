@@ -63,7 +63,6 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `noeta-ext-abi` | The extension **ABI**: the `Host` supertrait (twelve capability traits), `ExtModule`/`ExtType`/`ExtFn` registration, and the neutral `NativeValue`/`PackedView` marshalling seam. Third-party native packages link against this. |
 | `noeta-cache` | Default-on bytecode cache (`~/.cache/noeta/*.noeb`, build-identity-keyed). |
 | `noeta-reactive` | Signals/computed/effects: the reactive graph, topological flush, E0045 runaway guard. |
-| `noeta-crdt` | Local-first CRDTs behind `para.crdt`/`para.synced`; the p2panda transport lives in `noeta-para-p2p-net` (`para.p2p`). |
 | `noeta-jit-abi` | The frozen native↔interpreter calling-convention vocabulary shared by `noeta-vm`/`noeta-jit`. |
 | `noeta-aot-runtime` / `noeta-bundle` | Native AOT builds (`noeta build --native`): runtime support + self-contained artifact bundling (per-ring stdlib + DCE). |
 | `noeta-ide` | Shared IDE engine (hover/def/refs/outline/call+role graph) over the salsa db; reused by the LSP and MCP servers. |

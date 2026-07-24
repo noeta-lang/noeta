@@ -279,7 +279,7 @@ Exit codes: `0` success; `2` for a usage/config problem (no dsn configured, a mi
 seeds directory, an unconfirmed `--reset`); `1` for a run that failed (connect failure, a SQL error,
 checksum drift, a deleted migration, or seeding while migrations are pending). An app can migrate and
 seed itself at boot off the same engine with `conn.migrate("migrations")` then `conn.seed("seeds")`
-(see [para/db](https://github.com/…/packages/para-db)).
+(see the [para-db repo](https://github.com/noeta-lang/para-db)).
 
 ## `noeta serve` and `--watch`
 

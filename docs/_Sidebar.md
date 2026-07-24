@@ -33,8 +33,6 @@
 - [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
-- [LiveView](LiveView)
-- [Local-First & P2P](Local-First-and-P2P)
 - [Standard Library](Standard-Library)
 - [Standard-Library Modules](Standard-Library-Modules)
 

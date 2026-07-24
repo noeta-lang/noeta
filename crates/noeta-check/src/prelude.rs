@@ -439,9 +439,9 @@ impl Checker {
     pub(crate) fn seed_native_builtin_traits(&mut self) {
         // Snapshot (qualified identity, declared traits) over every native kind while the immutable
         // registry borrow is live, then release it before the `&mut self` `record_trait_impls`
-        // writes. Keyed by the **qualified identity** (`para.crdt.GCounter` once the para-p2p package
-        // is installed) the checker stores in `Type::Named`, so a `T: Mergeable` bound resolves
-        // against the same string.
+        // writes. Keyed by the **qualified identity** (e.g. `para.crdt.GCounter` when a program
+        // installs the out-of-tree para-p2p package) the checker stores in `Type::Named`, so a
+        // `T: Mergeable` bound resolves against the same string.
         let decls: Vec<(String, &'static [&'static str])> = {
             let reg = self.reg();
             let types = reg

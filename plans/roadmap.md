@@ -22,7 +22,8 @@ traits/generics/derives/attributes + reflection, modules + editions vocabulary, 
 over a twelve-capability Host boundary, async/generators/isolates, signals + LiveView, the bundled
 HTTP server, native AOT + WASM targets (playground included), the package manager with keyless
 signing + hosted-registry client, LSP/DAP/MCP + formatter + profiler + debug console, OTLP
-telemetry, CRDTs + p2p, and the `para` namespace with the aether web framework.
+telemetry, CRDTs + p2p, and the `para` namespace with the aether web framework — the `para`
+packages now extracted to their own repos (locally at `/home/niklas/Code/para/`, pre-publish).
 
 ## The frontier — good next picks
 

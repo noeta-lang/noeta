@@ -854,3 +854,223 @@ fn an_unknown_subcommand_falls_back_to_a_noeta_prefixed_binary_on_path() {
         .code(2)
         .stderr(predicate::str::contains("hello"));
 }
+
+// --- out-of-tree native package: git ABI dep + [patch] unification (para-extraction) ------------
+
+/// The **out-of-tree** native compose e2e, made a permanent regression test (it was proven only
+/// manually during the para extraction): a standalone package repo whose entry crate git-deps
+/// `noeta-ext-abi` from a *clone* of the toolchain repo — the exact shape every extracted `para`
+/// package ships in — composes against this workspace's source and runs, extension command
+/// included. The package repo also path-deps a sibling impl crate (entry/impl split, the
+/// first-party layout), so the `[patch]` must unify the ABI across BOTH crates.
+///
+/// The gotcha this encodes: the compose `[patch]` key must EQUAL the URL the package's Cargo.toml
+/// declares for its toolchain git deps. That is why `NOETA_TOOLCHAIN_REPO` is set explicitly to
+/// the clone's `file://` URL — the default patch key is this build's `CARGO_PKG_REPOSITORY`,
+/// which the fixture package never references, so without the override the git crates would be a
+/// SECOND `noeta-ext-abi` and the shim's `NOETA_EXTENSIONS` aggregation would not type-check.
+///
+/// `#[ignore]`d like the other compose-heavy gates (it clones the repo and cargo-fetches git
+/// deps). CI would run it as its own serial step, e.g.
+/// `cargo test -p noeta-cli --test cli -- --ignored composed_toolchain_out_of_tree_git_abi_dep`
+/// (no such step exists yet); locally run it with `-- --ignored` from the repo root.
+#[test]
+#[ignore = "compose-heavy: clones the toolchain repo + composes a toolchain; run explicitly or via its own CI step"]
+fn composed_toolchain_out_of_tree_git_abi_dep() {
+    let _guard = compose_guard();
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("out_of_tree_git_abi");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // A depth-1 clone of this workspace's repo — the stand-in for the *published* toolchain repo
+    // a standalone package git-deps (`NOETA_TOOLCHAIN_REPO=file://<clone>` below points the
+    // compose `[patch]` at the same URL).
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let clone = base.join("toolchain-clone");
+    git(
+        &base,
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &format!("file://{}", workspace.display()),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let repo_url = format!("file://{}", clone.display());
+
+    // The standalone package repo: `noeta.toml` + entry crate (`native/`) + a sibling impl crate
+    // (`impl/`) the entry path-deps. Both crates reference the ABI by git on the clone's URL.
+    let pkg = base.join("gitfx");
+    std::fs::create_dir_all(pkg.join("native/src")).unwrap();
+    std::fs::create_dir_all(pkg.join("impl/src")).unwrap();
+    std::fs::write(
+        pkg.join("noeta.toml"),
+        "[package]\nname = \"acme/gitfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("native/Cargo.toml"),
+        format!(
+            "[package]\nname = \"gitfx-native\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [lib]\npath = \"src/lib.rs\"\n\n\
+             [dependencies]\nnoeta-ext-abi = {{ git = \"{repo_url}\" }}\n\
+             gitfx-impl = {{ path = \"../impl\" }}\n\n[workspace]\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("native/src/lib.rs"),
+        r##"//! Entry crate of the out-of-tree fixture package: declares the extension surface; the
+//! behaviour lives in the path-depped sibling impl crate (the first-party entry/impl layout).
+
+use noeta_ext_abi::registry::{ExtFn, ExtModule, Extension, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{no_function_error, CommandCtx, ExtCommand, Host, NativeValue, ParsedArgs, StdError};
+
+const GFX_FNS: &[ExtFn] = &[ExtFn {
+    name: "triple",
+    params: &[SigType::Int],
+    ret: RetTy::Concrete(SigType::Int),
+}];
+
+fn gfx_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "triple" => gitfx_impl::triple(args),
+        _ => Err(no_function_error("gfx", func)),
+    }
+}
+
+const GFX_INFO: ExtCommand = ExtCommand {
+    name: "gfx-info",
+    about: "Prove an out-of-tree extension command dispatches through composition",
+    args: &[],
+    run: gfx_info_run,
+};
+
+fn gfx_info_run(_ctx: &mut dyn CommandCtx, _args: &ParsedArgs) -> u8 {
+    println!("gitfx: out-of-tree native extension ok");
+    0
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GitfxExtension;
+
+impl Extension for GitfxExtension {
+    fn name(&self) -> &'static str {
+        "gitfx"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        &[ExtModule {
+            name: "gfx",
+            functions: GFX_FNS,
+            dispatch: gfx_dispatch,
+            ..ExtModule::DEFAULTS
+        }]
+    }
+    fn commands(&self) -> &'static [ExtCommand] {
+        &[GFX_INFO]
+    }
+}
+
+pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&GitfxExtension];
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("impl/Cargo.toml"),
+        format!(
+            "[package]\nname = \"gitfx-impl\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [lib]\npath = \"src/lib.rs\"\n\n\
+             [dependencies]\nnoeta-ext-abi = {{ git = \"{repo_url}\" }}\n\n[workspace]\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("impl/src/lib.rs"),
+        r##"//! Impl crate of the out-of-tree fixture package — ABI-typed behaviour the entry crate
+//! path-deps, proving the `[patch]` unifies the git ABI across BOTH crates of the package repo.
+
+use noeta_ext_abi::registry::{NativeOut, Scalar};
+use noeta_ext_abi::{ErrorKind, NativeValue, StdError};
+
+pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
+    match args.first() {
+        Some(NativeValue::Scalar(Scalar::Int(n))) => Ok(NativeOut::Scalar(Scalar::Int(n * 3))),
+        _ => Err(StdError {
+            kind: ErrorKind::ArgType,
+            message: "`gfx.triple` expects an int".to_string(),
+        }),
+    }
+}
+"##,
+    )
+    .unwrap();
+    git(&pkg, &["init", "-q"]);
+    git(&pkg, &["add", "-A"]);
+    git(&pkg, &["commit", "-qm", "v1.0.0"]);
+
+    // The consuming app takes the package as a GIT dep (HEAD) and trusts its native + commands.
+    let app = base.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\ngitfx = {{ git = \"file://{}\" }}\n\
+             [trust]\nnative = [\"acme/gitfx\"]\ncommands = [\"acme/gitfx\"]\n",
+            pkg.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gitfx.{gfx}\n\necho gfx.triple(14);\n",
+    )
+    .unwrap();
+
+    // Compose + run: the native module resolves and dispatches (14 * 3 = 42).
+    composed_env(&mut lang())
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+
+    // The extension-contributed command dispatches through the same composed toolchain.
+    composed_env(&mut lang())
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .arg("gfx-info")
+        .current_dir(&app)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "gitfx: out-of-tree native extension ok",
+        ));
+}

@@ -10,7 +10,7 @@
 //!   first through the lazily-seeding facade — a scheduling race, not a guarantee.
 //! * If registration *installed*, every binary composing its own extension set (`install_with_extras`
 //!   in `noeta-conformance`'s `extern_identity`/`typed_call_seam`, `noeta-cli`'s doc samples,
-//!   `noeta-para-p2p`'s conformance) would find std already installed and panic in `install`.
+//!   an out-of-tree package's conformance) would find std already installed and panic in `install`.
 //!
 //! This is its own integration target, so it owns a fresh process and can observe the
 //! pre-first-lookup state — which is exactly what a `#[cfg(test)]` unit test inside a shared test

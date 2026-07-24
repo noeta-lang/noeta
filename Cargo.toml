@@ -54,9 +54,6 @@ noeta-stdlib = { path = "crates/noeta-stdlib" }
 # Native-extension ABI (P-NATIVE): the contract + dep-free primitives, split out of noeta-stdlib so
 # the batteries (crypto/uuid/json) don't ride the ABI. noeta-stdlib re-exports it (core/std-style).
 noeta-ext-abi = { path = "crates/noeta-ext-abi" }
-# The real p2panda transport for `para.p2p` (para-namespace F2b), extracted out of noeta-host-real so
-# the iroh/QUIC tree rides with the extension, not the CLI runtime. Depends only on noeta-ext-abi.
-noeta-para-p2p-net = { path = "crates/noeta-para-p2p-net" }
 noeta-html = { path = "crates/noeta-html" }
 noeta-css = { path = "crates/noeta-css" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
@@ -79,19 +76,12 @@ noeta-playground = { path = "crates/noeta-playground" }
 noeta-wasm-serve = { path = "crates/noeta-wasm-serve" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
-# The `para.db` native driver + migration engine. Depended on directly by the CLI so `noeta migrate`
-# can open a driver and run the migration engine without the composed toolchain; the package's native
-# entry crate re-exports its `NOETA_EXTENSIONS` for the runtime registry.
-noeta-para-db = { path = "crates/noeta-para-db" }
 # The reactive extension **contract** (capability-broker seam): the trait an out-of-tree reactive-node
 # extension (`para.synced`) programs against and the in-tree engine (`noeta-stdlib::reactive`)
 # implements — reached per-run via `noeta_ext_abi::capability::<dyn ReactiveSource>`. Tiny: deps only
 # noeta-ext-abi (NativeCtx/Retained) + noeta-reactive (NodeId). Neither engine internals nor consumer
 # node types cross it.
 noeta-reactive-abi = { path = "crates/noeta-reactive-abi" }
-# M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,
-# the data-convergence layer of the local-first stack (§9.15), wrapped by `std.crdt`.
-noeta-crdt = { path = "crates/noeta-crdt" }
 # M2 editor tooling: the shared IDE engine (MCP M5) — DocumentStore + resolve/completion/signature/
 # symbols over the noeta-db salsa graph, wire-protocol-free so `noeta lsp` and `noeta mcp` both
 # adapt over the one implementation.

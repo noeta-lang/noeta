@@ -43,9 +43,9 @@ pub fn shutdown_notify() -> std::sync::Arc<Notify> {
 #[cfg(feature = "telemetry")]
 mod telemetry;
 mod ws;
-// Real p2p transport (p2p P3) — the p2panda-net node + its group encryption — lives in the leaf
-// crate `noeta-para-p2p-net` (para-namespace F2b). Post-F2b `RealHost` no longer owns it (the
-// `para.p2p` extension does), so this crate depends on neither the leaf crate nor the p2panda tree;
+// Real p2p transport (p2p P3) — the p2panda-net node + its group encryption — ships with the
+// out-of-tree para-p2p package (para-namespace F2b). Post-F2b `RealHost` no longer owns it (the
+// `para.p2p` extension does), so this crate depends on neither that crate nor the p2panda tree;
 // `RealHost` only carries the p2p app-id config it surfaces via `P2pProvider::real_p2p`.
 
 use compact_str::CompactString;

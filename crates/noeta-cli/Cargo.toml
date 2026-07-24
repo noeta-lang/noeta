@@ -75,10 +75,6 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 # The hermetic Sigstore (test CA/CT/Rekor) the keyless publish e2e mints against (Phase 5, K4).
 noeta-pm = { workspace = true, features = ["keyless-test-fixtures"] }
-# The first-party non-default `para.p2p` extension — the doc-samples gate registers it in-process so
-# `docs/Local-First-and-P2P.md`'s `para.*` samples are validated against real signatures (a single
-# `noeta run` sees only std).
-noeta-para-p2p = { path = "../noeta-para-p2p" }
 # The advisory-feed e2e signs a mock feed the client verifies (namespace-protection #1).
 ed25519-dalek = { workspace = true }
 

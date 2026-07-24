@@ -99,7 +99,7 @@ impl crate::host::P2p for P2pBroker {
 }
 
 /// A shareable, `Send` handle to a **P2p backend** — either this loopback [`P2pBroker`] or the real
-/// node in `noeta-para-p2p-net` (para-namespace F2b). Both implement [`crate::host::P2p`]; the
+/// p2panda node shipped with the out-of-tree para-p2p package (para-namespace F2b). Both implement [`crate::host::P2p`]; the
 /// `para.p2p` extension picks which at creation (by the host's `real_p2p()` config) and holds one in
 /// per-run ctx state. It lives behind `Arc<Mutex<…>>` because the async `p2p.receive` leaf
 /// ([`P2pReceiveIo`]) is `Send` while ctx state is `Rc`-based — the `Arc` is what crosses into the
