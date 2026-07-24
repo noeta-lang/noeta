@@ -814,7 +814,7 @@ impl<'m> Vm<'m> {
                                 if ext_mod.deep_marshal {
                                     v.to_native_deep()
                                 } else {
-                                    marshal_native_arg(v)
+                                    marshal_native_arg(v, reg)
                                 }
                             })
                             .collect();
@@ -885,6 +885,7 @@ impl<'m> Vm<'m> {
                                 .find_type_qualified(e.type_identity())
                                 .is_some_and(|t| t.deep_marshal)
                         });
+                        let reg = self.reg();
                         let nargs: Vec<noeta_stdlib::NativeValue> = args
                             .iter()
                             .map(|r| {
@@ -892,11 +893,10 @@ impl<'m> Vm<'m> {
                                 if deep {
                                     v.to_native_deep()
                                 } else {
-                                    marshal_native_arg(v)
+                                    marshal_native_arg(v, reg)
                                 }
                             })
                             .collect();
-                        let reg = self.reg();
                         let host = &mut *self.persist.host;
                         let out = receiver.with_extern_mut(|e| {
                             reg.dispatch_typed_method(e, method, host, &nargs, recipe)
@@ -1538,7 +1538,10 @@ impl<'m> Vm<'m> {
                                         // the extern-method seam). A user class always resolves
                                         // through the proto table above, so only a genuine native
                                         // class reaches here. Left uncached like the field path.
-                                        if self.reg().find_class_method(&shape.name, method).is_some()
+                                        if self
+                                            .reg()
+                                            .find_class_method(&shape.name, method)
+                                            .is_some()
                                         {
                                             let arg_values = ArgBuf::collect(args, regs, fbase);
                                             let result = self.call_native_class_method(

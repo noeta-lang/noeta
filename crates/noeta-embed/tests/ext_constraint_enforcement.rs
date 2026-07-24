@@ -23,7 +23,7 @@ use noeta_embed::{Error, Session};
 use noeta_ext_abi::registry::{
     BundleFn, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout, EnumBacking,
     ExtBundle, ExtClass, ExtDerive, ExtDeriveMethod, ExtEnum, ExtField, ExtFn, ExtModule, ExtTier,
-    ExtTrait, ExtTraitMethod, ExtType, ExtVariant, Extension, NativeOut, NativeValue,
+    ExtTrait, ExtTraitMethod, ExtType, ExtVariant, Extension, FieldedKind, NativeOut, NativeValue,
     PackedConstraint, RetTy, Scalar, SigType, TierSite, VariantValue,
 };
 use noeta_ext_abi::{CtxError, CtxOut, ErrorKind, Host, Slot, StdError};
@@ -105,6 +105,7 @@ fn kern_dispatch(
                 ("tag".to_string(), NativeOut::Scalar(Scalar::Int(0))),
                 ("secret".to_string(), NativeOut::Scalar(Scalar::Int(0))),
             ],
+            kind: FieldedKind::Class,
         }),
         _ => Err(StdError {
             kind: ErrorKind::UnknownName,

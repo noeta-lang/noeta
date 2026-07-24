@@ -10,6 +10,7 @@
 //! registry is process-global — so, like the language guide, the API reference browses with no file
 //! open.
 
+use noeta_stdlib::NominalType;
 use noeta_stdlib::registry;
 
 /// One documented function of a module: its name, its rendered signature, and its prose (empty when

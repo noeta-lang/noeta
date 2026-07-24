@@ -131,18 +131,26 @@ fn ext_enum_type_info(en: &noeta_ext_abi::registry::ExtEnum) -> TypeInfo {
     }
 }
 
-/// Build the compiler's constructible-type record for a native-declared class (native-extensibility
-/// S2), so `Point { x: 1, y: 2 }` lowers to `MakeStruct` with a **class-kind** shape exactly like a
-/// `.noe` class. Field order comes straight from the [`ExtClass`] (the same order the checker seeds
-/// and a native `NativeOut::Instance` supplies), so a source-constructed instance and a
-/// native-constructed one share the layout and interchange. A native class declares no methods here
-/// (this slice's classes are field + destructor only) and no `.noe` `destruct` block — its
-/// destructor is the extern-handle field's Rust `Drop`, run by the collector on free.
-fn ext_class_type_info(cl: &noeta_ext_abi::registry::ExtClass) -> TypeInfo {
+/// Build the compiler's constructible-type record for a native-declared **fielded type** (a class
+/// or a value struct), so `Point { x: 1, y: 2 }` lowers to `MakeStruct` with the right-kind shape
+/// exactly like a `.noe` class/struct. Field order comes straight from the [`ExtFielded`] (the same
+/// order the checker seeds and a native `NativeOut::Instance` supplies), so a source-constructed
+/// instance and a native-constructed one share the layout and interchange. The [`FieldedKind`]
+/// discriminant selects the shape kind: a **class** gets a class-kind shape (reference identity,
+/// destructor via its extern-handle field's Rust `Drop`); a **struct** gets a struct-kind shape, so
+/// the object model derives structural equality and value semantics automatically. A native fielded
+/// type declares no methods here and no `.noe` `destruct` block.
+fn ext_fielded_type_info(cl: &noeta_ext_abi::registry::ExtFielded) -> TypeInfo {
     let fields = cl.fields.iter().map(|f| f.name.to_string()).collect();
-    TypeInfo::Class {
-        fields,
-        fns: HashMap::new(),
+    match cl.kind {
+        noeta_ext_abi::FieldedKind::Class => TypeInfo::Class {
+            fields,
+            fns: HashMap::new(),
+        },
+        noeta_ext_abi::FieldedKind::Struct => TypeInfo::Struct {
+            fields,
+            fns: HashMap::new(),
+        },
     }
 }
 
@@ -1148,14 +1156,25 @@ impl ModuleCompiler {
                                         .insert(imported.name.clone(), ext_enum_type_info(en));
                                 }
                             }
-                            // A native class (`use geo.Point`, native-extensibility S2): register it
-                            // as a **constructible** class-kind type handle keyed by the imported
-                            // short name, so `Point { … }` lowers exactly like a `.noe` class. The
-                            // registry (keyed by qualified identity) is the single source of fields.
-                            UseKind::ExtClass(qualified) => {
-                                if let Some(cl) = self.registry.find_class_qualified(&qualified) {
+                            // A native **fielded type** — a class (`use geo.Handle`,
+                            // native-extensibility S2) or a value struct (`use geo.Point`, fielded
+                            // unification): register it as a **constructible** type handle keyed by
+                            // the imported short name, so `Handle { … }` / `Point { … }` lowers
+                            // exactly like a `.noe` class/struct. The registry (keyed by qualified
+                            // identity) is the single source of fields; `ext_fielded_type_info`
+                            // selects the class-kind or struct-kind shape off `ExtFielded::kind`.
+                            UseKind::ExtClass(qualified) | UseKind::ExtStruct(qualified) => {
+                                if let Some(cl) = self.registry.resolve_fielded(&qualified) {
+                                    // A native value **struct** always compares structurally — record
+                                    // its imported (runtime shape) name so `MakeStruct` builds the
+                                    // shape with `structural_eq = true`, exactly as a `.noe` struct
+                                    // declaration does above. A native class stays identity (`==` is
+                                    // reference), so it is NOT added.
+                                    if cl.kind == noeta_ext_abi::FieldedKind::Struct {
+                                        self.structural_eq_types.insert(imported.name.clone());
+                                    }
                                     self.types
-                                        .insert(imported.name.clone(), ext_class_type_info(cl));
+                                        .insert(imported.name.clone(), ext_fielded_type_info(cl));
                                 }
                             }
                             _ => {

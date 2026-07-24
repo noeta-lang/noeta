@@ -1845,14 +1845,20 @@ impl Interpreter {
                         methods: HashMap::new(),
                     }))
                 }
-                // A native class (`use geo.Point`, native-extensibility S2): bind the imported short
-                // name to a **constructible** class `TypeDef` — fields (in registry order),
-                // `structural_eq = false` (reference identity), `is_struct = false`, non-opaque — so
-                // `Point { … }` constructs a real class `Object` exactly like a `.noe` class. The
-                // registry (keyed by qualified identity) is the single source of fields, and the def
-                // carries the **short** name a value stamps; matches the VM's `TypeInfo::Class` seed.
-                UseKind::ExtClass(qualified) if reg.find_class_qualified(&qualified).is_some() => {
-                    let cl = reg.find_class_qualified(&qualified).unwrap();
+                // A native **fielded type** (`use geo.Handle` / `use geo.Point`, native-extensibility
+                // S2 + fielded unification): bind the imported short name to a **constructible**
+                // `TypeDef` — fields in registry order, non-opaque — so `Handle { … }` / `Point { … }`
+                // constructs a real `Object` exactly like a `.noe` class/struct. The `FieldedKind`
+                // selects the semantics: a class is a reference type (`is_struct = false`,
+                // `structural_eq = false` → identity); a struct is a value type (`is_struct = true`,
+                // `structural_eq = true` → structural `==`, copy-on-assign). The registry (keyed by
+                // qualified identity) is the single source of fields, and the def carries the **short**
+                // name a value stamps; matches the VM's `ext_fielded_type_info` seed.
+                UseKind::ExtClass(qualified) | UseKind::ExtStruct(qualified)
+                    if reg.resolve_fielded(&qualified).is_some() =>
+                {
+                    let cl = reg.resolve_fielded(&qualified).unwrap();
+                    let is_struct = cl.kind == noeta_stdlib::FieldedKind::Struct;
                     Value::Type(Rc::new(TypeDef {
                         name: cl.name.to_string(),
                         fields: cl
@@ -1864,8 +1870,8 @@ impl Interpreter {
                             .collect(),
                         methods: HashMap::new(),
                         destructor: None,
-                        is_struct: false,
-                        structural_eq: false,
+                        is_struct,
+                        structural_eq: is_struct,
                         key_capable: std::cell::Cell::new(false),
                         derives_comparable: false,
                         derives_tojson: false,
@@ -3269,7 +3275,7 @@ impl Interpreter {
             let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
                 args.iter().map(value_to_native_deep).collect()
             } else {
-                args.iter().map(marshal_native_arg).collect()
+                args.iter().map(|a| marshal_native_arg(a, reg)).collect()
             };
             return match reg.dispatch(name, func, &mut *self.host, &nargs) {
                 // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
@@ -3325,7 +3331,7 @@ impl Interpreter {
         let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
             args.iter().map(value_to_native_deep).collect()
         } else {
-            args.iter().map(marshal_native_arg).collect()
+            args.iter().map(|a| marshal_native_arg(a, reg)).collect()
         };
         // `cell` is an independent `Rc`, so borrowing it and `self.host` at once is fine (the
         // FileHandle discipline).
@@ -3358,23 +3364,43 @@ impl Interpreter {
     ) -> Eval<Value> {
         // Bound once (IR3): `&'static`, so it survives the `&mut self` host borrow below.
         let reg = self.reg();
+        // Resolve over BOTH classes and structs (fielded unification) — a value-struct method
+        // dispatches through the same seam; only in-place mutation (`InstanceUpdate`) is class-only.
         let class = match recv {
-            Value::Object(obj) => reg.resolve_class(obj.def.name()),
+            Value::Object(obj) => reg.resolve_fielded(obj.def.name()),
             _ => None,
         };
         let Some(class) = class else {
             return Err(self.runtime_error(
                 DiagnosticCode::UnknownName,
                 span,
-                format!("no native class method `{name}`"),
+                format!("no native fielded-type method `{name}`"),
             ));
         };
-        let recv_native = marshal_native_arg(recv);
-        let nargs: Vec<noeta_stdlib::NativeValue> = args.iter().map(marshal_native_arg).collect();
+        let recv_native = marshal_native_arg(recv, reg);
+        let nargs: Vec<noeta_stdlib::NativeValue> =
+            args.iter().map(|a| marshal_native_arg(a, reg)).collect();
         match (class.dispatch)(&recv_native, name, &mut *self.host, &nargs) {
-            // Boundary 1: an in-place instance mutation. Apply each write to the LIVE receiver's slot
-            // (in-place, so aliases see it; the displaced value drops → its destructor fires), then
-            // materialize the method's own `ret`. Mirrors the VM's `call_native_class_method`.
+            // A **struct** (value type) has no in-place mutation: reject an `InstanceUpdate` from a
+            // struct dispatch as a runtime error rather than silently mutating a value. Mirrors the
+            // VM's guard, so both backends agree.
+            Ok(noeta_stdlib::NativeOut::InstanceUpdate { .. })
+                if class.kind == noeta_stdlib::FieldedKind::Struct =>
+            {
+                Err(self.runtime_error(
+                    DiagnosticCode::ImmutableField,
+                    span,
+                    format!(
+                        "native struct method `{name}` returned an in-place mutation, but a struct \
+                         `{}` is a value type — return a new value instead",
+                        class.name
+                    ),
+                ))
+            }
+            // Boundary 1: an in-place instance mutation (class only). Apply each write to the LIVE
+            // receiver's slot (in-place, so aliases see it; the displaced value drops → its
+            // destructor fires), then materialize the method's own `ret`. Mirrors the VM's
+            // `call_native_class_method`.
             Ok(noeta_stdlib::NativeOut::InstanceUpdate { writes, ret }) => {
                 let obj = match recv {
                     Value::Object(obj) => obj,
@@ -5869,7 +5895,10 @@ fn packed_key_fields(object: &ObjectValue) -> Option<Vec<noeta_stdlib::PackedKey
 /// every migrated module call goes through these rather than a per-function `read_*`. The
 /// scalar/host modules use only the scalar and string shapes; richer shapes are added as the
 /// modules that need them migrate. Mirrors the VM-side projection.
-fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
+fn marshal_native_arg(
+    value: &Value,
+    reg: &'static noeta_stdlib::registry::Registry,
+) -> noeta_stdlib::NativeValue {
     use noeta_stdlib::{NativeValue, Scalar};
     match value {
         Value::Int(n) => NativeValue::Scalar(Scalar::Int(*n)),
@@ -5883,8 +5912,9 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
         Value::Extern(e) => NativeValue::Extern(e.borrow().clone()),
         // A class instance crossing INTO a dispatch (native-extensibility S2): the full instance
         // (class name + `(field, value)` pairs in slot order, each marshalled), so a native fn can
-        // receive a native class value a program constructed. Mirrors the VM's projection; a value
-        // `struct` and an opaque import take the scalar/opaque paths below instead.
+        // receive a native class value a program constructed. Mirrors the VM's projection. This arm
+        // is UNCHANGED (`!is_struct && !opaque`) so a user `.noe` class marshals here exactly as
+        // before; a native value-struct is handled by the next arm.
         Value::Object(obj) if !obj.def.is_struct && !obj.def.opaque => {
             let slots = obj.slots.borrow();
             let fields = obj
@@ -5892,7 +5922,29 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
                 .fields
                 .iter()
                 .map(|f| f.name.clone())
-                .zip(slots.iter().map(marshal_native_arg))
+                .zip(slots.iter().map(|s| marshal_native_arg(s, reg)))
+                .collect();
+            NativeValue::Instance {
+                class: obj.def.name().to_string(),
+                fields,
+            }
+        }
+        // A **native value-struct** crossing INTO a dispatch (fielded unification): a struct-kind
+        // object whose type name resolves to a registered native fielded type. It marshals as the
+        // full `Instance`, so a native method/fn receives it exactly like a class. The registry gate
+        // keeps this SEPARATE from a user value-struct (a `Vec3` is `is_struct` too but does NOT
+        // resolve in the registry, so it falls through to the all-scalar `Object` arm below — no
+        // Vec3 regression).
+        Value::Object(obj)
+            if obj.def.is_struct && reg.resolve_fielded(obj.def.name()).is_some() =>
+        {
+            let slots = obj.slots.borrow();
+            let fields = obj
+                .def
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .zip(slots.iter().map(|s| marshal_native_arg(s, reg)))
                 .collect();
             NativeValue::Instance {
                 class: obj.def.name().to_string(),
@@ -5923,7 +5975,7 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
             enum_name: e.enum_name.clone(),
             variant: e.variant.clone(),
             variant_index: e.variant_index as u32,
-            fields: e.data.iter().map(marshal_native_arg).collect(),
+            fields: e.data.iter().map(|v| marshal_native_arg(v, reg)).collect(),
         },
         other => NativeValue::Opaque(other.type_name()),
     }
@@ -6091,13 +6143,19 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             variant_index: variant_index as usize,
             reflect: None,
         })),
-        // A native-declared class instance (native-extensibility S2): a REAL reference `Object` with
-        // a fresh class `TypeDef` (`structural_eq = false` → `==` is identity, `is_struct = false`),
-        // so it aliases and participates in the cycle collector like a `.noe` class. Fields
-        // materialize recursively in declared slot order (the native-state field is a
-        // `NativeOut::Extern` whose `Drop` is the destructor). Differential-identical to the VM's
-        // class-kind shape, and interchangeable with a source-constructed instance.
-        NativeOut::Instance { class, fields } => {
+        // A native-declared **fielded-type** instance (native-extensibility S2, unified): a REAL
+        // `Object` whose `TypeDef` kind comes from the carried `FieldedKind`. A `Class` gets a class
+        // `TypeDef` (`structural_eq = false` → `==` is identity, `is_struct = false`; aliases + cycle
+        // participation; its extern-handle field's `Drop` is the destructor). A `Struct` gets a value
+        // `TypeDef` (`is_struct = true`, `structural_eq = true` → structural `==`, value semantics).
+        // Fields materialize recursively in declared slot order. Differential-identical to the VM's
+        // shape kind, and interchangeable with a source-constructed instance.
+        NativeOut::Instance {
+            class,
+            fields,
+            kind,
+        } => {
+            let is_struct = matches!(kind, noeta_stdlib::FieldedKind::Struct);
             let field_specs = fields
                 .iter()
                 .map(|(n, _)| FieldSpec { name: n.clone() })
@@ -6111,8 +6169,8 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 fields: field_specs,
                 methods: HashMap::new(),
                 destructor: None,
-                is_struct: false,
-                structural_eq: false,
+                is_struct,
+                structural_eq: is_struct,
                 key_capable: std::cell::Cell::new(false),
                 derives_comparable: false,
                 derives_tojson: false,

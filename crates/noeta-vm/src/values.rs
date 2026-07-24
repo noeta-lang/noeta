@@ -21,7 +21,10 @@ use crate::*;
 /// migrated module call goes through these rather than a per-function `read_*`. The scalar/host
 /// modules use only the scalar and string shapes; richer shapes are added as the modules that
 /// need them migrate. Mirrors the tree-walker's projection.
-pub(crate) fn marshal_native_arg(value: Value) -> noeta_stdlib::NativeValue {
+pub(crate) fn marshal_native_arg(
+    value: Value,
+    reg: &'static noeta_stdlib::registry::Registry,
+) -> noeta_stdlib::NativeValue {
     use noeta_stdlib::{NativeValue, Scalar};
     if let Some(n) = value.as_int() {
         NativeValue::Scalar(Scalar::Int(n))
@@ -45,6 +48,7 @@ pub(crate) fn marshal_native_arg(value: Value) -> noeta_stdlib::NativeValue {
         // receive a native class value a program constructed. Mirrors the tree-walker's projection;
         // fields marshal recursively. (An extern-handle field would `clone_box`, so a class holding
         // native state is not designed to cross arg-IN — its methods read it by reference instead.)
+        // A user `.noe` class marshals here too (unconditional on `ShapeKind::Class`), unchanged.
         let shape = value.shape().expect("a class value has a shape");
         let slots = value.slots().unwrap_or_default();
         let fields = shape
@@ -52,7 +56,30 @@ pub(crate) fn marshal_native_arg(value: Value) -> noeta_stdlib::NativeValue {
             .iter()
             .cloned()
             .zip(slots)
-            .map(|(name, slot)| (name, marshal_native_arg(slot)))
+            .map(|(name, slot)| (name, marshal_native_arg(slot, reg)))
+            .collect();
+        NativeValue::Instance {
+            class: shape.name.clone(),
+            fields,
+        }
+    } else if value
+        .shape()
+        .is_some_and(|s| s.kind == ShapeKind::Struct && reg.resolve_fielded(&s.name).is_some())
+    {
+        // A **native value-struct** crossing INTO a dispatch (fielded unification): a struct-kind
+        // object whose shape name resolves to a registered native fielded type. It marshals as the
+        // full `Instance` (fields by name), so a native method/fn receives it exactly like a class.
+        // The registry gate is what keeps this SEPARATE from a user value-struct (a `Vec3`): a user
+        // struct is `ShapeKind::Struct` too but does NOT resolve in the registry, so it falls
+        // through to the all-scalar `Object` arm below, unchanged (no Vec3 regression).
+        let shape = value.shape().expect("a struct value has a shape");
+        let slots = value.slots().unwrap_or_default();
+        let fields = shape
+            .fields
+            .iter()
+            .cloned()
+            .zip(slots)
+            .map(|(name, slot)| (name, marshal_native_arg(slot, reg)))
             .collect();
         NativeValue::Instance {
             class: shape.name.clone(),
@@ -84,7 +111,7 @@ pub(crate) fn marshal_native_arg(value: Value) -> noeta_stdlib::NativeValue {
         let shape = value.shape().expect("an enum value has a shape");
         let fields = value
             .enum_data()
-            .map(|d| d.iter().map(|&e| marshal_native_arg(e)).collect())
+            .map(|d| d.iter().map(|&e| marshal_native_arg(e, reg)).collect())
             .unwrap_or_default();
         NativeValue::Variant {
             enum_name: shape.name.clone(),
@@ -215,15 +242,25 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
             );
             Value::enum_value(shape, fields.into_iter().map(materialize_native).collect())
         }
-        // A native-declared class instance (native-extensibility S2): a REAL reference `Object` with
-        // a fresh interned **class-kind** shape (`structural_eq = false` → `==` is identity), so it
-        // participates in the RC + cycle collector and aliases like a `.noe` class. Fields
-        // materialize recursively in the class's declared slot order (the native-state field is a
-        // `NativeOut::Extern` whose `Drop` is the destructor). The shape matches a source-constructed
-        // instance's (`make_record` with `ShapeKind::Class`), so the two interchange.
-        NativeOut::Instance { class, fields } => {
+        // A native-declared **fielded-type** instance (native-extensibility S2, unified): a REAL
+        // `Object` with a fresh interned shape whose kind comes from the carried `FieldedKind`. A
+        // `Class` gets a **class-kind** shape (`structural_eq = false` → `==` is identity; RC + cycle
+        // participation; its extern-handle field's `Drop` is the destructor). A `Struct` gets a
+        // **struct-kind** shape, so `Shape::object` derives `structural_eq = true` → value semantics
+        // (structural `==`, copy-on-assign) automatically. Fields materialize recursively in declared
+        // slot order. The shape matches a source-constructed instance's (the compiler builds the same
+        // kind from `ext_fielded_type_info`), so the two interchange.
+        NativeOut::Instance {
+            class,
+            fields,
+            kind,
+        } => {
+            let shape_kind = match kind {
+                noeta_stdlib::FieldedKind::Class => ShapeKind::Class,
+                noeta_stdlib::FieldedKind::Struct => ShapeKind::Struct,
+            };
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let shape = noeta_object::intern_shape(Shape::object(ShapeKind::Class, &class, names));
+            let shape = noeta_object::intern_shape(Shape::object(shape_kind, &class, names));
             let slots = fields
                 .into_iter()
                 .map(|(_, out)| materialize_native(out))

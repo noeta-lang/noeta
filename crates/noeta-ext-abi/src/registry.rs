@@ -148,18 +148,23 @@ pub enum NativeOut {
         variant_index: u32,
         fields: Vec<NativeOut>,
     },
-    /// A native-declared language **class** instance (native-extensibility S2) — a REAL reference
-    /// `Object` with a **class-kind** shape the backend materializes, NOT a value `struct`
-    /// ([`NativeOut::Struct`]): it has reference identity, participates in the RC + cycle collector,
-    /// and its extern-handle field's `Drop` is its destructor. `class` is the class's **short** name
-    /// (the runtime shape name, matching a source-constructed instance so the two interchange);
-    /// `fields` are its `(name, value)` pairs **in the class's declared slot order**, each itself a
-    /// [`NativeOut`] so a field nests (the native-state field is a [`NativeOut::Extern`] carrying the
-    /// handle). The dispatch names the class by its short name; the checker's qualified identity is a
-    /// separate, compile-time concern (the twin of [`NativeOut::Variant`]).
+    /// A native-declared **fielded-type** instance (native-extensibility S2, unified) — a REAL
+    /// language `Object` the backend materializes with named fields, distinct from an anonymous
+    /// value struct built by a call-site recipe ([`NativeOut::Struct`]). `kind` selects the shape:
+    /// [`FieldedKind::Class`] → a **class-kind** shape (reference identity, RC + cycle participation,
+    /// its extern-handle field's `Drop` as destructor); [`FieldedKind::Struct`] → a **struct-kind**
+    /// shape (structural equality, value/copy semantics — the object model derives it). `class` is
+    /// the type's **short** name (the runtime shape name, matching a source-constructed instance so
+    /// the two interchange); `fields` are its `(name, value)` pairs **in the type's declared slot
+    /// order**, each itself a [`NativeOut`] so a field nests (a class's native-state field is a
+    /// [`NativeOut::Extern`] carrying the handle). Carrying `kind` here keeps materialization
+    /// registry-free and lets both backends pick the identical shape kind from the value itself. The
+    /// dispatch names the type by its short name; the checker's qualified identity is a separate,
+    /// compile-time concern (the twin of [`NativeOut::Variant`]).
     Instance {
         class: String,
         fields: Vec<(String, NativeOut)>,
+        kind: FieldedKind,
     },
     /// A native class **instance method's in-place mutation** (native-extensibility S3 / boundary 1):
     /// the method returns an explicit **write-set** applied to its LIVE receiver, plus the value the
@@ -689,12 +694,17 @@ pub type TypeDispatch = fn(
 /// a [`NativeOut::InstanceUpdate`] write-set (boundary 1) — the backend applies it to the live
 /// receiver's slots. Native-state mutation through an extern-handle field's interior mutability
 /// (Rc/Arc-shared) is also visible without a write-set. Reading a field is served directly.
-pub type ClassDispatch = fn(
+pub type FieldedDispatch = fn(
     recv: &NativeValue,
     method: &str,
     host: &mut dyn Host,
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError>;
+
+/// The pre-unification name for [`FieldedDispatch`]. A native **class** and a native **struct** now
+/// share one fielded-type declaration ([`ExtFielded`]) and therefore one instance-method dispatch;
+/// this alias keeps every `ClassDispatch` reference compiling unchanged.
+pub type ClassDispatch = FieldedDispatch;
 
 /// A type's **higher-order** method dispatch (higher-order-abi H4): like [`TypeDispatch`], but
 /// the receiver and arguments arrive as opaque ctx slots and the body may re-enter the backend —
@@ -823,23 +833,85 @@ impl ExtType {
         typed_dispatch: None,
         docs: &[],
     };
+}
 
-    /// The type's **qualified identity** (`std.id.Uuid`) — `namespace.name`. This is the string the
-    /// checker keys `Type::Named` on and the runtime keys dispatch/`is`/`as` on; [`ExtType::name`]
-    /// is only the human-facing short form.
+/// The **identity quartet** every native declaration shares (audit: it was copy-pasted across
+/// [`ExtType`] / [`ExtEnum`] / [`ExtFielded`] / [`ExtTrait`]). A nominal type's identity is its
+/// qualified `namespace.name`: the string the checker keys `Type::Named` / `symbols.*` on and the
+/// runtime keys dispatch / `is` / `as` / `use`-projection on. [`NominalType::name`] is only the
+/// short human-facing form. Implementing `name()` + `namespace()` yields both projections once.
+pub trait NominalType {
+    /// The **short display name** (`Uuid`, `SameSite`, `Handle`, `Widget`).
+    fn name(&self) -> &str;
+    /// The namespace this declaration lives under (`std.id`, `std.http`, `res`, `fx`).
+    fn namespace(&self) -> &str;
+    /// The **qualified identity** (`std.id.Uuid`) — `namespace.name`.
+    fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace(), self.name())
+    }
+    /// Whether `q` **is** this declaration's qualified identity — [`NominalType::qualified`]
+    /// equality without building the `String`. Registry lookups run this per candidate per probe,
+    /// and the checker probes per imported-type annotation/member on the per-keystroke LSP path, so
+    /// the comparison must not allocate (audit-3 Finding 12).
+    fn is_qualified(&self, q: &str) -> bool {
+        qualified_matches(self.namespace(), self.name(), q)
+    }
+}
+
+/// The allocation-free `namespace.name == q` test, the single body every [`NominalType`] and the
+/// projected [`Nominal`] share.
+pub fn qualified_matches(namespace: &str, name: &str, q: &str) -> bool {
+    q.len() == namespace.len() + 1 + name.len()
+        && q.as_bytes()[namespace.len()] == b'.'
+        && q.starts_with(namespace)
+        && q.ends_with(name)
+}
+
+/// Which native declaration a projected [`Nominal`] came from — the lightweight discriminant the
+/// `use`-projection paths carry instead of the concrete `&ExtType`/`&ExtEnum`/… . A fielded type
+/// projects as [`NominalKind::Class`] or [`NominalKind::Struct`] off its [`ExtFielded::kind`], so
+/// `classify_use` maps it to the right [`UseKind`] without a second lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NominalKind {
+    Type,
+    Enum,
+    Class,
+    Struct,
+    Trait,
+}
+
+/// A **lightweight projection** of one native declaration's identity — its short `name` +
+/// `namespace` (both `&'static`, borrowed from the declaration, so the stream allocates nothing)
+/// plus which [`NominalKind`] it is. The single item type [`Registry::nominal_types`] yields, so
+/// `namespace_types` / `classify_use` / `resolve_namespace_child` walk one stream instead of four
+/// parallel per-kind loops. Identity probing reuses the shared allocation-free
+/// [`Nominal::is_qualified`].
+#[derive(Debug, Clone, Copy)]
+pub struct Nominal {
+    pub name: &'static str,
+    pub namespace: &'static str,
+    pub kind: NominalKind,
+}
+
+impl Nominal {
+    /// The **qualified identity** (`namespace.name`) — built on demand (the projection stream never
+    /// allocates; only a materialized output tuple does).
     pub fn qualified(&self) -> String {
         format!("{}.{}", self.namespace, self.name)
     }
-
-    /// Whether `q` **is** this type's qualified identity — [`ExtType::qualified`] equality without
-    /// building the `String`. Registry lookups run this per candidate type per probe, and the
-    /// checker probes per imported-type annotation/member on the per-keystroke LSP path, so the
-    /// comparison must not allocate (audit-3 Finding 12).
+    /// Whether `q` is this projection's qualified identity — allocation-free, so the checker's
+    /// per-keystroke `use` resolution stays alloc-free across the whole candidate stream.
     pub fn is_qualified(&self, q: &str) -> bool {
-        q.len() == self.namespace.len() + 1 + self.name.len()
-            && q.as_bytes()[self.namespace.len()] == b'.'
-            && q.starts_with(self.namespace)
-            && q.ends_with(self.name)
+        qualified_matches(self.namespace, self.name, q)
+    }
+}
+
+impl NominalType for ExtType {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn namespace(&self) -> &str {
+        self.namespace
     }
 }
 
@@ -900,21 +972,6 @@ impl ExtEnum {
         backing: EnumBacking::None,
     };
 
-    /// The enum's **qualified identity** (`std.http.SameSite`) — `namespace.name`, the string the
-    /// checker keys `symbols.enums`/`Type::Named` on. [`ExtEnum::name`] is only the short form.
-    pub fn qualified(&self) -> String {
-        format!("{}.{}", self.namespace, self.name)
-    }
-
-    /// Whether `q` is this enum's qualified identity — allocation-free, mirroring
-    /// [`ExtType::is_qualified`] (probed per candidate on the per-keystroke resolution path).
-    pub fn is_qualified(&self, q: &str) -> bool {
-        q.len() == self.namespace.len() + 1 + self.name.len()
-            && q.as_bytes()[self.namespace.len()] == b'.'
-            && q.starts_with(self.namespace)
-            && q.ends_with(self.name)
-    }
-
     /// The variant named `variant`, with its declaration index, if any.
     pub fn variant(&self, variant: &str) -> Option<(u32, &'static ExtVariant)> {
         self.variants
@@ -922,6 +979,15 @@ impl ExtEnum {
             .enumerate()
             .find(|(_, v)| v.name == variant)
             .map(|(i, v)| (i as u32, v))
+    }
+}
+
+impl NominalType for ExtEnum {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn namespace(&self) -> &str {
+        self.namespace
     }
 }
 
@@ -943,59 +1009,99 @@ pub enum VariantValue {
     Int(i64),
 }
 
-// --- Native-declared classes (native-extensibility S2) -------------------------------------------
+// --- Native-declared fielded types: classes + structs (native-extensibility S2, unified) --------
 
-/// A first-class language **class** contributed by an extension (native-extensibility S2): a TRUE
-/// reference type — reference identity (two bindings alias, `==` is identity), full participation in
-/// the RC + cycle collector, native state, a **destructor** (native Rust cleanup on collection),
-/// AND language-visible fields the language reads, mutates, and constructs. Unlike an [`ExtType`]
-/// (an opaque handle), a class exposes named fields; unlike a value `struct` ([`NativeOut::Struct`]),
-/// it has identity and a destructor.
+/// Whether a native [`ExtFielded`] type is a **class** (reference type) or a **struct** (value
+/// type) — the one load-bearing bit that distinguishes the two. A class and a struct are the same
+/// shape (named fields, methods, one dispatch); they differ only in semantics, and that difference
+/// is derived from this discriminant everywhere:
 ///
-/// **Representation** (decided S2): a native class value is a real language `Object` with a
-/// class-kind shape — so identity, reference semantics, RC, and cycle participation come from the
-/// object model unchanged. Native state + destructor ride on a **field typed as an extern handle**
-/// (an [`ExtType`] whose Rust `Drop` is the cleanup): when the object is collected — last reference
-/// or destructor-free cycle reclamation — that field's box is dropped and its `Drop` runs. No
-/// host-coupled finalizer is involved (a deliberate follow-up, not S2).
+/// - [`FieldedKind::Class`] — reference identity (two bindings alias, `==` is identity), full RC +
+///   cycle participation, native state + a **destructor** (an extern-handle field's `Drop`), and
+///   in-place mutation ([`NativeOut::InstanceUpdate`]). Seeded as `TypeKind::Class`; materialized
+///   with a `class`-kind shape (`structural_eq = false`).
+/// - [`FieldedKind::Struct`] — a **value** type: structural equality (`==` compares fields),
+///   copy-on-assign, no identity/destructor/cycle, and **no in-place mutation** (a method that
+///   "mutates" returns a new value; a dispatch returning `InstanceUpdate` is a runtime error).
+///   Seeded as `TypeKind::Struct`; materialized with a `struct`-kind shape (`structural_eq = true`).
 ///
-/// Its **identity** is the qualified `namespace.name` ([`ExtClass::qualified`], like [`ExtType`] /
-/// [`ExtEnum`]) — what the checker keys `symbols.records`/`Type::Named` on, so a native
+/// `Class` is the default ([`ExtFielded::DEFAULTS`]) so every pre-unification `ExtClass` fixture
+/// keeps its meaning unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldedKind {
+    Class,
+    Struct,
+}
+
+/// A first-class **fielded type** contributed by an extension (native-extensibility S2, unified): a
+/// real language type with language-visible named fields the language reads, mutates (class only),
+/// and constructs. One struct with a [`FieldedKind`] discriminant covers both a reference **class**
+/// and a value **struct** — see [`FieldedKind`] for the semantic split. Unlike an [`ExtType`] (an
+/// opaque handle), a fielded type exposes named fields.
+///
+/// **Representation:** a native fielded value is a real language `Object`. A `Class`-kind value gets
+/// a class-kind shape — identity, reference semantics, RC, and cycle participation from the object
+/// model unchanged; its native state + destructor ride on a **field typed as an extern handle** (an
+/// [`ExtType`] whose Rust `Drop` is the cleanup). A `Struct`-kind value gets a struct-kind shape, so
+/// the object model derives `structural_eq` and value semantics automatically.
+///
+/// Its **identity** is the qualified `namespace.name` ([`NominalType::qualified`], like [`ExtType`]
+/// / [`ExtEnum`]) — what the checker keys `symbols.records`/`Type::Named` on, so a native
 /// `res.Handle` never collides with a user's own `Handle`. Its **runtime** shape carries the short
-/// [`ExtClass::name`] (the display form and what a constructed/materialized value stamps).
+/// [`ExtFielded::name`] (the display form and what a constructed/materialized value stamps).
+///
+/// Authors declare a class through [`Extension::classes`] and a struct through
+/// [`Extension::structs`]; both produce this shared type, distinguished by [`ExtFielded::kind`].
+/// The convenience aliases [`ExtClass`] (defaults to `Class`) and [`ExtStruct`] name it at each
+/// hook, and [`ExtFielded::DEFAULTS`] / [`ExtFielded::STRUCT_DEFAULTS`] fill the respective kind.
 #[derive(Debug, Clone, Copy)]
-pub struct ExtClass {
-    /// The **short display name** (`Handle`). Identity is the qualified [`ExtClass::qualified`].
+pub struct ExtFielded {
+    /// The **short display name** (`Handle`, `Point`). Identity is [`NominalType::qualified`].
     pub name: &'static str,
-    /// The namespace this class lives under (`res`) — its qualified identity is `namespace.name`,
+    /// The namespace this type lives under (`res`) — its qualified identity is `namespace.name`,
     /// mirroring [`ExtType::namespace`] / [`ExtEnum::namespace`].
     pub namespace: &'static str,
-    /// The class's fields in **declaration (slot) order** — the order a native constructor supplies
+    /// The type's fields in **declaration (slot) order** — the order a native constructor supplies
     /// values in ([`NativeOut::Instance`]) and the order the object's slots take. Each states its
     /// name, type, visibility, and mutability; the checker seeds them into `symbols.records`
     /// (types), `symbols.private_fields` (visibility), and `symbols.mut_fields` (mutability).
     pub fields: &'static [ExtField],
     /// Instance-method signatures (native-extensibility S3 / Pass 2a) — same vocabulary as an
-    /// [`ExtType`]'s `methods`. A call `h.describe()` on a native class instance routes to
-    /// [`ExtClass::dispatch`]; the checker types the call off these signatures. Default empty (a
-    /// fields-only class, the S2 shape). Names are disjoint from the class's field names (a method
-    /// wins over a field, the checker's rule).
+    /// [`ExtType`]'s `methods`. A call `h.describe()` on a native fielded instance routes to
+    /// [`ExtFielded::dispatch`]; the checker types the call off these signatures. Default empty (a
+    /// fields-only type). Names are disjoint from the type's field names (a method wins over a
+    /// field, the checker's rule).
     pub methods: &'static [ExtFn],
     /// The one shared instance-method dispatch (native-extensibility S3 / Pass 2a) — the
-    /// [`ExtClass`] twin of [`ExtType::dispatch`]. Receives the instance marshalled to a
-    /// [`NativeValue::Instance`] plus the host seam; both backends route a class-kind object's
-    /// method call here (their `CallMethod` Object arm, on a native-class shape). A fields-only
-    /// class never reaches it, so the default reports an unregistered-method misuse.
-    pub dispatch: ClassDispatch,
-    /// The **traits this class declares** (native-extensibility S3 / Pass 2b) — the [`ExtClass`]
-    /// twin of [`ExtType::traits`]. A name matching a native [`ExtTrait`] makes the class satisfy
-    /// that trait: `seed_ext_traits` records it into `user_trait_impls[class_qualified][trait]`, so
-    /// a native class value coerces to `dyn Trait` and its trait-method call dispatches to the
-    /// class's native method (the Pass-2a Object-arm branch). Default empty.
+    /// [`ExtFielded`] twin of [`ExtType::dispatch`]. Receives the instance marshalled to a
+    /// [`NativeValue::Instance`] plus the host seam; both backends route a fielded object's method
+    /// call here (their `CallMethod` Object arm). A fields-only type never reaches it, so the
+    /// default reports an unregistered-method misuse. A `Struct`-kind dispatch that returns
+    /// [`NativeOut::InstanceUpdate`] is a runtime error (value types have no in-place mutation).
+    pub dispatch: FieldedDispatch,
+    /// The **traits this type declares** (native-extensibility S3 / Pass 2b) — the [`ExtFielded`]
+    /// twin of [`ExtType::traits`]. A name matching a native [`ExtTrait`] makes the type satisfy
+    /// that trait: `seed_ext_traits` records it into `user_trait_impls[qualified][trait]`, so a
+    /// native fielded value coerces to `dyn Trait` and its trait-method call dispatches to the
+    /// type's native method (the Pass-2a Object-arm branch). Default empty.
     pub traits: &'static [&'static str],
+    /// Whether this is a reference **class** or a value **struct** — the semantic discriminant. See
+    /// [`FieldedKind`]. Defaults to [`FieldedKind::Class`] so pre-unification `ExtClass` fixtures
+    /// keep their meaning; a struct sets it via [`ExtFielded::STRUCT_DEFAULTS`].
+    pub kind: FieldedKind,
 }
 
-/// One field of an [`ExtClass`]: its name, type, and the two access rules (visibility, mutability)
+/// The pre-unification name for [`ExtFielded`], defaulting (via [`ExtFielded::DEFAULTS`]) to a
+/// [`FieldedKind::Class`]. Keeps every `ExtClass { .. }` / `ExtClass::DEFAULTS` fixture compiling
+/// unchanged, and reads correctly at the [`Extension::classes`] hook.
+pub type ExtClass = ExtFielded;
+
+/// A [`FieldedKind::Struct`]-flavoured spelling of [`ExtFielded`] for the [`Extension::structs`]
+/// hook. It is the same type; a struct fixture fills its discriminant with
+/// `..ExtStruct::STRUCT_DEFAULTS`.
+pub type ExtStruct = ExtFielded;
+
+/// One field of an [`ExtFielded`]: its name, type, and the two access rules (visibility, mutability)
 /// the checker enforces. The native-state/destructor field is an ordinary field whose `ty` names an
 /// extern handle ([`SigType::Named`] of an [`ExtType`]).
 #[derive(Debug, Clone, Copy)]
@@ -1015,10 +1121,11 @@ pub struct ExtField {
     pub is_mut: bool,
 }
 
-impl ExtClass {
+impl ExtFielded {
     /// Literal-shortening defaults (`..ExtClass::DEFAULTS`), mirroring [`ExtEnum::DEFAULTS`]: a
-    /// fieldless, method-less class under `std`.
-    pub const DEFAULTS: ExtClass = ExtClass {
+    /// fieldless, method-less **class** under `std`. `Class` is the default kind, so a pre-unification
+    /// `ExtClass { .. ..ExtClass::DEFAULTS }` fixture keeps its exact meaning.
+    pub const DEFAULTS: ExtFielded = ExtFielded {
         name: "",
         namespace: "std",
         fields: &[],
@@ -1027,26 +1134,29 @@ impl ExtClass {
             Err(StdError {
                 kind: crate::ErrorKind::UnknownName,
                 message: format!(
-                    "internal: no class-method dispatch registered (method `{method}`)"
+                    "internal: no fielded-method dispatch registered (method `{method}`)"
                 ),
             })
         },
         traits: &[],
+        kind: FieldedKind::Class,
     };
 
-    /// The class's **qualified identity** (`res.Handle`) — `namespace.name`, the string the checker
-    /// keys `symbols.records`/`Type::Named` on. [`ExtClass::name`] is only the short form.
-    pub fn qualified(&self) -> String {
-        format!("{}.{}", self.namespace, self.name)
-    }
+    /// Literal-shortening defaults for a value **struct** (`..ExtStruct::STRUCT_DEFAULTS`) — the
+    /// [`ExtFielded::DEFAULTS`] shape with [`FieldedKind::Struct`], the one bit that flips reference
+    /// semantics to value semantics (structural equality, copy-on-assign, no in-place mutation).
+    pub const STRUCT_DEFAULTS: ExtFielded = ExtFielded {
+        kind: FieldedKind::Struct,
+        ..ExtFielded::DEFAULTS
+    };
+}
 
-    /// Whether `q` is this class's qualified identity — allocation-free, mirroring
-    /// [`ExtType::is_qualified`] (probed per candidate on the per-keystroke resolution path).
-    pub fn is_qualified(&self, q: &str) -> bool {
-        q.len() == self.namespace.len() + 1 + self.name.len()
-            && q.as_bytes()[self.namespace.len()] == b'.'
-            && q.starts_with(self.namespace)
-            && q.ends_with(self.name)
+impl NominalType for ExtFielded {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn namespace(&self) -> &str {
+        self.namespace
     }
 }
 
@@ -1111,20 +1221,14 @@ impl ExtTrait {
         namespace: "std",
         methods: &[],
     };
+}
 
-    /// The trait's **qualified identity** (`fx.Widget`) — `namespace.name`, what `classify_use` /
-    /// `namespace_types` project a `use pkg.TheTrait` onto. [`ExtTrait::name`] is only the short form.
-    pub fn qualified(&self) -> String {
-        format!("{}.{}", self.namespace, self.name)
+impl NominalType for ExtTrait {
+    fn name(&self) -> &str {
+        self.name
     }
-
-    /// Whether `q` is this trait's qualified identity — allocation-free, mirroring
-    /// [`ExtType::is_qualified`] (probed per candidate on the per-keystroke resolution path).
-    pub fn is_qualified(&self, q: &str) -> bool {
-        q.len() == self.namespace.len() + 1 + self.name.len()
-            && q.as_bytes()[self.namespace.len()] == b'.'
-            && q.starts_with(self.namespace)
-            && q.ends_with(self.name)
+    fn namespace(&self) -> &str {
+        self.namespace
     }
 }
 
@@ -1601,8 +1705,18 @@ pub trait Extension: Sync {
     }
     /// The extension's first-class **classes** (native-extensibility S2) — real reference-type
     /// language classes (identity, destructor, fields, cycle participation). Default empty; seeded
-    /// eagerly into the checker's symbol tables at prelude time by qualified identity.
+    /// eagerly into the checker's symbol tables at prelude time by qualified identity. Every entry
+    /// must be [`FieldedKind::Class`] (checked by [`Registry::validate`]).
     fn classes(&self) -> &'static [ExtClass] {
+        &[]
+    }
+    /// The extension's first-class **structs** (native-extensibility, fielded unification) — real
+    /// value-type language structs (structural equality, copy-on-assign, source-constructible,
+    /// no identity/destructor). The value-semantics twin of [`Extension::classes`]; both hooks
+    /// produce the shared [`ExtFielded`] type, distinguished by [`ExtFielded::kind`]. Default empty;
+    /// seeded eagerly alongside classes at prelude time. Every entry must be [`FieldedKind::Struct`]
+    /// (checked by [`Registry::validate`]).
+    fn structs(&self) -> &'static [ExtStruct] {
         &[]
     }
     /// The extension's first-class **traits** (native-extensibility S3) — real language traits that
@@ -1773,6 +1887,12 @@ pub enum UseKind {
     /// qualified identity so annotations/construction resolve); the backends bind a **constructible**
     /// class-kind type handle under the imported short name so `Handle { ... }` builds a real class.
     ExtClass(String),
+    /// A registered native **struct** (`use pkg.Point`, fielded unification) — qualified identity.
+    /// The value-type twin of [`UseKind::ExtClass`]: the checker maps the local name to the qualified
+    /// identity (so annotations/construction resolve); the backends bind a **constructible**
+    /// struct-kind type handle so `Point { .. }` builds a real value struct (structural equality,
+    /// copy-on-assign) rather than a reference class.
+    ExtStruct(String),
     /// A registered native **trait** (`use fx.Widget`, native-extensibility S3) — qualified
     /// identity. The checker maps the local (imported short) name to the qualified identity and
     /// seeds the user-trait tables under the short name, so `impl Widget for T`, `T: Widget`
@@ -1982,53 +2102,67 @@ impl Registry {
         out
     }
 
+    /// Every native declaration's lightweight identity projection — extern types, enums, fielded
+    /// types (classes + structs), and traits — as one allocation-free [`Nominal`] stream. The single
+    /// source `namespace_types` / `classify_use` / `resolve_namespace_child` walk, replacing the four
+    /// structurally identical per-kind loops each used to run. A fielded type projects as
+    /// [`NominalKind::Class`] or [`NominalKind::Struct`] off its [`ExtFielded::kind`].
+    pub fn nominal_types(&self) -> impl Iterator<Item = Nominal> + '_ {
+        self.units.iter().flat_map(|e| {
+            let types = e.types().iter().map(|t| Nominal {
+                name: t.name,
+                namespace: t.namespace,
+                kind: NominalKind::Type,
+            });
+            let enums = e.enums().iter().map(|t| Nominal {
+                name: t.name,
+                namespace: t.namespace,
+                kind: NominalKind::Enum,
+            });
+            let fielded = e
+                .classes()
+                .iter()
+                .chain(e.structs().iter())
+                .map(|t| Nominal {
+                    name: t.name,
+                    namespace: t.namespace,
+                    kind: match t.kind {
+                        FieldedKind::Class => NominalKind::Class,
+                        FieldedKind::Struct => NominalKind::Struct,
+                    },
+                });
+            let traits = e.traits().iter().map(|t| Nominal {
+                name: t.name,
+                namespace: t.namespace,
+                kind: NominalKind::Trait,
+            });
+            types.chain(enums).chain(fielded).chain(traits)
+        })
+    }
+
     /// The extension **types** reachable under a namespace prefix, as `(relative path, qualified
     /// identity)` — `std.http` → `[("Response", "std.http.Response")]`. A type under a sub-namespace
     /// keeps the dotted remainder (`("client.Handle", "std.http.client.Handle")`). Lets a `use
     /// std.http` group expose its types for a dotted annotation (`http.Response`) the way it exposes
-    /// its modules for a call (`http.client.get`).
+    /// its modules for a call (`http.client.get`). Projects every nominal kind — extern types,
+    /// enums, classes, structs, traits — through the one [`Registry::nominal_types`] stream.
     pub fn namespace_types(&self, prefix: &str) -> Vec<(String, String)> {
-        let Some((root, _)) = prefix.split_once('.') else {
+        if prefix.split_once('.').is_none() {
             return Vec::new();
-        };
-        let dotted = format!("{prefix}.");
-        let mut out = Vec::new();
-        for e in self.units.iter().filter(|e| e.root() == root) {
-            for t in e.types() {
-                let q = t.qualified();
-                if let Some(rest) = q.strip_prefix(&dotted) {
-                    out.push((rest.to_string(), q.to_string()));
-                }
-            }
-            // Native enums project the same way (native-extensibility S1) — the exact channel the
-            // F5 leaf-module fix opened for extern types — so `use pkg.TheEnum` (or a `use pkg`
-            // group then `pkg.TheEnum`) resolves a native enum by identity.
-            for t in e.enums() {
-                let q = t.qualified();
-                if let Some(rest) = q.strip_prefix(&dotted) {
-                    out.push((rest.to_string(), q.to_string()));
-                }
-            }
-            // Native classes project the same way (native-extensibility S2) — so `use pkg.TheClass`
-            // (or a `use pkg` group then `pkg.TheClass`) resolves a native class by identity, the
-            // exact leaf-module channel extern types and native enums use.
-            for t in e.classes() {
-                let q = t.qualified();
-                if let Some(rest) = q.strip_prefix(&dotted) {
-                    out.push((rest.to_string(), q.to_string()));
-                }
-            }
-            // Native traits project the same way (native-extensibility S3) — so `use pkg.TheTrait`
-            // (or a `use pkg` group then `pkg.TheTrait`) re-roots a native trait onto its qualified
-            // identity, the alias `collect` maps the short name through to seed the user-trait tables.
-            for t in e.traits() {
-                let q = t.qualified();
-                if let Some(rest) = q.strip_prefix(&dotted) {
-                    out.push((rest.to_string(), q.to_string()));
-                }
-            }
         }
-        out
+        let dotted = format!("{prefix}.");
+        self.nominal_types()
+            .filter_map(|n| {
+                let q = n.qualified();
+                match q.strip_prefix(&dotted) {
+                    Some(rest) => {
+                        let rest = rest.to_string();
+                        Some((rest, q))
+                    }
+                    None => None,
+                }
+            })
+            .collect()
     }
 
     /// Resolve one namespace hop: what `<prefix>.<member>` names (`std.http` + `client` →
@@ -2038,14 +2172,10 @@ impl Registry {
         let qualified = format!("{prefix}.{member}");
         if self.find_module(&qualified).is_some() {
             NsChild::Module(qualified)
-        } else if self.find_type_qualified(&qualified).is_some()
-            || self.find_enum_qualified(&qualified).is_some()
-            || self.find_class_qualified(&qualified).is_some()
-            || self.find_trait_qualified(&qualified).is_some()
-        {
-            // A native enum, class, or trait is a type-like member for namespace navigation
-            // (`pkg.SameSite` / `pkg.Handle` / `pkg.Widget` in a dotted annotation or bound),
-            // resolved by identity like an extern type.
+        } else if self.nominal_types().any(|n| n.is_qualified(&qualified)) {
+            // A native enum, class, struct, or trait is a type-like member for namespace navigation
+            // (`pkg.SameSite` / `pkg.Handle` / `pkg.Point` / `pkg.Widget` in a dotted annotation or
+            // bound), resolved by identity like an extern type.
             NsChild::Type(qualified)
         } else if self.is_namespace(&qualified) {
             NsChild::Namespace(qualified)
@@ -2071,17 +2201,17 @@ impl Registry {
         if self.find_module(&qualified).is_some() {
             return UseKind::Module(qualified);
         }
-        if self.find_type_qualified(&qualified).is_some() {
-            return UseKind::ExternType(qualified);
-        }
-        if self.find_enum_qualified(&qualified).is_some() {
-            return UseKind::ExtEnum(qualified);
-        }
-        if self.find_class_qualified(&qualified).is_some() {
-            return UseKind::ExtClass(qualified);
-        }
-        if self.find_trait_qualified(&qualified).is_some() {
-            return UseKind::ExtTrait(qualified);
+        // One projected-stream probe classifies every nominal kind (extern type / enum / class /
+        // struct / trait) — the four structurally identical `find_*_qualified` cascades collapse to
+        // the discriminant carried on the matched [`Nominal`].
+        if let Some(n) = self.nominal_types().find(|n| n.is_qualified(&qualified)) {
+            return match n.kind {
+                NominalKind::Type => UseKind::ExternType(qualified),
+                NominalKind::Enum => UseKind::ExtEnum(qualified),
+                NominalKind::Class => UseKind::ExtClass(qualified),
+                NominalKind::Struct => UseKind::ExtStruct(qualified),
+                NominalKind::Trait => UseKind::ExtTrait(qualified),
+            };
         }
         if path.len() >= 2 {
             let module = path.join(".");
@@ -2335,18 +2465,50 @@ impl Registry {
     }
 
     /// Resolve a native class from **either** a qualified identity or a bare short name — the class
-    /// twin of [`Registry::resolve_type`], read by `qualified_extern`.
+    /// twin of [`Registry::resolve_type`], read by `qualified_extern`. Class-kind only; a path that
+    /// accepts a value struct too uses [`Registry::resolve_fielded`].
     pub fn resolve_class(&self, name: &str) -> Option<&'static ExtClass> {
         self.find_class_qualified(name)
             .or_else(|| self.find_class(name))
     }
 
-    /// Find a native class's instance-method signature (native-extensibility S3 / Pass 2a) — the
-    /// class twin of [`Registry::find_type_method`]. `name` is the runtime shape name (the **short**
-    /// name a class-kind object carries) or a qualified identity. What both backends' `CallMethod`
-    /// Object arm consults to decide a native-class method call routes to [`ExtClass::dispatch`].
+    /// Every registered native **struct** (fielded unification), across all units — the value-type
+    /// twin of [`Registry::classes`], walked by `seed_ext_fielded` alongside classes.
+    pub fn structs(&self) -> impl Iterator<Item = &'static ExtStruct> + '_ {
+        self.units.iter().flat_map(|e| e.structs())
+    }
+
+    /// Every registered native **fielded type** — classes and structs — across all units. The
+    /// single stream the seeder and [`Registry::resolve_fielded`] read; each carries its own
+    /// [`ExtFielded::kind`].
+    pub fn fielded(&self) -> impl Iterator<Item = &'static ExtFielded> + '_ {
+        self.units
+            .iter()
+            .flat_map(|e| e.classes().iter().chain(e.structs().iter()))
+    }
+
+    /// Find a native struct by its **qualified identity** — allocation-free probing, mirroring
+    /// [`Registry::find_class_qualified`].
+    pub fn find_struct_qualified(&self, qualified: &str) -> Option<&'static ExtStruct> {
+        self.structs().find(|t| t.is_qualified(qualified))
+    }
+
+    /// Resolve a native **fielded type** (class OR struct) from either a qualified identity or a
+    /// bare short name. What both backends consult to materialize a [`NativeOut::Instance`] with the
+    /// right shape kind (via [`ExtFielded::kind`]) and to marshal a native fielded receiver/arg.
+    pub fn resolve_fielded(&self, name: &str) -> Option<&'static ExtFielded> {
+        self.fielded()
+            .find(|t| t.is_qualified(name))
+            .or_else(|| self.fielded().find(|t| t.name == name))
+    }
+
+    /// Find a native fielded type's instance-method signature (native-extensibility S3 / Pass 2a) —
+    /// the [`ExtFielded`] twin of [`Registry::find_type_method`]. `name` is the runtime shape name
+    /// (the **short** name a fielded object carries) or a qualified identity. What both backends'
+    /// `CallMethod` Object arm consults to decide a native fielded method call routes to
+    /// [`ExtFielded::dispatch`]. Resolves over both classes and structs.
     pub fn find_class_method(&self, name: &str, method: &str) -> Option<&'static ExtFn> {
-        self.resolve_class(name)?
+        self.resolve_fielded(name)?
             .methods
             .iter()
             .find(|m| m.name == method)
@@ -2842,6 +3004,69 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     t.name,
                     unit.name(),
                     t.namespace
+                ));
+            }
+        }
+    }
+    // Native fielded types (classes + structs, fielded unification). Same qualified-identity
+    // uniqueness and namespace-under-root rules; classes and structs share one identity space (a
+    // struct and a class may not share a qualified name), so the two hooks are checked together.
+    let mut fielded: Vec<((&str, &str), &str)> = units
+        .iter()
+        .flat_map(|e| {
+            e.classes()
+                .iter()
+                .chain(e.structs().iter())
+                .map(move |t| ((t.namespace, t.name), e.name()))
+        })
+        .collect();
+    fielded.sort_unstable();
+    for pair in fielded.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(format!(
+                "duplicate native fielded type `{}.{}` in the assembled registry (units `{}` and \
+                 `{}`): a qualified class/struct identity must be declared exactly once",
+                pair[0].0.0, pair[0].0.1, pair[0].1, pair[1].1
+            ));
+        }
+    }
+    for unit in units {
+        let root = unit.root();
+        for t in unit.classes().iter().chain(unit.structs().iter()) {
+            if t.namespace != root && !t.namespace.starts_with(&format!("{root}.")) {
+                return Err(format!(
+                    "native fielded type `{}` of unit `{}` declares namespace `{}`, outside the \
+                     unit's root `{root}`",
+                    t.name,
+                    unit.name(),
+                    t.namespace
+                ));
+            }
+        }
+        // The two author-facing hooks are the same underlying type distinguished only by
+        // `ExtFielded::kind`; a mismatched entry (a `Struct` in `classes()` or a `Class` in
+        // `structs()`) would silently seed the wrong semantics. Catch it loudly at assembly.
+        for t in unit.classes() {
+            if t.kind != FieldedKind::Class {
+                return Err(format!(
+                    "native type `{}.{}` of unit `{}` is declared through `classes()` but its \
+                     `kind` is `Struct` — a class hook must carry `FieldedKind::Class` (use \
+                     `structs()` for a value struct)",
+                    t.namespace,
+                    t.name,
+                    unit.name()
+                ));
+            }
+        }
+        for t in unit.structs() {
+            if t.kind != FieldedKind::Struct {
+                return Err(format!(
+                    "native type `{}.{}` of unit `{}` is declared through `structs()` but its \
+                     `kind` is `Class` — a struct hook must carry `FieldedKind::Struct` (use \
+                     `..ExtStruct::STRUCT_DEFAULTS`)",
+                    t.namespace,
+                    t.name,
+                    unit.name()
                 ));
             }
         }

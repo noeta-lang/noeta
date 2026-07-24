@@ -72,6 +72,7 @@ use noeta_ast::{
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::{Edition, EditionMap};
+use noeta_ext_abi::NominalType;
 use noeta_span::Span;
 use noeta_types::{BuiltinTrait, Type};
 

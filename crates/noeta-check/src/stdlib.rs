@@ -9,6 +9,7 @@
 //! `noeta-stdlib`; if a name is added there without a row here it simply falls back to `dyn`/runtime
 //! dispatch, never to a wrong type.
 
+use noeta_ext_abi::NominalType;
 use noeta_ext_abi::registry;
 use noeta_types::Type;
 
@@ -50,10 +51,11 @@ pub(crate) fn qualified_extern(reg: &registry::Registry, n: &str) -> String {
     if let Some(en) = reg.resolve_enum(n) {
         return en.qualified();
     }
-    // A native class (native-extensibility S2) qualifies the same way, so a signature naming a
-    // class by its short name (`SigType::Named("Handle")` — a native fn's return/param) resolves to
-    // the qualified identity the checker keys `symbols.records`/`Type::Named` on.
-    if let Some(cl) = reg.resolve_class(n) {
+    // A native fielded type — class (native-extensibility S2) or value struct (fielded unification)
+    // — qualifies the same way, so a signature naming it by its short name (`SigType::Named("Handle")`
+    // / `SigType::Named("Point")` — a native fn's return/param) resolves to the qualified identity the
+    // checker keys `symbols.records`/`Type::Named` on.
+    if let Some(cl) = reg.resolve_fielded(n) {
         return cl.qualified();
     }
     // A native trait (native-extensibility S3) qualifies the same way, so a signature naming a
@@ -137,9 +139,10 @@ pub(crate) fn sig_to_typeref(
             ret: Box::new(sig_to_typeref(reg, ret)),
             span: sp,
         },
-        SigType::Generic(n, args) => {
-            named_args(&qualified_extern(reg, n), args.iter().map(|a| sig_to_typeref(reg, a)).collect())
-        }
+        SigType::Generic(n, args) => named_args(
+            &qualified_extern(reg, n),
+            args.iter().map(|a| sig_to_typeref(reg, a)).collect(),
+        ),
         // A signature-level variable has no concrete declaration-site meaning — a permissive hole.
         SigType::Var(_) | SigType::BoundedVar(_, _) => named("dyn"),
     }
@@ -411,9 +414,10 @@ pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &st
                 _ => Type::Dyn,
             })
         }
-        // A registered native **class**'s instance methods (native-extensibility S3 / Pass 2a) come
-        // from its `ExtClass` signature table, like the extern-type arm above. A native class is not
-        // generic, so there are no receiver type-variable bindings.
+        // A registered native **fielded type**'s instance methods (native-extensibility S3 / Pass
+        // 2a) — a class or a value struct — come from its `ExtFielded` signature table (resolved by
+        // `find_class_method` over both), like the extern-type arm above. A native fielded type is
+        // not generic, so there are no receiver type-variable bindings.
         Type::Named(n, _) if reg.find_class_method(n, name).is_some() => {
             let sig = reg.find_class_method(n, name)?;
             Some(match sig.ret {
@@ -725,8 +729,9 @@ pub(super) fn method_params(
                     .collect(),
             )
         }
-        // A native **class**'s method parameters come from its `ExtClass` signature table
-        // (native-extensibility S3 / Pass 2a), like `method_return`; a native class is not generic.
+        // A native **fielded type**'s method parameters (class or value struct) come from its
+        // `ExtFielded` signature table (native-extensibility S3 / Pass 2a, resolved over both by
+        // `find_class_method`), like `method_return`; a native fielded type is not generic.
         Type::Named(n, _) if reg.find_class_method(n, name).is_some() => {
             let sig = reg.find_class_method(n, name)?;
             Some(sig.params.iter().map(|p| sig_to_type(reg, p)).collect())

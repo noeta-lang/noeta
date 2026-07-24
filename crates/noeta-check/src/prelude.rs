@@ -36,7 +36,7 @@ impl Checker {
         self.register_extension_attributes();
         self.seed_extern_type_traits();
         self.seed_ext_enums();
-        self.seed_ext_classes();
+        self.seed_ext_fielded();
     }
 
     /// Seed every installed extension's declared **native classes** (native-extensibility S2) into
@@ -54,18 +54,22 @@ impl Checker {
     /// `destructor_classes` would falsely claim a language destructor and defer its destructor-free
     /// cycles to the exit reaper; leaving it out keeps mid-run cycle reclamation, and the field's
     /// `Drop` fires on every free path regardless (verified by the S2 leak oracle).
-    pub(crate) fn seed_ext_classes(&mut self) {
+    pub(crate) fn seed_ext_fielded(&mut self) {
         // Snapshot the qualified declarations first so the immutable registry borrow is released
-        // before the `&mut self` symbol-table writes (the enum seeder takes the same shape).
-        struct ClassDecl {
+        // before the `&mut self` symbol-table writes (the enum seeder takes the same shape). One
+        // seeder covers both native classes and native structs — `reg().fielded()` streams both,
+        // and the only per-declaration difference is the `TypeKind` written off `ExtFielded::kind`
+        // (a class is a reference type; a struct is a value type with structural equality).
+        struct FieldedDecl {
             qualified: String,
             fields: Vec<(String, Type)>,
             private: HashSet<String>,
             muts: HashSet<String>,
+            kind: noeta_types::TypeKind,
         }
-        let decls: Vec<ClassDecl> = self
+        let decls: Vec<FieldedDecl> = self
             .reg()
-            .classes()
+            .fielded()
             .map(|cl| {
                 let fields = cl
                     .fields
@@ -85,26 +89,30 @@ impl Checker {
                     .filter(|f| f.is_mut)
                     .map(|f| f.name.to_string())
                     .collect();
-                ClassDecl {
+                let kind = match cl.kind {
+                    noeta_ext_abi::FieldedKind::Class => noeta_types::TypeKind::Class,
+                    noeta_ext_abi::FieldedKind::Struct => noeta_types::TypeKind::Struct,
+                };
+                FieldedDecl {
                     qualified: cl.qualified(),
                     fields,
                     private,
                     muts,
+                    kind,
                 }
             })
             .collect();
-        for ClassDecl {
+        for FieldedDecl {
             qualified,
             fields,
             private,
             muts,
+            kind,
         } in decls
         {
             self.symbols.records.insert(qualified.clone(), fields);
             self.symbols.types.insert(qualified.clone());
-            self.symbols
-                .type_kinds
-                .insert(qualified.clone(), noeta_types::TypeKind::Class);
+            self.symbols.type_kinds.insert(qualified.clone(), kind);
             if !private.is_empty() {
                 self.symbols
                     .private_fields
@@ -161,28 +169,26 @@ impl Checker {
                 let tr = reg.find_trait_qualified(qualified)?;
                 let decl = synth_trait_decl(reg, tr, local);
                 // Native declarations advertising this trait — a non-built-in name in `ExtType.traits`
-                // (Pass 1) OR `ExtClass.traits` (Pass 2b) matching the trait (short or qualified
-                // spelling). `record_trait_impls` drops non-built-in names (they can't satisfy a
-                // built-in bound), so this is the one channel that records a native declaration's
-                // native-trait impl. Written over both kinds so an ExtType and an ExtClass advertiser
-                // seed the same `user_trait_impls[qualified][trait]` uniformly — the coercion channel
-                // is representation-agnostic (its receiver is an extern value OR a class object).
-                let advertises = |traits: &[&str]| {
-                    traits.iter().any(|t| *t == tr.name || tr.is_qualified(t))
-                };
+                // (Pass 1) OR `ExtFielded.traits` (Pass 2b, a class OR a struct) matching the trait
+                // (short or qualified spelling). `record_trait_impls` drops non-built-in names (they
+                // can't satisfy a built-in bound), so this is the one channel that records a native
+                // declaration's native-trait impl. Written over every kind so an ExtType, a class,
+                // and a struct advertiser seed the same `user_trait_impls[qualified][trait]`
+                // uniformly — the coercion channel is representation-agnostic (its receiver is an
+                // extern value OR a fielded object).
+                let advertises =
+                    |traits: &[&str]| traits.iter().any(|t| *t == tr.name || tr.is_qualified(t));
                 let type_impls = reg
                     .extensions()
                     .iter()
                     .flat_map(|ext| ext.types())
                     .filter(|ty| advertises(ty.traits))
                     .map(|ty| ty.qualified());
-                let class_impls = reg
-                    .extensions()
-                    .iter()
-                    .flat_map(|ext| ext.classes())
+                let fielded_impls = reg
+                    .fielded()
                     .filter(|cl| advertises(cl.traits))
                     .map(|cl| cl.qualified());
-                let impls: Vec<String> = type_impls.chain(class_impls).collect();
+                let impls: Vec<String> = type_impls.chain(fielded_impls).collect();
                 Some(TraitSeed {
                     local: local.clone(),
                     decl,
@@ -190,12 +196,7 @@ impl Checker {
                 })
             })
             .collect();
-        for TraitSeed {
-            local,
-            decl,
-            impls,
-        } in seeds
-        {
+        for TraitSeed { local, decl, impls } in seeds {
             // A user `trait <local>` collected first wins (shadow ordering).
             self.symbols
                 .user_traits
