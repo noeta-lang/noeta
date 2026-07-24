@@ -155,19 +155,11 @@ macro_rules! impl_signed_scalar {
             }
             #[inline]
             fn min(self, o: Self) -> Self {
-                if self <= o {
-                    self
-                } else {
-                    o
-                }
+                if self <= o { self } else { o }
             }
             #[inline]
             fn max(self, o: Self) -> Self {
-                if self >= o {
-                    self
-                } else {
-                    o
-                }
+                if self >= o { self } else { o }
             }
             #[inline]
             fn abs(self) -> Self {
@@ -253,19 +245,11 @@ macro_rules! impl_unsigned_scalar {
             }
             #[inline]
             fn min(self, o: Self) -> Self {
-                if self <= o {
-                    self
-                } else {
-                    o
-                }
+                if self <= o { self } else { o }
             }
             #[inline]
             fn max(self, o: Self) -> Self {
-                if self >= o {
-                    self
-                } else {
-                    o
-                }
+                if self >= o { self } else { o }
             }
             /// Unsigned magnitude is the value itself.
             #[inline]
@@ -487,7 +471,10 @@ mod tests {
         let y = 4_000_000_000u32;
         assert_eq!(y.widen_mul(2), 8_000_000_000u64);
         // Wide accumulation.
-        assert_eq!(<i32 as Scalar>::wide_add(x.widen_mul(x), x.widen_mul(x)), 2 * 46341i64 * 46341);
+        assert_eq!(
+            <i32 as Scalar>::wide_add(x.widen_mul(x), x.widen_mul(x)),
+            2 * 46341i64 * 46341
+        );
     }
 
     /// `to_float` promotes integers to `f64`; `f32`/`f64` stay themselves.
