@@ -229,6 +229,14 @@ impl Checker {
     }
 
     pub(crate) fn method_call_return(&self, recv: &Type, name: &str) -> Type {
+        // A native (fielded/extern) method whose return is a trait associated-type projection
+        // `Self::Name` / `List<Self::Name>` (slice 1b): resolve it against `trait_assoc` at this
+        // concrete receiver — the type the implementing type's `AssocDerivation` computed at seed
+        // time. Checked BEFORE `method_return` (whose `sig_to_type` would erase the projection to a
+        // hole); an unresolved projection degrades to that same gradual hole.
+        if let Some(t) = self.native_method_assoc_return(recv, name) {
+            return t;
+        }
         if let Some(t) = stdlib::method_return(self.reg(), recv, name) {
             return t;
         }
@@ -249,6 +257,43 @@ impl Checker {
             return recv.clone();
         }
         Type::Unknown
+    }
+
+    /// Resolve a native method's associated-type return `Self::Name` (slice 1b) against `trait_assoc`
+    /// at a concrete receiver. Returns the concrete `Type` the implementing type's [`AssocDerivation`]
+    /// computed (`seed_ext_traits` folded it into `trait_assoc[(type, trait)]`), wrapped in `List<_>`
+    /// for the `List<Self::Name>` form. `Some(Type::Unknown)` when the method IS an associated-type
+    /// projection but no binding resolves (a gradual hole, never a wrong type); `None` when the method
+    /// is not an associated-type projection at all (defer to the ordinary [`stdlib::method_return`]).
+    fn native_method_assoc_return(&self, recv: &Type, name: &str) -> Option<Type> {
+        let Type::Named(type_name, _) = recv else {
+            return None;
+        };
+        let (assoc, wrap_list) = match stdlib::native_method_assoc_ret(self.reg(), recv, name)? {
+            stdlib::AssocRet::Bare(a) => (a, false),
+            stdlib::AssocRet::List(a) => (a, true),
+        };
+        let resolved = self
+            .resolve_assoc_for_type(type_name, assoc)
+            .unwrap_or(Type::Unknown);
+        Some(if wrap_list {
+            Type::List(Box::new(resolved))
+        } else {
+            resolved
+        })
+    }
+
+    /// The concrete `Type` bound to associated type `assoc` for `type_name` by ANY trait it
+    /// implements (slice 1b) — the native-trait analogue of [`Self::resolve_assoc`], which needs the
+    /// trait named. A native method's `Self::Name` return carries no trait context, but the assoc
+    /// name is unique to the (one) native trait declaring it, so the first `trait_assoc[(type_name,
+    /// _)]` entry binding `assoc` is the answer.
+    fn resolve_assoc_for_type(&self, type_name: &str, assoc: &str) -> Option<Type> {
+        self.symbols
+            .trait_assoc
+            .iter()
+            .find(|((t, _), map)| t == type_name && map.contains_key(assoc))
+            .map(|(_, map)| map[assoc].clone())
     }
 
     /// Whether field `field` of type `type_name` is accessible at the current checking context

@@ -4,6 +4,9 @@
 //! methods are `Checker` methods moved verbatim out of the crate root purely to shrink `lib.rs`.
 
 use super::*;
+// The shared element-derivation abstraction (slice 1b): `AssocDerivation::apply` folds a native
+// trait's derivation over an implementing type's element into a concrete `Type` for `trait_assoc`.
+use crate::stdlib::DeriveApply;
 
 impl Checker {
     /// Register built-in prelude types the checker must know regardless of the program. Run before
@@ -156,6 +159,9 @@ impl Checker {
             local: String,
             decl: noeta_ast::TraitDecl,
             impls: Vec<String>,
+            /// The trait's native-derived associated types (slice 1b): `(name, derivation)` per
+            /// `ExtAssocType`, applied over each implementing type's element into `trait_assoc`.
+            assoc: Vec<(&'static str, noeta_ext_abi::AssocDerivation)>,
         }
         let aliases: Vec<(String, String)> = self
             .imports
@@ -196,26 +202,64 @@ impl Checker {
                     .map(|en| en.qualified());
                 let impls: Vec<String> =
                     type_impls.chain(fielded_impls).chain(enum_impls).collect();
+                // The trait's native-derived associated types (slice 1b) — snapshot name + derivation
+                // under the registry borrow, applied per-impl below.
+                let assoc: Vec<(&'static str, noeta_ext_abi::AssocDerivation)> = tr
+                    .assoc_types
+                    .iter()
+                    .map(|a| (a.name, a.derivation))
+                    .collect();
                 Some(TraitSeed {
                     local: local.clone(),
                     decl,
                     impls,
+                    assoc,
                 })
             })
             .collect();
-        for TraitSeed { local, decl, impls } in seeds {
+        for TraitSeed {
+            local,
+            decl,
+            impls,
+            assoc,
+        } in seeds
+        {
             // A user `trait <local>` collected first wins (shadow ordering).
             self.symbols
                 .user_traits
                 .entry(local.clone())
                 .or_insert(decl);
             for ty in impls {
+                // Native-derived associated types (slice 1b): fold each `AssocDerivation` over this
+                // implementing type's uniform `@packed` element into `trait_assoc[(type, trait)]` —
+                // the SAME table slice 1a's `.noe` `type Name = …` bindings land in, so a native
+                // trait method's `Self::Name` resolves on a concrete receiver unchanged. Computed
+                // (immutable `packed_layout`/element read) BEFORE the `&mut` symbol writes below. A
+                // non-`@packed` implementor (no uniform element) records nothing — the projection then
+                // stays a gradual hole rather than a wrong concrete type.
+                let derived: Option<HashMap<String, Type>> = if assoc.is_empty() {
+                    None
+                } else {
+                    self.packed_layout(&Type::Named(ty.clone(), Vec::new()))
+                        .and_then(|layout| stdlib::packed_elem_type(&layout))
+                        .map(|elem| {
+                            assoc
+                                .iter()
+                                .map(|(name, derivation)| {
+                                    (name.to_string(), derivation.apply(&elem))
+                                })
+                                .collect()
+                        })
+                };
                 self.symbols
                     .user_trait_impls
-                    .entry(ty)
+                    .entry(ty.clone())
                     .or_default()
                     .entry(local.clone())
                     .or_default();
+                if let Some(map) = derived {
+                    self.symbols.trait_assoc.insert((ty, local.clone()), map);
+                }
             }
         }
     }
@@ -717,14 +761,28 @@ fn synth_trait_decl(
             }
         })
         .collect();
+    // Native associated types (ExtBundle→ExtTrait convergence, slice 1b): faithfully carry each
+    // `ExtAssocType`'s name into the `TraitDecl` so a native trait is indistinguishable from a `.noe`
+    // one to the coherence machinery. Their concrete values are **derived** (not per-impl `type Name
+    // = …` bindings), so the synthesized decl carries no default `TypeRef`; `seed_ext_traits` folds
+    // each `AssocDerivation` over the implementing type's element straight into `trait_assoc`.
+    let assoc_types = tr
+        .assoc_types
+        .iter()
+        .map(|a| noeta_ast::AssocTypeDecl {
+            name: a.name.to_string(),
+            name_span: sp,
+            default: None,
+            span: sp,
+        })
+        .collect();
     TraitDecl {
         name: local.to_string(),
         name_span: sp,
         is_public: true,
         type_params: Vec::new(),
         methods,
-        // Native traits declare no associated types yet (a later slice of the ExtBundle→ExtTrait arc).
-        assoc_types: Vec::new(),
+        assoc_types,
         decorators: Decorators::default(),
         span: sp,
     }

@@ -259,6 +259,7 @@ const FX_TRAITS: &[ExtTrait] = &[ExtTrait {
         },
         has_default: false,
     }],
+    assoc_types: &[],
 }];
 
 /// A tier restricted to **methods**. std has no tier that attaches to methods but not to functions,
