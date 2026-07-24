@@ -10,6 +10,7 @@
 use para.cli.{Command, Arg, run, dispatch}
 use std.io
 use std.os
+use std.env
 
 #[Command(about: "Add two integers")]
 fn add(a: int, b: int): int {
@@ -27,6 +28,49 @@ fn greet(name: string, #[Arg(short: "l", help: "shout the greeting")] loud: bool
 #[Command(about: "Report a rectangle's area (rounded down)")]
 fn area(w: float, h: float): int {
     io.outln("area ~= ${w} x ${h}")
+    return 0
+}
+
+// F1 — env-var fallback. `port` is sourced from argv first, else from `$PARA_CLI_PORT` when set,
+// else its default. The command returns the resolved port as its exit code, so a test can see which
+// source won without capturing any output.
+#[Command(about: "Bind a server port")]
+fn serve(#[Arg(env: "PARA_CLI_PORT", help: "port to bind")] port: int = 8080): int {
+    io.outln("serving on ${port}")
+    return port
+}
+
+// F3 — nested subcommands. `#[Command(name: "...")]` gives an explicit, possibly multi-token command
+// path; selection matches the LONGEST token-prefix of argv, so `remote add` wins over a bare
+// `remote`. The `remote` group has a root command; the `config` group deliberately has none, so a
+// bare `config` is a partial path (a helpful selection error, exit 2).
+#[Command(about: "List remotes", name: "remote")]
+fn remote_list(): int {
+    io.outln("(no remotes)")
+    return 0
+}
+
+#[Command(about: "Add a remote", name: "remote add")]
+fn remote_add(name: string, url: string): int {
+    io.outln("added ${name} -> ${url}")
+    return 0
+}
+
+#[Command(about: "Remove a remote", name: "remote remove")]
+fn remote_remove(name: string): int {
+    io.outln("removed ${name}")
+    return 0
+}
+
+#[Command(about: "Set a config value", name: "config set")]
+fn config_set(key: string, value: string): int {
+    io.outln("${key}=${value}")
+    return 0
+}
+
+#[Command(about: "Get a config value", name: "config get")]
+fn config_get(key: string): int {
+    io.outln(key)
     return 0
 }
 
@@ -127,5 +171,86 @@ os.exit(run())
     // The `--` terminator forces the rest to be positionals: here `-l` becomes greet's `name`.
     fn double_dash_terminator(): void {
         assert(dispatch(["greet", "--", "-l"]) == 0)
+    }
+
+    // ---- F1: env-var fallback ------------------------------------------------
+    // Each test's environment is isolated, so a var set in one is unset in the others.
+
+    // No argv value: the `#[Arg(env: "PARA_CLI_PORT")]` fallback supplies the port. `serve` returns
+    // the resolved port as its exit code, so this asserts the env value (70) actually bound.
+    fn env_fallback_used(): void {
+        env.set("PARA_CLI_PORT", "70")
+        assert(dispatch(["serve"]) == 70)
+    }
+
+    // An explicit argv value outranks the env fallback: `--port 55` wins over `$PARA_CLI_PORT`.
+    fn env_overridden_by_argv(): void {
+        env.set("PARA_CLI_PORT", "70")
+        assert(dispatch(["serve", "--port", "55"]) == 55)
+    }
+
+    // Env unset and no argv value: the parameter's own default (8080) fills in.
+    fn env_absent_uses_default(): void {
+        assert(dispatch(["serve"]) == 8080)
+    }
+
+    // ---- F2: colored help ----------------------------------------------------
+    // Under `noeta test` stdout is not a terminal (sandbox `is_tty()` is false), so help is emitted
+    // plain and color cannot be observed here; these assert the help paths still run cleanly (0).
+    // The tty path is exercised by eye via `noeta run demo/main.noe -- --help` in a real terminal.
+    fn top_help_plain_is_clean(): void {
+        assert(dispatch(["--help"]) == 0)
+    }
+    fn command_help_plain_is_clean(): void {
+        assert(dispatch(["serve", "--help"]) == 0)
+    }
+
+    // ---- F3: nested subcommands ---------------------------------------------
+
+    // Longest token-prefix wins: `remote add` (2 tokens) is selected over the bare `remote`.
+    fn nested_longest_prefix(): void {
+        assert(dispatch(["remote", "add", "origin", "http://x"]) == 0)
+    }
+    fn nested_remove(): void {
+        assert(dispatch(["remote", "remove", "origin"]) == 0)
+    }
+
+    // The bare group root is a valid one-token command when it exists.
+    fn nested_group_root(): void {
+        assert(dispatch(["remote"]) == 0)
+    }
+
+    // A group with no root command: a bare `config` is an incomplete path -> selection error (2).
+    fn nested_partial_path_errors(): void {
+        assert(dispatch(["config"]) == 2)
+    }
+
+    // A fully-qualified nested command binds its own arguments.
+    fn nested_config_set(): void {
+        assert(dispatch(["config", "set", "key", "val"]) == 0)
+    }
+
+    // A first token that begins no command name at all is still a plain unknown-command error (2).
+    fn nested_unknown_first_token(): void {
+        assert(dispatch(["bogus", "x"]) == 2)
+    }
+
+    // ---- F4: shell completions ----------------------------------------------
+    // `--completions <shell>` prints a script and exits 0; an unknown or missing shell is a usage
+    // error (2). It is a framework flag, so it never collides with a user command name.
+    fn completions_bash(): void {
+        assert(dispatch(["--completions", "bash"]) == 0)
+    }
+    fn completions_zsh(): void {
+        assert(dispatch(["--completions", "zsh"]) == 0)
+    }
+    fn completions_fish(): void {
+        assert(dispatch(["--completions", "fish"]) == 0)
+    }
+    fn completions_bad_shell(): void {
+        assert(dispatch(["--completions", "tcsh"]) == 2)
+    }
+    fn completions_missing_shell(): void {
+        assert(dispatch(["--completions"]) == 2)
     }
 }

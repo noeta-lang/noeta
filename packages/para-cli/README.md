@@ -48,10 +48,49 @@ $ myprog greet --help     # usage for one command
 
 | symbol | kind | purpose |
 | --- | --- | --- |
-| `Command { about: string = "" }` | `@attribute(Function, Method)` | marks an invokable command |
-| `Arg { help = "", short = "", long = "" }` | `@attribute(Param)` | per-parameter help + flag spellings |
+| `Command { about = "", name = "" }` | `@attribute(Function, Method)` | marks an invokable command; `name` overrides the derived name and MAY contain spaces (a nested path) |
+| `Arg { help = "", short = "", long = "", env = "" }` | `@attribute(Param)` | per-parameter help, flag spellings, and an environment-variable fallback |
 | `run(): int` | fn | dispatch the real `argv` (minus argv0), return the exit code |
 | `dispatch(argv: List<string>): int` | fn | the testable core: dispatch a synthetic argv |
+
+### Env-var fallback
+
+A parameter's value is sourced in order: an explicit `argv` token (positional/named/short), else the
+`#[Arg(env: "NAME")]` variable when set, else the parameter's own default (or a usage error if it is
+required). The fallback is shown in `--help` as `[env: NAME]`.
+
+```noeta
+#[Command(about: "Bind a server port")]
+fn serve(#[Arg(env: "PORT", help: "port to bind")] port: int = 8080): int { ... }
+//  serve                     # $PORT if set, else 8080
+//  PORT=9000 serve           # 9000
+//  serve --port 3000         # 3000 (argv outranks env)
+```
+
+### Nested subcommands
+
+`#[Command(name: "remote add")]` gives a command a multi-token path. Selection matches the **longest**
+command-name token-prefix of `argv`, so `remote add …` beats a bare `remote`. Top-level `--help`
+groups shared first-tokens hierarchically. A partial path with no matching command (e.g. a bare
+`config` when only `config set`/`config get` exist) is a usage error (exit 2) that lists the valid
+continuations.
+
+### Colored help
+
+When stdout is a terminal (`io.is_tty()`), `--help`/usage output is colorized — bold section headers,
+dimmed types and annotations. Piped output is plain, so captured help carries no escape codes.
+
+### Shell completions
+
+`--completions <bash|zsh|fish>` prints a sourceable completion script to stdout (exit 0) that
+completes the program's command-name tokens (nested paths included) and every command's flag names.
+It is a framework flag, not a `completions` subcommand, so it never collides with a user command name.
+
+```
+$ myprog --completions bash > /etc/bash_completion.d/myprog
+$ source <(myprog --completions zsh)
+$ myprog --completions fish > ~/.config/fish/completions/myprog.fish
+```
 
 `run()` is `dispatch(args.all().slice(1, …))`. Test against `dispatch` directly — because a command's
 `int` return is its exit code, an arithmetic command is self-verifying with no output to capture:
