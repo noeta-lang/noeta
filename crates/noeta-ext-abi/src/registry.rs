@@ -1412,6 +1412,19 @@ pub struct ExtTrait {
     /// The checker records a `(trait, method)` call-site route (`trait_call_sites`) and both backends
     /// dispatch it through [`Registry::dispatch_trait_method`], the trait twin of `dispatch_bundle_method`.
     pub dispatch: Option<TraitDispatch>,
+    /// The trait's **structural `Self`-constraint** (ExtBundle→ExtTrait convergence, slice 3) — the
+    /// THIRD and last capability an [`ExtBundle`] had that a trait lacked. When present, the trait may
+    /// only be `impl`-ed for a `@packed` struct whose fields match this [`PackedConstraint`] — exactly
+    /// the shape check a bundle bind makes ([`ExtBundle::constraint`]), now first-class on a trait. The
+    /// SAME `PackedConstraint` type is reused deliberately (not a fresh marker-trait predicate): the
+    /// constraint pins the implementing type's uniform *element*, which the trait's native-derived
+    /// associated types ([`ExtTrait::assoc_types`], slice 1b) then derive from — a built-in marker
+    /// would lose that element. The checker enforces it at the user `impl` site
+    /// (`check_user_trait_impl` → the shared `check_packed_self_constraint`, E0015), the same core
+    /// `check_bundle_binding` runs for a bundle; a native type advertising the trait via `traits` is
+    /// the extension author's own declaration and is validated at assembly. `None` leaves the trait
+    /// shape-agnostic (implementable for any type), the pre-slice-3 behavior.
+    pub self_constraint: Option<PackedConstraint>,
 }
 
 /// A native trait's **default-body dispatch** ([`ExtTrait::dispatch`], slice 2): the same
@@ -1476,6 +1489,7 @@ impl ExtTrait {
         methods: &[],
         assoc_types: &[],
         dispatch: None,
+        self_constraint: None,
     };
 }
 

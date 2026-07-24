@@ -162,6 +162,10 @@ impl Checker {
             /// The trait's native-derived associated types (slice 1b): `(name, derivation)` per
             /// `ExtAssocType`, applied over each implementing type's element into `trait_assoc`.
             assoc: Vec<(&'static str, noeta_ext_abi::AssocDerivation)>,
+            /// The trait's structural `Self`-constraint (slice 3): recorded into
+            /// `native_trait_self_constraints` when this native trait wins the `user_traits` slot,
+            /// then enforced at the user `impl` site.
+            self_constraint: Option<noeta_ext_abi::PackedConstraint>,
         }
         let aliases: Vec<(String, String)> = self
             .imports
@@ -214,6 +218,7 @@ impl Checker {
                     decl,
                     impls,
                     assoc,
+                    self_constraint: tr.self_constraint,
                 })
             })
             .collect();
@@ -222,13 +227,23 @@ impl Checker {
             decl,
             impls,
             assoc,
+            self_constraint,
         } in seeds
         {
             // A user `trait <local>` collected first wins (shadow ordering).
+            let native_won = !self.symbols.user_traits.contains_key(&local);
             self.symbols
                 .user_traits
                 .entry(local.clone())
                 .or_insert(decl);
+            // The trait's structural `Self`-constraint (slice 3) is recorded ONLY when the native
+            // trait actually occupies the slot — a same-named user `trait` shadows it and carries no
+            // such constraint, so recording it under a shadow would enforce a phantom shape.
+            if native_won && let Some(constraint) = self_constraint {
+                self.symbols
+                    .native_trait_self_constraints
+                    .insert(local.clone(), constraint);
+            }
             for ty in impls {
                 // Native-derived associated types (slice 1b): fold each `AssocDerivation` over this
                 // implementing type's uniform `@packed` element into `trait_assoc[(type, trait)]` —
