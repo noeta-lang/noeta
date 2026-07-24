@@ -909,6 +909,16 @@ struct Symbols {
     /// resolution. An associated type never enters the [`Type`] lattice; it is projected at each
     /// typing site (or degrades to `Type::Unknown` under `dyn`, where the impl is unknown).
     trait_assoc: HashMap<(String, String), HashMap<String, Type>>,
+    /// Native traits' **structural `Self`-constraints** (ExtBundle→ExtTrait convergence, slice 3):
+    /// local trait name → the [`noeta_ext_abi::PackedConstraint`] its [`noeta_ext_abi::ExtTrait::self_constraint`]
+    /// declares. Populated by [`Checker::seed_ext_traits`] **only when the native trait actually won
+    /// the `user_traits` slot** (a same-named user `trait` collected first shadows it — and carries no
+    /// such constraint), so the lookup respects shadow ordering. Read at the user `impl` site
+    /// ([`Checker::check_user_trait_impl`]): when a native trait carries one, the implementing type
+    /// must be a `@packed` struct matching it (the shared [`Checker::check_packed_self_constraint`],
+    /// E0015) — the same shape check `check_bundle_binding` runs for a bundle. Empty for a `.noe` trait
+    /// or a native trait with no constraint.
+    native_trait_self_constraints: HashMap<String, noeta_ext_abi::PackedConstraint>,
     /// Declared `From` conversions (error-ergonomics): target type name → the source types its
     /// in-body `impl From<Source>` blocks declare, resolved at collection so a `?` site can consult
     /// them regardless of statement order. Coherence allows at most one `From` impl per type (the

@@ -404,6 +404,21 @@ impl Checker {
                 );
             }
         }
+        // Native structural `Self`-constraint (ExtBundle→ExtTrait convergence, slice 3): the third
+        // capability a bundle had that a trait lacked. When this trait is a **native** trait carrying a
+        // [`noeta_ext_abi::ExtTrait::self_constraint`], the implementing type must be a `@packed` struct
+        // matching its [`noeta_ext_abi::PackedConstraint`] — the SAME shape check (and E0015 diagnostic)
+        // `check_bundle_binding` runs for a bundle bind, through the shared helper. A `.noe` trait (or a
+        // native trait with no constraint) records nothing in the table, so this is a no-op for it. The
+        // `trait_span` locates the diagnostic — `check_user_trait_impl` has no separate target span.
+        if let Some(constraint) = self
+            .symbols
+            .native_trait_self_constraints
+            .get(&decl.name)
+            .copied()
+        {
+            self.check_packed_self_constraint(target, trait_span, &decl.name, &constraint);
+        }
     }
 
     /// Two signature types conform if either side is unannotated (`Unknown`) or `dyn` — those defer
@@ -640,34 +655,9 @@ impl Checker {
         trait_name: &str,
         bundle: &'static noeta_ext_abi::ExtBundle,
     ) {
-        let target_ty = Type::Named(target.to_string(), vec![]);
-        let Some(layout) = self.packed_layout(&target_ty) else {
-            self.error(
-                DiagnosticCode::InvalidImpl,
-                target_span,
-                format!(
-                    "`{target}` cannot bind `{trait_name}`: a method bundle binds to a `@packed` \
-                     struct declared in this module"
-                ),
-            )
-            .help("mark the target `@packed` — bundles are packed-operations method sets");
-            return;
-        };
-        if let Some(message) = constraint_mismatch(&layout, &bundle.constraint) {
-            self.error(
-                DiagnosticCode::InvalidImpl,
-                target_span,
-                format!("`{target}` does not satisfy `{trait_name}`: {message}"),
-            );
+        if !self.check_packed_self_constraint(target, target_span, trait_name, &bundle.constraint) {
             return;
         }
-        // The bound type satisfies the constraint. Register its flat layout so the compiler interns a
-        // packed schema for it (scalar-unification slice 3): the bundle's *element* methods recover the
-        // element width from that schema even when the type never appears in a `List<T>` — a single
-        // struct value erases its field widths to boxed scalars at the seam, so without this an integer
-        // vector's element `add` would not wrap at its width on the VM (the tree-walker's per-type field
-        // index already covers it, so this keeps the two backends' results identical).
-        self.sites.bundle_schema_layouts.push(layout.clone());
         // Conflicts, reported on the binding (the textually-later party). Receiver-aware: an
         // Element method lives on `T` — it may not collide with the target's own methods or
         // fields; a Bulk method lives on `List<T>` — it may not shadow a built-in list method
@@ -692,8 +682,10 @@ impl Checker {
                         .get(target)
                         .is_some_and(|fields| fields.iter().any(|(f, _)| f == m.sig.name))
                     {
-                        conflicts
-                            .push(format!("`{target}` already declares a field `{}`", m.sig.name));
+                        conflicts.push(format!(
+                            "`{target}` already declares a field `{}`",
+                            m.sig.name
+                        ));
                     }
                 }
                 noeta_ext_abi::BundleReceiver::Bulk => {
@@ -731,6 +723,52 @@ impl Checker {
                 format!("{conflict} — binding `{trait_name}` would make the name ambiguous"),
             );
         }
+    }
+
+    /// The **packed-`Self` shape check** shared by the two structural constraints in the
+    /// ExtBundle→ExtTrait convergence: a bundle's [`noeta_ext_abi::ExtBundle::constraint`]
+    /// ([`Self::check_bundle_binding`]) and a native trait's [`noeta_ext_abi::ExtTrait::self_constraint`]
+    /// (slice 3, [`Self::check_user_trait_impl`]). Extracted verbatim from the bundle path so both
+    /// spellings enforce the *same* rule with the *same* E0015 diagnostics: the target must be a
+    /// locally-declared `@packed` struct ([`Self::packed_layout`]), its fields must satisfy the
+    /// [`noeta_ext_abi::PackedConstraint`] ([`constraint_mismatch`]), and on success its flat layout is
+    /// interned into [`Sites::bundle_schema_layouts`] so the compiler recovers the element width for the
+    /// element-relative methods (a single struct value erases its field widths to boxed scalars at the
+    /// seam; without this an integer vector's element op would not wrap at its width on the VM).
+    ///
+    /// Returns `true` when the constraint is satisfied (schema registered), `false` after emitting the
+    /// packed-target or field-mismatch diagnostic. `constraint_owner` names the binding in the message
+    /// (the bundle path passes its trait path, the trait path its trait name).
+    pub(crate) fn check_packed_self_constraint(
+        &mut self,
+        target: &str,
+        target_span: Span,
+        constraint_owner: &str,
+        constraint: &noeta_ext_abi::PackedConstraint,
+    ) -> bool {
+        let target_ty = Type::Named(target.to_string(), vec![]);
+        let Some(layout) = self.packed_layout(&target_ty) else {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                target_span,
+                format!(
+                    "`{target}` cannot bind `{constraint_owner}`: a method bundle binds to a `@packed` \
+                     struct declared in this module"
+                ),
+            )
+            .help("mark the target `@packed` — bundles are packed-operations method sets");
+            return false;
+        };
+        if let Some(message) = constraint_mismatch(&layout, constraint) {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                target_span,
+                format!("`{target}` does not satisfy `{constraint_owner}`: {message}"),
+            );
+            return false;
+        }
+        self.sites.bundle_schema_layouts.push(layout);
+        true
     }
 
     // (constraint_mismatch, the bundle-constraint comparison, is a free function below the impl.)

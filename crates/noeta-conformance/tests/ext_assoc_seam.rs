@@ -81,6 +81,9 @@ const REDUCE: ExtTrait = ExtTrait {
         },
     ],
     dispatch: None,
+    // No structural `Self`-constraint (slice 3): `Reduce` binds any implementing type; the
+    // constraint path is exercised by `ext_self_constraint_seam.rs`.
+    self_constraint: None,
 };
 
 // --- The native @packed struct that implements it ------------------------------------------------
