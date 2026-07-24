@@ -2556,7 +2556,7 @@ impl DocumentStore {
                     skipped: t
                         .attrs
                         .iter()
-                        .any(|a| a.name == noeta_ast::reflect::TEST_ATTR_SKIP),
+                        .any(|a| attr_is(a, noeta_ast::reflect::TEST_ATTR_SKIP)),
                     range: index.range(t.span, encoding),
                 })
                 .collect(),
@@ -2663,10 +2663,19 @@ fn to_document_symbol(
 
 /// The first string argument of the attribute named `name` (`#[Name("…")]`, `#[Group("…")]`), if
 /// the declaration carries it.
+/// Whether attribute `a` is the tier-metadata attribute whose qualified identity is `qualified`
+/// (`std.test.Skip`). A `@test` block's `#[Skip]`/`#[Name]` are prelude `@attribute`s applied
+/// without a `use`; the loader rewrites them to their FQN when it assembles an application, but the
+/// IDE reads the **un-rewritten** program (`activate_tiers` alone), where the same attribute is
+/// still its bare leaf (`Skip`). Match either form so test discovery agrees with a real run.
+fn attr_is(a: &noeta_ast::Attribute, qualified: &str) -> bool {
+    a.name == qualified || Some(a.name.as_str()) == qualified.rsplit('.').next()
+}
+
 fn attr_str(attrs: &[noeta_ast::Attribute], name: &str) -> Option<String> {
     attrs
         .iter()
-        .find(|a| a.name == name)?
+        .find(|a| attr_is(a, name))?
         .args
         .iter()
         .find_map(|arg| match &arg.value {

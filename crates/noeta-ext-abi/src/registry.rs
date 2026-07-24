@@ -2530,9 +2530,14 @@ impl Registry {
         self.units.iter().flat_map(|e| e.body_formatters().iter())
     }
 
-    /// The installed extension attribute named `name`, if any.
+    /// The installed extension attribute named `name` — its bare name (`Bench`) or its **qualified
+    /// identity** (`std.bench.Bench`). Attributes are namespace-scoped (D2 — no global attribute
+    /// namespace), and their identity-carrying references (a tier's `config`, an
+    /// `attributes_of::<…>()` key) name them by the qualified form; matching only the bare `name`
+    /// silently missed every such caller.
     pub fn find_ext_attribute(&self, name: &str) -> Option<&'static ExtAttribute> {
-        self.ext_attributes().find(|a| a.name == name)
+        self.ext_attributes()
+            .find(|a| a.name == name || a.is_qualified(name))
     }
 
     /// Whether `qualified` (`std.test.Skip`) is a registered extension attribute's identity. The
