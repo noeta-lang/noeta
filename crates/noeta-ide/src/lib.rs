@@ -869,12 +869,7 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
 
-        let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|t| {
-            t.kind == TokenKind::Ident
-                && t.span.source == source
-                && t.span.start <= offset
-                && offset <= t.span.end
-        })?;
+        let token = ident_token_at(&noeta_db::tokens(db, doc).0.tokens, offset)?;
         let name = &text[token.span.range()];
         // An imported type's merged declaration is linker-qualified (`geometry.vec.Vec2`), so a
         // bare reference (`Vec2 {}`) resolves through the entry's `use` bindings when the direct
@@ -1152,12 +1147,7 @@ impl DocumentStore {
 
         // On a path segment (`geometry`, `vec`, `std`, …): the module prefix up to that segment.
         // Segments carry no individual spans, so find the identifier token and match its text.
-        let token = noeta_db::tokens(db, doc).0.tokens.iter().find(|t| {
-            t.kind == TokenKind::Ident
-                && t.span.source == source
-                && t.span.start <= offset
-                && offset <= t.span.end
-        })?;
+        let token = ident_token_at(&noeta_db::tokens(db, doc).0.tokens, offset)?;
         let word = &text[token.span.range()];
         let idx = path.iter().position(|s| s == word)?;
         let module = path[..=idx].join(".");
@@ -1272,9 +1262,12 @@ impl DocumentStore {
         let offset = index.offset(position, encoding);
         let toks = noeta_db::tokens(db, doc);
         let tokens = &toks.0.tokens;
-        let i = tokens.iter().position(|t| {
-            t.span.source == source && t.span.start <= offset && offset <= t.span.end
-        })?;
+        // No `span.source` filter: this raw token stream is the entry document's own parse
+        // (`SourceId::FIRST`), but `source` is the document's *linked* id — in a multi-file
+        // workspace those differ, and the guard would reject every token (see `ident_token_at`).
+        let i = tokens
+            .iter()
+            .position(|t| t.span.start <= offset && offset <= t.span.end)?;
         let (at, name_tok) = match tokens[i].kind {
             TokenKind::Ident if i > 0 && tokens[i - 1].kind == TokenKind::At => {
                 (&tokens[i - 1], &tokens[i])
@@ -1297,14 +1290,24 @@ impl DocumentStore {
         // declaration. Both resolve through the one registry, so a directive that completes is a
         // directive that hovers regardless of which half of the name-space declared it. `None` is
         // a tier name — `hover_tier` handles those.
+        // Show the directive's *definition and args* (its `detail` signature, e.g.
+        // `@derive(Trait, …)`), then its doc prose — the same signature-then-doc shape the callable
+        // and type hovers use, so a directive reads like every other symbol. `detail` is a one-line
+        // "`<signature> — <gloss>`"; the signature is the part before the em-dash.
         let name = &text[name_tok.span.range()];
-        let descriptor = match noeta_ast::BuiltinDirective::from_name(name) {
-            Some(d) => d.info().doc.to_string(),
-            None => noeta_stdlib::registry::single_registry_process()
-                .find_ext_directive(name)?
-                .doc
-                .to_string(),
+        let (detail, doc) = match noeta_ast::BuiltinDirective::from_name(name) {
+            Some(d) => {
+                let info = d.info();
+                (info.detail.to_string(), info.doc.to_string())
+            }
+            None => {
+                let registry = noeta_stdlib::registry::single_registry_process();
+                let ext = registry.find_ext_directive(name)?;
+                (ext.detail.to_string(), ext.doc.to_string())
+            }
         };
+        let signature = detail.split(" — ").next().unwrap_or(&detail);
+        let descriptor = format!("```noeta\n{signature}\n```\n\n---\n\n{doc}");
         let span = Span {
             start: at.span.start,
             end: name_tok.span.end,
@@ -3105,16 +3108,20 @@ fn render_type_definition(
         )),
         _ => None,
     })?;
+    // Show the type's leaf name in the header: an imported type resolves through its merged,
+    // linker-qualified identity (`geometry.vec.Vec2`), but the hover reads best under the name the
+    // author wrote (`Vec2`) — the same treatment `render_fn_signature` gives a function name.
+    let leaf = name.rsplit('.').next().unwrap_or(name);
     members.extend(methods.iter().map(render_fn_signature));
     if members.is_empty() {
-        return Some(format!("{keyword} {name}{generics} {{}}"));
+        return Some(format!("{keyword} {leaf}{generics} {{}}"));
     }
     let body = members
         .iter()
         .map(|m| format!("    {m}"))
         .collect::<Vec<_>>()
         .join("\n");
-    Some(format!("{keyword} {name}{generics} {{\n{body}\n}}"))
+    Some(format!("{keyword} {leaf}{generics} {{\n{body}\n}}"))
 }
 
 /// Whether `name` is a type declared in this program (a `struct`/`class`/`enum`) — the signal that a
@@ -4166,6 +4173,108 @@ mod tests {
                 .any(|(line, label)| *line == 7 && label == ": dyn"),
             "uninferred closure param must not hint: {hints:?}"
         );
+    }
+
+    #[test]
+    fn hovers_read_cleanly_for_imports_attributes_and_directives() {
+        // (A) FQN stripping: an imported type renders under its LEAF name in a signature, not the
+        // linker-qualified `geometry.vec.Vec2` the merged program carries.
+        {
+            let dir = temp_workspace(
+                "leaf_types",
+                &[(
+                    "vec.noe",
+                    "namespace geometry.vec;\npub struct Vec2 {\n    x: int = 0\n    y: int = 0\n}\n",
+                )],
+            );
+            let entry = path_to_uri(&dir.join("main.noe"));
+            let mut store = test_store();
+            store.open(
+                &entry,
+                "use geometry.vec.Vec2\nfn add(a: Vec2, b: Vec2): Vec2 { return a }\nr = add(Vec2 {}, Vec2 {})\n".to_string(),
+            );
+            // Hover the call `add(...)` on line 2.
+            let sig = store
+                .hover_signature(
+                    &entry,
+                    Position {
+                        line: 2,
+                        character: 4,
+                    },
+                    Encoding::Utf8,
+                )
+                .map(|(s, _)| s);
+            assert_eq!(sig.as_deref(), Some("fn add(a: Vec2, b: Vec2): Vec2"));
+        }
+        // (B) A `#[...]` attribute in a multi-file workspace hovers as the attribute struct's
+        // DEFINITION and its fields (the args) — not a bare doc. This exercises the multi-file
+        // token-source fix: single-file already worked, the linked/raw SourceId mismatch hid it.
+        {
+            let dir = temp_workspace(
+                "attr_def",
+                &[(
+                    "attrs.noe",
+                    "namespace App.Attrs;\n@doc {\n  Marks a handler.\n}\n@attribute(Function)\npub struct Handler {\n    route: string\n}\n",
+                )],
+            );
+            let entry = path_to_uri(&dir.join("main.noe"));
+            let mut store = test_store();
+            store.open(
+                &entry,
+                "use App.Attrs.Handler\n#[Handler(\"/x\")]\nfn f(): int { return 1 }\n".to_string(),
+            );
+            let md = store
+                .hover_markdown(
+                    &entry,
+                    Position {
+                        line: 1,
+                        character: 3,
+                    },
+                    Encoding::Utf8,
+                )
+                .map(|(s, _)| s)
+                .expect("hover on an attribute usage");
+            assert!(
+                md.contains("struct Handler"),
+                "attribute shows its definition: {md}"
+            );
+            assert!(
+                md.contains("route: string"),
+                "attribute shows its args (fields): {md}"
+            );
+        }
+        // (C) An `@`-directive hovers as its signature (definition + args) AND its doc — not doc
+        // alone, and not (in a multi-file workspace) nothing at all.
+        {
+            let mut store = test_store();
+            store.open(
+                "file:///d.noe",
+                "@derive(Equatable)\nstruct P { x: int = 0 }\n".to_string(),
+            );
+            let md = store
+                .hover_markdown(
+                    "file:///d.noe",
+                    Position {
+                        line: 0,
+                        character: 2,
+                    },
+                    Encoding::Utf8,
+                )
+                .map(|(s, _)| s)
+                .expect("hover on a directive");
+            assert!(
+                md.contains("@derive("),
+                "directive shows its signature: {md}"
+            );
+            assert!(
+                md.contains("---"),
+                "directive shows signature THEN doc: {md}"
+            );
+            assert!(
+                md.to_lowercase().contains("generates") || md.to_lowercase().contains("derive"),
+                "directive shows its doc prose: {md}"
+            );
+        }
     }
 
     #[test]
