@@ -166,30 +166,38 @@ pub fn reduce_num_packed(
 ) -> Result<Option<RedNum>, StdError> {
     Ok(match field {
         PackedField::Int => reduce_buf::<i64>(op, bytes).map(RedNum::Int),
-        PackedField::IntN { bits: 8, signed: true } => {
-            reduce_buf::<i8>(op, bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 8, signed: false } => {
-            reduce_buf::<u8>(op, bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 16, signed: true } => {
-            reduce_buf::<i16>(op, bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 16, signed: false } => {
-            reduce_buf::<u16>(op, bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 32, signed: true } => {
-            reduce_buf::<i32>(op, bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 32, signed: false } => {
-            reduce_buf::<u32>(op, bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 64, signed: true } => {
-            reduce_buf::<i64>(op, bytes).map(RedNum::Int)
-        }
-        PackedField::IntN { bits: 64, signed: false } => {
-            reduce_buf::<u64>(op, bytes).map(|v| RedNum::Int(v as i64))
-        }
+        PackedField::IntN {
+            bits: 8,
+            signed: true,
+        } => reduce_buf::<i8>(op, bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 8,
+            signed: false,
+        } => reduce_buf::<u8>(op, bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 16,
+            signed: true,
+        } => reduce_buf::<i16>(op, bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 16,
+            signed: false,
+        } => reduce_buf::<u16>(op, bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 32,
+            signed: true,
+        } => reduce_buf::<i32>(op, bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 32,
+            signed: false,
+        } => reduce_buf::<u32>(op, bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 64,
+            signed: true,
+        } => reduce_buf::<i64>(op, bytes).map(RedNum::Int),
+        PackedField::IntN {
+            bits: 64,
+            signed: false,
+        } => reduce_buf::<u64>(op, bytes).map(|v| RedNum::Int(v as i64)),
         PackedField::Float | PackedField::F64 => reduce_buf::<f64>(op, bytes).map(RedNum::Float),
         PackedField::F32 => reduce_buf::<f32>(op, bytes).map(RedNum::F32),
         PackedField::Bool => return Err(non_numeric(op, "bool")),
@@ -216,30 +224,38 @@ fn checked_sum_buf<S: Elem>(bytes: &[u8]) -> Option<S> {
 pub fn checked_sum_packed(field: &PackedField, bytes: &[u8]) -> Result<Option<RedNum>, StdError> {
     Ok(match field {
         PackedField::Int => checked_sum_buf::<i64>(bytes).map(RedNum::Int),
-        PackedField::IntN { bits: 8, signed: true } => {
-            checked_sum_buf::<i8>(bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 8, signed: false } => {
-            checked_sum_buf::<u8>(bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 16, signed: true } => {
-            checked_sum_buf::<i16>(bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 16, signed: false } => {
-            checked_sum_buf::<u16>(bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 32, signed: true } => {
-            checked_sum_buf::<i32>(bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 32, signed: false } => {
-            checked_sum_buf::<u32>(bytes).map(|v| RedNum::Int(v as i64))
-        }
-        PackedField::IntN { bits: 64, signed: true } => {
-            checked_sum_buf::<i64>(bytes).map(RedNum::Int)
-        }
-        PackedField::IntN { bits: 64, signed: false } => {
-            checked_sum_buf::<u64>(bytes).map(|v| RedNum::Int(v as i64))
-        }
+        PackedField::IntN {
+            bits: 8,
+            signed: true,
+        } => checked_sum_buf::<i8>(bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 8,
+            signed: false,
+        } => checked_sum_buf::<u8>(bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 16,
+            signed: true,
+        } => checked_sum_buf::<i16>(bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 16,
+            signed: false,
+        } => checked_sum_buf::<u16>(bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 32,
+            signed: true,
+        } => checked_sum_buf::<i32>(bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 32,
+            signed: false,
+        } => checked_sum_buf::<u32>(bytes).map(|v| RedNum::Int(v as i64)),
+        PackedField::IntN {
+            bits: 64,
+            signed: true,
+        } => checked_sum_buf::<i64>(bytes).map(RedNum::Int),
+        PackedField::IntN {
+            bits: 64,
+            signed: false,
+        } => checked_sum_buf::<u64>(bytes).map(|v| RedNum::Int(v as i64)),
         PackedField::Float | PackedField::F64 => checked_sum_buf::<f64>(bytes).map(RedNum::Float),
         PackedField::F32 => checked_sum_buf::<f32>(bytes).map(RedNum::F32),
         PackedField::Bool => return Err(non_numeric(NumReduce::Sum, "bool")),

@@ -121,14 +121,38 @@ pub fn zip_num_packed(
 ) -> Result<Vec<u8>, StdError> {
     Ok(match field {
         PackedField::Int => zip_buf::<i64>(op, a, b),
-        PackedField::IntN { bits: 8, signed: true } => zip_buf::<i8>(op, a, b),
-        PackedField::IntN { bits: 8, signed: false } => zip_buf::<u8>(op, a, b),
-        PackedField::IntN { bits: 16, signed: true } => zip_buf::<i16>(op, a, b),
-        PackedField::IntN { bits: 16, signed: false } => zip_buf::<u16>(op, a, b),
-        PackedField::IntN { bits: 32, signed: true } => zip_buf::<i32>(op, a, b),
-        PackedField::IntN { bits: 32, signed: false } => zip_buf::<u32>(op, a, b),
-        PackedField::IntN { bits: 64, signed: true } => zip_buf::<i64>(op, a, b),
-        PackedField::IntN { bits: 64, signed: false } => zip_buf::<u64>(op, a, b),
+        PackedField::IntN {
+            bits: 8,
+            signed: true,
+        } => zip_buf::<i8>(op, a, b),
+        PackedField::IntN {
+            bits: 8,
+            signed: false,
+        } => zip_buf::<u8>(op, a, b),
+        PackedField::IntN {
+            bits: 16,
+            signed: true,
+        } => zip_buf::<i16>(op, a, b),
+        PackedField::IntN {
+            bits: 16,
+            signed: false,
+        } => zip_buf::<u16>(op, a, b),
+        PackedField::IntN {
+            bits: 32,
+            signed: true,
+        } => zip_buf::<i32>(op, a, b),
+        PackedField::IntN {
+            bits: 32,
+            signed: false,
+        } => zip_buf::<u32>(op, a, b),
+        PackedField::IntN {
+            bits: 64,
+            signed: true,
+        } => zip_buf::<i64>(op, a, b),
+        PackedField::IntN {
+            bits: 64,
+            signed: false,
+        } => zip_buf::<u64>(op, a, b),
         PackedField::Float | PackedField::F64 => zip_buf::<f64>(op, a, b),
         PackedField::F32 => zip_buf::<f32>(op, a, b),
         PackedField::Bool => return Err(non_numeric(op.symbol(), "bool")),
@@ -169,19 +193,47 @@ fn factor_f64(factor: Scalar) -> f64 {
 /// `xs.scale(s)`: multiply every element of a packed buffer by `factor`, same element type, wrapping
 /// for ints. `factor` is read as the field's own domain (the checker types the argument as the
 /// element type, so this is exact; the lenient casts here only cover a laundered `dyn` factor).
-pub fn scale_num_packed(field: &PackedField, a: &[u8], factor: Scalar) -> Result<Vec<u8>, StdError> {
+pub fn scale_num_packed(
+    field: &PackedField,
+    a: &[u8],
+    factor: Scalar,
+) -> Result<Vec<u8>, StdError> {
     let ki = factor_i64(factor);
     let kf = factor_f64(factor);
     Ok(match field {
         PackedField::Int => scale_buf::<i64>(a, ki),
-        PackedField::IntN { bits: 8, signed: true } => scale_buf::<i8>(a, ki as i8),
-        PackedField::IntN { bits: 8, signed: false } => scale_buf::<u8>(a, ki as u8),
-        PackedField::IntN { bits: 16, signed: true } => scale_buf::<i16>(a, ki as i16),
-        PackedField::IntN { bits: 16, signed: false } => scale_buf::<u16>(a, ki as u16),
-        PackedField::IntN { bits: 32, signed: true } => scale_buf::<i32>(a, ki as i32),
-        PackedField::IntN { bits: 32, signed: false } => scale_buf::<u32>(a, ki as u32),
-        PackedField::IntN { bits: 64, signed: true } => scale_buf::<i64>(a, ki),
-        PackedField::IntN { bits: 64, signed: false } => scale_buf::<u64>(a, ki as u64),
+        PackedField::IntN {
+            bits: 8,
+            signed: true,
+        } => scale_buf::<i8>(a, ki as i8),
+        PackedField::IntN {
+            bits: 8,
+            signed: false,
+        } => scale_buf::<u8>(a, ki as u8),
+        PackedField::IntN {
+            bits: 16,
+            signed: true,
+        } => scale_buf::<i16>(a, ki as i16),
+        PackedField::IntN {
+            bits: 16,
+            signed: false,
+        } => scale_buf::<u16>(a, ki as u16),
+        PackedField::IntN {
+            bits: 32,
+            signed: true,
+        } => scale_buf::<i32>(a, ki as i32),
+        PackedField::IntN {
+            bits: 32,
+            signed: false,
+        } => scale_buf::<u32>(a, ki as u32),
+        PackedField::IntN {
+            bits: 64,
+            signed: true,
+        } => scale_buf::<i64>(a, ki),
+        PackedField::IntN {
+            bits: 64,
+            signed: false,
+        } => scale_buf::<u64>(a, ki as u64),
         PackedField::Float | PackedField::F64 => scale_buf::<f64>(a, kf),
         PackedField::F32 => scale_buf::<f32>(a, kf as f32),
         PackedField::Bool => return Err(non_numeric("scale", "bool")),
@@ -216,14 +268,38 @@ pub fn map_num_packed(op: ElemMap, field: &PackedField, a: &[u8]) -> Result<Vec<
     };
     Ok(match field {
         PackedField::Int => map_buf::<i64>(op, a),
-        PackedField::IntN { bits: 8, signed: true } => map_buf::<i8>(op, a),
-        PackedField::IntN { bits: 8, signed: false } => map_buf::<u8>(op, a),
-        PackedField::IntN { bits: 16, signed: true } => map_buf::<i16>(op, a),
-        PackedField::IntN { bits: 16, signed: false } => map_buf::<u16>(op, a),
-        PackedField::IntN { bits: 32, signed: true } => map_buf::<i32>(op, a),
-        PackedField::IntN { bits: 32, signed: false } => map_buf::<u32>(op, a),
-        PackedField::IntN { bits: 64, signed: true } => map_buf::<i64>(op, a),
-        PackedField::IntN { bits: 64, signed: false } => map_buf::<u64>(op, a),
+        PackedField::IntN {
+            bits: 8,
+            signed: true,
+        } => map_buf::<i8>(op, a),
+        PackedField::IntN {
+            bits: 8,
+            signed: false,
+        } => map_buf::<u8>(op, a),
+        PackedField::IntN {
+            bits: 16,
+            signed: true,
+        } => map_buf::<i16>(op, a),
+        PackedField::IntN {
+            bits: 16,
+            signed: false,
+        } => map_buf::<u16>(op, a),
+        PackedField::IntN {
+            bits: 32,
+            signed: true,
+        } => map_buf::<i32>(op, a),
+        PackedField::IntN {
+            bits: 32,
+            signed: false,
+        } => map_buf::<u32>(op, a),
+        PackedField::IntN {
+            bits: 64,
+            signed: true,
+        } => map_buf::<i64>(op, a),
+        PackedField::IntN {
+            bits: 64,
+            signed: false,
+        } => map_buf::<u64>(op, a),
         PackedField::Float | PackedField::F64 => map_buf::<f64>(op, a),
         PackedField::F32 => map_buf::<f32>(op, a),
         PackedField::Bool => return Err(non_numeric(who, "bool")),
@@ -254,14 +330,38 @@ pub fn clamp_num_packed(
     let (lf, hf) = (factor_f64(lo), factor_f64(hi));
     Ok(match field {
         PackedField::Int => clamp_buf::<i64>(a, li, hi_i),
-        PackedField::IntN { bits: 8, signed: true } => clamp_buf::<i8>(a, li as i8, hi_i as i8),
-        PackedField::IntN { bits: 8, signed: false } => clamp_buf::<u8>(a, li as u8, hi_i as u8),
-        PackedField::IntN { bits: 16, signed: true } => clamp_buf::<i16>(a, li as i16, hi_i as i16),
-        PackedField::IntN { bits: 16, signed: false } => clamp_buf::<u16>(a, li as u16, hi_i as u16),
-        PackedField::IntN { bits: 32, signed: true } => clamp_buf::<i32>(a, li as i32, hi_i as i32),
-        PackedField::IntN { bits: 32, signed: false } => clamp_buf::<u32>(a, li as u32, hi_i as u32),
-        PackedField::IntN { bits: 64, signed: true } => clamp_buf::<i64>(a, li, hi_i),
-        PackedField::IntN { bits: 64, signed: false } => clamp_buf::<u64>(a, li as u64, hi_i as u64),
+        PackedField::IntN {
+            bits: 8,
+            signed: true,
+        } => clamp_buf::<i8>(a, li as i8, hi_i as i8),
+        PackedField::IntN {
+            bits: 8,
+            signed: false,
+        } => clamp_buf::<u8>(a, li as u8, hi_i as u8),
+        PackedField::IntN {
+            bits: 16,
+            signed: true,
+        } => clamp_buf::<i16>(a, li as i16, hi_i as i16),
+        PackedField::IntN {
+            bits: 16,
+            signed: false,
+        } => clamp_buf::<u16>(a, li as u16, hi_i as u16),
+        PackedField::IntN {
+            bits: 32,
+            signed: true,
+        } => clamp_buf::<i32>(a, li as i32, hi_i as i32),
+        PackedField::IntN {
+            bits: 32,
+            signed: false,
+        } => clamp_buf::<u32>(a, li as u32, hi_i as u32),
+        PackedField::IntN {
+            bits: 64,
+            signed: true,
+        } => clamp_buf::<i64>(a, li, hi_i),
+        PackedField::IntN {
+            bits: 64,
+            signed: false,
+        } => clamp_buf::<u64>(a, li as u64, hi_i as u64),
         PackedField::Float | PackedField::F64 => clamp_buf::<f64>(a, lf, hf),
         PackedField::F32 => clamp_buf::<f32>(a, lf as f32, hf as f32),
         PackedField::Bool => return Err(non_numeric("clamp", "bool")),
@@ -303,11 +403,7 @@ fn combine(op: ElemBinOp, a: Scalar, b: Scalar) -> Result<Scalar, StdError> {
 }
 
 /// Element-wise binary over two boxed scalar lists. The caller guarantees equal length.
-pub fn zip_num_scalars(
-    op: ElemBinOp,
-    a: &[Scalar],
-    b: &[Scalar],
-) -> Result<Vec<Scalar>, StdError> {
+pub fn zip_num_scalars(op: ElemBinOp, a: &[Scalar], b: &[Scalar]) -> Result<Vec<Scalar>, StdError> {
     a.iter().zip(b).map(|(&x, &y)| combine(op, x, y)).collect()
 }
 
@@ -356,12 +452,13 @@ pub fn clamp_num_scalars(a: &[Scalar], lo: Scalar, hi: Scalar) -> Result<Vec<Sca
             // `Ord::min`/`max` named explicitly: `i64` now implements `Elem` (in scope for the packed
             // kernels), so a bare `i.max(..)` is ambiguous between `Ord` and `Elem::max`. For a
             // total-order integer the two agree, so this is the same `Ord` clamp as before.
-            Scalar::Int(i) => {
-                Ok(Scalar::Int(Ord::min(Ord::max(i, factor_i64(lo)), factor_i64(hi))))
-            }
-            Scalar::F32(f) => {
-                Ok(Scalar::F32(f.max(factor_f64(lo) as f32).min(factor_f64(hi) as f32)))
-            }
+            Scalar::Int(i) => Ok(Scalar::Int(Ord::min(
+                Ord::max(i, factor_i64(lo)),
+                factor_i64(hi),
+            ))),
+            Scalar::F32(f) => Ok(Scalar::F32(
+                f.max(factor_f64(lo) as f32).min(factor_f64(hi) as f32),
+            )),
             Scalar::Float(f) => Ok(Scalar::Float(f.max(factor_f64(lo)).min(factor_f64(hi)))),
             Scalar::Bool(_) => Err(non_numeric("clamp", "bool")),
         })
@@ -382,28 +479,52 @@ mod tests {
             .collect()
     }
     fn i32_field() -> PackedField {
-        PackedField::IntN { bits: 32, signed: true }
+        PackedField::IntN {
+            bits: 32,
+            signed: true,
+        }
     }
 
     #[test]
     fn packed_add_sub_mul_wrap_at_width() {
         let a = le_i32(&[1, 2, 3]);
         let b = le_i32(&[10, 20, 30]);
-        assert_eq!(from_i32(&zip_num_packed(ElemBinOp::Add, &i32_field(), &a, &b).unwrap()), [11, 22, 33]);
-        assert_eq!(from_i32(&zip_num_packed(ElemBinOp::Sub, &i32_field(), &b, &a).unwrap()), [9, 18, 27]);
-        assert_eq!(from_i32(&zip_num_packed(ElemBinOp::Mul, &i32_field(), &a, &b).unwrap()), [10, 40, 90]);
+        assert_eq!(
+            from_i32(&zip_num_packed(ElemBinOp::Add, &i32_field(), &a, &b).unwrap()),
+            [11, 22, 33]
+        );
+        assert_eq!(
+            from_i32(&zip_num_packed(ElemBinOp::Sub, &i32_field(), &b, &a).unwrap()),
+            [9, 18, 27]
+        );
+        assert_eq!(
+            from_i32(&zip_num_packed(ElemBinOp::Mul, &i32_field(), &a, &b).unwrap()),
+            [10, 40, 90]
+        );
         // i32::MAX + 1 wraps to i32::MIN.
         let hi = le_i32(&[i32::MAX]);
         let one = le_i32(&[1]);
-        assert_eq!(from_i32(&zip_num_packed(ElemBinOp::Add, &i32_field(), &hi, &one).unwrap()), [i32::MIN]);
+        assert_eq!(
+            from_i32(&zip_num_packed(ElemBinOp::Add, &i32_field(), &hi, &one).unwrap()),
+            [i32::MIN]
+        );
     }
 
     #[test]
     fn packed_scale_abs_neg() {
         let a = le_i32(&[1, -2, 3]);
-        assert_eq!(from_i32(&scale_num_packed(&i32_field(), &a, Scalar::Int(2)).unwrap()), [2, -4, 6]);
-        assert_eq!(from_i32(&map_num_packed(ElemMap::Abs, &i32_field(), &a).unwrap()), [1, 2, 3]);
-        assert_eq!(from_i32(&map_num_packed(ElemMap::Neg, &i32_field(), &a).unwrap()), [-1, 2, -3]);
+        assert_eq!(
+            from_i32(&scale_num_packed(&i32_field(), &a, Scalar::Int(2)).unwrap()),
+            [2, -4, 6]
+        );
+        assert_eq!(
+            from_i32(&map_num_packed(ElemMap::Abs, &i32_field(), &a).unwrap()),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            from_i32(&map_num_packed(ElemMap::Neg, &i32_field(), &a).unwrap()),
+            [-1, 2, -3]
+        );
     }
 
     #[test]
@@ -418,10 +539,19 @@ mod tests {
     #[test]
     fn unsigned_abs_is_identity_and_neg_wraps() {
         let a: Vec<u8> = vec![200, 100];
-        let field = PackedField::IntN { bits: 8, signed: false };
-        assert_eq!(map_num_packed(ElemMap::Abs, &field, &a).unwrap(), vec![200, 100]);
+        let field = PackedField::IntN {
+            bits: 8,
+            signed: false,
+        };
+        assert_eq!(
+            map_num_packed(ElemMap::Abs, &field, &a).unwrap(),
+            vec![200, 100]
+        );
         // neg of u8 200 = wrapping_neg = 56.
-        assert_eq!(map_num_packed(ElemMap::Neg, &field, &a).unwrap(), vec![56, 156]);
+        assert_eq!(
+            map_num_packed(ElemMap::Neg, &field, &a).unwrap(),
+            vec![56, 156]
+        );
     }
 
     #[test]

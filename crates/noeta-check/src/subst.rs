@@ -733,8 +733,14 @@ pub(crate) fn constraint_mismatch(
             (ConstraintField::F32, PackedKind::F32) => true,
             (ConstraintField::Bool, PackedKind::Bool) => true,
             (
-                ConstraintField::IntN { bits: wb, signed: ws },
-                PackedKind::IntN { bits: fb, signed: fs },
+                ConstraintField::IntN {
+                    bits: wb,
+                    signed: ws,
+                },
+                PackedKind::IntN {
+                    bits: fb,
+                    signed: fs,
+                },
             ) => wb == fb && ws == fs,
             (ConstraintField::AnyNumeric, k) => matches!(
                 k,

@@ -741,7 +741,9 @@ impl<'m> Vm<'m> {
         let out = noeta_stdlib::zip_num_scalars(op, &a, &b)
             .map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
         Ok(Value::list(
-            out.into_iter().map(crate::values::scalar_to_value).collect(),
+            out.into_iter()
+                .map(crate::values::scalar_to_value)
+                .collect(),
         ))
     }
 
@@ -757,7 +759,11 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Result<Value, Abort> {
         let arg_scalar = |this: &mut Self, i: usize| -> Result<noeta_stdlib::Scalar, Abort> {
-            match args.get(i).copied().and_then(crate::values::value_to_scalar) {
+            match args
+                .get(i)
+                .copied()
+                .and_then(crate::values::value_to_scalar)
+            {
                 Some(s) => Ok(s),
                 None => Err(this.error(
                     DiagnosticCode::TypeMismatch,
@@ -805,7 +811,9 @@ impl<'m> Vm<'m> {
         };
         let out = result.map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
         Ok(Value::list(
-            out.into_iter().map(crate::values::scalar_to_value).collect(),
+            out.into_iter()
+                .map(crate::values::scalar_to_value)
+                .collect(),
         ))
     }
 
