@@ -602,6 +602,24 @@ const TABLE: &[Row] = &[
             ),
         ),
     ),
+    // `self_constraint` (ExtBundle→ExtTrait convergence, slice 3): the trait's structural `Self`-shape
+    // constraint — the third capability a bundle had that a trait lacked. States a RULE: a native trait
+    // carrying one may only be `impl`-ed for a `@packed` struct whose fields match the
+    // `PackedConstraint`, or the impl is E0015 — the SAME shape check (shared `check_packed_self_constraint`)
+    // `check_bundle_binding` runs for a bundle. No shipped extension declares a native trait with a
+    // self-constraint, so the constraint-enforcement fixture is the only exerciser; both directions
+    // matter (a matching packed struct binds clean, a non-packed / mismatched one is rejected).
+    Row(
+        "ExtTrait",
+        "self_constraint",
+        Constraint(
+            Anchor(CHECK_TRAITS, "fn check_packed_self_constraint("),
+            Anchor(
+                EMBED_CONSTRAINTS,
+                "fn a_native_trait_self_constraint_is_enforced(",
+            ),
+        ),
+    ),
     Row(
         "ExtTraitMethod",
         "sig",

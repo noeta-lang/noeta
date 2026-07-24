@@ -248,20 +248,50 @@ const FX_DERIVES: &[ExtDerive] = &[ExtDerive {
 /// shipped extension declares a native trait, so the checker's E0015 (incomplete-impl) arm has never
 /// run for a native trait's contract against the corpus; this fixture is its exerciser. A user type
 /// `impl Renderable for T` must define `fn render(): string` or the impl is E0015.
-const FX_TRAITS: &[ExtTrait] = &[ExtTrait {
-    name: "Renderable",
-    namespace: "fx",
-    methods: &[ExtTraitMethod {
-        sig: ExtFn {
-            name: "render",
-            params: &[],
-            ret: RetTy::Concrete(SigType::String),
-        },
-        has_default: false,
-    }],
-    assoc_types: &[],
-    dispatch: None,
-}];
+const FX_TRAITS: &[ExtTrait] = &[
+    ExtTrait {
+        name: "Renderable",
+        namespace: "fx",
+        methods: &[ExtTraitMethod {
+            sig: ExtFn {
+                name: "render",
+                params: &[],
+                ret: RetTy::Concrete(SigType::String),
+            },
+            has_default: false,
+        }],
+        assoc_types: &[],
+        dispatch: None,
+        // `Renderable` is shape-agnostic; the `self_constraint` path is exercised by `Packable` below.
+        self_constraint: None,
+    },
+    // A **native trait carrying a structural `Self`-constraint** (ExtBundle→ExtTrait convergence,
+    // slice 3) — the field under test. `Packable` may only be `impl`-ed for a `@packed` struct that
+    // is a **uniform numeric vector of ≥2 fields** (`AnyNumeric` + `Uniform { min: 2 }`), exactly the
+    // shape a bundle bind requires. No shipped extension declares a native trait with a
+    // self-constraint, so the checker's `check_packed_self_constraint` arm has never run for a trait
+    // against the corpus; this fixture is its exerciser. `lane_count` is an ordinary required method a
+    // conforming impl provides — the constraint is enforced alongside the method contract.
+    ExtTrait {
+        name: "Packable",
+        namespace: "fx",
+        methods: &[ExtTraitMethod {
+            sig: ExtFn {
+                name: "lane_count",
+                params: &[],
+                ret: RetTy::Concrete(SigType::Int),
+            },
+            has_default: false,
+        }],
+        assoc_types: &[],
+        dispatch: None,
+        self_constraint: Some(PackedConstraint {
+            fields: &[ConstraintField::AnyNumeric],
+            layout: ConstraintLayout::Any,
+            arity: ConstraintArity::Uniform { min: 2 },
+        }),
+    },
+];
 
 /// A tier restricted to **methods**. std has no tier that attaches to methods but not to functions,
 /// so the annotation-site gate has only ever been observed saying "yes".
@@ -443,6 +473,46 @@ fn a_native_trait_incomplete_impl_is_rejected() {
          impl Renderable for Card {}\n\
          echo 1\n",
         "must define `fn render`",
+    );
+}
+
+// --- ExtTrait.self_constraint (ExtBundle→ExtTrait convergence, slice 3) ---------------------------
+
+/// `ExtTrait.self_constraint` states the RULE a native trait's structural `Self`-shape enforces on an
+/// implementor: the trait may only be `impl`-ed for a `@packed` struct whose fields match the
+/// `PackedConstraint` — the third capability a bundle had that a trait lacked, now first-class on a
+/// trait and enforced by the SAME `check_packed_self_constraint` core (E0015) that `check_bundle_binding`
+/// runs. No shipped extension declares one, so this fixture is the only exerciser. All three directions
+/// matter: a matching `@packed` struct binds clean, a non-`@packed` target is rejected, and a `@packed`
+/// struct of the wrong field kinds is rejected with the SAME constraint-mismatch diagnostic the bundle
+/// path produces.
+#[test]
+fn a_native_trait_self_constraint_is_enforced() {
+    // A matching `@packed` struct — uniform numeric (`f32`), ≥2 fields — that also provides the
+    // required `lane_count` binds clean: the self-constraint is satisfied exactly as a bundle bind's.
+    accepts(
+        "use fx.Packable\n\
+         @packed struct Vec2 { x: f32; y: f32 }\n\
+         impl Packable for Vec2 { fn lane_count(): int { return 2 } }\n\
+         echo 1\n",
+    );
+    // A NON-`@packed` target is rejected (E0015): the self-constraint requires a packed struct, so the
+    // method being present is not enough — the same packed-target diagnostic a bundle bind emits.
+    rejects(
+        "use fx.Packable\n\
+         struct Plain { x: int }\n\
+         impl Packable for Plain { fn lane_count(): int { return 2 } }\n\
+         echo 1\n",
+        "cannot bind `Packable`",
+    );
+    // A `@packed` struct of the WRONG shape — `bool` is not numeric — is rejected with the SAME
+    // constraint-mismatch message the bundle path yields (both flow through `constraint_mismatch`).
+    rejects(
+        "use fx.Packable\n\
+         @packed struct Flags2 { a: bool; b: bool }\n\
+         impl Packable for Flags2 { fn lane_count(): int { return 2 } }\n\
+         echo 1\n",
+        "requires at least 2 `numeric` fields",
     );
 }
 
