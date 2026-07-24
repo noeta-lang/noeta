@@ -76,6 +76,10 @@ module.exports = grammar({
     [$._expression, $.qualified_identifier],
     // The chain length of a qualified head is decided by what follows (pattern variant vs head).
     [$.qualified_identifier],
+    // `use foo.{bar}` (grouped import) vs `use foo` then a `.{bar}` dot-brace statement — the same
+    // `.{` token now opens both. GLR keeps both until the terminator decides: no scanner `_newline`
+    // between the path and `.{` (same line) forces the grouped-import parse; a newline splits them.
+    [$._use_path],
   ],
 
   rules: {
@@ -121,7 +125,9 @@ module.exports = grammar({
     _use_path: $ => seq(
       $.identifier,
       repeat(seq('.', $.identifier)),
-      optional(seq('.', '{', commaSep1($.identifier), '}')),
+      // A grouped import `use a.b.{c, d}`. The `.{` is one fused token (the compiler lexer fuses it
+      // too), so `.` as a path separator and `.{` as a group opener never compete at `a • .`.
+      optional(seq('.{', commaSep1($.identifier), '}')),
     ),
 
     attribute: $ => seq(
@@ -281,11 +287,19 @@ module.exports = grammar({
 
     impl_block: $ => seq(
       'impl',
-      field('trait', $.identifier),
+      field('trait', $.trait_reference),
       optional(seq('for', field('type', $._type))),
       '{',
       repeat($.function_declaration),
       '}',
+    ),
+    // The reference right after `impl`: the trait for a trait impl, or the type for an inherent impl.
+    // It may be bare (`impl Add`), module-qualified (`impl vec.Kernels for T` — kernel-methods arc),
+    // generic (`impl From<Low>`, `impl Keyed<string> for Tag`), or both (`impl a.B<C>`). Previously a
+    // bare identifier only, which ERRORed on every qualified or generic impl (~54 in the corpus).
+    trait_reference: $ => seq(
+      field('name', choice($.qualified_identifier, $.identifier)),
+      optional(seq('<', commaSep1($._type), '>')),
     ),
 
     namespace_declaration: $ => seq(
@@ -396,6 +410,7 @@ module.exports = grammar({
       $.isolate_expression,
       $.concurrent_expression,
       $.struct_literal,
+      $.dot_brace_literal,
       $.list_literal,
       $.map_literal,
       $.set_literal,
@@ -528,6 +543,18 @@ module.exports = grammar({
       field('field', $.identifier),
     ),
 
+    // `.{ … }` — a target-typed struct literal (dot-brace-literals): the head type is inferred from
+    // context (a call arg `f(.{ … })`, a `: T = .{ … }` binding, a `return .{ … }`), so only the
+    // field-init body is written. Same body as `struct_literal`, headless. The `.` and `{` are
+    // separate tokens (as in the `use a.{b, c}` grouped import), disambiguated by the leading `.`
+    // sitting in expression-primary position with no receiver before it.
+    dot_brace_literal: $ => seq(
+      '.{',
+      optional(commaSep($._struct_field_init)),
+      optional(','),
+      '}',
+    ),
+
     list_literal: $ => seq('[', optional(commaSep($._expression)), optional(','), ']'),
 
     map_literal: $ => prec.dynamic(1, seq(
@@ -627,14 +654,21 @@ module.exports = grammar({
     )),
     boolean_literal: _ => choice('true', 'false'),
 
+    // A double-quoted or backtick string INTERPOLATES (`${…}` holes) and honors the full escape set.
+    // A single-quoted string is RAW (compiler lexer `RawStr`): no interpolation — `${…}`, `{`, `$`
+    // are literal — and its only escapes are `\'` and `\\` (every other backslash is literal too).
     string_literal: $ => choice(
       seq('"', repeat(choice($._string_content_dq, $.escape_sequence, $.interpolation)), '"'),
-      seq("'", repeat(choice($._string_content_sq, $.escape_sequence, $.interpolation)), "'"),
+      seq("'", repeat(choice($._raw_string_content, $.raw_escape_sequence)), "'"),
       seq('`', repeat(choice($._string_content_bt, $.escape_sequence, $.interpolation)), '`'),
     ),
     _string_content_dq: _ => token.immediate(prec(1, /[^"\\$]+|\$[^{]/)),
-    _string_content_sq: _ => token.immediate(prec(1, /[^'\\$]+|\$[^{]/)),
     _string_content_bt: _ => token.immediate(prec(1, /[^`\\$]+|\$[^{]/)),
+    // A run of raw single-quoted content: non-quote/non-backslash chars, or a backslash that does
+    // NOT start one of the two raw escapes (so `\t`, `\n`, `\$`, `\u{…}` stay literal — a raw string
+    // never expands them).
+    _raw_string_content: _ => token.immediate(prec(1, /([^'\\]|\\[^'\\])+/)),
+    raw_escape_sequence: _ => token.immediate(/\\['\\]/),
     escape_sequence: _ => token.immediate(/\\(u\{[0-9A-Fa-f]+\}|x[0-9A-Fa-f]{2}|\$\{|.)/),
     interpolation: $ => seq('${', $._expression, '}'),
 
