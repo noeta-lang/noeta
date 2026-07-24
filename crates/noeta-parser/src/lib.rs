@@ -630,8 +630,9 @@ fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
 
 /// Project a directive's arguments onto [`DeriveSpec`]s — the trait name plus its generic type
 /// arguments (`Serialize<Json>` → `name: "Serialize"`, `args: [Json]`). A non-generic derive has
-/// empty `args`; a stray `.`-qualifier on a derive argument is ignored (the checker never sees a
-/// valid program with one). A **named** argument configures the *preceding* trait (derive layers
+/// empty `args`; a **module-qualified** argument (`vec.Kernels`) keeps its qualifier as the spec
+/// name (`"vec.Kernels"`) — a method-bundle binding or cross-package trait the checker resolves. A
+/// **named** argument configures the *preceding* trait (derive layers
 /// 1+2): `via: field` is whole-trait delegation, any other `member: target` is a required-member
 /// binding — `@derive(Ordered, value: amount)`. A named argument with no preceding trait is E0037.
 fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec> {
@@ -691,6 +692,22 @@ fn directive_derive_specs(args: Vec<DirectiveArg>, ctx: &Ctx) -> Vec<DeriveSpec>
                 AttrValue::TypeRef { name, args } => specs.push(DeriveSpec {
                     name,
                     args,
+                    bindings: Vec::new(),
+                    via: None,
+                    span: arg.spans.head(),
+                }),
+                // A **module-qualified** name — `@derive(vec.Kernels)`. The expression fold reads a
+                // fieldless `module.Name` as an `Enum` value; in derive position it is a qualified
+                // trait/bundle path (a method-bundle binding, or a cross-package trait), kept whole
+                // (`vec.Kernels`) for the checker to resolve. A trailing `(…)` (non-empty `args`) is
+                // a constructor, never a trait name — it falls through to the error below.
+                AttrValue::Enum {
+                    enum_name,
+                    variant,
+                    args,
+                } if args.is_empty() => specs.push(DeriveSpec {
+                    name: format!("{enum_name}.{variant}"),
+                    args: Vec::new(),
                     bindings: Vec::new(),
                     via: None,
                     span: arg.spans.head(),

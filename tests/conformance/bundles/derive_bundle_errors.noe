@@ -1,0 +1,34 @@
+// Kernel-methods via `@derive` — impl-site diagnostics, IDENTICAL to the `impl`-form ones because
+// `@derive(vec.Kernels)` funnels into the same bundle-binding validation. A constraint mismatch
+// (a `bool` vector can't satisfy `vec.Kernels`; a FLOAT vector can't satisfy the integer-only
+// `vec.SatKernels`) is the same E0015 an empty `impl` would give. Binding the SAME bundle twice —
+// once by `@derive`, once by `impl` — is a coherence duplicate (E0027), exactly as two `impl`
+// blocks or two derives of a trait would be. A dotted name in a known module that names no bundle
+// is an unknown trait (E0014).
+// expect: error E0015 at 17:9
+// expect: error E0015 at 22:9
+// expect: error E0027 at 29:6
+// expect: error E0014 at 33:9
+// expect: exit 1
+use std.{vec}
+
+// Ineligible shape — `vec.Kernels` needs ≥2 numeric fields; a bool vector has none (E0015).
+@packed
+@derive(vec.Kernels)
+struct Flags { a: bool; b: bool }
+
+// `vec.SatKernels` is integer-only (saturation is undefined for floats) — a float vector is E0015.
+@packed
+@derive(vec.SatKernels)
+struct FVec3 { x: f32; y: f32; z: f32 }
+
+// The SAME bundle bound twice — `@derive` then `impl` — is one binding too many (E0027).
+@packed
+@derive(vec.Kernels)
+struct V3 { x: f32; y: f32; z: f32 }
+impl vec.Kernels for V3 {}
+
+// A dotted name in a bound module that resolves to no bundle is an unknown trait (E0014).
+@packed
+@derive(vec.Nope)
+struct W3 { x: f32; y: f32; z: f32 }
