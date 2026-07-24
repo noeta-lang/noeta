@@ -65,6 +65,13 @@ pub struct Sites {
     /// VM's `map` builtin builds a flat result at these sites (P-PACK 2.6 category B); invisible to
     /// `RunResult`, so the eval reference may ignore it and stay boxed.
     pub map_packed_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
+    /// Every `@packed` struct **bound to a `vec` method bundle** (`impl vec.Kernels for T {}`), by its
+    /// flat [`PackedLayout`] (scalar-unification slice 3). The compiler interns each into the module's
+    /// `packed_schemas` so the VM has the element width for the bundle's *element* methods even when the
+    /// type never appears in a `List<T>` (a single struct value erases its field widths to boxed
+    /// scalars; the interned schema recovers them, matching the tree-walker's per-type field index).
+    /// Not a construction site — purely a schema-availability channel.
+    pub bundle_schema_layouts: Vec<noeta_ast::reflect::PackedLayout>,
     /// Member-access spans (`list[i].field`) lowering fuses into a single `Rvalue::IndexField`, so a
     /// packed list element's field is read without materializing the element (P-PACK 2.5+). A pure
     /// function of the program, like the other site maps; the fusion is invisible to `RunResult`.
@@ -216,6 +223,8 @@ pub(crate) struct SiteMaps {
     /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
     /// site maps it is a pure function of the program, invisible to `RunResult`.
     pub(crate) map_packed_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
+    /// `@packed` structs bound to a `vec` bundle (scalar-unification slice 3) — see [`Sites`].
+    pub(crate) bundle_schema_layouts: Vec<noeta_ast::reflect::PackedLayout>,
     /// Member-access spans (`list[i].field`) the checker proved fusable: the index receiver is a
     /// built-in `List` and the field resolves on its element type. Lowering reads this (via
     /// [`Checked::index_field_sites`]) to emit a single [`Rvalue::IndexField`] that reads a packed
@@ -291,6 +300,7 @@ impl SiteMaps {
             deserialize_recipes: self.deserialize_recipes,
             decode_typed_sites: self.decode_typed_sites,
             map_packed_sites: self.map_packed_sites,
+            bundle_schema_layouts: self.bundle_schema_layouts,
             index_field_sites: self.index_field_sites,
             arg_orders: self.arg_orders,
             for_stream_sites: self.for_stream_sites,

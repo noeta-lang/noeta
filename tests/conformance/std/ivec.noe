@@ -1,4 +1,4 @@
-// Array-ops arc: integer vector kernels (`vec.IntKernels`) over `@packed` structs of `i32` fields.
+// Array-ops arc: integer vector kernels (`vec.Kernels`) over `@packed` structs of `i32` fields.
 // A single `Uniform` bundle binds both IVec2 (2 fields) and IVec3 (3 fields). Componentwise
 // add/sub/scale/min/max WRAP at i32 width (the arc convention); `dot` WIDENS to `int` (i64), the one
 // reduction whose accumulator width matters. Bulk `*_all` over a packed `List<IVecN>` matches the
@@ -26,9 +26,9 @@ use std.{vec}
 @packed struct IVec2 { x: i32; y: i32 }
 @packed(Layout.Column) struct CVec3 { x: i32; y: i32; z: i32 }
 
-impl vec.IntKernels for IVec3 {}
-impl vec.IntKernels for IVec2 {}
-impl vec.IntKernels for CVec3 {}
+impl vec.Kernels for IVec3 {}
+impl vec.Kernels for IVec2 {}
+impl vec.Kernels for CVec3 {}
 
 a = IVec3 { x: 1i32, y: 2i32, z: 3i32 }
 b = IVec3 { x: 10i32, y: 20i32, z: 30i32 }

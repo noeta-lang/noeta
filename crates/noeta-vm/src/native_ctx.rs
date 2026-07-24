@@ -665,6 +665,23 @@ impl NativeCtx for VmCtx<'_, '_> {
         Ok(self.insert(Value::object(shape, slots)))
     }
 
+    fn packed_element_fields(&mut self, slot: Slot) -> CtxResult<Option<Vec<PackedField>>> {
+        // The element bundle methods' width source: a single `@packed` struct value erases its field
+        // widths to boxed scalars, but the module's interned packed schemas carry the full kinds. Match
+        // the value's shape name against a schema's shape (every bundle-bound type appears in a
+        // `List<T>` in practice, so a schema exists); `None` degrades the caller to a width-erased path.
+        // The value's *shape* name (not `type_name`, which erases a struct to "object"): match it
+        // against a packed schema whose element shape is the same nominal type.
+        let Some(shape) = self.get(slot)?.shape() else {
+            return Ok(None);
+        };
+        let name = &shape.name;
+        Ok(self.vm.persist.packed_schemas.iter().find_map(|schema| {
+            let sh = schema.shape?;
+            (sh.name == *name).then(|| schema.fields.iter().map(packed_field).collect())
+        }))
+    }
+
     // ----- scheduler-service sub-capabilities: the VM is its own provider (returns `self`) -----
 
     fn task_context(&mut self) -> &mut dyn noeta_stdlib::TaskContext {

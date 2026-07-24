@@ -691,6 +691,7 @@ pub(crate) fn constraint_mismatch(
                 format!("{}{bits}", if *signed { 'i' } else { 'u' })
             }
             ConstraintField::AnyNumeric => "numeric".to_string(),
+            ConstraintField::AnyInteger => "integer".to_string(),
         }
     }
     fn render(fields: &[ConstraintField]) -> String {
@@ -741,6 +742,10 @@ pub(crate) fn constraint_mismatch(
                     | PackedKind::F64
                     | PackedKind::IntN { .. }
             ),
+            // The saturating bundle's field: any integer width/signedness, never a float or bool.
+            (ConstraintField::AnyInteger, k) => {
+                matches!(k, PackedKind::Int | PackedKind::IntN { .. })
+            }
             _ => false,
         }
     }

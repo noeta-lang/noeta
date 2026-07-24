@@ -394,6 +394,14 @@ pub enum RetTy {
     /// `float`. Matches the `Scalar::Float` associated type — the result of a magnitude/`sqrt` op.
     /// Element-relative, like [`RetTy::Elem`].
     ElemFloat,
+    /// A **`List` of the element's widened accumulator** (`dot_all() -> List<ElemWide>`) — the bulk
+    /// twin of [`RetTy::ElemWide`]: one widened reduction value per element of a packed `List<T>`.
+    /// Resolved by the checker against the bound shape's element kind, exactly as [`RetTy::ElemWide`],
+    /// then wrapped in `List<_>` (the scalar-unification collapse of the per-type `dot_all` returns).
+    ListElemWide,
+    /// A **`List` of the element's float promotion** (`length_all() -> List<ElemFloat>`) — the bulk
+    /// twin of [`RetTy::ElemFloat`].
+    ListElemFloat,
     /// The result type is named at the call site by a turbofish (`json.parse::<T>(): T`). The
     /// concrete `T` arrives as a [`TypeRecipe`] the checker records at the call site and the backend
     /// threads into the [`ExtModule::typed_dispatch`] (call-site-typed construction). The
@@ -439,6 +447,8 @@ impl RetTy {
             RetTy::Elem => "Elem".to_string(),
             RetTy::ElemWide => "ElemWide".to_string(),
             RetTy::ElemFloat => "ElemFloat".to_string(),
+            RetTy::ListElemWide => "List<ElemWide>".to_string(),
+            RetTy::ListElemFloat => "List<ElemFloat>".to_string(),
             // Named at the call site by a turbofish, in its declared wrapper.
             RetTy::TypeArg(TypeArgWrap::Plain) => {
                 "T /* call-site type: name it with ::<T> */".to_string()
@@ -1181,6 +1191,13 @@ pub enum ConstraintField {
     /// it can resolve the element-relative returns [`RetTy::Elem`]/[`RetTy::ElemWide`]/
     /// [`RetTy::ElemFloat`]. The specific forms above stay exact — this is additive.
     AnyNumeric,
+    /// A **uniform *integer* field of any width/signedness** — `int` and every `i8..i64`/`u8..u64`,
+    /// but never `float`/`f32`/`f64`/`bool`. The [`AnyNumeric`](Self::AnyNumeric) sibling restricted
+    /// to integers: the constraint of the **saturating** bundle (`vec.SatKernels`), where clamping to
+    /// the type's bounds is only meaningful for integers (a float "saturates" in the IEEE sense — it
+    /// is just plain arithmetic — so a float vector is rejected at the impl site). Like `AnyNumeric`
+    /// it captures the bound shape's concrete element type for the element-relative returns.
+    AnyInteger,
 }
 
 /// The storage layout a [`PackedConstraint`] requires of the bound type.

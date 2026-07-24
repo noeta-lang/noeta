@@ -87,6 +87,28 @@ pub trait Scalar: Copy {
 
     /// Promote one element to its [`Self::Float`] (for `length`/`normalize`).
     fn to_float(self) -> Self::Float;
+
+    /// Promote a **widened accumulator** ([`Self::Wide`]) to a float ([`Self::Float`]) — the missing
+    /// rung `length` needs (scalar-unification slice 3): a vector length is `sqrt` of the *widened*
+    /// dot accumulator, but [`Self::to_float`] promotes a bare element, not a `Wide`. Integers widen
+    /// `i64`/`u64` → `f64`; `f32`/`f64` are already their own `Wide == Float`.
+    fn wide_to_float(w: Self::Wide) -> Self::Float;
+
+    /// The square root of a [`Self::Float`] — the last step of `length`. `f64::sqrt` for the integer
+    /// widths (whose `Float` is `f64`), the inherent `sqrt` for `f32`/`f64`.
+    fn sqrt(f: Self::Float) -> Self::Float;
+
+    /// Build an element from an `f64`, **saturating** at the type's bounds — the saturating-scale
+    /// step (`vec.SatKernels`: `Color.scale(2.0)` clamps a channel to `[0, 255]`). Rounds to nearest,
+    /// then a saturating `as` cast (float→int casts saturate). A float element casts plainly (a
+    /// saturating bundle never binds a float, so this arm is only for trait completeness).
+    fn saturating_from_f64(f: f64) -> Self;
+
+    /// This element widened to a plain `f64` — the input to the saturating float-scale math
+    /// (`v.to_f64() * factor`), where the factor is a language `float`. Distinct from [`Self::to_float`]
+    /// (which returns the *associated* `Float`, `f32` for an `f32` element) so the arithmetic is
+    /// unambiguously `f64` regardless of the element width.
+    fn to_f64(self) -> f64;
 }
 
 /// Implement `Scalar` for a **signed** integer type (`Wide = i64`, `Float = f64`).
@@ -165,6 +187,22 @@ macro_rules! impl_signed_scalar {
             }
             #[inline]
             fn to_float(self) -> f64 {
+                self as f64
+            }
+            #[inline]
+            fn wide_to_float(w: i64) -> f64 {
+                w as f64
+            }
+            #[inline]
+            fn sqrt(f: f64) -> f64 {
+                f.sqrt()
+            }
+            #[inline]
+            fn saturating_from_f64(f: f64) -> Self {
+                f.round() as $ty
+            }
+            #[inline]
+            fn to_f64(self) -> f64 {
                 self as f64
             }
         }
@@ -251,6 +289,22 @@ macro_rules! impl_unsigned_scalar {
             fn to_float(self) -> f64 {
                 self as f64
             }
+            #[inline]
+            fn wide_to_float(w: u64) -> f64 {
+                w as f64
+            }
+            #[inline]
+            fn sqrt(f: f64) -> f64 {
+                f.sqrt()
+            }
+            #[inline]
+            fn saturating_from_f64(f: f64) -> Self {
+                f.round() as $ty
+            }
+            #[inline]
+            fn to_f64(self) -> f64 {
+                self as f64
+            }
         }
     };
 }
@@ -328,6 +382,22 @@ macro_rules! impl_float_scalar {
             #[inline]
             fn to_float(self) -> $ty {
                 self
+            }
+            #[inline]
+            fn wide_to_float(w: $ty) -> $ty {
+                w
+            }
+            #[inline]
+            fn sqrt(f: $ty) -> $ty {
+                f.sqrt()
+            }
+            #[inline]
+            fn saturating_from_f64(f: f64) -> Self {
+                f as $ty
+            }
+            #[inline]
+            fn to_f64(self) -> f64 {
+                self as f64
             }
         }
     };

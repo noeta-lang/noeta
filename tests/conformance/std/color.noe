@@ -1,4 +1,4 @@
-// Array-ops arc: `Color` kernels (`vec.ColorKernels`) over a 4×`u8` `@packed` struct (RGBA).
+// Array-ops arc: `Color` kernels (`vec.SatKernels`) over a 4×`u8` `@packed` struct (RGBA).
 // Channel math SATURATES — the one deliberate exception to the arc's wrap convention: `bright +
 // bright` must clamp to 255 (never wrap to a dark value), an underflowing subtract must clamp to 0.
 // Add/sub/scale only (a colour has no dot/length). Bulk `*_all` over a packed `List<Color>` matches
@@ -15,7 +15,7 @@ use std.{vec}
 
 @packed struct Color { r: u8; g: u8; b: u8; a: u8 }
 
-impl vec.ColorKernels for Color {}
+impl vec.SatKernels for Color {}
 
 bright = Color { r: 200u8, g: 100u8, b: 50u8, a: 255u8 }
 other  = Color { r: 100u8, g: 200u8, b: 50u8, a: 0u8 }

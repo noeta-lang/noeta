@@ -982,7 +982,11 @@ pub(super) fn module_return(
         // Element-relative returns are a bundle-method concern (they reference a bound `@packed`
         // shape's element); a plain module function has no such shape, so a hole is the safe
         // fallback — no shipped module function declares one.
-        RetTy::Elem | RetTy::ElemWide | RetTy::ElemFloat => Type::Unknown,
+        RetTy::Elem
+        | RetTy::ElemWide
+        | RetTy::ElemFloat
+        | RetTy::ListElemWide
+        | RetTy::ListElemFloat => Type::Unknown,
         // A call-site-typed function is never reached through the plain-call return path — its
         // result is named by the turbofish and typed in the `Expr::TypedModuleCall` arm (via
         // `typed_module_result`), so a hole is the safe fallback here.
@@ -1115,6 +1119,13 @@ pub(super) fn bundle_method_return(
         RetTy::Elem => elem.cloned().unwrap_or(Type::Unknown),
         RetTy::ElemWide => elem.map(elem_wide).unwrap_or(Type::Unknown),
         RetTy::ElemFloat => elem.map(elem_float).unwrap_or(Type::Unknown),
+        // The bulk twins: a `List` of the widened / float-promoted element (`dot_all`/`length_all`).
+        RetTy::ListElemWide => Type::List(Box::new(
+            elem.map(elem_wide).unwrap_or(Type::Unknown),
+        )),
+        RetTy::ListElemFloat => Type::List(Box::new(
+            elem.map(elem_float).unwrap_or(Type::Unknown),
+        )),
         RetTy::TypeArg(_) => Type::Unknown,
     }
 }

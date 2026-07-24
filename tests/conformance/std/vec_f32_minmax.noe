@@ -1,0 +1,29 @@
+// Scalar-unification slice 3 — the incidental gaps the OLD f32 `vec.Kernels` bundle lacked now exist
+// for every width (they are just more generic bodies): element `min`/`max`/`abs` on an f32 vector,
+// and the bulk `min_all`/`max_all`/`abs_all` forms. Same shared kernel both backends run.
+// expect: stdout "V3 {x: 1.0, y: 2.0, z: 3.0}"
+// expect: stdout "V3 {x: 4.0, y: 5.0, z: 3.0}"
+// expect: stdout "V3 {x: 1.0, y: 2.0, z: 3.0}"
+// expect: stdout "[V3 {x: 1.0, y: 2.0, z: 3.0}]"
+// expect: stdout "[V3 {x: 4.0, y: 5.0, z: 3.0}]"
+// expect: stdout "[V3 {x: 1.0, y: 2.0, z: 3.0}]"
+// expect: exit 0
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+impl vec.Kernels for V3 {}
+
+a = V3 { x: 1.0f32, y: 5.0f32, z: 3.0f32 }
+b = V3 { x: 4.0f32, y: 2.0f32, z: 3.0f32 }
+
+echo a.min(b)                                        // {1.0, 2.0, 3.0}
+echo a.max(b)                                        // {4.0, 5.0, 3.0}
+echo V3 { x: -1.0f32, y: 2.0f32, z: -3.0f32 }.abs()  // {1.0, 2.0, 3.0}
+
+// Bulk forms — same kernel over a packed `List<V3>`.
+xs = [V3 { x: 1.0f32, y: 5.0f32, z: 3.0f32 }]
+ys = [V3 { x: 4.0f32, y: 2.0f32, z: 3.0f32 }]
+echo xs.min_all(ys)                                  // [{1.0, 2.0, 3.0}]
+echo xs.max_all(ys)                                  // [{4.0, 5.0, 3.0}]
+echo [V3 { x: -1.0f32, y: 2.0f32, z: -3.0f32 }].abs_all()   // [{1.0, 2.0, 3.0}]
