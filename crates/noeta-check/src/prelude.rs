@@ -297,8 +297,25 @@ impl Checker {
             .collect();
         for (qualified, directives) in fielded {
             for d in directives {
-                if let noeta_ext_abi::ExtTypeDirective::Validated = d {
-                    self.symbols.validated_types.insert(qualified.clone());
+                match d {
+                    noeta_ext_abi::ExtTypeDirective::Validated => {
+                        self.symbols.validated_types.insert(qualified.clone());
+                    }
+                    // `@attribute` on a native fielded struct → the same `attributes` opt-in (E0029)
+                    // and, when placement is restricted, the same `attachable` gate (E0030) a `.noe`
+                    // `@attribute(Kind, …)` struct seeds — keyed on the qualified identity, with the
+                    // struct's fields (seeded by the fielded seeder) as its construction contract. One
+                    // enforcement path: a native `@attribute` is indistinguishable from a `.noe` one.
+                    noeta_ext_abi::ExtTypeDirective::Attribute(targets) => {
+                        self.symbols.attributes.insert(qualified.clone());
+                        if !targets.is_empty() {
+                            self.symbols.attachable.insert(
+                                qualified.clone(),
+                                targets.iter().map(|t| attr_target_kind(*t)).collect(),
+                            );
+                        }
+                    }
+                    noeta_ext_abi::ExtTypeDirective::Semantic => {}
                 }
             }
         }

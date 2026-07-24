@@ -1097,10 +1097,9 @@ pub enum FieldedKind {
 /// pairs are legal at assembly (the native analogue of the AST placement gate E0054), since a native
 /// type bypasses the source-level site check.
 ///
-/// **Reserved for later slices — deliberately not variants yet:** `@attribute` and `@role` (their
-/// resolution is being redesigned to be namespace-aware across `.noe` too, not the current flat
-/// short-name model) and `@packed` (flat value-struct layout, native-extensibility Slice E). Each
-/// will slot in here when its seeding + reader land; the ABI-coverage gate rejects a variant that has
+/// **Reserved for a later slice — deliberately not a variant yet:** `@role` (rides on an
+/// `@attribute` struct; D3) and `@packed` (flat value-struct layout, native-extensibility Slice E).
+/// Each slots in here when its seeding + reader land; the ABI-coverage gate rejects a variant that has
 /// no reader, so they are added only alongside their implementation.
 #[derive(Debug, Clone, Copy)]
 pub enum ExtTypeDirective {
@@ -1116,6 +1115,30 @@ pub enum ExtTypeDirective {
     /// `semantic_enums` membership). Enum-only. A `@semantic` enum is the vocabulary a `@role` tag
     /// draws its variants from.
     Semantic,
+    /// `@attribute` — mark this **fielded struct** usable as a `#[...]` data attribute, the native
+    /// analogue of a `.noe` `@attribute struct`. Struct-only. Seeds the checker's `attributes` opt-in
+    /// (E0029) keyed on the type's qualified identity, and — when the placement list is non-empty —
+    /// its `attachable` restriction (E0030), exactly as a `.noe` `@attribute(Kind, …)` does. An empty
+    /// slice is a bare `@attribute` (attachable anywhere). The struct's fields (already seeded by the
+    /// fielded seeder) are its construction contract, so a native `@attribute` and a `.noe` one behave
+    /// identically to every consumer, including reflection.
+    Attribute(&'static [AttrTarget]),
+}
+
+/// Where a native `@attribute` fielded struct may be **applied** — the ABI mirror of the checker's
+/// `TargetKind`, carried in [`ExtTypeDirective::Attribute`]. A `.noe` `@attribute(Method, Function)`
+/// lists these by name; a native declaration lists them as this closed enum. The checker maps each to
+/// its `TargetKind` when seeding the placement gate (E0030).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrTarget {
+    Struct,
+    Class,
+    Enum,
+    Function,
+    Method,
+    Field,
+    Variant,
+    Param,
 }
 
 /// A first-class **fielded type** contributed by an extension (native-extensibility S2, unified): a
@@ -3256,6 +3279,17 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                         unit.name()
                     ));
                 }
+                // `@attribute` is struct-only — an attribute is a struct (one canonical all-fields
+                // construction), never a reference class.
+                if matches!(d, ExtTypeDirective::Attribute(_)) && t.kind == FieldedKind::Class {
+                    return Err(format!(
+                        "native class `{}.{}` of unit `{}` carries `@attribute`, which applies \
+                         only to a struct (an attribute is a value struct, not a class)",
+                        t.namespace,
+                        t.name,
+                        unit.name()
+                    ));
+                }
             }
         }
         for t in unit.enums() {
@@ -3264,6 +3298,15 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     return Err(format!(
                         "native enum `{}.{}` of unit `{}` carries `@validated`, which applies only \
                          to a struct or a class",
+                        t.namespace,
+                        t.name,
+                        unit.name()
+                    ));
+                }
+                if matches!(d, ExtTypeDirective::Attribute(_)) {
+                    return Err(format!(
+                        "native enum `{}.{}` of unit `{}` carries `@attribute`, which applies only \
+                         to a struct",
                         t.namespace,
                         t.name,
                         unit.name()
