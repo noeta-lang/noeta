@@ -2504,9 +2504,14 @@ impl DocumentStore {
                 .filter(|t| t.span.source == source)
                 .map(|t| TestItem {
                     name: t.name.clone(),
-                    display: attr_str(&t.attrs, "Name"),
-                    group: attr_str(&t.attrs, "Group"),
-                    skipped: t.attrs.iter().any(|a| a.name == "Skip"),
+                    // The tier metadata attributes are namespace-scoped now (D2b); read them by their
+                    // qualified identity, the form the loader rewrites the application to.
+                    display: attr_str(&t.attrs, noeta_ast::reflect::TEST_ATTR_NAME),
+                    group: attr_str(&t.attrs, noeta_ast::reflect::TEST_ATTR_GROUP),
+                    skipped: t
+                        .attrs
+                        .iter()
+                        .any(|a| a.name == noeta_ast::reflect::TEST_ATTR_SKIP),
                     range: index.range(t.span, encoding),
                 })
                 .collect(),
