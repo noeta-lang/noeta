@@ -230,6 +230,11 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 .collect();
             Value::object(shape, slots)
         }
+        // An in-place instance mutation (boundary 1) has no receiver here to write into — the
+        // class-method call site (`call_native_class_method`) intercepts it, applies the write-set,
+        // and materializes `ret`. Reaching this generic path means a non-class dispatch returned it
+        // (no `self` to mutate), so the writes are a no-op and only `ret` materializes.
+        NativeOut::InstanceUpdate { ret, .. } => materialize_native(*ret),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the VM's shape table), not here; async work is
         // ticketed at the dispatch return (extern-types X5), never materialized.
@@ -801,11 +806,15 @@ impl Vm<'_> {
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one; materialize
             // it through the ordinary (non-recipe) path.
             out @ NativeOut::Instance { .. } => MatOut::Value(materialize_native(out)),
-            // `Object` (shape-from-argument) and bulk scalar vectors (a packed reduction's result,
-            // N3.4) are never produced by a recipe decode (a `TypeRecipe` names only JSON shapes).
-            NativeOut::Object(_) | NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
+            // `Object` (shape-from-argument), bulk scalar vectors (a packed reduction's result,
+            // N3.4), and an in-place instance mutation (boundary 1, only a class method returns it)
+            // are never produced by a recipe decode (a `TypeRecipe` names only JSON shapes).
+            NativeOut::Object(_)
+            | NativeOut::Spawn(_)
+            | NativeOut::Scalars(_)
+            | NativeOut::InstanceUpdate { .. } => {
                 unreachable!(
-                    "json.parse recipe decode never yields an Object/Spawn/bulk-scalar result"
+                    "json.parse recipe decode never yields an Object/Spawn/bulk-scalar/update result"
                 )
             }
         })

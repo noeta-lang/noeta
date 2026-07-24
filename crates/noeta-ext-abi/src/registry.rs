@@ -161,6 +161,25 @@ pub enum NativeOut {
         class: String,
         fields: Vec<(String, NativeOut)>,
     },
+    /// A native class **instance method's in-place mutation** (native-extensibility S3 / boundary 1):
+    /// the method returns an explicit **write-set** applied to its LIVE receiver, plus the value the
+    /// method itself returns. Only meaningful returned from a [`ClassDispatch`]; the backend, at the
+    /// class-method call site, applies each `(field, value)` in `writes` in place to the receiver's
+    /// slot — the same primitive a source-level `self.x = v` uses — so the mutation is visible through
+    /// every alias and identity is preserved, then materializes `ret` as the method's result.
+    ///
+    /// **Why an explicit write-set, not a mutable receiver snapshot:** the receiver crosses as a value
+    /// snapshot ([`NativeValue::Instance`]), so diffing a mutated snapshot back would (a) silently drop
+    /// a mutation of a reference-typed field and (b) re-marshal the native-state extern-handle field,
+    /// `clone_box`ing it into a second box (double-free). Naming the writes explicitly avoids both: the
+    /// backend never re-marshals a field it wasn't told to write. A write targets a **`is_mut`** field
+    /// (a non-`mut` or unknown field is a runtime error — the ABI mirrors source-level E0022 rules).
+    /// The old slot value is released (so swapping a native-state handle fires the displaced one's
+    /// destructor). `ret` is the method's ordinary result (`NativeOut::Unit` for a `void` mutator).
+    InstanceUpdate {
+        writes: Vec<(String, NativeOut)>,
+        ret: Box<NativeOut>,
+    },
     /// Async WORK instead of a value (extern-types X5): the backend tickets the descriptor on
     /// its executor (`spawn_ext`) and hands back a future — intercepted at the dispatch return,
     /// never reaching `materialize`. This is how an extension implements an async function
@@ -635,8 +654,10 @@ pub type TypeDispatch = fn(
 /// order) — the same shape a class value takes when it crosses arg-IN. The method reads its fields
 /// by name off `recv` (a language-value field like `label`, or its native-state extern-handle field
 /// as a [`NativeValue::Extern`]); it gets the same `&mut dyn Host` seam an [`ExtType`] method does.
-/// The receiver is a value snapshot — a method mutating the instance in place is a later, additive
-/// extension (arg-IN is likewise a snapshot); reading a field, the Pass-2a surface, is served fully.
+/// The receiver crosses as a value snapshot; a method that **mutates the instance in place** returns
+/// a [`NativeOut::InstanceUpdate`] write-set (boundary 1) — the backend applies it to the live
+/// receiver's slots. Native-state mutation through an extern-handle field's interior mutability
+/// (Rc/Arc-shared) is also visible without a write-set. Reading a field is served directly.
 pub type ClassDispatch = fn(
     recv: &NativeValue,
     method: &str,
@@ -974,7 +995,9 @@ impl ExtClass {
         dispatch: |_, method, _, _| {
             Err(StdError {
                 kind: crate::ErrorKind::UnknownName,
-                message: format!("internal: no class-method dispatch registered (method `{method}`)"),
+                message: format!(
+                    "internal: no class-method dispatch registered (method `{method}`)"
+                ),
             })
         },
         traits: &[],
@@ -1125,7 +1148,10 @@ pub enum ConstraintField {
     /// A fixed-width integer field `i8..i64`/`u8..u64` (packed-widths arc) — the array-ops integer
     /// (`IVec2`/`IVec3` at `i32`) and `Color` (`u8`) vector shapes. Mirrors
     /// [`crate::PackedField::IntN`] / `noeta_ast::reflect::PackedKind::IntN`.
-    IntN { bits: u8, signed: bool },
+    IntN {
+        bits: u8,
+        signed: bool,
+    },
 }
 
 /// The storage layout a [`PackedConstraint`] requires of the bound type.
@@ -2491,6 +2517,14 @@ impl Registry {
                 for (_, value) in fields {
                     self.debug_verify_out(owner, func, value);
                 }
+            }
+            // An in-place instance mutation (boundary 1): recurse into each write's value and the
+            // method's own return, so a nested extern in either is still verified.
+            O::InstanceUpdate { writes, ret } => {
+                for (_, value) in writes {
+                    self.debug_verify_out(owner, func, value);
+                }
+                self.debug_verify_out(owner, func, ret);
             }
             O::Scalar(_)
             | O::Str(_)

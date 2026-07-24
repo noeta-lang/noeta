@@ -1982,10 +1982,11 @@ impl Interpreter {
             // A native class instance (native-extensibility S2) — like a `Variant`, never decoded
             // from a JSON recipe, but a native `Result`/`Option` wrapper may carry one.
             out @ NativeOut::Instance { .. } => MatOut::Value(crate::materialize_native(out)),
-            // A `TypeRecipe` names only JSON shapes; async work and bulk scalar vectors (a packed
-            // reduction's result, N3.4) can never decode from one.
-            NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
-                unreachable!("json recipes never produce spawn/bulk-scalar results")
+            // A `TypeRecipe` names only JSON shapes; async work, bulk scalar vectors (a packed
+            // reduction's result, N3.4), and an in-place instance mutation (boundary 1, only a class
+            // method returns it) can never decode from one.
+            NativeOut::Spawn(_) | NativeOut::Scalars(_) | NativeOut::InstanceUpdate { .. } => {
+                unreachable!("json recipes never produce spawn/bulk-scalar/update results")
             }
             NativeOut::None => MatOut::Value(crate::builtin_enum("Option", "none", vec![])),
             NativeOut::Some(inner) => match self.materialize_recipe(*inner, path, span)? {

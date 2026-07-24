@@ -264,8 +264,67 @@ const POINT: ExtClass = ExtClass {
             is_mut: true,
         },
     ],
+    // **Boundary 1 — in-place instance mutation.** `bump()` mutates the `mut` field `y` in place
+    // (returning the new `y`) via a `NativeOut::InstanceUpdate` write-set; `bad_bump_x()` tries to
+    // write the *immutable* `x` and must be rejected at runtime.
+    methods: &[
+        ExtFn {
+            name: "bump",
+            params: &[],
+            ret: RetTy::Concrete(SigType::Int),
+        },
+        ExtFn {
+            name: "bad_bump_x",
+            params: &[],
+            ret: RetTy::Concrete(SigType::Unit),
+        },
+    ],
+    dispatch: point_dispatch,
     ..ExtClass::DEFAULTS
 };
+
+/// `Point`'s instance-method dispatch (boundary 1). `bump` reads the current `y` off the snapshot
+/// receiver, then returns a write-set setting `y = y + 1` **in place** on the live instance plus the
+/// new value as its result. `bad_bump_x` deliberately writes the immutable `x` — the backend must
+/// reject it (proving the `is_mut` guard), so it never actually mutates.
+fn point_dispatch(
+    recv: &NativeValue,
+    method: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let field = |name: &str| -> i64 {
+        match recv {
+            NativeValue::Instance { fields, .. } => fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .and_then(|(_, v)| match v {
+                    NativeValue::Scalar(Scalar::Int(n)) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or(0),
+            _ => 0,
+        }
+    };
+    match method {
+        "bump" => {
+            let next = field("y") + 1;
+            Ok(NativeOut::InstanceUpdate {
+                writes: vec![("y".to_string(), NativeOut::Scalar(Scalar::Int(next)))],
+                ret: Box::new(NativeOut::Scalar(Scalar::Int(next))),
+            })
+        }
+        // Targets the immutable `x` — the backend's `is_mut` guard must reject this before any write.
+        "bad_bump_x" => Ok(NativeOut::InstanceUpdate {
+            writes: vec![("x".to_string(), NativeOut::Scalar(Scalar::Int(-1)))],
+            ret: Box::new(NativeOut::Unit),
+        }),
+        _ => Err(StdError {
+            kind: noeta_stdlib::ErrorKind::UnknownName,
+            message: format!("no method `{method}`"),
+        }),
+    }
+}
 
 /// A state-holding class built to cross **arg-IN** (boundary 2): a native-state `bguard` (private —
 /// the [`BalancedGuard`] whose clone/drop is balanced) plus a public `tag`. `kit.open_res`
@@ -564,6 +623,57 @@ fn native_class_method_dispatches_to_native_on_both_backends() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let stdout = run_both_agree(METHOD_PROGRAM);
     assert_eq!(stdout, "handle:m\nm\n");
+}
+
+/// **Boundary 1 — a native method mutates its instance IN PLACE.** `p.bump()` returns a
+/// `NativeOut::InstanceUpdate` write-set; both backends apply it to the live receiver's `y` slot (the
+/// same primitive `p.y = v` uses), so the mutation persists after the call AND is visible through an
+/// alias (`q = p`). The backends must agree on every reading — that is what proves the write-set is
+/// applied identically on both sides, and that in-place mutation preserves reference identity.
+const MUTATE_PROGRAM: &str = r#"
+use fx.Point
+
+p = Point { x: 3, y: 4 }
+// bump() returns the new y AND mutates the instance in place.
+echo p.bump()
+echo p.y
+
+// Aliasing: q is the SAME instance; a mutation through p is visible through q.
+q = p
+echo p.bump()
+echo q.y
+"#;
+
+#[test]
+fn native_method_mutates_instance_in_place_on_both_backends() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let stdout = run_both_agree(MUTATE_PROGRAM);
+    assert_eq!(stdout, "5\n5\n6\n6\n");
+}
+
+/// **Boundary 1 guard — a write to an IMMUTABLE field is rejected at runtime.** `p.bad_bump_x()`
+/// returns a write-set targeting the non-`mut` field `x`; both backends must reject it (the ABI
+/// mirrors the source-level E0022-family rule) and abort with a nonzero exit before any mutation —
+/// `x` stays `3`. Proves the `is_mut` guard fires identically on both sides.
+#[test]
+fn native_method_write_to_immutable_field_is_rejected_on_both_backends() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_installed();
+    const PROGRAM: &str =
+        "use fx.Point\np = Point { x: 3, y: 4 }\np.bad_bump_x()\necho \"unreached\"\n";
+
+    for backend in ["eval", "vm"] {
+        let (stdout, exit, leaked) = run_one(backend, PROGRAM);
+        assert_ne!(exit, 0, "[{backend}] an immutable-field write must abort");
+        assert_eq!(
+            stdout, "",
+            "[{backend}] nothing after the rejected write runs"
+        );
+        assert_eq!(
+            leaked, 0,
+            "[{backend}] the aborted run must still leak nothing"
+        );
+    }
 }
 
 /// **Case 3 — destructor fires on linear collection.** A single `Handle` goes out of scope at program
