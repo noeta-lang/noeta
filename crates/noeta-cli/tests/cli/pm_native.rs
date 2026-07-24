@@ -103,10 +103,9 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrd};
 
 use noeta_ext_abi::registry::{
-    BundleFn, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout, DirectiveCtx,
-    ExtBundle,
-    ExtDirective, ExtFn, ExtModule, ExtType, Expansion, ExpansionError, Extension, NativeOut,
-    NativeValue,
+    BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout, DirectiveCtx,
+    ExtDirective, ExtFn, ExtModule, ExtTrait, ExtTraitMethod, ExtType, Expansion, ExpansionError,
+    Extension, NativeOut, NativeValue,
     PackedConstraint, RetTy, Scalar, SigType, TierSite,
 };
 use noeta_ext_abi::{
@@ -361,9 +360,24 @@ fn fx_info_run(_ctx: &mut dyn CommandCtx, _args: &ParsedArgs) -> u8 {
 // A third-party METHOD BUNDLE (kernel-methods K6): the consumer's own @packed pixel type opts in
 // with `impl fx.Pixels for Px {}` and gains `ps.brighten(delta)` — same COW raw-buffer kernel as
 // `fx.brighten_all`, in method position, statically routed through the composed toolchain.
-const PIXELS_BUNDLE: ExtBundle = ExtBundle {
+// Since the ExtBundle→ExtTrait fold-in (slice 4) a method bundle is a native `ExtTrait`, namespaced
+// to the qualified module (`imgfx.fx`) so `impl fx.Pixels for Px {}` resolves through the surface
+// adapter (`resolve_bundle_ref` → `find_trait_in_module`).
+const PIXELS_BUNDLE: ExtTrait = ExtTrait {
     name: "Pixels",
-    constraint: PackedConstraint {
+    namespace: "imgfx.fx",
+    methods: &[ExtTraitMethod {
+        sig: ExtFn {
+            name: "brighten",
+            params: &[SigType::F32],
+            ret: RetTy::SameAsArg(0),
+        },
+        has_default: true,
+        receiver: BundleReceiver::Bulk,
+    }],
+    assoc_types: &[],
+    dispatch: Some(pixels_bundle_dispatch),
+    self_constraint: Some(PackedConstraint {
         fields: &[
             ConstraintField::F32,
             ConstraintField::F32,
@@ -371,16 +385,7 @@ const PIXELS_BUNDLE: ExtBundle = ExtBundle {
         ],
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Exact,
-    },
-    methods: &[BundleFn {
-        sig: ExtFn {
-            name: "brighten",
-            params: &[SigType::F32],
-            ret: RetTy::SameAsArg(0),
-        },
-        receiver: BundleReceiver::Bulk,
-    }],
-    ctx_dispatch: pixels_bundle_dispatch,
+    }),
 };
 
 fn pixels_bundle_dispatch(
@@ -435,7 +440,6 @@ impl Extension for ImgfxExtension {
             dispatch: fx_dispatch,
             ctx_functions: FX_CTX_FNS,
             ctx_dispatch: Some(fx_ctx_dispatch),
-            bundles: &[PIXELS_BUNDLE],
             ..ExtModule::DEFAULTS
         }]
     }
@@ -449,6 +453,9 @@ impl Extension for ImgfxExtension {
             ctx_dispatch: Some(acc_ctx_dispatch),
             ..ExtType::DEFAULTS
         }]
+    }
+    fn traits(&self) -> &'static [ExtTrait] {
+        &[PIXELS_BUNDLE]
     }
     fn commands(&self) -> &'static [ExtCommand] {
         &[FX_INFO]

@@ -21,10 +21,10 @@
 
 use noeta_embed::{Error, Session};
 use noeta_ext_abi::registry::{
-    BundleFn, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout, EnumBacking,
-    ExtBundle, ExtClass, ExtDerive, ExtDeriveMethod, ExtEnum, ExtField, ExtFn, ExtModule, ExtTier,
-    ExtTrait, ExtTraitMethod, ExtType, ExtVariant, Extension, FieldedKind, NativeOut, NativeValue,
-    PackedConstraint, RetTy, Scalar, SigType, TierSite, VariantValue,
+    AssocDerivation, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout,
+    EnumBacking, ExtAssocType, ExtClass, ExtDerive, ExtDeriveMethod, ExtEnum, ExtField, ExtFn,
+    ExtModule, ExtTier, ExtTrait, ExtTraitMethod, ExtType, ExtVariant, Extension, FieldedKind,
+    NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, SigType, TierSite, VariantValue,
 };
 use noeta_ext_abi::{CtxError, CtxOut, ErrorKind, Host, Slot, StdError};
 
@@ -142,22 +142,27 @@ const FX_ENUMS: &[ExtEnum] = &[ExtEnum {
 ///
 /// The methods are never called here: a bundle *binding* is inert until a method call, and the
 /// constraint is validated at the `impl` site. That is precisely the surface under test.
-const COLS_BUNDLE: ExtBundle = ExtBundle {
+const COLS_BUNDLE: ExtTrait = ExtTrait {
     name: "Cols",
-    constraint: PackedConstraint {
-        fields: &[ConstraintField::F32, ConstraintField::F32],
-        layout: ConstraintLayout::Column,
-        arity: ConstraintArity::Exact,
-    },
-    methods: &[BundleFn {
+    // Namespaced to the qualified module `fx.kern` so `impl kern.Cols for T {}` resolves through the
+    // surface adapter (`resolve_bundle_ref` → `find_trait_in_module("fx.kern", "Cols")`).
+    namespace: "fx.kern",
+    methods: &[ExtTraitMethod {
         sig: ExtFn {
             name: "sum_all",
             params: &[],
             ret: RetTy::Concrete(SigType::F32),
         },
+        has_default: true,
         receiver: BundleReceiver::Bulk,
     }],
-    ctx_dispatch: cols_dispatch,
+    assoc_types: &[],
+    dispatch: Some(cols_dispatch),
+    self_constraint: Some(PackedConstraint {
+        fields: &[ConstraintField::F32, ConstraintField::F32],
+        layout: ConstraintLayout::Column,
+        arity: ConstraintArity::Exact,
+    }),
 };
 
 fn cols_dispatch(
@@ -185,40 +190,60 @@ fn cols_dispatch(
 /// exerciser (the same rationale as the rest of this file). The methods never run — a binding is
 /// inert until a call, and `Session::load` only checks — so what is under test is purely the
 /// checker's impl-site binding + element-relative return resolution.
-const NUM_BUNDLE: ExtBundle = ExtBundle {
+const NUM_BUNDLE: ExtTrait = ExtTrait {
     name: "Num",
-    constraint: PackedConstraint {
-        fields: &[ConstraintField::AnyNumeric],
-        layout: ConstraintLayout::Any,
-        arity: ConstraintArity::Uniform { min: 2 },
-    },
+    namespace: "fx.kern",
     methods: &[
-        BundleFn {
+        ExtTraitMethod {
             sig: ExtFn {
                 name: "dot",
                 params: &[SigType::Dyn],
-                ret: RetTy::ElemWide,
+                ret: RetTy::Concrete(SigType::Assoc("Wide")),
             },
+            has_default: true,
             receiver: BundleReceiver::Element,
         },
-        BundleFn {
+        ExtTraitMethod {
             sig: ExtFn {
                 name: "length",
                 params: &[],
-                ret: RetTy::ElemFloat,
+                ret: RetTy::Concrete(SigType::Assoc("Float")),
             },
+            has_default: true,
             receiver: BundleReceiver::Element,
         },
-        BundleFn {
+        ExtTraitMethod {
             sig: ExtFn {
                 name: "sum",
                 params: &[],
-                ret: RetTy::Elem,
+                ret: RetTy::Concrete(SigType::Assoc("Elem")),
             },
+            has_default: true,
             receiver: BundleReceiver::Element,
         },
     ],
-    ctx_dispatch: cols_dispatch,
+    // The native-derived associated types the element-relative returns name — `Wide`/`Float`/`Elem`
+    // (the retired `RetTy::ElemWide`/`ElemFloat`/`Elem` analogs), each derived from the bound element.
+    assoc_types: &[
+        ExtAssocType {
+            name: "Wide",
+            derivation: AssocDerivation::Widen,
+        },
+        ExtAssocType {
+            name: "Float",
+            derivation: AssocDerivation::FloatPromote,
+        },
+        ExtAssocType {
+            name: "Elem",
+            derivation: AssocDerivation::Element,
+        },
+    ],
+    dispatch: Some(cols_dispatch),
+    self_constraint: Some(PackedConstraint {
+        fields: &[ConstraintField::AnyNumeric],
+        layout: ConstraintLayout::Any,
+        arity: ConstraintArity::Uniform { min: 2 },
+    }),
 };
 
 /// The derive validator under test: a type deriving `Checked` must declare a field named `id`.
@@ -259,6 +284,7 @@ const FX_TRAITS: &[ExtTrait] = &[
                 ret: RetTy::Concrete(SigType::String),
             },
             has_default: false,
+            ..ExtTraitMethod::DEFAULTS
         }],
         assoc_types: &[],
         dispatch: None,
@@ -282,6 +308,7 @@ const FX_TRAITS: &[ExtTrait] = &[
                 ret: RetTy::Concrete(SigType::Int),
             },
             has_default: false,
+            ..ExtTraitMethod::DEFAULTS
         }],
         assoc_types: &[],
         dispatch: None,
@@ -291,6 +318,12 @@ const FX_TRAITS: &[ExtTrait] = &[
             arity: ConstraintArity::Uniform { min: 2 },
         }),
     },
+    // The two migrated **kernel traits** (ExtBundle→ExtTrait fold-in, slice 4), namespaced to the
+    // qualified module `fx.kern` so `impl kern.Cols`/`impl kern.Num` resolve through the surface
+    // adapter. `Cols` exercises `PackedConstraint.layout` (Column); `Num` exercises `AnyNumeric` +
+    // the element-relative associated-type returns (`Self::Wide`/`Self::Float`/`Self::Elem`).
+    COLS_BUNDLE,
+    NUM_BUNDLE,
 ];
 
 /// A tier restricted to **methods**. std has no tier that attaches to methods but not to functions,
@@ -315,7 +348,6 @@ impl Extension for FxExtension {
             name: "kern",
             functions: KERN_FNS,
             dispatch: kern_dispatch,
-            bundles: &[COLS_BUNDLE, NUM_BUNDLE],
             ..ExtModule::DEFAULTS
         }]
     }

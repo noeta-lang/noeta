@@ -269,21 +269,6 @@ impl Printer<'_> {
                 let marker = if *reuse { " reuse" } else { "" };
                 format!("{}.{}({}){}", atom(receiver), name, atoms(args), marker)
             }
-            Rvalue::BundleMethod {
-                receiver,
-                module,
-                bundle,
-                name,
-                args,
-                ..
-            } => format!(
-                "{}.{}({}) via {}::{}",
-                atom(receiver),
-                name,
-                atoms(args),
-                module,
-                bundle
-            ),
             Rvalue::TraitMethod {
                 receiver,
                 trait_name,

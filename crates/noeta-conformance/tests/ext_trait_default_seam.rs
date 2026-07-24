@@ -187,6 +187,7 @@ const GADGET: ExtTrait = ExtTrait {
             ret: RetTy::Concrete(SigType::String),
         },
         has_default: true,
+        ..ExtTraitMethod::DEFAULTS
     }],
     dispatch: Some(gadget_dispatch),
     ..ExtTrait::DEFAULTS

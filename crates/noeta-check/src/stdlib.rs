@@ -1021,14 +1021,6 @@ pub(super) fn module_return(
         RetTy::Concrete(s) => sig_to_type_bound(reg, &s, &bind_params(f.params, args)),
         RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
-        // Element-relative returns are a bundle-method concern (they reference a bound `@packed`
-        // shape's element); a plain module function has no such shape, so a hole is the safe
-        // fallback — no shipped module function declares one.
-        RetTy::Elem
-        | RetTy::ElemWide
-        | RetTy::ElemFloat
-        | RetTy::ListElemWide
-        | RetTy::ListElemFloat => Type::Unknown,
         // A call-site-typed function is never reached through the plain-call return path — its
         // result is named by the turbofish and typed in the `Expr::TypedModuleCall` arm (via
         // `typed_module_result`), so a hole is the safe fallback here.
@@ -1150,38 +1142,43 @@ pub(super) fn bundle_method_return(
     f: &registry::ExtFn,
     recv: &Type,
     args: &[Type],
+    assoc_types: &[registry::ExtAssocType],
     elem: Option<&Type>,
 ) -> Type {
-    use registry::RetTy;
+    use registry::{RetTy, SigType};
     match f.ret {
+        // The element-relative returns are now trait associated-type projections (`Self::Wide` /
+        // `Self::Float`, ExtBundle→ExtTrait fold-in, slice 4): resolve the name against the kernel
+        // trait's native-derived `assoc_types` folded over the bound element — the ONE derivation
+        // mechanism (slice 1b) instead of the retired `RetTy::Elem*` vocabulary. `List<Self::Wide>`
+        // (`dot_all`) / `List<Self::Float>` (`length_all`) nest through the same resolution.
+        RetTy::Concrete(SigType::Assoc(name)) => resolve_bundle_assoc(name, assoc_types, elem),
+        RetTy::Concrete(SigType::List(SigType::Assoc(name))) => {
+            Type::List(Box::new(resolve_bundle_assoc(name, assoc_types, elem)))
+        }
         RetTy::Concrete(s) => sig_to_type_bound(reg, &s, &bind_params(f.params, args)),
+        // `Self` (element receiver) / `List<Self>` (bulk receiver) — the receiver rides as slot 0.
         RetTy::SameAsArg(0) => recv.clone(),
         RetTy::SameAsArg(i) => args.get(i - 1).cloned().unwrap_or(Type::Dyn),
         RetTy::NumericPreserving => numeric_preserving(args),
-        // The element-relative returns resolve through the SHARED derivation abstraction (slice 1b):
-        // `RetTy::Elem*` is exactly what an [`registry::AssocDerivation`] expresses, so the bundle path
-        // and the native-trait associated-type path (`seed_ext_traits`) run one code path. This is the
-        // de-risking proof the ExtBundle→ExtTrait convergence rests on.
-        RetTy::Elem => elem
-            .map(|e| registry::AssocDerivation::Element.apply(e))
-            .unwrap_or(Type::Unknown),
-        RetTy::ElemWide => elem
-            .map(|e| registry::AssocDerivation::Widen.apply(e))
-            .unwrap_or(Type::Unknown),
-        RetTy::ElemFloat => elem
-            .map(|e| registry::AssocDerivation::FloatPromote.apply(e))
-            .unwrap_or(Type::Unknown),
-        // The bulk twins: a `List` of the widened / float-promoted element (`dot_all`/`length_all`).
-        RetTy::ListElemWide => Type::List(Box::new(
-            elem.map(|e| registry::AssocDerivation::Widen.apply(e))
-                .unwrap_or(Type::Unknown),
-        )),
-        RetTy::ListElemFloat => Type::List(Box::new(
-            elem.map(|e| registry::AssocDerivation::FloatPromote.apply(e))
-                .unwrap_or(Type::Unknown),
-        )),
         RetTy::TypeArg(_) => Type::Unknown,
     }
+}
+
+/// Resolve a kernel method's `Self::<name>` associated-type return against the trait's native-derived
+/// [`registry::ExtAssocType`]s folded over the bound `@packed` element — the SHARED derivation
+/// abstraction (slice 1b). A `None` element (a non-uniform shape reaching an element-relative method —
+/// never true for a well-formed `AnyNumeric` binding) or an unknown name degrades to a gradual hole.
+fn resolve_bundle_assoc(
+    name: &str,
+    assoc_types: &[registry::ExtAssocType],
+    elem: Option<&Type>,
+) -> Type {
+    assoc_types
+        .iter()
+        .find(|a| a.name == name)
+        .and_then(|a| elem.map(|e| a.derivation.apply(e)))
+        .unwrap_or(Type::Unknown)
 }
 
 /// The **shared element-derivation abstraction** (ExtBundle→ExtTrait convergence, slice 1b): applies

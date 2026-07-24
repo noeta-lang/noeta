@@ -185,11 +185,6 @@ const TABLE: &[Row] = &[
     ),
     Row(
         "ExtModule",
-        "bundles",
-        Data(Anchor(REGISTRY, "pub fn find_bundle(")),
-    ),
-    Row(
-        "ExtModule",
         "docs",
         Prose("per-function markdown for the docs browser; rendered, never checked"),
     ),
@@ -633,8 +628,27 @@ const TABLE: &[Row] = &[
         "has_default",
         Data(Anchor(CHECK_PRELUDE, "fn synth_trait_decl(")),
     ),
-    // --- Method bundles -------------------------------------------------------------------------
-    // What a type binding to the bundle must look like, validated at the `impl` site.
+    // `receiver` (ExtBundle→ExtTrait fold-in, slice 4): which receiver carries a kernel-trait method —
+    // `Self` (Element) or `List<Self>` (Bulk, the accepted dual-receiver asymmetry). States a RULE
+    // about which receiver a method is reachable on: `bundle_method_call` reads it to type a method on
+    // a bound `T` vs a `List<T>` of one; calling a Bulk method on an element (or the reverse) is not
+    // resolved. No shipped extension declares a kernel trait the corpus cannot reach with a bulk
+    // method, so the `kernels_methods.noe` corpus case (which calls both `v.add(w)` and `xs.add_all(ys)`)
+    // is the exerciser.
+    Row(
+        "ExtTraitMethod",
+        "receiver",
+        Constraint(
+            Anchor(
+                "crates/noeta-check/src/expr/member.rs",
+                "fn bundle_method_call(",
+            ),
+            Anchor("tests/conformance/bundles/kernels_methods.noe", "expect:"),
+        ),
+    ),
+    // --- PackedConstraint (a kernel trait's structural `Self`-constraint, `ExtTrait::self_constraint`)
+    // Since the ExtBundle→ExtTrait fold-in (slice 4) the constraint lives on the trait, not a bundle;
+    // it is validated at the `impl vec.Kernels for T {}` site by the same `constraint_mismatch` core.
     Row(
         "PackedConstraint",
         "fields",
@@ -643,8 +657,8 @@ const TABLE: &[Row] = &[
             Anchor("tests/conformance/bundles/bind_errors.noe", "expect:"),
         ),
     ),
-    // Row/Column: no SHIPPED bundle declares either (both are `Any`), so the corpus cannot
-    // reach the rejecting arms. Covered by a fixture extension instead.
+    // Row/Column: no SHIPPED kernel trait declares either (all are `Any`), so the corpus cannot
+    // reach the rejecting arms. Covered by a fixture extension instead (a `Column` self-constraint).
     Row(
         "PackedConstraint",
         "layout",
@@ -669,43 +683,6 @@ const TABLE: &[Row] = &[
                 "expect:",
             ),
         ),
-    ),
-    Row("BundleFn", "sig", Data(Anchor(REGISTRY, "pub fn method("))),
-    // Element vs Bulk: which receiver may call the method. Calling a `Bulk` method on an
-    // element (or the reverse) is not resolved, so the set is a rule about call sites.
-    Row(
-        "BundleFn",
-        "receiver",
-        Constraint(
-            Anchor(
-                "crates/noeta-check/src/expr/member.rs",
-                "fn bundle_method_call(",
-            ),
-            Anchor("tests/conformance/bundles/kernels_methods.noe", "expect:"),
-        ),
-    ),
-    Row(
-        "ExtBundle",
-        "name",
-        Data(Anchor(REGISTRY, "pub fn find_bundle(")),
-    ),
-    Row(
-        "ExtBundle",
-        "constraint",
-        Constraint(
-            Anchor(CHECK_TRAITS, "fn check_bundle_impl("),
-            Anchor("tests/conformance/bundles/bind_errors.noe", "expect:"),
-        ),
-    ),
-    Row(
-        "ExtBundle",
-        "methods",
-        Data(Anchor(REGISTRY, "pub fn method(")),
-    ),
-    Row(
-        "ExtBundle",
-        "ctx_dispatch",
-        Data(Anchor(REGISTRY, "pub fn dispatch_bundle_method(")),
     ),
     // --- Extension-declared prelude attributes ---------------------------------------------------
     Row(
@@ -973,8 +950,6 @@ const SCANNED: &[(&str, &[&str])] = &[
             "ExtTraitMethod",
             "ExtAssocType",
             "PackedConstraint",
-            "BundleFn",
-            "ExtBundle",
             "ExtAttrField",
             "ExtAttribute",
             "ExtTier",

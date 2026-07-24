@@ -393,30 +393,12 @@ pub enum RetTy {
     SameAsArg(usize),
     /// `int` if every argument is concretely `int`, else `float` (`math.abs`/`min`/`max`).
     NumericPreserving,
-    /// The constrained shape's **element scalar type** itself — resolved by the checker at the
-    /// `impl <module>.<Bundle> for T {}` site from `T`'s uniform numeric field kind (`scale(s:
-    /// Elem)`, an element-returning op). Only meaningful on a [`BundleFn`] whose bundle constraint
-    /// binds a uniform numeric field ([`ConstraintField::AnyNumeric`]); the checker resolves it
-    /// against the bound struct's concrete field type, so ONE bundle serves every element width.
-    Elem,
-    /// The element's **widened accumulator** (`dot() -> ElemWide`): an integer element (`int`, any
-    /// `iN`/`uN`) widens to `int` (i64), `f32` stays `f32`, `f64` stays `f64`, `float` stays
-    /// `float`. Matches the `Scalar::Wide` associated type — the accumulator a cross-lane reduction
-    /// cannot let silently wrap. Element-relative, like [`RetTy::Elem`].
-    ElemWide,
-    /// The element's **float promotion** (`length() -> ElemFloat`): an integer element (`int`, any
-    /// `iN`/`uN`) promotes to `float` (f64), `f32` stays `f32`, `f64` stays `f64`, `float` stays
-    /// `float`. Matches the `Scalar::Float` associated type — the result of a magnitude/`sqrt` op.
-    /// Element-relative, like [`RetTy::Elem`].
-    ElemFloat,
-    /// A **`List` of the element's widened accumulator** (`dot_all() -> List<ElemWide>`) — the bulk
-    /// twin of [`RetTy::ElemWide`]: one widened reduction value per element of a packed `List<T>`.
-    /// Resolved by the checker against the bound shape's element kind, exactly as [`RetTy::ElemWide`],
-    /// then wrapped in `List<_>` (the scalar-unification collapse of the per-type `dot_all` returns).
-    ListElemWide,
-    /// A **`List` of the element's float promotion** (`length_all() -> List<ElemFloat>`) — the bulk
-    /// twin of [`RetTy::ElemFloat`].
-    ListElemFloat,
+    // The element-relative returns (`Elem`/`ElemWide`/`ElemFloat`/`List<ElemWide>`/`List<ElemFloat>`)
+    // lived here until the ExtBundle→ExtTrait fold-in (slice 4). They were superseded by
+    // [`SigType::Assoc`] resolved through a trait's native-derived [`ExtAssocType`]: a kernel method's
+    // `dot` now returns `Concrete(Assoc("Wide"))`, `length` `Concrete(Assoc("Float"))`, and the bulk
+    // twins `Concrete(List(Assoc("Wide")))` / `Concrete(List(Assoc("Float")))` — one associated-type
+    // mechanism (slice 1b) instead of a second, bundle-only return vocabulary.
     /// The result type is named at the call site by a turbofish (`json.parse::<T>(): T`). The
     /// concrete `T` arrives as a [`TypeRecipe`] the checker records at the call site and the backend
     /// threads into the [`ExtModule::typed_dispatch`] (call-site-typed construction). The
@@ -457,13 +439,6 @@ impl RetTy {
                 .unwrap_or_else(|| "dyn".to_string()),
             // `int` when every argument is concretely `int`, else `float`.
             RetTy::NumericPreserving => "int | float".to_string(),
-            // Element-relative: the concrete element type is only known at the bundle's `impl`
-            // site, so a bare signature renders the symbolic element form (like `Var` → `T`).
-            RetTy::Elem => "Elem".to_string(),
-            RetTy::ElemWide => "ElemWide".to_string(),
-            RetTy::ElemFloat => "ElemFloat".to_string(),
-            RetTy::ListElemWide => "List<ElemWide>".to_string(),
-            RetTy::ListElemFloat => "List<ElemFloat>".to_string(),
             // Named at the call site by a turbofish, in its declared wrapper.
             RetTy::TypeArg(TypeArgWrap::Plain) => {
                 "T /* call-site type: name it with ::<T> */".to_string()
@@ -627,9 +602,10 @@ pub struct ExtModule {
     /// features (DCE Axis B), retiring the hand-maintained `module_ring`/`fn_ring` tables the CLI
     /// carried. The string must equal the `noeta-aot-runtime` Cargo feature that turns the ring on.
     pub ring: Option<&'static str>,
-    /// The module's **method bundles** (kernel-methods K0): named method sets a user's `@packed`
-    /// type acquires by explicit `impl <module>.<Bundle> for T {}`. Default empty.
-    pub bundles: &'static [ExtBundle],
+    // The module's method bundles lived here (`bundles: &[ExtBundle]`) until the ExtBundle→ExtTrait
+    // fold-in (slice 4). A kernel bundle is now a native [`ExtTrait`] registered through
+    // `Extension::traits()`; the `impl vec.Kernels for T {}` surface resolves the module-qualified
+    // spelling to that trait via the checker's `resolve_bundle_ref` + `Registry::find_trait_in_module`.
     /// Per-function **documentation prose** (docs-browser arc, Arc 2): `(function_name, markdown)`
     /// pairs surfaced by the API-reference docs generator (`noeta doc`, the editor's docs browser,
     /// the MCP docs tools). Co-located with the module's registration; opt-in and sparse — a
@@ -661,7 +637,6 @@ impl ExtModule {
         ctx_functions: &[],
         ctx_dispatch: None,
         ring: None,
-        bundles: &[],
         docs: &[],
         typed_functions: &[],
         typed_dispatch: None,
@@ -1397,13 +1372,13 @@ pub struct ExtTrait {
     /// `trait_assoc[(type, trait)]` table slice 1a populates — so a method naming `Self::Name`
     /// ([`SigType::Assoc`]) resolves on a concrete receiver exactly as a `.noe` associated type does.
     /// This is the mechanism that generalizes the bundle ABI's element-relative returns
-    /// ([`RetTy::ElemWide`]/[`RetTy::ElemFloat`]) to a first-class trait contract.
+    /// (`RetTy::ElemWide`/`RetTy::ElemFloat`) to a first-class trait contract.
     pub assoc_types: &'static [ExtAssocType],
     /// The trait's **native default-body dispatch** (ExtBundle→ExtTrait convergence, slice 2) — the
-    /// second capability a [`ExtBundle`] had that a trait lacked. When present, a method that
+    /// second capability a `ExtBundle` had that a trait lacked. When present, a method that
     /// [`ExtTraitMethod::has_default`] marks optional AND that the implementing type does **not**
     /// itself provide is answered by the **trait**, through this one shared [`TraitDispatch`]
-    /// (a [`CtxTypeDispatch`]: the receiver rides as ctx slot 0, exactly like [`ExtBundle::ctx_dispatch`]).
+    /// (a [`CtxTypeDispatch`]: the receiver rides as ctx slot 0, exactly like `ExtBundle::ctx_dispatch`).
     /// So a fully-defaulted native trait with a `dispatch` behaves like a bundle bind — an empty
     /// `impl X for T {}` (or a native type's `traits` advertisement) adopts every default body — while
     /// still permitting an override: a type that provides the method wins (source 1), the trait's
@@ -1413,9 +1388,9 @@ pub struct ExtTrait {
     /// dispatch it through [`Registry::dispatch_trait_method`], the trait twin of `dispatch_bundle_method`.
     pub dispatch: Option<TraitDispatch>,
     /// The trait's **structural `Self`-constraint** (ExtBundle→ExtTrait convergence, slice 3) — the
-    /// THIRD and last capability an [`ExtBundle`] had that a trait lacked. When present, the trait may
+    /// THIRD and last capability an `ExtBundle` had that a trait lacked. When present, the trait may
     /// only be `impl`-ed for a `@packed` struct whose fields match this [`PackedConstraint`] — exactly
-    /// the shape check a bundle bind makes ([`ExtBundle::constraint`]), now first-class on a trait. The
+    /// the shape check a bundle bind makes (`ExtBundle::constraint`), now first-class on a trait. The
     /// SAME `PackedConstraint` type is reused deliberately (not a fresh marker-trait predicate): the
     /// constraint pins the implementing type's uniform *element*, which the trait's native-derived
     /// associated types ([`ExtTrait::assoc_types`], slice 1b) then derive from — a built-in marker
@@ -1428,7 +1403,7 @@ pub struct ExtTrait {
 }
 
 /// A native trait's **default-body dispatch** ([`ExtTrait::dispatch`], slice 2): the same
-/// [`CtxTypeDispatch`] shape [`ExtBundle::ctx_dispatch`] uses — the receiver arrives as ctx slot 0,
+/// [`CtxTypeDispatch`] shape `ExtBundle::ctx_dispatch` uses — the receiver arrives as ctx slot 0,
 /// arguments after it, and the body may re-enter the backend. Re-homed onto the trait, keyed by
 /// `(trait, method)` instead of `(module, bundle, method)`.
 pub type TraitDispatch = CtxTypeDispatch;
@@ -1449,18 +1424,18 @@ pub struct ExtAssocType {
 
 /// How a native associated type is **derived from the implementing type's element** (slice 1b) — the
 /// closed vocabulary that expresses exactly what the bundle ABI's element-relative returns
-/// ([`RetTy::Elem`]/[`RetTy::ElemWide`]/[`RetTy::ElemFloat`]) did, now as a trait associated type.
+/// (`RetTy::Elem`/`RetTy::ElemWide`/`RetTy::ElemFloat`) did, now as a trait associated type.
 /// The checker interprets each against the bound `@packed` shape's uniform element kind; the ABI
 /// cannot itself produce a `Type`, so this stays a neutral enum (mirroring [`TypeRecipe`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssocDerivation {
-    /// The element scalar itself (`type Elem` — the [`RetTy::Elem`] analog).
+    /// The element scalar itself (`type Elem` — the `RetTy::Elem` analog).
     Element,
-    /// The element's **widened accumulator** (`type Wide` — the [`RetTy::ElemWide`] analog): an
+    /// The element's **widened accumulator** (`type Wide` — the `RetTy::ElemWide` analog): an
     /// integer element (`int`, any `iN`/`uN`) widens to `int` (i64), `f32` stays `f32`, `f64`/`float`
     /// unchanged. The type a cross-lane reduction cannot let silently wrap.
     Widen,
-    /// The element's **float promotion** (`type Float` — the [`RetTy::ElemFloat`] analog): an integer
+    /// The element's **float promotion** (`type Float` — the `RetTy::ElemFloat` analog): an integer
     /// element promotes to `float` (f64), `f32` stays `f32`, `f64`/`float` unchanged. A magnitude/sqrt op.
     FloatPromote,
 }
@@ -1478,6 +1453,25 @@ pub struct ExtTraitMethod {
     /// Whether the method carries a default (optional for an implementor); `false` for a required
     /// method whose absence in an `impl` is E0015.
     pub has_default: bool,
+    /// Which receiver carries this method (ExtBundle→ExtTrait convergence, slice 4 — the fold-in).
+    /// Almost every trait method lives on `Self` ([`BundleReceiver::Element`], the [`Self::DEFAULTS`]),
+    /// the receiver the contract binds. A [`BundleReceiver::Bulk`] method instead lives on `List<Self>`
+    /// (`xs.add_all(ys)`) — NOT a general trait capability, but the **surface marker** the migrated
+    /// kernel bundles' bulk `*_all` forms need: the checker's `bundle_method_call` reads it to type a
+    /// method on a `List<T>` of an implementing `T`. Kept per-method (rather than a general trait
+    /// notion) precisely because the `List<Self>` receiver is an accepted asymmetry, not a trait rule.
+    pub receiver: BundleReceiver,
+}
+
+impl ExtTraitMethod {
+    /// Literal-shortening defaults (`..ExtTraitMethod::DEFAULTS`): a required, `Self`-receiver method,
+    /// so a trait literal names only its `sig` (and `has_default` when it carries one) — the ordinary
+    /// trait method, with the [`BundleReceiver::Bulk`] marker reserved for the migrated kernel bundles.
+    pub const DEFAULTS: ExtTraitMethod = ExtTraitMethod {
+        sig: ExtFn::DEFAULTS,
+        has_default: false,
+        receiver: BundleReceiver::Element,
+    };
 }
 
 impl ExtTrait {
@@ -1562,8 +1556,8 @@ pub enum ConstraintField {
     /// form that lets ONE bundle bind every numeric vector width at once (the three fixed
     /// `vec.Kernels`/`IntKernels`/`ColorKernels` copies collapse to one). Paired with a
     /// [`ConstraintArity::Uniform`], the checker captures the bound shape's concrete element type so
-    /// it can resolve the element-relative returns [`RetTy::Elem`]/[`RetTy::ElemWide`]/
-    /// [`RetTy::ElemFloat`]. The specific forms above stay exact — this is additive.
+    /// it can resolve the element-relative returns `RetTy::Elem`/`RetTy::ElemWide`/
+    /// `RetTy::ElemFloat`. The specific forms above stay exact — this is additive.
     AnyNumeric,
     /// A **uniform *integer* field of any width/signedness** — `int` and every `i8..i64`/`u8..u64`,
     /// but never `float`/`f32`/`f64`/`bool`. The [`AnyNumeric`](Self::AnyNumeric) sibling restricted
@@ -1582,48 +1576,17 @@ pub enum ConstraintLayout {
     Column,
 }
 
-/// Which receiver carries a [`BundleFn`].
+/// Which receiver carries a trait method whose receiver is not the plain `Self` — the per-method
+/// marker on [`ExtTraitMethod::receiver`] (ExtBundle→ExtTrait convergence, slice 4). `ExtBundle` and
+/// `BundleFn` were folded into [`ExtTrait`]/[`ExtTraitMethod`] in that slice; this enum survives as
+/// the **surface adapter** the migrated kernel bundles' dual receiver needs — nothing more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BundleReceiver {
-    /// A method on a value of the bound type itself (`v.dot(w)`).
+    /// A method on a value of the implementing type itself (`v.dot(w)`) — the ordinary trait method.
     Element,
-    /// A method on a `List<T>` of the bound type (`xs.dot_all(ys)`, `xs.sum()`).
+    /// A method on a `List<T>` of the implementing type (`xs.dot_all(ys)`, `xs.sum()`): NOT a general
+    /// trait capability, an accepted asymmetry kept only for the kernel bundles' bulk `*_all` forms.
     Bulk,
-}
-
-/// One bundle method: an ordinary [`ExtFn`] signature (the receiver is *not* in `params` — it
-/// rides as ctx slot 0, the extern-type ctx-method convention, so `RetTy::SameAsArg(0)` means
-/// "same type as the receiver") plus which receiver carries it.
-#[derive(Debug, Clone, Copy)]
-pub struct BundleFn {
-    pub sig: ExtFn,
-    pub receiver: BundleReceiver,
-}
-
-/// A named method bundle contributed by a module (kernel-methods K0). Referenced at the impl site
-/// through the owning module's binding — `use std.{vec}` then `impl vec.Kernels for Px {}` — so
-/// provenance is explicit in the source.
-#[derive(Debug, Clone, Copy)]
-pub struct ExtBundle {
-    /// The bundle's surface name (`Kernels`). Unique within its module.
-    pub name: &'static str,
-    /// What a binding type must look like.
-    pub constraint: PackedConstraint,
-    /// The methods a bound type acquires. Method names are unique across the whole bundle
-    /// (regardless of receiver kind — one name meaning different things on `T` vs `List<T>`
-    /// would be a comprehension hazard; install-time validated).
-    pub methods: &'static [BundleFn],
-    /// The one shared higher-order dispatch (both backends): the bound receiver rides as slot 0.
-    /// Same shape as [`ExtType::ctx_dispatch`] — a `Bulk` method's slot 0 is the list.
-    pub ctx_dispatch: CtxTypeDispatch,
-}
-
-impl ExtBundle {
-    /// The bundle's method named `method`, if any.
-    pub fn method(&self, method: &str) -> Option<&'static BundleFn> {
-        // `methods` is a `&'static` slice, so the reference is `'static` too.
-        self.methods.iter().find(|m| m.sig.name == method)
-    }
 }
 
 /// The literal type of an extension-declared attribute field — the subset attribute
@@ -2605,32 +2568,22 @@ impl Registry {
         self.units.iter().flat_map(|e| e.commands())
     }
 
-    /// Find a registered method bundle by its owning module and surface name (kernel-methods K0).
-    pub fn find_bundle(&self, module: &str, bundle: &str) -> Option<&'static ExtBundle> {
-        self.find_module(module)?
-            .bundles
-            .iter()
-            .find(|b| b.name == bundle)
-    }
-
-    /// Route a bound bundle-method call to its bundle's shared ctx dispatch (kernel-methods K0).
-    pub fn dispatch_bundle_method(
+    /// Resolve a native trait that a **module-qualified** binding names — `impl vec.Kernels for T {}`
+    /// (ExtBundle→ExtTrait convergence, slice 4, the fold-in). This is the **surface adapter** for the
+    /// migrated kernel bundles: the checker resolves the module alias (`vec`) to its qualified module
+    /// (`std.vec`) and calls this with `(qualified_module, name)`; the kernel trait is registered with
+    /// its `namespace` equal to that qualified module, so its qualified identity is
+    /// `qualified_module.name` (`std.vec.Kernels`) — the same string [`Registry::find_trait_qualified`]
+    /// (the runtime dispatch route) matches. NOT a second mechanism: it only finds the one [`ExtTrait`].
+    pub fn find_trait_in_module(
         &self,
-        module: &str,
-        bundle: &str,
-        method: &str,
-        ctx: &mut dyn crate::NativeCtx,
-        recv: crate::Slot,
-        args: &[crate::Slot],
-    ) -> Result<crate::CtxOut, crate::CtxError> {
-        match self.find_bundle(module, bundle) {
-            Some(b) => (b.ctx_dispatch)(method, ctx, recv, args),
-            None => Err(StdError {
-                kind: crate::ErrorKind::UnknownName,
-                message: format!("no bundle `{bundle}` in module `{module}`"),
-            }
-            .into()),
-        }
+        qualified_module: &str,
+        name: &str,
+    ) -> Option<&'static ExtTrait> {
+        self.units
+            .iter()
+            .flat_map(|e| e.traits())
+            .find(|t| t.name == name && t.namespace == qualified_module)
     }
 
     /// Route a **trait default-body** method call to the trait's shared ctx dispatch
@@ -3796,40 +3749,22 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
             }
         }
     }
-    for module in units.iter().flat_map(|e| e.modules()) {
-        for (i, bundle) in module.bundles.iter().enumerate() {
-            for other in &module.bundles[i + 1..] {
-                if bundle.name == other.name {
-                    return Err(format!(
-                        "duplicate bundle `{}` in module `{}`",
-                        bundle.name, module.name
-                    ));
-                }
-            }
-            // A `Uniform` constraint reads only `fields[0]` (every field of the bound type must
-            // equal it) — declaring more than one kind is an author bug that would silently ignore
-            // the rest, so refuse it here where every assembly path passes.
-            if let ConstraintArity::Uniform { .. } = bundle.constraint.arity
-                && bundle.constraint.fields.len() != 1
-            {
-                return Err(format!(
-                    "bundle `{}.{}` has a `Uniform` arity constraint but declares {} field kinds — \
-                     a uniform vector constraint names exactly one kind (`fields[0]`)",
-                    module.name,
-                    bundle.name,
-                    bundle.constraint.fields.len()
-                ));
-            }
-            for (j, method) in bundle.methods.iter().enumerate() {
-                for other in &bundle.methods[j + 1..] {
-                    if method.sig.name == other.sig.name {
-                        return Err(format!(
-                            "duplicate method `{}` in bundle `{}.{}`",
-                            method.sig.name, module.name, bundle.name
-                        ));
-                    }
-                }
-            }
+    // A native trait's structural `Self`-constraint (slice 3) with `Uniform` arity reads only
+    // `fields[0]` (every field of the bound type must equal it) — declaring more than one kind is an
+    // author bug that would silently ignore the rest, so refuse it here where every assembly path
+    // passes. This was the `ExtBundle::constraint` guard until the ExtBundle→ExtTrait fold-in (slice 4)
+    // re-homed the constraint onto the trait; the migrated kernel traits are its live users.
+    for tr in units.iter().flat_map(|e| e.traits()) {
+        if let Some(c) = &tr.self_constraint
+            && let ConstraintArity::Uniform { .. } = c.arity
+            && c.fields.len() != 1
+        {
+            return Err(format!(
+                "trait `{}` has a `Uniform` self-constraint but declares {} field kinds — \
+                 a uniform vector constraint names exactly one kind (`fields[0]`)",
+                tr.qualified(),
+                c.fields.len()
+            ));
         }
     }
     // Author contracts the ABI states in prose but the types cannot enforce (audit-2 F4). Each of
@@ -4034,30 +3969,16 @@ pub fn commands() -> impl Iterator<Item = &'static crate::ExtCommand> {
     default_registry().into_iter().flat_map(|r| r.commands())
 }
 
-pub fn find_bundle(module: &str, bundle: &str) -> Option<&'static ExtBundle> {
-    default_registry().and_then(|r| r.find_bundle(module, bundle))
+/// Resolve a native trait a module-qualified binding names (`impl vec.Kernels for T {}`) through the
+/// process-global default registry — the surface adapter for the migrated kernel bundles (slice 4). See
+/// [`Registry::find_trait_in_module`].
+pub fn find_trait_in_module(qualified_module: &str, name: &str) -> Option<&'static ExtTrait> {
+    default_registry().and_then(|r| r.find_trait_in_module(qualified_module, name))
 }
 
-pub fn dispatch_bundle_method(
-    module: &str,
-    bundle: &str,
-    method: &str,
-    ctx: &mut dyn crate::NativeCtx,
-    recv: crate::Slot,
-    args: &[crate::Slot],
-) -> Result<crate::CtxOut, crate::CtxError> {
-    match default_registry() {
-        Some(r) => r.dispatch_bundle_method(module, bundle, method, ctx, recv, args),
-        None => Err(StdError {
-            kind: crate::ErrorKind::UnknownName,
-            message: format!("no bundle `{bundle}` in module `{module}`"),
-        }
-        .into()),
-    }
-}
-
-/// Route a trait default-body method call through the process-global default registry (slice 2) — the
-/// trait twin of [`dispatch_bundle_method`].
+/// Route a trait default-body method call through the process-global default registry (slice 2). Since
+/// the ExtBundle→ExtTrait fold-in (slice 4) this is also the route the migrated kernel bundles take:
+/// the checker records a `(trait, method)` site and the backends dispatch here.
 pub fn dispatch_trait_method(
     trait_q: &str,
     method: &str,
@@ -4261,7 +4182,7 @@ mod runtime_registry_tests {
     static B_DUP_NAME: Unit = Unit("a.core", "b", &[]);
     static B_DUP_MODULE: Unit = Unit("b.core", "a", &[M_MATH]);
 
-    // --- method bundles (kernel-methods K0) ---
+    // --- kernel method traits (ExtBundle→ExtTrait fold-in, slice 4) ---
     const VEC3_CONSTRAINT: PackedConstraint = PackedConstraint {
         fields: &[
             ConstraintField::F32,
@@ -4271,54 +4192,86 @@ mod runtime_registry_tests {
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Exact,
     };
-    const KERNELS: ExtBundle = ExtBundle {
+    /// A migrated kernel bundle, now a native [`ExtTrait`]: a fully-defaulted trait carrying a
+    /// `self_constraint`, native-derived `assoc_types`, and a `dispatch` — the shape the fold-in gives
+    /// `vec.Kernels`. Its `namespace` equals the qualified module (`g.vec`) so the module-qualified
+    /// `impl g.vec.Kernels` spelling resolves through `find_trait_in_module`.
+    const KERNELS: ExtTrait = ExtTrait {
         name: "Kernels",
-        constraint: VEC3_CONSTRAINT,
+        namespace: "g.vec",
         methods: &[
-            BundleFn {
+            ExtTraitMethod {
                 sig: ExtFn {
                     name: "dot",
                     params: &[SigType::Dyn],
-                    ret: RetTy::Concrete(SigType::F32),
+                    ret: RetTy::Concrete(SigType::Assoc("Wide")),
                 },
+                has_default: true,
                 receiver: BundleReceiver::Element,
             },
-            BundleFn {
+            ExtTraitMethod {
                 sig: ExtFn {
                     name: "scale_all",
                     params: &[SigType::F32],
                     ret: RetTy::SameAsArg(0),
                 },
+                has_default: true,
                 receiver: BundleReceiver::Bulk,
             },
         ],
-        ctx_dispatch: |method, _, _, _| {
+        assoc_types: &[ExtAssocType {
+            name: "Wide",
+            derivation: AssocDerivation::Widen,
+        }],
+        dispatch: Some(|method, _, _, _| {
             Err(StdError {
                 kind: crate::ErrorKind::UnknownName,
-                message: format!("test bundle never dispatches `{method}`"),
+                message: format!("test trait never dispatches `{method}`"),
             }
             .into())
-        },
+        }),
+        self_constraint: Some(VEC3_CONSTRAINT),
     };
     const M_VEC: ExtModule = ExtModule {
         name: "vec",
-        bundles: &[KERNELS],
         ..ExtModule::DEFAULTS
     };
     static G: Unit = Unit("g.core", "g", &[M_VEC]);
 
     #[test]
-    fn bundle_lookup_and_method_table() {
-        // `find_bundle` needs an installed registry; ride the same process-global default the
-        // lifecycle test seeds (Unit A) by validating structure directly instead.
-        let bundle = M_VEC.bundles.iter().find(|b| b.name == "Kernels").unwrap();
-        assert!(bundle.method("dot").is_some());
-        assert_eq!(
-            bundle.method("scale_all").unwrap().receiver,
-            BundleReceiver::Bulk
-        );
-        assert!(bundle.method("nope").is_none());
-        validate(&[&G]).expect("well-formed: unique bundle + method names");
+    fn kernel_trait_method_table_carries_receiver_markers() {
+        // The dual receiver survives as the per-method `receiver` marker (slice 4): an element method
+        // on `Self`, a bulk `*_all` on `List<Self>`. All methods are defaulted (answered by dispatch).
+        let dot = KERNELS
+            .methods
+            .iter()
+            .find(|m| m.sig.name == "dot")
+            .unwrap();
+        assert_eq!(dot.receiver, BundleReceiver::Element);
+        let bulk = KERNELS
+            .methods
+            .iter()
+            .find(|m| m.sig.name == "scale_all")
+            .unwrap();
+        assert_eq!(bulk.receiver, BundleReceiver::Bulk);
+        assert!(KERNELS.methods.iter().all(|m| m.has_default));
+        // The module-qualified spelling resolves to this trait through the surface adapter.
+        assert!(std::ptr::eq(
+            find_trait_in_module_in(&[KERNELS], "g.vec", "Kernels").unwrap(),
+            &KERNELS
+        ));
+    }
+
+    /// Free-function twin of [`Registry::find_trait_in_module`] over a fixed trait slice — the registry
+    /// method needs an installed unit, so this validates the same matching rule structurally.
+    fn find_trait_in_module_in<'a>(
+        traits: &'a [ExtTrait],
+        qualified_module: &str,
+        name: &str,
+    ) -> Option<&'a ExtTrait> {
+        traits
+            .iter()
+            .find(|t| t.name == name && t.namespace == qualified_module)
     }
 
     // --- namespace groups (module-namespaces) ---
@@ -4441,50 +4394,9 @@ mod runtime_registry_tests {
         );
     }
 
-    #[test]
-    fn duplicate_bundle_name_in_a_module_is_rejected() {
-        const M_DUP: ExtModule = ExtModule {
-            name: "vec2",
-            bundles: &[KERNELS, KERNELS],
-            ..ExtModule::DEFAULTS
-        };
-        static H: Unit = Unit("h.core", "h", &[M_DUP]);
-        assert!(validate(&[&H]).is_err(), "duplicate bundle name must panic");
-    }
-
-    #[test]
-    fn duplicate_method_name_in_a_bundle_is_rejected() {
-        const DUP_METHODS: ExtBundle = ExtBundle {
-            methods: &[
-                BundleFn {
-                    sig: ExtFn {
-                        name: "dot",
-                        ..ExtFn::DEFAULTS
-                    },
-                    receiver: BundleReceiver::Element,
-                },
-                // Same name on the other receiver kind is still a conflict (one name, one meaning).
-                BundleFn {
-                    sig: ExtFn {
-                        name: "dot",
-                        ..ExtFn::DEFAULTS
-                    },
-                    receiver: BundleReceiver::Bulk,
-                },
-            ],
-            ..KERNELS
-        };
-        const M_DUP: ExtModule = ExtModule {
-            name: "vec3",
-            bundles: &[DUP_METHODS],
-            ..ExtModule::DEFAULTS
-        };
-        static I: Unit = Unit("i.core", "i", &[M_DUP]);
-        assert!(
-            validate(&[&I]).is_err(),
-            "duplicate method name in a bundle must panic"
-        );
-    }
+    // (The duplicate-bundle-name and duplicate-method-name-in-a-bundle install checks were retired in
+    // the ExtBundle→ExtTrait fold-in (slice 4): a bundle is now an `ExtTrait`, and trait/method
+    // uniqueness is covered by the general native-declaration validation.)
 
     #[test]
     fn duplicate_unit_name_is_rejected() {
@@ -5268,10 +5180,6 @@ mod runtime_registry_tests {
         assert_eq!(extensions().len(), 2);
         assert!(find_module("a.math").is_some());
         assert!(find_module("math").is_some(), "bare-name lookup");
-        // Bundle resolution (kernel-methods K0): qualified and bare module forms.
-        assert!(find_bundle("g.vec", "Kernels").is_some());
-        assert!(find_bundle("vec", "Kernels").is_some(), "bare-name lookup");
-        assert!(find_bundle("g.vec", "Nope").is_none());
         // A second default is a no-op — the first install wins.
         install_default(|| vec![&A]);
         assert_eq!(extensions().len(), 2);
@@ -5283,22 +5191,12 @@ mod runtime_registry_tests {
 
 #[cfg(test)]
 mod elem_retty {
-    //! The scalar-unification ABI additions (element-relative return types + the `AnyNumeric`
-    //! constraint). The *resolution* of `Elem`/`ElemWide`/`ElemFloat` against a concrete element
-    //! type is the checker's job (exercised end-to-end in
-    //! `noeta-embed/tests/ext_constraint_enforcement.rs`); these pin the ABI-level contract this
-    //! crate owns — that the variants exist, render symbolically, and stay distinct.
+    //! The scalar-unification ABI additions. The element-relative *return* variants
+    //! (`RetTy::Elem`/`ElemWide`/`ElemFloat`) were removed in the ExtBundle→ExtTrait fold-in (slice 4),
+    //! superseded by `SigType::Assoc` resolved through a trait's native-derived `ExtAssocType`; what
+    //! remains crate-owned is the `AnyNumeric` constraint field, pinned here.
 
     use super::*;
-
-    #[test]
-    fn element_relative_returns_render_symbolically() {
-        // No params are referenced — the element type is only known at the bundle's impl site, so a
-        // bare signature renders the symbolic element form (like `Var(0)` → `T`).
-        assert_eq!(RetTy::Elem.render(&[]), "Elem");
-        assert_eq!(RetTy::ElemWide.render(&[]), "ElemWide");
-        assert_eq!(RetTy::ElemFloat.render(&[]), "ElemFloat");
-    }
 
     #[test]
     fn any_numeric_is_distinct_from_the_specific_forms() {
@@ -5316,14 +5214,14 @@ mod elem_retty {
     }
 
     #[test]
-    fn an_element_relative_bundle_signature_renders() {
-        // A whole `dot(dyn): ElemWide` bundle method renders end-to-end — the signature surface a
-        // unified `vec.Kernels` will expose.
+    fn an_associated_type_return_renders_as_self_projection() {
+        // A migrated kernel `dot(dyn): Self::Wide` renders end-to-end through `SigType::Assoc` — the
+        // signature surface the folded-in `vec.Kernels` now exposes (was `ElemWide`).
         let f = ExtFn {
             name: "dot",
             params: &[SigType::Dyn],
-            ret: RetTy::ElemWide,
+            ret: RetTy::Concrete(SigType::Assoc("Wide")),
         };
-        assert_eq!(f.render(), "fn dot(dyn): ElemWide");
+        assert_eq!(f.render(), "fn dot(dyn): Self::Wide");
     }
 }

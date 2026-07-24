@@ -262,27 +262,14 @@ pub enum Rvalue {
         supplied: Option<u64>,
         span: Span,
     },
-    /// A **method-bundle** method call (kernel-methods K2): `receiver.name(args)` where the
-    /// checker statically resolved the receiver's type to a bundle binding
-    /// (`impl <module>.<Bundle> for T {}`). The route is baked in — dispatch goes straight to the
-    /// registered bundle's shared ctx dispatch with the receiver as slot 0, no runtime discovery
-    /// (which is what makes an empty list receiver work). `module` is the owning module's
-    /// root-qualified identity (`"std.vec"`).
-    BundleMethod {
-        receiver: Atom,
-        module: String,
-        bundle: String,
-        name: String,
-        args: Vec<Atom>,
-        span: Span,
-    },
-    /// A **trait default-body** method call (ExtBundle→ExtTrait convergence, slice 2):
-    /// `receiver.name(args)` where the checker statically resolved that the method is a native
-    /// trait's *defaulted* method, the trait carries a native default-body dispatch
-    /// ([`noeta_ext_abi::ExtTrait::dispatch`]), and the receiver's type provides no override. The
-    /// route is baked in — dispatch goes straight to the registered trait's shared ctx dispatch with
-    /// the receiver as slot 0, no runtime discovery. The trait twin of [`Rvalue::BundleMethod`];
-    /// `trait_name` is the trait's qualified identity (`"fx.Gadget"`).
+    /// A **trait** method call with a baked-in route: `receiver.name(args)` where the checker
+    /// statically resolved the call to a native trait's shared ctx dispatch. Two producers: (a) a
+    /// native trait's *defaulted* method with a trait-level dispatch and no overriding implementor
+    /// ([`noeta_ext_abi::ExtTrait::dispatch`], slice 2); (b) — since the ExtBundle→ExtTrait fold-in
+    /// (slice 4) — every kernel-trait method (`impl vec.Kernels for T {}`), whose bundle runtime route
+    /// was unified onto this one. Dispatch goes straight to the registered trait's shared ctx dispatch
+    /// with the receiver as slot 0, no runtime discovery (which is what makes an empty list receiver
+    /// work for the bulk kernels). `trait_name` is the trait's qualified identity (`"std.vec.Kernels"`).
     TraitMethod {
         receiver: Atom,
         trait_name: String,

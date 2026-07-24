@@ -516,7 +516,6 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             args.iter().for_each(&mut *f);
         }
         Rvalue::Method { receiver, args, .. }
-        | Rvalue::BundleMethod { receiver, args, .. }
         | Rvalue::TraitMethod { receiver, args, .. } => {
             f(receiver);
             args.iter().for_each(&mut *f);

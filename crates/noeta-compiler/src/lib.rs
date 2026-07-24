@@ -3862,34 +3862,9 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::LoadConst { dst, k });
                 Ok(())
             }
-            // A method-bundle call (kernel-methods K2): route baked by the checker; the receiver
-            // and args are borrowed registers, exactly the ctx-method convention.
-            Rvalue::BundleMethod {
-                receiver,
-                module,
-                bundle,
-                name,
-                args,
-                span,
-            } => {
-                let recv = self.atom_reg(receiver)?;
-                let args = self.atom_regs(args)?;
-                let module_id = self.module.intern_name(module);
-                let bundle_id = self.module.intern_name(bundle);
-                let method_id = self.module.intern_name(name);
-                self.code.push(Op::BundleMethod {
-                    dst,
-                    recv,
-                    module: module_id,
-                    bundle: bundle_id,
-                    method: method_id,
-                    args,
-                    span: *span,
-                });
-                Ok(())
-            }
-            // A trait default-body call (ExtBundle→ExtTrait convergence, slice 2): route baked by the
-            // checker; the receiver and args are borrowed registers, the ctx-method convention.
+            // A trait method call (native default body, slice 2; or a kernel-trait method since the
+            // ExtBundle→ExtTrait fold-in, slice 4): route baked by the checker; the receiver and args
+            // are borrowed registers, the ctx-method convention.
             Rvalue::TraitMethod {
                 receiver,
                 trait_name,

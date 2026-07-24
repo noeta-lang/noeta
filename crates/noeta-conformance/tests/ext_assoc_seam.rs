@@ -50,6 +50,7 @@ const REDUCE: ExtTrait = ExtTrait {
                 ret: RetTy::Concrete(SigType::Assoc("Wide")),
             },
             has_default: false,
+            ..ExtTraitMethod::DEFAULTS
         },
         ExtTraitMethod {
             sig: ExtFn {
@@ -58,6 +59,7 @@ const REDUCE: ExtTrait = ExtTrait {
                 ret: RetTy::Concrete(SigType::Assoc("Mag")),
             },
             has_default: false,
+            ..ExtTraitMethod::DEFAULTS
         },
         ExtTraitMethod {
             sig: ExtFn {
@@ -68,6 +70,7 @@ const REDUCE: ExtTrait = ExtTrait {
                 ret: RetTy::Concrete(SigType::List(&SigType::Assoc("Wide"))),
             },
             has_default: false,
+            ..ExtTraitMethod::DEFAULTS
         },
     ],
     assoc_types: &[

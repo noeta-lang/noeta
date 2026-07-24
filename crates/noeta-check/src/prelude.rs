@@ -176,6 +176,17 @@ impl Checker {
         let seeds: Vec<TraitSeed> = aliases
             .iter()
             .filter_map(|(local, qualified)| {
+                // A **dotted** local (`vec.Kernels`) is a module-namespace projection of a kernel
+                // trait, NOT a short-name type import (`Packable`). Kernel traits are the migrated
+                // bundle surface (ExtBundle→ExtTrait fold-in, slice 4): they bind ONLY through the
+                // module-qualified `impl vec.Kernels for T {}` spelling, resolved via
+                // `resolve_bundle_ref`/`bundle_impls`, and must NOT be seeded as short-name
+                // `user_traits` (that would make the collect bundle-binding loop skip them, and route
+                // their methods through the general trait path, which has no notion of the `List<Self>`
+                // bulk receiver). Only short-name imports seed the general native-trait machinery.
+                if local.contains('.') {
+                    return None;
+                }
                 let reg = self.reg();
                 let tr = reg.find_trait_qualified(qualified)?;
                 let decl = synth_trait_decl(reg, tr, local);
@@ -243,6 +254,16 @@ impl Checker {
                 self.symbols
                     .native_trait_self_constraints
                     .insert(local.clone(), constraint);
+            }
+            // Which of this trait's associated types are **native-derived** (slice 1b / auto-supply,
+            // slice 4): a USER `impl <local> for T {}` must NOT be required to bind these — they are
+            // computed from `T`'s element, not written per-impl — so `check_user_trait_impl` treats
+            // them as auto-supplied (folding the derivation over `T`'s element into `trait_assoc`).
+            if native_won && !assoc.is_empty() {
+                self.symbols.native_derived_assoc.insert(
+                    local.clone(),
+                    assoc.iter().map(|(n, d)| (n.to_string(), *d)).collect(),
+                );
             }
             for ty in impls {
                 // Native-derived associated types (slice 1b): fold each `AssocDerivation` over this

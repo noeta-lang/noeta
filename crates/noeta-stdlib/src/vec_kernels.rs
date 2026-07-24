@@ -24,81 +24,247 @@
 //! stay in [`crate::vec3`] unchanged — this file replaces only the nominal *bundle* layer.
 
 use crate::registry::{
-    BundleFn, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout, ExtBundle, ExtFn,
-    NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, ScalarVec, SigType,
+    AssocDerivation, BundleReceiver, ConstraintArity, ConstraintField, ConstraintLayout,
+    ExtAssocType, ExtFn, ExtTrait, ExtTraitMethod, NativeOut, NativeValue, PackedConstraint, RetTy,
+    Scalar, ScalarVec, SigType,
 };
 use crate::scalar::Scalar as Elem;
 use crate::{CtxError, CtxOut, CtxResult, NativeCtx, PackedField, Slot, ctx_arity};
 
 // ---------------------------------------------------------------------------------------------------
-// The two bundles.
+// The two kernel traits (ExtBundle→ExtTrait convergence, slice 4 — the fold-in). Each was an
+// `ExtBundle` until this slice folded the bundle mechanism into `ExtTrait`: a fully-defaulted native
+// trait carrying a structural `self_constraint` (the old `ExtBundle::constraint`, slice 3),
+// native-derived `assoc_types` (`Wide`/`Float`, slice 1b — the old element-relative returns), and a
+// `dispatch` (the old `ctx_dispatch`, slice 2). The `impl vec.Kernels for T {}` / `@derive(vec.Kernels)`
+// surface is unchanged; the checker resolves the module-qualified spelling to these traits. The
+// per-method `receiver` marker keeps the bulk `*_all` forms on `List<Self>` (an accepted asymmetry).
 // ---------------------------------------------------------------------------------------------------
 
-/// A `BundleFn` builder (const-fn so the method tables are `&'static`).
-const fn bfn(name: &'static str, params: &'static [SigType], ret: RetTy, receiver: BundleReceiver) -> BundleFn {
-    BundleFn { sig: ExtFn { name, params, ret }, receiver }
+/// `Self::Wide` — the widened accumulator (`dot`), an [`ExtAssocType`] derived from the element.
+const WIDE: SigType = SigType::Assoc("Wide");
+/// `Self::Float` — the float promotion (`length`), an [`ExtAssocType`] derived from the element.
+const FLOAT: SigType = SigType::Assoc("Float");
+
+/// An `ExtTraitMethod` builder (const-fn so the method tables are `&'static`). Every kernel method is
+/// defaulted (answered by the trait's `dispatch`), so a bare `impl vec.Kernels for T {}` adopts them.
+const fn tfn(
+    name: &'static str,
+    params: &'static [SigType],
+    ret: RetTy,
+    receiver: BundleReceiver,
+) -> ExtTraitMethod {
+    ExtTraitMethod {
+        sig: ExtFn { name, params, ret },
+        has_default: true,
+        receiver,
+    }
 }
 
 /// `vec.Kernels` — default arithmetic over any uniform numeric shape (all widths + `f64`).
-pub(crate) const VEC_KERNELS: ExtBundle = ExtBundle {
+pub(crate) const VEC_KERNELS: ExtTrait = ExtTrait {
     name: "Kernels",
-    constraint: PackedConstraint {
+    // The namespace equals the qualified module so the `impl vec.Kernels for T {}` surface resolves
+    // through `Registry::find_trait_in_module("std.vec", "Kernels")` and the runtime dispatch route
+    // (`find_trait_qualified("std.vec.Kernels")`) match one identity.
+    namespace: "std.vec",
+    methods: KERNELS_METHODS,
+    // The native-derived associated types the element-relative returns name: `Self::Wide` (widen) and
+    // `Self::Float` (float-promote), computed from the bound `@packed` struct's uniform element.
+    assoc_types: &[
+        ExtAssocType {
+            name: "Wide",
+            derivation: AssocDerivation::Widen,
+        },
+        ExtAssocType {
+            name: "Float",
+            derivation: AssocDerivation::FloatPromote,
+        },
+    ],
+    dispatch: Some(kernels_dispatch),
+    self_constraint: Some(PackedConstraint {
         fields: &[ConstraintField::AnyNumeric],
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Uniform { min: 2 },
-    },
-    methods: KERNELS_METHODS,
-    ctx_dispatch: kernels_dispatch,
+    }),
 };
 
 /// `Kernels`' full method set: the shared element methods + `normalize` + the bulk `*_all` forms.
-const KERNELS_METHODS: &[BundleFn] = &[
-    bfn("add", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("sub", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("scale", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("min", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("max", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
+const KERNELS_METHODS: &[ExtTraitMethod] = &[
+    tfn(
+        "add",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "sub",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "scale",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "min",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "max",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
     // `abs` — the incidental gap the old f32 `vec.Kernels` lacked; now every width has it.
-    bfn("abs", &[], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("dot", &[SigType::Dyn], RetTy::ElemWide, BundleReceiver::Element),
-    bfn("length", &[], RetTy::ElemFloat, BundleReceiver::Element),
-    bfn("normalize", &[], RetTy::SameAsArg(0), BundleReceiver::Element),
-    // Bulk forms over a packed `List<T>`.
-    bfn("add_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("sub_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("scale_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("min_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("max_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("abs_all", &[], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("dot_all", &[SigType::Dyn], RetTy::ListElemWide, BundleReceiver::Bulk),
-    bfn("length_all", &[], RetTy::ListElemFloat, BundleReceiver::Bulk),
+    tfn("abs", &[], RetTy::SameAsArg(0), BundleReceiver::Element),
+    tfn(
+        "dot",
+        &[SigType::Dyn],
+        RetTy::Concrete(WIDE),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "length",
+        &[],
+        RetTy::Concrete(FLOAT),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "normalize",
+        &[],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    // Bulk forms over a packed `List<T>` (receiver `List<Self>`).
+    tfn(
+        "add_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "sub_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "scale_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "min_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "max_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn("abs_all", &[], RetTy::SameAsArg(0), BundleReceiver::Bulk),
+    tfn(
+        "dot_all",
+        &[SigType::Dyn],
+        RetTy::Concrete(SigType::List(&WIDE)),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "length_all",
+        &[],
+        RetTy::Concrete(SigType::List(&FLOAT)),
+        BundleReceiver::Bulk,
+    ),
 ];
 
 /// `vec.SatKernels` — saturating arithmetic over any uniform *integer* shape (`Color` and friends).
 /// No `dot`/`length`/`normalize` (those are vector-space ops; a saturating channel vector is a clamped
-/// tuple of intensities), so its method set is `add`/`sub`/`scale`/`min`/`max` + the bulk twins.
-pub(crate) const VEC_SAT_KERNELS: ExtBundle = ExtBundle {
+/// tuple of intensities), so its method set is `add`/`sub`/`scale`/`min`/`max` + the bulk twins — all
+/// `Self`/`List<Self>` returns, so it declares no associated types.
+pub(crate) const VEC_SAT_KERNELS: ExtTrait = ExtTrait {
     name: "SatKernels",
-    constraint: PackedConstraint {
+    namespace: "std.vec",
+    methods: SAT_METHODS,
+    assoc_types: &[],
+    dispatch: Some(sat_kernels_dispatch),
+    self_constraint: Some(PackedConstraint {
         fields: &[ConstraintField::AnyInteger],
         layout: ConstraintLayout::Any,
         arity: ConstraintArity::Uniform { min: 2 },
-    },
-    methods: SAT_METHODS,
-    ctx_dispatch: sat_kernels_dispatch,
+    }),
 };
 
-const SAT_METHODS: &[BundleFn] = &[
-    bfn("add", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("sub", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("scale", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("min", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("max", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Element),
-    bfn("add_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("sub_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("scale_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("min_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
-    bfn("max_all", &[SigType::Dyn], RetTy::SameAsArg(0), BundleReceiver::Bulk),
+const SAT_METHODS: &[ExtTraitMethod] = &[
+    tfn(
+        "add",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "sub",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "scale",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "min",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "max",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Element,
+    ),
+    tfn(
+        "add_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "sub_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "scale_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "min_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
+    tfn(
+        "max_all",
+        &[SigType::Dyn],
+        RetTy::SameAsArg(0),
+        BundleReceiver::Bulk,
+    ),
 ];
 
 // ---------------------------------------------------------------------------------------------------
@@ -220,18 +386,78 @@ macro_rules! by_numeric_kind {
     ($kind:expr, $S:ident, $body:expr) => {{
         use crate::PackedField as PF;
         match $kind {
-            PF::IntN { bits: 8, signed: true } => { type $S = i8; $body }
-            PF::IntN { bits: 8, signed: false } => { type $S = u8; $body }
-            PF::IntN { bits: 16, signed: true } => { type $S = i16; $body }
-            PF::IntN { bits: 16, signed: false } => { type $S = u16; $body }
-            PF::IntN { bits: 32, signed: true } => { type $S = i32; $body }
-            PF::IntN { bits: 32, signed: false } => { type $S = u32; $body }
-            PF::IntN { bits: 64, signed: true } => { type $S = i64; $body }
-            PF::IntN { bits: 64, signed: false } => { type $S = u64; $body }
-            PF::Int => { type $S = i64; $body }
-            PF::F32 => { type $S = f32; $body }
-            PF::Float => { type $S = f64; $body }
-            PF::F64 => { type $S = f64; $body }
+            PF::IntN {
+                bits: 8,
+                signed: true,
+            } => {
+                type $S = i8;
+                $body
+            }
+            PF::IntN {
+                bits: 8,
+                signed: false,
+            } => {
+                type $S = u8;
+                $body
+            }
+            PF::IntN {
+                bits: 16,
+                signed: true,
+            } => {
+                type $S = i16;
+                $body
+            }
+            PF::IntN {
+                bits: 16,
+                signed: false,
+            } => {
+                type $S = u16;
+                $body
+            }
+            PF::IntN {
+                bits: 32,
+                signed: true,
+            } => {
+                type $S = i32;
+                $body
+            }
+            PF::IntN {
+                bits: 32,
+                signed: false,
+            } => {
+                type $S = u32;
+                $body
+            }
+            PF::IntN {
+                bits: 64,
+                signed: true,
+            } => {
+                type $S = i64;
+                $body
+            }
+            PF::IntN {
+                bits: 64,
+                signed: false,
+            } => {
+                type $S = u64;
+                $body
+            }
+            PF::Int => {
+                type $S = i64;
+                $body
+            }
+            PF::F32 => {
+                type $S = f32;
+                $body
+            }
+            PF::Float => {
+                type $S = f64;
+                $body
+            }
+            PF::F64 => {
+                type $S = f64;
+                $body
+            }
             _ => return Err(non_numeric(kind_name($kind))),
         }
     }};
@@ -243,15 +469,66 @@ macro_rules! by_integer_kind {
     ($kind:expr, $S:ident, $body:expr) => {{
         use crate::PackedField as PF;
         match $kind {
-            PF::IntN { bits: 8, signed: true } => { type $S = i8; $body }
-            PF::IntN { bits: 8, signed: false } => { type $S = u8; $body }
-            PF::IntN { bits: 16, signed: true } => { type $S = i16; $body }
-            PF::IntN { bits: 16, signed: false } => { type $S = u16; $body }
-            PF::IntN { bits: 32, signed: true } => { type $S = i32; $body }
-            PF::IntN { bits: 32, signed: false } => { type $S = u32; $body }
-            PF::IntN { bits: 64, signed: true } => { type $S = i64; $body }
-            PF::IntN { bits: 64, signed: false } => { type $S = u64; $body }
-            PF::Int => { type $S = i64; $body }
+            PF::IntN {
+                bits: 8,
+                signed: true,
+            } => {
+                type $S = i8;
+                $body
+            }
+            PF::IntN {
+                bits: 8,
+                signed: false,
+            } => {
+                type $S = u8;
+                $body
+            }
+            PF::IntN {
+                bits: 16,
+                signed: true,
+            } => {
+                type $S = i16;
+                $body
+            }
+            PF::IntN {
+                bits: 16,
+                signed: false,
+            } => {
+                type $S = u16;
+                $body
+            }
+            PF::IntN {
+                bits: 32,
+                signed: true,
+            } => {
+                type $S = i32;
+                $body
+            }
+            PF::IntN {
+                bits: 32,
+                signed: false,
+            } => {
+                type $S = u32;
+                $body
+            }
+            PF::IntN {
+                bits: 64,
+                signed: true,
+            } => {
+                type $S = i64;
+                $body
+            }
+            PF::IntN {
+                bits: 64,
+                signed: false,
+            } => {
+                type $S = u64;
+                $body
+            }
+            PF::Int => {
+                type $S = i64;
+                $body
+            }
             _ => return Err(non_integer(kind_name($kind))),
         }
     }};
@@ -275,11 +552,15 @@ fn push_field(kind: &PackedField, s: &Scalar, out: &mut Vec<u8>) -> CtxResult<()
     };
     match kind {
         PackedField::Int => {
-            let Scalar::Int(n) = s else { return Err(non_numeric("int")) };
+            let Scalar::Int(n) = s else {
+                return Err(non_numeric("int"));
+            };
             out.extend_from_slice(&n.to_le_bytes());
         }
         PackedField::IntN { bits, .. } => {
-            let Scalar::Int(n) = s else { return Err(non_numeric("int")) };
+            let Scalar::Int(n) = s else {
+                return Err(non_numeric("int"));
+            };
             out.extend_from_slice(&n.to_le_bytes()[..(*bits as usize) / 8]);
         }
         PackedField::F32 => {
@@ -301,23 +582,34 @@ fn push_field(kind: &PackedField, s: &Scalar, out: &mut Vec<u8>) -> CtxResult<()
 fn read_field(kind: &PackedField, b: &[u8]) -> Scalar {
     match kind {
         PackedField::Int => Scalar::Int(i64::from_le_bytes(b[..8].try_into().unwrap())),
-        PackedField::IntN { bits: 8, signed: true } => Scalar::Int(i8::from_le_bytes([b[0]]) as i64),
-        PackedField::IntN { bits: 8, signed: false } => Scalar::Int(b[0] as i64),
-        PackedField::IntN { bits: 16, signed: true } => {
-            Scalar::Int(i16::from_le_bytes(b[..2].try_into().unwrap()) as i64)
-        }
-        PackedField::IntN { bits: 16, signed: false } => {
-            Scalar::Int(u16::from_le_bytes(b[..2].try_into().unwrap()) as i64)
-        }
-        PackedField::IntN { bits: 32, signed: true } => {
-            Scalar::Int(i32::from_le_bytes(b[..4].try_into().unwrap()) as i64)
-        }
-        PackedField::IntN { bits: 32, signed: false } => {
-            Scalar::Int(u32::from_le_bytes(b[..4].try_into().unwrap()) as i64)
-        }
-        PackedField::IntN { bits: 64, signed: false } => {
-            Scalar::Int(u64::from_le_bytes(b[..8].try_into().unwrap()) as i64)
-        }
+        PackedField::IntN {
+            bits: 8,
+            signed: true,
+        } => Scalar::Int(i8::from_le_bytes([b[0]]) as i64),
+        PackedField::IntN {
+            bits: 8,
+            signed: false,
+        } => Scalar::Int(b[0] as i64),
+        PackedField::IntN {
+            bits: 16,
+            signed: true,
+        } => Scalar::Int(i16::from_le_bytes(b[..2].try_into().unwrap()) as i64),
+        PackedField::IntN {
+            bits: 16,
+            signed: false,
+        } => Scalar::Int(u16::from_le_bytes(b[..2].try_into().unwrap()) as i64),
+        PackedField::IntN {
+            bits: 32,
+            signed: true,
+        } => Scalar::Int(i32::from_le_bytes(b[..4].try_into().unwrap()) as i64),
+        PackedField::IntN {
+            bits: 32,
+            signed: false,
+        } => Scalar::Int(u32::from_le_bytes(b[..4].try_into().unwrap()) as i64),
+        PackedField::IntN {
+            bits: 64,
+            signed: false,
+        } => Scalar::Int(u64::from_le_bytes(b[..8].try_into().unwrap()) as i64),
         PackedField::IntN { .. } => Scalar::Int(i64::from_le_bytes(b[..8].try_into().unwrap())),
         PackedField::F32 => Scalar::F32(f32::from_le_bytes(b[..4].try_into().unwrap())),
         PackedField::Float | PackedField::F64 => {
@@ -348,13 +640,20 @@ fn read_fields(kind: &PackedField, bytes: &[u8]) -> Vec<Scalar> {
 // ---------------------------------------------------------------------------------------------------
 
 fn arg_error(message: String) -> CtxError {
-    CtxError::Std(crate::StdError { kind: crate::ErrorKind::ArgType, message })
+    CtxError::Std(crate::StdError {
+        kind: crate::ErrorKind::ArgType,
+        message,
+    })
 }
 fn non_numeric(found: &str) -> CtxError {
-    arg_error(format!("`vec` kernels expect a uniform numeric vector, found a field of {found}"))
+    arg_error(format!(
+        "`vec` kernels expect a uniform numeric vector, found a field of {found}"
+    ))
 }
 fn non_integer(found: &str) -> CtxError {
-    arg_error(format!("`vec.SatKernels` saturating math is integer-only, found a field of {found}"))
+    arg_error(format!(
+        "`vec.SatKernels` saturating math is integer-only, found a field of {found}"
+    ))
 }
 fn len_error() -> CtxError {
     arg_error("`vec` bulk kernels expect two lists of equal length".to_string())
@@ -437,7 +736,9 @@ fn read_factor(ctx: &mut dyn NativeCtx, slot: Slot) -> CtxResult<Scalar> {
         NativeValue::Scalar(s @ (Scalar::Int(_) | Scalar::Float(_) | Scalar::F32(_))) => Ok(s),
         _ => {
             let found = ctx.type_name(slot)?;
-            Err(arg_error(format!("`vec` scale expects a number factor, found {found}")))
+            Err(arg_error(format!(
+                "`vec` scale expects a number factor, found {found}"
+            )))
         }
     }
 }
@@ -501,8 +802,11 @@ fn kernels_element(
         "scale" => {
             ctx_arity(method, args, 1)?;
             let factor = read_factor(ctx, args[0])?;
-            let bytes =
-                by_numeric_kind!(&kind, S, scale_buf::<S>(&ab, factor_as::<S>(&kind, &factor)?));
+            let bytes = by_numeric_kind!(
+                &kind,
+                S,
+                scale_buf::<S>(&ab, factor_as::<S>(&kind, &factor)?)
+            );
             Ok(CtxOut::Out(NativeOut::Object(read_fields(&kind, &bytes))))
         }
         // add / sub / min / max.
@@ -658,12 +962,7 @@ struct PackedInfo {
 
 /// `add_all`/`sub_all`/`min_all`/`max_all`: the flat, layout-agnostic element-wise byte op over two
 /// same-layout packed buffers → a fresh packed `List<T>`.
-fn bulk_binop(
-    op: BinOp,
-    ctx: &mut dyn NativeCtx,
-    xs: Slot,
-    ys: Slot,
-) -> Result<CtxOut, CtxError> {
+fn bulk_binop(op: BinOp, ctx: &mut dyn NativeCtx, xs: Slot, ys: Slot) -> Result<CtxOut, CtxError> {
     if ctx.list_len(xs)? == 0 {
         return empty_list(ctx);
     }
@@ -702,7 +1001,11 @@ fn bulk_scale(ctx: &mut dyn NativeCtx, xs: Slot, factor: Slot) -> Result<CtxOut,
     }
     let f = read_factor(ctx, factor)?;
     let a = packed_uniform(ctx, xs)?.ok_or_else(|| non_numeric("a non-packed vector list"))?;
-    let bytes = by_numeric_kind!(&a.kind, S, scale_buf::<S>(&a.bytes, factor_as::<S>(&a.kind, &f)?));
+    let bytes = by_numeric_kind!(
+        &a.kind,
+        S,
+        scale_buf::<S>(&a.bytes, factor_as::<S>(&a.kind, &f)?)
+    );
     Ok(CtxOut::Slot(ctx.make_packed_like(xs, bytes)?))
 }
 
@@ -775,18 +1078,47 @@ fn dot_scalarvec(
     use crate::PackedField as PF;
     macro_rules! ints {
         ($S:ty) => {
-            ScalarVec::Int(dot_buf::<$S>(a, b, fields, count, column).into_iter().map(|w| w as i64).collect())
+            ScalarVec::Int(
+                dot_buf::<$S>(a, b, fields, count, column)
+                    .into_iter()
+                    .map(|w| w as i64)
+                    .collect(),
+            )
         };
     }
     match kind {
-        PF::IntN { bits: 8, signed: true } => ints!(i8),
-        PF::IntN { bits: 8, signed: false } => ints!(u8),
-        PF::IntN { bits: 16, signed: true } => ints!(i16),
-        PF::IntN { bits: 16, signed: false } => ints!(u16),
-        PF::IntN { bits: 32, signed: true } => ints!(i32),
-        PF::IntN { bits: 32, signed: false } => ints!(u32),
-        PF::IntN { bits: 64, signed: true } => ints!(i64),
-        PF::IntN { bits: 64, signed: false } => ints!(u64),
+        PF::IntN {
+            bits: 8,
+            signed: true,
+        } => ints!(i8),
+        PF::IntN {
+            bits: 8,
+            signed: false,
+        } => ints!(u8),
+        PF::IntN {
+            bits: 16,
+            signed: true,
+        } => ints!(i16),
+        PF::IntN {
+            bits: 16,
+            signed: false,
+        } => ints!(u16),
+        PF::IntN {
+            bits: 32,
+            signed: true,
+        } => ints!(i32),
+        PF::IntN {
+            bits: 32,
+            signed: false,
+        } => ints!(u32),
+        PF::IntN {
+            bits: 64,
+            signed: true,
+        } => ints!(i64),
+        PF::IntN {
+            bits: 64,
+            signed: false,
+        } => ints!(u64),
         PF::Int => ints!(i64),
         PF::F32 => ScalarVec::F32(dot_buf::<f32>(a, b, fields, count, column)),
         _ => ScalarVec::Float(dot_buf::<f64>(a, b, fields, count, column)),
@@ -804,18 +1136,47 @@ fn length_scalarvec(
     use crate::PackedField as PF;
     macro_rules! floats {
         ($S:ty) => {
-            ScalarVec::Float(length_buf::<$S>(a, fields, count, column).into_iter().map(|f| f as f64).collect())
+            ScalarVec::Float(
+                length_buf::<$S>(a, fields, count, column)
+                    .into_iter()
+                    .map(|f| f as f64)
+                    .collect(),
+            )
         };
     }
     Ok(match kind {
-        PF::IntN { bits: 8, signed: true } => floats!(i8),
-        PF::IntN { bits: 8, signed: false } => floats!(u8),
-        PF::IntN { bits: 16, signed: true } => floats!(i16),
-        PF::IntN { bits: 16, signed: false } => floats!(u16),
-        PF::IntN { bits: 32, signed: true } => floats!(i32),
-        PF::IntN { bits: 32, signed: false } => floats!(u32),
-        PF::IntN { bits: 64, signed: true } => floats!(i64),
-        PF::IntN { bits: 64, signed: false } => floats!(u64),
+        PF::IntN {
+            bits: 8,
+            signed: true,
+        } => floats!(i8),
+        PF::IntN {
+            bits: 8,
+            signed: false,
+        } => floats!(u8),
+        PF::IntN {
+            bits: 16,
+            signed: true,
+        } => floats!(i16),
+        PF::IntN {
+            bits: 16,
+            signed: false,
+        } => floats!(u16),
+        PF::IntN {
+            bits: 32,
+            signed: true,
+        } => floats!(i32),
+        PF::IntN {
+            bits: 32,
+            signed: false,
+        } => floats!(u32),
+        PF::IntN {
+            bits: 64,
+            signed: true,
+        } => floats!(i64),
+        PF::IntN {
+            bits: 64,
+            signed: false,
+        } => floats!(u64),
         PF::Int => floats!(i64),
         PF::F32 => ScalarVec::F32(length_buf::<f32>(a, fields, count, column)),
         PF::Float | PF::F64 => ScalarVec::Float(length_buf::<f64>(a, fields, count, column)),

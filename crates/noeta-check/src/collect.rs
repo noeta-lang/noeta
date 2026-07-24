@@ -822,17 +822,25 @@ impl Checker {
         }
     }
 
-    /// Resolve a dotted trait path (`vec.Kernels`) to its registered bundle: everything before
-    /// the last dot is a bound module name (`use std.{vec}`), the last segment the bundle.
-    /// `None` when the module binding or the bundle doesn't exist — the impl-site check reports.
+    /// Resolve a dotted trait path (`vec.Kernels`) to its registered kernel **trait** (ExtBundle→ExtTrait
+    /// fold-in, slice 4): everything before the last dot is a bound module name (`use std.{vec}`), the
+    /// last segment the trait. `None` when the module binding or the trait doesn't exist — the impl-site
+    /// check reports.
+    ///
+    /// **Surface adapter, NOT a second mechanism.** The kernel traits were `ExtBundle`s until the
+    /// fold-in; this resolves the *module-qualified spelling* (`vec.Kernels`) — the surface a bundle bind
+    /// was written in — to the one native `ExtTrait`, which the checker then treats through the ordinary
+    /// trait machinery (its `self_constraint`, `assoc_types`, `dispatch`). The returned `String` is the
+    /// qualified module (`std.vec`), which equals the trait's `namespace` (so `find_trait_in_module`
+    /// matches it) and, appended with the trait name, its `qualified()` runtime-dispatch identity.
     pub(crate) fn resolve_bundle_ref(
         &self,
         trait_name: &str,
-    ) -> Option<(String, &'static noeta_ext_abi::ExtBundle)> {
-        let (module_ref, bundle_name) = trait_name.rsplit_once('.')?;
+    ) -> Option<(String, &'static noeta_ext_abi::ExtTrait)> {
+        let (module_ref, trait_short) = trait_name.rsplit_once('.')?;
         let qualified = self.imports.modules.get(module_ref)?;
-        let bundle = self.reg().find_bundle(qualified, bundle_name)?;
-        Some((qualified.clone(), bundle))
+        let tr = self.reg().find_trait_in_module(qualified, trait_short)?;
+        Some((qualified.clone(), tr))
     }
 
     /// Record which of a type's `fields` carry a default (`name: T = …`) — and so are **optional** in
