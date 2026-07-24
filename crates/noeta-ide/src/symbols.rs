@@ -236,18 +236,28 @@ pub(crate) fn param_detail(param: &Param) -> String {
     }
 }
 
+/// The leaf of a possibly linker-qualified type name: `geometry.vec.Vec2` → `Vec2`, `Vec2` → `Vec2`.
+/// The linker rewrites an imported type reference in the merged program to its fully-qualified
+/// identity; for display we want the name the author wrote. A type identifier never contains a `.`,
+/// so any `.` is unambiguously a module-qualifier separator (mirrors `render_fn_signature`, which
+/// shows a function's leaf name for the same reason).
+fn type_leaf(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
 /// Render a surface [`TypeRef`] back to compact source syntax for symbol detail (`List<int>`, `?T`,
-/// `A | B`, `(A, B)`, `(A) -> R`). Shared with member completion.
+/// `A | B`, `(A, B)`, `(A) -> R`). Shared with member completion. A linker-qualified type name is
+/// shown by its leaf (`Vec2`, not `geometry.vec.Vec2`) — see [`type_leaf`].
 pub fn render_type_ref(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Named { name, args, .. } => {
             if args.is_empty() {
-                name.clone()
+                type_leaf(name).to_string()
             } else {
-                format!("{}<{}>", name, join(args))
+                format!("{}<{}>", type_leaf(name), join(args))
             }
         }
-        TypeRef::DynTrait { trait_name, .. } => format!("dyn {trait_name}"),
+        TypeRef::DynTrait { trait_name, .. } => format!("dyn {}", type_leaf(trait_name)),
         TypeRef::Optional { inner, .. } => format!("?{}", render_type_ref(inner)),
         TypeRef::Union { members, .. } => members
             .iter()
