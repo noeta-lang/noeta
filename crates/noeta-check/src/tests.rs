@@ -2797,3 +2797,40 @@ fn h(c: dyn Container): string { return c.get(); }
     assert!(codes(as_int).is_empty(), "{:?}", codes(as_int));
     assert!(codes(as_string).is_empty(), "{:?}", codes(as_string));
 }
+
+#[test]
+fn assoc_type_unbound_non_default_is_coherence_error() {
+    // An impl that omits an associated type with NO default fails coherence (E0015).
+    let src = "\
+trait Container {
+  type Item
+  fn get(): Self::Item
+}
+class Boxx {
+  v: int
+  impl Container {
+    fn get(): int { return self.v; }
+  }
+}
+";
+    assert_eq!(codes(src), ["E0015"]);
+}
+
+#[test]
+fn assoc_type_defaulted_binding_is_omittable() {
+    // A defaulted associated type may be left unbound — no coherence error, and the type still checks.
+    let src = "\
+trait Container {
+  type Item = int
+  fn get(): Self::Item
+}
+class Boxx {
+  v: int
+  impl Container {
+    fn get(): int { return self.v; }
+  }
+}
+fn f(b: Boxx): int { return b.get(); }
+";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
