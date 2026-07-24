@@ -401,7 +401,8 @@ pub fn symbols(p: &Prepared) -> SymbolsOutput {
         Ok(prog) => prog,
         Err(_) => program,
     };
-    let info = noeta_ast::reflect::build(role_program);
+    let native_roles = noeta_stdlib::registry::single_registry_process().native_roles();
+    let info = noeta_ast::reflect::build(role_program, &native_roles);
     let mut role_map: std::collections::HashMap<&str, Vec<String>> =
         std::collections::HashMap::new();
     for r in &info.roles {

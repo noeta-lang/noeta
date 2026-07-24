@@ -272,7 +272,8 @@ fn compile_inner(
     destruct_reachable: Vec<String>,
     opts: CompileOptions,
 ) -> Result<Module, Unsupported> {
-    let mut reflection = noeta_ast::reflect::build(program);
+    let native_roles = opts.registry.native_roles();
+    let mut reflection = noeta_ast::reflect::build(program, &native_roles);
     // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
@@ -363,7 +364,8 @@ pub fn compile_session_with(
         .iter()
         .cloned()
         .collect();
-    let mut reflection = noeta_ast::reflect::build(program);
+    let native_roles = opts.registry.native_roles();
+    let mut reflection = noeta_ast::reflect::build(program, &native_roles);
     // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
@@ -728,7 +730,9 @@ impl SessionCompiler {
         // Accumulate this entry's reflection into the persistent set (latest-wins), so a query on a
         // type declared in an earlier entry resolves — the tree-walker `Session` accumulates the same
         // way, keeping the session differential green.
-        self.reflection.accumulate(noeta_ast::reflect::build(entry));
+        let native_roles = self.mc.registry.native_roles();
+        self.reflection
+            .accumulate(noeta_ast::reflect::build(entry, &native_roles));
         // Re-embed extension attribute shapes: `accumulate` purges a redeclared name's records, and
         // the extension shapes must survive every entry (idempotent for names already present).
         noeta_check::extend_reflection(&mut self.reflection);
@@ -5234,11 +5238,14 @@ mod tests {
         // `compile` embeds the installed extensions' attribute shapes (`#[Skip]`/`#[Bench]`/…,
         // now registry-declared) via `extend_reflection`, so the parity comparison applies the
         // same embedding to the raw builder output.
-        let mut from_builder = noeta_ast::reflect::build(&parsed.program);
+        // `compile` builds reflection against the process-global registry (`CompileOptions::default`),
+        // so the parity comparison must feed the raw builder the same native-role table.
+        let native_roles = noeta_ext_abi::registry::single_registry_process().native_roles();
+        let mut from_builder = noeta_ast::reflect::build(&parsed.program, &native_roles);
         noeta_check::extend_reflection(&mut from_builder);
         assert_eq!(from_module, from_builder);
         // Deterministic: the same AST always yields the same artifact.
-        let mut again = noeta_ast::reflect::build(&parsed.program);
+        let mut again = noeta_ast::reflect::build(&parsed.program, &native_roles);
         noeta_check::extend_reflection(&mut again);
         assert_eq!(from_builder, again);
     }

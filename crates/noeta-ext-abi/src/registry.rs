@@ -1097,10 +1097,10 @@ pub enum FieldedKind {
 /// pairs are legal at assembly (the native analogue of the AST placement gate E0054), since a native
 /// type bypasses the source-level site check.
 ///
-/// **Reserved for a later slice — deliberately not a variant yet:** `@role` (rides on an
-/// `@attribute` struct; D3) and `@packed` (flat value-struct layout, native-extensibility Slice E).
-/// Each slots in here when its seeding + reader land; the ABI-coverage gate rejects a variant that has
-/// no reader, so they are added only alongside their implementation.
+/// **Reserved for a later slice — deliberately not a variant yet:** `@packed` (flat value-struct
+/// layout, native-extensibility Slice E). It slots in here when its seeding + reader land; the
+/// ABI-coverage gate rejects a variant that has no reader, so it is added only alongside its
+/// implementation. (`@role` shipped in Slice D3 as [`ExtTypeDirective::Role`].)
 #[derive(Debug, Clone, Copy)]
 pub enum ExtTypeDirective {
     /// `@validated` — bar bare literal / record-update construction of this type outside its own
@@ -1123,6 +1123,35 @@ pub enum ExtTypeDirective {
     /// fielded seeder) are its construction contract, so a native `@attribute` and a `.noe` one behave
     /// identically to every consumer, including reflection.
     Attribute(&'static [AttrTarget]),
+    /// `@role(Enum.Variant)` — tag this **`@attribute` struct** with one or more semantic roles, the
+    /// native analogue of a `.noe` `@role(Enum.Variant)` on an `@attribute` record. A role is a
+    /// *facet* of an attribute: applying the role-bearing attribute to a declaration confers each
+    /// tagged role on that declaration, surfaced by `roles_of()` as a `RoleBinding { target, role }`.
+    /// Struct-only, and **only** on a type that also carries [`ExtTypeDirective::Attribute`] — the
+    /// role has nothing to attach to otherwise. [`Registry::validate`] enforces the coupling at
+    /// assembly (the native analogue of the checker's E0031 role rules): each [`ExtRoleTag::enum_name`]
+    /// must resolve to a `@semantic` enum (a native enum carrying [`ExtTypeDirective::Semantic`], or
+    /// the built-in `Semantic` prelude enum), and its named variant must exist and be **fieldless**.
+    /// Unlike the other directives this seeds **no** `Symbols` table: a role is surfaced purely by
+    /// `reflect::build` joining the tags against the in-program attribute applications, so
+    /// [`Registry::native_roles`] projects the tags into the plain-data table that builder now accepts.
+    Role(&'static [ExtRoleTag]),
+}
+
+/// One `@role(Enum.Variant)` tag on a native `@attribute` struct — the ABI mirror of the AST
+/// `RoleTag { enum_name, variant }`. Both name a fieldless variant of a `@semantic` enum by the
+/// identity a role query and a materialized `role` value carry: the enum's qualified identity for a
+/// native `@semantic` enum, or the bare `"Semantic"` for the built-in prelude enum. Carried inside
+/// [`ExtTypeDirective::Role`]; [`Registry::validate`] resolves and checks each at assembly, and
+/// [`Registry::native_roles`] projects it into `reflect::build`'s native-role table.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtRoleTag {
+    /// The role's `@semantic` enum, by the identity a `roles_of::<Enum>()` filter and the
+    /// materialized `RoleBinding.role` value carry — a native `@semantic` enum's **qualified**
+    /// identity (`cfg.Stage`), or the bare `"Semantic"` for the built-in prelude enum.
+    pub enum_name: &'static str,
+    /// The role's variant (`EntryPoint`) — must exist on `enum_name` and be fieldless.
+    pub variant: &'static str,
 }
 
 /// Where a native `@attribute` fielded struct may be **applied** — the ABI mirror of the checker's
@@ -2540,13 +2569,22 @@ impl Registry {
             .find(|a| a.name == name || a.is_qualified(name))
     }
 
-    /// Whether `qualified` (`std.test.Skip`) is a registered extension attribute's identity. The
-    /// linker consults this to fold **only attribute** imports into a module's rewrite map (so a
-    /// `#[Skip]`/`attributes_of::<Skip>()` resolves to its FQN like the checker's gate does), leaving
-    /// every other native import to the checker's `extern_types` — the rewrite blast radius stays on
-    /// attribute names.
+    /// Whether `qualified` (`std.test.Skip`, `cfg.Route`) is a registered native **attribute**'s
+    /// identity — either a standalone [`ExtAttribute`] hook OR a fielded **struct** carrying the
+    /// [`ExtTypeDirective::Attribute`] directive (D2b: a native `@attribute` struct is an attribute to
+    /// every consumer). The linker consults this to fold **only attribute** imports into a module's
+    /// rewrite map (so a `#[Skip]`/`#[Route]`/`attributes_of::<Skip>()` resolves to its FQN like the
+    /// checker's gate does — one identity everywhere), leaving every other native import to the
+    /// checker's `extern_types`. Covering the fielded form is what lets a native `@attribute` *struct*
+    /// application qualify in a linked program (and, riding on it, a native `@role` surface — D3).
     pub fn is_ext_attribute(&self, qualified: &str) -> bool {
         self.ext_attributes().any(|a| a.is_qualified(qualified))
+            || self.fielded().any(|f| {
+                f.is_qualified(qualified)
+                    && f.directives
+                        .iter()
+                        .any(|d| matches!(d, ExtTypeDirective::Attribute(_)))
+            })
     }
 
     /// Find a registered extern type by its short display name (extern-types X1) — first match in
@@ -2655,6 +2693,34 @@ impl Registry {
         self.units
             .iter()
             .flat_map(|e| e.classes().iter().chain(e.structs().iter()))
+    }
+
+    /// The **native `@role` table** (native type-declaration unification, Slice D3) — the plain-data
+    /// projection `noeta_ast::reflect::build` merges to surface native roles. Each entry is a
+    /// role-bearing native `@attribute` struct's **qualified identity** (`cfg.Route`, the identity a
+    /// linked attribute application is qualified to) paired with its `(enum_name, variant)` role tags.
+    /// `reflect::build` joins these against the in-program attribute applications exactly as it joins a
+    /// `.noe` struct's own `@role` tags, so applying a native role-bearing attribute confers the role.
+    /// A registry-free `Vec` (owned `String`s) because `noeta-ast` cannot see this crate; the callers
+    /// that have this compile's registry pass `&reg.native_roles()` and the pure `.noe` path passes
+    /// `&[]`. Empty when no native fielded type carries [`ExtTypeDirective::Role`].
+    pub fn native_roles(&self) -> Vec<(String, Vec<(String, String)>)> {
+        self.fielded()
+            .filter_map(|f| {
+                let tags: Vec<(String, String)> = f
+                    .directives
+                    .iter()
+                    .flat_map(|d| match d {
+                        ExtTypeDirective::Role(tags) => tags
+                            .iter()
+                            .map(|t| (t.enum_name.to_string(), t.variant.to_string()))
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .collect();
+                (!tags.is_empty()).then(|| (f.qualified(), tags))
+            })
+            .collect()
     }
 
     /// Find a native struct by its **qualified identity** — allocation-free probing, mirroring
@@ -3087,6 +3153,80 @@ pub fn install_default(provider: fn() -> Vec<&'static (dyn Extension + Sync)>) {
 }
 
 /// The uniqueness sweep behind [`Registry::new`] — O(n²) over a handful of units.
+/// The built-in `Semantic` prelude enum's variant names (native type-declaration unification, Slice
+/// D3). Mirrors `noeta_ast::reflect::SEMANTIC_VARIANTS` — `noeta-ext-abi` is dep-free of `noeta-ast`,
+/// so [`Registry::validate`]'s native `@role` check keeps its own copy to resolve a tag naming the
+/// built-in `Semantic` vocabulary (every variant fieldless, so a named one is valid iff it appears
+/// here). If the prelude list changes, update this mirror.
+const BUILTIN_SEMANTIC_VARIANTS: &[&str] = &[
+    "EntryPoint",
+    "PersistenceBoundary",
+    "TrustBoundary",
+    "Sink",
+    "Layer",
+];
+
+/// Assembly-time check for one native `@role` tag (Slice D3): its `enum_name` must resolve to a
+/// `@semantic` enum — the built-in `Semantic` prelude enum, or a native enum (across every unit)
+/// whose **qualified identity** matches and that carries [`ExtTypeDirective::Semantic`] — and its
+/// named `variant` must exist on that enum and be **fieldless**. The native analogue of the checker's
+/// E0031 role-tag rules; `t`/`unit` name the tagged struct for the diagnostic.
+fn check_role_tag(
+    units: &[&'static (dyn Extension + Sync)],
+    tag: &ExtRoleTag,
+    t: &ExtFielded,
+    unit: &str,
+) -> Result<(), String> {
+    // The built-in `Semantic` vocabulary is always `@semantic`; its variants are all fieldless.
+    if tag.enum_name == "Semantic" {
+        if !BUILTIN_SEMANTIC_VARIANTS.contains(&tag.variant) {
+            return Err(format!(
+                "native struct `{}.{}` of unit `{unit}` carries `@role(Semantic.{})`, but the \
+                 built-in `Semantic` enum has no variant `{}`",
+                t.namespace, t.name, tag.variant, tag.variant
+            ));
+        }
+        return Ok(());
+    }
+    // Otherwise the enum must be a native `@semantic` enum, resolved by qualified identity.
+    let Some(en) = units
+        .iter()
+        .flat_map(|u| u.enums())
+        .find(|en| en.is_qualified(tag.enum_name))
+    else {
+        return Err(format!(
+            "native struct `{}.{}` of unit `{unit}` carries `@role({}.{})`, but `{}` is not a \
+             registered native enum (name it by its qualified identity, or use the built-in \
+             `Semantic`)",
+            t.namespace, t.name, tag.enum_name, tag.variant, tag.enum_name
+        ));
+    };
+    if !en
+        .directives
+        .iter()
+        .any(|d| matches!(d, ExtTypeDirective::Semantic))
+    {
+        return Err(format!(
+            "native struct `{}.{}` of unit `{unit}` carries `@role({}.{})`, but `{}` is not a \
+             `@semantic` enum — only a `@semantic` enum's variants are roles",
+            t.namespace, t.name, tag.enum_name, tag.variant, tag.enum_name
+        ));
+    }
+    match en.variant(tag.variant) {
+        None => Err(format!(
+            "native struct `{}.{}` of unit `{unit}` carries `@role({}.{})`, but `{}` has no \
+             variant `{}`",
+            t.namespace, t.name, tag.enum_name, tag.variant, tag.enum_name, tag.variant
+        )),
+        Some((_, v)) if !v.fields.is_empty() => Err(format!(
+            "native struct `{}.{}` of unit `{unit}` carries `@role({}.{})`, but variant `{}` is \
+             not fieldless — a role variant carries no payload",
+            t.namespace, t.name, tag.enum_name, tag.variant, tag.variant
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
     for (i, unit) in units.iter().enumerate() {
         for other in &units[i + 1..] {
@@ -3295,6 +3435,39 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                         unit.name()
                     ));
                 }
+                // `@role` (Slice D3): struct-only, and a *facet* of `@attribute` — the native analogue
+                // of the checker's E0031 role rules. A role rides on what the attribute attaches to, so
+                // the same type must carry `@attribute`; each tag must name a fieldless variant of a
+                // `@semantic` enum (a native one, or the built-in `Semantic`). A native type bypasses
+                // the source-level gate, so these couplings are enforced here at assembly.
+                if let ExtTypeDirective::Role(tags) = d {
+                    if t.kind == FieldedKind::Class {
+                        return Err(format!(
+                            "native class `{}.{}` of unit `{}` carries `@role`, which applies only \
+                             to a struct (a role tags an `@attribute` struct)",
+                            t.namespace,
+                            t.name,
+                            unit.name()
+                        ));
+                    }
+                    if !t
+                        .directives
+                        .iter()
+                        .any(|x| matches!(x, ExtTypeDirective::Attribute(_)))
+                    {
+                        return Err(format!(
+                            "native struct `{}.{}` of unit `{}` carries `@role` without \
+                             `@attribute` — a role is a facet of an attribute and has nothing to \
+                             attach to on a plain struct; also declare it `@attribute`",
+                            t.namespace,
+                            t.name,
+                            unit.name()
+                        ));
+                    }
+                    for tag in *tags {
+                        check_role_tag(units, tag, t, unit.name())?;
+                    }
+                }
             }
         }
         for t in unit.enums() {
@@ -3312,6 +3485,17 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) -> Result<(), String> {
                     return Err(format!(
                         "native enum `{}.{}` of unit `{}` carries `@attribute`, which applies only \
                          to a struct",
+                        t.namespace,
+                        t.name,
+                        unit.name()
+                    ));
+                }
+                // `@role` tags an `@attribute` struct — never an enum (an enum is a role *vocabulary*
+                // via `@semantic`, not a role bearer).
+                if matches!(d, ExtTypeDirective::Role(_)) {
+                    return Err(format!(
+                        "native enum `{}.{}` of unit `{}` carries `@role`, which applies only to a \
+                         struct (an enum is a role vocabulary via `@semantic`, not a role bearer)",
                         t.namespace,
                         t.name,
                         unit.name()
@@ -4306,6 +4490,174 @@ mod runtime_registry_tests {
         assert!(
             validate(&[&U]).is_err(),
             "`@validated` applies only to a struct/class — an enum carrying it must refuse to assemble"
+        );
+    }
+
+    // --- native @role coupling (Slice D3) ---
+    //
+    // `@role` is a facet of `@attribute`: struct-only, on a type that also carries `@attribute`, each
+    // tag naming a fieldless variant of a `@semantic` enum. A native type bypasses the source gate, so
+    // `validate` enforces every coupling at assembly — the native analogue of the checker's E0031.
+
+    /// A `@semantic` enum with one fieldless and one FIELDED variant — a fielded-variant role must be
+    /// rejected, a fieldless one accepted.
+    const KIND: ExtEnum = ExtEnum {
+        name: "Kind",
+        namespace: "cfg",
+        variants: &[
+            ExtVariant {
+                name: "Simple",
+                fields: &[],
+                value: VariantValue::None,
+            },
+            ExtVariant {
+                name: "Tagged",
+                fields: &[SigType::Int],
+                value: VariantValue::None,
+            },
+        ],
+        directives: &[ExtTypeDirective::Semantic],
+        ..ExtEnum::DEFAULTS
+    };
+    /// A plain (non-`@semantic`) enum — naming it in a `@role` must be rejected.
+    const PLAIN: ExtEnum = ExtEnum {
+        name: "Plain",
+        namespace: "cfg",
+        variants: &[ExtVariant {
+            name: "A",
+            fields: &[],
+            value: VariantValue::None,
+        }],
+        ..ExtEnum::DEFAULTS
+    };
+
+    #[test]
+    fn native_role_with_attribute_and_a_semantic_variant_assembles() {
+        // The legal shape: an `@attribute` struct also carrying `@role`, over the built-in `Semantic`
+        // vocabulary AND a native `@semantic` enum's fieldless variant.
+        const OK: ExtStruct = ExtStruct {
+            name: "Route",
+            namespace: "cfg",
+            directives: &[
+                ExtTypeDirective::Attribute(&[]),
+                ExtTypeDirective::Role(&[
+                    ExtRoleTag {
+                        enum_name: "Semantic",
+                        variant: "EntryPoint",
+                    },
+                    ExtRoleTag {
+                        enum_name: "cfg.Kind",
+                        variant: "Simple",
+                    },
+                ]),
+            ],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[KIND], &[OK], &[]);
+        validate(&[&U])
+            .expect("an `@attribute` + `@role` struct over a `@semantic` variant is legal");
+    }
+
+    #[test]
+    fn native_role_without_attribute_is_rejected() {
+        // `@role` over the always-valid built-in `Semantic`, but the struct is not `@attribute` — the
+        // role has nothing to attach to.
+        const BAD: ExtStruct = ExtStruct {
+            name: "Lonely",
+            namespace: "cfg",
+            directives: &[ExtTypeDirective::Role(&[ExtRoleTag {
+                enum_name: "Semantic",
+                variant: "EntryPoint",
+            }])],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[], &[BAD], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "`@role` without `@attribute` on the same struct must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn native_role_naming_a_non_semantic_enum_is_rejected() {
+        const BAD: ExtStruct = ExtStruct {
+            name: "Route",
+            namespace: "cfg",
+            directives: &[
+                ExtTypeDirective::Attribute(&[]),
+                ExtTypeDirective::Role(&[ExtRoleTag {
+                    enum_name: "cfg.Plain",
+                    variant: "A",
+                }]),
+            ],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[PLAIN], &[BAD], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "a `@role` naming a non-`@semantic` enum must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn native_role_naming_a_fielded_variant_is_rejected() {
+        const BAD: ExtStruct = ExtStruct {
+            name: "Route",
+            namespace: "cfg",
+            directives: &[
+                ExtTypeDirective::Attribute(&[]),
+                ExtTypeDirective::Role(&[ExtRoleTag {
+                    enum_name: "cfg.Kind",
+                    variant: "Tagged",
+                }]),
+            ],
+            ..ExtStruct::STRUCT_DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[KIND], &[BAD], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "a `@role` naming a fielded (non-fieldless) variant must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn native_role_on_a_class_is_rejected() {
+        const BAD: ExtClass = ExtClass {
+            name: "Handle",
+            namespace: "cfg",
+            directives: &[ExtTypeDirective::Role(&[ExtRoleTag {
+                enum_name: "Semantic",
+                variant: "EntryPoint",
+            }])],
+            ..ExtClass::DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[], &[], &[BAD]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "`@role` is struct-only — a class carrying it must refuse to assemble"
+        );
+    }
+
+    #[test]
+    fn native_role_on_an_enum_is_rejected() {
+        const BAD: ExtEnum = ExtEnum {
+            name: "Nope",
+            namespace: "cfg",
+            variants: &[ExtVariant {
+                name: "A",
+                fields: &[],
+                value: VariantValue::None,
+            }],
+            directives: &[ExtTypeDirective::Role(&[ExtRoleTag {
+                enum_name: "Semantic",
+                variant: "EntryPoint",
+            }])],
+            ..ExtEnum::DEFAULTS
+        };
+        static U: DirUnit = DirUnit("cfg.core", &[BAD], &[], &[]);
+        assert!(
+            validate(&[&U]).is_err(),
+            "`@role` applies only to a struct — an enum carrying it must refuse to assemble"
         );
     }
 

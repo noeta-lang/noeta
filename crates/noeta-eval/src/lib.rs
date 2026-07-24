@@ -241,9 +241,10 @@ impl Session {
         // accumulates identically, so the session differential stays green.
         let ir = noeta_ir_passes::insert_drops(&ir, None);
         let ir = noeta_ir_passes::thread_reuse(&ir);
+        let native_roles = self.interp.reg().native_roles();
         self.interp
             .reflection
-            .accumulate(noeta_ast::reflect::build(&lowerable));
+            .accumulate(noeta_ast::reflect::build(&lowerable, &native_roles));
         let flow = self.interp.run_ir_batch(&ir);
         // **Remove** (not clone) the sentinel so an evaluated trailing value never lingers in scope.
         // Keeping it bound would hold a reference to the value across entries, which would both leak
@@ -2208,10 +2209,7 @@ impl Interpreter {
     /// field type names (`packed_fields`), so it covers every declared `@packed` struct, not only those
     /// materialized into a packed list. `None` if `name` is not a `@packed` struct or any field is not
     /// a simple numeric/`bool` primitive (such a type never binds a `vec` bundle).
-    pub(crate) fn packed_field_kinds(
-        &self,
-        name: &str,
-    ) -> Option<Vec<noeta_stdlib::PackedField>> {
+    pub(crate) fn packed_field_kinds(&self, name: &str) -> Option<Vec<noeta_stdlib::PackedField>> {
         let fields = self.packed_fields.get(name)?;
         fields
             .iter()
@@ -5556,14 +5554,38 @@ fn parse_packed_field(name: &str) -> Option<noeta_stdlib::PackedField> {
         "f32" => PF::F32,
         "f64" => PF::F64,
         "bool" => PF::Bool,
-        "i8" => PF::IntN { bits: 8, signed: true },
-        "i16" => PF::IntN { bits: 16, signed: true },
-        "i32" => PF::IntN { bits: 32, signed: true },
-        "i64" => PF::IntN { bits: 64, signed: true },
-        "u8" => PF::IntN { bits: 8, signed: false },
-        "u16" => PF::IntN { bits: 16, signed: false },
-        "u32" => PF::IntN { bits: 32, signed: false },
-        "u64" => PF::IntN { bits: 64, signed: false },
+        "i8" => PF::IntN {
+            bits: 8,
+            signed: true,
+        },
+        "i16" => PF::IntN {
+            bits: 16,
+            signed: true,
+        },
+        "i32" => PF::IntN {
+            bits: 32,
+            signed: true,
+        },
+        "i64" => PF::IntN {
+            bits: 64,
+            signed: true,
+        },
+        "u8" => PF::IntN {
+            bits: 8,
+            signed: false,
+        },
+        "u16" => PF::IntN {
+            bits: 16,
+            signed: false,
+        },
+        "u32" => PF::IntN {
+            bits: 32,
+            signed: false,
+        },
+        "u64" => PF::IntN {
+            bits: 64,
+            signed: false,
+        },
         _ => return None,
     })
 }

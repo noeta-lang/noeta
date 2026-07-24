@@ -27,9 +27,9 @@
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
 use noeta_stdlib::registry::{
-    AttrTarget, EnumBacking, ExtEnum, ExtField, ExtFn, ExtModule, ExtStruct, ExtTypeDirective,
-    ExtVariant, Extension, FieldedKind, NativeOut, NativeValue, RetTy, Scalar, SigType,
-    VariantValue,
+    AttrTarget, EnumBacking, ExtEnum, ExtField, ExtFn, ExtModule, ExtRoleTag, ExtStruct,
+    ExtTypeDirective, ExtVariant, Extension, FieldedKind, NativeOut, NativeValue, RetTy, Scalar,
+    SigType, VariantValue,
 };
 use noeta_stdlib::{Host, StdError};
 use noeta_vm::VmBackend;
@@ -131,6 +131,31 @@ const ROUTE: ExtStruct = ExtStruct {
         AttrTarget::Function,
         AttrTarget::Method,
     ])],
+    ..ExtStruct::STRUCT_DEFAULTS
+};
+
+/// A native `@attribute` value struct that ALSO carries `@role(Semantic.EntryPoint)` (Slice D3) — the
+/// native analogue of a `.noe` `@attribute @role(Semantic.EntryPoint) struct`. The role is a facet of
+/// the attribute: applying `#[Mark(...)]` to a declaration confers the `Semantic.EntryPoint` role on
+/// it, surfaced by `roles_of()`. [`Registry::validate`] enforces the coupling (also `@attribute`, a
+/// fieldless `@semantic` variant) at assembly; the tag is projected into `reflect::build` via
+/// `Registry::native_roles`, so a native role-bearing attribute confers a role exactly as a `.noe` one.
+const MARK: ExtStruct = ExtStruct {
+    name: "Mark",
+    namespace: "cfg",
+    fields: &[ExtField {
+        name: "tag",
+        ty: SigType::String,
+        is_public: true,
+        is_mut: false,
+    }],
+    directives: &[
+        ExtTypeDirective::Attribute(&[AttrTarget::Function]),
+        ExtTypeDirective::Role(&[ExtRoleTag {
+            enum_name: "Semantic",
+            variant: "EntryPoint",
+        }]),
+    ],
     ..ExtStruct::STRUCT_DEFAULTS
 };
 
@@ -240,7 +265,7 @@ impl Extension for CfgExtension {
         &[STAGE, PLAIN]
     }
     fn structs(&self) -> &'static [ExtStruct] {
-        &[CONFIG, LOOSE, ROUTE]
+        &[CONFIG, LOOSE, ROUTE, MARK]
     }
 }
 
@@ -255,6 +280,9 @@ fn ensure_installed() {
 /// Every fixture test touches the shared process-global registry; each holds this for its whole run
 /// so the installs/counters do not race (mirrors `ext_struct_seam.rs`).
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A per-process sequence for unique temp-entry directories (the linked-role runner writes a file).
+static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // --- Helpers -------------------------------------------------------------------------------------
 
@@ -327,6 +355,67 @@ fn check_codes(program: &str) -> Vec<String> {
         .iter()
         .map(|d| d.code.to_string())
         .collect()
+}
+
+/// Load + link a program from a temp entry file, then check + run on **both** backends with the leak
+/// oracle — the linked twin of [`run_both_agree`]. A native `@role` binding only surfaces over a
+/// **linked** program: the loader qualifies a native attribute application (`#[Mark]`) to its FQN
+/// (`cfg.Mark`), the identity `reflect::build`'s native-role join keys on (via `Registry::native_roles`).
+/// The single-file `run_both_agree` bypasses the loader (no qualification), so it cannot exercise this.
+/// Returns the shared stdout.
+#[track_caller]
+fn run_linked_both_agree(program: &str) -> String {
+    ensure_installed();
+    let dir = std::env::temp_dir().join(format!(
+        "noeta_d3_role_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir is creatable");
+    let entry = dir.join("main.noe");
+    std::fs::write(&entry, program).expect("entry file is writable");
+
+    let linked = match noeta_loader::load(&entry, noeta_lexer::Edition::DEFAULT) {
+        Ok(Ok(linked)) => linked,
+        other => panic!("program must load + link cleanly: {other:?}"),
+    };
+    let checked = noeta_check::check_all(&linked.program);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "program must check cleanly: {:?}",
+        checked.diagnostics
+    );
+
+    let eval_before = noeta_eval::live_count();
+    let reference =
+        noeta_conformance::reference::reference_run(&linked.program, checked.sites.clone());
+    let eval_after = noeta_eval::live_count();
+    assert_eq!(
+        eval_before, eval_after,
+        "tree-walker leak oracle: heap residency must return to baseline"
+    );
+
+    let module = noeta_compiler::compile_with_sites(&linked.program, checked.sites, false, false)
+        .expect("program compiles to bytecode");
+    let vm_before = noeta_value::live_count() as i64;
+    let vm = VmBackend::new().run_module(&module);
+    let vm_after = noeta_value::live_count() as i64;
+    assert_eq!(
+        vm_before, vm_after,
+        "VM leak oracle: heap residency must return to baseline"
+    );
+
+    assert_eq!(
+        reference, vm,
+        "backends must agree on the native-role program"
+    );
+    assert_eq!(
+        reference.exit_code, 0,
+        "diagnostics: {:?}",
+        reference.diagnostics
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    reference.stdout
 }
 
 // --- @semantic -----------------------------------------------------------------------------------
@@ -433,5 +522,41 @@ fn native_attribute_struct_gates_application_and_placement() {
     assert!(
         badarg.iter().any(|c| c == "E0007"),
         "a wrong-typed native @attribute argument must be E0007; got {badarg:?}"
+    );
+}
+
+// --- @role (Slice D3) ----------------------------------------------------------------------------
+
+#[test]
+fn native_role_binding_surfaces_on_both_backends() {
+    let _guard = SERIAL.lock().unwrap();
+    // The native `Mark` struct carries BOTH `@attribute(Function)` and `@role(Semantic.EntryPoint)`.
+    // Applying `#[Mark(...)]` to `handler` confers the `Semantic.EntryPoint` role on it — surfaced by
+    // `roles_of()` as one `RoleBinding { target: "handler", role: Semantic.EntryPoint }`. This rides
+    // the D3 seam end to end: `Registry::native_roles` projects the tag, the loader qualifies the
+    // application to `cfg.Mark`, `reflect::build` joins them, and both backends materialize the same
+    // enum value — proved by the differential + the `match b.role` reading the correct variant. The
+    // turbofish `roles_of::<Semantic>()` filters to the same one, confirming the role's enum identity.
+    let stdout = run_linked_both_agree(
+        "use cfg.Mark\n\
+         #[Mark(\"x\")]\n\
+         fn handler(): int { return 1; }\n\
+         bindings = roles_of()\n\
+         echo bindings.len()\n\
+         for b in bindings {\n\
+         \x20   name = match b.role {\n\
+         \x20       Semantic.EntryPoint => \"entrypoint\",\n\
+         \x20       _ => \"other\",\n\
+         \x20   }\n\
+         \x20   echo \"${b.target}=${name}\"\n\
+         }\n\
+         echo roles_of::<Semantic>().len()\n",
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["1", "handler=entrypoint", "1"],
+        "a native role-bearing attribute applied in a linked module must surface its \
+         {{target, role}} binding — correct target and enum variant — identically on both backends"
     );
 }
