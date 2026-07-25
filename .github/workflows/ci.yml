@@ -193,12 +193,21 @@ jobs:
       # The wasm differential oracle (W1.3): every corpus program, bundled and executed by the
       # wasm runner under wasmtime (--sandbox), must match the native VM byte-for-byte — stdout,
       # exit code, and rendered stderr. The wasm analogue of the bundle oracle's L1.3 gate.
-      - name: Install wasmtime
-        run: curl -sSf https://wasmtime.dev/install.sh | bash
+      # Pinned direct release download: install.sh resolves "latest" via the unauthenticated
+      # GitHub API, which rate-limits on shared runner IPs and once yielded a literal `{` as the
+      # version — succeeding with nothing installed. v46 matches the workspace's wasmtime-internal
+      # crates; bump both together.
+      - name: Install wasmtime (pinned)
+        run: |
+          V=v46.0.1
+          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/${V}/wasmtime-${V}-x86_64-linux.tar.xz" | tar -xJ
+          "./wasmtime-${V}-x86_64-linux/wasmtime" --version
+          echo "NOETA_WASMTIME=${PWD}/wasmtime-${V}-x86_64-linux/wasmtime" >> "$GITHUB_ENV"
+          echo "${PWD}/wasmtime-${V}-x86_64-linux" >> "$GITHUB_PATH"
       - name: Build the wasm runner (the shipping artifact profile)
         run: cargo build -p noeta-wasm-runner --target wasm32-wasip1 --profile wasm-release --locked
       - name: Wasm differential oracle (runner under wasmtime vs native VM)
-        run: PATH="$HOME/.wasmtime/bin:$PATH" cargo run -p noeta-conformance --locked -- --wasm-differential
+        run: cargo run -p noeta-conformance --locked -- --wasm-differential
       # The browser engine (W2): the playground cdylib must build for wasm32-unknown-unknown and
       # actually execute in a plain JS embedding — the node smoke drives check/run/fmt through the
       # hand-rolled ABI, the same way a Web Worker embedding does. The frontend that embeds this
@@ -211,7 +220,7 @@ jobs:
       # The edge-serve payoff (W4): `noeta build --serve` a real handler, run the wasi:http
       # component under `wasmtime serve`, assert a live HTTP round trip.
       - name: wasi:http serve e2e (component under wasmtime serve)
-        run: PATH="$HOME/.wasmtime/bin:$PATH" bash crates/noeta-wasm-serve/tests/e2e.sh
+        run: bash crates/noeta-wasm-serve/tests/e2e.sh
       # Distribution blobs: the generic wasm engines double as the packaged-toolchain artifacts.
       - name: Upload the generic wasm engines
         uses: actions/upload-artifact@v4

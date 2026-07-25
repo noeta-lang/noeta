@@ -807,7 +807,12 @@ mod tests {
     #[test]
     fn eval_uses_the_context() {
         noeta_stdlib::registry::default_seeded();
-        let out = eval("xs.len()", Some("xs = [10, 20, 30];"), false, &RunLimits::default());
+        let out = eval(
+            "xs.len()",
+            Some("xs = [10, 20, 30];"),
+            false,
+            &RunLimits::default(),
+        );
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
         assert_eq!(out.value.as_deref(), Some("3"));
     }
