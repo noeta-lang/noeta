@@ -130,6 +130,29 @@ jobs:
             "https://api.github.com/repos/noeta-lang/${{ matrix.repo }}/dispatches" \
             -d "{\"event_type\":\"release-published\",\"client_payload\":{\"tag\":\"$TAG\"}}"
 
+  # Advance the org-level `NOETA_VERSION` Actions variable to this release. The para package
+  # repos' workflows resolve their pinned toolchain from that variable (single bump point), and the
+  # native ones guard it against their manifests' toolchain tag pin — so after this advances, a
+  # package whose manifests still pin the previous tag goes red with an explicit message rather
+  # than failing obscurely. Non-prerelease only: an rc must not move the fleet. GITHUB_TOKEN cannot
+  # write org variables — ORG_VARS_PAT is a fine-grained PAT with organization "Variables: write".
+  advance-ecosystem-version:
+    name: Advance org NOETA_VERSION
+    needs: [build, release]
+    if: needs.build.outputs.is_prerelease != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set org variable to ${{ github.ref_name }}
+        env:
+          GH_TOKEN: ${{ secrets.ORG_VARS_PAT }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # PATCH updates the existing variable; a 404 means it was never created — POST it.
+          gh api -X PATCH "/orgs/noeta-lang/actions/variables/NOETA_VERSION" \
+            -f name=NOETA_VERSION -f value="$TAG" \
+          || gh api -X POST "/orgs/noeta-lang/actions/variables" \
+            -f name=NOETA_VERSION -f value="$TAG" -f visibility=all
+
   # Build the VS Code extension .vsix and attach it to the GitHub release. Its version is NOT read
   # from package.json — the git tag is the single source of truth, so the extension always ships at
   # the same version as the toolchain (`vX.Y.Z` is stamped in at package time, never committed).
