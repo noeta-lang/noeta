@@ -64,7 +64,7 @@ serde_json = { workspace = true }
 similar = { workspace = true }
 
 [features]
-# The shipped `lang` binary is JIT-enabled by default (milestone P-JIT): real-host `lang run`/
+# The shipped `noeta` binary is JIT-enabled by default (milestone P-JIT): real-host `noeta run`/
 # `bench` drive the tier-1 JIT under hot-counter promotion. `--no-default-features` builds a
 # Cranelift-free interpreter-only binary (identical behaviour, smaller build).
 default = ["jit"]

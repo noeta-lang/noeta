@@ -219,7 +219,7 @@ impl VmSession {
     /// completion as entry 0, then continue the session incrementally from its final state. A
     /// fragment evaluated afterwards resolves the checked program's globals, functions, types, and
     /// methods by their **original ids** (the compiler's tables are the module's own id-spaces), and
-    /// values entry 0 created keep full `Rc<Shape>` identity in later entries. The initial run is
+    /// values entry 0 created keep full interned `&'static Shape` identity in later entries. The initial run is
     /// fully checked; fragments are checkerless, exactly like REPL entries.
     ///
     /// Returns the session plus entry 0's output (its stdout/diagnostics/trace — a debug console or
@@ -819,7 +819,7 @@ mod tests {
         // ORIGINAL proto index / global slot (stable-prefix accumulation).
         assert_eq!(eval(&mut session, "echo twice(base + 1);"), "22\n");
         // A fragment constructs the checked program's type; structural equality against a value
-        // entry 0 built proves the `Rc<Shape>` is the SAME shape (pointer identity), not a re-wrap.
+        // entry 0 built proves the `&'static Shape` is the SAME shape (pointer identity), not a re-wrap.
         assert_eq!(eval(&mut session, "echo p0 == P { x: 3 };"), "true\n");
         // A fragment-defined closure captures a checked-program global and calls a checked-program
         // function — new code (a new proto) composed with original ids.

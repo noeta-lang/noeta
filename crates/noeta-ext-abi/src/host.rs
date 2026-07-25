@@ -574,8 +574,8 @@ impl SyncStatus {
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// core capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Os`], [`Entropy`],
-/// [`Ids`], [`Network`], the three telemetry signals [`Tracing`](crate::Tracing) /
+/// core capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Console`], [`Os`],
+/// [`Entropy`], [`Ids`], [`Network`], the three telemetry signals [`Tracing`](crate::Tracing) /
 /// [`Metrics`](crate::Metrics) / [`Logging`](crate::Logging)) plus [`P2pProvider`], through which a
 /// host **optionally** offers the [`P2p`] capability (the p2p/local-first stack left `std` for the
 /// non-default `para` package, so peer networking is no longer a mandatory arm — see [`P2pProvider`]).

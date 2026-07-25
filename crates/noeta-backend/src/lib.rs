@@ -1,12 +1,12 @@
 //! The execution-backend seam: the contract every runtime implements.
 //!
-//! Extracted into its own crate in M1 so the two backends — the M0 tree-walker
+//! Extracted into its own crate in M1 so the two backends — the Core-IR interpreter
 //! (`noeta-eval`) and the M1 bytecode VM (`noeta-vm`) — are *siblings*: neither depends
 //! on the other, and both depend only on this tiny vocabulary. The conformance harness
 //! runs a program through both and asserts their [`RunResult`]s are identical (the
 //! differential oracle). Comparing `RunResult` — observable output, not internal value
 //! representation — is exactly what lets the two backends use completely different value
-//! models (the tree-walker's `Rc`-based enum vs. the VM's NaN-boxed words).
+//! models (the interpreter's `Rc`-based enum vs. the VM's NaN-boxed words).
 
 use noeta_ast::Program;
 use noeta_diagnostics::Diagnostic;
@@ -33,8 +33,9 @@ impl RunResult {
     }
 }
 
-/// An execution backend. M0 ships the tree-walker; M1 adds the bytecode VM, and the two
-/// are cross-checked against this contract.
+/// An execution backend. The two implementations — the Core-IR interpreter (`noeta-eval`,
+/// the retired M0 AST tree-walker's successor) and the M1 bytecode VM (`noeta-vm`) — are
+/// cross-checked against this contract.
 pub trait Backend {
     fn run(&self, program: &Program) -> RunResult;
 }

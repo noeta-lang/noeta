@@ -43,7 +43,10 @@ use noeta_ext_abi::{
     no_function_error, no_method_error, type_error,
 };
 
-/// The reserved surface type name for a span handle. A user declaration of this name is E0049.
+/// The surface type name for a span handle. `Span` is a namespaced extern type, not a reserved
+/// name — a user may declare their own `Span`; a clash arises only if `use std.tracing.Span` is
+/// also in scope (an import conflict, E0020). E0049 is reserved for the checker-native generics
+/// `Iterator`/`Future`/`Sender`/`Receiver`.
 pub const SPAN_TYPE_NAME: &str = "Span";
 
 /// `Span`'s qualified runtime identity — what [`crate::ExternValue::type_identity`] returns.
