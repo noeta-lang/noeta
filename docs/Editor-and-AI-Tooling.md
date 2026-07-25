@@ -151,9 +151,10 @@ and `mcp` alike.
 **Execute** — run and observe, not just read:
 - `run` / `eval` / `test` — run a program (stdout/exit/traceback), evaluate an expression
   (value + type), run `@test` blocks. **Sandboxed and deterministic by default** (in-memory fs,
-  logical clock, seeded random; `real: true` opts into the real host). `run` is bounded by
-  liveness limits — a runaway loop is stopped, never hung; `eval` and `test` do not yet enforce
-  that bound, so avoid pointing either at code with an unbounded loop.
+  logical clock, seeded random; `real: true` opts into the real host). All three are bounded by
+  liveness limits — a runaway loop is stopped in-VM, never hung: `run` reports `limit_hit`, `eval`
+  returns with `limit_hit` set, and a `test` case that spins fails (with `limit_hit`) instead of
+  hanging the suite. Every bound is defaulted and tunable per call (`limits`).
 - `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — interactive debug
   sessions over the VM's own debugger seam: pause at entry or breakpoints, read the call stack and
   live locals, step by line, evaluate expressions in a paused frame (type-checked against the
