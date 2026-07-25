@@ -22,8 +22,16 @@ permissions:
   contents: write
 
 jobs:
+  # The full CI suite, reused as the release gate (one definition, no drift): a tag push does not
+  # trigger ci.yml on its own, so without this a broken commit could tag-ship binaries and advance
+  # the ecosystem's NOETA_VERSION. Everything downstream needs `build`, which needs this.
+  gate:
+    name: CI gates
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build ${{ matrix.target }}
+    needs: gate
     runs-on: ${{ matrix.os }}
     outputs:
       is_prerelease: ${{ steps.meta.outputs.is_prerelease }}

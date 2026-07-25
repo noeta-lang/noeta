@@ -20,6 +20,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Callable as a gate by other workflows — release.yml runs the full suite before building
+  # artifacts, so a tag on a commit that would fail CI can never ship a release.
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
