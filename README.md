@@ -41,16 +41,34 @@ echo match validate(cart) {
 
 ## Try it
 
-The quickest taste is the **[playground](https://play.noeta.dev)** — the real toolchain compiled to WebAssembly, running in your browser with nothing to install. To build from source, you need a recent stable Rust toolchain (1.95+).
+The quickest taste is the **[playground](https://play.noeta.dev)** — the real toolchain compiled to WebAssembly, running in your browser with nothing to install.
+
+### Install
+
+One line, on Linux or macOS (x86_64/aarch64) — downloads the latest [release](https://github.com/noeta-lang/noeta/releases), verifies its checksum, and installs to `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/noeta-lang/noeta/main/install.sh | sh
+```
+
+`--version vX.Y.Z` pins a release; `--to <dir>` (or `NOETA_INSTALL_DIR`) changes the destination. Then:
+
+```sh
+echo 'echo "hello"' > hello.noe
+noeta run hello.noe     # -> hello
+noeta repl              # interactive REPL
+```
+
+### Building from source
+
+You need a recent stable Rust toolchain (1.95+).
 
 ```sh
 cargo build                                 # build the workspace + the `noeta` binary
-echo 'echo "hello"' > hello.noe
-cargo run -p noeta-cli -- run hello.noe     # -> hello
-cargo run -p noeta-cli -- repl               # interactive REPL
+cargo run -p noeta-cli -- run hello.noe
 ```
 
-To put `noeta` on your `PATH`: `cargo install --path crates/noeta-cli`.
+To put a source-built `noeta` on your `PATH`: `cargo install --path crates/noeta-cli`.
 
 ## Documentation
 
