@@ -38,6 +38,9 @@ sha2 = { workspace = true, optional = true }
 # the out-of-band print-URL/paste-code flow automatically.
 sigstore-sign = { workspace = true, optional = true }
 sigstore-oidc = { workspace = true, optional = true, features = ["browser"] }
+# Detect ambient CI credentials directly (the same detector `sigstore-oidc` uses under the hood),
+# so `ambient_identity` can tell "no id-token in this CI" (→ unsigned) from a broken token endpoint.
+ambient-id = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt"] }
 # `keyless-test-fixtures` only (see the feature): minting the hermetic test CA/CT/Rekor.
 p256 = { workspace = true, optional = true }
@@ -66,6 +69,7 @@ keyless = [
     "dep:sigstore-types",
     "dep:sigstore-sign",
     "dep:sigstore-oidc",
+    "dep:ambient-id",
     "dep:tokio",
     "dep:serde_json",
     "dep:sha2",

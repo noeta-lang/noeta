@@ -2941,6 +2941,7 @@ dependencies = [
 name = "noeta-pm"
 version = "0.1.0"
 dependencies = [
+ "ambient-id",
  "base64",
  "const-oid",
  "ed25519-dalek",

@@ -201,13 +201,41 @@ impl AmbientIdentity {
 }
 
 /// Detect an ambient OIDC identity (CI). Errors only on a *broken* ambient environment (e.g. the
-/// token endpoint refused) — a plain "not in CI" is `Ok(None)`.
+/// token endpoint refused) — both "not in CI" **and** "in a CI that provisions no id-token for this
+/// job" are `Ok(None)`, so publish falls back to the key path (or unsigned).
+///
+/// The audience is `"sigstore"` (Fulcio pins `aud`), matching `sigstore-oidc`'s own detector — but
+/// we drive `ambient-id` directly rather than through [`sigstore_oidc::IdentityToken::detect_ambient`]
+/// because that wrapper flattens the detector's structured error into an opaque string, collapsing
+/// "GitHub Actions with no `id-token: write` permission" (`InsufficientPermissions`) and "GitLab CI
+/// with no configured `SIGSTORE_ID_TOKEN`" (`Missing`) — both plain *keyless-unavailable* conditions
+/// — into the same message as a genuinely failed token request. A CI job that simply wasn't granted
+/// an id-token is not broken; treating it as a hard error would abort every unsigned publish that
+/// happens to run under such a runner (e.g. our own CI, which grants no `id-token: write`).
 pub fn ambient_identity() -> Result<Option<AmbientIdentity>, PmError> {
     let runtime = publish_runtime()?;
-    let token = runtime
-        .block_on(sigstore_oidc::IdentityToken::detect_ambient())
-        .map_err(|err| PmError::Auth(format!("ambient OIDC detection failed: {err}")))?;
-    Ok(token.map(AmbientIdentity))
+    match runtime.block_on(ambient_id::Detector::new().detect("sigstore")) {
+        Ok(Some(token)) => AmbientIdentity::from_jwt(token.reveal()).map(Some),
+        Ok(None) => Ok(None),
+        // A recognized CI that provisions no id-token for this job → keyless simply isn't available.
+        Err(err) if is_unprovisioned(&err) => Ok(None),
+        Err(err) => Err(PmError::Auth(format!(
+            "ambient OIDC detection failed: {err}"
+        ))),
+    }
+}
+
+/// Whether an `ambient-id` detection error means "this CI grants no id-token here" (keyless is
+/// unavailable → fall back), as opposed to a genuinely broken token endpoint (abort). GitHub Actions
+/// without `id-token: write` reports `InsufficientPermissions`; GitLab CI without the audience's
+/// `<AUD>_ID_TOKEN` reports `Missing`. Every other variant (a refused HTTP request, a failed CLI) is
+/// a real failure worth surfacing.
+fn is_unprovisioned(err: &ambient_id::Error) -> bool {
+    matches!(
+        err,
+        ambient_id::Error::GitHubActions(ambient_id::GitHubError::InsufficientPermissions(_))
+            | ambient_id::Error::GitLabCI(ambient_id::GitLabError::Missing(_))
+    )
 }
 
 /// Acquire an OIDC identity **interactively** (K6): the OAuth 2.0 authorization-code flow with

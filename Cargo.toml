@@ -148,6 +148,12 @@ sigstore-types = "0.11"
 # wraps it in a scoped block_on (publish is CLI-only, never in the interpreter hot path).
 sigstore-sign = { version = "0.11", default-features = false, features = ["rustls"] }
 sigstore-oidc = { version = "0.11", default-features = false, features = ["rustls"] }
+# `sigstore-oidc`'s own ambient-credential detector, pulled in directly so `ambient_identity` can
+# read the crate's *structured* detection error (GitHub `InsufficientPermissions`, GitLab `Missing`)
+# rather than the opaque string `sigstore-oidc::detect_ambient` flattens it into — the distinction
+# between "this CI grants no id-token" (fall back to unsigned) and a genuinely broken token endpoint.
+# Pin the exact version `sigstore-oidc` resolves so both see the SAME `ambient_id::Error` type.
+ambient-id = "=0.0.11"
 # Hermetic keyless test fixtures (Phase 5, K4 — `keyless-test-fixtures`, test builds only):
 # minting a REAL test CA + CT log + Rekor log (certs with embedded SCTs, inclusion proofs,
 # signed checkpoints) so the publish→resolve loop verifies under the DEFAULT policy with no
