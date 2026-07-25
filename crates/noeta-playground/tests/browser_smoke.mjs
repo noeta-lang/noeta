@@ -155,7 +155,9 @@ assert.match(fmt.formatted, /echo "hello"/);
 const ideText = 'fn add(a: int, b: int): int {\n  return a + b;\n}\n\necho add(1, 2);';
 const hover = call(noeta_hover, ideText, 1, 9);
 assert.equal(hover.found, true);
-assert.equal(hover.type, 'int');
+// The engine composes the same rich Markdown the VS Code hover shows (a `value` field), not a
+// bare `type` string — a hover over `a` in `a + b` carries its `int` type.
+assert.ok(hover.value.includes('int'), `hover value: ${hover.value}`);
 const def = call(noeta_definition, ideText, 4, 5);
 assert.equal(def.found, true);
 assert.equal(def.range.start.line, 0);
@@ -167,7 +169,7 @@ assert.ok(completions.items.some((item) => item.label === 'add' && item.kind ===
 
 // The browser host (W3.0): `noeta_run_browser` reaches the real-world leaves through the
 // imports — a full std.http round trip over the JSON contract, plus real entropy for uuids.
-const fetching = 'use std.http.client\nr = client.get("https://svc.test/ping")\necho r.status()\necho r.body()';
+const fetching = 'use std.http.client\nr = client.get("https://svc.test/ping")?\necho r.status()\necho r.body()';
 const browserRun = call(noeta_run_browser, fetching);
 assert.equal(browserRun.compiled, true, JSON.stringify(browserRun));
 assert.equal(browserRun.exit_code, 0, JSON.stringify(browserRun));
@@ -256,9 +258,9 @@ if (JSPI) {
     '        client.get_async("https://svc.test/a"),',
     '        client.get_async("https://svc.test/b"),',
     '    ])',
-    '    echo "${rs[0].status()},${rs[1].status()}"',
-    '    echo rs[0].body()',
-    '    echo rs[1].body()',
+    '    echo "${rs[0]?.status()},${rs[1]?.status()}"',
+    '    echo rs[0]?.body()',
+    '    echo rs[1]?.body()',
     '}',
     'run().await',
   ].join('\n');
