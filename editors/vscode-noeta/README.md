@@ -102,7 +102,7 @@ npm install                    # fetches vscode-languageclient
 
 # then either: open this folder in VS Code and press F5 (Run Noeta Extension), or
 # symlink it into your extensions directory and reload:
-ln -s "$PWD" ~/.vscode/extensions/noeta-0.3.0
+ln -s "$PWD" ~/.vscode/extensions/noeta-0.1.0
 ```
 
 Any `.noe` file then picks up the `noeta` language mode and the server starts automatically. Run

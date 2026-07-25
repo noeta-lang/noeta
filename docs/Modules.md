@@ -158,7 +158,7 @@ Reaching for a member the group does not have is a compile error, with a suggest
 
 ```noeta error
 use std.http
-r = http.get("...")     // E0005: namespace `http` has no member `get`  (did you mean `client`?)
+r = http.get("...")     // E0005: namespace `http` has no member `get`
 echo "unreachable"
 ```
 

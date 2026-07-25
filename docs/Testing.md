@@ -44,7 +44,9 @@ A test's return type is optional; both `fn adds()` and `fn adds(): void` work.
 
 ## Metadata attributes
 
-Lead a test with any of these prelude attributes to change how it runs or is reported:
+Lead a test with any of these `std.test` attributes to change how it runs or is reported. They are
+not prelude — bring them in with `use std.test.{Skip, Name, Group, Data}` (or qualify one inline,
+`#[std.test.Skip]`):
 
 | Attribute | Effect |
 |---|---|
@@ -54,6 +56,8 @@ Lead a test with any of these prelude attributes to change how it runs or is rep
 | `#[Data([…])]` | Parameterized — runs once per row, reported as `name[row]`. |
 
 ```noeta
+use std.test.{Skip, Name, Group, Data}
+
 @test {
     #[Skip("flaky until fixed")]
     fn not_ready(): void { assert(false) }

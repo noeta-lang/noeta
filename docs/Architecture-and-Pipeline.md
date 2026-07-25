@@ -2,7 +2,7 @@
 
 This section is the "how it works under the hood" tour, for the curious and the systems-minded. It describes the implementation as it actually exists — and, where the design intends more than what has shipped, says so.
 
-The implementation is a workspace of ~40 small Rust crates forming a strict dependency DAG (the crate map below covers the pipeline core; the tooling and runtime subsystems — JIT, package manager, LSP/DAP/MCP, formatter, profiler, CRDT, reactivity — add the rest). Two ideas organize everything: a **compilation pipeline** of sharp, single-purpose stages, and a **two-backend differential oracle** that keeps the whole thing honest.
+The implementation is a workspace of ~50 small Rust crates forming a strict dependency DAG (the crate map below covers the pipeline core; the tooling and runtime subsystems — JIT, package manager, LSP/DAP/MCP, formatter, profiler, CRDT, reactivity — add the rest). Two ideas organize everything: a **compilation pipeline** of sharp, single-purpose stages, and a **two-backend differential oracle** that keeps the whole thing honest.
 
 ## The pipeline
 

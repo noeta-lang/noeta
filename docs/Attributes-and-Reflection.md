@@ -10,7 +10,7 @@ Four `@` decorators attach metadata to or drive codegen on a *declaration* — `
 
 ### `@derive(...)` — synthesize trait impls
 
-Generates trait implementations from a type's shape. Covered in [Generics & Traits](Generics-and-Traits#derive--synthesized-implementations). The derivable set is closed: `Equatable`, `Comparable`, `Display`, `Clone`, `Serialize<Format>`.
+Generates trait implementations from a type's shape. Covered in [Generics & Traits](Generics-and-Traits#derive--synthesized-implementations). The derivable set is closed: `Equatable`, `Comparable`, `Display`, `Error`, `Clone`, `Serialize<Format>`.
 
 ### `@attribute` — mark a struct usable as `#[...]`
 

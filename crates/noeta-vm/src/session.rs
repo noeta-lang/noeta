@@ -188,6 +188,12 @@ pub struct VmSession {
     factory: HostFactory,
     /// `Some` between entries; taken (and put back) transiently inside [`VmSession::eval`].
     state: Option<SessionState>,
+    /// An optional liveness/observation [`Debugger`](crate::Debugger) installed on every entry's
+    /// ephemeral [`Vm`] (see [`VmSession::set_debugger`]). Held here between entries and lent to the
+    /// entry's `Vm` for the duration of its run — a runaway loop inside a session entry (an `eval`
+    /// fragment, a `test` case) is bounded exactly as a `run` is, over the same per-op seam. `None`
+    /// on the REPL / differential paths, where it costs one predicted branch per entry.
+    debugger: Option<Box<dyn crate::Debugger>>,
 }
 
 impl std::fmt::Debug for VmSession {
@@ -211,7 +217,18 @@ impl VmSession {
             compiler: SessionCompiler::new(),
             factory,
             state: Some(SessionState::fresh(host, executor)),
+            debugger: None,
         }
+    }
+
+    /// Install (or clear with `None`) a [`Debugger`](crate::Debugger) consulted before every
+    /// instruction of every subsequent entry. The debugger is held on the session between entries
+    /// and lent to each entry's ephemeral [`Vm`] for its run, so a single instance accumulates
+    /// across the entries of one session — the seam an embedding uses to bound a session's liveness
+    /// (an MCP `eval`/`test` arms a step-count + wall-clock limit debugger here, the same one a
+    /// `run` installs, so a runaway loop terminates in-VM instead of hanging the caller).
+    pub fn set_debugger(&mut self, debugger: Option<Box<dyn crate::Debugger>>) {
+        self.debugger = debugger;
     }
 
     /// A session **adopted from a checked compile** (tooling-unification T3): run `module` — the
@@ -219,7 +236,7 @@ impl VmSession {
     /// completion as entry 0, then continue the session incrementally from its final state. A
     /// fragment evaluated afterwards resolves the checked program's globals, functions, types, and
     /// methods by their **original ids** (the compiler's tables are the module's own id-spaces), and
-    /// values entry 0 created keep full `Rc<Shape>` identity in later entries. The initial run is
+    /// values entry 0 created keep full interned `&'static Shape` identity in later entries. The initial run is
     /// fully checked; fragments are checkerless, exactly like REPL entries.
     ///
     /// Returns the session plus entry 0's output (its stdout/diagnostics/trace — a debug console or
@@ -264,6 +281,7 @@ impl VmSession {
             compiler,
             factory,
             state: Some(vm.into_state()),
+            debugger: None,
         };
         (
             session,
@@ -415,8 +433,14 @@ impl VmSession {
         // residency, so persistent state is never charged against the watermark).
         noeta_value::safepoint_gc_arm(noeta_value::safepoint_gc_default_threshold());
         let mut vm = Vm::load_seeded(&module, state);
+        // Lend the session's debugger to this entry's ephemeral Vm for the run, then take it back
+        // (the dispatch loop restores it into `vm.debugger` on both a clean finish and a
+        // `Terminate`, so it is always present here). A single instance thus accumulates its
+        // step/deadline budget across the session's entries.
+        vm.debugger = self.debugger.take();
         pre_run(&mut vm);
         vm.run_top();
+        self.debugger = vm.debugger.take();
 
         let value = if captures_value {
             self.sentinel_slot().and_then(|slot| {
@@ -819,7 +843,7 @@ mod tests {
         // ORIGINAL proto index / global slot (stable-prefix accumulation).
         assert_eq!(eval(&mut session, "echo twice(base + 1);"), "22\n");
         // A fragment constructs the checked program's type; structural equality against a value
-        // entry 0 built proves the `Rc<Shape>` is the SAME shape (pointer identity), not a re-wrap.
+        // entry 0 built proves the `&'static Shape` is the SAME shape (pointer identity), not a re-wrap.
         assert_eq!(eval(&mut session, "echo p0 == P { x: 3 };"), "true\n");
         // A fragment-defined closure captures a checked-program global and calls a checked-program
         // function — new code (a new proto) composed with original ids.

@@ -7,7 +7,7 @@ The type checker: the inferred-static front-end between parsing and compilation.
 
 ## A shared front-end
 
-The checker runs upstream of *both* backends (in the conformance harness, the differential, and `noeta run`). A program it rejects never reaches the tree-walker or the VM, and its diagnostics are the program's whole observable result — identical regardless of which backend would have run. That is what lets the checker promote runtime errors to compile-time ones while keeping the differential oracle green by construction, and lets a negative type-error case assert via the ordinary `// expect: error EXXXX` header.
+The checker runs upstream of *both* backends (in the conformance harness, the differential, and `noeta run`). A program it rejects never reaches the reference backend (`noeta-eval`) or the VM, and its diagnostics are the program's whole observable result — identical regardless of which backend would have run. That is what lets the checker promote runtime errors to compile-time ones while keeping the differential oracle green by construction, and lets a negative type-error case assert via the ordinary `// expect: error EXXXX` header.
 
 ## Inferred-static, with an interior inference hole
 

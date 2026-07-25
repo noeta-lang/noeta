@@ -396,6 +396,10 @@ pub struct EvalArgs {
     /// Evaluate against the real host instead of the sandbox. Default false.
     #[serde(default)]
     pub real: Option<bool>,
+    /// Liveness limits (timeout / step budget). All optional and defaulted; always on — a runaway
+    /// loop in `expr` or `context` trips the bound and returns with `limit_hit` set.
+    #[serde(default)]
+    pub limits: Option<execute::RunLimits>,
 }
 
 /// Arguments to `test`: a source with `@test` blocks, an optional filter, and the real-host opt-in.
@@ -411,6 +415,10 @@ pub struct TestArgs {
     /// Run the tests against the real host instead of the sandbox. Default false.
     #[serde(default)]
     pub real: Option<bool>,
+    /// Liveness limits (timeout / step budget) applied per case. All optional and defaulted; always
+    /// on — a runaway loop in one case fails that case (with `limit_hit`) instead of hanging.
+    #[serde(default)]
+    pub limits: Option<execute::RunLimits>,
 }
 
 /// Arguments to `explain_diagnostic`.
@@ -820,14 +828,16 @@ budget, and an output cap (tune via `limits`). A program that does not type-chec
     #[tool(
         description = "Evaluate a Noeta expression and get its value and type — a one-shot REPL. \
 Provide `context` (prior bindings/definitions, e.g. `xs = [1, 2, 3];`) that run before `expr`. \
-Sandbox by default; `real: true` uses the real host. Use this to check what an expression produces \
-without writing a whole program."
+Sandbox by default; `real: true` uses the real host. Bounded by liveness limits (a timeout and an \
+instruction budget, tune via `limits`): a runaway loop trips the bound and returns with `limit_hit` \
+set instead of hanging. Use this to check what an expression produces without writing a whole program."
     )]
     async fn eval(&self, Parameters(args): Parameters<EvalArgs>) -> Json<execute::EvalOutput> {
         Json(execute::eval(
             &args.expr,
             args.context.as_deref(),
             args.real.unwrap_or(false),
+            &args.limits.unwrap_or_default(),
         ))
     }
 
@@ -836,7 +846,8 @@ without writing a whole program."
         description = "Run the `@test` blocks in Noeta code and report each case (pass/fail/skip, \
 with the failing assertion and any stdout). Honors `#[Data([...])]` rows, `#[Skip]`, `#[Name]`, and \
 `#[Group]`; `filter` keeps only tests whose name or group matches. Sandbox by default; `real: true` \
-uses the real host."
+uses the real host. Each case is bounded by liveness limits (a timeout and an instruction budget, \
+tune via `limits`): a runaway loop fails that case (with `limit_hit`) instead of hanging the suite."
     )]
     async fn test(
         &self,
@@ -847,6 +858,7 @@ uses the real host."
             &prepared,
             args.filter.as_deref(),
             args.real.unwrap_or(false),
+            &args.limits.unwrap_or_default(),
         )))
     }
 

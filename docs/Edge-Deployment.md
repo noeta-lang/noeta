@@ -19,7 +19,7 @@ Both verbs are **binary surgery, not compilation**: your program's compiled bund
 
 ## The program
 
-A handler is an ordinary `(Request) -> Response`. Nothing about it is edge-specific — this is the same program `noeta serve` runs on your laptop:
+A handler is an ordinary `(Request) -> Response`. Nothing about it is edge-specific — this is the same program `noeta run` runs on your laptop, on a real socket:
 
 ```noeta check
 use std.http.server
@@ -35,7 +35,7 @@ fn handle(req: Request): Response {
 server.serve(8080, handle)
 ```
 
-The `port` argument to `server.serve` is inert at the edge — the platform owns the socket and invokes your component per request — but it is what `noeta serve app.noe --port 8080` binds locally, so the one program serves both ways. Routing (`req.path()`), reading the request (`req.method()`, `req.header(name)`, `req.body()`), and building the reply (`server.response(status, body, headers?)`, `Response.with_header`) are all just code; there is no framework or runtime hook to learn. See [Standard-Library Modules → Server](Standard-Library-Modules#server-httpserver) for the full API.
+The `port` argument to `server.serve` is inert at the edge — the platform owns the socket and invokes your component per request — but it is what `noeta run app.noe` binds locally, so the one program serves both ways. (The `noeta serve` CLI subcommand is a different convenience — it expects a top-level `fn fetch` and drives its own `--port`; a program that calls `server.serve` itself, as here, is run directly with `noeta run`.) Routing (`req.path()`), reading the request (`req.method()`, `req.header(name)`, `req.body()`), and building the reply (`server.response(status, body, headers?)`, `Response.with_header`) are all just code; there is no framework or runtime hook to learn. See [Standard-Library Modules → Server](Standard-Library-Modules#server-httpserver) for the full API.
 
 ## Building the artifact
 

@@ -1,7 +1,7 @@
 // edge-hello — a minimal HTTP handler that deploys to the edge unchanged.
 //
 // The same program runs three ways from one source:
-//   noeta serve hello.noe --port 8080     # locally, on a real socket
+//   noeta run hello.noe                   # locally, on a real socket (the program calls server.serve itself)
 //   noeta build --serve hello.noe         # → hello.serve.wasm, a wasi:http component
 //   spin up  /  spin deploy               # under Fermyon Spin (see spin.toml + deploy.sh)
 //

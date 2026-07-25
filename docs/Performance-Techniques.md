@@ -45,7 +45,7 @@ The layout is visible in the editor: hovering a packed value or list shows the s
 1. The array-of-structs `chunks_exact` loop is *already* autovectorized by LLVM, so hand-SIMD only got in the way.
 2. The 1-byte-aligned array-of-structs buffer forces a scalar gather/scatter to fill lane registers, which dominates.
 
-The shipped win instead comes from a **struct-of-arrays layout that unlocks LLVM autovectorization**: an opt-in `SoaVec3` columnar type (three contiguous `f32` columns), built once from a `List<Vec3>` via an O(n) transpose and reduced many times, giving **2.7×–4×** on `dot`/`length`. The surface is the `vec.soa*` family (`soa`, `soa_dot`, `soa_length`, `soa_add`, `soa_scale`, …).
+The shipped win instead comes from a **struct-of-arrays layout that unlocks LLVM autovectorization**: an opt-in `SoaVec3` columnar type (three contiguous `f32` columns), built once from a `List<Vec3>` via an O(n) transpose and reduced many times, giving **2.7×–4×** on `dot`/`length`. This lives as an internal `noeta-stdlib` Rust API (`SoaVec3` and its `soa_*` kernels — `soa_from_packed`, `soa_dot`, `soa_length`, `soa_add`, `soa_scale`, …, in `crates/noeta-stdlib/src/vec3.rs`), not (yet) a `.noe`-callable surface.
 
 > [!NOTE]
 > The column→`&[f32]` reinterpret in the shipped path is done via the safe, checked `bytemuck` crate (falling back to the byte-read path when a buffer is misaligned), so `noeta-stdlib` stays `unsafe`-free there. The lesson: *the right layout plus the compiler's autovectorizer beat hand-written intrinsics here* — measure before reaching for SIMD.

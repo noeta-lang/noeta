@@ -5,8 +5,8 @@ Micro-benchmarks live in the file they measure, inside a `@bench` block — the 
 ```console
 $ noeta bench sort.noe
 running 2 benchmarks
-  sum_100                    412ns/iter  (1000 iterations)
-  sum_10                      38ns/iter  (200 iterations)
+  sum_100                    412 ns/iter  (1000 iterations)
+  sum_10                      38 ns/iter  (200 iterations)
 
 2 ran, 0 failed, 2 total
 ```
@@ -31,7 +31,7 @@ fn sum_to(n: int): int {
 
 ### Iteration count
 
-The block directive is **distribution sugar**: `@bench(iterations: N) { … }` stamps the prelude `#[Bench(iterations: N)]` attribute onto each contained fn — validated like any attribute construction, visible to reflection. A fn can carry its own `#[Bench(…)]` to override the block's. The count comes from the first of these that is set:
+The block directive is **distribution sugar**: `@bench(iterations: N) { … }` stamps the `std.bench.Bench` attribute (`#[Bench(iterations: N)]`) onto each contained fn — validated like any attribute construction, visible to reflection, and stamped already-qualified so the block form needs no `use`. A fn can carry its own `#[Bench(…)]` to override the block's, but writing the attribute yourself needs `use std.bench.Bench` (or the qualified form, `#[std.bench.Bench(iterations: 50)]`) — it is not prelude. The count comes from the first of these that is set:
 
 1. `--iterations N` on the command line (overrides everything).
 2. The fn's own `#[Bench(iterations: N)]` attribute.

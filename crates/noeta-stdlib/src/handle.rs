@@ -4,7 +4,9 @@
 //! A handle is the project's first mutable heap value type beyond field assignment, and the
 //! differential oracle compares it on the sandbox path — so the cursor logic must be byte-identical
 //! across the tree-walker and the VM. Keeping the whole state machine here (the tree-walker wraps it
-//! in `Rc<RefCell<FileHandle>>`, the VM stores it in a heap `Payload::FileHandle`) makes that
+//! in `Rc<RefCell<FileHandle>>`, the VM stores it in a heap `Payload::Extern(ExternBox)` — the
+//! generic extern-value mechanism that superseded the old bespoke `Payload::FileHandle` variant)
+//! makes that
 //! identity structural rather than a property the two backends each re-derive.
 //!
 //! ## A handle is a reference type — by design (Phase 5.2b)

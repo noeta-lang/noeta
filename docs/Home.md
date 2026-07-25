@@ -76,6 +76,7 @@ Everything the `noeta` binary does beyond running code.
 - [Profiling (`noeta profile`)](Profiling)
 - [Observability](Observability)
 - [WebAssembly & the Edge (`--wasm`, `--serve`, the playground)](WebAssembly-and-the-Edge)
+- [Edge Deployment (Fermyon Spin, Fastly Compute)](Edge-Deployment)
 
 ### Language & standard-library reference
 The exhaustive reference for syntax, semantics, and the stdlib.
@@ -86,6 +87,7 @@ The exhaustive reference for syntax, semantics, and the stdlib.
 - [Generics & Traits](Generics-and-Traits)
 - [The Type System](Type-System)
 - [Error Handling](Error-Handling)
+- [Validation](Validation)
 - [Modules & Visibility](Modules)
 - [Fixed-Width Integers, Bitwise & Packed Types](Fixed-Width-Integers)
 - [Attributes & Reflection](Attributes-and-Reflection)
