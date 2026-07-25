@@ -103,7 +103,38 @@ A bare expression prints its value. The REPL keeps your bindings alive between e
 
 Multi-line input is detected automatically — an unclosed `{`, `(`, or `[` continues onto the next line (`… ` prompt).
 
-## 5 · The rest of the toolchain
+## 5 · Start a real project
+
+A single file is all `noeta run` needs. The moment you want dependencies, a test suite, or editor debugging, scaffold a package:
+
+```console
+$ noeta init hello
+  created noeta.toml
+  created src/main.noe
+  created .gitignore
+  created .vscode/launch.json
+  created .vscode/extensions.json
+  created AGENTS.md
+  created SYNTAX.md
+  created git repository
+initialized Noeta package `local/hello` in hello
+$ noeta test hello/src/main.noe
+running 2 tests on 2 threads
+  ok    greets
+  ok    greets_noeta
+
+2 passed, 0 failed, 2 total
+```
+
+The scaffold works before you edit a line:
+
+- **`noeta.toml`** — the package identity, the `[dependencies]` table (add one with `noeta add`), and two build targets: `development` with the dev tiers (`@test`, `@bench`, `@doc`, `@debug`) live, and `production` as an explicit name for the tier-free baseline.
+- **`src/main.noe`** — a small entry file that exercises all four tiers, so `run`, `test`, `bench`, and `doc` each have something to do immediately.
+- **`.vscode/`, `AGENTS.md`, `SYNTAX.md`** — run/debug profiles for the [editor extension](Editor-and-AI-Tooling), and the docs an AI agent needs to drive the project.
+
+`noeta init` never overwrites an existing file, so it is also safe to run in a directory that already has code. The full scaffold is documented at [The CLI](The-CLI#noeta-init); the manifest it writes on the [`noeta.toml` Manifest](Manifest) page.
+
+## 6 · The rest of the toolchain
 
 The `noeta` binary is more than a runner. In brief:
 
@@ -127,3 +158,4 @@ Run `noeta <command> --help` for the flags of any command.
 - **[Language Tour](Language-Tour)** — learn the whole language by example.
 - **[The Type System](Type-System)** — how types, inference, unions, and `dyn` fit together.
 - **[Standard Library](Standard-Library)** — the built-in types and modules you will reach for.
+- **[The `noeta.toml` Manifest](Manifest)** and **[Package Registries](Package-Registries)** — dependencies, build targets, and where packages come from.
