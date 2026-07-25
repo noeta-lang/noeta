@@ -48,7 +48,7 @@ The quickest taste is the **[playground](https://play.noeta.dev)** — the real 
 One line, on Linux or macOS (x86_64/aarch64) — downloads the latest [release](https://github.com/noeta-lang/noeta/releases), verifies its checksum, and installs to `~/.local/bin`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/noeta-lang/noeta/main/install.sh | sh
+curl -fsSL https://noeta.dev/install | sh
 ```
 
 `--version vX.Y.Z` pins a release; `--to <dir>` (or `NOETA_INSTALL_DIR`) changes the destination. Then:
