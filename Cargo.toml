@@ -110,6 +110,11 @@ tokio = { version = "1", features = ["rt", "fs", "io-util", "time", "net"] }
 # executor path with a genuine future; `rustls-tls` keeps it portable (no system OpenSSL). The
 # deterministic sandbox has its own pure responder and pulls none of this in.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# `noeta upgrade` (toolchain self-update): unpack the release `noeta-<tag>-<target>.tar.gz`
+# artifact. `flate2` was already in the tree transitively (compression codecs, `object`); `tar` is a new
+# addition — the lightest maintained tar reader, used only by the CLI's upgrade verb.
+flate2 = "1"
+tar = "0.4"
 # OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
 # real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
 getrandom = "0.3"

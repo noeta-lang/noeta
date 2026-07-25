@@ -51,7 +51,7 @@ One line, on Linux or macOS (x86_64/aarch64) — downloads the latest [release](
 curl -fsSL https://noeta.dev/install | sh
 ```
 
-`--version vX.Y.Z` pins a release; `--to <dir>` (or `NOETA_INSTALL_DIR`) changes the destination. Then:
+`--version vX.Y.Z` pins a release; `--to <dir>` (or `NOETA_INSTALL_DIR`) changes the destination. Upgrade later with `noeta upgrade`. Then:
 
 ```sh
 echo 'echo "hello"' > hello.noe

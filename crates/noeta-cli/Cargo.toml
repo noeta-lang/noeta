@@ -54,6 +54,12 @@ noeta-pm = { workspace = true, features = ["fmt-config", "registry-http", "prove
 noeta-mcp = { workspace = true }
 sha2 = { workspace = true }
 clap = { workspace = true }
+# `noeta upgrade` (toolchain self-update): fetch the latest GitHub release and swap the running
+# binary. Blocking reqwest shares the rustls stack the CLI already compiles (noeta-pm's registry
+# client uses the same pattern); flate2 + tar unpack the release artifact.
+reqwest = { workspace = true, features = ["blocking"] }
+flate2 = { workspace = true }
+tar = { workspace = true }
 # `--watch` restart-on-change dev loop (server-hmr W0).
 notify = { workspace = true }
 toml = { workspace = true }
@@ -77,6 +83,11 @@ predicates = { workspace = true }
 noeta-pm = { workspace = true, features = ["keyless-test-fixtures"] }
 # The advisory-feed e2e signs a mock feed the client verifies (namespace-protection #1).
 ed25519-dalek = { workspace = true }
+# The `noeta upgrade` e2e builds a release-shaped tarball fixture (tar.gz + SHA256SUMS) that a
+# local HTTP stub serves to the env-seam-redirected upgrade flow.
+flate2 = { workspace = true }
+tar = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

@@ -25,3 +25,4 @@ mod repl;
 mod run;
 mod targets;
 mod test_runner;
+mod upgrade;

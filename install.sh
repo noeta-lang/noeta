@@ -1,5 +1,6 @@
 #!/bin/sh
 # Noeta installer — downloads the released `noeta` binary for this machine and puts it on PATH.
+# Once installed, later releases are one `noeta upgrade` away — this script is only needed once.
 #
 #   curl -fsSL https://raw.githubusercontent.com/noeta-lang/noeta/main/install.sh | sh
 #
@@ -23,7 +24,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --to) INSTALL_DIR="$2"; shift 2 ;;
-    -h|--help) sed -n '2,12p' "$0" 2>/dev/null || true; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0" 2>/dev/null || true; exit 0 ;;
     *) fail "unknown option \`$1\` (try --version <tag>, --to <dir>)" ;;
   esac
 done
@@ -56,6 +57,13 @@ if [ -z "$VERSION" ]; then
     | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   [ -n "$VERSION" ] || fail "could not resolve the latest release (no releases yet, or GitHub API unreachable) — pass --version vX.Y.Z"
 fi
+
+# Prereleases are never installed — same definition as the release workflow: any `-` in the tag
+# (v1.2.0-rc.1, v1.2.0-alpha). The latest-release API already excludes them; this also guards an
+# explicit --version/NOETA_VERSION.
+case "$VERSION" in
+  *-*) fail "prerelease builds are not installable via install.sh (requested \`$VERSION\`) — only proper releases (vX.Y.Z) can be installed" ;;
+esac
 
 DIST="noeta-$VERSION-$TARGET"
 BASE="https://github.com/$REPO/releases/download/$VERSION"

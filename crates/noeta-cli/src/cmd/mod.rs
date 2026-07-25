@@ -16,3 +16,4 @@ pub(crate) mod run;
 pub(crate) mod serve;
 pub(crate) mod servers;
 pub(crate) mod test;
+pub(crate) mod upgrade;
