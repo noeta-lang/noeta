@@ -57,6 +57,68 @@ resolved from any registry, so a `[registries]` entry can't shadow the toolchain
 The three forge shorthands all normalize to one base URL; `github:`/`gitlab:` are just convenience
 over `git:`.
 
+## Publishing to the hosted registry
+
+The hosted registry (`registry.noeta.dev`, or any deployment of the registry service) is still an
+index — publishing uploads no code. `noeta publish` records *identity + version → git coordinates*
+plus a signed attestation, and consumers keep fetching your source from your repo. Submitting a
+package is three steps; the first happens once per scope.
+
+### 1 · Claim your scope
+
+A scope — the `company` half of `company/package` — is claimed **self-service and squat-proof**: you
+can only claim the scope whose name matches an identity you prove.
+
+```sh
+noeta claim acme            # prove you are the GitHub org/user `acme`
+```
+
+In GitHub Actions (with `id-token: write` granted) the ambient OIDC token is the proof — zero-config.
+On a laptop the command falls back to the GitHub **device flow**: it prints a URL and a code, and you
+authorize in a browser. Alternatively, `noeta claim acme --domain acme.dev` proves control of a
+domain whose first label is the scope, by serving `https://acme.dev/.well-known/noeta-registry.txt`
+containing `noeta-scope=acme`.
+
+On success a **publish token** is bound to the scope and printed **once** — save it:
+
+```sh
+export NOETA_REGISTRY_TOKEN=…       # what `noeta publish` authenticates with
+```
+
+Re-running `noeta claim` as the same proven identity rotates the token; any other identity is
+refused — ownership never transfers implicitly. Full flag reference at
+[The CLI](The-CLI#noeta-claim).
+
+### 2 · Tag the release
+
+A release is a `v<semver>` git tag on a repo consumers can reach; the `noeta.toml` at that tag is
+the release's manifest (a published package may depend only via the registry — `path`/`git`
+dependencies are rejected at publish).
+
+```sh
+git tag v1.2.0
+git push --tags
+```
+
+### 3 · Publish
+
+```sh
+noeta publish --git https://github.com/acme/greet    # tag defaults to v<version>
+```
+
+This resolves the tag to its commit SHA, pins *`acme/greet` 1.2.0 → URL + tag + commit* into the
+index, and **signs an attestation** binding name + version to that commit — keyless and zero-config
+in CI, via `--interactive` browser sign-in or a [`noeta key new`](The-CLI#noeta-key) key file on a
+laptop (see [Package Provenance](Package-Provenance) for the trade-offs). A published version is
+**immutable**. Your package then appears at `https://registry.noeta.dev/acme/greet` — readme,
+versions, and API docs.
+
+Once the scope's releases are signed, harden it so a leaked token alone can't publish:
+
+```sh
+noeta scope require-provenance acme
+```
+
 ## Git-forge registries
 
 The convention is Go-module-like:
@@ -76,17 +138,18 @@ The convention is Go-module-like:
 - **The commit is pinned.** The tag's commit SHA is recorded in `noeta.lock`, so a later build fetches
   that exact commit — a moved tag is caught.
 
-### Publishing
+### Publishing to a git forge
 
-There is no publish command and no upload: **a release is a pushed tag.**
+There is no publish command, no upload, and no scope to claim: **a release is a pushed tag.**
 
 ```sh
 git tag v1.2.0
 git push --tags
 ```
 
-That's the whole publish flow for a git-forge registry. (`noeta publish` targets the hosted index and
-is refused for a git forge.)
+That's the whole publish flow for a git-forge registry. (`noeta publish` and `noeta claim` target the
+hosted index and are refused for a git forge — see
+[publishing to the hosted registry](#publishing-to-the-hosted-registry) above.)
 
 ## Authenticating private repos
 
@@ -132,9 +195,12 @@ hosted registry (or a mirror of it) rather than a bare git forge — see
 | `NOETA_GIT_FORGE_CACHE` | Where git-forge bare clones are cached (default: the toolchain cache dir) |
 | `NOETA_GITHUB_TOKEN` | A token to authenticate `github.com` git access (CI) |
 | `NOETA_GITHUB_AUTH_HOST` | Scope the token's auth header at a different host (self-hosted GitHub-compatible forge) |
+| `NOETA_REGISTRY_TOKEN` | The scope's publish token (bound by `noeta claim`) — authenticates `noeta publish`, `noeta scope`, and publisher advisories |
+| `NOETA_GITHUB_CLIENT_ID` | The registry's public GitHub OAuth client id — enables the laptop device flow for `noeta claim` |
+| `NOETA_REGISTRY_AUDIENCE` | The OIDC audience the registry expects for claims (default `noeta-registry`) |
 
 ## See also
 
 - [Package Provenance](Package-Provenance) — signed attestations, transparency log, advisories
 - [Modules & Visibility](Modules) — how `use` resolves the packages you depend on
-- [The `noeta` CLI](The-CLI) — `noeta add`, `noeta publish`, and resolution commands
+- [The `noeta` CLI](The-CLI) — `noeta add`, `noeta claim`, `noeta publish`, and resolution commands

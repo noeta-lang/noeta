@@ -105,8 +105,11 @@ $ noeta key new                  # writes noeta-signing.key, prints the public k
 $ noeta publish --git … --tag …  # signs if NOETA_SIGNING_KEY or ./noeta-signing.key exists
 ```
 
-Register the public key with your registry scope. Consumers verify signatures against it and pin
-it on first use. `--key` forces this path even when an ambient CI identity is present.
+Register the public key with your registry scope — today a registry-operator step (the self-service
+[`noeta claim`](The-CLI#noeta-claim) flow binds the scope's *publish token*, not a signing key; send
+the printed public key to the operator of the registry you publish to). Consumers verify signatures
+against it and pin it on first use. `--key` forces this path even when an ambient CI identity is
+present.
 
 ## Trust-on-first-use and downgrade protection
 

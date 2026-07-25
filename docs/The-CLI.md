@@ -20,7 +20,9 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta mcp`](Editor-and-AI-Tooling) | The agent-native MCP server, over stdio (for AI tooling; see [Editor & AI Tooling](Editor-and-AI-Tooling)). |
 | [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
 | [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
+| [`noeta claim`](#noeta-claim) | Claim a registry scope self-service — prove your GitHub identity (or a domain) and get the publish token. |
 | [`noeta publish`](#noeta-publish) | Publish a tagged release of your package to the registry, signed ([provenance](Package-Provenance)). |
+| [`noeta scope`](#noeta-scope) | Manage a scope you own — e.g. require verified provenance on every release. |
 | [`noeta audit`](#noeta-audit) | Report the dependency tree's trust footprint — native/command grants, pinned provenance, and advisory hits by tier. |
 | [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, or list/promote the report queue. |
 | [`noeta watch-scope`](#noeta-watch-scope) | Monitor a scope's advisory transparency log for silent suppression or rewrite. |
@@ -508,9 +510,9 @@ All three accept `--target <NAME>`, which acts as a **gate**: if the named `noet
 
 ---
 
-## Packages: `publish`, `audit`, `key`
+## Packages: `claim`, `publish`, `scope`, `audit`, `key`
 
-Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grants in `[trust]`) and resolve automatically on `run`/`build`/`check` — there is no separate install step; the resolved pins live in `noeta.lock` (commit it). These three verbs are the *publisher/consumer trust* surface. The trust model behind them — attestations, the two signing roots, pinning, downgrade protection — is documented on [Package Provenance](Package-Provenance).
+Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grants in `[trust]`) and resolve automatically on `run`/`build`/`check` — there is no separate install step; the resolved pins live in `noeta.lock` (commit it). These verbs are the *publisher/consumer trust* surface. The trust model behind them — attestations, the two signing roots, pinning, downgrade protection — is documented on [Package Provenance](Package-Provenance); the end-to-end submission walkthrough on [Package Registries](Package-Registries#publishing-to-the-hosted-registry).
 
 ### The manifest: `[package]` and dependency forms
 
@@ -544,6 +546,19 @@ The **dependency key** (`util`, `http`, …) is the import root you address the 
 
 **Editions** pin the language/ABI semantics a package is written against, so a package can evolve on its own cadence and a newer toolchain still compiles it under *its* edition. `edition` is validated against the editions this toolchain understands (an unknown one is a manifest error); omitting it uses the current edition. Each package's edition is recorded in `noeta.lock`, and the toolchain keys its compiled-bytecode cache on it — so switching a package's edition never serves a stale artifact.
 
+### `noeta claim`
+
+```text
+noeta claim <SCOPE> [--token <TOKEN>] [--audience <AUDIENCE>] [--domain <DOMAIN>]
+```
+
+Claims a registry **scope** — the `company` half of `company/package` — self-service and **squat-proof**: you can only claim the scope whose name matches an identity you prove. Two proof paths:
+
+- **GitHub (default).** In GitHub Actions (grant `id-token: write`), the ambient OIDC token proves the workflow runs under the org/user of the scope's name — zero-config. On a laptop, it falls back to the GitHub **device flow**: a URL + code is printed, you authorize in a browser. The device flow needs the registry's public OAuth client id in `NOETA_GITHUB_CLIENT_ID` (the registry operator publishes it).
+- **`--domain <domain>`.** Prove control of a domain whose first label is the scope (`acme.dev` for `acme`): the registry fetches `https://<domain>/.well-known/noeta-registry.txt` and expects `noeta-scope=<scope>`.
+
+On success a **publish token** is bound to the scope — a given `--token`, or a freshly minted one printed **once** (save it; `noeta publish` reads it from `NOETA_REGISTRY_TOKEN`). Re-claiming as the *same* proven identity rotates the token; any other identity is refused with a conflict — ownership never transfers implicitly. Reserved namespaces (`std`, `noeta`, `core`) are never claimable, and a first-party scope only by its designated org. Claiming targets the hosted registry the scope routes to (`[registries]`, else `NOETA_REGISTRY_URL`) — a git-forge registry has no claim endpoint.
+
 ### `noeta publish`
 
 ```text
@@ -562,7 +577,15 @@ How it signs — an explicit flag wins, then the environment decides:
 | A key file exists (`NOETA_SIGNING_KEY` or `./noeta-signing.key`) | **Key-based** Ed25519 — `[signed]`. |
 | None of the above | `[UNSIGNED]` (resolves, but consumers can't verify it). |
 
-A published version is **immutable** — re-publishing the same version with different coordinates is rejected. A package with `path`/`git` dependencies is rejected at publish (consumers couldn't resolve them); depend via the registry. Publishing to the hosted registry needs `NOETA_REGISTRY_TOKEN`; `NOETA_REGISTRY_URL` selects it (otherwise the file-backed local index is used — offline development and tests).
+A published version is **immutable** — re-publishing the same version with different coordinates is rejected. A package with `path`/`git` dependencies is rejected at publish (consumers couldn't resolve them); depend via the registry. Publishing to the hosted registry needs `NOETA_REGISTRY_TOKEN` (bound by [`noeta claim`](#noeta-claim)); `NOETA_REGISTRY_URL` selects it (otherwise the file-backed local index is used — offline development and tests).
+
+### `noeta scope`
+
+```text
+noeta scope require-provenance <SCOPE> [--root <key|keyless>] [--off]
+```
+
+Manages the publishing policy of a scope you own, authenticated with the scope's publish token (`NOETA_REGISTRY_TOKEN`) against `NOETA_REGISTRY_URL`. `require-provenance` makes the registry reject any release under the scope that doesn't carry verified provenance — so a leaked publish token *alone* can no longer push a release. `--root` narrows which trust root satisfies it (`key` for an Ed25519 signature, `keyless` for a Sigstore bundle; omitted, either does); `--off` lifts the requirement. See [Package Provenance](Package-Provenance).
 
 ### `noeta audit`
 
