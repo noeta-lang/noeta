@@ -64,8 +64,11 @@
 
 ; An expression tier `@name { text ${hole} }`: the `@name` reads like a decorator, its prose runs
 ; are string-like, and each `${…}` hole is highlighted as code by the string-interpolation rules
-; above (the `interpolation` node is shared).
-(expr_tier_block "@" @attribute name: (identifier) @attribute)
+; above (the `interpolation` node is shared). The name is `_`, not `(identifier)`: without a
+; per-project `project-tiers.json` overlay the `name` field holds only the unreachable NUL
+; sentinel token (an anonymous node), so `name: (identifier)` is a statically impossible pattern;
+; with an overlay each tier name is aliased to `identifier` and `_` still matches it.
+(expr_tier_block "@" @attribute name: _ @attribute)
 (expr_tier_block (text_segment) @string)
 
 ; --------------------------------------------------------------------- keywords

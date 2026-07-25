@@ -15,6 +15,9 @@ name: CI
 #   - wasm   : the portability invariant behind the WASM target (plans/wasm/): the interpreter
 #              pipeline must keep checking on wasm32-wasip1 — no tokio/threads/Cranelift/getrandom
 #              may creep onto the default path.
+#   - editors: the editor-tooling suites — the tree-sitter grammar (static corpus + the per-project
+#              overlay harness, parser regenerated in CI) and the VS Code extension's TextMate
+#              grammar tests (indent + interpolation scopes).
 
 on:
   push:
@@ -251,3 +254,33 @@ jobs:
       # crates that opt out of the workspace `unsafe_code = "forbid"` for the refcount/collector paths.
       - name: cargo miri test (noeta-value, noeta-gc)
         run: cargo miri test -p noeta-value -p noeta-gc --locked
+
+  editors:
+    name: Editor tooling (tree-sitter grammar + VS Code extension)
+    runs-on: ubuntu-latest
+    # Like every job in this file, this also gates releases: release.yml reuses the whole workflow
+    # via `workflow_call`, so editor-tooling drift (grammar vs queries, TextMate scopes) blocks a
+    # tag from shipping just like a failing oracle would.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # The VS Code extension's TextMate-grammar tests: indent rules and the string-interpolation
+      # scope assertions (vscode-textmate/oniguruma driven, no VS Code host needed).
+      - name: VS Code extension tests
+        working-directory: editors/vscode-noeta
+        run: |
+          npm ci
+          npm test
+      # The tree-sitter grammar. `src/parser.c` is generated and gitignored (only the hand-written
+      # `src/scanner.c` is tracked), so CI MUST `tree-sitter generate` before testing. `npm test`
+      # then runs the static corpus (also validating queries/*.scm against the compiled grammar)
+      # plus the per-project overlay harness (test/project/run.js), which regenerates with custom
+      # tiers in a temp dir and asserts generation is deterministic.
+      - name: tree-sitter grammar tests
+        working-directory: editors/tree-sitter-noeta
+        run: |
+          npm ci
+          npm run generate
+          npm test
