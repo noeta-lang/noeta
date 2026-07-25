@@ -475,19 +475,63 @@ fn quote(s: &str) -> String {
     crate::toml_quote(s)
 }
 
-/// Open the registry index a resolve/publish should use (package-manager Phase 4, S4). With the
-/// `registry-http` feature and `NOETA_REGISTRY_URL` set, this is the **networked** [`HttpIndex`]
-/// (the hosted index); otherwise the file-backed [`LocalIndex`] (offline / tests). A future default
-/// production URL flips the else-branch once the hosted registry is live.
+/// The **built-in default registry** — the hosted production index a bare toolchain (no
+/// `[registries]` mapping, no environment override) resolves from and publishes to.
+pub const DEFAULT_REGISTRY_URL: &str = "https://registry.noeta.dev";
+
+/// Where [`open_default`] routes, decided by the two environment overrides. Split out from the
+/// environment reads so the precedence is unit-testable without mutating process env (env vars are
+/// process-global and tests run in parallel).
+///
+/// A build without the `registry-http` feature has no HTTP client, so it collapses every route to
+/// the file-backed [`LocalIndex`] regardless of what this returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultRoute {
+    /// `NOETA_REGISTRY_URL` is set — an explicit hosted index (highest environment precedence).
+    EnvUrl(std::ffi::OsString),
+    /// `NOETA_REGISTRY_DIR` is set — the file-backed [`LocalIndex`] (offline / tests).
+    LocalDir,
+    /// Nothing is set — the built-in hosted registry, [`DEFAULT_REGISTRY_URL`].
+    Hosted,
+}
+
+/// The [`open_default`] routing decision: `NOETA_REGISTRY_URL` wins, then `NOETA_REGISTRY_DIR`
+/// (the local-index override), then the built-in hosted default.
+pub fn default_route(env_url: Option<std::ffi::OsString>, local_dir: bool) -> DefaultRoute {
+    match env_url {
+        Some(url) => DefaultRoute::EnvUrl(url),
+        None if local_dir => DefaultRoute::LocalDir,
+        None => DefaultRoute::Hosted,
+    }
+}
+
+/// Open the registry index a resolve/publish should use when no `[registries]` mapping routes the
+/// scope (package-manager Phase 4, S4). Precedence: `NOETA_REGISTRY_URL` (an explicit hosted
+/// index), then `NOETA_REGISTRY_DIR` (the file-backed [`LocalIndex`] — offline / tests), then the
+/// **built-in hosted registry** at [`DEFAULT_REGISTRY_URL`] — the production index is live, so the
+/// bare default is networked. A build without the `registry-http` feature has no HTTP client and
+/// always opens the local index.
 pub fn open_default() -> Result<Box<dyn Index>, PmError> {
     #[cfg(feature = "registry-http")]
-    if let Some(url) = std::env::var_os("NOETA_REGISTRY_URL") {
-        let base = url
-            .into_string()
-            .map_err(|_| PmError::Network("NOETA_REGISTRY_URL is not valid UTF-8".to_string()))?;
-        return Ok(Box::new(HttpIndex::new(base)?));
+    {
+        match default_route(
+            std::env::var_os("NOETA_REGISTRY_URL"),
+            std::env::var_os("NOETA_REGISTRY_DIR").is_some(),
+        ) {
+            DefaultRoute::EnvUrl(url) => {
+                let base = url.into_string().map_err(|_| {
+                    PmError::Network("NOETA_REGISTRY_URL is not valid UTF-8".to_string())
+                })?;
+                Ok(Box::new(HttpIndex::new(base)?))
+            }
+            DefaultRoute::LocalDir => Ok(Box::new(LocalIndex::open()?)),
+            DefaultRoute::Hosted => Ok(Box::new(HttpIndex::new(DEFAULT_REGISTRY_URL)?)),
+        }
     }
-    Ok(Box::new(LocalIndex::open()?))
+    #[cfg(not(feature = "registry-http"))]
+    {
+        Ok(Box::new(LocalIndex::open()?))
+    }
 }
 
 /// Open the index for a `[registries]` source (private-registries arc): `None` = the environment
@@ -931,6 +975,19 @@ impl HttpIndex {
                 "malformed transparency-log consistency proof: {err}"
             ))
         })
+    }
+}
+
+/// The override reminder appended to a *default*-registry network failure: a user who never chose
+/// a registry should learn, right where the resolve fails, that the built-in default is what was
+/// tried and how to point elsewhere. Empty for an explicitly configured base (they already know).
+#[cfg(feature = "registry-http")]
+fn default_override_hint(base: &str) -> &'static str {
+    if base == DEFAULT_REGISTRY_URL {
+        " (the built-in default registry — override it with NOETA_REGISTRY_URL or a `[registries]` \
+         mapping in noeta.toml)"
+    } else {
+        ""
     }
 }
 
@@ -1677,11 +1734,16 @@ pub fn fetch_github_oidc(audience: &str) -> Result<Option<String>, PmError> {
 impl Index for HttpIndex {
     fn releases(&self, name: &str) -> Result<Vec<Release>, PmError> {
         let resp = self.client.get(self.url_for(name)).send().map_err(|err| {
-            PmError::Network(format!("registry request for `{name}` failed: {err}"))
+            PmError::Network(format!(
+                "registry request for `{name}` at {} failed: {err}{}",
+                self.base,
+                default_override_hint(&self.base)
+            ))
         })?;
         if !resp.status().is_success() {
             return Err(PmError::Network(format!(
-                "registry returned {} for `{name}`",
+                "registry at {} returned {} for `{name}`",
+                self.base,
                 resp.status()
             )));
         }
@@ -1926,6 +1988,46 @@ impl Index for HttpIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The default-registry routing (v0.2.0 flip): with no overrides the bare toolchain resolves
+    // from the hosted production index. These assert on the pure routing decision + the constant —
+    // never a live network call — and stay parallel-safe by passing the would-be env values in
+    // rather than mutating process env.
+    #[test]
+    fn bare_default_routes_to_the_hosted_registry() {
+        assert_eq!(default_route(None, false), DefaultRoute::Hosted);
+        assert_eq!(DEFAULT_REGISTRY_URL, "https://registry.noeta.dev");
+    }
+
+    #[test]
+    fn noeta_registry_url_wins_over_everything() {
+        let url = std::ffi::OsString::from("https://registry.example.com");
+        // Even with the local-dir override also set, the explicit URL takes precedence.
+        assert_eq!(
+            default_route(Some(url.clone()), true),
+            DefaultRoute::EnvUrl(url.clone())
+        );
+        assert_eq!(
+            default_route(Some(url.clone()), false),
+            DefaultRoute::EnvUrl(url)
+        );
+    }
+
+    #[test]
+    fn noeta_registry_dir_stays_above_the_hosted_fallback() {
+        // The local-index override tests and offline use rely on must keep beating the hosted
+        // default — a `NOETA_REGISTRY_DIR` run must never touch the network.
+        assert_eq!(default_route(None, true), DefaultRoute::LocalDir);
+    }
+
+    #[cfg(feature = "registry-http")]
+    #[test]
+    fn default_network_failures_name_the_url_and_the_overrides() {
+        assert!(default_override_hint(DEFAULT_REGISTRY_URL).contains("NOETA_REGISTRY_URL"));
+        assert!(default_override_hint(DEFAULT_REGISTRY_URL).contains("[registries]"));
+        // An explicitly configured registry gets no "did you mean to override?" noise.
+        assert_eq!(default_override_hint("https://registry.example.com"), "");
+    }
 
     fn mem(name: &str) -> LocalIndex {
         let dir = std::env::temp_dir().join(format!("noeta_registry_test_{name}"));

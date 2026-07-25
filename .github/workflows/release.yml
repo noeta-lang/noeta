@@ -46,6 +46,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A released binary composes native-package toolchains at `tag = v<CARGO_PKG_VERSION>`, so the
+      # binary's baked-in version and the tag it ships under must match EXACTLY — prerelease suffix
+      # included (a `v0.2.0-rc.1` tag needs workspace version `0.2.0-rc.1`). A mismatch would ship a
+      # binary that composes against a different toolchain tag than the one it was built from.
+      - name: Guard tag matches the workspace version
+        shell: bash
+        run: |
+          WORKSPACE_VERSION="$(awk -F'"' '/^\[/{in_ws = ($0 == "[workspace.package]")} in_ws && /^version = /{print $2; exit}' Cargo.toml)"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [[ -z "$WORKSPACE_VERSION" ]]; then
+            echo "::error::could not read [workspace.package] version from Cargo.toml"
+            exit 1
+          fi
+          if [[ "$TAG_VERSION" != "$WORKSPACE_VERSION" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${WORKSPACE_VERSION} — bump [workspace.package] version and tag together (tag v${WORKSPACE_VERSION}, or fix the version and re-tag)"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches workspace version ${WORKSPACE_VERSION}"
+
       - name: Release metadata
         id: meta
         shell: bash

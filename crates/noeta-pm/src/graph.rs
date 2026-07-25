@@ -970,8 +970,10 @@ impl Walker<'_> {
 
     /// The registry index for `company`'s packages, opened on first use and cached (private-registries
     /// arc). The `[registries]` map routes the scope to its source — a specific hosted registry, a
-    /// GitHub org, or (unmapped) the environment default (`NOETA_REGISTRY_URL` + `registry-http`, else
-    /// the local index). Two scopes on the same source share one client.
+    /// GitHub org, or (unmapped) the default chain: `NOETA_REGISTRY_URL`, then `NOETA_REGISTRY_DIR`
+    /// (the local index), then the built-in hosted registry at `registry.noeta.dev` (`registry-http`
+    /// builds; without the HTTP client, always the local index). Two scopes on the same source share
+    /// one client.
     fn index_for(&mut self, company: &str) -> Result<&dyn crate::registry::Index, PmError> {
         let source = self.registries.source_for(company);
         let key = registry_cache_key(source);

@@ -170,7 +170,9 @@ The target to build is chosen at the command line (`--target`), not in the manif
 ## `[registries]` — routing scopes to registries
 
 Route a scope to the registry its packages resolve from, with an optional `default` for the rest.
-Fully covered in [Package Registries](Package-Registries).
+Unmapped scopes resolve from the built-in default — the hosted registry at `registry.noeta.dev` —
+unless `[registries].default` or the `NOETA_REGISTRY_URL`/`NOETA_REGISTRY_DIR` environment
+overrides say otherwise. Fully covered in [Package Registries](Package-Registries).
 
 ```toml
 [registries]

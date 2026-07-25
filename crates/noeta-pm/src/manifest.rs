@@ -58,8 +58,8 @@ pub struct Manifest {
 /// registry that scope's packages resolve from, plus an optional `default` for every other scope. Lets
 /// a project mix the public hosted registry with private ones (e.g. a whole GitHub org) without making
 /// everything private: `acme/*` can come from `github:acme` while everything else stays on the default.
-/// Empty = the single default registry (`NOETA_REGISTRY_URL` or the local index) for everything, i.e.
-/// today's behavior.
+/// Empty = the single default registry for everything — the built-in hosted index at
+/// `registry.noeta.dev`, or the `NOETA_REGISTRY_URL`/`NOETA_REGISTRY_DIR` environment overrides.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Registries {
     /// The fallback for scopes with no explicit mapping. `None` = the environment default.

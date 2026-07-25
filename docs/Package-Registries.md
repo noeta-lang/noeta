@@ -9,8 +9,10 @@ group, or a self-hosted Gitea/Forgejo server is a collection of repos with tags 
 what an index needs. So you can point a scope at a git forge and resolve packages straight from it,
 public or private, with no separate registry service to run.
 
-By default every dependency resolves from one registry (the hosted service at `NOETA_REGISTRY_URL`,
-or the local file index offline). The `[registries]` table lets you route **per scope** instead.
+By default every dependency resolves from one registry — the built-in hosted service at
+`registry.noeta.dev`. Point the default elsewhere with `NOETA_REGISTRY_URL` (another hosted
+registry) or `NOETA_REGISTRY_DIR` (a local file index, used offline and in tests). The
+`[registries]` table lets you route **per scope** instead.
 
 ## The `[registries]` table
 
@@ -191,7 +193,8 @@ hosted registry (or a mirror of it) rather than a bare git forge — see
 
 | Variable | Effect |
 |---|---|
-| `NOETA_REGISTRY_URL` | The default hosted registry for unmapped scopes (when no `[registries].default`) |
+| `NOETA_REGISTRY_URL` | Override the built-in default registry (`registry.noeta.dev`) for unmapped scopes (when no `[registries].default`) |
+| `NOETA_REGISTRY_DIR` | Resolve unmapped scopes from a local file-backed index at this directory instead of a hosted registry (offline / tests) |
 | `NOETA_GIT_FORGE_CACHE` | Where git-forge bare clones are cached (default: the toolchain cache dir) |
 | `NOETA_GITHUB_TOKEN` | A token to authenticate `github.com` git access (CI) |
 | `NOETA_GITHUB_AUTH_HOST` | Scope the token's auth header at a different host (self-hosted GitHub-compatible forge) |
