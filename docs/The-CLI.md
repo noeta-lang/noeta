@@ -27,6 +27,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta advisory`](#noeta-advisory) | Issue a publisher advisory for a scope you own, file a public report, or list/promote the report queue. |
 | [`noeta watch-scope`](#noeta-watch-scope) | Monitor a scope's advisory transparency log for silent suppression or rewrite. |
 | [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
+| [`noeta upgrade`](#noeta-upgrade) | Self-update the toolchain binary to the latest release. |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
@@ -627,3 +628,16 @@ noeta key new [--out <PATH>]
 ```
 
 Generates an Ed25519 keypair for the key-based signing path: writes the **private** key (default `noeta-signing.key`, mode 0600 — keep it out of git) and prints the **public** key to register with your registry scope. Only needed if you can't sign keyless (no CI identity and no browser); see [Package Provenance](Package-Provenance) for the trade-offs — keyless has nothing to steal and is publicly monitorable, a key file is neither.
+
+## `noeta upgrade`
+
+```text
+noeta upgrade [--version <vX.Y.Z>] [--check]
+```
+
+Self-updates the **toolchain binary** to the latest [release](https://github.com/noeta-lang/noeta/releases) — the counterpart of [`noeta update`](#packages-claim-publish-scope-audit-key), which re-resolves a *project's dependencies*. It resolves the latest release, downloads the binary for this machine, verifies its SHA-256 checksum against the release's `SHA256SUMS`, and atomically replaces the running executable (staged beside it, then renamed over — safe while `noeta` runs). Already current is a no-op; a successful swap prints the old → new version.
+
+- `--version vX.Y.Z` installs that exact release instead of the latest — downgrades are allowed and labeled as such. **Prereleases are never installed**: the latest-release resolution excludes them by definition, and an explicit prerelease tag (any `-` suffix, e.g. `v0.3.0-rc.1`) is refused.
+- `--check` reports whether an upgrade is available and changes nothing: exit 0 when current, exit 1 when a newer release exists — so scripts can gate on the exit code.
+
+A `noeta` installed by `cargo install` is refused (upgrade that through cargo — the binary belongs to cargo's bookkeeping), and platforms without release binaries are pointed at [building from source](https://github.com/noeta-lang/noeta#building-from-source). Set `GITHUB_TOKEN` (or `GH_TOKEN`) to lift GitHub's unauthenticated API rate limit in CI; it is never required.

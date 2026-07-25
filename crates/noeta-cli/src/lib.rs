@@ -66,6 +66,7 @@ use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
 use cmd::serve::{ext_command_clap, ext_command_dispatch};
 use cmd::servers::{cmd_cache, cmd_dap, cmd_lsp, cmd_mcp, cmd_profile};
 use cmd::test::{call_stmt, cmd_test};
+use cmd::upgrade::cmd_upgrade;
 use output::emit_diagnostics_mapped;
 
 #[derive(Parser)]
@@ -481,6 +482,21 @@ enum Command {
     /// re-fetched at the remote and re-pinned to its current commit SHA, so `update` picks up a
     /// moved tag that a locked build would otherwise reproduce from the old commit.
     Update,
+    /// Self-update the **toolchain binary** from GitHub releases — the counterpart of `update`,
+    /// which re-resolves a *project's dependencies*. Resolves the latest release, verifies the
+    /// artifact's SHA-256 checksum, and atomically replaces the running executable. Prereleases
+    /// are never installed. A cargo-installed `noeta` is refused (upgrade that through cargo);
+    /// unsupported platforms are pointed at building from source.
+    Upgrade {
+        /// Install this exact release tag (e.g. `v0.2.0`) instead of the latest. Downgrades are
+        /// allowed and labeled as such; prerelease tags (any `-` suffix) are refused.
+        #[arg(long, value_name = "vX.Y.Z")]
+        version: Option<String>,
+        /// Only report whether an upgrade is available, changing nothing. Exits 0 when this
+        /// binary is current and 1 when a newer release exists, so scripts can gate on it.
+        #[arg(long, conflicts_with = "version")]
+        check: bool,
+    },
     /// Publish this package to the registry index (package-manager P2.5). Records this package's
     /// `[package]` name + version → its git coordinates so others can depend on it by version. This
     /// is the **client stub**: it writes to the local/offline index (`NOETA_REGISTRY_DIR`); the
@@ -1014,6 +1030,7 @@ pub fn run_cli(
             package.as_deref(),
         ),
         Command::Update => cmd_update(),
+        Command::Upgrade { version, check } => cmd_upgrade(version.as_deref(), check),
         Command::Publish {
             git,
             tag,
