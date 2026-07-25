@@ -115,6 +115,34 @@ impl Debugger for LimitDebugger {
     }
 }
 
+/// Build the always-on liveness debugger for one execution, plus the `Arc` atomics its outcome is
+/// shared through (the concrete debugger is consumed by the run). One seam for every pillar: `run`
+/// installs it on the module run; `eval`/`test` install it on their [`VmSession`] entries — so a
+/// runaway loop is bounded identically wherever code executes (decision #5).
+fn make_limiter(limits: &RunLimits) -> (LimitDebugger, Arc<AtomicU8>, Arc<AtomicU64>) {
+    let tripped = Arc::new(AtomicU8::new(TRIP_NONE));
+    let step_count = Arc::new(AtomicU64::new(0));
+    let debugger = LimitDebugger {
+        steps: 0,
+        max_steps: limits.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
+        deadline: Instant::now()
+            + Duration::from_millis(limits.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
+        tripped: tripped.clone(),
+        step_count: step_count.clone(),
+    };
+    (debugger, tripped, step_count)
+}
+
+/// Which liveness limit tripped, as the caller-facing signal (`"timeout"` / `"step_limit"`), or
+/// `None` when the run finished within budget. The same vocabulary [`RunOutput::limit_hit`] uses.
+fn limit_signal(tripped: &AtomicU8) -> Option<String> {
+    match tripped.load(Ordering::Relaxed) {
+        TRIP_STEPS => Some("step_limit".to_string()),
+        TRIP_TIMEOUT => Some("timeout".to_string()),
+        _ => None,
+    }
+}
+
 /// Run a checked program and report what happened. Gates on the type check first (a program with
 /// errors never runs); then compiles via the salsa `linked_bytecode` query and executes the module
 /// tier-0 against the sandbox (default) or real host, under the always-on liveness limits.
@@ -162,27 +190,14 @@ pub fn run(
     };
 
     let (host, executor) = make_host(real, args).map_err(|e| ErrorData::internal_error(e, None))?;
-    let tripped = Arc::new(AtomicU8::new(TRIP_NONE));
-    let step_count = Arc::new(AtomicU64::new(0));
-    let debugger = LimitDebugger {
-        steps: 0,
-        max_steps: limits.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
-        deadline: Instant::now()
-            + Duration::from_millis(limits.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
-        tripped: tripped.clone(),
-        step_count: step_count.clone(),
-    };
+    let (debugger, tripped, step_count) = make_limiter(limits);
 
     let (result, trace) =
         VmBackend::new().run_module_debug(module, host, executor, Some(Box::new(debugger)));
 
     let cap = limits.output_bytes.unwrap_or(DEFAULT_OUTPUT_BYTES);
     let (stdout, stdout_truncated) = truncate_utf8(result.stdout, cap);
-    let limit_hit = match tripped.load(Ordering::Relaxed) {
-        TRIP_STEPS => Some("step_limit".to_string()),
-        TRIP_TIMEOUT => Some("timeout".to_string()),
-        _ => None,
-    };
+    let limit_hit = limit_signal(&tripped);
     let traceback = (trace.len() >= 2).then(|| noeta_vm::render_trace(&trace, &source_map));
     let diagnostics = map_diagnostics(&source_map, &result.diagnostics);
 
@@ -214,20 +229,41 @@ pub struct EvalOutput {
     pub stdout: String,
     /// Diagnostics from parsing or running the fragment (a parse error, an unknown name, a panic).
     pub diagnostics: Vec<JsonDiagnostic>,
+    /// Set when a liveness limit stopped the evaluation: `"timeout"` or `"step_limit"` (the same
+    /// signal `run` reports). A runaway loop in `expr` (or its `context`) trips this instead of
+    /// hanging.
+    pub limit_hit: Option<String>,
 }
 
 /// Evaluate one expression against an optional `context` (prior bindings/definitions), REPL-style,
 /// via [`VmSession`]. Sandbox by default; `real: true` runs it against the real host. The `context`
 /// runs first as its own session entry, then the expression; a value-producing expression is
 /// additionally re-typed (as the REPL's `:type` does — so a side-effecting expression runs twice).
-pub fn eval(expr: &str, context: Option<&str>, real: bool) -> EvalOutput {
+///
+/// The evaluation is bounded by the always-on liveness limits (decision #5): a step-count + wall-clock
+/// [`LimitDebugger`] is armed on the session, so a runaway loop in `context` or `expr` terminates
+/// in-VM and returns with `limit_hit` set, exactly as a `run` does.
+pub fn eval(expr: &str, context: Option<&str>, real: bool, limits: &RunLimits) -> EvalOutput {
     let mut session = VmSession::new(session_factory(real));
+    let (debugger, tripped, _steps) = make_limiter(limits);
+    session.set_debugger(Some(Box::new(debugger)));
     let ctx_map = SourceMap::new(vec![Source::new(
         SourceId::FIRST,
         "<eval>".to_string(),
         String::new(),
     )]);
     let mut stdout = String::new();
+
+    // A liveness trip during a session entry: the run terminated in-VM (an abort that may leave no
+    // diagnostic), so it is reported explicitly rather than inferred from `diagnostics`.
+    let tripped_out = |stdout: String, hit: String| EvalOutput {
+        ok: false,
+        value: None,
+        r#type: None,
+        stdout,
+        diagnostics: Vec::new(),
+        limit_hit: Some(hit),
+    };
 
     // Run the context (bindings, fn/type definitions) as a first entry; its diagnostics are fatal to
     // the eval (the expression would reference names that never bound).
@@ -240,10 +276,14 @@ pub fn eval(expr: &str, context: Option<&str>, real: bool) -> EvalOutput {
                 r#type: None,
                 stdout,
                 diagnostics: map_diagnostics(&ctx_map, &frag.diagnostics),
+                limit_hit: None,
             };
         }
         let out = session.eval(&frag.program);
         stdout.push_str(&out.stdout);
+        if let Some(hit) = limit_signal(&tripped) {
+            return tripped_out(stdout, hit);
+        }
         if !out.diagnostics.is_empty() {
             return EvalOutput {
                 ok: false,
@@ -251,6 +291,7 @@ pub fn eval(expr: &str, context: Option<&str>, real: bool) -> EvalOutput {
                 r#type: None,
                 stdout,
                 diagnostics: map_diagnostics(&ctx_map, &out.diagnostics),
+                limit_hit: None,
             };
         }
     }
@@ -263,10 +304,14 @@ pub fn eval(expr: &str, context: Option<&str>, real: bool) -> EvalOutput {
             r#type: None,
             stdout,
             diagnostics: map_diagnostics(&ctx_map, &frag.diagnostics),
+            limit_hit: None,
         };
     }
     let out = session.eval(&frag.program);
     stdout.push_str(&out.stdout);
+    if let Some(hit) = limit_signal(&tripped) {
+        return tripped_out(stdout, hit);
+    }
     let diagnostics = map_diagnostics(&ctx_map, &out.diagnostics);
     // Type the value only when the fragment produced one (a trailing bare expression). Re-running a
     // definition/binding entry to type it would redefine it; a value-yielding expression is safe to
@@ -281,6 +326,7 @@ pub fn eval(expr: &str, context: Option<&str>, real: bool) -> EvalOutput {
         r#type,
         stdout,
         diagnostics,
+        limit_hit: None,
     }
 }
 
@@ -309,13 +355,17 @@ pub struct TestCaseResult {
     pub message: Option<String>,
     /// Anything the case printed (useful on a failure).
     pub stdout: String,
+    /// Set when a liveness limit stopped this case: `"timeout"` or `"step_limit"`. A case that trips
+    /// it counts as a failure (a runaway loop is a failing test, not a hang).
+    pub limit_hit: Option<String>,
 }
 
 /// Run a file's `@test` blocks and report each case. Activates the `test` tier over the linked
 /// program, type-checks it once, then runs each case (`setup` + a call to the test fn) as a fresh
 /// [`VmSession`] entry — sandbox by default, `real: true` for the real host. `filter` keeps only
-/// cases whose test name or `#[Group(...)]` contains it.
-pub fn test(p: &Prepared, filter: Option<&str>, real: bool) -> TestOutput {
+/// cases whose test name or `#[Group(...)]` contains it. Each case runs under the always-on liveness
+/// limits (decision #5), so a runaway loop in one case fails that case instead of hanging the suite.
+pub fn test(p: &Prepared, filter: Option<&str>, real: bool, limits: &RunLimits) -> TestOutput {
     let source_map = SourceMap::new(p.sources.clone());
     let empty = |diagnostics| TestOutput {
         ok: false,
@@ -371,11 +421,12 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool) -> TestOutput {
                 status: "skip".to_string(),
                 message: None,
                 stdout: String::new(),
+                limit_hit: None,
             });
             continue;
         }
         for case in expand_cases(test_fn) {
-            let result = run_case(&setup, &case, activated.program.span, real);
+            let result = run_case(&setup, &case, activated.program.span, real, limits);
             match result.status.as_str() {
                 "pass" => passed += 1,
                 _ => failed += 1,
@@ -410,8 +461,15 @@ enum CaseArg {
 }
 
 /// Run one case as a fresh sandbox/real [`VmSession`] entry: `setup` + a call to the test fn (with
-/// its `#[Data]` arg, if any). A diagnostic (assertion/panic) or a nonzero exit is a failure.
-fn run_case(setup: &[Stmt], case: &Case, span: noeta_span::Span, real: bool) -> TestCaseResult {
+/// its `#[Data]` arg, if any). A diagnostic (assertion/panic) or a nonzero exit is a failure; a
+/// liveness-limit trip (a runaway loop) is a failure too, reported through `limit_hit`.
+fn run_case(
+    setup: &[Stmt],
+    case: &Case,
+    span: noeta_span::Span,
+    real: bool,
+    limits: &RunLimits,
+) -> TestCaseResult {
     let args = match &case.arg {
         CaseArg::None => Vec::new(),
         CaseArg::Value(expr) => vec![expr.clone()],
@@ -421,6 +479,7 @@ fn run_case(setup: &[Stmt], case: &Case, span: noeta_span::Span, real: bool) -> 
                 status: "fail".to_string(),
                 message: Some(message.clone()),
                 stdout: String::new(),
+                limit_hit: None,
             };
         }
     };
@@ -429,7 +488,20 @@ fn run_case(setup: &[Stmt], case: &Case, span: noeta_span::Span, real: bool) -> 
     let program = Program { stmts, span };
 
     let mut session = VmSession::new(session_factory(real));
+    let (debugger, tripped, _steps) = make_limiter(limits);
+    session.set_debugger(Some(Box::new(debugger)));
     let out: SessionOutput = session.eval(&program);
+    // A liveness trip terminates the case in-VM (an abort that may leave no diagnostic), so it is
+    // reported explicitly — a runaway test is a failing test, never a hang.
+    if let Some(hit) = limit_signal(&tripped) {
+        return TestCaseResult {
+            name: case.display.clone(),
+            status: "fail".to_string(),
+            message: Some(format!("the test exceeded its liveness limit ({hit})")),
+            stdout: out.stdout,
+            limit_hit: Some(hit),
+        };
+    }
     let passed = out.diagnostics.is_empty() && out.trace.is_empty();
     let message = (!passed).then(|| {
         out.diagnostics
@@ -442,6 +514,7 @@ fn run_case(setup: &[Stmt], case: &Case, span: noeta_span::Span, real: bool) -> 
         status: if passed { "pass" } else { "fail" }.to_string(),
         message,
         stdout: out.stdout,
+        limit_hit: None,
     }
 }
 
@@ -724,16 +797,17 @@ mod tests {
     #[test]
     fn eval_reports_value_and_type() {
         noeta_stdlib::registry::default_seeded();
-        let out = eval("1 + 2", None, false);
+        let out = eval("1 + 2", None, false, &RunLimits::default());
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
         assert_eq!(out.value.as_deref(), Some("3"));
         assert_eq!(out.r#type.as_deref(), Some("int"));
+        assert!(out.limit_hit.is_none());
     }
 
     #[test]
     fn eval_uses_the_context() {
         noeta_stdlib::registry::default_seeded();
-        let out = eval("xs.len()", Some("xs = [10, 20, 30];"), false);
+        let out = eval("xs.len()", Some("xs = [10, 20, 30];"), false, &RunLimits::default());
         assert!(out.ok, "diagnostics: {:?}", out.diagnostics);
         assert_eq!(out.value.as_deref(), Some("3"));
     }
@@ -741,7 +815,7 @@ mod tests {
     #[test]
     fn eval_surfaces_a_parse_error() {
         noeta_stdlib::registry::default_seeded();
-        let out = eval("1 +", None, false);
+        let out = eval("1 +", None, false, &RunLimits::default());
         assert!(!out.ok);
         assert!(!out.diagnostics.is_empty());
     }
@@ -756,12 +830,74 @@ fn add(a: int, b: int): int { return a + b; }
 @test fn fails(): void { assert(add(2, 2) == 5); }
 ";
         let p = prep(src);
-        let out = test(&p, None, false);
+        let out = test(&p, None, false, &RunLimits::default());
         assert!(out.diagnostics.is_empty(), "compile: {:?}", out.diagnostics);
         assert_eq!(out.passed, 1);
         assert_eq!(out.failed, 1);
         assert!(!out.ok);
         let adds = out.cases.iter().find(|c| c.name == "adds").unwrap();
         assert_eq!(adds.status, "pass");
+    }
+
+    #[test]
+    fn eval_stops_an_infinite_loop_at_the_step_limit() {
+        // A runaway loop in an `eval` fragment must trip the liveness bound and RETURN rather than
+        // hang the caller — the gap this fixes. A small step budget makes it fast + deterministic.
+        noeta_stdlib::registry::default_seeded();
+        let limits = RunLimits {
+            max_steps: Some(50_000),
+            ..Default::default()
+        };
+        let out = eval(
+            "mut n = 0;\nwhile true {\n  n = n + 1;\n}\n",
+            None,
+            false,
+            &limits,
+        );
+        assert_eq!(out.limit_hit.as_deref(), Some("step_limit"));
+        assert!(!out.ok);
+    }
+
+    #[test]
+    fn eval_stops_an_infinite_loop_in_the_context() {
+        // The bound covers the `context` entry too (it runs first, as its own session entry).
+        noeta_stdlib::registry::default_seeded();
+        let limits = RunLimits {
+            max_steps: Some(50_000),
+            ..Default::default()
+        };
+        let out = eval(
+            "1",
+            Some("mut n = 0;\nwhile true {\n  n = n + 1;\n}\n"),
+            false,
+            &limits,
+        );
+        assert_eq!(out.limit_hit.as_deref(), Some("step_limit"));
+        assert!(!out.ok);
+    }
+
+    #[test]
+    fn test_stops_an_infinite_loop_case_at_the_step_limit() {
+        // A `@test` case with a runaway loop must fail (via the liveness bound) rather than hang the
+        // suite — the same gap, on the `test`/`run_case` path.
+        noeta_stdlib::registry::default_seeded();
+        let src = "\
+@test fn spins(): void {
+  mut n = 0;
+  while true { n = n + 1; }
+}
+";
+        let p = prep(src);
+        let limits = RunLimits {
+            max_steps: Some(50_000),
+            ..Default::default()
+        };
+        let out = test(&p, None, false, &limits);
+        assert!(out.diagnostics.is_empty(), "compile: {:?}", out.diagnostics);
+        assert_eq!(out.failed, 1);
+        assert!(!out.ok);
+        let spins = out.cases.iter().find(|c| c.name == "spins").unwrap();
+        assert_eq!(spins.status, "fail");
+        assert_eq!(spins.limit_hit.as_deref(), Some("step_limit"));
     }
 }
