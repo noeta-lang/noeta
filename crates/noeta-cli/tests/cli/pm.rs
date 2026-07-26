@@ -982,6 +982,84 @@ fn publishing_a_package_with_a_path_dependency_is_rejected() {
 }
 
 #[test]
+fn publishing_a_manifest_with_a_patch_table_is_rejected() {
+    // Dev-time path override: `[patch]` re-points identities at local trees no consumer has, so a
+    // release must never carry one. Refused up front, before touching git or the registry.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_publish_patch_lint");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+         [patch]\n\"para/db\" = { path = \"../para-db\" }\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&base)
+        .env("NOETA_REGISTRY_DIR", base.join("registry"))
+        .args([
+            "publish",
+            "--git",
+            "https://example.com/acme/lib",
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("non-empty `[patch]` table"))
+        .stderr(predicate::str::contains("para/db"))
+        .stderr(predicate::str::contains("Publish aborted"));
+}
+
+#[test]
+fn a_resolve_with_an_active_patch_is_loud_and_links_the_patched_tree() {
+    // The override must never be silent: every resolve prints a per-patch stderr notice — and the
+    // program really runs the patched tree's code, end to end.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_patch_notice");
+    let _ = std::fs::remove_dir_all(&base);
+    let lib = base.join("lib");
+    let lib_patched = base.join("lib_patched");
+    let app = base.join("app");
+    for (dir, marker) in [(&lib, "original"), (&lib_patched, "patched")] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("noeta.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("api.noe"),
+            format!("namespace lib.api;\npub fn which(): string {{ return \"{marker}\"; }}\n"),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[dependencies]\nlib = { path = \"../lib\" }\n\
+         [patch]\n\"acme/lib\" = { path = \"../lib_patched\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use lib.api.which;\necho which();\n").unwrap();
+
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("patched"))
+        .stderr(predicate::str::contains("[patch] `acme/lib`"));
+    // The lock, if written at all, records no patched state (the only dependency is patched, so
+    // nothing real is pinned).
+    if let Ok(lock) = std::fs::read_to_string(app.join("noeta.lock")) {
+        assert!(
+            !lock.contains("acme/lib"),
+            "no patched pin in the lock: {lock}"
+        );
+    }
+}
+
+#[test]
 fn a_target_scoped_dependency_links_only_under_its_target() {
     // dev-deps D2, finally wired (audit-5 F3): `[targets.<name>.dependencies]` was parsed,
     // validated, and documented — but no production path resolved it, so a declared dev-only

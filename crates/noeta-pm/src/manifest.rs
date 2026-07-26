@@ -52,6 +52,11 @@ pub struct Manifest {
     trust: Trust,
     registries: Registries,
     db: DbConfig,
+    /// The `[patch]` table (dev-time path override): package identity (`company/package`) → the
+    /// local tree that replaces it. Parsed for every manifest, but **honored only from the root
+    /// app's** — the resolver never reads a dependency's `[patch]` (no inheritance, the same
+    /// top-down authority rule as `[trust]`).
+    patch: BTreeMap<String, PathBuf>,
 }
 
 /// The `[registries]` table (private-registries arc) — a map from a **scope** (`company`) to the
@@ -817,6 +822,7 @@ impl Manifest {
         let trust = parse_trust(&table)?;
         let registries = parse_registries(&table)?;
         let db = parse_db(&table)?;
+        let patch = parse_patch(&table)?;
         let mut targets = BTreeMap::new();
 
         let Some(targets_value) = table.get("targets") else {
@@ -827,6 +833,7 @@ impl Manifest {
                 trust,
                 registries,
                 db,
+                patch,
             });
         };
         let targets_table = targets_value
@@ -910,6 +917,7 @@ impl Manifest {
             trust,
             registries,
             db,
+            patch,
         })
     }
 
@@ -936,6 +944,12 @@ impl Manifest {
     /// The declared dependencies, keyed by local **import root** (the dependency-table key).
     pub fn dependencies(&self) -> &BTreeMap<String, Dependency> {
         &self.dependencies
+    }
+
+    /// The `[patch]` overrides (dev-time path override): package identity → the local tree that
+    /// replaces it. Honored by the resolver **only when this is the root app's manifest**.
+    pub fn patch(&self) -> &BTreeMap<String, PathBuf> {
+        &self.patch
     }
 
     /// The active tier names for `target`, merging inherited tiers (`extends`) under this target's
@@ -1454,6 +1468,60 @@ fn parse_registries(table: &toml::Table) -> Result<Registries, String> {
     Ok(registries)
 }
 
+/// Parse the optional `[patch]` table (dev-time path override — Noeta's analog of Cargo's
+/// `[patch]`): each key is a full **package identity** (`"company/package"`, quoted since it
+/// contains a slash), each value a `{ path = "…" }` table naming the local tree that replaces the
+/// identity's declared source during resolution. Only `path` overrides exist — a `git` or
+/// `version` patch is refused with a pointer at the supported form, so the advanced Cargo shapes
+/// stay deliberately out of scope. A built-in scope (`std`/`noeta`/`core`) is served by the
+/// compiler and can never be patched.
+fn parse_patch(table: &toml::Table) -> Result<BTreeMap<String, PathBuf>, String> {
+    let Some(value) = table.get("patch") else {
+        return Ok(BTreeMap::new());
+    };
+    let patch_table = value
+        .as_table()
+        .ok_or("`patch` must be a table of `\"company/package\" = { path = \"…\" }` overrides")?;
+    let mut out = BTreeMap::new();
+    for (key, val) in patch_table {
+        // Validate the identity shape so a typo'd key fails loudly instead of silently patching
+        // nothing (the same rule as a `[trust]` grant).
+        let name = PackageName::parse(key).map_err(|err| format!("`patch.\"{key}\"`: {err}"))?;
+        if crate::reserved::is_builtin(&name.company) {
+            return Err(format!(
+                "`patch.\"{key}\"`: `{}` is a built-in scope served by the compiler and cannot be \
+                 patched",
+                name.company
+            ));
+        }
+        let override_table = val.as_table().ok_or_else(|| {
+            format!(
+                "`patch.\"{key}\"` must be a `{{ path = \"…\" }}` table — only local path \
+                 overrides are supported"
+            )
+        })?;
+        for k in override_table.keys() {
+            if k != "path" {
+                return Err(format!(
+                    "`patch.\"{key}\"` has an unsupported key `{k}` — only `path` overrides are \
+                     supported (no git or version patches)"
+                ));
+            }
+        }
+        let path = override_table
+            .get("path")
+            .and_then(|p| p.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "`patch.\"{key}\"` must carry a string `path` — only local path overrides are \
+                     supported"
+                )
+            })?;
+        out.insert(key.clone(), PathBuf::from(path));
+    }
+    Ok(out)
+}
+
 /// Parse a human duration into seconds for `[trust].publish_cooldown`: an integer with an optional unit
 /// suffix `s`/`m`/`h`/`d` (seconds/minutes/hours/days), e.g. `"24h"`, `"30m"`, `"7d"`, `"3600s"`. A
 /// bare number is seconds. Zero is allowed (a no-op window). Rejects a negative, empty, or malformed
@@ -1669,6 +1737,68 @@ mod tests {
         assert!(
             err.to_string().contains("`db.url` must be a string"),
             "{err}"
+        );
+    }
+
+    // --- `[patch]` (dev-time path override) ----------------------------------------------------
+
+    #[test]
+    fn the_patch_table_parses_identity_keyed_path_overrides() {
+        let m = Manifest::parse(
+            "[dependencies]\ndb = { version = \"^1.0\", package = \"para/db\" }\n\
+             [patch]\n\
+             \"para/db\" = { path = \"../para-db\" }\n\
+             \"acme/http\" = { path = \"/abs/http\" }\n",
+        )
+        .expect("valid");
+        assert_eq!(m.patch().len(), 2);
+        assert_eq!(m.patch()["para/db"], PathBuf::from("../para-db"));
+        assert_eq!(m.patch()["acme/http"], PathBuf::from("/abs/http"));
+        // No `[patch]` table → empty (the common case; parsing is purely additive).
+        assert!(
+            Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n")
+                .unwrap()
+                .patch()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_patch_override_must_be_a_path_table() {
+        // A git patch is deliberately unsupported (only local path overrides exist).
+        let err =
+            Manifest::parse("[patch]\n\"para/db\" = { git = \"https://example.com/para/db\" }\n")
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only `path` overrides are supported"),
+            "{err}"
+        );
+        // A bare version string is not an override either.
+        let err = Manifest::parse("[patch]\n\"para/db\" = \"^2.0\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("only local path overrides"),
+            "{err}"
+        );
+        // A `path` of the wrong type fails loudly.
+        assert!(Manifest::parse("[patch]\n\"para/db\" = { path = 5 }\n").is_err());
+    }
+
+    #[test]
+    fn a_patch_key_must_be_a_package_identity() {
+        let err = Manifest::parse("[patch]\ndb = { path = \"../db\" }\n").unwrap_err();
+        assert!(
+            err.to_string().contains("must be `company/package`"),
+            "the key is a full identity, not an import root: {err}"
+        );
+    }
+
+    #[test]
+    fn a_builtin_scope_cannot_be_patched() {
+        let err = Manifest::parse("[patch]\n\"std/http\" = { path = \"../http\" }\n").unwrap_err();
+        assert!(
+            err.to_string().contains("built-in scope"),
+            "core namespaces are never patchable: {err}"
         );
     }
 

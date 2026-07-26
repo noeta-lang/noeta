@@ -442,6 +442,19 @@ pub(crate) fn cmd_publish(
         );
         return ExitCode::from(1);
     };
+    // A `[patch]` override is dev-only state: it re-points package identities at local trees no
+    // consumer has, so a release carrying one could never resolve the same way twice. Refuse up
+    // front (before touching git), like the path-dependency lint below.
+    if !manifest.patch().is_empty() {
+        let ids: Vec<&str> = manifest.patch().keys().map(String::as_str).collect();
+        eprintln!(
+            "noeta: this manifest has a non-empty `[patch]` table ({}) — a patch is a local \
+             dev-time override and must not travel with a release. Remove the `[patch]` table, \
+             then publish. Publish aborted.",
+            ids.join(", ")
+        );
+        return ExitCode::from(1);
+    }
     let name = format!("{}/{}", pkg.name.company, pkg.name.package);
     let version = pkg.version.clone();
     // The declared license travels with the release into the registry's immutable record (and its
