@@ -55,6 +55,12 @@ build. Omit it and the package makes no claim. It is a courtesy floor, not the c
 contract itself (that is the extension ABI): declare the oldest toolchain you actually test
 against, typically the release current when you publish.
 
+The value is a full SemVer requirement — ranges (`">=0.2, <0.4"`), tilde, exact, and wildcard
+forms all work. Prefer `>=`: a bare `"0.2"` means caret (`>=0.2.0, <0.3.0`), which *also imposes an
+upper bound* and would refuse noeta 0.3 — rarely what a compatibility floor intends. A pre-release
+binary (say `0.3.0-rc.1`) matches as its release triple `0.3.0`, so release candidates are not
+spuriously refused.
+
 **`license`** is checked for SPDX *shape* only — letters, digits, and `` .+()- ``, up to 120
 characters — not validated as real SPDX. It is publisher-asserted: the registry never reads your
 source, so the claim is yours, and the SHA-pinned tree's `LICENSE` file is the ground truth. It is
