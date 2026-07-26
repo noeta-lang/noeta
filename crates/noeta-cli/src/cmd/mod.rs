@@ -3,6 +3,7 @@
 
 pub(crate) mod bench;
 pub(crate) mod build;
+pub(crate) mod cache;
 pub(crate) mod check;
 pub(crate) mod doc;
 pub(crate) mod expand;

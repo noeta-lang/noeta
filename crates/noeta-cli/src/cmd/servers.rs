@@ -1,72 +1,8 @@
-//! The server/daemon verbs (`lsp`/`dap`/`mcp` — thin stdio launchers), the profiler
-//! entry, and the startup-cache inspector.
+//! The server/daemon verbs (`lsp`/`dap`/`mcp` — thin stdio launchers) and the profiler
+//! entry. (The cache inspector grew into its own module, `cmd::cache`.)
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-
-use crate::CacheAction;
-use crate::output::human_bytes;
-
-/// `noeta cache <path|info|clear>` — inspect or clear the transparent startup cache.
-pub(crate) fn cmd_cache(action: &CacheAction) -> ExitCode {
-    let Some(dir) = noeta_cache::Cache::locate() else {
-        eprintln!("noeta: no cache directory could be resolved (set HOME or NOETA_CACHE_DIR)");
-        return ExitCode::from(1);
-    };
-    match action {
-        CacheAction::Path => {
-            println!("{}", dir.display());
-            ExitCode::SUCCESS
-        }
-        CacheAction::Info => {
-            let cap = noeta_cache::max_bytes();
-            let cap_str = if cap == 0 {
-                "unbounded".to_string()
-            } else {
-                human_bytes(cap)
-            };
-            if !dir.exists() {
-                println!("{}\n0 entries, 0 B on disk (cap {cap_str})", dir.display());
-                return ExitCode::SUCCESS;
-            }
-            match noeta_cache::Cache::open_at(dir.clone()).and_then(|c| c.stats()) {
-                Ok((count, bytes)) => {
-                    println!("{}", dir.display());
-                    println!(
-                        "{count} {}, {} on disk (cap {cap_str})",
-                        if count == 1 { "entry" } else { "entries" },
-                        human_bytes(bytes),
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(err) => {
-                    eprintln!("noeta: cannot read cache at {}: {err}", dir.display());
-                    ExitCode::from(1)
-                }
-            }
-        }
-        CacheAction::Clear => {
-            if !dir.exists() {
-                println!("cache is already empty ({})", dir.display());
-                return ExitCode::SUCCESS;
-            }
-            match noeta_cache::Cache::open_at(dir.clone()).and_then(|c| c.clear()) {
-                Ok(n) => {
-                    println!(
-                        "removed {n} cached compilation{} from {}",
-                        if n == 1 { "" } else { "s" },
-                        dir.display()
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(err) => {
-                    eprintln!("noeta: cannot clear cache at {}: {err}", dir.display());
-                    ExitCode::from(1)
-                }
-            }
-        }
-    }
-}
 
 /// Start the Noeta language server over stdio, blocking until the editor client disconnects.
 pub(crate) fn cmd_lsp() -> ExitCode {

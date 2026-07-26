@@ -382,26 +382,39 @@ Cached artifacts live under `~/.cache/noeta/` (XDG: `$XDG_CACHE_HOME/noeta/`; ma
 ### `noeta cache`
 
 ```text
-noeta cache <path|info|clear>
+noeta cache [ls|path|info|clean [--all]|clear]
 ```
 
-Inspect or clear the startup cache.
+Inspect or clean the whole per-user cache. Beyond the `*.noeb` startup-cache entries, the cache root holds two more categories: **composed toolchains** (`compose/` — an app with native dependencies gets its own built toolchain, easily 1–2 GiB each) and **fetched package sources** (`pkg/`). Everything in it is re-derivable, so deleting any of it is always safe — the next run recompiles, recomposes, or refetches what it needs.
 
 | Subcommand | Effect |
 |---|---|
+| `noeta cache` / `noeta cache ls` | Per-category summary (entry counts + sizes); compose entries — the multi-GiB ones — are listed individually with size and last-used time. |
+| `noeta cache clean` | Remove the composed toolchains other toolchain builds left behind (stale versions this binary can never reuse), reporting the bytes reclaimed; this binary's own compositions are kept. |
+| `noeta cache clean --all` | Wipe the whole cache: all composed toolchains, fetched package sources, and cached compilations. |
 | `noeta cache path` | Print the cache directory (whether or not it exists yet). |
-| `noeta cache info` | Show the location, entry count, total size on disk, and the size cap. |
-| `noeta cache clear` | Remove all cached compilations. |
+| `noeta cache info` | Show the startup-cache location, entry count, total size on disk, and the size cap. |
+| `noeta cache clear` | Remove all cached compilations (the `*.noeb` entries only). |
 
 ```console
-$ noeta cache info
+$ noeta cache
 /home/you/.cache/noeta
-128 entries, 11.4 MiB on disk (cap 256.0 MiB)
-$ noeta cache clear
-removed 128 cached compilations from /home/you/.cache/noeta
+  bytecode    128 entries    11.4 MiB   cached compilations (*.noeb)
+  compose       2 entries     3.4 GiB   composed toolchains
+  pkg          41 entries    58.3 MiB   fetched package sources
+  total                       3.5 GiB
+
+compose entries (most recently used first):
+  49069baa993a0e4d…    2.0 GiB   last used just now
+  6bffebc6bf79e72a…    1.4 GiB   last used 12 days ago
+(`noeta cache clean` removes the entries stale toolchain builds left behind)
+$ noeta cache clean
+removed 1 stale composed toolchain (1.4 GiB reclaimed); kept 1 current
 ```
 
-The cache never grows without bound: once it exceeds `NOETA_CACHE_MAX_BYTES`, the oldest entries are evicted on the next compile (silently — inspect with `noeta cache info`).
+Composed toolchains are keyed on (among other things) the running binary's build identity, so every toolchain rebuild or [`noeta upgrade`](#noeta-upgrade) strands the previous build's compositions — that is what `clean` reclaims. Only the three cache categories are ever touched; anything else living under the cache root (bench baselines, watch state) is left alone.
+
+The startup cache never grows without bound: once it exceeds `NOETA_CACHE_MAX_BYTES`, the oldest entries are evicted on the next compile (silently — inspect with `noeta cache info`).
 
 ---
 

@@ -11,6 +11,7 @@ mod support;
 
 mod bench;
 mod build;
+mod cache;
 mod check;
 mod doc;
 mod expand;
