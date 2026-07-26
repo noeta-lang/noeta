@@ -127,6 +127,39 @@ acme = [
 ]
 ```
 
+## `[patch]` — dev-time path overrides
+
+Point a package identity at a local source tree while you develop it, without editing any
+`[dependencies]` entry or regenerating locks by hand. Keys are full identities
+(`"company/package"` — quoted, they contain a slash); values are `{ path = "…" }` tables, relative
+to this manifest. `path` is the only override form — there are no git or version-selective patches.
+
+```toml
+[dependencies]
+db = { version = "^1.4", package = "para/db" }
+
+[patch]
+# Every occurrence of para/db in the whole graph resolves from this tree instead:
+"para/db" = { path = "../para-db" }
+```
+
+- **Root-only.** Patches are honored only from the **root app's** manifest — a dependency's own
+  `[patch]` table is never read (no inheritance, the same top-down authority rule as `[trust]`).
+- **Everywhere.** The override applies wherever the identity occurs — a direct dependency, a
+  transitive one, or a scope member — and a patched registry identity never touches the index, so
+  the patched version doesn't need to be published at all.
+- **The patched tree's version wins.** Its own `noeta.toml` is authoritative; if that version
+  fails a requirement the graph imposes (a consumer still declaring `^1` while your checkout says
+  `2.0.0`), resolution **warns and proceeds** — a dev override means the developer knows best, and
+  it never becomes an error. The tree must declare exactly the identity it patches; a mismatch is
+  a hard error.
+- **Loud.** Every resolve with an active patch prints a per-patch notice on stderr — an override
+  is never silent.
+- **Never recorded.** `noeta.lock` omits patched identities entirely: the lock records only
+  reproducible state, so while the patch is active the identity simply has no pin, and removing
+  the patch re-pins it from its declared source on the next resolve — no stale entries either way.
+- **Not publishable.** `noeta publish` refuses a manifest with a non-empty `[patch]` table.
+
 ## `[trust]` — grants and provenance policy
 
 Dependencies get no elevated capability by default. `[trust]` is where you grant specific ones and

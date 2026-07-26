@@ -104,6 +104,13 @@ pub struct LockedPackage {
     /// The package's effective language [`Edition`] (follow-on F1), pinned so a rebuild reproduces
     /// the exact edition each dependency compiled under.
     pub edition: crate::edition::Edition,
+    /// Whether this package was materialized via the root manifest's dev-time `[patch]` override.
+    /// A patched entry is real in the resolved graph, but the lockfile writer **omits** it
+    /// ([`crate::lock`]): the lock records only reproducible state, and a patch is a mutable local
+    /// override — recording it (even marked) would leave the lock chasing a hash that changes on
+    /// every edit and a stale entry behind once the patch is removed. Omission keeps the lock
+    /// self-consistent: removing the patch simply re-pins the identity on the next resolve.
+    pub patched: bool,
 }
 
 /// A resolved dependency's origin (package-manager P2.4).
@@ -144,6 +151,39 @@ struct Instance {
     /// dependency contributes exactly one identity; a **scope** dependency (`key = [ … ]`) contributes
     /// one per member package, all sharing the scope, so a key may map to several.
     edges: BTreeMap<String, Vec<String>>,
+    /// Whether this instance was materialized from a root `[patch]` override (dev-time path
+    /// override) — carried into [`LockedPackage::patched`] so the lock writer can omit it.
+    patched: bool,
+}
+
+/// One resolved `[patch]` override (dev-time path override): the path as written in the root
+/// manifest and the canonicalized on-disk tree it names.
+struct PatchOverride {
+    /// The manifest-relative path, kept verbatim for [`ResolvedSource::Path`] (like a path dep).
+    declared: PathBuf,
+    /// The materialized tree: root-manifest dir + `declared`, canonicalized.
+    dir: PathBuf,
+}
+
+/// Resolve the root manifest's `[patch]` table against its directory. This is the ONLY place patch
+/// overrides enter resolution — child manifests' `[patch]` tables are parsed but never read here,
+/// which is what enforces the root-only rule (no inheritance, same as `[trust]` grants).
+fn resolve_patches(manifest: &Manifest, manifest_dir: &Path) -> BTreeMap<String, PatchOverride> {
+    manifest
+        .patch()
+        .iter()
+        .map(|(identity, path)| {
+            let joined = manifest_dir.join(path);
+            let dir = joined.canonicalize().unwrap_or(joined);
+            (
+                identity.clone(),
+                PatchOverride {
+                    declared: path.clone(),
+                    dir,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Resolve the full dependency graph rooted at `entry`'s manifest (package-manager P2.4). Returns an
@@ -218,6 +258,20 @@ fn resolve_graph_impl(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
+    // Dev-time path override (`[patch]`): honored ONLY from the ROOT app's manifest, resolved
+    // here and nowhere else — a dependency's own `[patch]` table is never consulted (no
+    // inheritance, the same top-down authority rule as `[trust]`).
+    let patches = resolve_patches(&manifest, &manifest_dir);
+    // Loud visibility: an override must never be silent. Every resolve with an active patch says
+    // so, per patch, on stderr (the CLI's render seam is stderr for out-of-band notices).
+    for (identity, patch) in &patches {
+        eprintln!(
+            "noeta: [patch] `{identity}` → `{}` (dev override; `{}` records no patched state)",
+            patch.dir.display(),
+            crate::lock::LOCK_NAME
+        );
+    }
+
     // The lock is consulted during the walk (git deps fetched by their pinned SHA — offline when
     // already stored) and refreshed afterwards.
     let lock = crate::lock::Lock::read(&manifest_dir);
@@ -244,6 +298,8 @@ fn resolve_graph_impl(
         registry_ids: std::collections::BTreeSet::new(),
         candidates: BTreeMap::new(),
         mat_memo: std::collections::HashMap::new(),
+        patches: &patches,
+        patched_versions: BTreeMap::new(),
     };
     // Phase 4, S5b: first *select versions* — gather the candidate graph (materialize the path/git
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
@@ -259,6 +315,17 @@ fn resolve_graph_impl(
     walker.solve(&root_deps, &manifest_dir, lock_pins)?;
     let mut root_edges = BTreeMap::new();
     walker.walk(&root_deps, &manifest_dir, &mut root_edges)?;
+
+    // A declared patch nothing resolves to is almost always a typo'd identity or a since-removed
+    // dependency — say so (a note, not an error: the resolve itself is fine without it).
+    for identity in patches.keys() {
+        if !walker.instances.contains_key(identity) {
+            eprintln!(
+                "noeta: note: [patch] `{identity}` is declared but nothing in the dependency \
+                 graph resolves to it"
+            );
+        }
+    }
 
     let scope_trust = walker.scope_trust;
     // The root package's edition governs the merged compilation unit (per-package editions of the
@@ -329,7 +396,9 @@ fn resolve_graph_impl(
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
     // manifest with no resolved dependencies, so a bare-`[targets]` project grows no lock — and
     // for a query resolve ([`resolve_graph_query`]), which must not write project state at all.
-    if refresh == LockRefresh::Refresh && !graph.locked.is_empty() {
+    // A `[patch]`ed identity is never recorded (the writer omits it — see [`LockedPackage::patched`]
+    // and `crate::lock::render`), so a graph whose every package is patched writes nothing either.
+    if refresh == LockRefresh::Refresh && graph.locked.iter().any(|p| !p.patched) {
         // Resolution doesn't touch the advisory feed (that's `noeta audit`), so preserve any advisory
         // pin already in the lock rather than erasing it on every build.
         let advisory_trust = crate::lock::Lock::read(&manifest_dir)
@@ -494,6 +563,17 @@ struct Walker<'a> {
     /// tree hash is a full-tree SHA-256 — this halves both. Keyed by the *source* (path or
     /// url+ref), not identity, since gather learns the identity only after materializing.
     mat_memo: std::collections::HashMap<String, (PathBuf, ResolvedSource, Option<String>)>,
+    /// The **root** manifest's `[patch]` overrides (dev-time path override), identity → local tree.
+    /// The root-only rule holds structurally: this is the only patch map the walk ever sees — a
+    /// dependency's own `[patch]` table is never read.
+    patches: &'a BTreeMap<String, PatchOverride>,
+    /// identity → the patched tree's own version, learned by [`Walker::gather_patches`]. The
+    /// patched version **wins** everywhere: every requirement the graph imposes on a patched
+    /// identity is neutralized to `=<this version>` (with a stderr warning when the original
+    /// requirement isn't satisfied — warn, never error: a dev override means the developer knows
+    /// best, and warn-and-proceed is the only choice that can apply *consistently*, since the
+    /// override force-selects one version and cannot half-apply).
+    patched_versions: BTreeMap<String, Version>,
 }
 
 impl Walker<'_> {
@@ -553,17 +633,35 @@ impl Walker<'_> {
         base_dir: &Path,
         root: ScopeRoot,
     ) -> Result<String, PmError> {
-        let (dir, source, fetched_hash) = self.materialize(key, dep, base_dir)?;
-        let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
+        let (mut dir, mut source, mut fetched_hash) = self.materialize(key, dep, base_dir)?;
+        let mut child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
             .map_err(|err| err.map_msg(|m| format!("dependency `{key}`: {m}")))?;
-        let pkg = child_manifest.package().ok_or_else(|| {
-            PmError::Manifest(format!(
-                "dependency `{key}` at `{}` has no `[package]` table (needed for its identity \
-                 and namespace root)",
-                dir.display()
-            ))
-        })?;
-        let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
+        let identity = {
+            let pkg = package_of(&child_manifest, key, &dir)?;
+            format!("{}/{}", pkg.name.company, pkg.name.package)
+        };
+        // Dev-time path override (`[patch]`): the ROOT manifest re-points this identity at a local
+        // tree, so materialize from the patch instead of the declared source. Every sighting of a
+        // dependency — direct, transitive, or scope member — funnels through `walk_one`, which is
+        // what makes the override apply wherever the identity occurs. A patched *registry*
+        // dependency was already intercepted inside `materialize` (its identity is declared, and
+        // the index must never be consulted); a path/git dependency is identifiable only after its
+        // declared tree's manifest is read, so it swaps here.
+        let patched = self.patches.contains_key(&identity);
+        if let Some(patch) = self.patches.get(&identity)
+            && dir != patch.dir
+        {
+            dir = patch.dir.clone();
+            source = ResolvedSource::Path {
+                path: patch.declared.clone(),
+            };
+            // A patch tree is the developer's mutable working copy — always hash it fresh.
+            fetched_hash = None;
+            child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
+                .map_err(|err| err.map_msg(|m| format!("patch for `{identity}`: {m}")))?;
+            // `gather_patches` already validated the patched tree declares this same identity.
+        }
+        let pkg = package_of(&child_manifest, key, &dir)?;
         check_toolchain_req(pkg, &format!("dependency `{key}` (`{identity}`)"))?;
         let root_segment = match root {
             ScopeRoot::Package => pkg.name.root().to_string(),
@@ -645,6 +743,7 @@ impl Walker<'_> {
                 source,
                 native: pkg.native.clone(),
                 edges: BTreeMap::new(),
+                patched,
             },
         );
         let mut child_edges = BTreeMap::new();
@@ -727,6 +826,20 @@ impl Walker<'_> {
                     ))
                 })?;
                 let name = format!("{}/{}", package.company, package.package);
+                // Dev-time path override (`[patch]`): a patched identity materializes from its
+                // local tree and NEVER touches the index — the patched version may not even be
+                // published yet, which is precisely the use case. It is also not a registry
+                // identity for trust purposes (transparency/provenance apply to served releases,
+                // not the developer's own working tree).
+                if let Some(patch) = self.patches.get(&name) {
+                    return Ok((
+                        patch.dir.clone(),
+                        ResolvedSource::Path {
+                            path: patch.declared.clone(),
+                        },
+                        None,
+                    ));
+                }
                 // This identity came from a registry dependency — transparency enforcement applies to
                 // it (a direct git/path dep isn't logged, so it's out of scope).
                 self.registry_ids.insert(name.clone());
@@ -1009,6 +1122,11 @@ impl Walker<'_> {
         let mut registry: BTreeMap<String, Vec<crate::registry::Release>> = BTreeMap::new();
         let mut registry_queue: Vec<String> = Vec::new();
 
+        // Dev-time path override (`[patch]`): seed each patched identity as a path candidate FIRST,
+        // so a patched registry dependency is never queued for the index and a patched path/git
+        // dependency's declared tree never becomes the candidate.
+        self.gather_patches(&mut path_git, &mut registry_queue)?;
+
         // Root's direct dependencies as resolver requirements; path/git deps are materialized here to
         // learn their identities + edges, registry identities are queued for index loading.
         let root_deps = self.gather(
@@ -1104,10 +1222,36 @@ impl Walker<'_> {
         let candidates = Candidates {
             path_git: &path_git,
             registry: &registry,
+            patched: &self.patched_versions,
         };
         // The synthetic root identity can't collide with a real `company/package` (no slash).
         self.solution =
             crate::resolve::resolve(&candidates, "\u{0}root", &Version::new(0, 0, 0), &root_deps)?;
+        // Warn about registry-declared requirements the patched version fails: `Candidates`
+        // silently neutralized them so PubGrub could not error, and the solved releases' declared
+        // edges are exactly the graph-imposed requirements that were bypassed. (Root and path/git
+        // spine edges warned in `gather_one`; the lock fast path above skips these best-effort
+        // warnings, never the override itself.)
+        if !self.patched_versions.is_empty() {
+            for (id, version) in &self.solution {
+                let Some(release) = registry
+                    .get(id)
+                    .and_then(|rs| rs.iter().find(|r| &r.version == version))
+                else {
+                    continue;
+                };
+                for dep in &release.deps {
+                    if let Some(patched) = self.patched_versions.get(&dep.package)
+                        && !dep.req.matches(patched)
+                    {
+                        eprintln!(
+                            "{}",
+                            patch_mismatch_warning(&dep.package, &dep.req, patched)
+                        );
+                    }
+                }
+            }
+        }
         // Keep the loaded candidate sets: `materialize` reads the solved release from here rather
         // than re-querying the index (which for a git-forge scope means another `git fetch`).
         self.candidates = registry;
@@ -1168,6 +1312,19 @@ impl Walker<'_> {
                     ))
                 })?;
                 let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
+                // Dev-time path override (`[patch]`): the patched tree (seeded by
+                // `gather_patches`) is the sole candidate for this identity — the declared tree's
+                // subtree is not gathered, and the `=<declared version>` requirement this edge
+                // would impose is neutralized to the patched version (warned when they differ).
+                if let Some(patched) = self.patched_versions.get(&identity) {
+                    if *patched != pkg.version {
+                        eprintln!(
+                            "{}",
+                            patch_mismatch_warning(&identity, &exact_req(&pkg.version), patched)
+                        );
+                    }
+                    return Ok((identity.clone(), exact_req(patched)));
+                }
                 if !path_git.contains_key(&identity) {
                     // Insert a placeholder before recursing so a dependency cycle terminates.
                     path_git.insert(
@@ -1204,6 +1361,16 @@ impl Walker<'_> {
                         crate::reserved::builtin_registry_refusal(&package.company, &identity)
                     )));
                 }
+                // Dev-time path override (`[patch]`): a patched registry identity is already a
+                // path candidate — never queue it for the index, and neutralize the declared
+                // requirement to the patched tree's version (warned when unsatisfied, never an
+                // error — the developer's override wins).
+                if let Some(patched) = self.patched_versions.get(&identity) {
+                    if !req.matches(patched) {
+                        eprintln!("{}", patch_mismatch_warning(&identity, req, patched));
+                    }
+                    return Ok((identity.clone(), exact_req(patched)));
+                }
                 registry_queue.push(identity.clone());
                 Ok((identity, req.clone()))
             }
@@ -1211,6 +1378,71 @@ impl Walker<'_> {
                 "internal error: scope dependency `{key}` reached `gather_one` unexpanded"
             ))),
         }
+    }
+
+    /// Seed the candidate graph with the root's `[patch]` overrides (dev-time path override): each
+    /// patched identity becomes a **path candidate** pinned at the patched tree's own version —
+    /// the same "a local source overrides the registry" precedence a path dependency enjoys — so
+    /// the override wins wherever the identity occurs (direct, transitive, or scope member). Two
+    /// passes: versions first, then dependency edges, so one patched tree may depend on another
+    /// patched identity. Validates each patch points at a tree that really declares the identity
+    /// it claims to override (a mismatch is a configuration error and fails loudly).
+    fn gather_patches(
+        &mut self,
+        path_git: &mut BTreeMap<String, PathGitCandidate>,
+        registry_queue: &mut Vec<String>,
+    ) -> Result<(), PmError> {
+        if self.patches.is_empty() {
+            return Ok(());
+        }
+        let entries: Vec<(String, PathBuf)> = self
+            .patches
+            .iter()
+            .map(|(id, p)| (id.clone(), p.dir.clone()))
+            .collect();
+        // Pass 1: read each patched tree's manifest — validate its identity and record its
+        // version (the version that wins during selection).
+        let mut manifests = Vec::with_capacity(entries.len());
+        for (identity, dir) in &entries {
+            let manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
+                .map_err(|err| err.map_msg(|m| format!("patch for `{identity}`: {m}")))?;
+            let pkg = manifest.package().ok_or_else(|| {
+                PmError::Manifest(format!(
+                    "patch for `{identity}` at `{}` has no `[package]` table (needed for its \
+                     identity)",
+                    dir.display()
+                ))
+            })?;
+            let actual = format!("{}/{}", pkg.name.company, pkg.name.package);
+            if actual != *identity {
+                return Err(PmError::Manifest(format!(
+                    "patch for `{identity}` points at `{}`, which declares itself `{actual}` — a \
+                     patch must override the same package identity",
+                    dir.display()
+                )));
+            }
+            check_toolchain_req(pkg, &format!("patch for `{identity}`"))?;
+            self.patched_versions
+                .insert(identity.clone(), pkg.version.clone());
+            manifests.push(manifest);
+        }
+        // Pass 2: each patched tree is a path candidate (placeholder inserted before recursing so
+        // a dependency cycle terminates), its own dependencies gathered like any path dep's.
+        for ((identity, dir), manifest) in entries.iter().zip(&manifests) {
+            if path_git.contains_key(identity) {
+                continue;
+            }
+            path_git.insert(
+                identity.clone(),
+                PathGitCandidate {
+                    version: self.patched_versions[identity].clone(),
+                    deps: Vec::new(),
+                },
+            );
+            let deps = self.gather(manifest.dependencies(), dir, path_git, registry_queue)?;
+            path_git.get_mut(identity).expect("just inserted").deps = deps;
+        }
+        Ok(())
     }
 
     /// Drop registry candidates published within `[trust].publish_cooldown` (namespace-protection #1),
@@ -1352,6 +1584,10 @@ struct PathGitCandidate {
 struct Candidates<'a> {
     path_git: &'a BTreeMap<String, PathGitCandidate>,
     registry: &'a BTreeMap<String, Vec<crate::registry::Release>>,
+    /// `[patch]`ed identity → the patched tree's version (dev-time path override). A registry
+    /// release's declared requirement on a patched identity is neutralized to exactly this version
+    /// so PubGrub cannot fail on it — the mismatch is *warned about* post-solve, never an error.
+    patched: &'a BTreeMap<String, Version>,
 }
 
 impl crate::resolve::Registry for Candidates<'_> {
@@ -1380,7 +1616,12 @@ impl crate::resolve::Registry for Candidates<'_> {
                 .map(|r| {
                     r.deps
                         .iter()
-                        .map(|d| (d.package.clone(), d.req.clone()))
+                        .map(|d| match self.patched.get(&d.package) {
+                            // A requirement on a `[patch]`ed identity is neutralized to the
+                            // patched version (see the field doc); the solve warns afterwards.
+                            Some(v) => (d.package.clone(), exact_req(v)),
+                            None => (d.package.clone(), d.req.clone()),
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -1610,6 +1851,7 @@ fn assemble(
             source: inst.source.clone(),
             native: inst.native.clone(),
             edition: inst.edition,
+            patched: inst.patched,
         });
         if let Some(native) = &inst.native {
             native_crates.push(NativeCrate {
@@ -1696,6 +1938,36 @@ fn unique_segment(base: &str, used: &mut HashSet<String>) -> String {
         }
         n += 1;
     }
+}
+
+/// A dependency manifest's `[package]` table, or the "no `[package]`" error naming the dependency
+/// and its on-disk tree (shared by the declared and the `[patch]`-swapped manifest in `walk_one`).
+fn package_of<'m>(
+    manifest: &'m Manifest,
+    key: &str,
+    dir: &Path,
+) -> Result<&'m crate::manifest::PackageMeta, PmError> {
+    manifest.package().ok_or_else(|| {
+        PmError::Manifest(format!(
+            "dependency `{key}` at `{}` has no `[package]` table (needed for its identity \
+             and namespace root)",
+            dir.display()
+        ))
+    })
+}
+
+/// The stderr warning for a `[patch]`ed tree whose version fails a requirement the dependency
+/// graph imposes on that identity. **Warn, never error** — the documented semantics: a dev
+/// override means the developer knows best (they are typically mid-version-bump, testing
+/// `2.0.0-dev` against consumers that still declare `^1`), and warn-and-proceed is also the only
+/// behavior that can hold *consistently*, because the patched version is force-selected wherever
+/// the identity occurs and cannot half-apply.
+fn patch_mismatch_warning(identity: &str, imposed: &VersionReq, patched: &Version) -> String {
+    format!(
+        "noeta: warning: [patch] `{identity}` is at {patched}, which does not satisfy the \
+         requirement `{imposed}` the dependency graph imposes — proceeding with the patched tree \
+         (a dev override wins; remove the patch to restore normal resolution)"
+    )
 }
 
 /// Read and parse a manifest at `path`, tagging IO/parse errors with the path.
@@ -1810,6 +2082,333 @@ mod tests {
         assert!(
             app.join("noeta.lock").exists(),
             "the build-command resolve refreshes noeta.lock"
+        );
+    }
+
+    // --- `[patch]` (dev-time path override) ----------------------------------------------------
+
+    /// Write a minimal package at `dir`: a `[package]` manifest (plus `extra` manifest text) and
+    /// one module file whose body carries `marker` so a test can tell which tree materialized.
+    fn write_pkg(dir: &Path, name: &str, version: &str, extra: &str, marker: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("noeta.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n{extra}"),
+        )
+        .unwrap();
+        let root = name.split('/').nth(1).unwrap();
+        std::fs::write(
+            dir.join("api.noe"),
+            format!("namespace {root}.api;\npub fn which(): string {{ return \"{marker}\"; }}\n"),
+        )
+        .unwrap();
+    }
+
+    /// A fresh fixture base directory for one `[patch]` test.
+    fn patch_base(name: &str) -> PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("noeta_patch_test_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// The locked entry for `identity`, panicking helpfully when absent.
+    fn locked<'g>(graph: &'g ResolvedGraph, identity: &str) -> &'g LockedPackage {
+        graph
+            .locked
+            .iter()
+            .find(|l| l.identity == identity)
+            .unwrap_or_else(|| panic!("`{identity}` is in the resolved graph"))
+    }
+
+    #[test]
+    fn a_patch_overrides_a_direct_path_dependency() {
+        let base = patch_base("direct");
+        write_pkg(&base.join("lib"), "acme/lib", "1.0.0", "", "original");
+        write_pkg(
+            &base.join("lib_patched"),
+            "acme/lib",
+            "2.0.0",
+            "",
+            "patched",
+        );
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\" }\n\
+             [patch]\n\"acme/lib\" = { path = \"../lib_patched\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("a patched graph resolves");
+        // The patched tree's own version wins, the entry is flagged, and the source records the
+        // patch path (relative to the ROOT manifest, like a path dep).
+        let entry = locked(&graph, "acme/lib");
+        assert_eq!(entry.version, Version::new(2, 0, 0));
+        assert!(entry.patched, "the locked entry carries the patched flag");
+        assert!(
+            matches!(&entry.source, ResolvedSource::Path { path } if path == Path::new("../lib_patched")),
+            "the source is the patch path: {:?}",
+            entry.source
+        );
+        // The linked modules really come from the patched tree.
+        let module_text: String = graph.packages[0]
+            .modules
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert!(
+            module_text.contains("patched") && !module_text.contains("original"),
+            "the patched tree's modules link: {module_text}"
+        );
+    }
+
+    #[test]
+    fn a_patch_overrides_a_transitive_dependency() {
+        // The override applies WHEREVER the identity occurs — here two levels down, declared by a
+        // dependency's own manifest, without touching that manifest.
+        let base = patch_base("transitive");
+        write_pkg(&base.join("leaf"), "acme/leaf", "1.0.0", "", "original");
+        write_pkg(
+            &base.join("leaf_patched"),
+            "acme/leaf",
+            "9.9.9",
+            "",
+            "patched",
+        );
+        write_pkg(
+            &base.join("mid"),
+            "acme/mid",
+            "1.0.0",
+            "[dependencies]\nleaf = { path = \"../leaf\" }\n",
+            "mid",
+        );
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nmid = { path = \"../mid\" }\n\
+             [patch]\n\"acme/leaf\" = { path = \"../leaf_patched\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves");
+        assert_eq!(locked(&graph, "acme/leaf").version, Version::new(9, 9, 9));
+        assert!(locked(&graph, "acme/leaf").patched);
+        // The un-patched package is untouched and unflagged.
+        assert_eq!(locked(&graph, "acme/mid").version, Version::new(1, 0, 0));
+        assert!(!locked(&graph, "acme/mid").patched);
+    }
+
+    #[test]
+    fn a_patch_overrides_a_scope_member() {
+        let base = patch_base("scope_member");
+        write_pkg(&base.join("a"), "para/a", "1.0.0", "", "a");
+        write_pkg(&base.join("b"), "para/b", "1.0.0", "", "original-b");
+        write_pkg(&base.join("b_patched"), "para/b", "3.0.0", "", "patched-b");
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\npara = [ { path = \"../a\" }, { path = \"../b\" } ]\n\
+             [patch]\n\"para/b\" = { path = \"../b_patched\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves");
+        assert_eq!(locked(&graph, "para/b").version, Version::new(3, 0, 0));
+        assert!(locked(&graph, "para/b").patched);
+        assert!(!locked(&graph, "para/a").patched);
+    }
+
+    #[test]
+    fn a_dependencys_own_patch_table_is_never_honored() {
+        // Root-only, like `[trust]`: a dependency shipping a `[patch]` of its own must not be able
+        // to redirect anybody's resolution — only the ROOT app's `[patch]` is read.
+        let base = patch_base("dep_patch_ignored");
+        write_pkg(&base.join("leaf"), "acme/leaf", "1.0.0", "", "original");
+        write_pkg(&base.join("leaf_evil"), "acme/leaf", "6.6.6", "", "evil");
+        write_pkg(
+            &base.join("mid"),
+            "acme/mid",
+            "1.0.0",
+            "[dependencies]\nleaf = { path = \"../leaf\" }\n\
+             [patch]\n\"acme/leaf\" = { path = \"../leaf_evil\" }\n",
+            "mid",
+        );
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nmid = { path = \"../mid\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves");
+        let leaf = locked(&graph, "acme/leaf");
+        assert_eq!(
+            leaf.version,
+            Version::new(1, 0, 0),
+            "the dependency's own [patch] must be ignored"
+        );
+        assert!(!leaf.patched);
+    }
+
+    #[test]
+    fn a_patched_registry_dependency_never_touches_the_index() {
+        // The core dev loop: the app depends on `para/db` via the registry, the developer patches
+        // it to a local checkout. No registry is configured or reachable here — resolution must
+        // succeed anyway, purely from the patch (the patched version need not be published at all).
+        let base = patch_base("registry_bypass");
+        write_pkg(&base.join("db"), "para/db", "1.2.3", "", "local-db");
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\ndb = { version = \"^1.0\", package = \"para/db\" }\n\
+             [patch]\n\"para/db\" = { path = \"../db\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves without any index");
+        let db = locked(&graph, "para/db");
+        assert_eq!(db.version, Version::new(1, 2, 3));
+        assert!(db.patched);
+        // A patched identity is not a registry identity: transparency/provenance apply to served
+        // releases, never to the developer's own working tree.
+        assert!(graph.registry_identities.is_empty());
+    }
+
+    #[test]
+    fn a_patched_version_that_misses_the_requirement_warns_but_proceeds() {
+        // The documented choice: the patched tree's version WINS. `^1.0` vs a 2.0.0 patch is the
+        // mid-bump dev loop — a warning on stderr, never an error.
+        let base = patch_base("version_mismatch");
+        write_pkg(&base.join("db"), "para/db", "2.0.0", "", "next-db");
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\ndb = { version = \"^1.0\", package = \"para/db\" }\n\
+             [patch]\n\"para/db\" = { path = \"../db\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe"))
+            .expect("a version mismatch under [patch] warns, it never fails the resolve");
+        assert_eq!(locked(&graph, "para/db").version, Version::new(2, 0, 0));
+        // The warning text itself (printed on stderr; rendered by the pure helper).
+        let warning = patch_mismatch_warning(
+            "para/db",
+            &VersionReq::parse("^1.0").unwrap(),
+            &Version::new(2, 0, 0),
+        );
+        assert!(warning.contains("warning"), "{warning}");
+        assert!(warning.contains("does not satisfy"), "{warning}");
+        assert!(
+            warning.contains("proceeding with the patched tree"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn the_lock_never_records_patched_state_and_repins_after_removal() {
+        let base = patch_base("lock_omission");
+        write_pkg(&base.join("lib"), "acme/lib", "1.0.0", "", "original");
+        write_pkg(
+            &base.join("lib_patched"),
+            "acme/lib",
+            "2.0.0",
+            "",
+            "patched",
+        );
+        write_pkg(&base.join("util"), "acme/util", "1.0.0", "", "util");
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let with_patch = "[dependencies]\n\
+             lib = { path = \"../lib\" }\nutil = { path = \"../util\" }\n\
+             [patch]\n\"acme/lib\" = { path = \"../lib_patched\" }\n";
+        std::fs::write(app.join("noeta.toml"), with_patch).unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        resolve_graph(&app.join("main.noe")).expect("resolves");
+        let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+        assert!(
+            lock.contains("acme/util"),
+            "the real dependency is pinned: {lock}"
+        );
+        assert!(
+            !lock.contains("acme/lib"),
+            "the patched identity leaves no trace in the lock: {lock}"
+        );
+
+        // Remove the patch: the next resolve re-pins the identity from its declared source — the
+        // lock was self-consistent throughout (no stale patched entry to clean up).
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\" }\nutil = { path = \"../util\" }\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves unpatched");
+        assert_eq!(locked(&graph, "acme/lib").version, Version::new(1, 0, 0));
+        let lock = std::fs::read_to_string(app.join("noeta.lock")).unwrap();
+        assert!(
+            lock.contains("acme/lib") && lock.contains("acme/util"),
+            "removing the patch re-pins the identity: {lock}"
+        );
+    }
+
+    #[test]
+    fn a_patch_tree_declaring_a_different_identity_is_refused() {
+        let base = patch_base("identity_mismatch");
+        write_pkg(&base.join("lib"), "acme/lib", "1.0.0", "", "original");
+        write_pkg(&base.join("other"), "acme/other", "1.0.0", "", "other");
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\" }\n\
+             [patch]\n\"acme/lib\" = { path = \"../other\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        let err = resolve_graph(&app.join("main.noe")).expect_err("a mismatched patch is refused");
+        let msg = err.message().to_string();
+        assert!(msg.contains("acme/lib"), "names the patch key: {msg}");
+        assert!(msg.contains("declares itself `acme/other`"), "{msg}");
+    }
+
+    #[test]
+    fn an_unused_patch_does_not_break_resolution() {
+        // A patch nothing resolves to gets a stderr note but the resolve (and the graph) is
+        // unaffected — the ghost never enters the materialized set.
+        let base = patch_base("unused");
+        write_pkg(&base.join("lib"), "acme/lib", "1.0.0", "", "original");
+        write_pkg(&base.join("ghost"), "acme/ghost", "1.0.0", "", "ghost");
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[dependencies]\nlib = { path = \"../lib\" }\n\
+             [patch]\n\"acme/ghost\" = { path = \"../ghost\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
+
+        let graph = resolve_graph(&app.join("main.noe")).expect("resolves");
+        assert_eq!(locked(&graph, "acme/lib").version, Version::new(1, 0, 0));
+        assert!(
+            !graph.locked.iter().any(|l| l.identity == "acme/ghost"),
+            "an unused patch never materializes into the graph"
         );
     }
 
