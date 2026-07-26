@@ -1074,3 +1074,291 @@ pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
             "gitfx: out-of-tree native extension ok",
         ));
 }
+
+// --- out-of-tree native package: REGISTRY-INDEX round trip + trust + lock shape -----------------
+
+/// The **registry-index** sibling of [`composed_toolchain_out_of_tree_git_abi_dep`], and the
+/// NATIVE-package half of `doc.rs::pure_source_package_publishes_and_resolves_from_the_registry`
+/// (whose pure-source round trip deliberately carries no native crate): a standalone native
+/// package repo — entry crate git-depping `noeta-ext-abi` + a path-depped sibling impl crate, the
+/// extracted-`para` shape — is `noeta publish`ed into a directory-backed `LocalIndex`
+/// (`NOETA_REGISTRY_DIR`), and a fresh consumer takes it as a REGISTRY dependency
+/// (`{ version = "^1", package = "acme/imgfx" }`), never a path or git dep. End to end, hermetic
+/// (`file://` URLs only, no network), this proves:
+///
+///   1. resolution REFUSES the native package until the root app's `[trust].native` lists its
+///      identity — the Phase-4 authority gate, through the registry path;
+///   2. once trusted, `noeta.lock` pins the registry release as git coordinates — `source = "git"`
+///      + `url` + `tag` + publish-pinned `sha` — plus the content `hash`;
+///   3. the consumer-side compose builds the package FROM THE STORE and the program dispatches its
+///      native fn (`NOETA_TOOLCHAIN_REPO` = the `file://` URL the package's Cargo.toml declares,
+///      so the compose `[patch]` key matches — the same gotcha the git-dep test encodes);
+///   4. the package's `ExtCommand` stays refused until `[trust].commands` grants it, and
+///      dispatches once granted.
+///
+/// `noeta publish` itself composes too (the native-build publish quality gate), so the whole test
+/// runs three compositions; like its git-dep sibling it is `#[ignore]`d and meant to run as its
+/// own serial step: `cargo test -p noeta-cli --test cli -- --ignored native_package_from_registry`.
+#[test]
+#[ignore = "compose-heavy: publishes + composes a toolchain; run explicitly or via its own CI step"]
+fn composed_toolchain_native_package_from_registry_index() {
+    let _guard = compose_guard();
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native_from_registry_index");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let reg = base.join("registry");
+    let cache = base.join("cache");
+
+    // The toolchain repo URL the package's Cargo.toml declares — the workspace itself, so the
+    // compose `[patch."<url>"]` (keyed by `NOETA_TOOLCHAIN_REPO`) matches without any clone.
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let repo_url = format!("file://{}", workspace.display());
+
+    // The standalone native package repo: `noeta.toml` (`native = "native"`) + entry crate +
+    // path-depped sibling impl crate — the shape every extracted `para` package ships in.
+    let pkg = base.join("imgfx-repo");
+    std::fs::create_dir_all(pkg.join("native/src")).unwrap();
+    std::fs::create_dir_all(pkg.join("impl/src")).unwrap();
+    std::fs::write(
+        pkg.join("noeta.toml"),
+        "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("native/Cargo.toml"),
+        format!(
+            "[package]\nname = \"imgfx-reg-native\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\n\
+             [lib]\npath = \"src/lib.rs\"\n\n\
+             [dependencies]\nnoeta-ext-abi = {{ git = \"{repo_url}\" }}\n\
+             imgfx-reg-impl = {{ path = \"../impl\" }}\n\n[workspace]\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("native/src/lib.rs"),
+        r##"//! Entry crate of the registry-index fixture package: declares the extension surface;
+//! the behaviour lives in the path-depped sibling impl crate (the first-party entry/impl layout).
+
+use noeta_ext_abi::registry::{ExtFn, ExtModule, Extension, NativeOut, RetTy, SigType};
+use noeta_ext_abi::{no_function_error, CommandCtx, ExtCommand, Host, NativeValue, ParsedArgs, StdError};
+
+const FX_FNS: &[ExtFn] = &[ExtFn {
+    name: "triple",
+    params: &[SigType::Int],
+    ret: RetTy::Concrete(SigType::Int),
+}];
+
+fn fx_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "triple" => imgfx_reg_impl::triple(args),
+        _ => Err(no_function_error("fx", func)),
+    }
+}
+
+const IMGFX_INFO: ExtCommand = ExtCommand {
+    name: "imgfx-info",
+    about: "Prove a registry-resolved extension command dispatches only when command-trusted",
+    args: &[],
+    run: imgfx_info_run,
+};
+
+fn imgfx_info_run(_ctx: &mut dyn CommandCtx, _args: &ParsedArgs) -> u8 {
+    println!("imgfx: registry-index native extension ok");
+    0
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImgfxExtension;
+
+impl Extension for ImgfxExtension {
+    fn name(&self) -> &'static str {
+        "imgfx"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        &[ExtModule {
+            name: "fx",
+            functions: FX_FNS,
+            dispatch: fx_dispatch,
+            ..ExtModule::DEFAULTS
+        }]
+    }
+    fn commands(&self) -> &'static [ExtCommand] {
+        &[IMGFX_INFO]
+    }
+}
+
+pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ImgfxExtension];
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("impl/Cargo.toml"),
+        format!(
+            "[package]\nname = \"imgfx-reg-impl\"\nversion = \"1.0.0\"\nedition = \"2024\"\n\n\
+             [lib]\npath = \"src/lib.rs\"\n\n\
+             [dependencies]\nnoeta-ext-abi = {{ git = \"{repo_url}\" }}\n\n[workspace]\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("impl/src/lib.rs"),
+        r##"//! Impl crate of the registry-index fixture package — ABI-typed behaviour the entry
+//! crate path-deps, so the `[patch]` must unify the git ABI across BOTH crates here too.
+
+use noeta_ext_abi::registry::{NativeOut, Scalar};
+use noeta_ext_abi::{ErrorKind, NativeValue, StdError};
+
+pub fn triple(args: &[NativeValue]) -> Result<NativeOut, StdError> {
+    match args.first() {
+        Some(NativeValue::Scalar(Scalar::Int(n))) => Ok(NativeOut::Scalar(Scalar::Int(n * 3))),
+        _ => Err(StdError {
+            kind: ErrorKind::ArgType,
+            message: "`fx.triple` expects an int".to_string(),
+        }),
+    }
+}
+"##,
+    )
+    .unwrap();
+    git_in(&["init", "-q"], &pkg);
+    commit_version(
+        &pkg,
+        "v1.0.0",
+        "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+    );
+
+    // Publish the release into the directory-backed index. The native-build publish quality gate
+    // composes a toolchain to build the package's own crate, so the compose env + the `[patch]`
+    // key (`NOETA_TOOLCHAIN_REPO`) are already needed here.
+    let pkg_url = format!("file://{}", pkg.display());
+    composed_env(&mut lang())
+        .current_dir(&pkg)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .args(["publish", "--git", &pkg_url, "--tag", "v1.0.0"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("building native crate")
+                .and(predicate::str::contains("published `acme/imgfx` 1.0.0")),
+        );
+
+    // The consumer app: a REGISTRY dependency — a version requirement resolved through the index
+    // (`{ version, package }`), never a path or git URL. The key equals the package's root segment
+    // (`imgfx`), the native convention: a native module's namespace is compiled into its extension,
+    // so it is not re-rooted to an arbitrary key the way a source package's modules are.
+    let app = base.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    let manifest = |trust: &str| {
+        format!(
+            "[package]\nname = \"acme/photo_app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nimgfx = {{ version = \"^1\", package = \"acme/imgfx\" }}\n{trust}"
+        )
+    };
+    std::fs::write(
+        app.join("main.noe"),
+        "use imgfx.{fx}\n\necho fx.triple(14);\n",
+    )
+    .unwrap();
+
+    // 1. The Phase-4 authority gate, through the registry path: WITHOUT `[trust].native` the
+    //    resolve refuses the native package, naming the identity and the grant to add.
+    std::fs::write(app.join("noeta.toml"), manifest("")).unwrap();
+    lang()
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .arg("update")
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("ships native code")
+                .and(predicate::str::contains("acme/imgfx"))
+                .and(predicate::str::contains("[trust].native")),
+        );
+
+    // 2. WITH the grant the resolve passes, and the lock pins the registry release: git coords
+    //    (`source`/`url`/`tag` + the publish-pinned `sha`) and the content `hash`.
+    std::fs::write(
+        app.join("noeta.toml"),
+        manifest("\n[trust]\nnative = [\"acme/imgfx\"]\n"),
+    )
+    .unwrap();
+    lang()
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .arg("update")
+        .assert()
+        .success();
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).unwrap();
+    let sha = git_sha(&pkg, "v1.0.0");
+    for needle in [
+        "name = \"acme/imgfx\"".to_string(),
+        "version = \"1.0.0\"".to_string(),
+        "source = \"git\"".to_string(),
+        format!("url = \"{pkg_url}\""),
+        "tag = \"v1.0.0\"".to_string(),
+        format!("sha = \"{sha}\""),
+        "hash = ".to_string(),
+    ] {
+        assert!(lock.contains(&needle), "lock missing `{needle}`:\n{lock}");
+    }
+
+    // 3. Consumer-side compose + run: the store-materialized package's native crate composes
+    //    against this workspace's source and the program dispatches its fn (14 * 3 = 42).
+    composed_env(&mut lang())
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+
+    // 4. The package's ExtCommand is NOT dispatchable on `[trust].native` alone: the composed
+    //    toolchain registers commands only for `[trust].commands`-granted identities, so the
+    //    subcommand stays unknown (clap's error, after the compose delegation).
+    composed_env(&mut lang())
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .arg("imgfx-info")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("imgfx-info"))
+        .stdout(predicate::str::contains("registry-index native extension ok").not());
+
+    // 5. WITH `[trust].commands` the command-trust change recomposes and the command dispatches.
+    std::fs::write(
+        app.join("noeta.toml"),
+        manifest("\n[trust]\nnative = [\"acme/imgfx\"]\ncommands = [\"acme/imgfx\"]\n"),
+    )
+    .unwrap();
+    composed_env(&mut lang())
+        .current_dir(&app)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .env("NOETA_TOOLCHAIN_REPO", &repo_url)
+        .env("NOETA_TOOLCHAIN_SRC", &workspace)
+        .arg("imgfx-info")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "imgfx: registry-index native extension ok",
+        ));
+}

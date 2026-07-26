@@ -227,7 +227,9 @@ fn pure_source_package_publishes_and_resolves_from_the_registry() {
     // index** — a registry dep (`{ version, package }`), not a path — locking the git source + sha
     // + content hash, so `use view.page.*` resolves from the registry-fetched package. (This
     // coverage was first proven with the in-tree `para-html` package before the `para` family moved
-    // to its own repos; the synthetic package below keeps the round-trip gated without it.)
+    // to its own repos; the synthetic package below keeps the round-trip gated without it. The
+    // NATIVE-package registry round trip — compose + trust gates on top of this shape — is
+    // `pm_native.rs::composed_toolchain_native_package_from_registry_index`.)
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pure_source_registry");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
