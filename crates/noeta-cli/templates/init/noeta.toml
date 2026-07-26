@@ -6,11 +6,11 @@ name = "@PACKAGE_NAME@"
 version = "0.1.0"
 
 # Dependencies live here — add one with `noeta add` (see `noeta add --help`).
-# The table key is the local import root; the source can be a registry version,
-# a git tag, or a path:
+# The table key is the local import root; the source can be a registry version
+# (`version` + the `package` identity it resolves to), a git tag, or a path:
 #
 # [dependencies]
-# http = { registry = "acme/http" }
+# http = { version = "^1.2", package = "acme/http" }
 # geometry = { path = "../geometry" }
 
 # Build targets are named recipes deciding which dev tiers (`@test`, `@bench`, `@doc`,
