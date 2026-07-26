@@ -17,6 +17,7 @@ mod doc;
 mod expand;
 mod fmt;
 mod grammar;
+mod ide;
 mod init;
 mod isolates;
 mod namespace;

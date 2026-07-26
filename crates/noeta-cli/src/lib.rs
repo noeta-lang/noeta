@@ -57,6 +57,7 @@ use cmd::doc::cmd_doc;
 use cmd::expand::cmd_expand;
 use cmd::fmt::cmd_fmt;
 use cmd::grammar::cmd_grammar_treesitter;
+use cmd::ide::cmd_ide;
 use cmd::init::cmd_init;
 use cmd::pm::{
     cmd_add, cmd_advisory_promote, cmd_advisory_publish, cmd_advisory_report, cmd_advisory_reports,
@@ -357,6 +358,24 @@ enum Command {
     /// (e.g. the VS Code extension or `claude mcp add`); speaks JSON-RPC on stdin/stdout. Exposes
     /// the compiler as agent tools — `check` first, then docs/examples, semantic queries, and more.
     Mcp,
+    /// Install editor tooling matching this toolchain. `--vscode` downloads the Noeta VS Code
+    /// extension (`noeta-<version>.vsix`) from **this binary's own GitHub release** and installs
+    /// it via the editor's `--install-extension` — the extension is pinned to the binary's
+    /// version so grammar and language-server behavior always match the toolchain; after
+    /// `noeta upgrade`, run `noeta ide --vscode` again to move the extension in step. The
+    /// release asset is the install path while the marketplace listing is pending, and remains
+    /// the one for VSCodium and offline installs.
+    Ide {
+        /// Install the VS Code extension: download this release's `.vsix`, verify it against the
+        /// release's `SHA256SUMS`, and run `<editor> --install-extension --force` (re-running
+        /// updates in place).
+        #[arg(long)]
+        vscode: bool,
+        /// The editor binary to install with — a name looked up on PATH, or a path. Default: the
+        /// first of `code`, `codium`, `code-insiders` found on PATH.
+        #[arg(long, value_name = "NAME|PATH", requires = "vscode")]
+        bin: Option<String>,
+    },
     /// Profile a program and report where it spends its time. Runs the file under the production VM
     /// tier-0 (JIT unarmed, so every frame is observable) and prints a profile to stderr; the
     /// program's own stdout is forwarded verbatim.
@@ -1051,6 +1070,7 @@ pub fn run_cli(
         ),
         Command::Update => cmd_update(),
         Command::Upgrade { version, check } => cmd_upgrade(version.as_deref(), check),
+        Command::Ide { vscode, bin } => cmd_ide(vscode, bin.as_deref()),
         Command::Publish {
             git,
             tag,

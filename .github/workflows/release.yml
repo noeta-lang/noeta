@@ -2,7 +2,8 @@ name: Release
 
 # Tag-triggered release. On a `v*` tag:
 #   - build the `noeta` binary for linux + macOS (x86_64 + aarch64),
-#   - attach the tarballs + SHA256SUMS to a GitHub release,
+#   - package the VS Code extension .vsix,
+#   - attach the tarballs + .vsix + a SHA256SUMS covering all of them to a GitHub release,
 #   - on a NON-prerelease, dispatch `release-published` to the web repos so docs advances to this
 #     release's docs and the sites refresh their version pill.
 #
@@ -115,9 +116,12 @@ jobs:
           name: noeta-${{ matrix.target }}
           path: "*.tar.gz"
 
+  # Attaches EVERY release asset — the binary tarballs and the extension .vsix — in one step, so
+  # the single SHA256SUMS covers all of them. `noeta upgrade` verifies the tarball against it and
+  # `noeta ide --vscode` the .vsix; an asset outside the sums file would be uninstallable there.
   release:
     name: Publish GitHub release
-    needs: build
+    needs: [build, package-extension]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -127,7 +131,7 @@ jobs:
 
       - name: Checksums
         working-directory: dist
-        run: sha256sum *.tar.gz > SHA256SUMS
+        run: sha256sum *.tar.gz *.vsix > SHA256SUMS
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -182,14 +186,15 @@ jobs:
           || gh api -X POST "/orgs/noeta-lang/actions/variables" \
             -f name=NOETA_VERSION -f value="$TAG" -f visibility=all
 
-  # Build the VS Code extension .vsix and attach it to the GitHub release. Its version is NOT read
-  # from package.json — the git tag is the single source of truth, so the extension always ships at
-  # the same version as the toolchain (`vX.Y.Z` is stamped in at package time, never committed).
-  # This runs for EVERY tag, prereleases included, so an rc build is always a downloadable artifact
-  # even when registry publishing is skipped. Depends on `release` so the release exists to attach to.
+  # Build the VS Code extension .vsix. Its version is NOT read from package.json — the git tag is
+  # the single source of truth, so the extension always ships at the same version as the toolchain
+  # (`vX.Y.Z` is stamped in at package time, never committed). This runs for EVERY tag, prereleases
+  # included, so an rc build is always a downloadable artifact even when registry publishing is
+  # skipped. It runs BEFORE `release`, which attaches the .vsix alongside the tarballs and folds it
+  # into the release's SHA256SUMS — the checksum `noeta ide --vscode` verifies the download against.
   package-extension:
     name: Package VS Code extension
-    needs: [build, release]
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -220,11 +225,6 @@ jobs:
         with:
           name: vscode-extension
           path: editors/vscode-noeta/*.vsix
-
-      - name: Attach to the GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: editors/vscode-noeta/*.vsix
 
   # Publish the packaged extension to the registries. Open VSX is the primary channel (it serves
   # VSCodium/Cursor, which the Microsoft Marketplace does not). Each step self-skips when its token

@@ -38,8 +38,9 @@ fn host_target() -> Option<&'static str> {
 }
 
 /// Spawn a tiny HTTP/1.1 fixture server serving the given `(path, body)` routes (anything else
-/// 404s) and return its base URL. The thread serves until the test process exits.
-fn serve_routes(routes: Vec<(String, Vec<u8>)>) -> String {
+/// 404s) and return its base URL. The thread serves until the test process exits. Shared with the
+/// `ide` tests — `noeta ide` consumes the same release-asset contract through the same seams.
+pub(crate) fn serve_routes(routes: Vec<(String, Vec<u8>)>) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -95,7 +96,7 @@ fn release_tarball(stem: &str, binary: &[u8]) -> Vec<u8> {
     builder.into_inner().unwrap().finish().unwrap()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     sha2::Sha256::digest(bytes)
         .iter()

@@ -12,9 +12,14 @@ A TextMate grammar and VS Code extension live in
 grammar is **static** — it colorizes without running the compiler, instantly and offline — and
 covers the whole surface: keywords, the three string forms with `${…}` interpolation, every numeric
 literal form, primitive and container types, PascalCase user types, `@directive`/tier blocks,
-`#[attribute]`s, and the full operator set. Install by symlinking the folder into
-`~/.vscode/extensions/` (VSCodium works identically); the extension's README has details and a
-`sample.noe` exercising every construct.
+`#[attribute]`s, and the full operator set. Install the extension with
+[`noeta ide --vscode`](The-CLI#noeta-ide): it downloads the `.vsix` matching your toolchain's
+version from the GitHub release, verifies it, and installs it into VS Code or VSCodium — a
+marketplace listing is still pending, but the release asset ships today, and this path also covers
+VSCodium and offline installs; re-run it after `noeta upgrade` so the extension moves in step with
+the toolchain. From a source checkout, symlink the folder into `~/.vscode/extensions/` instead
+(VSCodium works identically); the extension's README has details and a `sample.noe` exercising
+every construct.
 
 For **Neovim / Helix / Zed**, a
 [tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta)

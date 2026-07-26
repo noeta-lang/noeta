@@ -24,14 +24,17 @@ const REPO: &str = "noeta-lang/noeta";
 const BUILD_FROM_SOURCE: &str = "https://github.com/noeta-lang/noeta#building-from-source";
 /// The default GitHub API base (`releases/latest` resolution).
 const DEFAULT_API_BASE: &str = "https://api.github.com";
-/// The default release-asset download base (`<base>/<tag>/<file>`).
-const DEFAULT_DOWNLOAD_BASE: &str = "https://github.com/noeta-lang/noeta/releases/download";
+/// The default release-asset download base (`<base>/<tag>/<file>`). Shared with `noeta ide`,
+/// which downloads the release's `.vsix` from the same host under the same contract.
+pub(crate) const DEFAULT_DOWNLOAD_BASE: &str =
+    "https://github.com/noeta-lang/noeta/releases/download";
 
 // Test-only seams: the integration tests point these at a local fixture server so the whole flow
 // (resolve → download → verify → replace) runs against controlled data. They are not user-facing
-// configuration — the release artifact contract is GitHub's.
+// configuration — the release artifact contract is GitHub's. The download seam is shared with
+// `noeta ide`, which consumes the same release assets.
 const API_BASE_ENV: &str = "NOETA_UPGRADE_API_BASE";
-const DOWNLOAD_BASE_ENV: &str = "NOETA_UPGRADE_DOWNLOAD_BASE";
+pub(crate) const DOWNLOAD_BASE_ENV: &str = "NOETA_UPGRADE_DOWNLOAD_BASE";
 
 /// `noeta upgrade [--version vX.Y.Z] [--check]` — self-update the toolchain binary.
 ///
@@ -212,7 +215,7 @@ fn dist_stem(tag: &str, target: &str) -> String {
 
 /// Whether the executable lives under cargo's bin directory (`$CARGO_HOME/bin`, or the default
 /// `~/.cargo/bin`) — i.e. was `cargo install`ed and should be upgraded through cargo.
-fn cargo_installed(exe: &Path, cargo_home: Option<&Path>, home: Option<&Path>) -> bool {
+pub(crate) fn cargo_installed(exe: &Path, cargo_home: Option<&Path>, home: Option<&Path>) -> bool {
     let mut bins: Vec<PathBuf> = Vec::new();
     if let Some(cargo_home) = cargo_home {
         bins.push(cargo_home.join("bin"));
@@ -225,7 +228,7 @@ fn cargo_installed(exe: &Path, cargo_home: Option<&Path>, home: Option<&Path>) -
 
 /// The expected SHA-256 for `asset` out of a `SHA256SUMS` body: `<64-hex>  <name>` lines, with
 /// the `*<name>` binary-mode variant some `sha256sum` invocations emit also accepted.
-fn expected_checksum(sums: &str, asset: &str) -> Option<String> {
+pub(crate) fn expected_checksum(sums: &str, asset: &str) -> Option<String> {
     sums.lines().find_map(|line| {
         let (hash, rest) = line
             .trim_end()
@@ -240,7 +243,7 @@ fn expected_checksum(sums: &str, asset: &str) -> Option<String> {
 }
 
 /// Lowercase hex of a byte string's SHA-256.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut hex = String::with_capacity(64);
     for byte in digest {
@@ -253,7 +256,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// The blocking HTTP client all requests share: identified UA, bounded connect. No overall
 /// timeout — the tarball download on a slow link may legitimately take a while; per-request
 /// timeouts are set where bounded responses are expected.
-fn http_client() -> Result<reqwest::blocking::Client, String> {
+pub(crate) fn http_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("noeta/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(30))
@@ -336,7 +339,10 @@ fn download_verified_binary(tag: &str, target: &str) -> Result<Vec<u8>, String> 
 }
 
 /// GET a URL to bytes, treating any non-2xx as an error.
-fn fetch_bytes(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn fetch_bytes(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<Vec<u8>, String> {
     let response = client
         .get(url)
         .send()

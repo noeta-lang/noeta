@@ -30,6 +30,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta watch-scope`](#noeta-watch-scope) | Monitor a scope's advisory transparency log for silent suppression or rewrite. |
 | [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
 | [`noeta upgrade`](#noeta-upgrade) | Self-update the toolchain binary to the latest release. |
+| [`noeta ide`](#noeta-ide) | Install the matching editor extension — the VS Code/VSCodium `.vsix` at this binary's version. |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
@@ -679,3 +680,15 @@ Self-updates the **toolchain binary** to the latest [release](https://github.com
 - `--check` reports whether an upgrade is available and changes nothing: exit 0 when current, exit 1 when a newer release exists — so scripts can gate on the exit code.
 
 A `noeta` installed by `cargo install` is refused (upgrade that through cargo — the binary belongs to cargo's bookkeeping), and platforms without release binaries are pointed at [building from source](https://github.com/noeta-lang/noeta#building-from-source). Set `GITHUB_TOKEN` (or `GH_TOKEN`) to lift GitHub's unauthenticated API rate limit in CI; it is never required.
+
+## `noeta ide`
+
+```text
+noeta ide --vscode [--bin <NAME|PATH>]
+```
+
+Installs the **Noeta VS Code extension at this binary's own version**: downloads `noeta-<version>.vsix` from the toolchain's GitHub release `v<version>`, verifies it against the release's `SHA256SUMS` (the same artifact contract [`noeta upgrade`](#noeta-upgrade) consumes), and installs it with the editor's own `--install-extension --force` — so re-running updates the installed extension in place. The version pinning is the point: the extension's grammar and language-server integration then always match the running toolchain — after a [`noeta upgrade`](#noeta-upgrade), run `noeta ide --vscode` again to move the extension in step.
+
+The editor is auto-detected — the first of `code`, `codium`, `code-insiders` found on PATH — and `--bin <name-or-path>` overrides the pick (any binary speaking `--install-extension` works). The `.vsix` is staged in the noeta cache and removed after a successful install; if the editor's install invocation fails, the file is **kept** and its path printed so you can install it by hand.
+
+This verb exists because the Visual Studio Marketplace listing is still pending — the release asset is the install path in the meantime — and it stays useful beyond that: it is the install path for **VSCodium** (which the Microsoft marketplace does not serve) and for offline or version-pinned setups. A cargo-installed or source-built `noeta` has no matching release asset and is refused; install from the source tree instead ([`editors/vscode-noeta`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta)). Bare `noeta ide` prints a short pointer at `--vscode` (more editors may follow).
