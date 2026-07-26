@@ -35,15 +35,16 @@ command -v tar >/dev/null 2>&1 || fail "tar is required"
 # --- Detect the release target for this machine -------------------------------------------------
 OS=$(uname -s)
 ARCH=$(uname -m)
+SUPPORTED="x86_64/aarch64 Linux (glibc) and x86_64/aarch64 macOS"
 case "$OS" in
   Linux) OS_PART="unknown-linux-gnu" ;;
   Darwin) OS_PART="apple-darwin" ;;
-  *) fail "unsupported OS \`$OS\` — build from source: https://github.com/$REPO#building-from-source" ;;
+  *) fail "unsupported OS \`$OS\` — prebuilt binaries cover $SUPPORTED; on anything else build from source: https://github.com/$REPO#building-from-source" ;;
 esac
 case "$ARCH" in
   x86_64|amd64) ARCH_PART="x86_64" ;;
   aarch64|arm64) ARCH_PART="aarch64" ;;
-  *) fail "unsupported architecture \`$ARCH\` — build from source: https://github.com/$REPO#building-from-source" ;;
+  *) fail "unsupported architecture \`$ARCH\` on $OS — prebuilt binaries cover $SUPPORTED; on anything else build from source: https://github.com/$REPO#building-from-source" ;;
 esac
 # A musl-only Linux (e.g. Alpine) cannot run the gnu build.
 if [ "$OS_PART" = "unknown-linux-gnu" ] && [ ! -e /lib/ld-linux-x86-64.so.2 ] && [ ! -e /lib/ld-linux-aarch64.so.1 ]; then
