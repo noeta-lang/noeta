@@ -2041,3 +2041,112 @@ fn a_git_dependency_is_pinned_and_reproduces_offline() {
         .success()
         .stdout(predicate::str::contains("pinned offline value"));
 }
+
+// --- `noeta publish --docs-only` (docs remediation) ---------------------------------------------
+
+#[test]
+fn publish_docs_only_reuploads_docs_without_touching_the_index() {
+    // The remediation tool for a shelf release whose stored docs are wrong (the docsgen-root
+    // regression left every para/* release with `{"modules": []}`): `--docs-only` reruns the same
+    // docs-generation pipeline a publish runs and re-uploads the artifact for an ALREADY-published
+    // version — no `--git`, no new version, and the index is byte-for-byte untouched.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_docs_only");
+    let _ = std::fs::remove_dir_all(&base);
+    let pkg = base.join("pkg");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("noeta.toml"),
+        "[package]\nname = \"acme/greeter\"\nversion = \"0.3.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("lib.noe"),
+        "namespace greeter.lib;\n\
+         pub fn greet(who: string): string { return \"hello \" + who }\n",
+    )
+    .unwrap();
+    git_in(&["init", "-q"], &pkg);
+    git_in(&["add", "-A"], &pkg);
+    git_in(&["commit", "-qm", "init"], &pkg);
+    git_in(&["tag", "v0.3.0"], &pkg);
+
+    let url = format!("file://{}", pkg.display());
+    lang()
+        .current_dir(&pkg)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--git", &url])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("docs uploaded"));
+
+    // Snapshot every registry file EXCEPT the docs artifact — `--docs-only` must change none of it.
+    let snapshot = |dir: &std::path::Path| -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .filter(|e| !e.file_name().to_string_lossy().starts_with("docs__"))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    };
+    let index_before = snapshot(&reg);
+
+    // The source grows a new function; the shelf docs are now stale.
+    std::fs::write(
+        pkg.join("lib.noe"),
+        "namespace greeter.lib;\n\
+         pub fn greet(who: string): string { return \"hello \" + who }\n\
+         pub fn wave(): string { return \"o/\" }\n",
+    )
+    .unwrap();
+
+    // `--docs-only` regenerates + re-uploads for the existing 0.3.0 — no `--git` needed.
+    lang()
+        .current_dir(&pkg)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--docs-only"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "docs re-uploaded for `acme/greeter` 0.3.0",
+        ));
+
+    // The stored artifact now carries the new function…
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["doc", "--package", "acme/greeter@0.3.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wave"));
+    // …and the index is exactly as the publish left it.
+    assert_eq!(
+        snapshot(&reg),
+        index_before,
+        "--docs-only must never write the index"
+    );
+
+    // A version that is NOT in the index is refused with a pointed error — a docs-only upload for
+    // an unpublished version is a mistake (docs belong to a release).
+    std::fs::write(
+        pkg.join("noeta.toml"),
+        "[package]\nname = \"acme/greeter\"\nversion = \"9.9.9\"\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&pkg)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--docs-only"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`acme/greeter@9.9.9` is not published",
+        ));
+}

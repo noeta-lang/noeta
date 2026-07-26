@@ -603,6 +603,7 @@ On success a **publish token** is bound to the scope — a given `--token`, or a
 
 ```text
 noeta publish --git <URL> [--tag <TAG>] [--key | --interactive [--oob]]
+noeta publish --docs-only
 ```
 
 Publishes the package in the current directory's `noeta.toml` to the registry: resolves `--tag` (default `v<version>`) to its commit SHA, pins that into the index entry, and **signs an attestation** binding *name + version → commit* so consumers can verify the release independently of trusting the registry.
@@ -616,6 +617,8 @@ How it signs — an explicit flag wins, then the environment decides:
 | Ambient CI identity (GitHub Actions, GitLab, Buildkite) | **Keyless** (Sigstore), zero-config — `[keyless: <identity>]`. |
 | A key file exists (`NOETA_SIGNING_KEY` or `./noeta-signing.key`) | **Key-based** Ed25519 — `[signed]`. |
 | None of the above | `[UNSIGNED]` (resolves, but consumers can't verify it). |
+
+`--docs-only` regenerates the release's documentation artifact through the same pipeline a publish runs (for a native package: the composed-toolchain build and its API-reference extraction) and re-uploads it for a version **already in the index** — no `--git`, no new version, no provenance; the upload needs only the scope's publish token (`NOETA_REGISTRY_TOKEN`). It refuses when the manifest's version is not published: docs belong to a release, so a docs-only upload for an unpublished version is a mistake. Use it to fix a shelf release whose stored docs are wrong or empty without bumping the version.
 
 A published version is **immutable** — re-publishing the same version with different coordinates is rejected. A package with `path`/`git` dependencies is rejected at publish (consumers couldn't resolve them); depend via the registry. A manifest with a non-empty [`[patch]` table](Manifest#patch--dev-time-path-overrides) is likewise rejected — a patch is a local dev-time override and must not travel with a release. Publishing to the hosted registry needs `NOETA_REGISTRY_TOKEN` (bound by [`noeta claim`](#noeta-claim)). The target index is the one **the package's scope routes to**, exactly like resolution: a `[registries]` mapping for the scope wins (so a private scope never leaks to the public registry), then `NOETA_REGISTRY_URL`, then `NOETA_REGISTRY_DIR`'s file-backed local index (offline development and tests), else the built-in hosted registry at `registry.noeta.dev`.
 

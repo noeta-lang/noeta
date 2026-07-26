@@ -231,15 +231,22 @@ enum Command {
         /// writes the artifact + Markdown tree with `--out`.
         #[arg(long, conflicts_with_all = ["file", "package"])]
         api: bool,
-        /// With `--api`, document only the extension whose namespace root is this (a package's own
-        /// name segment) — its own modules/types, excluding `std`. Omit to document the whole
-        /// registry.
-        #[arg(long, requires = "api", value_name = "NAMESPACE")]
+        /// With `--api`, document only the extensions whose namespace root is this — an explicit
+        /// single-namespace filter, excluding `std`. Omit to document the whole registry.
+        #[arg(long, requires = "api", value_name = "NAMESPACE", group = "api_scope")]
         root: Option<String>,
-        /// With `--api --root`, fail (before emitting docs) if the package registers any module or
-        /// extern type outside its root namespace — the publish quality gate against a type that
-        /// leaked into `std` (a missing `namespace:`). Exit 2 lists the offenders.
-        #[arg(long, requires = "root")]
+        /// With `--api`, document every registered NON-BUILTIN extension — in a package's
+        /// composed toolchain, exactly the package's own surface under its real namespace
+        /// root(s). This is what `noeta publish` uses: unlike `--root`, it never guesses the
+        /// namespace from the package name, so an extension whose `root()` diverges from its
+        /// package segment (or a package registering several extensions) documents correctly.
+        #[arg(long, requires = "api", group = "api_scope")]
+        non_builtin: bool,
+        /// With `--api --root` or `--api --non-builtin`, fail (before emitting docs) if the
+        /// scoped extensions register any surface outside their own namespace root(s) — the
+        /// publish quality gate against a type that leaked into `std` (a missing `namespace:`)
+        /// or an extension squatting a toolchain-owned root. Exit 2 lists the offenders.
+        #[arg(long, requires = "api_scope")]
         lint: bool,
     },
     /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
@@ -524,9 +531,10 @@ enum Command {
     /// is the **client stub**: it writes to the local/offline index (`NOETA_REGISTRY_DIR`); the
     /// hosted registry service is built and operated separately.
     Publish {
-        /// The git repository URL the release's source lives at.
-        #[arg(long)]
-        git: String,
+        /// The git repository URL the release's source lives at. Not needed with `--docs-only`
+        /// (nothing is pinned or published).
+        #[arg(long, required_unless_present = "docs_only")]
+        git: Option<String>,
         /// The git tag for this release (defaults to `v<version>`).
         #[arg(long)]
         tag: Option<String>,
@@ -554,6 +562,13 @@ enum Command {
         /// failure never blocks the publish (it degrades to a warning).
         #[arg(long)]
         no_readme: bool,
+        /// Only regenerate and re-upload the documentation artifact for a version that is
+        /// ALREADY published — no new version, no index write, no provenance (the registry's
+        /// docs endpoint wants only the scope's publish token, `NOETA_REGISTRY_TOKEN`). The
+        /// remediation tool for a shelf release whose stored docs are wrong or empty. Refuses
+        /// if the manifest's version is not in the index.
+        #[arg(long, conflicts_with_all = ["no_docs", "no_readme", "key", "interactive", "oob", "tag"])]
+        docs_only: bool,
     },
     /// Report the dependency tree's **trust footprint** (package-manager Phase 4): every resolved
     /// dependency, its source, and which ones run **native code** or contribute **CLI commands** —
@@ -983,8 +998,18 @@ pub fn run_cli(
             target,
             api,
             root,
+            non_builtin,
             lint,
-        } => cmd_doc(&file, &package, &out, &target, api, root.as_deref(), lint),
+        } => cmd_doc(
+            &file,
+            &package,
+            &out,
+            &target,
+            api,
+            root.as_deref(),
+            non_builtin,
+            lint,
+        ),
         Command::Build {
             file,
             out,
@@ -1079,14 +1104,16 @@ pub fn run_cli(
             oob,
             no_docs,
             no_readme,
+            docs_only,
         } => cmd_publish(
-            &git,
+            git.as_deref(),
             tag.as_deref(),
             key,
             interactive,
             oob,
             no_docs,
             no_readme,
+            docs_only,
         ),
         Command::Audit { path } => cmd_audit(&path),
         Command::Key { action } => cmd_key(&action),

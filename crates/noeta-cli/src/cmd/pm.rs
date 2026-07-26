@@ -454,14 +454,18 @@ pub(crate) fn warn_new_committers(old_lock: &lock::Lock, graph: &graph::Resolved
 /// `noeta publish --git <url> [--tag <tag>]` — record this package's identity + version → git
 /// coordinates in the registry index (package-manager P2.5, client stub). The tag defaults to
 /// `v<version>`. Writes to the local/offline index; the hosted registry is operated separately.
+/// With `--docs-only`, skip the index entirely and only regenerate + re-upload the docs artifact
+/// for an already-published version (remediation for a release whose stored docs are wrong).
+#[allow(clippy::too_many_arguments)] // a straight fan-out of the clap variant's fields
 pub(crate) fn cmd_publish(
-    git: &str,
+    git: Option<&str>,
     tag: Option<&str>,
     force_key: bool,
     interactive: bool,
     oob: bool,
     no_docs: bool,
     no_readme: bool,
+    docs_only: bool,
 ) -> ExitCode {
     let manifest_path = match locate_manifest() {
         Ok(p) => p,
@@ -497,6 +501,18 @@ pub(crate) fn cmd_publish(
     }
     let name = format!("{}/{}", pkg.name.company, pkg.name.package);
     let version = pkg.version.clone();
+    // `--docs-only`: regenerate this release's docs artifact (the same pipeline a publish runs,
+    // including the composed-toolchain build for a native package) and re-upload it for a version
+    // ALREADY in the index — no new version, no provenance, no index write. The remediation tool
+    // for a shelf release whose stored docs are wrong or empty.
+    if docs_only {
+        return cmd_publish_docs_only(&manifest, &manifest_path, pkg, &name, &version);
+    }
+    let Some(git) = git else {
+        // clap enforces `--git` unless `--docs-only`; keep a real error for library callers.
+        eprintln!("noeta: `noeta publish` needs `--git <URL>` (the release's source repository)");
+        return ExitCode::from(2);
+    };
     // The declared license travels with the release into the registry's immutable record (and its
     // transparency-log leaf). Optional — but nudge, since consumers can't legally use an unlicensed
     // package.
@@ -560,35 +576,14 @@ pub(crate) fn cmd_publish(
     // quality gate** — a native crate that won't compile can't be composed by any consumer, so we
     // refuse to publish it (fail fast, before pinning a SHA / attesting / touching the index). The
     // registry never compiles anything: only the finished `docs.json` is later uploaded.
-    let native_docs: Option<String> = match &pkg.native {
-        Some(native_dir) => {
-            let pkg_dir = manifest_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            let crate_dir = pkg_dir.join(native_dir);
-            println!(
-                "building native crate at `{}` (publish quality gate)…",
-                crate_dir.display()
-            );
-            match compose::package_api_docs(&name, &crate_dir, &pkg.name.package) {
-                Ok(api_json) => {
-                    // Fold in any `.noe` glue the package also ships (advisory; the API surface wins).
-                    let noe_json = docgen::package_docs_json(pkg_dir).ok().map(|(j, _)| j);
-                    Some(docgen::finalize_native_docs(
-                        &api_json,
-                        noe_json.as_deref(),
-                        &name,
-                        &version.to_string(),
-                    ))
-                }
-                Err(err) => {
-                    eprintln!("noeta: native package build failed — not publishing.\n{err}");
-                    return ExitCode::from(1);
-                }
+    let native_docs: Option<String> =
+        match native_release_docs(pkg, &manifest_path, &name, &version) {
+            Ok(docs) => docs,
+            Err(err) => {
+                eprintln!("noeta: native package build failed — not publishing.\n{err}");
+                return ExitCode::from(1);
             }
-        }
-        None => None,
-    };
+        };
 
     let tag = tag
         .map(str::to_string)
@@ -716,34 +711,15 @@ pub(crate) fn cmd_publish(
                 .unwrap_or_else(|| PathBuf::from("."));
             if !no_docs {
                 let docs = match native_docs {
-                    // A native package's docs are pre-generated JSON; count declarations from its
-                    // module items (the pure-Noeta path gets an exact count from docgen).
-                    Some(json) => {
-                        let decls = serde_json::from_str::<serde_json::Value>(&json)
-                            .ok()
-                            .and_then(|d| d.get("modules").and_then(|m| m.as_array()).cloned())
-                            .map_or(0, |mods| {
-                                mods.iter()
-                                    .map(|m| {
-                                        m.get("items")
-                                            .and_then(|i| i.as_array())
-                                            .map_or(0, Vec::len)
-                                    })
-                                    .sum()
-                            });
-                        Ok((json, decls))
-                    }
-                    None => docgen::package_docs_json(&pkg_dir).map(|(json, g)| (json, g.decls)),
+                    // A native package's docs are pre-generated JSON (the quality-gated build
+                    // above); a pure-Noeta package's are generated from source here.
+                    Some(json) => Ok(json),
+                    None => docgen::package_docs_json(&pkg_dir).map(|(json, _)| json),
                 };
                 match docs {
-                    Ok((docs_json, decls)) => match index.put_docs(&name, &version, &docs_json) {
+                    Ok(docs_json) => match index.put_docs(&name, &version, &docs_json) {
                         Ok(()) => {
-                            let modules = serde_json::from_str::<serde_json::Value>(&docs_json)
-                                .ok()
-                                .and_then(|d| {
-                                    d.get("modules").and_then(|m| m.as_array()).map(|a| a.len())
-                                })
-                                .unwrap_or(0);
+                            let (modules, decls) = docs_json_counts(&docs_json);
                             println!(
                                 "docs uploaded ({modules} module{}, {decls} declaration{})",
                                 plural(modules),
@@ -773,6 +749,147 @@ pub(crate) fn cmd_publish(
         }
         Err(err) => {
             eprintln!("noeta: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Generate a NATIVE package's registry docs artifact: build the package's own crate into a
+/// composed toolchain (the publish quality gate — an uncompilable crate is refused), emit its
+/// **non-builtin** API surface (every extension the composition adds over the toolchain's builtin
+/// units, so a `root()` diverging from the package segment still documents), and fold in any
+/// `.noe` glue the package also ships. `Ok(None)` for a pure-source package (no `native =` entry).
+fn native_release_docs(
+    pkg: &manifest::PackageMeta,
+    manifest_path: &std::path::Path,
+    name: &str,
+    version: &semver::Version,
+) -> Result<Option<String>, String> {
+    let Some(native_dir) = &pkg.native else {
+        return Ok(None);
+    };
+    let pkg_dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let crate_dir = pkg_dir.join(native_dir);
+    println!(
+        "building native crate at `{}` (publish quality gate)…",
+        crate_dir.display()
+    );
+    let api_json = compose::package_api_docs(name, &crate_dir)?;
+    // Fold in any `.noe` glue the package also ships (advisory; the API surface wins).
+    let noe_json = docgen::package_docs_json(pkg_dir).ok().map(|(j, _)| j);
+    Ok(Some(docgen::finalize_native_docs(
+        &api_json,
+        noe_json.as_deref(),
+        name,
+        &version.to_string(),
+    )))
+}
+
+/// `(modules, declarations)` counted from a finished `docs.json` artifact, for the summary line.
+/// A declaration item carries `kind`; a free-floating `@doc` section does not — so this matches
+/// the generator's own `decl_count` exactly.
+fn docs_json_counts(json: &str) -> (usize, usize) {
+    let Some(modules) = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|d| d.get("modules").and_then(|m| m.as_array()).cloned())
+    else {
+        return (0, 0);
+    };
+    let decls = modules
+        .iter()
+        .map(|m| {
+            m.get("items")
+                .and_then(|i| i.as_array())
+                .map_or(0, |items| {
+                    items.iter().filter(|i| i.get("kind").is_some()).count()
+                })
+        })
+        .sum();
+    (modules.len(), decls)
+}
+
+/// `noeta publish --docs-only` — regenerate the release's documentation artifact through the same
+/// pipeline a publish runs (composed-toolchain API docs for a native package, source docs for a
+/// pure one) and re-upload it for a version **already in the index**. Never touches the index:
+/// no new version, no tag/SHA pinning, no provenance — the hosted registry's docs endpoint wants
+/// only the scope's publish token (`NOETA_REGISTRY_TOKEN`), which the HTTP client supplies as on a
+/// normal publish. Refuses when the manifest's version is not published (docs belong to a release;
+/// uploading docs for a version that doesn't exist is a mistake, and the registry would 404 it).
+fn cmd_publish_docs_only(
+    manifest: &manifest::Manifest,
+    manifest_path: &std::path::Path,
+    pkg: &manifest::PackageMeta,
+    name: &str,
+    version: &semver::Version,
+) -> ExitCode {
+    // Route to the registry that owns this package's scope, exactly like a publish (a private
+    // scope's docs must not leak to the public registry).
+    let scope_source = manifest.registries().source_for(&pkg.name.company);
+    if scope_source.is_some() {
+        println!(
+            "uploading docs for `{name}` via the `[registries]` source for `{}`",
+            pkg.name.company
+        );
+    }
+    let index = match registry::open_source(scope_source) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("noeta: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    // Docs belong to a release — refuse an upload for a version the index has never published.
+    let releases = match index.releases(name) {
+        Ok(releases) => releases,
+        Err(err) => {
+            eprintln!("noeta: cannot check whether `{name}@{version}` is published: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if !releases.iter().any(|r| r.version == *version) {
+        eprintln!(
+            "noeta: `{name}@{version}` is not published — `--docs-only` re-uploads the docs \
+             artifact for an EXISTING release and never creates one. Publish the release first \
+             (`noeta publish --git …`), or fix `[package] version` to name the release whose docs \
+             you are regenerating."
+        );
+        return ExitCode::from(1);
+    }
+    let pkg_dir = manifest_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let docs_json = match native_release_docs(pkg, manifest_path, name, version) {
+        Ok(Some(json)) => json,
+        Ok(None) => match docgen::package_docs_json(&pkg_dir) {
+            Ok((json, _)) => json,
+            Err(err) => {
+                eprintln!("noeta: docs not generated: {err}");
+                return ExitCode::from(1);
+            }
+        },
+        Err(err) => {
+            eprintln!("noeta: native package build failed — docs not generated.\n{err}");
+            return ExitCode::from(1);
+        }
+    };
+    // Unlike the ride-along upload of a full publish (advisory: a docs failure must not unpublish
+    // a release that already succeeded), the upload IS the whole point here — fail loudly.
+    match index.put_docs(name, version, &docs_json) {
+        Ok(()) => {
+            let (modules, decls) = docs_json_counts(&docs_json);
+            println!(
+                "docs re-uploaded for `{name}` {version} ({modules} module{}, {decls} \
+                 declaration{}) — index untouched",
+                plural(modules),
+                plural(decls)
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("noeta: docs not uploaded: {err}");
             ExitCode::from(1)
         }
     }

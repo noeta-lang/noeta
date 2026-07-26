@@ -67,7 +67,7 @@ $ noeta doc --package acme/greeter@0.3.0 --out docs/   # pinned — render the M
 
 Stored docs are *advisory metadata*, not provenance: unsigned, last-wins on re-publish, and a hosted registry may regenerate them from source itself (the docs.rs model) rather than trust the upload.
 
-Plain extraction (`noeta doc <FILE>`, no `--out`/`--package`) takes one more flag, `--target <NAME>`, which gates extraction on the `doc` tier being live in that build target. `noeta doc` also has a second mode, `--api`, which documents the **intrinsic registry** (the stdlib and any composed native modules) instead of `.noe` source — `--root <NAMESPACE>` scopes it to one extension and `--lint` gates a package's own docs on every registered symbol living under its own namespace root; see `noeta doc --help`.
+Plain extraction (`noeta doc <FILE>`, no `--out`/`--package`) takes one more flag, `--target <NAME>`, which gates extraction on the `doc` tier being live in that build target. `noeta doc` also has a second mode, `--api`, which documents the **intrinsic registry** (the stdlib and any composed native modules) instead of `.noe` source — `--root <NAMESPACE>` scopes it to the extensions rooted at one namespace, `--non-builtin` scopes it to every non-builtin extension (what `noeta publish` uses in a package's composed toolchain — it never guesses a root, so an extension whose namespace root diverges from its package name still documents), and `--lint` gates a package's own docs on every registered symbol living under its extensions' own namespace roots; see `noeta doc --help`.
 
 ---
 

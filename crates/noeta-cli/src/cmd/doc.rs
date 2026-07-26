@@ -123,15 +123,32 @@ pub(crate) fn web_docs_url(base: &str, name: &str, version: &str) -> String {
 /// `noeta doc --api`: generate the API reference from the intrinsic registry (stdlib + any composed
 /// native modules). Prints the schema-1 `docs.json` to stdout, or — with `--out` — writes the
 /// artifact and renders its Markdown tree (the same schema the hosted registry renders). `root`
-/// scopes to one extension's namespace (a package documenting itself).
-pub(crate) fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>, lint: bool) -> ExitCode {
-    // The publish namespace lint: a package's whole surface must sit under its own root (`--root`).
-    // Report every offender and refuse (exit 2) before emitting anything — the publish gate.
-    if lint && let Some(root) = root {
-        let violations = noeta_ide::api::namespace_violations(root);
+/// scopes to one extension's namespace (an explicit user filter); `non_builtin` scopes to every
+/// registered non-builtin extension — the publish docs path, which must not guess a root because an
+/// extension's `root()` may deliberately diverge from its package's manifest segment.
+pub(crate) fn cmd_doc_api(
+    out: &Option<PathBuf>,
+    root: Option<&str>,
+    non_builtin: bool,
+    lint: bool,
+) -> ExitCode {
+    // The publish namespace lint: the scoped extensions' whole surface must sit under their own
+    // roots (and, for `--non-builtin`, never claim a toolchain-owned root). Report every offender
+    // and refuse (exit 2) before emitting anything — the publish gate.
+    if lint {
+        let violations = if non_builtin {
+            noeta_ide::api::namespace_violations_excluding(
+                &docgen::builtin_extension_names(),
+                &docgen::toolchain_roots(),
+            )
+        } else if let Some(root) = root {
+            noeta_ide::api::namespace_violations(root)
+        } else {
+            Vec::new()
+        };
         if !violations.is_empty() {
             eprintln!(
-                "noeta: package `{root}` registers surface outside its own namespace ({} \
+                "noeta: this package registers surface outside its own namespace ({} \
                  violation{}):",
                 violations.len(),
                 plural(violations.len()),
@@ -142,7 +159,12 @@ pub(crate) fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>, lint: bool)
             return ExitCode::from(2);
         }
     }
-    let (json, done) = docgen::registry_docs_json(None, root);
+    let scope = if non_builtin {
+        docgen::ApiScope::NonBuiltin
+    } else {
+        root.map_or(docgen::ApiScope::All, docgen::ApiScope::Root)
+    };
+    let (json, done) = docgen::registry_docs_json(None, scope);
     match out {
         Some(out_dir) => match docgen::render_json_to(out_dir, &json) {
             Ok(_) => {
@@ -168,6 +190,7 @@ pub(crate) fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>, lint: bool)
     }
 }
 
+#[allow(clippy::too_many_arguments)] // a straight fan-out of the clap variant's fields
 pub(crate) fn cmd_doc(
     file: &Option<PathBuf>,
     package: &Option<String>,
@@ -175,12 +198,13 @@ pub(crate) fn cmd_doc(
     target: &Option<String>,
     api: bool,
     root: Option<&str>,
+    non_builtin: bool,
     lint: bool,
 ) -> ExitCode {
     // `--api`: the registry-backed path — the intrinsic surface (stdlib + composed native modules)
     // as a schema-1 `docs.json`, organized by module. No local source involved.
     if api {
-        return cmd_doc_api(out, root, lint);
+        return cmd_doc_api(out, root, non_builtin, lint);
     }
     // `--package`: the registry-fetch path — a published release's stored artifact, no local
     // source involved.

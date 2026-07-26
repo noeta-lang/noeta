@@ -160,13 +160,18 @@ pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
 }
 
 /// Build (client-side, cached) a composed toolchain that links **the package's own** native entry
-/// crate at `crate_dir`, then run `noeta doc --api --root <root_ns>` inside it and return the
-/// emitted `docs.json`. This is how `noeta publish` generates a native package's API reference: the
+/// crate at `crate_dir`, then run `noeta doc --api --non-builtin` inside it and return the emitted
+/// `docs.json`. This is how `noeta publish` generates a native package's API reference: the
 /// module surface lives only in the compiled Rust, so it must be *built* — on the **publisher's**
 /// machine (the registry never compiles anything). A build failure surfaces as `Err`, which the
 /// publish flow uses as a quality gate (don't publish a native package whose crate won't compile).
-/// `root_ns` scopes the output to the package's own namespace, excluding std.
-pub fn package_api_docs(identity: &str, crate_dir: &Path, root_ns: &str) -> Result<String, String> {
+///
+/// `--non-builtin`, never `--root <package segment>`: the composed toolchain links exactly the
+/// builtin units plus this package's own extension(s), so "everything non-builtin" IS the
+/// package's surface. Guessing the root from the manifest segment silently documented `[]` for any
+/// extension whose `root()` diverges from its segment (para/p2p roots at `para`) — the empty
+/// `docs.json` every published para/* release carried.
+pub fn package_api_docs(identity: &str, crate_dir: &Path) -> Result<String, String> {
     let nc = NativeCrate {
         identity: identity.to_string(),
         crate_dir: crate_dir.to_path_buf(),
@@ -176,14 +181,13 @@ pub fn package_api_docs(identity: &str, crate_dir: &Path, root_ns: &str) -> Resu
     };
     // A doc-generation query exposes no CLI of its own, so command-trust is irrelevant — `&[]`.
     let binary = compose_binary(&[nc], &[], ShimKind::Toolchain)?;
-    // `--lint`: the composed toolchain refuses (exit 2) if the package registers any module or
-    // extern type outside its own namespace — the publish quality gate against a type that leaked
-    // into `std` (a missing `namespace:`). Its stderr carries the offenders; surface it verbatim.
+    // `--lint`: the composed toolchain refuses (exit 2) if the package registers any extern type
+    // outside its extensions' own roots, or an extension claims a toolchain-owned root — the
+    // publish quality gate. Its stderr carries the offenders; surface it verbatim.
     let output = std::process::Command::new(&binary)
         .arg("doc")
         .arg("--api")
-        .arg("--root")
-        .arg(root_ns)
+        .arg("--non-builtin")
         .arg("--lint")
         .output()
         .map_err(|err| {

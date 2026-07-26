@@ -102,17 +102,63 @@ pub fn package_docs_json(dir: &Path) -> Result<(String, Generated), String> {
     ))
 }
 
+/// How `noeta doc --api` scopes the registry surface it documents.
+#[derive(Debug, Clone, Copy)]
+pub enum ApiScope<'a> {
+    /// The whole registry (the default `--api`).
+    All,
+    /// Only the extensions rooted at this namespace (`--root <ns>`) — an explicit user filter.
+    Root(&'a str),
+    /// Every registered extension EXCEPT the toolchain's builtin units (`--non-builtin`) — the
+    /// publish docs path: in a package's composed toolchain this is exactly the package's own
+    /// surface, whatever namespace root(s) it declares (`root()` may diverge from the package's
+    /// manifest segment, e.g. para/p2p rooting at `para`).
+    NonBuiltin,
+}
+
+/// The unit names of the extensions the toolchain itself installs — [`run_cli`](crate::run_cli)'s
+/// exact builtin set, derived from the same statics it assembles (the `std` family from
+/// `std_units()` plus the first-party `html`/`css` formatter units), never a parallel string list.
+/// The complement of this set in any composed registry is the composition's own package surface.
+pub fn builtin_extension_names() -> Vec<&'static str> {
+    use noeta_stdlib::Extension;
+    let mut names: Vec<&'static str> = noeta_stdlib::registry::std_units()
+        .iter()
+        .map(|e| e.name())
+        .collect();
+    names.push(noeta_html::HTML_EXTENSION.name());
+    names.push(noeta_css::CSS_EXTENSION.name());
+    names
+}
+
+/// The namespace roots the toolchain owns — the builtin units' own roots plus the reserved
+/// built-in scopes (`std`/`noeta`/`core`) — which the publish lint refuses a package extension to
+/// claim. Assembly-time validation cannot catch this squat (a fresh module under `std.` collides
+/// with nothing), so the lint is where it surfaces.
+pub fn toolchain_roots() -> Vec<&'static str> {
+    use noeta_stdlib::Extension;
+    let mut roots: Vec<&'static str> = noeta_stdlib::registry::std_units()
+        .iter()
+        .map(|e| e.root())
+        .collect();
+    roots.push(noeta_html::HTML_EXTENSION.root());
+    roots.push(noeta_css::CSS_EXTENSION.root());
+    roots.extend_from_slice(noeta_pm::reserved::builtin_scopes());
+    roots.sort_unstable();
+    roots.dedup();
+    roots
+}
+
 /// Build the **API-reference** `docs.json` (docs-browser Arc 2) from the intrinsic registry — the
 /// stdlib and any composed native modules — rather than from `.noe` source. One module entry per
 /// registry module (`std.math`, `std.http.client`, …), each function an `fn` item carrying its
 /// rendered signature and any registered doc prose. Same schema-1 shape as [`generate`], so it
 /// rides to the registry and renders on the hosted docs page identically. `package` names the
-/// artifact (e.g. the toolchain's `std`), or `None` for a generic title. `root` scopes the surface
-/// to a single extension's namespace (a package documenting *itself*, excluding std); `None`
-/// documents the whole registry.
+/// artifact (e.g. the toolchain's `std`), or `None` for a generic title. `scope` selects which
+/// extensions' surface is documented (see [`ApiScope`]).
 pub fn registry_docs_json(
     package: Option<(String, String)>,
-    root: Option<&str>,
+    scope: ApiScope<'_>,
 ) -> (String, Generated) {
     let fn_item = |f: noeta_ide::api::ApiFn| {
         Item::Decl(DeclDocs {
@@ -123,9 +169,16 @@ pub fn registry_docs_json(
             public: true,
         })
     };
-    let (api_modules, api_types) = match root {
-        Some(r) => (noeta_ide::api::modules_of(r), noeta_ide::api::types_of(r)),
-        None => (noeta_ide::api::modules(), noeta_ide::api::types()),
+    let (api_modules, api_types) = match scope {
+        ApiScope::All => (noeta_ide::api::modules(), noeta_ide::api::types()),
+        ApiScope::Root(r) => (noeta_ide::api::modules_of(r), noeta_ide::api::types_of(r)),
+        ApiScope::NonBuiltin => {
+            let builtin = builtin_extension_names();
+            (
+                noeta_ide::api::modules_excluding(&builtin),
+                noeta_ide::api::types_excluding(&builtin),
+            )
+        }
     };
     // One `docs.json` module per registry module and per extern type — both are qualified surfaces
     // of functions/methods, so they render uniformly by-module on the hosted page.
@@ -646,7 +699,7 @@ mod tests {
 
     #[test]
     fn registry_docs_json_is_schema1_by_module_with_prose() {
-        let (text, done) = registry_docs_json(None, None);
+        let (text, done) = registry_docs_json(None, ApiScope::All);
         assert!(done.modules > 3 && done.decls > 0);
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(doc["schema"].as_u64(), Some(SCHEMA as u64));
@@ -709,7 +762,7 @@ mod tests {
     fn registry_docs_json_scopes_to_a_root() {
         // Scoping to `std` keeps the std surface; an unknown root yields nothing (a native package
         // documenting itself excludes std this way).
-        let (std_text, std_done) = registry_docs_json(None, Some("std"));
+        let (std_text, std_done) = registry_docs_json(None, ApiScope::Root("std"));
         assert!(std_done.modules > 3);
         let doc: serde_json::Value = serde_json::from_str(&std_text).unwrap();
         assert!(
@@ -719,7 +772,18 @@ mod tests {
                 .iter()
                 .all(|m| m["namespace"].as_str().unwrap().starts_with("std"))
         );
-        let (_empty_text, empty_done) = registry_docs_json(None, Some("nosuchpkg"));
+        let (_empty_text, empty_done) = registry_docs_json(None, ApiScope::Root("nosuchpkg"));
         assert_eq!(empty_done.modules, 0);
+    }
+
+    #[test]
+    fn registry_docs_json_non_builtin_is_empty_in_the_stock_toolchain() {
+        // The stock (uncomposed) toolchain registers ONLY builtin units, so the publish scope
+        // documents nothing — the builtin set really is the exact complement of a composition's
+        // package surface. (The composed-toolchain half — a package extension surviving the
+        // exclusion — is the cli integration test over the imgfx fixture, and the divergent-root
+        // case is unit-tested in noeta-ide::api.)
+        let (_text, done) = registry_docs_json(None, ApiScope::NonBuiltin);
+        assert_eq!(done.modules, 0, "no non-builtin units in the stock binary");
     }
 }

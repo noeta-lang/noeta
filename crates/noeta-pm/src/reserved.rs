@@ -62,6 +62,13 @@ pub fn is_builtin(scope: &str) -> bool {
     matches!(classify(scope), Some(Reserved::Builtin))
 }
 
+/// The built-in (toolchain-owned) scopes themselves — for callers that need the *set* rather than a
+/// membership test (the publish namespace lint reports a package extension claiming any of these as
+/// its namespace root).
+pub fn builtin_scopes() -> &'static [&'static str] {
+    BUILTIN_SCOPES
+}
+
 /// The error a resolver/`noeta add` raises when asked to fetch a built-in scope from a registry —
 /// naming the offending `identity` and its reserved `scope`, and pointing at the reason (it is not a
 /// registry package but an attempt to shadow core code). Callers prefix their own context (which

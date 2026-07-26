@@ -13,6 +13,9 @@
 use noeta_stdlib::NominalType;
 use noeta_stdlib::registry;
 
+/// The extension unit type every enumeration here walks — the registry's own element type.
+type Ext = &'static (dyn noeta_stdlib::Extension + Sync);
+
 /// One documented function of a module: its name, its rendered signature, and its prose (empty when
 /// undocumented).
 #[derive(Debug, Clone)]
@@ -42,19 +45,32 @@ pub struct ApiType {
 /// `std.math`, …), each with its functions (plain + higher-order) sorted by name. Reads the
 /// process-global registry via the stdlib facade, which lazily seeds the built-in `std` units.
 pub fn modules() -> Vec<ApiModule> {
-    modules_impl(None)
+    modules_in(registry::extensions(), &|_| true)
 }
 
-/// The modules of just the extension whose [`root`](noeta_stdlib::Extension::root) is `root` (a
-/// package's own namespace segment) — for scoping a package's API docs to itself, excluding std.
+/// The modules of just the extensions whose [`root`](noeta_stdlib::Extension::root) is `root` —
+/// an explicit single-namespace filter (`noeta doc --api --root <ns>`).
 pub fn modules_of(root: &str) -> Vec<ApiModule> {
-    modules_impl(Some(root))
+    modules_in(registry::extensions(), &|ext| ext.root() == root)
 }
 
-fn modules_impl(root: Option<&str>) -> Vec<ApiModule> {
+/// The modules of every registered extension EXCEPT the named units — the publish docs path
+/// (`noeta doc --api --non-builtin`): a composed toolchain's registry holds exactly the builtin
+/// units plus the package's own extension(s), so excluding the builtins by unit name documents the
+/// package's real surface. Filtering by [`Extension::name`](noeta_stdlib::Extension::name), never by
+/// root, honors an extension whose `root()` deliberately diverges from its package segment
+/// (`para/p2p` rooting at `para`) and a package registering several units — the cases the old
+/// `root == package segment` guess silently documented as `{"modules": []}`.
+pub fn modules_excluding(exclude_units: &[&str]) -> Vec<ApiModule> {
+    modules_in(registry::extensions(), &|ext| {
+        !exclude_units.contains(&ext.name())
+    })
+}
+
+fn modules_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiModule> {
     let mut out: Vec<ApiModule> = Vec::new();
-    for ext in registry::extensions() {
-        if root.is_some_and(|r| ext.root() != r) {
+    for ext in exts {
+        if !keep(*ext) {
             continue;
         }
         for m in ext.modules() {
@@ -96,19 +112,27 @@ pub fn function(qualified: &str, name: &str) -> Option<ApiFn> {
 /// Every extern type the registry knows, qualified and sorted (`std.crypto.Hasher`, `std.id.Uuid`,
 /// …), each with its methods (plain + higher-order) sorted by name.
 pub fn types() -> Vec<ApiType> {
-    types_impl(None)
+    types_in(registry::extensions(), &|_| true)
 }
 
-/// The extern types of just the extension whose `root` is `root` — the type analogue of
+/// The extern types of just the extensions whose `root` is `root` — the type analogue of
 /// [`modules_of`].
 pub fn types_of(root: &str) -> Vec<ApiType> {
-    types_impl(Some(root))
+    types_in(registry::extensions(), &|ext| ext.root() == root)
 }
 
-fn types_impl(root: Option<&str>) -> Vec<ApiType> {
+/// The extern types of every registered extension EXCEPT the named units — the type analogue of
+/// [`modules_excluding`].
+pub fn types_excluding(exclude_units: &[&str]) -> Vec<ApiType> {
+    types_in(registry::extensions(), &|ext| {
+        !exclude_units.contains(&ext.name())
+    })
+}
+
+fn types_in(exts: &[Ext], keep: &dyn Fn(Ext) -> bool) -> Vec<ApiType> {
     let mut out: Vec<ApiType> = Vec::new();
-    for ext in registry::extensions() {
-        if root.is_some_and(|r| ext.root() != r) {
+    for ext in exts {
+        if !keep(*ext) {
             continue;
         }
         for t in ext.types() {
@@ -155,27 +179,69 @@ pub fn method(qualified: &str, name: &str) -> Option<ApiFn> {
         .find(|m| m.name == name)
 }
 
-/// Namespacing violations for a package publishing under `pkg_root` (the publish lint). Every
-/// extern type a package's extension registers must be qualified under the package's **own** root
-/// — a consumer re-roots the package at its dependency-table key, and the published API docs use
-/// the package root, so a type that leaks into another namespace (most commonly an `ExtType` that
-/// omits `namespace:` and so defaults to `std`) would be unreachable and is a publish-blocking
-/// error. Returns one message per violation; empty = clean.
-///
-/// Runs in the package's composed toolchain, whose registry holds the first-party toolchain
-/// extensions (std, and the bundled `css`/`html`, each under its own reserved root) plus this
-/// package's extension(s). The package's extensions are exactly the ones rooted at `pkg_root`
-/// (`Extension::root()` == the package's name segment), so we inspect only those — the bundled
-/// extensions under other roots are not the package's surface and are left alone.
+/// Namespacing violations for the extensions rooted at `pkg_root` (the `--root` form of the publish
+/// lint): every extern type such an extension registers must be qualified under that root — a type
+/// that leaks into another namespace (most commonly an `ExtType` that omits `namespace:` and so
+/// defaults to `std`) would be unreachable and is a publish-blocking error. Returns one message per
+/// violation; empty = clean.
 pub fn namespace_violations(pkg_root: &str) -> Vec<String> {
-    let under = |ns: &str| ns == pkg_root || ns.starts_with(&format!("{pkg_root}."));
+    namespace_violations_in(
+        registry::extensions(),
+        &|ext| under(ext.root(), pkg_root),
+        &[],
+    )
+}
+
+/// Namespacing violations for **every registered non-builtin extension** — the publish-path lint
+/// (`noeta doc --api --non-builtin --lint`). `exclude_units` names the toolchain's own builtin units
+/// (by [`Extension::name`](noeta_stdlib::Extension::name)); every other unit is the publishing
+/// package's real surface, whatever roots it declares. The old form filtered by
+/// `root == package segment`, which made the lint vacuous for a package whose extension roots
+/// diverge from its segment (`para/p2p` rooting at `para`). Checks, per package unit:
+///
+/// - its `root()` must not claim a **toolchain-owned root** (`toolchain_roots`: the builtin units'
+///   own roots plus the reserved built-in scopes) — an extra unit rooting at `std`/`css`/… would
+///   win `use std.X` resolution for its own additions, which assembly-time validation cannot
+///   refuse (no module identity collides);
+/// - every extern type must be namespaced under the unit's **own** root (belt-and-suspenders with
+///   `Registry::validate`, which enforces the same rule at assembly for the default paths).
+pub fn namespace_violations_excluding(
+    exclude_units: &[&str],
+    toolchain_roots: &[&str],
+) -> Vec<String> {
+    namespace_violations_in(
+        registry::extensions(),
+        &|ext| !exclude_units.contains(&ext.name()),
+        toolchain_roots,
+    )
+}
+
+/// Whether namespace `ns` sits at or under `root` (`para` / `para.p2p` under `para`).
+fn under(ns: &str, root: &str) -> bool {
+    ns == root || (ns.starts_with(root) && ns.as_bytes().get(root.len()) == Some(&b'.'))
+}
+
+fn namespace_violations_in(
+    exts: &[Ext],
+    keep: &dyn Fn(Ext) -> bool,
+    toolchain_roots: &[&str],
+) -> Vec<String> {
     let mut out = Vec::new();
-    for ext in registry::extensions().iter().filter(|e| under(e.root())) {
+    for ext in exts.iter().filter(|e| keep(**e)) {
+        let root = ext.root();
+        if let Some(owned) = toolchain_roots.iter().find(|r| under(root, r)) {
+            out.push(format!(
+                "extension `{}` declares the namespace root `{root}`, which is owned by the Noeta \
+                 toolchain (`{owned}`) — a package must publish its surface under its own root",
+                ext.name()
+            ));
+            continue; // its types would all re-report the same squat
+        }
         for t in ext.types() {
-            if !under(t.namespace) {
+            if !under(t.namespace, root) {
                 out.push(format!(
-                    "extern type `{}` is namespaced `{}`, not under the package root `{pkg_root}` \
-                     — set `namespace: \"{pkg_root}\"` on it (the field defaults to `std`)",
+                    "extern type `{}` is namespaced `{}`, not under its extension's root `{root}` \
+                     — set `namespace: \"{root}\"` on it (the field defaults to `std`)",
                     t.name, t.namespace
                 ));
             }
@@ -281,6 +347,188 @@ mod tests {
         // covered by the cli integration test over the imgfx fixture.)
         assert!(namespace_violations("std").is_empty());
         assert!(namespace_violations("nosuchpkg").is_empty());
+    }
+
+    // --- publish docs-gen scoping (docsgen-root regression) -------------------------------------
+    //
+    // `noeta publish` documents a native package by running the composed toolchain's docs
+    // generator. It used to scope with `--root <package segment>`, but an extension may
+    // deliberately root at a DIFFERENT namespace (`Extension::root()` defaults to `name()` and is
+    // overridable) — the published para/p2p package roots at `para` while its segment is `p2p`, so
+    // the exact-root filter matched nothing and the registry stored `{"modules": []}`. The publish
+    // path now excludes the toolchain's builtin units by unit NAME and documents everything else.
+    // These fixtures mirror that shape without composing a toolchain (the cheap layer that would
+    // have caught it).
+
+    static DIVERGENT_FNS: &[noeta_stdlib::ExtFn] = &[noeta_stdlib::ExtFn {
+        name: "connect",
+        params: &[noeta_stdlib::SigType::Int],
+        ret: noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Int),
+    }];
+    static DIVERGENT_MODULES: &[noeta_stdlib::ExtModule] = &[noeta_stdlib::ExtModule {
+        name: "p2p",
+        functions: DIVERGENT_FNS,
+        ..noeta_stdlib::ExtModule::DEFAULTS
+    }];
+    static DIVERGENT_TYPES: &[noeta_stdlib::ExtType] = &[noeta_stdlib::ExtType {
+        name: "Peer",
+        namespace: "para.p2p",
+        ..noeta_stdlib::ExtType::DEFAULTS
+    }];
+
+    /// The para/p2p shape: package segment `p2p`, extension unit `p2p-native`, root `para`.
+    struct DivergentRootExt;
+    impl noeta_stdlib::Extension for DivergentRootExt {
+        fn name(&self) -> &'static str {
+            "p2p-native"
+        }
+        fn root(&self) -> &'static str {
+            "para"
+        }
+        fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+            DIVERGENT_MODULES
+        }
+        fn types(&self) -> &'static [noeta_stdlib::ExtType] {
+            DIVERGENT_TYPES
+        }
+    }
+    static DIVERGENT_EXT: DivergentRootExt = DivergentRootExt;
+
+    static CONVENTION_MODULES: &[noeta_stdlib::ExtModule] = &[noeta_stdlib::ExtModule {
+        name: "fx",
+        functions: DIVERGENT_FNS,
+        ..noeta_stdlib::ExtModule::DEFAULTS
+    }];
+    /// The convention shape (acme/imgfx): root == unit name == package segment.
+    struct ConventionExt;
+    impl noeta_stdlib::Extension for ConventionExt {
+        fn name(&self) -> &'static str {
+            "imgfx"
+        }
+        fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+            CONVENTION_MODULES
+        }
+    }
+    static CONVENTION_EXT: ConventionExt = ConventionExt;
+
+    static LEAKY_TYPES: &[noeta_stdlib::ExtType] = &[noeta_stdlib::ExtType {
+        name: "Peer",
+        namespace: "std", // the classic omitted-`namespace:` default
+        ..noeta_stdlib::ExtType::DEFAULTS
+    }];
+    /// A divergent-root package whose type leaks into `std`.
+    struct LeakyExt;
+    impl noeta_stdlib::Extension for LeakyExt {
+        fn name(&self) -> &'static str {
+            "leaky-native"
+        }
+        fn root(&self) -> &'static str {
+            "para"
+        }
+        fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+            &[]
+        }
+        fn types(&self) -> &'static [noeta_stdlib::ExtType] {
+            LEAKY_TYPES
+        }
+    }
+    static LEAKY_EXT: LeakyExt = LeakyExt;
+
+    /// A package extension squatting a toolchain-owned root outright.
+    struct SquatExt;
+    impl noeta_stdlib::Extension for SquatExt {
+        fn name(&self) -> &'static str {
+            "squat-native"
+        }
+        fn root(&self) -> &'static str {
+            "std"
+        }
+        fn modules(&self) -> &'static [noeta_stdlib::ExtModule] {
+            CONVENTION_MODULES
+        }
+    }
+    static SQUAT_EXT: SquatExt = SquatExt;
+
+    /// The builtin-unit names of a `std`-only assembly, the exclusion set the publish path passes.
+    fn std_unit_names() -> Vec<&'static str> {
+        noeta_stdlib::registry::std_units()
+            .iter()
+            .map(|e| e.name())
+            .collect()
+    }
+
+    #[test]
+    fn publish_docs_scope_includes_a_divergent_root_extension() {
+        // (a) The publish-path scope (exclude builtins by unit name) yields the divergent
+        // extension's whole surface, under its REAL root…
+        let mut exts: Vec<Ext> = noeta_stdlib::registry::std_units();
+        exts.push(&DIVERGENT_EXT);
+        let builtin = std_unit_names();
+        let keep = |ext: Ext| !builtin.contains(&ext.name());
+        let mods = modules_in(&exts, &keep);
+        assert_eq!(
+            mods.iter()
+                .map(|m| m.qualified.as_str())
+                .collect::<Vec<_>>(),
+            ["para.p2p"],
+            "the divergent-root extension's module is documented, std's are excluded"
+        );
+        assert_eq!(mods[0].functions[0].name, "connect");
+        let types = types_in(&exts, &keep);
+        assert_eq!(
+            types
+                .iter()
+                .map(|t| t.qualified.as_str())
+                .collect::<Vec<_>>(),
+            ["para.p2p.Peer"]
+        );
+        // …while the old publish scoping — exact root == the package's manifest segment (`p2p`) —
+        // matches nothing: the empty `{"modules": []}` artifact this regression pins down.
+        assert!(
+            modules_in(&exts, &|ext| ext.root() == "p2p").is_empty(),
+            "root-equals-segment filtering is exactly the bug"
+        );
+    }
+
+    #[test]
+    fn publish_docs_scope_is_unchanged_for_the_convention_case() {
+        // (b) A package whose extension follows the convention (root == unit name == segment)
+        // documents identically under the old `--root` filter and the new builtin-exclusion scope.
+        let mut exts: Vec<Ext> = noeta_stdlib::registry::std_units();
+        exts.push(&CONVENTION_EXT);
+        let builtin = std_unit_names();
+        let by_exclusion = modules_in(&exts, &|ext| !builtin.contains(&ext.name()));
+        let by_root = modules_in(&exts, &|ext| ext.root() == "imgfx");
+        assert_eq!(
+            by_exclusion
+                .iter()
+                .map(|m| &m.qualified)
+                .collect::<Vec<_>>(),
+            by_root.iter().map(|m| &m.qualified).collect::<Vec<_>>(),
+        );
+        assert_eq!(by_exclusion[0].qualified, "imgfx.fx");
+    }
+
+    #[test]
+    fn publish_lint_fires_for_a_divergent_root_package() {
+        // (c) The publish-path lint checks the package's REAL extensions. A divergent-root
+        // package's type leaking into `std` fires (the old segment-root filter skipped the
+        // extension entirely, making the lint vacuous)…
+        let violations = namespace_violations_in(&[&LEAKY_EXT], &|_| true, &["std"]);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            violations[0].contains("`Peer`") && violations[0].contains("`std`"),
+            "{violations:?}"
+        );
+        // …and an extension claiming a toolchain-owned root at all is itself a violation.
+        let squat = namespace_violations_in(&[&SQUAT_EXT], &|_| true, &["std", "css", "html"]);
+        assert_eq!(squat.len(), 1, "{squat:?}");
+        assert!(squat[0].contains("`squat-native`"), "{squat:?}");
+        // A well-namespaced divergent-root package is clean under the same checks.
+        assert!(
+            namespace_violations_in(&[&DIVERGENT_EXT], &|_| true, &["std", "css", "html"])
+                .is_empty()
+        );
     }
 
     #[test]
