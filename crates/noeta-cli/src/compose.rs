@@ -444,6 +444,16 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The marker file inside each compose entry recording the **build identity** of the `noeta`
+/// binary that last used it. The compose key folds `noeta_cache::binary_identity()` in, so every
+/// toolchain rebuild strands the previous build's entries — gigabytes no future invocation can
+/// ever hit again. The key is a hash (the identity can't be recovered from it), so the identity is
+/// also written beside the entry: `noeta cache clean` removes entries whose marker is not this
+/// binary's, and `noeta cache ls` reads the marker's mtime as the entry's last-used time (it is
+/// rewritten on every use, hit or miss). An entry with no marker was last used by a pre-marker
+/// toolchain build — stale by the same argument.
+pub(crate) const COMPOSE_IDENTITY_FILE: &str = "identity";
+
 /// The compose workspace under the user cache (`~/.cache/noeta/compose/<key>/`).
 fn compose_dir(key: &str) -> Result<PathBuf, String> {
     let root = noeta_cache::Cache::locate()
@@ -451,6 +461,12 @@ fn compose_dir(key: &str) -> Result<PathBuf, String> {
     let dir = root.join("compose").join(key);
     std::fs::create_dir_all(dir.join("src"))
         .map_err(|err| format!("cannot create `{}`: {err}", dir.display()))?;
+    // Stamp the entry with this binary's identity (see [`COMPOSE_IDENTITY_FILE`]). Best-effort —
+    // a failed write costs only an over-eager future `cache clean`, never the composition.
+    let _ = std::fs::write(
+        dir.join(COMPOSE_IDENTITY_FILE),
+        noeta_cache::binary_identity().unwrap_or_default(),
+    );
     Ok(dir)
 }
 

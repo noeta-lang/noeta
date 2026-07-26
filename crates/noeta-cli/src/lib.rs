@@ -51,6 +51,7 @@ mod watch;
 
 use cmd::bench::cmd_bench;
 use cmd::build::{cmd_build, cmd_dump};
+use cmd::cache::cmd_cache;
 use cmd::check::cmd_check;
 use cmd::doc::cmd_doc;
 use cmd::expand::cmd_expand;
@@ -64,7 +65,7 @@ use cmd::pm::{
 use cmd::repl::cmd_repl;
 use cmd::run::{cmd_run, execute_real_host, try_run_stapled};
 use cmd::serve::{ext_command_clap, ext_command_dispatch};
-use cmd::servers::{cmd_cache, cmd_dap, cmd_lsp, cmd_mcp, cmd_profile};
+use cmd::servers::{cmd_dap, cmd_lsp, cmd_mcp, cmd_profile};
 use cmd::test::{call_stmt, cmd_test};
 use cmd::upgrade::cmd_upgrade;
 use output::emit_diagnostics_mapped;
@@ -407,13 +408,15 @@ enum Command {
     // (`Serve` was a variant here until higher-order-abi H6 — `noeta serve` is now an
     // extension-contributed command, `noeta-stdlib/src/serve.rs::SERVE_COMMAND`, wired
     // dynamically in `main`.)
-    /// Inspect or clear the transparent startup cache (M3). `noeta run`/`dump`/`build` cache each
-    /// compile under `~/.cache/noeta/` so a repeated run of unchanged sources skips the front-end;
-    /// caching is on by default (disable per-run with `--no-cache`, or everywhere with
-    /// `NOETA_NO_CACHE`).
+    /// Inspect or clean the per-user cache (`~/.cache/noeta/`). It holds three kinds of derived
+    /// state: cached compilations (`*.noeb` — the transparent startup cache, M3), composed
+    /// toolchains (`compose/` — a full build per native-dependency set, easily 1–2 GiB each),
+    /// and fetched package sources (`pkg/`). Everything in it is re-derivable, so deleting any
+    /// of it is always safe — the next run recompiles, recomposes, or refetches what it needs.
+    /// Without a subcommand, `ls`.
     Cache {
         #[command(subcommand)]
-        action: CacheAction,
+        action: Option<CacheAction>,
     },
     /// Format `.noe` source into the canonical style. By default rewrites each file in place
     /// (atomically); a directory argument formats every `.noe` beneath it. Style is read from the
@@ -777,11 +780,26 @@ enum KeyAction {
 
 #[derive(Subcommand)]
 enum CacheAction {
+    /// Summarize the cache per category — cached compilations (`*.noeb`), composed toolchains
+    /// (`compose/`), and fetched package sources (`pkg/`) — with entry counts and sizes; compose
+    /// entries (the multi-GiB ones) are listed individually with size and last-used time. The
+    /// default when no subcommand is given.
+    Ls,
     /// Print the cache directory path (whether or not it exists yet).
     Path,
-    /// Show the cache location, entry count, total size on disk, and the size cap.
+    /// Show the startup-cache location, entry count, total size on disk, and the size cap.
     Info,
-    /// Remove all cached compilations.
+    /// Remove the composed toolchains that other toolchain builds left behind (stale versions
+    /// this binary can never reuse), reporting the bytes reclaimed; this binary's own
+    /// compositions are kept. Always safe: everything in the cache is re-derivable — a later
+    /// run rebuilds what it needs.
+    Clean {
+        /// Wipe the whole cache instead: all composed toolchains, fetched package sources, and
+        /// cached compilations. Equally safe — costs at most a recompile/recompose/refetch.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Remove all cached compilations (the `*.noeb` startup-cache entries only).
     Clear,
 }
 
@@ -998,7 +1016,7 @@ pub fn run_cli(
             lines,
             jit,
         ),
-        Command::Cache { action } => cmd_cache(&action),
+        Command::Cache { action } => cmd_cache(action.as_ref()),
         Command::Fmt {
             files,
             check,
