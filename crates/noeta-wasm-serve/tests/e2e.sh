@@ -8,7 +8,22 @@ cd "$(dirname "$0")/../../.."
 SCRATCH=$(mktemp -d)
 SERVE_PID=""
 UPSTREAM_PID=""
+SERVE_LOG="$SCRATCH/serve.log"
 trap 'rm -rf "$SCRATCH"; [ -n "$SERVE_PID" ] && kill "$SERVE_PID" 2>/dev/null; [ -n "$UPSTREAM_PID" ] && kill "$UPSTREAM_PID" 2>/dev/null || true' EXIT
+
+# Fail loudly: an assertion mismatch prints the serving engine's captured output — the
+# component's own stderr (where the runtime surfaces handler diagnostics) lands there, so the
+# real cause is in the CI log instead of just "unexpected body".
+fail() {
+  echo "$1" >&2
+  if [ -s "$SERVE_LOG" ]; then
+    echo "--- server log ($SERVE_LOG) ---" >&2
+    cat "$SERVE_LOG" >&2
+  else
+    echo "--- server log is empty ---" >&2
+  fi
+  exit 1
+}
 
 cat > "$SCRATCH/edge.noe" <<'NOE'
 use std.http.server
@@ -27,7 +42,7 @@ cargo run -q -p noeta-cli --no-default-features --locked -- \
   build --serve "$SCRATCH/edge.noe" -o "$SCRATCH/edge.serve.wasm"
 
 ADDR=127.0.0.1:8917
-wasmtime serve -S cli=y --addr "$ADDR" "$SCRATCH/edge.serve.wasm" &
+wasmtime serve -S cli=y --addr "$ADDR" "$SCRATCH/edge.serve.wasm" > "$SERVE_LOG" 2>&1 &
 SERVE_PID=$!
 for _ in $(seq 1 100); do
   curl -s -o /dev/null "http://$ADDR/" && break
@@ -36,8 +51,8 @@ done
 
 BODY=$(curl -s "http://$ADDR/ping")
 STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://$ADDR/ping")
-[ "$STATUS" = "200" ] || { echo "unexpected status: $STATUS"; exit 1; }
-[ "$BODY" = "edge says hi: /ping" ] || { echo "unexpected body: $BODY"; exit 1; }
+[ "$STATUS" = "200" ] || fail "unexpected status: $STATUS"
+[ "$BODY" = "edge says hi: /ping" ] || fail "unexpected body: $BODY"
 kill "$SERVE_PID" 2>/dev/null; SERVE_PID=""
 echo "wasi:http serve e2e: an unchanged http.serve program answered over real HTTP ✓"
 
@@ -64,21 +79,21 @@ use std.http.client
 use std.http.{Request, Response}
 
 fn handle(req: Request): Response {
-    upstream = client.get("http://127.0.0.1:8916/data")
+    upstream = client.get("http://127.0.0.1:8916/data")?
     return server.response(200, "edge proxied: ${upstream.body()}")
 }
 
 server.serve(8080, handle)
 NOE
 cargo run -q -p noeta-cli --no-default-features --locked --   build --serve "$SCRATCH/proxy.noe" -o "$SCRATCH/proxy.serve.wasm"
-wasmtime serve -S cli=y --addr "$ADDR" "$SCRATCH/proxy.serve.wasm" &
+wasmtime serve -S cli=y --addr "$ADDR" "$SCRATCH/proxy.serve.wasm" > "$SERVE_LOG" 2>&1 &
 SERVE_PID=$!
 for _ in $(seq 1 100); do
   curl -s -o /dev/null "http://$ADDR/" && break
   sleep 0.2
 done
 BODY=$(curl -s "http://$ADDR/go")
-[ "$BODY" = "edge proxied: 42 from upstream" ] || { echo "unexpected proxy body: $BODY"; exit 1; }
+[ "$BODY" = "edge proxied: 42 from upstream" ] || fail "unexpected proxy body: $BODY"
 kill "$SERVE_PID" 2>/dev/null; SERVE_PID=""
 echo "wasi:http outbound e2e: the handler proxied a real upstream through outgoing-handler ✓"
 
@@ -101,14 +116,14 @@ component = "app"
 source = "$SCRATCH/proxy.serve.wasm"
 allowed_outbound_hosts = ["http://127.0.0.1:8916"]
 EOF
-  spin up -f "$SCRATCH/spin.toml" --listen "127.0.0.1:8915" &
+  spin up -f "$SCRATCH/spin.toml" --listen "127.0.0.1:8915" > "$SERVE_LOG" 2>&1 &
   SERVE_PID=$!
   for _ in $(seq 1 100); do
     curl -s -o /dev/null "http://127.0.0.1:8915/" && break
     sleep 0.2
   done
   BODY=$(curl -s "http://127.0.0.1:8915/go")
-  [ "$BODY" = "edge proxied: 42 from upstream" ] || { echo "unexpected Spin body: $BODY"; exit 1; }
+  [ "$BODY" = "edge proxied: 42 from upstream" ] || fail "unexpected Spin body: $BODY"
   echo "Spin e2e: the same component served and proxied under Spin ✓"
 else
   echo "Spin e2e: skipped — spin not on PATH (wasmtime legs above are the required gate)"
