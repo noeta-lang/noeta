@@ -198,7 +198,7 @@ Registration literals should spell only what they use and default the rest — `
 
 The toolchain's own source resolves in order: `NOETA_TOOLCHAIN_SRC` (a checkout override, hermetic setups) → the workspace the running binary was built in (path deps — the development norm) → a git dependency pinned to the running binary's version tag (`noeta-cli = { git = …, tag = "vX.Y.Z" }` — cargo's own git cache does the fetching).
 
-**Versioning policy (pre-1.0).** The consumed crates (`noeta-ext-abi`, `noeta-cli` as a lib, `noeta-stdlib`) are versioned and git-tagged together (`v0.2.0` first — the ancient `v0.1.0` tag predates the extension ABI). A composed shim pins the toolchain by that tag and cargo unifies the extension's `noeta-ext-abi` onto the same source, so compatibility is ordinary source-level semver: **pre-1.0, a minor bump may break extension code**; patch releases are additive. `#[non_exhaustive]` is deliberately not used — the `..DEFAULTS` convention is the additive-evolution mechanism (see the N3.6 audit in the package-manager arc ledger, `plans/` git history).
+**Versioning policy (pre-1.0).** The consumed crates (`noeta-ext-abi`, `noeta-cli` as a lib, `noeta-stdlib`) are versioned and git-tagged together (`v0.2.0` first — the ancient `v0.1.0` tag predates the extension ABI). A composed shim pins the toolchain by that tag and cargo unifies the extension's `noeta-ext-abi` onto the same source, so compatibility is ordinary source-level semver: **pre-1.0, a minor bump may break extension code**; patch releases are additive. `#[non_exhaustive]` is deliberately not used — the `..DEFAULTS` convention is the additive-evolution mechanism (see the N3.6 audit in the package-manager arc ledger, `plans/` git history). The full author-facing compatibility statement — what is stable, what is not, and how versions resolve at consume time — is [Extension Compatibility](Extension-Compatibility).
 
 **Out-of-tree packages need exactly one copy of the toolchain.** A standalone package repo can't path-depend the noeta monorepo, so its entry crate names its toolchain crates by **git on the noeta repo**:
 
@@ -350,6 +350,7 @@ One subtlety worth knowing if you are debugging this path: a turbofish method ca
 
 ## See also
 
+- [Extension Compatibility](Extension-Compatibility) — the API contract for native package authors: the stable surface, what is not stable, and the pre-1.0 policy.
 - [Standard-Library Modules](Standard-Library-Modules) — the modules registered through this seam.
 - [Concurrency Internals](Concurrency-Internals) — the `Host` capability's role in the deterministic/real split.
 
