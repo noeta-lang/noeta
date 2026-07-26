@@ -114,7 +114,11 @@ present.
 ## Trust-on-first-use and downgrade protection
 
 The first time a consumer resolves a release from a scope, whichever trust root it carries is
-**pinned** in `noeta.lock` (commit this file):
+**pinned** in `noeta.lock` (commit this file). The lock (format `version = 2`) already pins each
+package's resolved version, git coordinates (`url`/`tag`/`sha`), content `hash`, and language
+`edition`; provenance adds a `[[scope]]` entry per scope — the keyless identity, or for the key
+root a `public_key` — plus the registry's transparency-log head (`[log]`) and advisory-feed head
+(`[advisory]`), all trust-on-first-use:
 
 ```toml
 [[scope]]

@@ -1,25 +1,37 @@
 # Getting Started
 
-This page gets you from a clean checkout to running your own program in a few minutes.
+This page gets you from nothing to running your own program in a few minutes.
 
 > [!NOTE]
-> Noeta is pre-alpha and not yet published as a released binary. You build the toolchain from source with a recent stable Rust. The binary is named `noeta`; source files use the `.noe` extension.
+> Noeta is alpha software. The binary is named `noeta`; source files use the `.noe` extension. At alpha, prebuilt binaries cover **Linux and macOS only** (x86_64/aarch64) — other platforms build from source (below).
 
-## 1 · Build the toolchain
+## 1 · Install the toolchain
 
-You need a recent stable Rust toolchain (1.95+). Then, from the repository root:
+One line — it downloads the latest [release](https://github.com/noeta-lang/noeta/releases) for your machine, verifies its checksum, and installs to `~/.local/bin`:
+
+```sh
+curl -fsSL https://noeta.dev/install | sh
+```
+
+`--version vX.Y.Z` pins a specific release; `--to <dir>` (or `NOETA_INSTALL_DIR`) changes the destination. Later releases are one `noeta upgrade` away — the installer is only needed once (and `noeta upgrade` never installs a prerelease; see [The CLI](The-CLI#noeta-upgrade)).
+
+**macOS:** the release binaries are not Apple-notarized, so Gatekeeper may refuse to run a copy of `noeta` whose download it quarantined — typically one fetched with a browser rather than the installer (`curl` does not set the quarantine attribute). If macOS blocks it ("cannot be opened because the developer cannot be verified"), clear the quarantine flag and re-run:
+
+```sh
+xattr -d com.apple.quarantine <path-to>/noeta
+```
+
+### Building from source
+
+On any other platform (musl-only Linux, Windows, *BSD) — or to hack on the toolchain — build with a recent stable Rust (1.95+) from a checkout of [the repository](https://github.com/noeta-lang/noeta):
 
 ```sh
 cargo build                 # builds the whole workspace, including the `noeta` binary
 ```
 
-The binary lands at `target/debug/noeta`. For a fast optimized build use `cargo build --release` (→ `target/release/noeta`). To put `noeta` on your `PATH`:
+The binary lands at `target/debug/noeta`; `cargo build --release` produces the optimized `target/release/noeta`. To put a source-built `noeta` on your `PATH`: `cargo install --path crates/noeta-cli`.
 
-```sh
-cargo install --path crates/noeta-cli
-```
-
-Everywhere below, `noeta` means "the built binary." If you have not installed it, substitute `cargo run -p noeta-cli --` for `noeta` — e.g. `cargo run -p noeta-cli -- run hello.noe`.
+Everywhere below, `noeta` means "the installed binary."
 
 ## 2 · Hello, world
 
@@ -146,6 +158,8 @@ The `noeta` binary is more than a runner. In brief:
 | `noeta test <file>` | Run the program's `@test` blocks. See [Testing](Testing). |
 | `noeta bench <file>` | Run and measure its `@bench` blocks. See [Benchmarking](Benchmarking). |
 | `noeta doc <file>` | Extract its `@doc { … }` prose to stdout. See [Documentation & Dev Tiers](Documentation-and-Tiers). |
+| `noeta add …` | Add a dependency to `noeta.toml` and resolve it. See [Using Packages](Using-Packages). |
+| `noeta upgrade` | Self-update the toolchain to the latest release. See [The CLI](The-CLI#noeta-upgrade). |
 
 Run `noeta <command> --help` for the flags of any command.
 
@@ -156,6 +170,7 @@ Run `noeta <command> --help` for the flags of any command.
 ## Where to go next
 
 - **[Language Tour](Language-Tour)** — learn the whole language by example.
+- **[Using Packages](Using-Packages)** — add your first dependency and run a project that uses it.
 - **[The Type System](Type-System)** — how types, inference, unions, and `dyn` fit together.
 - **[Standard Library](Standard-Library)** — the built-in types and modules you will reach for.
 - **[The `noeta.toml` Manifest](Manifest)** and **[Package Registries](Package-Registries)** — dependencies, build targets, and where packages come from.

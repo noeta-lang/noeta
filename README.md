@@ -37,7 +37,7 @@ echo match validate(cart) {
 - **Batteries and tooling.** A layered standard library and a toolchain that runs, checks, builds, formats, tests, benchmarks, profiles, and documents your code — `run`/`build`/`check`/`repl`, `test`/`bench`/`doc`, `fmt`/`profile`, plus `lsp`/`dap`/`mcp` editor & agent servers and a package manager.
 
 > [!NOTE]
-> **Status: pre-alpha, not public.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), WebAssembly builds and the browser playground (`noeta build --wasm`/`--serve`), a package manager, and the `noeta lsp` / `noeta dap` / `noeta mcp` editor & agent tooling all ship today. LiveView (server-driven UI over WebSockets) ships as the `para/html` package — the first-party `para` package family (html, api, cli, aether, db, p2p) lives in its own repositories under the noeta-lang org; still on the roadmap: desktop packaging. Until alpha, anything may change without notice — syntax, stdlib, and file formats included. The [docs](https://docs.noeta.dev) mark the plan-vs-reality boundary everywhere.
+> **Status: alpha.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), WebAssembly builds and the browser playground (`noeta build --wasm`/`--serve`), a package manager, and the `noeta lsp` / `noeta dap` / `noeta mcp` editor & agent tooling all ship today. LiveView (server-driven UI over WebSockets) ships as the `para/html` package — the first-party `para` package family (html, api, cli, aether, aether_db, db, p2p) lives in its own repositories under the noeta-lang org and is published on the hosted registry at [registry.noeta.dev](https://registry.noeta.dev); still on the roadmap: desktop packaging. Until alpha, anything may change without notice — syntax, stdlib, and file formats included. The [docs](https://docs.noeta.dev) mark the plan-vs-reality boundary everywhere.
 
 ## Try it
 
@@ -51,7 +51,9 @@ One line, on Linux or macOS (x86_64/aarch64) — downloads the latest [release](
 curl -fsSL https://noeta.dev/install | sh
 ```
 
-`--version vX.Y.Z` pins a release; `--to <dir>` (or `NOETA_INSTALL_DIR`) changes the destination. Upgrade later with `noeta upgrade`. Then:
+`--version vX.Y.Z` pins a release; `--to <dir>` (or `NOETA_INSTALL_DIR`) changes the destination. Upgrade later with `noeta upgrade`. At alpha these two platforms are the only ones with prebuilt binaries — anything else (musl-only Linux, Windows, *BSD) builds from source, below.
+
+**macOS note:** the binaries are not Apple-notarized. The installer's `curl | sh` path is unaffected, but if you download a release archive with a browser, Gatekeeper will quarantine it and refuse to run `noeta`; clear it with `xattr -d com.apple.quarantine <path-to>/noeta`. Then:
 
 ```sh
 echo 'echo "hello"' > hello.noe

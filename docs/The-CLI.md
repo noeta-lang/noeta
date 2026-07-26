@@ -20,6 +20,8 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta mcp`](Editor-and-AI-Tooling) | The agent-native MCP server, over stdio (for AI tooling; see [Editor & AI Tooling](Editor-and-AI-Tooling)). |
 | [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
 | [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
+| [`noeta add`](#noeta-add) | Add a dependency to `noeta.toml` and resolve it into `noeta.lock`. |
+| [`noeta update`](#noeta-update) | Re-resolve the dependency graph, re-pinning moved refs and refreshed versions. |
 | [`noeta claim`](#noeta-claim) | Claim a registry scope self-service — prove your GitHub identity (or a domain) and get the publish token. |
 | [`noeta publish`](#noeta-publish) | Publish a tagged release of your package to the registry, signed ([provenance](Package-Provenance)). |
 | [`noeta scope`](#noeta-scope) | Manage a scope you own — e.g. require verified provenance on every release. |
@@ -511,7 +513,7 @@ All three accept `--target <NAME>`, which acts as a **gate**: if the named `noet
 
 ---
 
-## Packages: `claim`, `publish`, `scope`, `audit`, `key`
+## Packages: `add`, `update`, `claim`, `publish`, `scope`, `audit`, `key`
 
 Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grants in `[trust]`) and resolve automatically on `run`/`build`/`check` — there is no separate install step; the resolved pins live in `noeta.lock` (commit it). These verbs are the *publisher/consumer trust* surface. The trust model behind them — attestations, the two signing roots, pinning, downgrade protection — is documented on [Package Provenance](Package-Provenance); the end-to-end submission walkthrough on [Package Registries](Package-Registries#publishing-to-the-hosted-registry).
 
@@ -541,11 +543,32 @@ gfx   = { git = "https://github.com/acme/gfx", branch = "main" }
 draft = { git = "https://github.com/acme/draft" }
 # A registry dependency by SemVer requirement (`package` is the registry identity):
 json  = { version = "^1.2", package = "acme/json" }
+# A scope dependency — several packages sharing one scope, bound under one key:
+para  = [
+  { version = "^0.1", package = "para/aether" },
+  { version = "^0.1", package = "para/db" },
+]
 ```
 
-The **dependency key** (`util`, `http`, …) is the import root you address the package by — `use util.…` — decoupled from its global `company/package` identity (like Rust's `foo = { package = "real-name" }`). A **git** source resolves its ref (`tag`/`branch`/HEAD) to a commit SHA at the remote and records that SHA in `noeta.lock`, so **every** form is reproducible regardless of ref kind — a plain build fetches by the pinned SHA (offline once cached), and only `noeta update` re-resolves a moving `branch`/HEAD ref to its new tip. `tag` and `branch` are mutually exclusive. A **published** package (`noeta publish`) may depend only via the registry — a `path`/`git` dependency is rejected at publish time, since a consumer couldn't resolve it.
+The **dependency key** (`util`, `http`, …) is the import root you address the package by — `use util.…` — decoupled from its global `company/package` identity (like Rust's `foo = { package = "real-name" }`). A **git** source resolves its ref (`tag`/`branch`/HEAD) to a commit SHA at the remote and records that SHA in `noeta.lock`, so **every** form is reproducible regardless of ref kind — a plain build fetches by the pinned SHA (offline once cached), and only `noeta update` re-resolves a moving `branch`/HEAD ref to its new tip. `tag` and `branch` are mutually exclusive. A **scope** dependency (an array value) binds several packages that share one `company` scope under a single key, so an app can depend on `para/aether` *and* `para/db` without colliding TOML keys; each member is any non-scope source, and all members must share one scope (see [the Manifest](Manifest) for the full rules). A **published** package (`noeta publish`) may depend only via the registry — a `path`/`git` dependency is rejected at publish time, since a consumer couldn't resolve it.
 
 **Editions** pin the language/ABI semantics a package is written against, so a package can evolve on its own cadence and a newer toolchain still compiles it under *its* edition. `edition` is validated against the editions this toolchain understands (an unknown one is a manifest error); omitting it uses the current edition. Each package's edition is recorded in `noeta.lock`, and the toolchain keys its compiled-bytecode cache on it — so switching a package's edition never serves a stale artifact.
+
+### `noeta add`
+
+```text
+noeta add [KEY] (--path <DIR> | --git <URL> --tag <TAG> | --version <REQ> [--package <company/pkg>])
+```
+
+Adds a dependency to the nearest `noeta.toml` (a format-preserving edit — comments and ordering survive), then resolves the graph so `noeta.lock` reflects it. Exactly one source form: `--path`, `--git` + `--tag`, or `--version` (with `--package` naming the registry identity). The import-root `KEY` may be omitted where it can be derived — from `--package`'s package half, or a `--path` dependency's own `[package]` name; a key that differs from the package's declared root is a deliberate rename and warned about (`use <key>.…`, not `use <root>.…`). A key that would capture a built-in import root (`std`/`noeta`/`core`) is refused. After resolving, the **committer signal** flags a newly-pulled release whose history introduces committers new to that repo.
+
+### `noeta update`
+
+```text
+noeta update
+```
+
+Discards the current pins and re-resolves the whole graph, rewriting `noeta.lock`: every requirement is re-satisfied against the index, and every git ref — a moving `branch`/HEAD tip, or a tag whose pin drifted — is re-`ls-remote`d and re-pinned to its current commit SHA. This is the *only* verb that moves existing pins; a plain `run`/`build`/`check` always reproduces the lock. Trust-root changes surface here too: a legitimate maintainer migration (key rotation, a move to keyless) is accepted by `noeta update` re-pinning the scope, never silently mid-build (see [Package Provenance](Package-Provenance#trust-on-first-use-and-downgrade-protection)). The committer signal runs on every changed pin.
 
 ### `noeta claim`
 
@@ -578,7 +601,7 @@ How it signs — an explicit flag wins, then the environment decides:
 | A key file exists (`NOETA_SIGNING_KEY` or `./noeta-signing.key`) | **Key-based** Ed25519 — `[signed]`. |
 | None of the above | `[UNSIGNED]` (resolves, but consumers can't verify it). |
 
-A published version is **immutable** — re-publishing the same version with different coordinates is rejected. A package with `path`/`git` dependencies is rejected at publish (consumers couldn't resolve them); depend via the registry. Publishing to the hosted registry needs `NOETA_REGISTRY_TOKEN` (bound by [`noeta claim`](#noeta-claim)); `NOETA_REGISTRY_URL` selects it (otherwise the file-backed local index is used — offline development and tests).
+A published version is **immutable** — re-publishing the same version with different coordinates is rejected. A package with `path`/`git` dependencies is rejected at publish (consumers couldn't resolve them); depend via the registry. Publishing to the hosted registry needs `NOETA_REGISTRY_TOKEN` (bound by [`noeta claim`](#noeta-claim)). The target index is the one **the package's scope routes to**, exactly like resolution: a `[registries]` mapping for the scope wins (so a private scope never leaks to the public registry), then `NOETA_REGISTRY_URL`, then `NOETA_REGISTRY_DIR`'s file-backed local index (offline development and tests), else the built-in hosted registry at `registry.noeta.dev`.
 
 ### `noeta scope`
 
@@ -635,7 +658,7 @@ Generates an Ed25519 keypair for the key-based signing path: writes the **privat
 noeta upgrade [--version <vX.Y.Z>] [--check]
 ```
 
-Self-updates the **toolchain binary** to the latest [release](https://github.com/noeta-lang/noeta/releases) — the counterpart of [`noeta update`](#packages-claim-publish-scope-audit-key), which re-resolves a *project's dependencies*. It resolves the latest release, downloads the binary for this machine, verifies its SHA-256 checksum against the release's `SHA256SUMS`, and atomically replaces the running executable (staged beside it, then renamed over — safe while `noeta` runs). Already current is a no-op; a successful swap prints the old → new version.
+Self-updates the **toolchain binary** to the latest [release](https://github.com/noeta-lang/noeta/releases) — the counterpart of [`noeta update`](#noeta-update), which re-resolves a *project's dependencies*. It resolves the latest release, downloads the binary for this machine, verifies its SHA-256 checksum against the release's `SHA256SUMS`, and atomically replaces the running executable (staged beside it, then renamed over — safe while `noeta` runs). Already current is a no-op; a successful swap prints the old → new version.
 
 - `--version vX.Y.Z` installs that exact release instead of the latest — downgrades are allowed and labeled as such. **Prereleases are never installed**: the latest-release resolution excludes them by definition, and an explicit prerelease tag (any `-` suffix, e.g. `v0.3.0-rc.1`) is refused.
 - `--check` reports whether an upgrade is available and changes nothing: exit 0 when current, exit 1 when a newer release exists — so scripts can gate on the exit code.
