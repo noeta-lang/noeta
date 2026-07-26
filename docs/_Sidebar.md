@@ -4,6 +4,7 @@
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
 - [Using Packages](Using-Packages)
+- [Package Quickstart](Quickstart-Packages)
 
 **Tools**
 - [The `noeta` CLI](The-CLI)
@@ -45,6 +46,7 @@
 - [Concurrency Internals](Concurrency-Internals)
 - [Performance Techniques](Performance-Techniques)
 - [Native Extensions](Native-Extensions)
+- [Extension Compatibility](Extension-Compatibility)
 
 **Contributing**
 - [Developer Guide](Contributing)
