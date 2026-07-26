@@ -558,8 +558,9 @@ enum Command {
         /// The publish token to bind (default: a fresh random token, printed on success).
         #[arg(long)]
         token: Option<String>,
-        /// The OIDC audience the registry expects (default: `NOETA_REGISTRY_AUDIENCE` or
-        /// `noeta-registry`). Must match the registry's configured audience.
+        /// The OIDC audience the registry expects (default: `NOETA_REGISTRY_AUDIENCE`, else the
+        /// host of the registry the claim talks to, e.g. `registry.noeta.dev`). Must match the
+        /// registry's configured audience.
         #[arg(long)]
         audience: Option<String>,
         /// Claim by **domain** instead of GitHub: prove you control this domain (whose first label must
@@ -569,7 +570,8 @@ enum Command {
         domain: Option<String>,
     },
     /// Manage a registry scope you own — its publishing policy (namespace-protection #1). Authenticated
-    /// with the scope's publish token (`NOETA_REGISTRY_TOKEN`) against `NOETA_REGISTRY_URL`.
+    /// with the scope's publish token (`NOETA_REGISTRY_TOKEN`) against the registry the scope routes
+    /// to (`[registries]`, else `NOETA_REGISTRY_URL`, else the built-in default).
     Scope {
         #[command(subcommand)]
         action: ScopeAction,

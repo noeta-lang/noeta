@@ -357,9 +357,14 @@ fn enforce_transparency(
     pinned: Option<&crate::lock::LogTrust>,
 ) -> Result<crate::lock::LogTrust, PmError> {
     use crate::transparency;
+    // The registry follows the same default chain as resolution (`NOETA_REGISTRY_URL`, then
+    // `NOETA_REGISTRY_DIR`, then the built-in hosted default) — `None` only when
+    // `NOETA_REGISTRY_DIR` routes to the file-backed local index, which serves no log.
     let index = crate::registry::open_http()?.ok_or_else(|| {
         PmError::Trust(
-            "`[trust].require_transparency` needs the hosted registry — set `NOETA_REGISTRY_URL`"
+            "`[trust].require_transparency` needs a hosted registry, but `NOETA_REGISTRY_DIR` \
+             routes to the file-backed local index (which serves no transparency log) — unset it \
+             or set `NOETA_REGISTRY_URL`"
                 .to_string(),
         )
     })?;

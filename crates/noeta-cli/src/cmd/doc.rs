@@ -104,10 +104,12 @@ pub(crate) fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
     }
 }
 
-/// The hosted registry's browser URL for a release's rendered docs, when a hosted registry is
-/// configured (`NOETA_REGISTRY_URL`). `None` for the file-backed local index (no web surface).
+/// The hosted registry's browser URL for a release's rendered docs, when the default chain lands
+/// on a hosted registry (`NOETA_REGISTRY_URL`, else the built-in default — the same routing
+/// `open_default` follows). `None` when `NOETA_REGISTRY_DIR` routes to the file-backed local index
+/// (no web surface).
 pub(crate) fn registry_web_docs_url(name: &str, version: &semver::Version) -> Option<String> {
-    let base = std::env::var("NOETA_REGISTRY_URL").ok()?;
+    let base = registry::default_http_base().ok()??;
     Some(web_docs_url(&base, name, &version.to_string()))
 }
 
