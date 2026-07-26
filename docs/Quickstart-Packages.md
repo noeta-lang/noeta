@@ -120,8 +120,11 @@ noeta run src/main.noe -- --help
 ```
 
 ```
-Commands:
-  greet    Greet someone
+usage: main.noe <name> [--loud]
+
+Arguments:
+  name: string
+  loud: bool (-l) [optional] - shout it
 ```
 
 > [!NOTE]
