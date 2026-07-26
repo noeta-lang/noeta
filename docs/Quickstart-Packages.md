@@ -70,7 +70,7 @@ para = { version = "^0.1", package = "para/cli" }
 
 Replace `src/main.noe` with a two-command CLI. In `para/cli`, the function signature is the spec: annotate a function with `#[Command]` and the framework derives the argument parser, help text, and exit codes from it.
 
-```noeta
+```noeta ignore
 use para.cli.{Command, Arg, run}
 use std.{io, os}
 
