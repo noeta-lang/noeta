@@ -90,6 +90,12 @@ jobs:
       # working interpreter-only CLI (identical behaviour, no Cranelift).
       - name: lean CLI build (--no-default-features, Cranelift-free)
         run: cargo test -p noeta-cli --no-default-features --locked
+      # The out-of-tree native-package round trips (a git-dep package and a registry-index package,
+      # each composing a full consumer-side toolchain) are #[ignore]d as too heavy for the default
+      # suite — run them explicitly here, where the disk was already reclaimed for compose builds.
+      # They share a compose guard, so the runs are serial by construction.
+      - name: composed-toolchain e2e (out-of-tree native package, git + registry index)
+        run: cargo test -p noeta-cli --no-default-features --locked -- --ignored composed_toolchain
       # The lean feature SHAPES the AOT/native-size/p2p stories depend on, checked cheaply so a
       # latent gap can't hide until a slow `build --native` e2e (it has before: a ring-less native
       # build once failed on tokio's private sync module — see noeta-host-real/Cargo.toml). These are
