@@ -209,6 +209,9 @@ fn resolve_graph_impl(
         });
     };
     let manifest = read_manifest(&manifest_path)?;
+    if let Some(pkg) = manifest.package() {
+        check_toolchain_req(pkg, "this package")?;
+    }
     let root_deps = manifest.active_dependencies(target)?;
     let manifest_dir = manifest_path
         .parent()
@@ -556,6 +559,7 @@ impl Walker<'_> {
             ))
         })?;
         let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
+        check_toolchain_req(pkg, &format!("dependency `{key}` (`{identity}`)"))?;
         let root_segment = match root {
             ScopeRoot::Package => pkg.name.root().to_string(),
             ScopeRoot::Scope => pkg.name.company.clone(),
@@ -1631,6 +1635,35 @@ fn assemble(
     }
 }
 
+/// Enforce a manifest's `package.toolchain` requirement against the **running binary's** version.
+/// Checked at resolve time — for the root package and for every materialized dependency — so a
+/// too-old binary fails with "upgrade noeta", not a Rust compile error deep inside a native
+/// compose (or a checker error against language features the binary predates).
+fn check_toolchain_req(pkg: &crate::manifest::PackageMeta, what: &str) -> Result<(), PmError> {
+    let Some(req) = &pkg.toolchain else {
+        return Ok(());
+    };
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("CARGO_PKG_VERSION is always valid SemVer");
+    if toolchain_req_satisfied(req, &running) {
+        return Ok(());
+    }
+    Err(PmError::Conflict(format!(
+        "{what} requires noeta {req} but this binary is {running} — run `noeta upgrade` (or \
+         install a matching release) to use it"
+    )))
+}
+
+/// The version-vs-requirement core of [`check_toolchain_req`], split out for direct testing (the
+/// caller bakes in `CARGO_PKG_VERSION`). Pre-release/build metadata on the running version is
+/// stripped before matching: SemVer comparators never match a pre-release of a *different* triple,
+/// which would make a `0.3.0-rc.1` dev binary spuriously fail `toolchain = ">=0.2"`. For a
+/// minimum-toolchain claim, an rc of 0.3.0 has 0.3.0's surface — treat it as such.
+fn toolchain_req_satisfied(req: &semver::VersionReq, running: &semver::Version) -> bool {
+    let released = semver::Version::new(running.major, running.minor, running.patch);
+    req.matches(&released)
+}
+
 /// Check a declared native entry crate exists: `<package root>/<native>/Cargo.toml` must be a
 /// file (Phase 3, N3.1). The manifest parser already rejected absolute/`..` values.
 fn validate_native_crate(package_dir: &Path, native: &str) -> Result<(), PmError> {
@@ -1694,6 +1727,64 @@ mod tests {
         .unwrap();
         std::fs::write(app.join("main.noe"), "echo 1\n").unwrap();
         app
+    }
+
+    #[test]
+    fn a_dependency_requiring_a_newer_toolchain_fails_with_an_upgrade_message() {
+        let app = path_dep_fixture("toolchain_req_dep");
+        std::fs::write(
+            app.parent().unwrap().join("lib").join("noeta.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\ntoolchain = \">=999.0\"\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("a too-new dep is refused");
+        let msg = err.message().to_string();
+        assert!(msg.contains("acme/lib"), "names the package: {msg}");
+        assert!(
+            msg.contains("requires noeta >=999.0"),
+            "states the requirement: {msg}"
+        );
+        assert!(msg.contains("noeta upgrade"), "points at the fix: {msg}");
+    }
+
+    #[test]
+    fn the_root_packages_own_toolchain_requirement_is_enforced() {
+        let app = path_dep_fixture("toolchain_req_root");
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\ntoolchain = \">=999.0\"\n\
+             [dependencies]\nlib = { path = \"../lib\" }\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("a too-new root is refused");
+        assert!(err.message().contains("requires noeta >=999.0"), "{err}");
+        // A satisfiable requirement resolves normally.
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\ntoolchain = \">=0.1\"\n\
+             [dependencies]\nlib = { path = \"../lib\" }\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&app.join("main.noe")).expect("a satisfied requirement passes");
+        assert_eq!(graph.packages.len(), 1);
+    }
+
+    #[test]
+    fn toolchain_matching_ignores_the_running_versions_prerelease() {
+        // A `0.3.0-rc.1` dev binary has 0.3.0's surface; SemVer's "a plain comparator never
+        // matches a pre-release" rule must not make it fail `>= 0.2`.
+        let req = semver::VersionReq::parse(">=0.2").unwrap();
+        let rc = semver::Version::parse("0.3.0-rc.1").unwrap();
+        assert!(!req.matches(&rc), "raw SemVer matching would refuse the rc");
+        assert!(
+            toolchain_req_satisfied(&req, &rc),
+            "the stripped match accepts it"
+        );
+        let old = semver::Version::parse("0.1.5").unwrap();
+        assert!(
+            !toolchain_req_satisfied(&req, &old),
+            "a genuinely old binary still fails"
+        );
     }
 
     #[test]

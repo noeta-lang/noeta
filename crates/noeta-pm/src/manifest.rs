@@ -313,6 +313,13 @@ pub struct PackageMeta {
     /// which the toolchain treats as [`Edition::DEFAULT`]; the value is validated at parse time
     /// (an unknown edition is a manifest error), so a present value is always a known edition.
     pub edition: Option<crate::edition::Edition>,
+    /// The **minimum toolchain** this package works with (`toolchain = ">=0.2"`) — a SemVer
+    /// requirement the *running `noeta` binary's* version must satisfy at resolve time. Without
+    /// it, a too-old binary composing a too-new package dies deep in a Rust compile (or a checker
+    /// error) instead of saying "upgrade noeta". `None` means the package makes no claim — it is
+    /// an author-side promise, not a sandbox: the real compatibility contract is the extension
+    /// ABI, this field only turns a violation into a clear, early message.
+    pub toolchain: Option<semver::VersionReq>,
     /// The relative directory of this package's native Rust **entry crate** (package-manager
     /// Phase 3, N3.1): `native = "native"` points at a `Cargo.toml` whose crate exports the
     /// package's extension units (one crate, any number of units — std's own shape). `None` for a
@@ -1059,6 +1066,17 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
             Some(crate::edition::Edition::parse(s)?)
         }
     };
+    let toolchain = match pkg.get("toolchain") {
+        None => None,
+        Some(v) => {
+            let req = v.as_str().ok_or(
+                "`package.toolchain` must be a string (a SemVer requirement, e.g. `\">=0.2\"`)",
+            )?;
+            Some(semver::VersionReq::parse(req).map_err(|err| {
+                format!("`package.toolchain` `{req}` is not a valid SemVer requirement: {err}")
+            })?)
+        }
+    };
     let native = match pkg.get("native") {
         None => None,
         Some(v) => {
@@ -1097,6 +1115,7 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
         name,
         version,
         edition,
+        toolchain,
         native,
         license,
         keywords,
@@ -1813,6 +1832,33 @@ mod tests {
         )
         .expect_err("malformed license rejected");
         assert!(err.message().contains("SPDX"), "{err}");
+    }
+
+    #[test]
+    fn parses_a_toolchain_requirement_and_rejects_a_malformed_one() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n\
+             toolchain = \">=0.2\"\n",
+        )
+        .expect("valid");
+        let req = m.package().unwrap().toolchain.clone().unwrap();
+        assert!(req.matches(&semver::Version::new(0, 2, 0)));
+        assert!(!req.matches(&semver::Version::new(0, 1, 9)));
+        // Omitted → None (the package makes no toolchain claim).
+        let m =
+            Manifest::parse("[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n").unwrap();
+        assert_eq!(m.package().unwrap().toolchain, None);
+        // Not a SemVer requirement → a manifest error naming the value.
+        let err = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n\
+             toolchain = \"latest\"\n",
+        )
+        .expect_err("malformed toolchain requirement rejected");
+        assert!(err.message().contains("SemVer requirement"), "{err}");
     }
 
     #[test]

@@ -26,6 +26,7 @@ identity, so it cannot be published.
 | `name` | **yes** | `"company/package"` | Two identifiers joined by a single `/`. |
 | `version` | **yes** | SemVer string | A concrete version like `"1.2.0"`, not a range. |
 | `edition` | no | `"2026"` | The language edition. Defaults to the current edition when omitted. |
+| `toolchain` | no | SemVer requirement | The minimum `noeta` this package works with, e.g. `">=0.2"`. |
 | `native` | no | relative directory | Points at this package's native Rust entry crate. See [Native Extensions](Native-Extensions). |
 | `license` | no | SPDX expression | Recorded with the release and bound into its transparency-log leaf. |
 | `keywords` | no | array of tags | Discovery tags the registry indexes by. |
@@ -36,6 +37,7 @@ identity, so it cannot be published.
 name = "acme/imgfx"                          # the global identity the registry indexes
 version = "1.2.0"                            # SemVer
 edition = "2026"                             # optional — the language edition this package targets
+toolchain = ">=0.2"                          # optional — the minimum noeta this package works with
 license = "MIT OR Apache-2.0"                # optional — declared SPDX expression
 keywords = ["image", "simd"]                 # optional — up to 5 discovery tags
 description = "Fast image effects for Noeta" # optional — one-line search blurb
@@ -44,6 +46,14 @@ description = "Fast image effects for Noeta" # optional — one-line search blur
 **`name`** is a global identity `company/package`. Each half is an identifier — a letter or `_`,
 then letters, digits, or `_` (no leading digit, no hyphens). The `package` half is the *import root*
 a consumer re-binds the dependency under; see `[dependencies]` below.
+
+**`toolchain`** declares the minimum `noeta` version the package works with, as a SemVer
+requirement the *running binary's* version must satisfy (`toolchain = ">=0.2"`). It is enforced at
+resolve time — for your own package and for every dependency — so a consumer on an older toolchain
+gets "requires noeta >=0.2 … run `noeta upgrade`" instead of a compile error deep inside a native
+build. Omit it and the package makes no claim. It is a courtesy floor, not the compatibility
+contract itself (that is the extension ABI): declare the oldest toolchain you actually test
+against, typically the release current when you publish.
 
 **`license`** is checked for SPDX *shape* only — letters, digits, and `` .+()- ``, up to 120
 characters — not validated as real SPDX. It is publisher-asserted: the registry never reads your
