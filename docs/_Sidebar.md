@@ -3,6 +3,7 @@
 **Onboarding**
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
+- [Using Packages](Using-Packages)
 
 **Tools**
 - [The `noeta` CLI](The-CLI)

@@ -10,9 +10,12 @@ what an index needs. So you can point a scope at a git forge and resolve package
 public or private, with no separate registry service to run.
 
 By default every dependency resolves from one registry — the built-in hosted service at
-`registry.noeta.dev`. Point the default elsewhere with `NOETA_REGISTRY_URL` (another hosted
-registry) or `NOETA_REGISTRY_DIR` (a local file index, used offline and in tests). The
-`[registries]` table lets you route **per scope** instead.
+`registry.noeta.dev`, which is live and already serves the first-party `para/*` packages
+(see [Using Packages](Using-Packages)). Point the default elsewhere with `NOETA_REGISTRY_URL`
+(another hosted registry) or `NOETA_REGISTRY_DIR` (a local file index, used offline and in
+tests) — precedence when set together is `NOETA_REGISTRY_URL`, then `NOETA_REGISTRY_DIR`,
+then the hosted default. The `[registries]` table lets you route **per scope** instead, and a
+scope it maps never falls through to the environment default.
 
 ## The `[registries]` table
 
@@ -72,10 +75,12 @@ A scope — the `company` half of `company/package` — is claimed **self-servic
 can only claim the scope whose name matches an identity you prove.
 
 ```sh
-noeta claim acme            # prove you are the GitHub org/user `acme`
+NOETA_REGISTRY_URL=https://registry.noeta.dev noeta claim acme   # prove you are the GitHub org/user `acme`
 ```
 
-In GitHub Actions (with `id-token: write` granted) the ambient OIDC token is the proof — zero-config.
+`noeta claim` targets the hosted registry the scope routes to — a `[registries]` mapping, else
+`NOETA_REGISTRY_URL` (there is no implicit default here: claiming binds a credential, so you name
+the registry explicitly). In GitHub Actions (with `id-token: write` granted) the ambient OIDC token is the proof — zero-config.
 On a laptop the command falls back to the GitHub **device flow**: it prints a URL and a code, and you
 authorize in a browser. Alternatively, `noeta claim acme --domain acme.dev` proves control of a
 domain whose first label is the scope, by serving `https://acme.dev/.well-known/noeta-registry.txt`
@@ -138,7 +143,8 @@ The convention is Go-module-like:
   requirement. But if *every* candidate version's manifest is unparseable, resolution fails with an
   error listing each offending tag and its cause, rather than reporting a misleading "no versions found".
 - **The commit is pinned.** The tag's commit SHA is recorded in `noeta.lock`, so a later build fetches
-  that exact commit — a moved tag is caught.
+  that exact commit — a moved tag is caught. `noeta update` is the deliberate re-pin: it discards the
+  lock and re-resolves every ref to its current commit.
 
 ### Publishing to a git forge
 

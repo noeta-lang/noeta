@@ -61,6 +61,7 @@ total: 24.48
 Learn the language from zero.
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
+- [Using Packages](Using-Packages)
 
 ### Bundled tools
 Everything the `noeta` binary does beyond running code.
@@ -115,7 +116,9 @@ Build the compiler, run the tests, and add a feature.
 ## Project status
 
 > [!NOTE]
-> **Pre-alpha.** The language core and its tooling are complete and usable today: the full syntax,
+> **Alpha.** Prebuilt binaries cover Linux and macOS (x86_64/aarch64) — see
+> [Getting Started](Getting-Started#1--install-the-toolchain); other platforms build from source.
+> The language core and its tooling are complete and usable today: the full syntax,
 > the type system, traits/generics/derives, multi-file modules, a layered standard library, real
 > host IO, structured concurrency, the package manager, native AOT and WebAssembly builds
 > (`noeta build --native`/`--wasm`/`--serve`), and the `run`/`repl`/`test`/`bench`/`doc`

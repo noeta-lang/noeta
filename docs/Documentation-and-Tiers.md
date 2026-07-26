@@ -184,10 +184,10 @@ A target can also carry its own dependencies, which **layer on top of** the glob
 
 ```toml
 [dependencies]                          # the default/base — present in every build
-http = { registry = "acme/http" }
+http = { version = "^1.0", package = "acme/http" }
 
 [targets.dev.dependencies]              # layered on only when this target is selected
-lint = { registry = "acme/noeta-lint" }
+lint = { version = "^0.3", package = "acme/noeta-lint" }
 ```
 
 The **global config is the default**: omit `--target` and a command sees `[dependencies]` and no tiers — the minimal, safe baseline. Put your shipping dependencies in the global config and keep dev-only tools/tiers in a `[targets.dev]` overlay you opt into with `--target dev`. There is no separate "dev vs prod" concept baked into the language — *you* decide what each target contains; the default build simply excludes anything you scoped under a target.
