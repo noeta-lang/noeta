@@ -2422,11 +2422,11 @@ dependencies = [
 
 [[package]]
 name = "noeta-alloc-probe"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "noeta-aot-runtime"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-bundle",
  "noeta-bytecode",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-ast"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-span",
  "serde",
@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-backend"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
@@ -2456,7 +2456,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-builtins"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ast",
  "noeta-span",
@@ -2464,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-bundle"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "miniz_oxide",
  "noeta-bytecode",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-bytecode"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
@@ -2486,14 +2486,14 @@ dependencies = [
 
 [[package]]
 name = "noeta-cache"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "noeta-check"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "criterion",
  "insta",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2558,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-compiler"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ast",
  "noeta-builtins",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-conformance"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2608,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-css"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "malva",
  "noeta-ext-abi",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-dap"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ast",
  "noeta-bytecode",
@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-db"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-alloc-probe",
  "noeta-ast",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-diagnostics"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ariadne",
  "noeta-span",
@@ -2667,14 +2667,14 @@ dependencies = [
 
 [[package]]
 name = "noeta-edition"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-span",
 ]
 
 [[package]]
 name = "noeta-embed"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ast",
  "noeta-check",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-eval"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "criterion",
  "insta",
@@ -2712,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-ext-abi"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "compact_str",
  "equivalent",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-fmt"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ec4rs",
  "noeta-ast",
@@ -2735,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-gc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-object",
  "noeta-value",
@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-host-real"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "compact_str",
@@ -2760,14 +2760,14 @@ dependencies = [
 
 [[package]]
 name = "noeta-html"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ext-abi",
 ]
 
 [[package]]
 name = "noeta-ide"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "include_dir",
  "noeta-ast",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-ir"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "insta",
  "noeta-ast",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-ir-passes"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ir",
  "noeta-lexer",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-jit"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -2837,14 +2837,14 @@ dependencies = [
 
 [[package]]
 name = "noeta-jit-abi"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-value",
 ]
 
 [[package]]
 name = "noeta-lexer"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "insta",
  "logos",
@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-loader"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
@@ -2868,7 +2868,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-lsp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-diagnostics",
  "noeta-ide",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "include_dir",
  "noeta-ast",
@@ -2909,14 +2909,14 @@ dependencies = [
 
 [[package]]
 name = "noeta-object"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "noeta-parser"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chumsky",
  "insta",
@@ -2932,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-playground"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "compact_str",
  "getrandom 0.3.4",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-pm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ambient-id",
  "base64",
@@ -2984,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-prof"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "inferno",
  "noeta-alloc-probe",
@@ -3005,11 +3005,11 @@ dependencies = [
 
 [[package]]
 name = "noeta-reactive"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "noeta-reactive-abi"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ext-abi",
  "noeta-reactive",
@@ -3017,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-runner"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "mimalloc",
  "noeta-ast",
@@ -3040,14 +3040,14 @@ dependencies = [
 
 [[package]]
 name = "noeta-span"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "noeta-stdlib"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "bcrypt",
@@ -3072,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-types"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-ast",
  "noeta-span",
@@ -3080,7 +3080,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-value"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "compact_str",
  "hashbrown 0.17.1",
@@ -3095,7 +3095,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-vm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "criterion",
  "insta",
@@ -3119,7 +3119,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-wasi-host"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "compact_str",
  "getrandom 0.3.4",
@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-wasm-runner"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-backend",
  "noeta-bundle",
@@ -3142,7 +3142,7 @@ dependencies = [
 
 [[package]]
 name = "noeta-wasm-serve"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "noeta-bundle",
  "noeta-bytecode",
