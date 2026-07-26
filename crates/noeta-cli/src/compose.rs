@@ -9,7 +9,11 @@
 //! Retrieval of the toolchain source (user decision, 2026-07-09): **cargo fetches it** — inside
 //! the noeta workspace the shim uses path dependencies (instant, the interim norm); outside, it
 //! declares git dependencies pinned to the running binary's version tag and cargo's own git cache
-//! handles fetch/offline/reuse. `NOETA_TOOLCHAIN_SRC` overrides with an explicit checkout.
+//! handles fetch/offline/reuse. `NOETA_TOOLCHAIN_SRC` overrides with an explicit checkout. In
+//! both forms the shim also carries a `[patch]` on the canonical toolchain repo redirecting
+//! *every* toolchain crate to the consumer binary's own source ([`toolchain_patch_section`]) — a
+//! released binary materializes a cached checkout of its own tag for this — so a package pinned
+//! at any older release tag still composes as ONE copy of each toolchain crate.
 //!
 //! An entry crate exports its units under a fixed convention:
 //! `pub static NOETA_EXTENSIONS: &[&(dyn noeta_ext_abi::Extension + Sync)]` — a slice, so one
@@ -489,9 +493,13 @@ fn build(
     // The compose dir's basename IS the compose key (`compose_dir`); stamp it into the shim's
     // package version so distinct compositions are distinct cargo packages ([`shim_version`]).
     let key = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    // The local toolchain source the `[patch]` section redirects to — for a released (git-tag)
+    // binary this materializes the cached checkout of its own tag (a cache miss is the only path
+    // that reaches here, so the clone happens at most once per tag).
+    let src_root = toolchain_src_root(toolchain)?;
     std::fs::write(
         dir.join("Cargo.toml"),
-        shim_cargo_toml(entries, toolchain, kind, key),
+        shim_cargo_toml(entries, toolchain, &src_root, kind, key),
     )
     .map_err(|err| format!("writing shim Cargo.toml: {err}"))?;
     std::fs::write(
@@ -560,9 +568,12 @@ fn build_aot_archive(
 ) -> Result<(), String> {
     // Same per-key package identity as [`build`] ([`shim_version`]).
     let key = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    // Same [`toolchain_src_root`] materialization as [`build`] — the AOT shim's `[patch]` section
+    // must unify a package's pinned toolchain tag onto this binary's own source too.
+    let src_root = toolchain_src_root(toolchain)?;
     std::fs::write(
         dir.join("Cargo.toml"),
-        aot_shim_cargo_toml(entries, toolchain, rings, key),
+        aot_shim_cargo_toml(entries, toolchain, &src_root, rings, key),
     )
     .map_err(|err| format!("writing AOT shim Cargo.toml: {err}"))?;
     std::fs::write(dir.join("src").join("lib.rs"), aot_shim_lib_rs(entries))
@@ -649,6 +660,7 @@ const DEFAULT_AOT_LIBS: &[&str] = &[
 fn aot_shim_cargo_toml(
     entries: &[Entry],
     toolchain: &ToolchainSource,
+    src_root: &Path,
     rings: &[String],
     key: &str,
 ) -> String {
@@ -722,7 +734,7 @@ fn aot_shim_cargo_toml(
             toml_quote(&e.dir.display().to_string())
         ));
     }
-    out.push_str(&toolchain_patch_section(toolchain));
+    out.push_str(&toolchain_patch_section(src_root));
     out.push_str("\n[workspace]\n\n[profile.release]\ncodegen-units = 1\nlto = \"thin\"\n");
     out
 }
@@ -780,6 +792,7 @@ fn shim_version(key: &str) -> String {
 fn shim_cargo_toml(
     entries: &[Entry],
     toolchain: &ToolchainSource,
+    src_root: &Path,
     kind: ShimKind,
     key: &str,
 ) -> String {
@@ -835,9 +848,100 @@ fn shim_cargo_toml(
             toml_quote(&e.dir.display().to_string())
         ));
     }
-    out.push_str(&toolchain_patch_section(toolchain));
+    out.push_str(&toolchain_patch_section(src_root));
     out.push_str("\n[workspace]\n\n[profile.release]\ncodegen-units = 1\nlto = \"thin\"\n");
     out
+}
+
+/// The local source tree the shim's `[patch]` section redirects every toolchain crate to. For a
+/// **workspace** toolchain this is the workspace itself; for a released (**git-tag**) toolchain it
+/// is a cached checkout of the running binary's own release tag, materialized on first use under
+/// `<cache>/toolchain-src/` ([`materialize_toolchain_checkout`]). Called only on a compose cache
+/// **miss** (from [`build`]/[`build_aot_archive`]) — a cache hit never clones anything.
+fn toolchain_src_root(toolchain: &ToolchainSource) -> Result<PathBuf, String> {
+    match toolchain {
+        ToolchainSource::Workspace(root) => Ok(root.clone()),
+        ToolchainSource::GitTag { repo, tag } => materialize_toolchain_checkout(repo, tag),
+    }
+}
+
+/// Clone the toolchain repo at `tag` into the cache (`<cache>/toolchain-src/<tag>-<repo hash>/`)
+/// and return the checkout, reusing an existing one. Release tags are immutable by policy, so a
+/// complete checkout (detected by its `crates/noeta-cli/Cargo.toml`) never goes stale. The clone
+/// lands in a temp sibling first and is renamed into place, so a torn clone is never mistaken for
+/// a checkout and a concurrent compose racing the same tag resolves to identical content.
+fn materialize_toolchain_checkout(repo: &str, tag: &str) -> Result<PathBuf, String> {
+    let cache = noeta_cache::Cache::locate()
+        .ok_or("no cache directory could be resolved (set HOME or NOETA_CACHE_DIR)")?;
+    let mut h = Sha256::new();
+    h.update(repo.as_bytes());
+    let repo_hash = hex(&h.finalize());
+    let safe_tag: String = tag
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let dir = cache
+        .join("toolchain-src")
+        .join(format!("{safe_tag}-{}", &repo_hash[..12]));
+    let complete = |d: &Path| {
+        d.join("crates")
+            .join("noeta-cli")
+            .join("Cargo.toml")
+            .is_file()
+    };
+    if complete(&dir) {
+        return Ok(dir);
+    }
+    let _ = std::fs::remove_dir_all(&dir); // a torn earlier attempt
+    std::fs::create_dir_all(dir.parent().expect("cache root parent")).map_err(|err| {
+        format!(
+            "cannot create `{}`: {err}",
+            dir.parent().expect("cache root parent").display()
+        )
+    })?;
+    let tmp = dir.with_file_name(format!(
+        "{}.tmp-{}",
+        dir.file_name().and_then(|n| n.to_str()).unwrap_or("clone"),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let output = std::process::Command::new("git")
+        .args(["clone", "--quiet", "--depth", "1", "--branch", tag, repo])
+        .arg(&tmp)
+        .output()
+        .map_err(|err| {
+            format!(
+                "cannot run `git` (required to fetch the toolchain source `{repo}` at `{tag}` \
+                 for composing native dependencies): {err}"
+            )
+        })?;
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!(
+            "fetching the toolchain source (`{repo}` at tag `{tag}`) failed:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if let Err(err) = std::fs::rename(&tmp, &dir) {
+        // A concurrent compose won the race — its checkout of the same immutable tag is identical.
+        if complete(&dir) {
+            let _ = std::fs::remove_dir_all(&tmp);
+        } else {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!(
+                "installing the toolchain checkout (`{}` → `{}`): {err}",
+                tmp.display(),
+                dir.display()
+            ));
+        }
+    }
+    Ok(dir)
 }
 
 /// The `[patch]` section that redirects a native package's git dependencies **on the canonical
@@ -849,16 +953,22 @@ fn shim_cargo_toml(
 /// `noeta-ext-abi`, so a `dyn Extension` from the package would not match the shim's
 /// `noeta_ext_abi::Extension` type and the `NOETA_EXTENSIONS` aggregation would not type-check.
 ///
-/// Only emitted for a **workspace** (local-path) toolchain: a git-tag toolchain unifies naturally
-/// when the package pins the same tag, and Cargo forbids patching a git source with itself. Every
-/// `crates/*` member is patched to its path; Cargo ignores the unused ones (a package depends on only
-/// a few), and the composed build captures cargo's output, so the unused-patch notes never reach the
-/// user. Crate directory names equal their package names across the workspace, so the directory name
-/// is the patch key.
-fn toolchain_patch_section(toolchain: &ToolchainSource) -> String {
-    let ToolchainSource::Workspace(root) = toolchain else {
-        return String::new();
-    };
+/// Emitted for **both** toolchain forms, always redirecting to local **paths** under `src_root`
+/// ([`toolchain_src_root`] — the workspace itself, or the cached checkout of a released binary's
+/// own tag). A git-tag toolchain must patch too: a package pinned at an *older* tag than the
+/// running binary would otherwise resolve a **second** copy of every toolchain crate (the
+/// every-release-breaks-every-published-package defect). And the patch must use `path` sources —
+/// Cargo rejects a `[patch."<url>"]` entry whose own source is the same canonical URL *regardless
+/// of a differing `tag`, `rev`, or `.git` suffix* ("points to the same source, but patches must
+/// point to different sources"; canonical-URL comparison ignores the git ref — verified
+/// empirically against cargo 1.97). A `path` source is a different source kind, always accepted,
+/// and also covers the redundant case where the package already pins the binary's own tag.
+///
+/// Every `crates/*` member is patched to its path; Cargo ignores the unused ones (a package depends
+/// on only a few), and the composed build captures cargo's output, so the unused-patch notes never
+/// reach the user. Crate directory names equal their package names across the workspace, so the
+/// directory name is the patch key.
+fn toolchain_patch_section(src_root: &Path) -> String {
     // The git URL a native package references its toolchain crates by. Defaults to this build's
     // `repository`, overridable via `NOETA_TOOLCHAIN_REPO` for a fork, a private mirror, or a local
     // `file://` clone — the patch key must equal the URL the package's Cargo.toml declares.
@@ -867,7 +977,7 @@ fn toolchain_patch_section(toolchain: &ToolchainSource) -> String {
     if repo.is_empty() {
         return String::new();
     }
-    let crates_dir = root.join("crates");
+    let crates_dir = src_root.join("crates");
     let Ok(entries) = std::fs::read_dir(&crates_dir) else {
         return String::new();
     };
@@ -1055,11 +1165,24 @@ mod tests {
         // binary would be cached (a `[trust].commands` recompose that still lacks the command).
         // The compose key stamped into the version as semver build metadata breaks the tie.
         let ws = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
-        let a = shim_cargo_toml(&entries(), &ws, ShimKind::Toolchain, "cafe0123deadbeef");
-        let b = shim_cargo_toml(&entries(), &ws, ShimKind::Toolchain, "beefbeefbeefbeef");
+        let root = Path::new("/src/noeta");
+        let a = shim_cargo_toml(
+            &entries(),
+            &ws,
+            root,
+            ShimKind::Toolchain,
+            "cafe0123deadbeef",
+        );
+        let b = shim_cargo_toml(
+            &entries(),
+            &ws,
+            root,
+            ShimKind::Toolchain,
+            "beefbeefbeefbeef",
+        );
         assert!(a.contains("version = \"0.0.0+cafe0123dead\""), "{a}");
         assert!(b.contains("version = \"0.0.0+beefbeefbeef\""), "{b}");
-        let aot = aot_shim_cargo_toml(&entries(), &ws, &[], "cafe0123deadbeef");
+        let aot = aot_shim_cargo_toml(&entries(), &ws, root, &[], "cafe0123deadbeef");
         assert!(aot.contains("version = \"0.0.0+cafe0123dead\""), "{aot}");
         // A keyless call (unit-test convenience) still yields a VALID semver — no dangling `+`.
         assert_eq!(shim_version(""), "0.0.0");
@@ -1070,6 +1193,7 @@ mod tests {
         let toml = shim_cargo_toml(
             &entries(),
             &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            Path::new("/src/noeta"),
             ShimKind::Toolchain,
             "cafe0123deadbeef",
         );
@@ -1092,6 +1216,7 @@ mod tests {
                 repo: "https://github.com/noeta-lang/noeta".to_string(),
                 tag: "v0.1.0".to_string(),
             },
+            Path::new("/nonexistent/checkout"),
             ShimKind::Toolchain,
             "cafe0123deadbeef",
         );
@@ -1118,6 +1243,7 @@ mod tests {
         let toml = shim_cargo_toml(
             &entries(),
             &ToolchainSource::Workspace(root.clone()),
+            &root,
             ShimKind::Toolchain,
             "cafe0123deadbeef",
         );
@@ -1133,33 +1259,69 @@ mod tests {
             "each crate redirected to its path:\n{toml}"
         );
         assert!(toml.contains("noeta-vm = { path ="), "{toml}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
-        // A git-tag (out-of-workspace) toolchain emits NO patch — it unifies by pinning the same tag,
-        // and Cargo forbids patching a git source with itself.
+    #[test]
+    fn gittag_shim_patches_all_toolchain_crates_to_the_binaries_own_tag() {
+        // The every-release-breaks-every-published-package defect: a released (git-tag) binary
+        // composing a package whose crates pin an OLDER toolchain tag resolved TWO copies of
+        // `noeta-ext-abi` (the shim's tag + the package's pin), so the package's `dyn Extension`
+        // was a different type than the shim's and the compose build failed with E0308. The fix:
+        // a git-tag toolchain emits the same `[patch]` as a workspace one, redirecting every
+        // toolchain crate to the cached checkout of the BINARY's own tag — `path` entries, because
+        // Cargo rejects a patch whose source is the same canonical git URL regardless of a
+        // differing `tag`/`rev`/`.git` suffix (verified against cargo 1.97).
+        let checkout =
+            std::env::temp_dir().join(format!("noeta_gittag_patch_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&checkout);
+        for c in ["noeta-ext-abi", "noeta-stdlib"] {
+            let d = checkout.join("crates").join(c);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{c}\"\n")).unwrap();
+        }
         let git = shim_cargo_toml(
             &entries(),
             &ToolchainSource::GitTag {
-                repo: "https://example.com/acme/noeta".to_string(),
-                tag: "v0.1.0".to_string(),
+                repo: "https://github.com/noeta-lang/noeta".to_string(),
+                tag: "v0.2.1".to_string(),
             },
+            &checkout,
             ShimKind::Toolchain,
             "cafe0123deadbeef",
         );
+        // The shim's own deps still pin the binary's tag by git…
         assert!(
-            !git.contains("[patch."),
-            "no patch for a git-tag toolchain:\n{git}"
+            git.contains(
+                "noeta-cli = { git = \"https://github.com/noeta-lang/noeta\", tag = \"v0.2.1\" }"
+            ),
+            "{git}"
         );
-        let _ = std::fs::remove_dir_all(&root);
+        // …and the `[patch]` (keyed on the canonical repo URL a package's Cargo.toml declares)
+        // redirects every toolchain crate — the shim's own deps AND any tag the package pinned —
+        // to the binary's-tag checkout.
+        assert!(git.contains("[patch."), "a [patch] section:\n{git}");
+        for c in ["noeta-ext-abi", "noeta-stdlib"] {
+            assert!(
+                git.contains(&format!(
+                    "{c} = {{ path = \"{}\" }}",
+                    checkout.join("crates").join(c).display()
+                )),
+                "crate `{c}` redirected to the binary's-tag checkout:\n{git}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&checkout);
     }
 
     #[test]
     fn footprint_rings_are_full_in_a_runnable_shim_but_gated_in_the_aot_shim() {
         let ws = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
+        let root = Path::new("/src/noeta");
 
         // A Toolchain (and a Runner) shim enables ALL of an entry crate's rings — a runnable binary
         // is fully capable, so `noeta run` / `--exe` get real p2p.
         for kind in [ShimKind::Toolchain, ShimKind::Runner] {
-            let toml = shim_cargo_toml(&ring_entries(), &ws, kind, "cafe0123deadbeef");
+            let toml = shim_cargo_toml(&ring_entries(), &ws, root, kind, "cafe0123deadbeef");
             assert!(
                 toml.contains("ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\", features = [\"ring-p2p\"] }"),
                 "{kind:?} shim enables the ring:\n{toml}"
@@ -1170,6 +1332,7 @@ mod tests {
         let selected = aot_shim_cargo_toml(
             &ring_entries(),
             &ws,
+            root,
             &["ring-p2p".to_string()],
             "cafe0123deadbeef",
         );
@@ -1178,7 +1341,7 @@ mod tests {
             "selected ring enabled:\n{selected}"
         );
         // … not selected (the program never imports the ring's modules) ⇒ shed (no features).
-        let shed = aot_shim_cargo_toml(&ring_entries(), &ws, &[], "cafe0123deadbeef");
+        let shed = aot_shim_cargo_toml(&ring_entries(), &ws, root, &[], "cafe0123deadbeef");
         assert!(
             shed.contains(
                 "ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\" }"
@@ -1193,6 +1356,7 @@ mod tests {
         let toml = shim_cargo_toml(
             &entries(),
             &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            Path::new("/src/noeta"),
             ShimKind::Runner,
             "cafe0123deadbeef",
         );
@@ -1215,6 +1379,7 @@ mod tests {
         let toml = shim_cargo_toml(
             &mixed_entries(),
             &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            Path::new("/src/noeta"),
             ShimKind::Toolchain,
             "cafe0123deadbeef",
         );
@@ -1234,6 +1399,7 @@ mod tests {
         let toml = shim_cargo_toml(
             &mixed_entries(),
             &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            Path::new("/src/noeta"),
             ShimKind::Runner,
             "cafe0123deadbeef",
         );
@@ -1257,6 +1423,7 @@ mod tests {
         let toml = aot_shim_cargo_toml(
             &mixed_entries(),
             &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            Path::new("/src/noeta"),
             &["ring-http-client".to_string()],
             "cafe0123deadbeef",
         );
@@ -1286,6 +1453,7 @@ mod tests {
         let toml = aot_shim_cargo_toml(
             &entries(),
             &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            Path::new("/src/noeta"),
             &[],
             "cafe0123deadbeef",
         );

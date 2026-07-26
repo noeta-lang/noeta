@@ -135,7 +135,13 @@ own toolchain version**, not your tag:
   `NOETA_TOOLCHAIN_REPO`—it must equal the URL your `Cargo.toml` declares). Your git pin is
   overridden wholesale.
 - With a **released (git-tag) toolchain**, the shim's own dependencies use the running binary's
-  version tag, and cargo unifies your pin onto the same source when the tags agree.
+  version tag, and the composer injects the same `[patch]` section, redirecting every toolchain
+  crate to a cached checkout of the **binary's own release tag**—regardless of the tag your
+  package pins. A package pinned at an older tag (say `v0.2.0`) still composes under a newer
+  binary (say `v0.2.1`): your pin is overridden to the consumer's toolchain, exactly as in the
+  workspace case. That is the whole one-toolchain-wins guarantee—without it, your pin and the
+  shim's tag would be two different sources, two compiled copies of `noeta-ext-abi`, and a type
+  error instead of a build.
 
 Either way the whole graph resolves to **one copy** of each toolchain crate—necessary for Rust type
 identity (a second compiled copy of `noeta-ext-abi` would make your `dyn Extension` a different
