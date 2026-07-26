@@ -361,19 +361,24 @@ fn noeta_claim_by_domain_posts_the_domain_proof() {
 }
 
 #[test]
-fn noeta_claim_guides_when_not_in_ci_and_device_flow_unconfigured() {
-    // With a registry URL but no GitHub Actions OIDC environment and no configured device-flow client
-    // id, `noeta claim` can't prove ownership — it points at both paths (set NOETA_GITHUB_CLIENT_ID,
-    // or run from a workflow) and exits 1 without contacting the registry.
+fn noeta_claim_device_flow_works_without_a_configured_client_id() {
+    // Outside GitHub Actions, `noeta claim` falls back to the device flow using the BUILT-IN
+    // client id of the hosted registry's OAuth app — no NOETA_GITHUB_CLIENT_ID required. Pin the
+    // OAuth endpoint to an unroutable host so the test proves the flow is *attempted* (the
+    // failure names the device-code request, not a missing client id) while staying hermetic.
     lang()
         .env("NOETA_REGISTRY_URL", "https://registry.invalid")
         .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
         .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
         .env_remove("NOETA_GITHUB_CLIENT_ID")
+        .env("NOETA_GITHUB_OAUTH_URL", "http://127.0.0.1:1")
         .args(["claim", "acme"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("NOETA_GITHUB_CLIENT_ID"));
+        .stderr(
+            predicate::str::contains("device")
+                .and(predicate::str::contains("NOETA_GITHUB_CLIENT_ID").not()),
+        );
 }
 
 #[test]

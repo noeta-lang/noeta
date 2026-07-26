@@ -153,6 +153,11 @@ pub(crate) fn cmd_claim(
     }
 }
 
+/// The hosted registry's "Noeta Registry" GitHub OAuth app — the device-flow client id `noeta
+/// claim` uses when `NOETA_GITHUB_CLIENT_ID` is unset. A client id is a public identifier, not a
+/// secret: the device flow authenticates with the user's browser approval, never an app secret.
+const DEFAULT_GITHUB_CLIENT_ID: &str = "Ov23liXGU5JL6IDlR8L6";
+
 /// The OIDC audience `noeta claim` requests: `--audience` wins, then `NOETA_REGISTRY_AUDIENCE`,
 /// else it is **derived from the host of the registry base URL** the claim talks to — the
 /// production registry validates tokens whose audience is its own hostname
@@ -194,14 +199,12 @@ pub(crate) fn acquire_claim_proof(audience: &str) -> Result<registry::ClaimProof
     if let Some(jwt) = registry::fetch_github_oidc(audience)? {
         return Ok(registry::ClaimProof::Oidc(jwt));
     }
-    // Laptop: the GitHub OAuth device flow. Needs the registry's GitHub OAuth app client id (public —
-    // the device flow uses no secret); `NOETA_GITHUB_OAUTH_URL` overrides the endpoint for testing.
-    let client_id = std::env::var("NOETA_GITHUB_CLIENT_ID").map_err(|_| {
-        "not running in GitHub Actions, and the GitHub OAuth device flow isn't configured — set \
-         NOETA_GITHUB_CLIENT_ID to the registry's GitHub OAuth app client id (the registry operator \
-         provides it), or run `noeta claim` from a GitHub Actions workflow granting `id-token: write`."
-            .to_string()
-    })?;
+    // Laptop: the GitHub OAuth device flow. The client id is a PUBLIC identifier (the device flow
+    // uses no secret): the built-in default is the hosted registry's "Noeta Registry" OAuth app;
+    // `NOETA_GITHUB_CLIENT_ID` overrides it for a third-party registry's own app, and
+    // `NOETA_GITHUB_OAUTH_URL` overrides the endpoint for testing.
+    let client_id = std::env::var("NOETA_GITHUB_CLIENT_ID")
+        .unwrap_or_else(|_| DEFAULT_GITHUB_CLIENT_ID.to_string());
     let oauth_base = std::env::var("NOETA_GITHUB_OAUTH_URL")
         .unwrap_or_else(|_| "https://github.com".to_string());
     let device = github::request_device_code(&oauth_base, &client_id, "read:org")?;

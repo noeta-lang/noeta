@@ -154,7 +154,7 @@ pub(crate) fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
     // `SourceId::FIRST` (REPL-on-VM follow-on). Only entries that actually run are kept; a syntax-error
     // entry compiles nothing, so no future trace can reference it.
     let mut sources: Vec<Source> = preloaded_sources;
-    eprint!("lang repl — type a statement, Ctrl-D to exit\n» ");
+    eprint!("noeta repl — type a statement, Ctrl-D to exit\n» ");
     let _ = io::stderr().flush();
 
     eprintln!("type :help for commands");
