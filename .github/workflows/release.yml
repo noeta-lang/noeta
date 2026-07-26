@@ -124,6 +124,10 @@ jobs:
     needs: [build, package-extension]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: the notes compiler diffs against the previous tag
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -133,12 +137,54 @@ jobs:
         working-directory: dist
         run: sha256sum *.tar.gz *.vsix > SHA256SUMS
 
+      # Compile the release notes from the conventional commits since the previous tag: sections
+      # per type (breaking changes first), first lines only, trailers dropped. Every commit on main
+      # is conventional, so this is the changelog — GitHub's own generator is PR-based and produces
+      # only a compare link for a direct-commit history.
+      - name: Compile release notes from conventional commits
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          RANGE=${PREV:+${PREV}..}${TAG}
+          {
+            declare -A SECTION=( [feat]="Features" [fix]="Fixes" [perf]="Performance" \
+              [docs]="Documentation" [refactor]="Refactoring" [ci]="CI & build" [build]="CI & build" \
+              [test]="Housekeeping" [chore]="Housekeeping" [style]="Housekeeping" )
+            ORDER=(Breaking Features Fixes Performance Documentation Refactoring "CI & build" Housekeeping Other)
+            CONVENTIONAL='^([a-z]+)(\([^)]*\))?(!)?: (.*)$'
+            declare -A BODY
+            while IFS= read -r line; do
+              subject=${line#* }
+              # Merge commits carry no changelog signal of their own.
+              [[ "$subject" == Merge\ * ]] && continue
+              if [[ "$subject" =~ $CONVENTIONAL ]]; then
+                type=${BASH_REMATCH[1]}; scope=${BASH_REMATCH[2]}; bang=${BASH_REMATCH[3]}; msg=${BASH_REMATCH[4]}
+                scope=${scope#(}; scope=${scope%)}
+                entry="- ${scope:+**${scope}:** }${msg}"
+                if [[ -n "$bang" ]]; then key="Breaking"; else key=${SECTION[$type]:-Other}; fi
+              else
+                entry="- ${subject}"
+                key="Other"
+              fi
+              BODY[$key]+="${entry}"$'\n'
+            done < <(git log --no-merges --pretty='%H %s' "$RANGE")
+            for key in "${ORDER[@]}"; do
+              [[ -n "${BODY[$key]:-}" ]] || continue
+              [[ "$key" == "Breaking" ]] && echo "## ⚠ Breaking changes" || echo "## ${key}"
+              printf '%s\n' "${BODY[$key]}"
+            done
+            if [[ -n "$PREV" ]]; then
+              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            fi
+          } > notes.md
+          echo "--- notes for ${RANGE}:"; cat notes.md
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           prerelease: ${{ needs.build.outputs.is_prerelease == 'true' }}
-          generate_release_notes: true
+          body_path: notes.md
 
   # Advance the web properties. Docs syncs its content from this release's tag, so it must run only
   # for a real (non-prerelease) release; the landing/playground pills just refresh. GITHUB_TOKEN
