@@ -686,10 +686,15 @@ fn noeta_advisory_promote_scope_owner_signs_the_same_keyless_bundle() {
 
 #[test]
 fn noeta_claim_requires_the_hosted_registry() {
-    // namespace-protection #1: claiming a scope talks to the hosted registry — without a configured
-    // URL, `noeta claim` explains that rather than failing opaquely.
+    // namespace-protection #1: claiming a scope talks to the hosted registry. With no overrides the
+    // default chain lands on the built-in hosted registry, so the only route with no claim endpoint
+    // is `NOETA_REGISTRY_DIR` (the file-backed local index) — `noeta claim` explains that rather
+    // than failing opaquely or silently falling through to the network.
+    let reg = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("claim_local_dir_registry");
+    std::fs::create_dir_all(&reg).unwrap();
     lang()
         .env_remove("NOETA_REGISTRY_URL")
+        .env("NOETA_REGISTRY_DIR", &reg)
         .args(["claim", "acme"])
         .assert()
         .failure()
@@ -745,8 +750,10 @@ fn noeta_claim_uses_the_github_device_flow_off_ci() {
 
 #[test]
 fn noeta_scope_require_provenance_validates_and_needs_a_registry() {
-    // namespace-protection #1 Phase 1: the CLI validates `--root` and requires a registry URL before
-    // it would ever contact the network.
+    // namespace-protection #1 Phase 1: the CLI validates `--root` before it would ever contact the
+    // network, and — since the default chain now ends at the built-in hosted registry — the one
+    // route with no policy endpoint is `NOETA_REGISTRY_DIR` (the file-backed local index), which
+    // gets an explanation rather than a silent fall-through to the network.
     lang()
         .env_remove("NOETA_REGISTRY_URL")
         .args(["scope", "require-provenance", "para", "--root", "nonsense"])
@@ -755,8 +762,11 @@ fn noeta_scope_require_provenance_validates_and_needs_a_registry() {
         .stderr(predicate::str::contains(
             "`--root` must be `key` or `keyless`",
         ));
+    let reg = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scope_policy_local_dir_registry");
+    std::fs::create_dir_all(&reg).unwrap();
     lang()
         .env_remove("NOETA_REGISTRY_URL")
+        .env("NOETA_REGISTRY_DIR", &reg)
         .args(["scope", "require-provenance", "para"])
         .assert()
         .failure()

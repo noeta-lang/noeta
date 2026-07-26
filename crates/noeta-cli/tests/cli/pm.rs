@@ -455,9 +455,15 @@ fn a_dependency_syntax_error_is_reported_against_the_dependency_file() {
 #[test]
 fn noeta_audit_reports_the_trust_footprint() {
     // A pure path-dependency project: audit lists the dependency and reports no elevated authority.
+    // NOETA_REGISTRY_DIR routes the default chain to the file-backed local index so the audit's
+    // best-effort transparency/advisory sections never touch the network (the bare default is the
+    // hosted production registry).
     let entry = path_dep_project("pm_audit");
     let app_dir = entry.parent().unwrap();
+    let reg = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_audit_registry");
+    std::fs::create_dir_all(&reg).unwrap();
     lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
         .arg("audit")
         .arg(app_dir)
         .assert()

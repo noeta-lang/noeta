@@ -33,13 +33,14 @@ pub(crate) fn cmd_scope_require_provenance(scope: &str, root: Option<&str>, off:
         return ExitCode::from(2);
     }
     // Route through the project's `[registries]` mapping for this scope (like resolve/publish);
-    // env default otherwise.
+    // the environment default chain (ending in the built-in hosted registry) otherwise.
     let base = match scope_registry_base(scope) {
         Ok(Some(base)) => base,
         Ok(None) => {
             eprintln!(
-                "noeta: setting a scope policy needs the hosted registry — set `NOETA_REGISTRY_URL` \
-                 or map the scope under `[registries]`"
+                "noeta: setting a scope policy needs the hosted registry, but \
+                 `NOETA_REGISTRY_DIR` routes to the file-backed local index — unset it, set \
+                 `NOETA_REGISTRY_URL`, or map the scope under `[registries]`"
             );
             return ExitCode::from(2);
         }
@@ -80,22 +81,25 @@ pub(crate) fn cmd_claim(
     domain: Option<&str>,
 ) -> ExitCode {
     // Claiming talks to the hosted registry over HTTP — the one the project's `[registries]`
-    // routes this scope to (like resolve/publish), else the environment default.
+    // routes this scope to (like resolve/publish), else the environment default chain ending in
+    // the built-in hosted registry.
     let base = match scope_registry_base(scope) {
         Ok(Some(base)) => base,
         Ok(None) => {
             eprintln!(
-                "noeta: `noeta claim` needs the hosted registry — set `NOETA_REGISTRY_URL` to the \
+                "noeta: `noeta claim` needs the hosted registry, but `NOETA_REGISTRY_DIR` routes \
+                 to the file-backed local index — unset it, set `NOETA_REGISTRY_URL` to the \
                  registry you are claiming a scope on, or map the scope under `[registries]`"
             );
             return ExitCode::from(2);
         }
         Err(code) => return code,
     };
-    let audience = audience
-        .map(str::to_string)
-        .or_else(|| std::env::var("NOETA_REGISTRY_AUDIENCE").ok())
-        .unwrap_or_else(|| "noeta-registry".to_string());
+    let audience = claim_audience(
+        audience,
+        std::env::var("NOETA_REGISTRY_AUDIENCE").ok(),
+        &base,
+    );
 
     // Prove ownership. `--domain` claims by proving control of a domain (the registry fetches its
     // well-known file); otherwise prefer an ambient GitHub Actions OIDC token (CI) and fall back to the
@@ -146,6 +150,39 @@ pub(crate) fn cmd_claim(
             eprintln!("noeta: {err}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// The OIDC audience `noeta claim` requests: `--audience` wins, then `NOETA_REGISTRY_AUDIENCE`,
+/// else it is **derived from the host of the registry base URL** the claim talks to — the
+/// production registry validates tokens whose audience is its own hostname
+/// (`https://registry.noeta.dev` → `registry.noeta.dev`), so the derived default matches whatever
+/// registry the claim was routed to (an explicit URL, a `[registries]` mapping, or the built-in
+/// default). The env value is passed in rather than read here so the precedence is unit-testable
+/// without mutating process env.
+fn claim_audience(flag: Option<&str>, env: Option<String>, base: &str) -> String {
+    flag.map(str::to_string)
+        .or(env)
+        .unwrap_or_else(|| host_of(base))
+}
+
+/// The host component of a base URL: scheme, userinfo, port, and path stripped. Falls back to the
+/// trimmed input when there is no recognizable host (a malformed base fails later, at the HTTP
+/// client, with a better error than anything we could say here).
+fn host_of(base: &str) -> String {
+    let rest = base.split_once("://").map_or(base, |(_, rest)| rest);
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    // A bracketed IPv6 literal keeps its colons; otherwise a colon starts the port.
+    let host = if let Some(v6) = rest.strip_prefix('[') {
+        v6.split_once(']').map_or(rest, |(host, _)| host)
+    } else {
+        rest.split(':').next().unwrap_or(rest)
+    };
+    if host.is_empty() {
+        base.trim().trim_end_matches('/').to_string()
+    } else {
+        host.to_string()
     }
 }
 
@@ -838,12 +875,12 @@ pub(crate) fn cmd_audit(path: &std::path::Path) -> ExitCode {
 
     // Transparency log (namespace-protection #1): verify each dependency is publicly **included** in
     // the registry's append-only log under a **signed** checkpoint — so a compromised registry can't
-    // serve an unlogged forgery without detection. Best-effort and only when a hosted registry is
-    // configured; a not-logged/unreachable result is a note (direct git deps aren't logged), not a
-    // failure. The pinned key is carried across deps so a registry serving different keys is caught.
-    if let Some(base) = std::env::var_os("NOETA_REGISTRY_URL")
-        && let Ok(index) = registry::HttpIndex::new(base.to_string_lossy().into_owned())
-    {
+    // serve an unlogged forgery without detection. Best-effort and only when the default chain lands
+    // on a hosted registry (`NOETA_REGISTRY_URL`, else — unless `NOETA_REGISTRY_DIR` routes to the
+    // file-backed local index, which serves no log — the built-in hosted default); a
+    // not-logged/unreachable result is a note (direct git deps aren't logged), not a failure. The
+    // pinned key is carried across deps so a registry serving different keys is caught.
+    if let Ok(Some(index)) = registry::open_http() {
         println!("\n  Transparency log:");
         let mut pinned: Option<String> = None;
         let mut verified = 0usize;
@@ -1123,8 +1160,9 @@ pub(crate) fn cmd_advisory_publish(
         Ok(Some(base)) => base,
         Ok(None) => {
             eprintln!(
-                "noeta: publishing an advisory needs the hosted registry — set `NOETA_REGISTRY_URL` \
-                 or map `{scope}` under `[registries]`"
+                "noeta: publishing an advisory needs the hosted registry, but `NOETA_REGISTRY_DIR` \
+                 routes to the file-backed local index — unset it, set `NOETA_REGISTRY_URL`, or \
+                 map `{scope}` under `[registries]`"
             );
             return ExitCode::from(2);
         }
@@ -1196,7 +1234,8 @@ pub(crate) fn cmd_advisory_report(
         Ok(Some(base)) => base,
         Ok(None) => {
             eprintln!(
-                "noeta: filing a report needs the hosted registry — set `NOETA_REGISTRY_URL` or map \
+                "noeta: filing a report needs the hosted registry, but `NOETA_REGISTRY_DIR` routes \
+                 to the file-backed local index — unset it, set `NOETA_REGISTRY_URL`, or map \
                  `{scope}` under `[registries]`"
             );
             return ExitCode::from(2);
@@ -1278,8 +1317,9 @@ fn sign_advisory_keyless(
 }
 
 /// Resolve the registry client for a report triage/promote verb (advisory-intake residual a). The base
-/// URL comes from `--scope`'s `[registries]` routing (scope-owner path) or `NOETA_REGISTRY_URL` (operator
-/// path). The bearer token is the scope publish token (`NOETA_REGISTRY_TOKEN`, the default) unless
+/// URL comes from `--scope`'s `[registries]` routing (scope-owner path) or the environment default
+/// chain ending in the built-in hosted registry (operator path — same precedence as everything
+/// else). The bearer token is the scope publish token (`NOETA_REGISTRY_TOKEN`, the default) unless
 /// `operator` is set, which swaps in the admin token (`NOETA_REGISTRY_ADMIN_TOKEN`).
 fn report_index(scope: Option<&str>, operator: bool) -> Result<registry::HttpIndex, ExitCode> {
     let base = match scope {
@@ -1287,18 +1327,26 @@ fn report_index(scope: Option<&str>, operator: bool) -> Result<registry::HttpInd
             Ok(Some(base)) => base,
             Ok(None) => {
                 eprintln!(
-                    "noeta: this needs the hosted registry — set `NOETA_REGISTRY_URL` or map `{s}` \
+                    "noeta: this needs the hosted registry, but `NOETA_REGISTRY_DIR` routes to the \
+                     file-backed local index — unset it, set `NOETA_REGISTRY_URL`, or map `{s}` \
                      under `[registries]`"
                 );
                 return Err(ExitCode::from(2));
             }
             Err(code) => return Err(code),
         },
-        None => match std::env::var("NOETA_REGISTRY_URL") {
-            Ok(url) if !url.is_empty() => url,
-            _ => {
-                eprintln!("noeta: this needs the hosted registry — set `NOETA_REGISTRY_URL`");
+        None => match registry::default_http_base() {
+            Ok(Some(base)) => base,
+            Ok(None) => {
+                eprintln!(
+                    "noeta: this needs the hosted registry, but `NOETA_REGISTRY_DIR` routes to the \
+                     file-backed local index — unset it or set `NOETA_REGISTRY_URL`"
+                );
                 return Err(ExitCode::from(2));
+            }
+            Err(err) => {
+                eprintln!("noeta: {err}");
+                return Err(ExitCode::from(1));
             }
         },
     };
@@ -1595,9 +1643,11 @@ pub(crate) fn locate_manifest() -> Result<PathBuf, ExitCode> {
 
 /// The hosted-registry base URL a scope-management command (`claim`, `scope require-provenance`)
 /// should talk to for `scope`: the enclosing project's `[registries]` mapping when it routes the
-/// scope to a hosted URL — the same routing resolution and publish follow — else the
-/// `NOETA_REGISTRY_URL` environment default. A scope mapped to a git forge is a hard error (a
-/// forge has no claim/policy endpoints), not a silent fall-through to the wrong registry.
+/// scope to a hosted URL — the same routing resolution and publish follow — else the environment
+/// default chain (`NOETA_REGISTRY_URL`, then `NOETA_REGISTRY_DIR` → `None`, the file-backed local
+/// index has no claim/policy endpoints, then the built-in hosted default). A scope mapped to a git
+/// forge is a hard error (a forge has no claim/policy endpoints), not a silent fall-through to the
+/// wrong registry.
 pub(crate) fn scope_registry_base(scope: &str) -> Result<Option<String>, ExitCode> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(path) = manifest::find(&cwd)
@@ -1616,7 +1666,10 @@ pub(crate) fn scope_registry_base(scope: &str) -> Result<Option<String>, ExitCod
             None => {}
         }
     }
-    Ok(std::env::var_os("NOETA_REGISTRY_URL").map(|v| v.to_string_lossy().into_owned()))
+    registry::default_http_base().map_err(|err| {
+        eprintln!("noeta: {err}");
+        ExitCode::from(1)
+    })
 }
 
 /// Quote a string as a TOML basic string for a manifest value we write (`noeta add`).
@@ -1655,7 +1708,8 @@ pub(crate) fn cmd_watch_scope(scope: &str, state_path: Option<&std::path::Path>)
         Ok(Some(base)) => base,
         Ok(None) => {
             eprintln!(
-                "noeta: watch-scope needs the hosted registry — set `NOETA_REGISTRY_URL` or map \
+                "noeta: watch-scope needs the hosted registry, but `NOETA_REGISTRY_DIR` routes to \
+                 the file-backed local index — unset it, set `NOETA_REGISTRY_URL`, or map \
                  `{scope}` under `[registries]`"
             );
             return ExitCode::from(2);
@@ -1915,4 +1969,62 @@ fn verify_log_extension(
         &root_from,
         &root_to,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `noeta claim`'s OIDC audience: `--audience` wins, then `NOETA_REGISTRY_AUDIENCE`, then the
+    // host of the registry base the claim was routed to. These pass the would-be env value in
+    // rather than mutating process env (tests run in parallel), mirroring the `default_route`
+    // tests in `noeta_pm::registry`.
+    #[test]
+    fn claim_audience_defaults_to_the_registry_host() {
+        assert_eq!(
+            claim_audience(None, None, "https://registry.noeta.dev"),
+            "registry.noeta.dev"
+        );
+        // The production default registry derives the production audience.
+        assert_eq!(
+            claim_audience(None, None, noeta_pm::registry::DEFAULT_REGISTRY_URL),
+            "registry.noeta.dev"
+        );
+    }
+
+    #[test]
+    fn claim_audience_flag_and_env_win_over_the_derived_host() {
+        assert_eq!(
+            claim_audience(
+                Some("custom-aud"),
+                Some("env-aud".to_string()),
+                "https://registry.noeta.dev"
+            ),
+            "custom-aud"
+        );
+        assert_eq!(
+            claim_audience(
+                None,
+                Some("env-aud".to_string()),
+                "https://registry.noeta.dev"
+            ),
+            "env-aud"
+        );
+    }
+
+    #[test]
+    fn host_of_strips_scheme_port_path_and_userinfo() {
+        assert_eq!(host_of("https://registry.noeta.dev/"), "registry.noeta.dev");
+        assert_eq!(
+            host_of("https://registry.noeta.dev/v1/x?q=1"),
+            "registry.noeta.dev"
+        );
+        assert_eq!(host_of("http://127.0.0.1:39041"), "127.0.0.1");
+        assert_eq!(
+            host_of("https://user:pw@reg.example.com:8443/path"),
+            "reg.example.com"
+        );
+        assert_eq!(host_of("http://[::1]:8080/x"), "::1");
+        assert_eq!(host_of("registry.example.com"), "registry.example.com");
+    }
 }

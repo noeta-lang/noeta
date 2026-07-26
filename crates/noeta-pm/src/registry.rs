@@ -1021,17 +1021,46 @@ pub struct LogConsistency {
     pub proof: Vec<String>,
 }
 
-/// Open the **hosted** registry as a concrete [`HttpIndex`] when `NOETA_REGISTRY_URL` is set (needed
-/// for transparency-log verification, which uses HttpIndex-only endpoints), else `None`.
+/// The hosted-registry **base URL** a [`DefaultRoute`] lands on, for the HttpIndex-only surfaces
+/// (transparency log, advisory feed, scope claim/policy, reports). Same precedence as
+/// [`open_default`]: the explicit `NOETA_REGISTRY_URL`, else — when `NOETA_REGISTRY_DIR` routes to
+/// the file-backed local index — `None` (a directory serves none of those HTTP endpoints, and an
+/// offline/test run must never fall through to the network), else the built-in
+/// [`DEFAULT_REGISTRY_URL`]. Split out from the environment reads so the precedence is
+/// unit-testable without mutating process env, exactly like [`default_route`].
+pub fn http_base_for(route: DefaultRoute) -> Result<Option<String>, PmError> {
+    match route {
+        DefaultRoute::EnvUrl(url) => {
+            Ok(Some(url.into_string().map_err(|_| {
+                PmError::Network("NOETA_REGISTRY_URL is not valid UTF-8".to_string())
+            })?))
+        }
+        DefaultRoute::LocalDir => Ok(None),
+        DefaultRoute::Hosted => Ok(Some(DEFAULT_REGISTRY_URL.to_string())),
+    }
+}
+
+/// The hosted-registry base URL the environment's default route lands on ([`http_base_for`] over
+/// the live environment): `NOETA_REGISTRY_URL` wins, `NOETA_REGISTRY_DIR` yields `None` (the local
+/// index has no HTTP surface), else the built-in hosted default. Every user-facing command that
+/// needs a *hosted* registry and has no `[registries]` scope mapping to follow resolves its base
+/// through this — the same chain resolve/publish follow — rather than requiring
+/// `NOETA_REGISTRY_URL` outright.
+pub fn default_http_base() -> Result<Option<String>, PmError> {
+    http_base_for(default_route(
+        std::env::var_os("NOETA_REGISTRY_URL"),
+        std::env::var_os("NOETA_REGISTRY_DIR").is_some(),
+    ))
+}
+
+/// Open the registry the default chain routes to as a concrete [`HttpIndex`] (needed for
+/// transparency-log/advisory verification, which use HttpIndex-only endpoints). Follows the same
+/// precedence as [`open_default`]: `NOETA_REGISTRY_URL`, then `NOETA_REGISTRY_DIR` (→ `None` — the
+/// file-backed local index has no HTTP surface), then the built-in hosted default.
 #[cfg(feature = "registry-http")]
 pub fn open_http() -> Result<Option<HttpIndex>, PmError> {
-    match std::env::var_os("NOETA_REGISTRY_URL") {
-        Some(url) => {
-            let base = url.into_string().map_err(|_| {
-                PmError::Network("NOETA_REGISTRY_URL is not valid UTF-8".to_string())
-            })?;
-            Ok(Some(HttpIndex::new(base)?))
-        }
+    match default_http_base()? {
+        Some(base) => Ok(Some(HttpIndex::new(base)?)),
         None => Ok(None),
     }
 }
@@ -2018,6 +2047,41 @@ mod tests {
         // The local-index override tests and offline use rely on must keep beating the hosted
         // default — a `NOETA_REGISTRY_DIR` run must never touch the network.
         assert_eq!(default_route(None, true), DefaultRoute::LocalDir);
+    }
+
+    // The HttpIndex-only surfaces (transparency log, advisories, claim/policy, reports) resolve
+    // their base URL through the SAME chain as `open_default` — these mirror the `default_route`
+    // tests above for `http_base_for`, again passing the would-be env values in rather than
+    // mutating process env.
+    #[test]
+    fn bare_http_base_is_the_hosted_registry() {
+        // No overrides: an audit/verify/log command talks to the built-in hosted registry rather
+        // than demanding NOETA_REGISTRY_URL.
+        assert_eq!(
+            http_base_for(default_route(None, false)).unwrap(),
+            Some(DEFAULT_REGISTRY_URL.to_string())
+        );
+    }
+
+    #[test]
+    fn noeta_registry_url_wins_for_the_http_base() {
+        let url = std::ffi::OsString::from("https://registry.example.com");
+        // Explicit URL beats both the local-dir override and the hosted default.
+        assert_eq!(
+            http_base_for(default_route(Some(url.clone()), true)).unwrap(),
+            Some("https://registry.example.com".to_string())
+        );
+        assert_eq!(
+            http_base_for(default_route(Some(url), false)).unwrap(),
+            Some("https://registry.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn noeta_registry_dir_yields_no_http_base() {
+        // The file-backed local index has no HTTP surface — an offline/test run with
+        // NOETA_REGISTRY_DIR set must get `None`, never a silent fall-through to the network.
+        assert_eq!(http_base_for(default_route(None, true)).unwrap(), None);
     }
 
     #[cfg(feature = "registry-http")]

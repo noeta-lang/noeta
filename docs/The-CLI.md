@@ -594,7 +594,7 @@ Claims a registry **scope** — the `company` half of `company/package` — self
 - **GitHub (default).** In GitHub Actions (grant `id-token: write`), the ambient OIDC token proves the workflow runs under the org/user of the scope's name — zero-config. On a laptop, it falls back to the GitHub **device flow**: a URL + code is printed, you authorize in a browser. The device flow needs the registry's public OAuth client id in `NOETA_GITHUB_CLIENT_ID` (the registry operator publishes it).
 - **`--domain <domain>`.** Prove control of a domain whose first label is the scope (`acme.dev` for `acme`): the registry fetches `https://<domain>/.well-known/noeta-registry.txt` and expects `noeta-scope=<scope>`.
 
-On success a **publish token** is bound to the scope — a given `--token`, or a freshly minted one printed **once** (save it; `noeta publish` reads it from `NOETA_REGISTRY_TOKEN`). Re-claiming as the *same* proven identity rotates the token; any other identity is refused with a conflict — ownership never transfers implicitly. Reserved namespaces (`std`, `noeta`, `core`) are never claimable, and a first-party scope only by its designated org. Claiming targets the hosted registry the scope routes to (`[registries]`, else `NOETA_REGISTRY_URL`) — a git-forge registry has no claim endpoint.
+On success a **publish token** is bound to the scope — a given `--token`, or a freshly minted one printed **once** (save it; `noeta publish` reads it from `NOETA_REGISTRY_TOKEN`). Re-claiming as the *same* proven identity rotates the token; any other identity is refused with a conflict — ownership never transfers implicitly. Reserved namespaces (`std`, `noeta`, `core`) are never claimable, and a first-party scope only by its designated org. Claiming targets the hosted registry the scope routes to (`[registries]`, else `NOETA_REGISTRY_URL`, else the built-in default `registry.noeta.dev`) — a git-forge registry has no claim endpoint, and `NOETA_REGISTRY_DIR` (the file-backed local index) has none either. The OIDC audience defaults to the host of that registry (`registry.noeta.dev` for the default); `--audience` or `NOETA_REGISTRY_AUDIENCE` overrides it.
 
 ### `noeta publish`
 
@@ -622,7 +622,7 @@ A published version is **immutable** — re-publishing the same version with dif
 noeta scope require-provenance <SCOPE> [--root <key|keyless>] [--off]
 ```
 
-Manages the publishing policy of a scope you own, authenticated with the scope's publish token (`NOETA_REGISTRY_TOKEN`) against `NOETA_REGISTRY_URL`. `require-provenance` makes the registry reject any release under the scope that doesn't carry verified provenance — so a leaked publish token *alone* can no longer push a release. `--root` narrows which trust root satisfies it (`key` for an Ed25519 signature, `keyless` for a Sigstore bundle; omitted, either does); `--off` lifts the requirement. See [Package Provenance](Package-Provenance).
+Manages the publishing policy of a scope you own, authenticated with the scope's publish token (`NOETA_REGISTRY_TOKEN`) against the registry the scope routes to (`[registries]`, else `NOETA_REGISTRY_URL`, else the built-in default `registry.noeta.dev`). `require-provenance` makes the registry reject any release under the scope that doesn't carry verified provenance — so a leaked publish token *alone* can no longer push a release. `--root` narrows which trust root satisfies it (`key` for an Ed25519 signature, `keyless` for a Sigstore bundle; omitted, either does); `--off` lifts the requirement. See [Package Provenance](Package-Provenance).
 
 ### `noeta audit`
 

@@ -206,7 +206,7 @@ hosted registry (or a mirror of it) rather than a bare git forge — see
 | `NOETA_GITHUB_AUTH_HOST` | Scope the token's auth header at a different host (self-hosted GitHub-compatible forge) |
 | `NOETA_REGISTRY_TOKEN` | The scope's publish token (bound by `noeta claim`) — authenticates `noeta publish`, `noeta scope`, and publisher advisories |
 | `NOETA_GITHUB_CLIENT_ID` | The registry's public GitHub OAuth client id — enables the laptop device flow for `noeta claim` |
-| `NOETA_REGISTRY_AUDIENCE` | The OIDC audience the registry expects for claims (default `noeta-registry`) |
+| `NOETA_REGISTRY_AUDIENCE` | The OIDC audience the registry expects for claims (default: the host of the registry being claimed on, e.g. `registry.noeta.dev`) |
 
 ## See also
 
