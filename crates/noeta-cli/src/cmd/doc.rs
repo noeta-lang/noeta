@@ -211,13 +211,9 @@ pub(crate) fn cmd_doc(
     if let Some(spec) = package {
         return cmd_doc_package(spec, out);
     }
-    let Some(file) = file else {
-        eprintln!(
-            "noeta: `noeta doc` needs a `.noe` file (or `--package <NAME>` for published docs)"
-        );
-        return ExitCode::from(2);
-    };
-    let file = file.as_path();
+    // No path and no `--package`/`--api`: document the current directory, as `check`/`test` do.
+    let here = PathBuf::from(".");
+    let file = file.as_deref().unwrap_or(&here);
     // The compose probe hands back the graph it resolved (default selection) for the load below
     // (audit-5 F2); the `--out` generator path never links, so it simply drops it.
     let resolved = match compose::maybe_delegate(file) {
@@ -226,6 +222,28 @@ pub(crate) fn cmd_doc(
     };
     if let Some(code) = target_gate(file, target, "doc") {
         return code;
+    }
+    // `--out` is checked BEFORE the directory branch below: the artifact is a *package's* docs,
+    // keyed by the `[package]` identity beside its entry, so it needs that entry named. Silently
+    // extracting to stdout instead would drop the flag the user actually asked for.
+    if out.is_some() && file.is_dir() {
+        eprintln!(
+            "noeta: `--out` documents a package — name its entry `.noe` file, not a directory"
+        );
+        return ExitCode::from(2);
+    }
+    // A **directory**: extract from every `.noe` beneath it. There is no entry to link, so the
+    // provider dispatch and the whole-program load below have nothing to act on — extraction works
+    // on a parse alone, which is exactly what makes a directory meaningful here.
+    if file.is_dir() {
+        let rendered = render_docs(&doc_sources(file));
+        if rendered.is_empty() {
+            eprintln!("noeta: no `@doc` blocks found");
+            return ExitCode::SUCCESS;
+        }
+        print!("{rendered}");
+        let _ = io::stdout().flush();
+        return ExitCode::SUCCESS;
     }
     // `--out`: the generator path — a registry-ready artifact from a bare parse, before (and
     // independent of) the extraction/provider machinery below.
@@ -277,34 +295,86 @@ pub(crate) fn cmd_doc(
         }
     }
 
-    let docs = noeta_check::resolve_docs(&linked.program);
-    if docs.is_empty() {
+    // Extract per file, over every module in the workspace — not just the entry's linked closure.
+    // A `@doc` block is adjacency-resolved against the file it sits in, and linking merges a
+    // module's *declarations* without the doc blocks beside them, so extracting from the linked
+    // program silently dropped the documentation of every imported symbol: a two-module project
+    // printed the entry's docs and nothing else, even for the module functions it calls. This is
+    // also what `--out` has always done (`docgen::generate` documents every module it reads), so
+    // the two halves of `noeta doc` now agree on what "the docs" means.
+    let out = render_docs(&doc_sources(file));
+    if out.is_empty() {
         eprintln!("noeta: no `@doc` blocks found");
         return ExitCode::SUCCESS;
-    }
-
-    let mut out = String::new();
-    for (i, doc) in docs.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let source = linked.sources.source(doc.span.source);
-        let line = source.line_col(doc.span.start).line;
-        // A declaration-attached block's header carries the documented symbol (adjacency-resolved);
-        // an unattached block's header is the bare location, exactly as before.
-        let header = match &doc.target {
-            noeta_check::DocTarget::Decl { name, .. } => {
-                format!("<!-- {}:{} · {} -->\n", source.name(), line, name)
-            }
-            _ => format!("<!-- {}:{} -->\n", source.name(), line),
-        };
-        out.push_str(&header);
-        out.push_str(&noeta_check::dedent_doc(&doc.text));
-        out.push('\n');
     }
     print!("{out}");
     let _ = io::stdout().flush();
     ExitCode::SUCCESS
+}
+
+/// The sources `noeta doc` extracts from: every `.noe` beneath a directory, or — for a file — the
+/// entry together with its sibling modules, the same workspace `docgen::generate` reads.
+fn doc_sources(path: &std::path::Path) -> Vec<noeta_span::Source> {
+    if path.is_dir() {
+        return crate::cmd::check::noe_files(path)
+            .iter()
+            .filter_map(|p| {
+                std::fs::read_to_string(p).ok().map(|text| {
+                    noeta_span::Source::new(
+                        noeta_span::SourceId::FIRST,
+                        p.display().to_string(),
+                        text,
+                    )
+                })
+            })
+            .collect();
+    }
+    match noeta_loader::read_workspace(path) {
+        Ok(workspace) => std::iter::once(workspace.entry)
+            .chain(workspace.modules)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Extract and render every `@doc` block in `sources`, in file then source order.
+///
+/// Each file is parsed on its own and re-keyed to `SourceId::FIRST`, because doc adjacency is a
+/// per-file fact and never crosses a file — the same reason `docgen::module_docs` does it. A file
+/// that does not parse contributes nothing rather than failing the run: extraction works on a
+/// parse alone, so it is expected to run over work-in-progress code.
+fn render_docs(sources: &[noeta_span::Source]) -> String {
+    let mut out = String::new();
+    for source in sources {
+        let local = noeta_span::Source::new(
+            noeta_span::SourceId::FIRST,
+            source.name(),
+            source.text().to_string(),
+        );
+        let lexed = noeta_lexer::lex(&local);
+        let parsed = noeta_parser::parse(&local, &lexed.tokens);
+        if !lexed.diagnostics.is_empty() || !parsed.diagnostics.is_empty() {
+            continue;
+        }
+        for doc in noeta_check::resolve_docs(&parsed.program) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            let line = local.line_col(doc.span.start).line;
+            // A declaration-attached block's header carries the documented symbol
+            // (adjacency-resolved); an unattached block's header is the bare location.
+            let header = match &doc.target {
+                noeta_check::DocTarget::Decl { name, .. } => {
+                    format!("<!-- {}:{} · {} -->\n", local.name(), line, name)
+                }
+                _ => format!("<!-- {}:{} -->\n", local.name(), line),
+            };
+            out.push_str(&header);
+            out.push_str(&noeta_check::dedent_doc(&doc.text));
+            out.push('\n');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
