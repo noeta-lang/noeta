@@ -2712,13 +2712,31 @@ mod tests {
         std::fs::create_dir_all(&scoped).unwrap();
         let path = scoped.join(MANIFEST_NAME);
         std::fs::write(&path, "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
-        add_dependency(&path, "para", "{ version = \"^0.1\", package = \"para/aether\" }").unwrap();
-        add_dependency(&path, "para", "{ version = \"^0.1\", package = \"para/html\" }").unwrap();
-        add_dependency(&path, "para", "{ version = \"^0.1\", package = \"para/db\" }").unwrap();
+        add_dependency(
+            &path,
+            "para",
+            "{ version = \"^0.1\", package = \"para/aether\" }",
+        )
+        .unwrap();
+        add_dependency(
+            &path,
+            "para",
+            "{ version = \"^0.1\", package = \"para/html\" }",
+        )
+        .unwrap();
+        add_dependency(
+            &path,
+            "para",
+            "{ version = \"^0.1\", package = \"para/db\" }",
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let m = Manifest::parse(&text).unwrap();
         let Dependency::Scope(members) = &m.dependencies()["para"] else {
-            panic!("expected a scope dependency, got {:?}", m.dependencies()["para"]);
+            panic!(
+                "expected a scope dependency, got {:?}",
+                m.dependencies()["para"]
+            );
         };
         assert_eq!(members.len(), 3);
         let packages: Vec<String> = members
@@ -2737,7 +2755,12 @@ mod tests {
 
         // Re-adding an identical source is still refused: it would bind one package twice.
         assert!(
-            add_dependency(&path, "para", "{ version = \"^0.1\", package = \"para/db\" }").is_err()
+            add_dependency(
+                &path,
+                "para",
+                "{ version = \"^0.1\", package = \"para/db\" }"
+            )
+            .is_err()
         );
     }
 
