@@ -67,7 +67,7 @@ for (i, x) in ["a", "b"].enumerate() {   // enumerate yields (index, value) tupl
 
 Iterating a map yields its values; iterating a set yields elements in sorted order.
 
-A user type iterates through the `Iterable` protocol — `iter()` returning a list — or as a **`next`-driven iterator**: an object exposing a callable `next` member (a method, or a closure-valued field) is driven `next()` → `some(x)`/`none` until exhausted. `iter()` may itself return such a handle. User iteration materializes its elements eagerly; lazy streaming is the built-in `Iterator<T>`'s (`xs.iter()`).
+A user type iterates through the `Iterable` protocol — `iter()` returning a list — or as a **`next`-driven iterator**: an object exposing a callable `next` member (a method, or a closure-valued field) is driven `next()` → `some(x)`/`none` until exhausted (`some`/`none` and the optional type `?int` are covered in [Error Handling](Error-Handling)). `iter()` may itself return such a handle. User iteration is eager: the elements are materialized up front. Lazy, on-demand streaming belongs to the built-in `Iterator<T>` (`xs.iter()`).
 
 ```noeta
 struct Gen {
@@ -125,7 +125,7 @@ fn label(s: Status): string {
 | Result | `Ok(v)`, `Err(e)` |
 | Type | `is int`, `is string`, `is Point` (on unions / `dyn`) |
 
-```noeta check
+```noeta
 fn classify(p: (int, int)): string {
     return match p {
         (0, 0) => "origin",
@@ -134,11 +134,30 @@ fn classify(p: (int, int)): string {
         (x, y) => "at ${x},${y}",
     }
 }
+echo classify((0, 4))          // y-axis at 4
 
-echo match place(items, customer) {
-    Ok(order)  => order.label(),
-    Err(error) => "failed",
+fn parse_age(s: string): Result<int, string> {
+    return match s.to_int() {
+        some(n) => Ok(n),
+        none    => Err("not a number: ${s}"),
+    }
 }
+echo match parse_age("42") {
+    Ok(n)  => "age ${n}",
+    Err(e) => e,
+}                              // age 42
+```
+
+> [!NOTE]
+> There are **no match guards** — `pat if cond => …` is not part of the grammar (the `if` is a parse error). Branch inside the arm instead, with the `if … then … else` expression or a nested `if`:
+
+```noeta
+n = 5
+echo match n {
+    0 => "zero",
+    k => if k > 0 then "pos" else "neg",
+}
+// pos
 ```
 
 ### Arm bodies: expressions vs. blocks

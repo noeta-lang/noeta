@@ -1,6 +1,6 @@
 # The Type System
 
-Noeta is **inferred-static**: types are checked at compile time, signatures are required at named boundaries, and bodies are inferred. `dyn` is the single explicit escape into dynamic typing. This page covers the surface — the type forms you write and the operations that move between them. For how the checker works internally, see [The Type Checker](Type-Checker-Internals).
+Noeta is **inferred-static**: types are checked at compile time, signatures are required at named boundaries, and bodies are inferred. `dyn` is the single explicit escape into dynamic typing. This page covers the surface — the type forms you write and the operations that move between them. You have met most of these forms on the preceding pages already; this page is the map that puts them in one place. For how the checker works internally, see [The Type Checker](Type-Checker-Internals).
 
 ## The shape of it
 
@@ -26,7 +26,7 @@ sq = fn(n) => n * n                             // inferred (int) -> int
 | `(A, B)` | Tuple. |
 | `A \| B` | Union (a *closed* dynamic). |
 | `dyn` | The open top — any value. |
-| `Struct` `Class` `Enum` `Record` | Abstract kind-types (see below). |
+| `Struct` `Class` `Enum` | Abstract kind-types (see below). |
 
 ## Optionals — `?T`
 
@@ -94,7 +94,7 @@ An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees 
 
 ## Abstract kind-types
 
-`Struct`, `Class`, `Enum`, and `Record` are supertypes of every declared type of that kind — useful for runtime kind tests against a `dyn`:
+`Struct`, `Class`, and `Enum` are supertypes of every declared type of that kind — useful for runtime kind tests against a `dyn`:
 
 ```noeta
 enum Color { Red; Green }
@@ -114,11 +114,7 @@ This is the "inferred-static" contract: no holes at named boundaries, inference 
 
 ## Stable bindings and explicit numeric conversion
 
-Two rules keep a binding's static type **trustworthy** — the type an editor shows for `mut x` is the type `x` actually has, from declaration onward:
-
-- **A `mut` binding has a fixed type.** It is set at declaration (annotated, or inferred from the initializer) and does not drift: a reassignment must be assignable to it, else E0007; the type is never silently changed by a later write. Reassigning an *immutable* binding at all is E0006, caught statically. For a binding that legitimately holds more than one type, declare a **union** (`mut x: int | string`) or `dyn` — the same explicit choices you make anywhere else. (One inferred type is still *completed* by its first write: `mut acc = []` resolves its element type from the accumulator's later writes; see [E0023](#where-inference-stops).)
-
-- **Numeric conversion is explicit at a boundary.** `int` is **not** a subtype of `float`: binding, passing, returning, or storing an `int` where a `float` is expected is E0007 — write `2.0`, not `2` (as Rust does, and unlike C/Java). Numbers still combine inside an **expression** — `int` and `float` promote in arithmetic (`x + 1` on a `float` `x` is a `float`) — and that result is then checked against its boundary like any other value, so a widened `float` can never reach an `int` binding implicitly.
+Two rules keep a binding's static type **trustworthy**: a `mut` binding's type is fixed at declaration (declare a union or `dyn` for a binding that must hold more), and numeric conversion is explicit at a boundary (`int` is not a subtype of `float`, though the two still promote inside an arithmetic expression). Both are covered in full in [Syntax Basics](Syntax-Basics#bindings-and-mutability) — see also its [numeric-conversion note](Syntax-Basics#number-literals).
 
 ## See also
 

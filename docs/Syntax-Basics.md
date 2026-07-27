@@ -64,18 +64,7 @@ while (running) { tick() }
 for x in (items) { echo x }
 ```
 
-### Formatting: `noeta fmt` canonicalizes both
-
-`noeta fmt` normalizes header parentheses and trailing semicolons. Configure it in the `[fmt]` table of `noeta.toml`, or override per-run with `--parens` / `--semicolons`:
-
-```toml
-[fmt]
-parens = "remove"       # "remove" (default) strips header parens; "add" wraps them: `if (x) {`
-semicolons = "remove"   # "remove" (default) strips redundant `;`; "add" terminates every simple
-                        # statement; "preserve" keeps them exactly as written
-```
-
-`remove` only strips a `;` that is genuinely redundant — one that the newline the formatter puts after the statement could replace. A `;` that is structurally required is kept: when the next statement begins with a token that would otherwise continue this line (e.g. a leading `-`), the `;` is the only thing separating them.
+Both choices — header parentheses and trailing semicolons — are normalized by `noeta fmt`, configured in the `[fmt]` table of `noeta.toml`; see [The `noeta` CLI](The-CLI#noeta-fmt).
 
 ## `echo`
 
@@ -136,7 +125,7 @@ xs: List<int> = [1, 2, 3]
 count: int = 3
 ```
 
-**There is no shadowing** — one name means one thing per scope stack (E0059). A binder — a closure parameter, `for` variable, or match-pattern binding — may not reuse a name already bound in a scope it can see, and a binding may not reuse an imported name (E0020); rename one side. A plain `name = expr` never introduces a second binding either: the first use in a scope declares it, and a later one (in the same or an inner scope) reassigns it — E0006 if it is immutable, E0007 if the type would change. Named functions make this ergonomic by being **sealed** — their bodies don't see surrounding value bindings at all (import one explicitly with `use (…)`), so their parameters conflict with nothing. See [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).
+**There is no shadowing** — one name means one thing per scope stack: a binder (closure parameter, `for` variable, match-pattern binding) may not reuse a name already bound in a scope it can see (E0059), a binding may not reuse an imported name (E0020), and a plain `name = expr` never introduces a second binding — the first use in a scope declares it, and a later one reassigns it (E0006 if immutable, E0007 if the type would change). Named functions stay ergonomic because they are **sealed** — their bodies don't see surrounding value bindings, so their parameters conflict with nothing (see [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause)).
 
 **Compound assignment** `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`:
 
@@ -274,6 +263,13 @@ echo 5..2    // []
 
 ### Precedence
 
-Tightest to loosest: unary `!`/`-` → `* / %` → `+ -` → shifts `<< >>` → bitwise `& ^ |` → comparison/equality → `&&` → `||`. Parentheses override. Bitwise binds *tighter* than comparison, so `5 & 3 == 1` is `(5 & 3) == 1`.
+Tightest to loosest: postfix (call, `.`, `[i]`, try `?`) → unary `!`/`-` → `* / %` → `+ -` → shifts `<< >>` → `&` → `^` → `|` → `~` and ranges `..`/`..=` → comparison `< <= > >=` and `is T` → equality `== != === !==` → `&&` → `||` and `??` → `|>` (loosest). Parentheses override.
+
+The consequences worth knowing:
+
+- Bitwise binds *tighter* than comparison, so `5 & 3 == 1` is `(5 & 3) == 1`.
+- `~` and `..` sit between bitwise and comparison: `1 + 2 ~ "x"` is `(1 + 2) ~ "x"` (→ `3x`), `"a" ~ "b" == "ab"` is `("a" ~ "b") == "ab"` (→ `true`), and `0..n-1` is `0..(n-1)`.
+- `is` is at the comparison tier: `a + b is int` is `(a + b) is int`, and `x is int == true` is `(x is int) == true`.
+- `??` sits alongside `||`, tighter only than the pipeline: `a ?? b |> f` is `(a ?? b) |> f`.
 
 See also [Fixed-Width Integers & Bitwise](Fixed-Width-Integers) for the bitwise operators in depth.

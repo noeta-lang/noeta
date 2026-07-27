@@ -42,14 +42,11 @@ of a closure counter. Without the clause, a reference to a top-level binding is 
 fix spelled out (E0005: *add `use (name)` to the signature, or pass it as a parameter*), and a
 bare assignment to an unlisted name simply declares a fresh local.
 
-**No shadowing (E0059).** One name means one thing per scope stack. A binder — a closure
-parameter, `for` variable, match-pattern binding, or fresh local — may not reuse a name already
-bound in a scope it can see, and a binding may not reuse an imported name or module alias
-(E0020). Sealing is what keeps this ergonomic: named-fn params conflict with nothing because the
-surrounding bindings genuinely are not in scope. Where capture *is* implicit — anonymous
-closures — the rule bites: `fn(base) => …` under a visible `base` is rejected; rename one.
-(Reassignment is not shadowing — `x = 5` on an existing binding follows the `mut` rules E0006/E0007
-— and `is`-narrowing refines the *same* binding, so neither ever needs a shadow.)
+**No shadowing (E0059).** One name means one thing per scope stack — the rule in full lives in
+[Syntax Basics](Syntax-Basics#bindings-and-mutability). Sealing is what keeps it ergonomic here:
+named-fn params conflict with nothing because the surrounding bindings genuinely are not in
+scope, while an anonymous closure captures implicitly — so `fn(base) => …` under a visible
+`base` is rejected; rename one.
 
 ## Default (optional) parameters
 
@@ -105,22 +102,7 @@ echo f(1, c: 9)    // 129 — `b` skipped, and still defaults
 
 The skipped parameter's default is evaluated by the callee in its own scope, exactly as when an argument list simply stops early — skipping one and omitting a trailing one are the same thing to the function being called.
 
-Named arguments work the same on methods and associated functions:
-
-```noeta
-class M {
-    pub k: int
-    fn make(): M { return M { k: 0 } }
-    fn f(a: int, b: int = 2, c: int = 3): int { return self.k + a * 100 + b * 10 + c }
-    fn mk(a: int, b: int = 2, c: int = 3): M { return M { k: a * 100 + b * 10 + c } }
-}
-m = M.make()
-
-// sample:start
-echo m.f(1, c: 9)        // 129
-echo M.mk(b: 5, a: 1).k  // 153
-// sample:end
-```
+Named arguments work the same on methods and associated functions (`m.f(1, c: 9)`, `M.mk(b: 5, a: 1)`).
 
 A label must name a parameter of the callee (an unknown one is E0061, with the closest match suggested), and no parameter may be filled twice — once positionally and again by name.
 
@@ -215,15 +197,7 @@ fn run(f: (int) -> int, x: int): int { return f(x) }
 
 Collection methods are passable as values via **unbound method handles**: `list.len`, `string.upper`, `Stack.size` — each a callable taking the receiver as its first argument (`xss.map(list.len)`).
 
-**Generic functions are values too.** With an expected function type in play — a `map` argument, an annotated binding, a declared `Fn`-typed field or parameter — a generic function instantiates against the expectation and checks precisely; without one it stays the erased, `dyn`-parameter value (calls defer per position):
-
-```noeta
-fn wrap<T>(x: T): List<T> { return [x] }
-
-echo [1, 2].map(wrap)                 // [[1], [2]] — precise: (int) -> List<int>
-g: (string) -> List<string> = wrap    // instantiates from the annotation
-h = wrap                              // bare: the erased value, still callable at any type
-```
+**Generic functions are values too.** With an expected function type in play — a `map` argument, an annotated binding — a generic function instantiates against the expectation and checks precisely; without one it stays the erased, `dyn`-parameter value, calls deferred per position. The full rules are in [Generics & Traits](Generics-and-Traits#generic-functions-as-values).
 
 The prelude constructors `Ok`/`Err`/`some` — and `panic` — are first-class the same way: `results.map(Ok)` passes the genuine constructor, with a direct call's exact arity behavior and error text. (`assert` stays a special form, and a generic function that forwards `T` into a call-site-typed position — see [Generics & Traits](Generics-and-Traits) — must be called rather than passed.)
 

@@ -52,7 +52,7 @@ p = b.paired::<string>("hi")        // Pair<int, string> — T from b, U from th
 
 All three instantiation paths a free function has apply, consistent with them: **argument inference** (`b.choose(99, true)` infers `U = int`), the **member turbofish** `recv.m::<U>(args)` (the class's parameter never appears among these — only the method's own, arity-checked E0058), and **expected-type seeding** (`xs: List<int> = b.collect()` seeds a return-only `U` from the annotation). Bounds on a method parameter ride the ordinary trait machinery (`fn bigger<U: Comparable>(...)`; a non-`Comparable` argument is E0025). The parameters are erased like every generic — one compiled method serves every instantiation.
 
-Two boundaries hold statically. A generic method's own parameter does **not** forward into a call-site-typed position (`json.try_parse::<U>` inside a method body is E0058 — method dispatch has no hidden-slot channel; forwarding stays a top-level-generic-fn capability). And a **trait's** required-method set stays monomorphic — a per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter; put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
+Two boundaries hold statically. A generic method's own parameter does **not** forward into a call-site-typed position (`json.try_parse::<U>` inside a method body is E0058 — forwarding stays a top-level-generic-fn capability). And a **trait's** required-method set stays monomorphic — a per-method `<U>` on a trait method is E0058, since the trait is dispatched dynamically and each `impl` would have to agree on the parameter; put the generic method on a concrete type, or make the whole trait generic (`trait T<U> { ... }`).
 
 ## Forwarding `T`
 
@@ -73,7 +73,7 @@ order = load::<Order>("{\"id\": 1}")
 user  = load::<User>("{\"name\": \"Ada\"}")   // same body, per-instantiation decode
 ```
 
-Generics are erased, so one compiled body serves every instantiation; where a forwarded site needs per-instantiation data at runtime (a decode recipe, an attribute type's name), the instantiating call passes it through a hidden argument — invisible in the surface language. Forwarding works from a **top-level generic function** and from a **nested `fn`** inside one, and a **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`. The boundaries, all reported statically: a **generic method's** own parameter does not forward into a call-site-typed position (E0058 — method dispatch has no hidden-slot channel); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
+Forwarding works from a **top-level generic function** and from a **nested `fn`** inside one, and a **composite** parameter forwards too (`List<T>`, `Box<T>` in a `::<...>` position), not just the bare `T`. The boundaries, all reported statically: a **generic method's** own parameter does not forward into a call-site-typed position (E0058); an instantiation the call site cannot pin must be spelled with a turbofish (E0023); and a function that forwards `T` this way is not usable as a bare value (E0058) — call it, or wrap it in a closure.
 
 ## Generic functions as values
 
@@ -87,6 +87,32 @@ f: (string) -> List<string> = wrap   // and here as (string) -> List<string>
 ```
 
 Declared bounds ride along (`g: (Box, Box) -> Box = biggest` is E0025 when `Box` is not `Comparable`). A bare, expectation-free binding (`f = wrap`) keeps the honest gradual value: the erased signature, parameters `dyn`, calls deferred per position. The runtime value is the same erased function either way — only the static judgment changes.
+
+## The built-in traits
+
+Traits are a **fixed built-in set** — naming an unknown one is E0014. Operators dispatch to a trait's method:
+
+| Trait | Method | Lights up |
+|---|---|---|
+| `Equatable` | `eq(other): bool` | `==` `!=` |
+| `Comparable` | `compare(other): Ordering` | `< <= > >=` |
+| `Display` | `to_string(): string` | `echo`, `${…}` |
+| `Error` | `message(): string` | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
+| `Validate` | `validate(): Result<void, E>` | a data-boundary invariant; auto-runs at typed decode — see [Validation](Validation) |
+| `From<Source>` | `from(value: Source): Target` — associated | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at--impl-fromsource) |
+| `Add` | `add(other): T` | `+` |
+| `Sub` | `sub(other): T` | `-` |
+| `Mul` | `mul(other): T` | `*` |
+| `Div` | `div(other): T` | `/` |
+| `Concat` | `concat(other): T` | `~` |
+| `TryAdd` | `try_add(other): Result<T, E>` | fallible `+` (via `?`) |
+| `Index` | `get(i): T` | `a[i]` |
+| `Length` | `len(): int` | `x.len()` on a `<T: Length>` parameter |
+| `Iterable` | `iter(): Iterator<T>` | `for x in o` |
+| `Callable` | `call(...)` — any arity | `obj(args)` |
+| `Clone` | — | structural clone |
+
+`Ordering` is a namable built-in enum (`Ordering.Less` / `Equal` / `Greater`); calling `.compare()` on a primitive returns it.
 
 ## Bounds
 
@@ -134,32 +160,6 @@ An instantiated bound must match the trait's arity (`T: Keyed<int, string>` on a
 
 The bound also types the **body**: on a `T`-typed value, a method the bound's trait declares resolves at the bound's instantiation — under `<T: Keyed<int>>`, `item.key()` is an `int` and `item.same(x)` demands an `int`, so a wrong argument, return, or arity is E0007 at the definition, before any call site exists. A method no bound declares stays leniently deferred.
 
-## The built-in traits
-
-Traits are a **fixed built-in set** — naming an unknown one is E0014. Operators dispatch to a trait's method:
-
-| Trait | Method | Lights up |
-|---|---|---|
-| `Equatable` | `eq(other): bool` | `==` `!=` |
-| `Comparable` | `compare(other): Ordering` | `< <= > >=` |
-| `Display` | `to_string(): string` | `echo`, `${…}` |
-| `Error` | `message(): string` | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
-| `Validate` | `validate(): Result<void, E>` | a data-boundary invariant; auto-runs at typed decode — see [Validation](Validation) |
-| `From<Source>` | `from(value: Source): Target` — associated | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at--impl-fromsource) |
-| `Add` | `add(other): T` | `+` |
-| `Sub` | `sub(other): T` | `-` |
-| `Mul` | `mul(other): T` | `*` |
-| `Div` | `div(other): T` | `/` |
-| `Concat` | `concat(other): T` | `~` |
-| `TryAdd` | `try_add(other): Result<T, E>` | fallible `+` (via `?`) |
-| `Index` | `get(i): T` | `a[i]` |
-| `Length` | `len(): int` | `x.len()` on a `<T: Length>` parameter |
-| `Iterable` | `iter(): Iterator<T>` | `for x in o` |
-| `Callable` | `call(...)` — any arity | `obj(args)` |
-| `Clone` | — | structural clone |
-
-`Ordering` is a namable built-in enum (`Ordering.Less` / `Equal` / `Greater`); calling `.compare()` on a primitive returns it.
-
 ## Implementing a trait
 
 Implement a trait **in the type's body** with `impl Trait { }` (uniform across class, struct, and enum):
@@ -197,16 +197,7 @@ There is also a **standalone** `impl Trait for T { ... }`, which must target a t
 
 ## `@derive` — synthesized implementations
 
-`@derive(...)` generates trait impls from a type's shape. It is a *codegen* directive, distinct from `#[...]` data attributes (see [Attributes & Reflection](Attributes-and-Reflection)).
-
-| Derivable | Effect |
-|---|---|
-| `Equatable` | Structural equality. |
-| `Comparable` | Field-wise ordering, in declaration order (recurses into nested objects and enum payloads). On an **enum**: variant declaration order first (`Low < Medium < High`), then payload fields. Also what `.sorted()` uses. |
-| `Display` | A structural `to_string` — a **marker**: the structural default you already get, kept so a competing hand-written `impl Display` is a coherence error. |
-| `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
-| `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
-| `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). |
+`@derive(...)` generates trait impls from a type's shape — a *codegen* directive, distinct from `#[...]` data attributes (see [Attributes & Reflection](Attributes-and-Reflection)):
 
 ```noeta check
 @derive(Equatable, Comparable, Display, Clone)
@@ -216,66 +207,9 @@ class Point {
     fn new(x: int, y: int): Point { return Point { x: x, y: y } }
 }
 echo Point.new(1, 2) < Point.new(1, 3)   // true
-
-@derive(Serialize<Json>)
-class User { name: string  id: int  active: bool }
-echo User.new("Ada", 7, true).to_json()  // {"name":"Ada","id":7,"active":true}
 ```
 
-**Deriving a user trait.** `@derive(<UserTrait>)` is valid when the trait is non-generic and **every** method has a default body — the derive adopts the defaults wholesale, exactly like an empty `impl Trait for T {}`, and registers the trait membership (so the type satisfies `T: Trait` bounds and coerces to `dyn Trait`). A trait with a required (default-less) method cannot be derived — E0050 names the missing methods; write the explicit `impl`. Because Noeta is reflection-first, a fully-defaulted trait can still do real per-type work: its default bodies can reflect over `self` (`type_of`, `attributes_of`) rather than needing a macro system.
-
-```noeta check
-trait Describable {
-    fn label(): string { return "thing" }
-    fn describe(): string { return "a " ~ self.label() ~ "!" }
-}
-@derive(Describable)
-struct Point { x: int }
-echo Point { x: 1 }.describe()   // a thing!
-```
-
-Errors: deriving a non-derivable trait (`@derive(Add)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. The old `#[derive(...)]` spelling is E0017.
-
-**Bridging a required member.** A trait with required methods can still derive when you tell the machinery — or let it deduce — what to bridge them to (`@derive(Trait, member: target)`):
-
-```noeta check
-trait Ordered {
-    fn value(): int
-    fn less(other: Money): bool { return self.value() < other.value() }
-}
-@derive(Ordered, value: amount)
-struct Money { amount: int }
-```
-
-The synthesized bridge is mechanical (`fn value(): int { return self.amount }`) and fully checked. With no explicit binding, deduction is deterministic: a field with the **same name** as the required method wins; else a **unique** type-compatible field; anything else is E0050 *listing the candidates*. A binding can also target an existing method (forwarded with the trait's arguments).
-
-**Delegating through a field (`via:`).** `@derive(Trait, via: field)` forwards the whole trait through a field — the newtype pattern without boilerplate. For a user trait, every method forwards into the field's own implementation (the field's type must implement the trait). For the built-ins, a template table covers `Equatable`/`Comparable`/`Display` (compare/render the fields) and the operator traits `Add`/`Sub`/`Mul`/`Div`/`Concat` (unwrap-op-rewrap; single-field types only, since the result must construct a new value):
-
-```noeta check
-@derive(Comparable, via: cents)
-@derive(Add, via: cents)
-struct Price { cents: int }
-```
-
-**Native derive recipes.** An extension can register a derive (`ExtDerive` — see [Native Extensions](Native-Extensions)): `@derive(<Name>)` then synthesizes methods forwarding into the extension's native handler. std ships `Inspect` — `@derive(Inspect)` gives `inspect()`, a structural dump through the native JSON renderer. And with `fields_of(value)` (see [Attributes & Reflection](Attributes-and-Reflection)), a fully-defaulted user trait can do the same kind of structural work in pure Noeta — walk `self`'s fields reflectively — and be derived onto any type.
-
-**Field constraints (E0050).** A derive must be supportable by the type's fields (or an enum's variant payloads): `Comparable` needs every field to have an ordering — a `List`/`Map`/`Set`/tuple/`bytes`/function field can never order, so the derive is rejected at the declaration instead of failing at the first runtime comparison. `Serialize` likewise rejects function-typed fields. Value-dependent kinds (`dyn`, unions, extern types like `Uuid`) stay permitted and defer to the runtime. `Equatable` has no constraint — structural `==` is total.
-
-**Generic derives are conditional.** `@derive(Comparable) struct Box<T> { value: T }` defers the parameter-typed field to each use: `Box<int>` satisfies `Comparable`, `Box<List<int>>` does not (the bound fails at the call site, E0025). A hand-written `impl` is the author's contract and stays unconditional.
-
-`via:` composes with this: a parameter-typed via field defers to the instantiation site too, and the condition is the **via field's alone** — delegation exists precisely so sibling fields don't constrain the trait. A `Slot<T>` with an `id: int` field and a `payload: T` field deriving `@derive(Comparable, via: id)` satisfies `Comparable` at every instantiation (only `id` is compared), even `Slot<List<int>>`, which a field-wise derive would refuse:
-
-```noeta check
-@derive(Comparable, via: value)
-struct Box<T> {
-    value: T
-    note: string
-}
-fn smallest<T: Comparable>(x: T, y: T): T {
-    return if x < y then x else y
-}
-echo smallest(Box { value: 1, note: "a" }, Box { value: 9, note: "b" }).value
-```
+The derivable built-ins are `Equatable`, `Comparable`, `Display`, `Error`, `Clone`, and `Serialize<Json>`; a fully-defaulted user trait derives too, and the `member:`/`via:` bindings bridge or delegate what a plain derive cannot reach. The full story — the derivable table, user-trait derives, bridging, delegation, native recipes, field constraints, and conditional generic derives — lives on [Derives](Derives).
 
 ## Coherence
 
