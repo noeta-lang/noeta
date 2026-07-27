@@ -1,0 +1,22 @@
+// A nested `fn` inside a GENERATOR body is usable from every state, not just the one its
+// declaration lands in. The body is flattened into a state machine at each `yield`, so before this
+// the declaration executed in state 0 and its name was gone by state 1 — `helper()` below a `yield`
+// aborted with E0005 "cannot find `helper` in this scope" even when declared first. Both halves are
+// covered: a call BEFORE the declaration (the hoist) and a call AFTER a suspend (the cell).
+// expect: stdout "1"
+// expect: stdout "9"
+// expect: stdout "2"
+// expect: stdout "20"
+// expect: exit 0
+fn g(): Iterator<int> {
+    yield helper()          // called before the declaration — nested fns hoist
+    yield 9
+    yield helper() + 1      // called after a suspend — the binding survives it
+    yield double(10)
+    fn helper(): int { return 1 }
+    fn double(n: int): int { return n * 2 }
+}
+
+for v in g() {
+    echo v
+}

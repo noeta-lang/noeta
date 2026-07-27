@@ -675,6 +675,22 @@ fn is_hoistable_fn(stmt: &AstStmt) -> bool {
     matches!(stmt, AstStmt::Fn(decl) if decl.captures.is_empty())
 }
 
+/// `stmts` reordered so every hoistable `fn` declaration precedes everything else, each group
+/// keeping its source order — the declaration-hoist as a pure **AST** rewrite.
+///
+/// Extracted from [`Lowerer::lower_stmts_hoisting_fns`] because the coroutine paths need the same
+/// rule one stage earlier: [`Lowerer::lower_generator`] / [`Lowerer::lower_async`] hand the raw body
+/// to [`desugar_state_machine`], which splits it into states *before* any lowering runs, so a
+/// declaration-hoist applied during lowering never reaches them. Sharing this keeps the hoist ONE
+/// rule across every scope — bodies, top level, and now state-machine bodies — rather than a second
+/// copy that can drift from the first.
+fn hoisted_fn_order(stmts: &[AstStmt]) -> impl Iterator<Item = &AstStmt> {
+    stmts
+        .iter()
+        .filter(|s| is_hoistable_fn(s))
+        .chain(stmts.iter().filter(|s| !is_hoistable_fn(s)))
+}
+
 fn module_global_names(program: &AstProgram) -> HashSet<String> {
     program
         .stmts
@@ -822,15 +838,8 @@ impl Lowerer<'_> {
         stmts: &[AstStmt],
         out: &mut Vec<Stmt>,
     ) -> Result<(), Unsupported> {
-        for stmt in stmts {
-            if is_hoistable_fn(stmt) {
-                self.lower_stmt(stmt, out)?;
-            }
-        }
-        for stmt in stmts {
-            if !is_hoistable_fn(stmt) {
-                self.lower_stmt(stmt, out)?;
-            }
+        for stmt in hoisted_fn_order(stmts) {
+            self.lower_stmt(stmt, out)?;
         }
         Ok(())
     }
@@ -1317,8 +1326,12 @@ impl Lowerer<'_> {
         span: Span,
         params: &[String],
     ) -> Result<Block, Unsupported> {
+        // Hoist nested `fn` declarations before the body is split into states: the flattener cuts
+        // at each `yield`, so a declaration left below one lands in a later state than its callers.
+        // Same rule every other scope gets (see [`hoisted_fn_order`]).
+        let hoisted: Vec<AstStmt> = hoisted_fn_order(stmts).cloned().collect();
         let desugar = desugar_state_machine(
-            stmts,
+            &hoisted,
             span,
             self.sites.for_stream_sites,
             SuspendMode::Gen,
@@ -1373,8 +1386,11 @@ impl Lowerer<'_> {
         span: Span,
         params: &[String],
     ) -> Result<Block, Unsupported> {
+        // Same declaration-hoist the generator gets: the flattener cuts at each `.await`, so a
+        // nested `fn` must be declared before the first cut to be visible to every state.
+        let hoisted: Vec<AstStmt> = hoisted_fn_order(stmts).cloned().collect();
         let desugar = desugar_state_machine(
-            stmts,
+            &hoisted,
             span,
             self.sites.for_stream_sites,
             SuspendMode::Async,

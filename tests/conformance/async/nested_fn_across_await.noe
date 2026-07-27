@@ -1,0 +1,16 @@
+// The async twin of `generators/nested_fn_across_yield`: an async body is flattened by the same
+// state-machine desugar, cutting at each `.await`, so a nested `fn` had the same two failures —
+// invisible before its declaration, and gone after the first suspend. Both are covered here.
+// expect: stdout "6"
+// expect: exit 0
+use std.task.{sleep}
+
+async fn compute(): int {
+    before = helper()       // called before the declaration
+    sleep(1).await
+    return before + helper() + double(1)  // and after a suspend
+    fn helper(): int { return 2 }
+    fn double(n: int): int { return n * 2 }
+}
+
+echo compute().await
