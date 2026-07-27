@@ -204,7 +204,21 @@ fn plan_for(stmt: &Stmt, sources: &[Source], registry: &'static Registry) -> Vec
                             .map(|k| (k.clone(), a.value.as_directive_arg()))
                     })
                     .collect(),
-                target: at.name.to_string(),
+                // The declaration's name as an IDENTIFIER — its last dotted segment.
+                //
+                // By the time expansion runs, the linker has already qualified this file's
+                // declarations, so `at.name` is `shop.upstream.PetStore` in any file with a
+                // `namespace`. A hook's whole job is to emit source that is spliced INTO that
+                // declaration, where the only spelling in scope is the bare one — and the wrapper
+                // this text is parsed inside (`struct <target> { … }`) is not even syntax with a
+                // dotted name, so a qualified target made every `@`-directive on a namespaced
+                // declaration fail to parse. That is every multi-file project.
+                target: at
+                    .name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(at.name.as_ref())
+                    .to_string(),
                 site,
                 source_dir: source_dir_of(f.name_span, sources),
             },
