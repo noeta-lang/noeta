@@ -1,0 +1,9 @@
+// `??` unwraps a fallible value, so a left side that is already a single concrete type has nothing
+// to fall back FROM — the fallback is dead code and both backends abort on it at run time. The
+// checker used to yield `Unknown` here, which unified with anything and let the program check
+// clean, so the failure only surfaced when the line actually ran (a map lookup with a default was
+// the common way to hit it: `m[k] ?? d` — a map index yields the value type, not an option).
+// expect: error E0007 at 9:6
+// expect: exit 1
+m = { "a": "1" }
+echo m["a"] ?? "absent"
