@@ -52,8 +52,17 @@ The reported unit adapts to the magnitude: `ns`, `µs`, `ms`, or `s`.
 ## Command reference
 
 ```text
-noeta bench [OPTIONS] <FILE>
+noeta bench [OPTIONS] [PATH]
 ```
+
+`PATH` (default `.`) is a file **or a directory**, exactly like [`noeta check`](The-CLI#noeta-check)
+and [`noeta test`](Testing#command-reference). A directory measures every `.noe` beneath it as its
+own entry into one report, labelling each result with the file it came from
+(`src/util.noe::parse_bench`) — the only way a multi-module project's benchmarks all run, since
+linking merges a module's declarations without its `@bench` blocks. A file measures just that file.
+
+Baselines stay keyed **per entry file**, so a directory run writes exactly the baselines a per-file
+run writes, and the two compare against each other.
 
 | Flag | Effect |
 |---|---|

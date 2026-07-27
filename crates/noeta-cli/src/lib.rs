@@ -170,7 +170,11 @@ enum Command {
     },
     /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
     Bench {
-        /// Path to a `.noe` file.
+        /// File or directory to benchmark (default: the current directory, walked recursively for
+        /// `.noe` files). A directory measures every file's `@bench` blocks as its own entry and
+        /// aggregates one report — an entry does not carry its modules' benchmarks. Baselines stay
+        /// keyed per entry file, so a directory run compares like with like.
+        #[arg(default_value = ".")]
         file: PathBuf,
         /// Override the iteration count for every benchmark, taking precedence over a per-bench
         /// `@bench(iterations: N)` directive. Without either, the count is **calibrated**: a
@@ -212,7 +216,10 @@ enum Command {
     /// Extract a program's `@doc { … }` text blocks to stdout, or — with `--out` — generate the
     /// package's documentation artifact (a registry-ready `docs.json` plus a Markdown tree).
     Doc {
-        /// Path to a `.noe` file. Omit with `--package` to fetch a published package's docs.
+        /// File or directory to document (default: the current directory when no `--package`
+        /// is given). A directory extracts every `.noe` beneath it; a file extracts that file
+        /// **and its sibling modules**, since a `@doc` block belongs to the file it sits in and
+        /// linking merges declarations without them.
         file: Option<PathBuf>,
         /// Fetch a **published** package's stored documentation from the registry instead of
         /// reading local source: `company/package` (highest published version) or

@@ -41,19 +41,48 @@ pub(crate) struct BenchOutcome {
     baseline_delta_pct: Option<f64>,
 }
 
-/// `noeta bench <FILE>` — discover the program's `@bench` blocks (object-model slice 6) and measure
-/// each. Unlike `noeta test`, benchmarks run **sequentially** (concurrency would corrupt timings).
-/// Each bench's per-iteration cost is estimated by a **two-point** measurement: the fn is invoked N
-/// and 2N times in fresh isolates and the per-iteration time is `(t(2N) − t(N)) / N`, which cancels
-/// the fixed per-run overhead (runtime startup, global/setup evaluation, IR lowering — all identical
-/// between the two runs). N comes from `--iterations`, else the per-bench `@bench(iterations: N)`
+/// Everything a bench run carries besides the path it runs over — threaded as one value so the
+/// file and directory paths take the same options without a wall of parameters.
+pub(crate) struct BenchOptions<'a> {
+    iterations_override: Option<u64>,
+    names: &'a [String],
+    json: bool,
+    save_baseline: &'a Option<String>,
+    baseline: &'a Option<String>,
+    max_regress: Option<f64>,
+    target: &'a Option<String>,
+}
+
+/// What one file contributed to a bench run.
+enum FileBenches {
+    /// The tier prologue short-circuited (delegation, a `--target` that does not make `bench`
+    /// live, or a rendered diagnostic). Carries its exit code.
+    Ran(ExitCode),
+    /// The file ran but selected no benchmarks. `any_declared` separates "declares none" from
+    /// "declares some, and `--name` kept none".
+    None { any_declared: bool },
+    /// The file's selected benchmarks were measured.
+    Collected(Vec<BenchOutcome>),
+}
+
+/// `noeta bench [PATH]` — discover `@bench` blocks (object-model slice 6) and measure each. Unlike
+/// `noeta test`, benchmarks run **sequentially** (concurrency would corrupt timings). Each bench's
+/// per-iteration cost is estimated by a **two-point** measurement: the fn is invoked N and 2N times
+/// in fresh isolates and the per-iteration time is `(t(2N) − t(N)) / N`, which cancels the fixed
+/// per-run overhead (runtime startup, global/setup evaluation, IR lowering — all identical between
+/// the two runs). N comes from `--iterations`, else the per-bench `@bench(iterations: N)`
 /// directive, else **calibration** (a two-run probe sizes N so one point takes
 /// [`BENCH_TARGET_POINT_NS`]). `--name` filters (exact fn-name match, repeatable); `--json`
-/// reports one machine-readable object; `--save-baseline`/`--baseline` persist and diff runs
-/// (per entry file, in the noeta cache — timings are machine-local).
+/// reports one machine-readable object; `--save-baseline`/`--baseline` persist and diff runs.
+///
+/// `PATH` (default `.`) is a file or a **directory**, mirroring `noeta check`/`noeta test`. A
+/// directory measures every `.noe` beneath it as its own entry — the only way a multi-module
+/// project's benchmarks all run, since linking merges a sibling's declarations without its
+/// `@bench` blocks. Baselines stay **per entry file** (they are keyed by it), which is what makes
+/// a directory run's `--baseline`/`--save-baseline` compare like with like.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_bench(
-    file: &std::path::Path,
+    path: &std::path::Path,
     iterations_override: Option<u64>,
     names: &[String],
     json: bool,
@@ -62,33 +91,103 @@ pub(crate) fn cmd_bench(
     max_regress: Option<f64>,
     target: &Option<String>,
 ) -> ExitCode {
+    let opts = BenchOptions {
+        iterations_override,
+        names,
+        json,
+        save_baseline,
+        baseline,
+        max_regress,
+        target,
+    };
+    if path.is_dir() {
+        return bench_directory(path, &opts);
+    }
+    match run_file_benches(path, &opts, None) {
+        FileBenches::Ran(code) => code,
+        FileBenches::None { any_declared } => {
+            println!("{}", empty_bench_message(any_declared, names));
+            ExitCode::SUCCESS
+        }
+        FileBenches::Collected(outcomes) => report_benches(&outcomes, &opts, 0),
+    }
+}
+
+/// The message for a run that selected no benchmarks.
+fn empty_bench_message(any_declared: bool, names: &[String]) -> &'static str {
+    if any_declared && !names.is_empty() {
+        "no benchmarks matching --name"
+    } else {
+        "no benchmarks found"
+    }
+}
+
+/// Measure every `.noe` file under `dir` as its own entry, into one report and one exit code.
+///
+/// Outcomes are labelled with the file they came from, so a bench name shared by two modules stays
+/// distinguishable. Labelling happens *after* each file's baseline load/save, which key on the
+/// bare fn name — so a directory run diffs against exactly the baselines a per-file run wrote.
+fn bench_directory(dir: &std::path::Path, opts: &BenchOptions) -> ExitCode {
+    if let Err(code) = crate::compose::maybe_delegate(dir) {
+        return code;
+    }
+    let mut outcomes: Vec<BenchOutcome> = Vec::new();
+    let mut broken = 0usize;
+    let mut any_declared = false;
+    for file in &crate::cmd::check::noe_files(dir) {
+        let label = file
+            .strip_prefix(dir)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .into_owned();
+        match run_file_benches(file, opts, Some(&label)) {
+            FileBenches::Ran(code) => {
+                if code != ExitCode::SUCCESS {
+                    broken += 1;
+                }
+            }
+            FileBenches::None { any_declared: d } => any_declared |= d,
+            FileBenches::Collected(o) => outcomes.extend(o),
+        }
+    }
+    if outcomes.is_empty() && broken == 0 {
+        println!("{}", empty_bench_message(any_declared, opts.names));
+        return ExitCode::SUCCESS;
+    }
+    report_benches(&outcomes, opts, broken)
+}
+
+/// Measure one file's `@bench` blocks. The single-file body of [`cmd_bench`], factored out so the
+/// directory walk can reuse it; `label`, when given, prefixes each reported name with its file.
+fn run_file_benches(
+    file: &std::path::Path,
+    opts: &BenchOptions,
+    label: Option<&str>,
+) -> FileBenches {
     // The shared tier prologue: compose delegation, the `--target` gate, the dep-aware load,
     // provider dispatch (a `bench = "<pkg>"` target hands the tier to that package's runner),
     // activation diagnostics, and the whole-program type check.
-    let run = match tier_prologue(file, "bench", target) {
-        Prologue::Ran(code) => return code,
+    let run = match tier_prologue(file, "bench", opts.target) {
+        Prologue::Ran(code) => return FileBenches::Ran(code),
         Prologue::Ready(run) => *run,
     };
     let activated = &run.activated;
 
     // `--name` keeps only exact fn-name matches — the single-benchmark seam editors use, and the
     // impact-filtered `--watch` consumer (server-hmr W3).
-    let selected: Vec<&TierFn> = if names.is_empty() {
+    let selected: Vec<&TierFn> = if opts.names.is_empty() {
         activated.benches.iter().collect()
     } else {
         activated
             .benches
             .iter()
-            .filter(|b| names.iter().any(|n| n == &b.name))
+            .filter(|b| opts.names.iter().any(|n| n == &b.name))
             .collect()
     };
     if selected.is_empty() {
-        if names.is_empty() {
-            println!("no benchmarks found");
-        } else {
-            println!("no benchmarks matching --name");
-        }
-        return ExitCode::SUCCESS;
+        return FileBenches::None {
+            any_declared: !activated.benches.is_empty(),
+        };
     }
 
     let setup: Vec<Stmt> = activated
@@ -99,25 +198,27 @@ pub(crate) fn cmd_bench(
         .cloned()
         .collect();
 
-    let base = match baseline {
+    let base = match opts.baseline {
         Some(name) => match load_bench_baseline(file, name) {
             Ok(map) => Some(map),
             Err(err) => {
                 eprintln!("noeta: {err}");
-                return ExitCode::from(2);
+                return FileBenches::Ran(ExitCode::from(2));
             }
         },
         None => None,
     };
 
     let total = selected.len();
-    if !json {
-        println!("running {total} benchmark{}", plural(total));
+    if !opts.json {
+        let in_file = label.map(|l| format!(" in {l}")).unwrap_or_default();
+        println!("running {total} benchmark{}{in_file}", plural(total));
     }
 
     let mut outcomes: Vec<BenchOutcome> = Vec::with_capacity(total);
     for bench in &selected {
-        let n = iterations_override
+        let n = opts
+            .iterations_override
             .or_else(|| iterations_arg(bench))
             .map(|n| n.max(1))
             .unwrap_or_else(|| calibrate_iterations(&setup, &run.editions, bench));
@@ -148,30 +249,43 @@ pub(crate) fn cmd_bench(
         {
             outcome.baseline_delta_pct = Some((cur - prev) / prev * 100.0);
         }
-        if !json {
-            print_bench_outcome(&outcome, baseline.as_deref());
+        if !opts.json {
+            print_bench_outcome(&outcome, opts.baseline.as_deref(), label);
         }
         outcomes.push(outcome);
     }
 
-    if let Some(name) = save_baseline
+    // Save BEFORE labelling: a baseline is keyed by the bare fn name, per entry file, so the file
+    // a directory run wrote is byte-identical to the one `noeta bench <that file>` writes.
+    if let Some(name) = opts.save_baseline
         && let Err(err) = save_bench_baseline(file, name, &outcomes)
     {
         eprintln!("noeta: cannot save baseline `{name}`: {err}");
-        return ExitCode::from(2);
+        return FileBenches::Ran(ExitCode::from(2));
     }
+    if let Some(l) = label {
+        for outcome in &mut outcomes {
+            outcome.name = format!("{l}::{}", outcome.name);
+        }
+    }
+    FileBenches::Collected(outcomes)
+}
 
+/// Print the summary (human or `--json`) and decide the exit code. `broken` counts files whose
+/// prologue failed — they rendered their own diagnostics and fail the run.
+fn report_benches(outcomes: &[BenchOutcome], opts: &BenchOptions, broken: usize) -> ExitCode {
+    let total = outcomes.len();
     let failed = outcomes.iter().filter(|o| o.per_iter_ns.is_none()).count();
     // The CI gate: any bench past the allowed regression fails the run (their names on stderr —
     // the JSON stays a pure result object either way).
-    let regressed: Vec<&BenchOutcome> = match max_regress {
+    let regressed: Vec<&BenchOutcome> = match opts.max_regress {
         Some(limit) => outcomes
             .iter()
             .filter(|o| o.baseline_delta_pct.is_some_and(|pct| pct > limit))
             .collect(),
         None => Vec::new(),
     };
-    if json {
+    if opts.json {
         let out = serde_json::json!({
             "benches": outcomes.iter().map(|o| serde_json::json!({
                 "name": o.name,
@@ -195,11 +309,18 @@ pub(crate) fn cmd_bench(
             "noeta: `{}` regressed {:+.1}% (limit {:+.1}%)",
             o.name,
             o.baseline_delta_pct.unwrap_or_default(),
-            max_regress.unwrap_or_default(),
+            opts.max_regress.unwrap_or_default(),
+        );
+    }
+    if broken > 0 {
+        eprintln!(
+            "noeta: {broken} file{} failed to check; {} benchmarks did not run",
+            plural(broken),
+            if broken == 1 { "its" } else { "their" }
         );
     }
     let _ = io::stdout().flush();
-    if failed == 0 && regressed.is_empty() {
+    if failed == 0 && regressed.is_empty() && broken == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
@@ -208,7 +329,18 @@ pub(crate) fn cmd_bench(
 
 /// One line of the human bench report: per-iteration time, iteration count, and — under
 /// `--baseline` — the percent delta against the named baseline.
-pub(crate) fn print_bench_outcome(outcome: &BenchOutcome, baseline: Option<&str>) {
+pub(crate) fn print_bench_outcome(
+    outcome: &BenchOutcome,
+    baseline: Option<&str>,
+    label: Option<&str>,
+) {
+    // The stored name stays bare until the baseline has been saved (it is the baseline's key), so
+    // a directory run's per-line label is applied here, at display time, to match the summary and
+    // the `--json` names.
+    let name = match label {
+        Some(l) => format!("{l}::{}", outcome.name),
+        None => outcome.name.clone(),
+    };
     match (outcome.per_iter_ns, &outcome.message) {
         (Some(per_ns), _) => {
             let delta = match (outcome.baseline_delta_pct, baseline) {
@@ -217,7 +349,7 @@ pub(crate) fn print_bench_outcome(outcome: &BenchOutcome, baseline: Option<&str>
             };
             println!(
                 "  {:<28} {:>11}/iter  ({} iterations){delta}",
-                outcome.name,
+                name,
                 fmt_per_iter(per_ns),
                 outcome.iterations,
             );
@@ -225,7 +357,7 @@ pub(crate) fn print_bench_outcome(outcome: &BenchOutcome, baseline: Option<&str>
         (None, msg) => {
             println!(
                 "  {:<28} FAILED: {}",
-                outcome.name,
+                name,
                 msg.as_deref().unwrap_or("unknown")
             );
         }
