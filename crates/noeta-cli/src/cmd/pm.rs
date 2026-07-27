@@ -314,6 +314,22 @@ pub(crate) fn cmd_add(
         None
     };
 
+    // The package's **scope** (the `company` half), derived the same way and for the same reason as
+    // the root above. Binding `para/aether` under the key `para` is not a rename — it is the
+    // package's own scope, and the scope is a legitimate import root that several packages share
+    // (`para.aether`, `para.api`). Without this, the documented spelling from the package guide
+    // earns a warning telling the author their correct code is surprising.
+    let derived_scope: Option<String> = if let Some(p) = &package_name {
+        Some(p.company.clone())
+    } else if let Some(rel) = path {
+        let dep_manifest = manifest_dir.join(rel).join(manifest::MANIFEST_NAME);
+        manifest::current_package(&dep_manifest)
+            .ok()
+            .and_then(|(identity, _)| identity.split('/').next().map(str::to_string))
+    } else {
+        None
+    };
+
     // The import-root key: the one given, else the derived root, else an error (a `--git` source with
     // no explicit key can't derive one).
     let binding_key = match key {
@@ -377,10 +393,13 @@ pub(crate) fn cmd_add(
             }
             // Now that the package is materialized, its *declared* root is authoritative (this also
             // covers `--git`, whose root wasn't known before). If the chosen key differs, the binding
-            // is a deliberate rename — surface it so `use <key>.…` isn't a surprise. A scope binds
-            // several packages under the scope root by design, so re-rooting there is not a rename.
+            // is a deliberate rename — surface it so `use <key>.…` isn't a surprise. Two bindings are
+            // NOT renames and stay quiet: a scope binding several packages under one root, and a
+            // single package bound under its own scope (`para/aether` keyed `para`), which is the
+            // spelling the package guide teaches and the one its own modules declare.
             if let [dep] = bound[..]
                 && dep.root != binding_key
+                && derived_scope.as_deref() != Some(binding_key.as_str())
             {
                 eprintln!(
                     "warning: `{binding_key}` binds a package whose own module root is `{root}` — \

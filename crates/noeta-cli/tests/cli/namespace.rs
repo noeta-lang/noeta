@@ -96,6 +96,69 @@ fn noeta_add_derives_the_import_root() {
 }
 
 #[test]
+fn binding_a_package_under_its_own_scope_is_not_a_rename() {
+    // A package keyed by its SCOPE (`para/aether` under `para`) is the spelling the package guide
+    // teaches, the spelling the package's own modules declare (`namespace para.aether`), and the
+    // one that lets two packages of a scope share an import root. Warning about it told an author
+    // their correct code was surprising — a warning on the happy path is a warning people learn to
+    // ignore. A genuine rename (a key that is neither the package root nor its scope) still warns.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_scope_key");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("widgets");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("m.noe"),
+        "namespace acme.widgets;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
+
+    // Keyed by the scope — quiet.
+    lang()
+        .current_dir(&app)
+        .args(["add", "acme", "--path", "../widgets"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("module root is").not());
+
+    // Keyed by neither the root nor the scope — a real rename, and still reported. A second,
+    // distinct package: binding the SAME one twice resolves to one instance, so it would not
+    // exercise the warning at all.
+    let other = base.join("gizmos");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(
+        other.join("noeta.toml"),
+        "[package]\nname = \"acme/gizmos\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        other.join("m.noe"),
+        "namespace acme.gizmos;\npub fn v(): int { return 2; }\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&app)
+        .args(["add", "gadgets", "--path", "../gizmos"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "binds a package whose own module root is `gizmos`",
+        ));
+}
+
+#[test]
 fn noeta_add_refuses_a_builtin_import_root() {
     // namespace-protection #2/#3: binding a dependency under `std` would shadow the compiler's own
     // `use std.…` namespace — refused before the manifest is touched.
