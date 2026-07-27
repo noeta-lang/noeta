@@ -1,6 +1,6 @@
 # Language Tour
 
-A guided, example-driven walk through the whole language in one sitting. Every snippet runs with `noeta run`. If you have not built the toolchain yet, start with [Getting Started](Getting-Started).
+A guided, example-driven walk through the whole language in one sitting. Every snippet runs with `noeta run`. If you have not installed the toolchain yet, start with [Getting Started](Getting-Started).
 
 This tour teaches by building up. For the exhaustive rules on any topic, follow the links to the reference pages.
 
@@ -98,7 +98,7 @@ for (idx, x) in ["a", "b"].enumerate() {    // destructure the (index, value) tu
 ```
 
 (No shadowing: the loop variables pick names distinct from the `mut i` above — one name, one
-meaning, per scope. → E0059 in [Functions & Closures](Functions-and-Closures#sealed-functions--the-use--capture-clause).)
+meaning, per scope.)
 
 `break` and `continue` work as expected. → [Control Flow & Pattern Matching](Control-Flow-and-Pattern-Matching).
 
@@ -313,7 +313,16 @@ echo pick(false) ?? 0          // 0
 
 The `?` operator propagates a failure, early-returning it from the current function:
 
-```noeta ignore
+```noeta
+struct Item { price: float  qty: int }
+
+enum OrderError { Empty }
+
+class Order {
+    pub items: List<Item>
+    fn new(items: List<Item>): Order { return Order { items: items } }
+}
+
 fn validate(items: List<Item>): Result<void, OrderError> {
     if items.len() == 0 { return Err(OrderError.Empty) }
     return Ok()
@@ -323,6 +332,16 @@ fn place(items: List<Item>): Result<Order, OrderError> {
     validate(items)?                        // returns the Err here if invalid
     return Ok(Order.new(items))
 }
+
+echo match place([Item { price: 9.99, qty: 2 }]) {
+    Ok(o)  => "placed ${o.items.len()} item(s)",
+    Err(_) => "rejected",
+}                                           // placed 1 item(s)
+
+echo match place([]) {
+    Ok(_)  => "placed",
+    Err(_) => "rejected",
+}                                           // rejected
 ```
 
 → [Error Handling](Error-Handling).
@@ -331,7 +350,7 @@ fn place(items: List<Item>): Result<Order, OrderError> {
 
 ## Generics and traits
 
-Type parameters don't affect dispatch — one compiled shape serves every instantiation — though values carry a reflected type tag, so `type_of` and `x is List<int>` can still recover the type arguments. They can be bounded by a built-in trait:
+Generics let one definition serve many types without giving up checking — a `Box<T>` holds any `T`, and `max<T: Comparable>` accepts any type that can be ordered. Type parameters can be bounded by a built-in trait:
 
 ```noeta
 class Box<T> {
@@ -356,6 +375,8 @@ class Money {
 
 echo Money.new(5) < Money.new(9)     // true
 ```
+
+(Under the hood, one compiled shape serves every instantiation — type parameters do not affect dispatch — but values carry a reflected type tag, so `type_of` and `x is List<int>` still recover the type arguments.)
 
 → [Generics & Traits](Generics-and-Traits).
 

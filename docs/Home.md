@@ -55,12 +55,15 @@ $ noeta run demo.noe
 total: 24.48
 ```
 
+One small program, and already: enums with payloads, `Result`-typed validation, an exhaustive nested `match`, closures over a typed list, and interpolated strings. The [Language Tour](Language-Tour) walks through all of it.
+
 ## Browse the docs
 
 ### Onboarding
 Learn the language from zero.
 - [Getting Started](Getting-Started)
 - [Language Tour](Language-Tour)
+- [Package Quickstart](Quickstart-Packages)
 - [Using Packages](Using-Packages)
 
 ### Bundled tools
@@ -122,6 +125,6 @@ Build the compiler, run the tests, and add a feature.
 > host IO, structured concurrency, the package manager, native AOT and WebAssembly builds
 > (`noeta build --native`/`--wasm`/`--serve`), and the `run`/`repl`/`test`/`bench`/`doc`
 > toolchain, along with `noeta lsp`/`noeta dap` editor tooling and the `noeta mcp` agent surface.
-> Still on the roadmap: desktop packaging. Until alpha, anything may change
+> Still on the roadmap: desktop packaging. Until beta, anything may change
 > without notice — syntax, stdlib, and file formats included. Where a feature is a plan rather than
 > a reality, these docs say so plainly.
