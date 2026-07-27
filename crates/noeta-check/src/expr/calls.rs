@@ -1636,11 +1636,19 @@ impl Checker {
                 continue;
             }
             if !self.arg_assignable(arg, param) {
-                self.error(
+                let d = self.error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("argument of type `{arg}` is not assignable to `{param}`"),
                 );
+                // `number` is the one parameter type whose name does not list its members, so say
+                // what it admits — once, here, rather than in the message every call site prints.
+                if param.is_arith_numeric_union() {
+                    d.help(
+                        "`number` is any numeric scalar: `int`, `float`, `f32`, `f64`, and the \
+                         fixed widths `i8`…`u64`",
+                    );
+                }
             }
         }
     }

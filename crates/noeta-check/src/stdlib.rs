@@ -160,13 +160,14 @@ pub(crate) fn sig_to_typeref(
         SigType::SelfTy => named("Self"),
         // "Any number" as a declared type is the union of every numeric scalar — the same set
         // `arith_numeric_union` builds for the lattice side, spelled in the AST's type language.
+        // "Any number" as a declared type is the union of every numeric scalar, spelled in the AST's
+        // type language. The members come from `Type::arith_numeric` rather than a second literal
+        // list, so the two vocabularies cannot drift apart.
         SigType::Numeric => TypeRef::Union {
-            members: [
-                "int", "float", "f32", "f64", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
-            ]
-            .iter()
-            .map(|n| named(n))
-            .collect(),
+            members: match Type::arith_numeric() {
+                Type::Union(members) => members.iter().map(|t| named(&t.to_string())).collect(),
+                other => vec![named(&other.to_string())],
+            },
             span: sp,
         },
     }
@@ -263,26 +264,8 @@ fn sig_to_type_bound(
         // routes through `bundle_method_params` instead, which does. A gradual hole here, for the
         // same reason `Assoc` is one: better an un-inferred argument than a confidently wrong type.
         SigType::SelfTy => Type::Unknown,
-        SigType::Numeric => arith_numeric_union(),
+        SigType::Numeric => Type::arith_numeric(),
     }
-}
-
-/// Every numeric scalar the language has, as a union — the lattice numerics `int`/`float`, the
-/// strict floats `f32`/`f64`, and all eight `i8`..`u64` widths. This is
-/// [`Type::is_arith_numeric`]'s set spelled as a type, which is what makes a
-/// [`registry::SigType::Numeric`] parameter accept any number and reject everything else.
-///
-/// Built here rather than in the ABI because the widths are `noeta_types` vocabulary the ABI cannot
-/// name (its `SigType` has no fixed-width variants at all — the very gap `Numeric` exists to close).
-fn arith_numeric_union() -> Type {
-    let widths = [8u8, 16, 32, 64]
-        .into_iter()
-        .flat_map(|bits| [true, false].map(move |signed| Type::IntN { signed, bits }));
-    Type::union(
-        [Type::Int, Type::Float, Type::F32, Type::F64]
-            .into_iter()
-            .chain(widths),
-    )
 }
 
 /// Bind a declared signature's type variables from the call's actual argument types
