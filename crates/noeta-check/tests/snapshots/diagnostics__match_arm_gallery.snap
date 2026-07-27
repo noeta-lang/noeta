@@ -1,0 +1,65 @@
+---
+source: crates/noeta-check/tests/diagnostics.rs
+expression: out
+---
+================ E0066 unreachable arm after a wildcard ================
+[E0066] Error: this `match` arm can never run: the `_` arm above already matches every value
+   ╭─[ snippet.noe:4:9 ]
+   │
+ 3 │         _ => "many",
+   │         ┬  
+   │         ╰── this pattern already matches every value…
+ 4 │         1 => "one",
+   │         ┬  
+   │         ╰── …so this arm is never reached
+   │ 
+   │ Help: delete this arm, or move the catch-all `_` arm to last position
+───╯
+
+================ E0066 unreachable arm after a bare `none` ================
+[E0066] Error: this `match` arm can never run: the `none` arm above already matches every value
+   ╭─[ snippet.noe:4:9 ]
+   │
+ 3 │         none => "empty",
+   │         ──┬─  
+   │           ╰─── this pattern already matches every value…
+ 4 │         some(v) => "${v}",
+   │         ───┬───  
+   │            ╰───── …so this arm is never reached
+   │ 
+   │ Help: `none` in pattern position is a bare binding — it matches every value, so it has to come last; put the `some(…)` arm first
+───╯
+
+================ E0067 a payload-free variant spelled bare ================
+[E0067] Error: `String` here binds the whole value instead of matching the variant `Type.String`: a bare identifier pattern is always a binding, so this arm runs for every case
+   ╭─[ snippet.noe:4:9 ]
+   │
+ 4 │         String => "string",
+   │         ───┬──  
+   │            ╰──── `String` here binds the whole value instead of matching the variant `Type.String`: a bare identifier pattern is always a binding, so this arm runs for every case
+   │ 
+   │ Help: write the variant qualified as `Type.String`; a payload-carrying variant is call-shaped (`Variant(x)`) and needs no qualification, a payload-free one does
+───╯
+
+================ E0067 + E0066 the arms a shadowed variant swallows ================
+[E0067] Error: `String` here binds the whole value instead of matching the variant `Type.String`: a bare identifier pattern is always a binding, so this arm runs for every case
+   ╭─[ snippet.noe:4:9 ]
+   │
+ 4 │         String => "string",
+   │         ───┬──  
+   │            ╰──── `String` here binds the whole value instead of matching the variant `Type.String`: a bare identifier pattern is always a binding, so this arm runs for every case
+   │ 
+   │ Help: write the variant qualified as `Type.String`; a payload-carrying variant is call-shaped (`Variant(x)`) and needs no qualification, a payload-free one does
+───╯
+[E0066] Error: this `match` arm can never run: the `String` arm above already matches every value
+   ╭─[ snippet.noe:5:9 ]
+   │
+ 4 │         String => "string",
+   │         ───┬──  
+   │            ╰──── this pattern already matches every value…
+ 5 │         Int => "int",
+   │         ─┬─  
+   │          ╰─── …so this arm is never reached
+   │ 
+   │ Help: `Int` here is a binding, not the variant `Type.Int` — write it qualified as `Type.Int` so it matches only that case
+───╯

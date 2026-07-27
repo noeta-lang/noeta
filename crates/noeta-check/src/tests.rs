@@ -3362,3 +3362,141 @@ fn an_open_expectation_leaves_match_arms_synthesizing() {
     let src = "fn f(x: int): dyn { return match x { 1 => {\"a\": 1, \"b\": \"two\"}, _ => 0 }; }\n";
     assert_eq!(codes(src), ["E0007"], "{:?}", codes(src));
 }
+
+// ----- E0066 / E0067: arm reachability and the variant a bare binding shadows -----
+//
+// A bare identifier pattern BINDS — it matches every value. A payload-carrying variant is
+// call-shaped and therefore unambiguous, but a payload-free one spelled bare looks exactly like a
+// binding, so `String => …` on a `Type` scrutinee answers the first arm for every case and kills
+// every arm below it in silence. E0067 names the qualified spelling; E0066 reports the arms it
+// swallowed. Both are errors: the dead arms are dead code no author intends.
+
+/// The rendered help lines, so a test can assert the suggestion actually names the fix.
+fn helps(text: &str) -> Vec<String> {
+    seed_std();
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    check(&parsed.program)
+        .iter()
+        .filter_map(|d| d.help.clone())
+        .collect()
+}
+
+const TYPE_ENUM: &str = "enum Type { String; Int; Bool; List(inner: string) }\n";
+
+#[test]
+fn a_bare_payload_free_variant_pattern_shadows_the_variant() {
+    let src =
+        format!("{TYPE_ENUM}fn f(t: Type): string {{ return match t {{ String => \"s\" }}; }}\n");
+    assert_eq!(codes(&src), ["E0067"]);
+    assert!(
+        helps(&src)[0].contains("Type.String"),
+        "the help must name the qualified spelling: {:?}",
+        helps(&src)
+    );
+}
+
+#[test]
+fn the_shadowed_variant_diagnostic_is_an_error_not_a_warning() {
+    let src =
+        format!("{TYPE_ENUM}fn f(t: Type): string {{ return match t {{ String => \"s\" }}; }}\n");
+    assert!(warn_codes(&src).is_empty(), "{:?}", warn_codes(&src));
+}
+
+#[test]
+fn every_arm_below_a_shadowed_variant_is_unreachable() {
+    // The whole-class case: one E0067 on the arm that swallowed everything, then one E0066 per
+    // arm it killed — each naming the one thing to fix.
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ String => \"s\", Int => \"i\", _ => \"o\" }};\n}}\n"
+    );
+    assert_eq!(codes(&src), ["E0067", "E0066", "E0066"]);
+}
+
+#[test]
+fn a_qualified_payload_free_variant_pattern_is_clean() {
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ Type.String => \"s\", _ => \"o\" }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+}
+
+#[test]
+fn a_payload_carrying_variant_pattern_needs_no_qualification() {
+    // Call-shaped, so it can never be read as a binding — and it emits a real test, so the arms
+    // below it stay reachable.
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ List(i) => i, _ => \"o\" }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+}
+
+#[test]
+fn a_binding_that_is_not_a_variant_of_the_scrutinee_is_clean() {
+    // Deliberately narrow: the rule fires only on a payload-free variant of the SCRUTINEE's own
+    // enum, never on an ordinary catch-all binding.
+    let src = format!(
+        "{TYPE_ENUM}fn f(t: Type): string {{\n  return match t {{ Type.Int => \"i\", rest => \"other\" }};\n}}\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+    assert!(
+        codes("fn f(n: int): string { return match n { 0 => \"z\", rest => \"${rest}\" }; }\n")
+            .is_empty()
+    );
+}
+
+#[test]
+fn an_arm_after_a_wildcard_is_unreachable() {
+    let src = "fn f(n: int): string { return match n { _ => \"m\", 1 => \"o\" }; }\n";
+    assert_eq!(codes(src), ["E0066"]);
+    assert!(
+        helps(src)[0].contains("last position"),
+        "the help must say where the catch-all belongs: {:?}",
+        helps(src)
+    );
+}
+
+#[test]
+fn an_arm_after_a_bare_binding_is_unreachable() {
+    let src = "fn f(n: int): string { return match n { rest => \"${rest}\", 1 => \"o\" }; }\n";
+    assert_eq!(codes(src), ["E0066"]);
+}
+
+#[test]
+fn a_catch_all_in_last_position_is_clean() {
+    assert!(
+        codes("fn f(n: int): string { return match n { 0 => \"z\", _ => \"m\" }; }\n").is_empty()
+    );
+    assert!(
+        codes("fn f(n: int): string { return match n { 0 => \"z\", rest => \"${rest}\" }; }\n")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_guarded_catch_all_leaves_the_arms_below_it_reachable() {
+    // The checker cannot prove a guard ever true, so a guarded arm closes nothing.
+    let src = "fn f(n: int): string { return match n { big if big > 9 => \"b\", _ => \"m\" }; }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn a_bare_none_arm_before_its_some_arm_is_reported() {
+    // `none` is a bare binding like any other, so it swallows the `some` arm it was meant to pair
+    // with — the same defect, in the one prelude pattern where it is easiest to write by accident.
+    let src = "fn f(o: ?int): string { return match o { none => \"n\", some(v) => \"${v}\" }; }\n";
+    assert_eq!(codes(src), ["E0066"]);
+    assert!(
+        helps(src)[0].contains("`some(…)` arm first"),
+        "the help must give the ordering fix: {:?}",
+        helps(src)
+    );
+    // The conventional order is clean, and `none` is never proposed as a "qualified" spelling —
+    // the bare form IS its correct spelling.
+    assert!(
+        codes("fn f(o: ?int): string { return match o { some(v) => \"${v}\", none => \"n\" }; }\n")
+            .is_empty()
+    );
+}

@@ -4,6 +4,14 @@
 
 use crate::*;
 
+/// The Option-`none` pattern spelling. Parsed as a [`Pattern::Binding`] like any other bare
+/// identifier — which is exactly why it needs naming here.
+const NONE_PATTERN: &str = "none";
+
+/// The E0066 help for the one prelude pattern that is irrefutable *and* reads as a case test.
+const NONE_ARM_HELP: &str = "`none` in pattern position is a bare binding — it matches every \
+                             value, so it has to come last; put the `some(…)` arm first";
+
 impl Checker {
     /// Type a `match` in *synthesis* position — no expectation reaches the arms, so each arm body
     /// synthesizes on its own. See [`Self::match_type`] for the full rule.
@@ -51,7 +59,12 @@ impl Checker {
             _ => None,
         };
         let mut result = Type::Unknown;
+        // The arm sequence's own soundness (E0066/E0067), threaded through the loop so it reports in
+        // source order alongside each arm's body diagnostics. `catch_all` is the first unguarded
+        // irrefutable arm seen so far — everything after it is dead.
+        let mut catch_all: Option<(String, Span)> = None;
         for arm in arms {
+            self.check_arm_reachability(arm, &scrut, &mut catch_all);
             env.push(HashMap::new());
             self.bind_pattern(&arm.pattern, &scrut, env);
             // An `is T` arm's target is a type annotation like any other — validate it, so an arm
@@ -141,6 +154,110 @@ impl Checker {
             }
         }
         result
+    }
+
+    /// One arm's **reachability** (E0066) and **variant-shadowing** (E0067) check, folded over the
+    /// arm list: `catch_all` carries the first unguarded irrefutable arm seen so far (its rendered
+    /// pattern text and span), so every later arm is provably dead.
+    ///
+    /// Irrefutability here is deliberately syntactic — a `_` wildcard or a bare-identifier
+    /// [`Pattern::Binding`], unguarded. Both compile to *no test at all* in either backend (the
+    /// binding form merely names the scrutinee), so nothing downstream can rescue a later arm. A
+    /// guard makes an arm refutable (the checker cannot prove a guard ever true), and every other
+    /// pattern form emits a test.
+    ///
+    /// The two diagnostics are exclusive, most-specific-first: an already-dead arm is E0066 (with
+    /// the qualified spelling folded into its help when the dead pattern is *also* a shadowed
+    /// variant), and only a still-live arm is E0067. So each faulty arm produces exactly one
+    /// diagnostic naming the one thing to fix.
+    fn check_arm_reachability(
+        &mut self,
+        arm: &MatchArm,
+        scrut: &Type,
+        catch_all: &mut Option<(String, Span)>,
+    ) {
+        // The variant a bare-identifier pattern silently shadows, if any — the fact that turns
+        // "unreachable arm" from a puzzle into an instruction.
+        let shadowed = match &arm.pattern {
+            Pattern::Binding { name, .. } => self
+                .shadowed_payload_free_variant(scrut, name)
+                .map(|qualified| (name.clone(), qualified)),
+            _ => None,
+        };
+        if let Some((catch_text, catch_span)) = catch_all.clone() {
+            let help = match &shadowed {
+                Some((name, qualified)) => format!(
+                    "`{name}` here is a binding, not the variant `{qualified}` — write it \
+                     qualified as `{qualified}` so it matches only that case"
+                ),
+                // A bare `none` reads as the Option-none pattern but is a binding like any other,
+                // so it swallows the arms after it. Worth saying outright: the fix is ordering.
+                None if catch_text == NONE_PATTERN => NONE_ARM_HELP.to_string(),
+                None => format!(
+                    "delete this arm, or move the catch-all `{catch_text}` arm to last position"
+                ),
+            };
+            self.error(
+                DiagnosticCode::UnreachableMatchArm,
+                arm.pattern.span(),
+                format!(
+                    "this `match` arm can never run: the `{catch_text}` arm above already matches \
+                     every value"
+                ),
+            )
+            // Both spans are labelled explicitly: the renderer drops its implicit primary label as
+            // soon as a diagnostic carries any of its own, and the arm that died is half the story.
+            .label(catch_span, "this pattern already matches every value…")
+            .label(arm.pattern.span(), "…so this arm is never reached")
+            .help(help);
+        } else if let Some((name, qualified)) = &shadowed {
+            self.error(
+                DiagnosticCode::VariantShadowedByBinding,
+                arm.pattern.span(),
+                format!(
+                    "`{name}` here binds the whole value instead of matching the variant \
+                     `{qualified}`: a bare identifier pattern is always a binding, so this arm runs \
+                     for every case"
+                ),
+            )
+            .help(format!(
+                "write the variant qualified as `{qualified}`; a payload-carrying variant is \
+                 call-shaped (`Variant(x)`) and needs no qualification, a payload-free one does"
+            ));
+        }
+        // Only an *unguarded* wildcard/binding closes the match — a guard leaves the case open.
+        if catch_all.is_none() && arm.guard.is_none() {
+            let text = match &arm.pattern {
+                Pattern::Wildcard { .. } => Some("_".to_string()),
+                Pattern::Binding { name, .. } => Some(name.clone()),
+                _ => None,
+            };
+            if let Some(text) = text {
+                *catch_all = Some((text, arm.pattern.span()));
+            }
+        }
+    }
+
+    /// The qualified spelling of the **payload-free** enum variant a bare-identifier pattern
+    /// shadows, given the scrutinee's type — `Some("Type.String")` for `String` matched against a
+    /// `Type` that declares `String;`.
+    ///
+    /// Only a *declared* enum qualifies ([`Type::Named`]): a payload-free variant is the one form
+    /// whose pattern spelling is indistinguishable from a binding, and it is the one form the
+    /// language requires to be written qualified. `Option`/`Result` are deliberately excluded —
+    /// `none` is the *correct* bare spelling of its case, so naming it here would be advice to write
+    /// something that does not exist.
+    fn shadowed_payload_free_variant(&self, scrut: &Type, name: &str) -> Option<String> {
+        let Type::Named(type_name, _) = scrut else {
+            return None;
+        };
+        let key = self.enum_type_key(type_name)?;
+        self.symbols
+            .enums
+            .get(&key)?
+            .iter()
+            .any(|v| v.name == name && v.fields.is_empty())
+            .then(|| format!("{type_name}.{name}"))
     }
 
     /// Promote a non-exhaustive `match` to a compile error (`E0011`), but only when the
@@ -293,10 +410,11 @@ impl Checker {
             // `is T` binds no name here — `synth_match` narrows the scrutinee identifier instead.
             | Pattern::IsType { .. } => {}
             Pattern::Binding { name, span } => {
-                // A bare `none` in pattern position is the Option-none CONSTRUCTOR pattern (it is
-                // represented as a binding but matched by name), not a fresh binding — exempt it
-                // from the reserved-name rule so `match o { some(v) => …, none => … }` stays legal.
-                if name != "none" {
+                // A bare `none` in pattern position reads as the Option-none case rather than a
+                // fresh binding — exempt it from the reserved-name rule so
+                // `match o { some(v) => …, none => … }` stays legal. It is still an irrefutable
+                // binding underneath, which is why an arm *after* it is E0066.
+                if name != NONE_PATTERN {
                     self.check_reserved_name(name, *span);
                     // A match-pattern binding lands in the arm's just-pushed frame — any env hit
                     // is a shadow (E0059).

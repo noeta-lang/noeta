@@ -18,7 +18,9 @@ echo Status.try_from("Nope") == none;
 echo Status.from("Pending");
 // A payload variant name is not constructible (no payload to supply) -> none -> the `??` fallback.
 m = Status.try_from("Failed");
+// `some(s)` first: a bare `none` pattern is a *binding*, so it matches every value — putting it
+// ahead of the `some` arm would swallow it (E0066).
 echo match m {
-    none => "fallback",
     some(s) => "${s}",
+    none => "fallback",
 };

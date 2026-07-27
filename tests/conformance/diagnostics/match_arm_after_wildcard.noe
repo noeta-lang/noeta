@@ -1,0 +1,28 @@
+// An arm after an unguarded irrefutable one can never run (E0066). The rule needs no type
+// information: `_` and a bare-identifier binding both compile to *no test at all*, so control never
+// reaches anything below them. Both irrefutable forms are exercised — a `_` catch-all written too
+// early, and a bare binding (`other`) that reads like a pattern but is one.
+//
+// A guarded arm is NOT irrefutable — the checker cannot prove a guard ever true — so `big if big > 9`
+// leaves the cases after it reachable and is not reported.
+// expect: error E0066 at 15:9
+// expect: error E0066 at 23:9
+// expect: exit 1
+fn rank(n: int): string {
+    return match n {
+        0 => "zero",
+        _ => "many",
+        1 => "one",
+    }
+}
+
+fn label(v: int): string {
+    return match v {
+        big if big > 9 => "big ${big}",
+        other => "small ${other}",
+        0 => "zero",
+    }
+}
+
+echo rank(1)
+echo label(0)
