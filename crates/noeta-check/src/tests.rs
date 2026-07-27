@@ -2393,6 +2393,24 @@ fn exhaustive_match_whose_arms_all_return_is_a_return() {
         )
         .is_empty()
     );
+    // The type domain rides the same judgement: `is` arms covering every member of a closed union
+    // are exhaustive, so an all-returning type-pattern `match` returns too.
+    assert!(
+        codes(
+            "fn f(x: int | string): int { match x { is int => { return 1 }, \
+             is string => { return 2 }, } }\n"
+        )
+        .is_empty()
+    );
+    // …but `dyn` is the open top: no finite set of `is` arms exhausts it, so E0048 stands
+    // (alongside the E0011 the open domain already earns).
+    assert_eq!(
+        codes(
+            "fn f(x: dyn): int { match x { is int => { return 1 }, \
+             is string => { return 2 }, } }\n"
+        ),
+        ["E0011", "E0048"]
+    );
 }
 
 #[test]
