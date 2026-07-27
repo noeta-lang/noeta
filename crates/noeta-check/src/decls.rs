@@ -502,21 +502,31 @@ impl Checker {
                 PackedKind::Struct(inner) => layout_key_capable(inner),
             })
         }
-        if matches!(
-            key_name,
-            "string" | "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
-        ) {
-            return Some(true);
-        }
-        if matches!(key_name, "float" | "f32") {
-            return Some(false);
-        }
-        // `bool` splits by role (post derive-soundness: bool is orderable, `false < true`):
-        // a `Set<bool>` is fine — the runtime canonicalizes it like any orderable element — but
-        // a map key needs a `MapKey` kind, which bool deliberately lacks (two possible keys is a
-        // smell; use fields). The gates pass their role via `for_set`.
-        if key_name == "bool" {
-            return Some(for_set);
+        // A built-in scalar decides here, exhaustively over `BuiltinTy` — the string list this
+        // replaces knew `float`/`f32` but not `f64`, so a `Map<f64, _>` annotation slipped
+        // through the gate a `Map<float, _>` failed (the silent-fallthrough drift the funnel
+        // exists to prevent).
+        if let Some(builtin) = noeta_types::BuiltinTy::from_name_any(key_name) {
+            use noeta_types::BuiltinTy::*;
+            return match builtin {
+                Str | Int | IntN { .. } => Some(true),
+                // The float family is uniformly barred: NaN ≠ NaN and `-0.0 == 0.0` make float
+                // keys a footgun, and `f64` is `float` under another name.
+                Float | F32 | F64 => Some(false),
+                // `bool` splits by role (post derive-soundness: bool is orderable, `false <
+                // true`): a `Set<bool>` is fine — the runtime canonicalizes it like any orderable
+                // element — but a map key needs a `MapKey` kind, which bool deliberately lacks
+                // (two possible keys is a smell; use fields). The gates pass their role via
+                // `for_set`.
+                Bool => Some(for_set),
+                // The remaining built-ins keep the lenient answer the old fallthrough gave them
+                // — now stated rather than inherited. `bytes` keys are undecided (content
+                // comparison exists; a `MapKey` form does not — an explicit deferral), and a
+                // container/abstract-kind head in key position is a malformed type the arity
+                // check (E0058) already reports on its own span.
+                Bytes | Unit | Dyn | List | Set | Map | Option | Result | KindEnum | KindStruct
+                | KindClass => None,
+            };
         }
         if let Some(ext) = self.imported_extern(key_name) {
             return Some(ext.key_capable);
