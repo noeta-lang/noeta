@@ -16,6 +16,7 @@ pub mod derive;
 pub mod desugar;
 mod pretty;
 pub mod reflect;
+pub mod shape;
 mod syntax_kind;
 
 pub use builtin_ty::{BuiltinTy, Spelling, parse_int_width};

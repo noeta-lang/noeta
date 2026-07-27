@@ -12,6 +12,8 @@
 //! still reported: the per-document diagnostics view filters to spans its own document owns, so
 //! without re-attribution the user would see nothing at all for a real error.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use noeta_ext_abi::registry::{
     DirectiveCtx, Expansion, ExpansionError, ExtDirective, ExtModule, Extension, TierSite,
 };
@@ -67,6 +69,28 @@ fn expand_fails_with_read(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionErro
     })
 }
 
+/// How many times the **shape** hook has run. Only [`editing_a_field_re_runs_the_expansion`] uses
+/// `@ix_shape`, so the counter is not racy against the other tests in this binary.
+static SHAPE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Generates one accessor per field of the decorated declaration, from `DirectiveCtx::fields` alone
+/// — no arguments, no reads. Its output is therefore a pure function of the declaration's shape,
+/// which is what makes a stale expansion detectable: if the memo did not participate in the field
+/// edit, the generated members would still describe the *old* struct.
+fn expand_shape(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    SHAPE_CALLS.fetch_add(1, Ordering::SeqCst);
+    let mut source = String::new();
+    for (name, spelling) in &ctx.fields {
+        source.push_str(&format!(
+            "fn {name}_type(): string {{ return \"{spelling}\"; }}\n"
+        ));
+    }
+    Ok(Expansion {
+        source,
+        reads: Vec::new(),
+    })
+}
+
 struct Fixture;
 
 impl Extension for Fixture {
@@ -106,6 +130,15 @@ impl Extension for Fixture {
             ExtDirective {
                 name: "ix_fails",
                 expand: Some(expand_fails_with_read),
+                ..BASE
+            },
+            // Argument-free, so nothing but the decorated declaration's own shape can change what
+            // it emits.
+            ExtDirective {
+                name: "ix_shape",
+                max_args: Some(0),
+                params: &[],
+                expand: Some(expand_shape),
                 ..BASE
             },
         ]
@@ -309,6 +342,61 @@ fn a_workspace_with_no_expanding_directive_is_unchanged() {
     assert!(
         store.diagnostics(uri).expect("known").0.is_empty(),
         "and a clean program stays clean"
+    );
+}
+
+/// **The incrementality crux for `DirectiveCtx::fields`.** Editing the decorated struct's *fields*
+/// must re-run its `expand` hook.
+///
+/// Expansion is memoized: it runs inside the `linked_from` salsa query, whose inputs are the
+/// workspace's `SourceProgram` texts. The declaration's fields are read out of the parsed entry, so
+/// they are part of that memo's input by construction — but "by construction" is exactly the kind of
+/// claim that quietly stops being true. A stale expansion here would be silent: the program would
+/// keep compiling, against members describing a struct that no longer exists.
+///
+/// Both halves are asserted, because either alone can pass while the feature is broken: the hook
+/// really *ran again* (the counter), and what it produced really *describes the new shape*.
+#[test]
+fn editing_a_field_re_runs_the_expansion() {
+    use salsa::Setter as _;
+
+    install();
+    let mut db = noeta_db::LangDatabase::default();
+    let before = "@ix_shape\nstruct Api { base: string }\necho 1;\n";
+    let entry = Source::new(SourceId(0), "/proj/main.noe", before);
+    let ws = noeta_db::workspace(&db, &entry, &[], noeta_lexer::Edition::DEFAULT);
+    let src = noeta_db::workspace_entry(&db, ws);
+
+    let linked = noeta_db::linked_from(&db, ws, src);
+    assert_eq!(
+        methods_of(linked.program.as_ref().expect("the entry links"), "Api"),
+        vec!["base_type"]
+    );
+    assert_eq!(
+        linked.expansions[0].source.text(),
+        "struct Api {\nfn base_type(): string { return \"string\"; }\n}\n"
+    );
+    let runs_before = SHAPE_CALLS.load(Ordering::SeqCst);
+
+    // The edit: rename the field and give it a generic type. Nothing else about the directive
+    // changes — same name, same (absent) arguments, same file, no reads.
+    src.set_text(&mut db)
+        .to("@ix_shape\nstruct Api { tags: List<int> }\necho 1;\n".to_string());
+
+    let linked = noeta_db::linked_from(&db, ws, src);
+    assert_eq!(
+        methods_of(linked.program.as_ref().expect("the entry still links"), "Api"),
+        vec!["tags_type"],
+        "the expansion is stale: it still describes the struct's old fields"
+    );
+    assert_eq!(
+        linked.expansions[0].source.text(),
+        // And at full fidelity — a `List<int>` field must not reach the hook as `List`.
+        "struct Api {\nfn tags_type(): string { return \"List<int>\"; }\n}\n"
+    );
+    assert!(
+        SHAPE_CALLS.load(Ordering::SeqCst) > runs_before,
+        "the hook must actually re-run — a memo that served the old answer would be the bug"
     );
 }
 

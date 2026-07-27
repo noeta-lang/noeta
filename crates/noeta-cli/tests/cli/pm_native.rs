@@ -63,6 +63,17 @@ fn composed_project(name: &str) -> PathBuf {
     )
     .unwrap();
 
+    // The SHAPE-driven generator (see `expand_fx_shape`): it takes no arguments and reads no file,
+    // so everything it emits is derived from the decorated declaration's own fields. Its own entry
+    // for the same reason `spec.noe` is one. `tags` is generic on purpose — an erased `List` would
+    // generate an accessor with the wrong return type, and only a full-fidelity spelling catches it.
+    std::fs::write(
+        app.join("shape.noe"),
+        "@fx_shape\nstruct Order { id: int; tags: List<string> }\n\
+         echo Order.tags_type();\n",
+    )
+    .unwrap();
+
     std::fs::write(
         dep.join("noeta.toml"),
         "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
@@ -434,6 +445,23 @@ fn expand_fx_spec(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     })
 }
 
+/// A SHAPE-driven directive (`DirectiveCtx::fields`): one accessor per field of the decorated
+/// declaration, reporting that field's declared type spelling. It takes no arguments and reads no
+/// file, so everything it emits is derived from the declaration's own shape — which makes `noeta
+/// expand`'s printout a direct assertion on what the compiler handed the hook.
+fn expand_fx_shape(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    let mut source = String::new();
+    for (name, spelling) in &ctx.fields {
+        source.push_str(&format!(
+            "fn {name}_type(): string {{ return \"{spelling}\"; }}\n"
+        ));
+    }
+    Ok(Expansion {
+        source,
+        reads: Vec::new(),
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ImgfxExtension;
 
@@ -469,16 +497,28 @@ impl Extension for ImgfxExtension {
         &[FX_INFO]
     }
     fn directives(&self) -> &'static [ExtDirective] {
-        &[ExtDirective {
-            name: "fx_spec",
-            sites: &[TierSite::Type],
-            max_args: Some(1),
-            named_keys: &[],
-            detail: "@fx_spec(\"<file>\")",
-            doc: "Generate one accessor per name in the given spec file.",
-            params: &["spec"],
-            expand: Some(expand_fx_spec),
-        }]
+        &[
+            ExtDirective {
+                name: "fx_spec",
+                sites: &[TierSite::Type],
+                max_args: Some(1),
+                named_keys: &[],
+                detail: "@fx_spec(\"<file>\")",
+                doc: "Generate one accessor per name in the given spec file.",
+                params: &["spec"],
+                expand: Some(expand_fx_spec),
+            },
+            ExtDirective {
+                name: "fx_shape",
+                sites: &[TierSite::Type],
+                max_args: Some(0),
+                named_keys: &[],
+                detail: "@fx_shape",
+                doc: "Generate one accessor per field of the decorated declaration.",
+                params: &[],
+                expand: Some(expand_fx_shape),
+            },
+        ]
     }
     // dev-deps D5: a DEV-only capability — a tier-body formatter — gated behind the `fmt` feature.
     // The runtime capabilities above (module/type/command) always compile; this one, and the marker
@@ -862,6 +902,34 @@ fn composed_toolchain_end_to_end() {
         .assert()
         .success()
         .stdout(predicate::str::contains("42"));
+
+    // 7. `DirectiveCtx::fields`: a hook that takes no arguments and reads no file still generates
+    //    members derived from the decorated declaration's **shape**. The spelling must be the
+    //    declared one at full fidelity — `List<string>`, never `List` — because the generator writes
+    //    it back out as source.
+    composed_env(&mut lang())
+        .arg("expand")
+        .arg(app.join("shape.noe"))
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("// Order ⟨@fx_shape⟩")
+                .and(predicate::str::contains(
+                    r#"fn id_type(): string { return "int"; }"#,
+                ))
+                .and(predicate::str::contains(
+                    r#"fn tags_type(): string { return "List<string>"; }"#,
+                )),
+        )
+        .stderr(predicate::str::contains("expanded 1 declaration"));
+
+    // And it runs: the shape-derived accessor really is callable code, not just printed text.
+    composed_env(&mut lang())
+        .arg("run")
+        .arg(app.join("shape.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("List<string>"));
 }
 
 #[test]

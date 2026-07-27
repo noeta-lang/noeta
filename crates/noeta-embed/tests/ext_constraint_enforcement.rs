@@ -266,15 +266,37 @@ fn checked_validate(type_name: &str, fields: &[(String, String)]) -> Option<Stri
     ))
 }
 
-const FX_DERIVES: &[ExtDerive] = &[ExtDerive {
-    name: "Checked",
-    methods: &[ExtDeriveMethod {
-        name: "checked_id",
-        arity: 0,
-        handler: "json.stringify",
-    }],
-    validate: Some(checked_validate),
-}];
+/// A validator that never accepts — it reports the shape it was handed, verbatim. `ExtDerive`'s
+/// `(field name, field type spelling)` contract is only worth anything if the *spelling* really is
+/// the declared one, and reading it back out of a diagnostic is the only way to see it.
+fn shaped_validate(type_name: &str, fields: &[(String, String)]) -> Option<String> {
+    let rendered: Vec<String> = fields
+        .iter()
+        .map(|(name, ty)| format!("{name}: {ty}"))
+        .collect();
+    Some(format!("`{type_name}` shape: [{}]", rendered.join(", ")))
+}
+
+const FX_DERIVES: &[ExtDerive] = &[
+    ExtDerive {
+        name: "Checked",
+        methods: &[ExtDeriveMethod {
+            name: "checked_id",
+            arity: 0,
+            handler: "json.stringify",
+        }],
+        validate: Some(checked_validate),
+    },
+    ExtDerive {
+        name: "Shaped",
+        methods: &[ExtDeriveMethod {
+            name: "shaped_id",
+            arity: 0,
+            handler: "json.stringify",
+        }],
+        validate: Some(shaped_validate),
+    },
+];
 
 /// A **native trait** with one required method — the `ExtTrait.methods` constraint under test. No
 /// shipped extension declares a native trait, so the checker's E0015 (incomplete-impl) arm has never
@@ -436,6 +458,23 @@ fn an_extension_derive_validator_gates_the_declaration() {
     rejects(
         "@derive(Checked)\nstruct Row { label: string }\necho 1\n",
         "the recipe needs an `id` field",
+    );
+}
+
+/// The **shape a validator is handed** — the other half of the same contract, and the half nothing
+/// pinned. It is the very same derivation (`noeta_ast::shape`) that fills an expanding directive's
+/// `DirectiveCtx::fields`, so pinning it here pins both: a recipe and an expansion hook in one
+/// extension must not be able to see the same struct differently.
+///
+/// The spellings are the **declared** ones, in declaration order: a generic argument survives
+/// (`List<int>`, not `List` — a recipe generating an accessor needs the element type), and surface
+/// sugar is not desugared (`?User`, not `Option<User>` — a recipe writes source back out).
+#[test]
+fn a_derive_validator_is_handed_the_declared_field_spellings() {
+    rejects(
+        "@derive(Shaped)\nstruct Row { id: int; tags: List<int>; who: ?User }\n\
+         struct User { n: int }\necho 1\n",
+        "`Row` shape: [id: int, tags: List<int>, who: ?User]",
     );
 }
 

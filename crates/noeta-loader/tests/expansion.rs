@@ -63,6 +63,28 @@ fn expand_garbage(_: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
     })
 }
 
+/// Generates one accessor per **member of the declaration it decorates**, reporting that member's
+/// declared type spelling — the shape half of the hook contract (`DirectiveCtx::fields`).
+///
+/// Deliberately a function of nothing but `ctx.fields`: what it emits changes when, and only when,
+/// the decorated declaration's own shape changes. Reads nothing, so a difference in its output can
+/// only have come from the declaration.
+fn expand_shape(ctx: &DirectiveCtx) -> Result<Expansion, ExpansionError> {
+    let mut source = format!(
+        "fn member_count(): int {{ return {}; }}\n",
+        ctx.fields.len()
+    );
+    for (name, spelling) in &ctx.fields {
+        source.push_str(&format!(
+            "fn {name}_type(): string {{ return \"{spelling}\"; }}\n"
+        ));
+    }
+    Ok(Expansion {
+        source,
+        reads: Vec::new(),
+    })
+}
+
 struct Fixture;
 
 impl Extension for Fixture {
@@ -114,6 +136,18 @@ impl Extension for Fixture {
                 expand: Some(expand_gated),
                 ..BASE
             },
+            // The shape-driven generator. Takes no arguments at all, so its output can only be a
+            // function of the declaration it sits on; attaches to a `trait` too, so the empty shape
+            // of a memberless declaration is observable.
+            ExtDirective {
+                name: "fx_shape",
+                sites: &[TierSite::Type, TierSite::Trait],
+                max_args: Some(0),
+                named_keys: &[],
+                params: &[],
+                expand: Some(expand_shape),
+                ..BASE
+            },
         ]
     }
 }
@@ -146,6 +180,21 @@ fn methods_of(linked: &Linked, name: &str) -> Vec<String> {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// The generated source for `target`, verbatim — what `noeta expand` prints, and what a shape-driven
+/// generator has to be asserted on: a member *list* would not show the type spellings at all.
+fn expansion_text(linked: &Linked, target: &str) -> String {
+    let prefix = format!("{target} ⟨");
+    linked
+        .sources
+        .clone()
+        .into_sources()
+        .into_iter()
+        .find(|s| s.name().starts_with(&prefix))
+        .unwrap_or_else(|| panic!("no expansion for `{target}`"))
+        .text()
+        .to_string()
 }
 
 #[test]
@@ -360,5 +409,125 @@ fn an_invocation_that_breaks_the_declared_argument_contract_is_skipped() {
         GATED_CALLS.load(Ordering::SeqCst),
         0,
         "the hook was called for a malformed invocation"
+    );
+}
+
+// --- the decorated declaration's shape (`DirectiveCtx::fields`) ---------------------------------
+
+#[test]
+fn a_hook_generates_from_the_decorated_struct_s_fields() {
+    // The feature: a hook that takes no arguments at all still produces members derived from the
+    // declaration it sits on. Before `fields`, the most a hook could know about `Order` was its name.
+    let linked = load(
+        r#"
+        @fx_shape
+        struct Order {
+            id: int
+            fn ping(): int { return 0; }
+        }
+        echo 1;
+        "#,
+    )
+    .expect("expansion succeeds");
+
+    assert_eq!(
+        methods_of(&linked, "Order"),
+        vec!["ping", "member_count", "id_type"]
+    );
+    assert!(
+        expansion_text(&linked, "Order").contains(r#"fn id_type(): string { return "int"; }"#),
+        "unexpected expansion: {}",
+        expansion_text(&linked, "Order")
+    );
+}
+
+#[test]
+fn a_field_type_arrives_as_the_declared_spelling_at_full_fidelity() {
+    // A generic field must arrive as `List<int>`, not `List`. A hook writes source: an erased head
+    // would make it generate an accessor with the wrong return type, and nothing downstream could
+    // tell that the generator had been lied to.
+    let linked = load(
+        r#"
+        @fx_shape
+        struct Order {
+            tags: List<string>
+            grid: Map<string, List<int>>
+            who: ?User
+            free: dyn
+        }
+        echo 1;
+        "#,
+    )
+    .expect("expansion succeeds");
+
+    let text = expansion_text(&linked, "Order");
+    for expected in [
+        r#"fn tags_type(): string { return "List<string>"; }"#,
+        r#"fn grid_type(): string { return "Map<string, List<int>>"; }"#,
+        // Surface sugar is not desugared: `?User` is what was written, so `?User` is what a
+        // generator writing source back out has to be given.
+        r#"fn who_type(): string { return "?User"; }"#,
+        r#"fn free_type(): string { return "dyn"; }"#,
+    ] {
+        assert!(text.contains(expected), "missing `{expected}` in: {text}");
+    }
+}
+
+#[test]
+fn a_class_reports_its_fields_and_an_enum_its_variants() {
+    let linked = load(
+        r#"
+        @fx_shape
+        class Session { token: string }
+
+        @fx_shape
+        enum OrderError {
+            Empty;
+            NegativePrice(index: int);
+            Wrapped(string);
+        }
+        echo 1;
+        "#,
+    )
+    .expect("expansion succeeds");
+
+    assert!(
+        expansion_text(&linked, "Session")
+            .contains(r#"fn token_type(): string { return "string"; }"#),
+        "a class shapes by its fields: {}",
+        expansion_text(&linked, "Session")
+    );
+
+    // An enum's analogue of a field is its **variant**, reported with the payload spelling as
+    // declared — the empty string for a variant that carries none.
+    let text = expansion_text(&linked, "OrderError");
+    for expected in [
+        r#"fn member_count(): int { return 3; }"#,
+        r#"fn Empty_type(): string { return ""; }"#,
+        r#"fn NegativePrice_type(): string { return "(index: int)"; }"#,
+        r#"fn Wrapped_type(): string { return "(string)"; }"#,
+    ] {
+        assert!(text.contains(expected), "missing `{expected}` in: {text}");
+    }
+}
+
+#[test]
+fn a_declaration_with_no_typed_members_reports_an_empty_shape() {
+    // A `trait` is a contract, not a data type: it declares no members with types, so the shape is
+    // empty rather than absent or wrong. (`Function`/`Method` sites never reach expansion at all —
+    // there is no declaration body to splice members into.)
+    let linked = load(
+        r#"
+        @fx_shape
+        trait Shape { fn area(): int }
+        echo 1;
+        "#,
+    )
+    .expect("expansion succeeds");
+
+    assert!(
+        expansion_text(&linked, "Shape").contains("fn member_count(): int { return 0; }"),
+        "unexpected expansion: {}",
+        expansion_text(&linked, "Shape")
     );
 }

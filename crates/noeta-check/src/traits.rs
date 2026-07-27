@@ -1022,13 +1022,13 @@ impl Checker {
                             format!("`{}` is a native derive; `via:` does not apply", spec.name),
                         );
                     } else if let Some(validate) = ext.validate {
-                        let shape: Vec<(String, String)> = fields
-                            .iter()
-                            .map(|f| {
-                                let ty = field_type(&f.ty, &self.imports.extern_types);
-                                (f.name.clone(), ty.to_string())
-                            })
-                            .collect();
+                        // The shared derivation (`noeta_ast::shape`), which also builds
+                        // `DirectiveCtx::fields` for an `ExtDirective::expand` hook. One walk, so a
+                        // derive recipe and an expansion hook in the same extension can never see
+                        // the same declaration differently — and the spelling a recipe judges is the
+                        // *declared* one (`List<int>`, `?User`) rather than a lattice rendering of
+                        // it, which is what a recipe generating code from a field actually needs.
+                        let shape = noeta_ast::shape::field_shape(fields);
                         if let Some(message) = validate(type_name, &shape) {
                             self.error(DiagnosticCode::UnderivableTrait, spec.span, message);
                         }
