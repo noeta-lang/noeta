@@ -10,7 +10,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
 | [`noeta expand`](#noeta-expand) | Print the source that compile-time `@`-directive expansions generated. |
 | [`noeta migrate`](#noeta-migrate) | Apply plain-SQL database migrations — an extension command the [para/db](para-db) package provides. |
-| [`noeta serve`](#noeta-serve) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
+| [`noeta serve`](#noeta-serve-and---watch) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
 | [`noeta test`](Testing) | Discover and run `@test` blocks. |
