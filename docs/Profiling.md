@@ -2,10 +2,10 @@
 
 `noeta profile app.noe` runs a program and reports **where it spends its time** — a hot-function
 table or a flamegraph. Like the debugger, it is a dev-time tool over the **production VM**: the same
-`load → check → compile → run` pipeline `noeta run` uses. By default the JIT is unarmed so every
-frame is observable (**tier-0**); `--jit` arms the tier-1 JIT and samples native code at the
-trampoline, so the profile reflects what actually ships (see
-[*Tiers, and what they mean*](#tiers-and-what-they-mean)).
+`load → check → compile → run` pipeline `noeta run` uses. By default a profile runs **tier-0** —
+tier-0 is the interpreter, tier-1 the JIT — with the JIT unarmed so every frame is observable.
+`--jit` arms tier-1 instead and samples native code at the trampoline, so the profile reflects what
+actually ships. [*Tiers, and what they mean*](#tiers-and-what-they-mean) covers the trade-off.
 
 ## Three profilers
 

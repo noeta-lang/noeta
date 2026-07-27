@@ -25,6 +25,41 @@ Noeta ships two things people call "observability"; they don't overlap:
 
 Reach for the profiler to make one run faster; reach for telemetry to understand a live system.
 
+## Five-minute quick start: see a trace
+
+Any OTLP collector works — Jaeger, Tempo, Honeycomb, an OpenTelemetry Collector. Jaeger's
+all-in-one image is the fastest to stand up locally:
+
+```sh
+docker run --rm -p 16686:16686 -p 4318:4318 jaegertracing/jaeger:latest
+```
+
+Write a program with a span (this is the page's tracing example, trimmed):
+
+```noeta check
+use std.{tracing}
+
+fn handle_order(id: int): void {
+    tracing.with_span("handle_order", fn(): void {
+        span = tracing.span("db.lookup")
+        span.set_attribute("order.id", id)
+        span.end()
+    })
+}
+
+handle_order(7)
+```
+
+Run it with the endpoint set — the env var is the on-switch, there is no flag:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_SERVICE_NAME=orders noeta run app.noe
+```
+
+Open Jaeger's UI at [http://localhost:16686](http://localhost:16686), pick the `orders` service,
+and hit *Find Traces*: one trace, `handle_order` with `db.lookup` nested under it. Unset the env
+var and the same program emits nothing — telemetry is opt-in, as the next section explains.
+
 ## Telemetry is opt-in
 
 Nothing is emitted until you point Noeta at a collector. The switch is the **standard OTLP endpoint
@@ -208,25 +243,29 @@ tp = tracing.current_context()          // "00-<trace>-<span>-01"
 span = tracing.span_from("consume", inbound_traceparent)
 ```
 
+## When production breaks
+
+An aborting request is visible in the trace: the auto-instrumented SERVER span (`"{method}
+{route}"`) answers a `500`, so it ends carrying `http.response.status_code: 500` and an **error
+status** (`HTTP 500` — only a `5xx` marks the span an error; a `4xx` is the client's fault). Any
+`with_span` the handler was inside also ends with an error status (`span body aborted`), so the
+innermost error span points at the failing operation. From there the path is local: use the span's
+attributes (route, method, your own `set_attribute`s) to reproduce the request on your machine,
+then step through it under [Debugging](Debugging) — the debugger is launch-only, so you re-run the
+program rather than attach to the live one. If the symptom is slowness rather than an abort, take
+the reproduction to [Profiling](Profiling) instead.
+
 ## Design notes
 
-- **Write-only, never differential-tested.** A span, a log, a metric never re-enters program output,
-  so both Noeta backends produce identical results regardless of what they emit — telemetry is
-  real-host-only, like the network. A deterministic in-memory recorder backs the sandbox purely so
-  conformance can assert on what's emitted (both backends are held to *byte-identical* spans, log
-  records, and collected metrics by parity oracles).
-- **Per-task context.** The active-span stack is **task-local**: each cooperative task (and each
-  isolate) carries its own, so interleaved work can't cross-parent — and logs correlate to the right
-  span. A spawned task inherits a snapshot of its spawner's context.
-- **Metrics collection.** Aggregation (counter sums, histogram buckets) is host-side, keyed by
-  attribute set; the real host exports on a periodic reader (a background thread) plus a final flush.
-  The sandbox collects **once at teardown** — wall-time periodicity is nondeterministic, so a periodic
-  sandbox reader could never be oracle-stable; this split keeps the oracle deterministic while the real
-  host stays useful for long-running servers.
-- **Bundle cost.** A program that never imports a telemetry module and never sets an endpoint pays
-  nothing at runtime. The exporter is a hand-rolled OTLP/HTTP-JSON writer over the `reqwest` +
-  `serde_json` already in the build — deliberately **not** `opentelemetry-otlp` (which drags
-  `tonic`/`prost`) — and sits behind a default-on `telemetry` build feature a minimal CLI can drop.
+Telemetry is a **write-only side effect**: a span, a log, a metric never re-enters program output,
+so it can't change what a program computes. The active-span stack is **task-local** — each
+cooperative task and isolate carries its own, and a spawned task inherits a snapshot of its
+spawner's — so interleaved work can't cross-parent and logs correlate to the right span. Metric
+aggregation is host-side, exported on a periodic reader plus a final flush. A program that never
+imports a telemetry module and never sets an endpoint pays nothing at runtime, and the exporter is
+a lean OTLP/HTTP-JSON writer behind a default-on `telemetry` build feature. Both backends are held
+to byte-identical telemetry by parity oracles — see [The Virtual Machine](The-Virtual-Machine) for
+that internals story.
 
 ## See also
 
