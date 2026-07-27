@@ -6,7 +6,7 @@ The language distinguishes **codegen directives** (`@…`) from **data attribute
 
 ## The decorator directives
 
-Four `@` decorators attach metadata to or drive codegen on a *declaration* — `@derive`, `@attribute`, `@role`, and `@semantic`. (The layout directive `@packed` and the `@test`/`@bench`/`@doc`/`@debug` [dev-tier blocks](Documentation-and-Tiers) also use `@` but do different jobs — see [Other `@` directives](#other--directives) below.)
+Four `@` decorators attach metadata to or drive codegen on a *declaration* — `@derive`, `@attribute`, `@role`, and `@semantic`. (The layout directive `@packed` and the `@test`/`@bench`/`@doc`/`@debug` [dev-tier blocks](Dev-Tiers) also use `@` but do different jobs — see [Other `@` directives](#other--directives) below.)
 
 ### `@derive(...)` — synthesize trait impls
 
@@ -65,7 +65,7 @@ misplaced directive reports, whichever directive it is.
 Two more directive families use the `@` sigil but are not decorators in this four-set:
 
 - **`@packed` / `@packed(Layout.Column)`** — a *layout* directive marking a struct as a packed value type (flat or column-major storage). See [Fixed-Width Integers & Packed Types](Fixed-Width-Integers#packed-value-types--packed).
-- **`@test` / `@bench` / `@doc` / `@debug`** — *dev-tier* blocks that gate co-located content. See [Documentation & Dev Tiers](Documentation-and-Tiers).
+- **`@test` / `@bench` / `@doc` / `@debug`** — *dev-tier* blocks that gate co-located content. See [Dev Tiers](Dev-Tiers).
 
 ## The reflection surface
 

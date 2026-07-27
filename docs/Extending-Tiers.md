@@ -77,7 +77,7 @@ Because the declaration is ordinary code, a **pure-Noeta package** can ship `@sq
 
 ### Native (Rust-package) expression tiers
 
-A **native** package declares an expression tier the same way it registers modules and types — through the extension ABI (`ExtTier`), naming the body language, the value type, and a **native handler** (a module function). The tier is then available wherever the package is installed, with no import of the handler, and its blocks are checked and typed like any expression. std dogfoods this with **`@json`**: a native handler (`std.template.render`) that interleaves the statics with JSON-quoted holes.
+A **native** package declares an expression tier the same way it registers modules and types — through the extension ABI (`ExtTier`), naming the body language, the value type, and a **native handler** (a module function). The tier is then available wherever the package is installed, with no import of the handler, and its blocks are checked and typed like any expression. std itself uses this seam for **`@json`**: a native handler (`std.template.render`) that interleaves the statics with JSON-quoted holes.
 
 ```noeta
 id = "u-7"

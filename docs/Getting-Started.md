@@ -162,7 +162,7 @@ The `noeta` binary is more than a runner. In brief:
 | `noeta repl` | Interactive REPL. |
 | `noeta test <file>` | Run the program's `@test` blocks. See [Testing](Testing). |
 | `noeta bench <file>` | Run and measure its `@bench` blocks. See [Benchmarking](Benchmarking). |
-| `noeta doc <file>` | Extract its `@doc { … }` prose to stdout. See [Documentation & Dev Tiers](Documentation-and-Tiers). |
+| `noeta doc <file>` | Extract its `@doc { … }` prose to stdout. See [Documentation](Documentation-and-Tiers). |
 | `noeta add …` | Add a dependency to `noeta.toml` and resolve it. See [Using Packages](Using-Packages). |
 | `noeta upgrade` | Self-update the toolchain to the latest release. See [The CLI](The-CLI#noeta-upgrade). |
 

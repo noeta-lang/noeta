@@ -51,11 +51,11 @@ not see a top-level binding implicitly — capture it with a `use (…)` clause 
 [Functions & Closures](Functions-and-Closures)), in test fns and helpers alike:
 
 ```noeta
-users = ["ada", "grace"]                 # shared setup — rebuilt for every test
+users = ["ada", "grace"]                 // shared setup — rebuilt for every test
 
 fn count_users() use (users): int { return users.len() }
 
-echo "starting up"                       # a main effect — does NOT run under `noeta test`
+echo "starting up"                       // a main effect — does NOT run under `noeta test`
 
 @test {
     fn sees_fixture(): void { assert(count_users() == 2) }
@@ -171,5 +171,5 @@ impacted tests**, not everything:
 ## See also
 
 - [Benchmarking](Benchmarking) — the `@bench` sibling of `@test`.
-- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model these blocks belong to, and `noeta.toml` targets.
+- [Dev Tiers](Dev-Tiers) — the tier model these blocks belong to, and `noeta.toml` targets.
 - [Attributes & Reflection](Attributes-and-Reflection) — how `#[…]` attributes work in general.

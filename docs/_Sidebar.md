@@ -11,9 +11,11 @@
 - [The `noeta.toml` Manifest](Manifest)
 - [Package Registries](Package-Registries)
   - [Package Provenance](Package-Provenance)
+- [Dev Tiers](Dev-Tiers)
+  - [Extending Tiers](Extending-Tiers)
 - [Testing](Testing)
   - [Benchmarking](Benchmarking)
-- [Documentation & Dev Tiers](Documentation-and-Tiers)
+- [Documentation](Documentation-and-Tiers)
 - [Editor & AI Tooling](Editor-and-AI-Tooling)
 - [Debugging](Debugging)
 - [Profiling](Profiling)
@@ -27,6 +29,7 @@
 - [Functions & Closures](Functions-and-Closures)
 - [Structs, Classes & Enums](Structs-Classes-and-Enums)
 - [Generics & Traits](Generics-and-Traits)
+  - [Derives](Derives)
 - [The Type System](Type-System)
 - [Error Handling](Error-Handling)
 - [Validation](Validation)
@@ -35,7 +38,7 @@
 - [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
-- [Standard Library](Standard-Library)
+- [Built-ins (Ring 1)](Standard-Library)
 
 **Concepts & design**
 - [Architecture & Pipeline](Architecture-and-Pipeline)
@@ -45,6 +48,7 @@
   - [Concurrency Internals](Concurrency-Internals)
   - [Performance Techniques](Performance-Techniques)
 - [Native Extensions](Native-Extensions)
+  - [Writing a Native Package](Writing-Native-Packages)
   - [Extension Compatibility](Extension-Compatibility)
 
 **Contributing**

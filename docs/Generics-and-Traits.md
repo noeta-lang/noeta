@@ -99,7 +99,7 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Display` | `to_string(): string` | `echo`, `${…}` |
 | `Error` | `message(): string` | the idiomatic `Err` payload — see [Error Handling](Error-Handling) |
 | `Validate` | `validate(): Result<void, E>` | a data-boundary invariant; auto-runs at typed decode — see [Validation](Validation) |
-| `From<Source>` | `from(value: Source): Target` — associated | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at--impl-fromsource) |
+| `From<Source>` | `from(value: Source): Target` — associated | error conversion at `?` — see [Error Handling](Error-Handling#converting-errors-at---impl-fromsource) |
 | `Add` | `add(other): T` | `+` |
 | `Sub` | `sub(other): T` | `-` |
 | `Mul` | `mul(other): T` | `*` |

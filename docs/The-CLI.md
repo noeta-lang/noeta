@@ -55,7 +55,7 @@ noeta init [PATH]            # default: the current directory (created if missin
 
 What it writes — never overwriting a file that already exists, so it is safe in a non-empty directory:
 
-- **`noeta.toml`** — package identity plus two build targets: `development` wires the four std dev tiers (`@test`, `@bench`, `@doc`, `@debug`) live, and `production` is an explicit name for the tier-free baseline (see [build targets](Documentation-and-Tiers#build-targets--noetatoml)).
+- **`noeta.toml`** — package identity plus two build targets: `development` wires the four std dev tiers (`@test`, `@bench`, `@doc`, `@debug`) live, and `production` is an explicit name for the tier-free baseline (see [build targets](Dev-Tiers#build-targets--noetatoml)).
 - **`src/main.noe`** — a fmt-canonical entry file exercising every tier: a documented function with a `@debug` trace, a two-case `@test` block, and a `@bench`.
 - **`.vscode/`** — the run/debug profiles the [Noeta extension](Editor-and-AI-Tooling) picks up (F5 debugging over `noeta dap`), plus the extension recommendation.
 - **`.gitignore`** — build/profiler artifacts ignored; `noeta.lock` deliberately not (commit it).
@@ -139,7 +139,7 @@ Loads, type-checks, and executes a `.noe` file on the **real host** — real `en
 | `--no-cache` | Bypass the [startup cache](#the-startup-cache) for this run — don't read a cached compile and don't write one. Same effect as `NOETA_NO_CACHE`. |
 | `--jit-stats` | After the run, print a summary to stderr of what the Tier-1 JIT compiled and why anything bailed or was declined (see [The Virtual Machine](The-Virtual-Machine#tier-1--the-jit)). |
 
-The active-tier set is the target’s live tiers ∪ any `--tier` flags, resolved *before* loading (a bad target fails fast). With an empty active set — the default — every `@test`/`@bench`/`@doc`/`@debug` block strips away and the program runs as written. See [Documentation & Dev Tiers](Documentation-and-Tiers).
+The active-tier set is the target’s live tiers ∪ any `--tier` flags, resolved *before* loading (a bad target fails fast). With an empty active set — the default — every `@test`/`@bench`/`@doc`/`@debug` block strips away and the program runs as written. See [Dev Tiers](Dev-Tiers).
 
 **Passing arguments to the program**
 
@@ -194,7 +194,7 @@ This is structural. `--exe` staples your program onto the lean **`noeta-runner`*
 
 **Running a source tree in production** (PHP/Python/Ruby-style — deploy the `.noe` sources and point a runtime at the entry file) is a first-class deployment mode with the same guarantee: run it with `noeta-runner app.noe`, the same lean runtime, which compiles on the fly and links no dev tooling. (`noeta run` is the dev-workstation entry point and does carry the full toolchain; for production source deploys, ship `noeta-runner`.)
 
-Which of your dependencies' code is present is governed by [`noeta.toml` targets](Documentation-and-Tiers) — build the default (safe, minimal) target, or `--target <name>` to layer in more. Package authors keep dev-only capabilities (like a tier-body formatter) out of your shipped binary automatically; see *shipping dev capabilities* in [Native Extensions](Native-Extensions).
+Which of your dependencies' code is present is governed by [`noeta.toml` targets](Dev-Tiers) — build the default (safe, minimal) target, or `--target <name>` to layer in more. Package authors keep dev-only capabilities (like a tier-body formatter) out of your shipped binary automatically; see *shipping dev capabilities* in [Native Extensions](Native-Extensions).
 
 ## `noeta check`
 
@@ -456,9 +456,9 @@ The opcode set and prototype/side-table layout are described in [The Virtual Mac
 
 - **[Testing](Testing)** — `@test` blocks, `assert`, metadata attributes, isolation, and concurrency.
 - **[Benchmarking](Benchmarking)** — `@bench` blocks and the timing method.
-- **[Documentation & Dev Tiers](Documentation-and-Tiers)** — `@doc` extraction, the tier model, and `noeta.toml` build targets.
+- **[Dev Tiers](Dev-Tiers)** — the tier model and `noeta.toml` build targets; **[Documentation](Documentation-and-Tiers)** — `@doc` extraction.
 
-A program (or a dependency) can also declare its **own** tier with `@tier` — `noeta <tier> <FILE>` dispatches to the declaring package's runner; see [Documentation & Dev Tiers](Documentation-and-Tiers).
+A program (or a dependency) can also declare its **own** tier with `@tier` — `noeta <tier> <FILE>` dispatches to the declaring package's runner; see [Extending Tiers](Extending-Tiers).
 
 All three accept `--target <NAME>`, which acts as a **gate**: if the named `noeta.toml` target does not make that tier live, the command prints a notice and no-ops with exit `0`. With no `--target`, they always proceed.
 

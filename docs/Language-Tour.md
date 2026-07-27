@@ -487,5 +487,5 @@ total: 24.48
 You have seen the whole surface. For depth:
 
 - **Reference** — the [Language & standard-library section](Home#language--standard-library-reference) has one page per topic.
-- **Tools** — [Testing](Testing), [Benchmarking](Benchmarking), and [Documentation & Dev Tiers](Documentation-and-Tiers) cover the `@test`/`@bench`/`@doc` workflow.
+- **Tools** — [Testing](Testing), [Benchmarking](Benchmarking), [Dev Tiers](Dev-Tiers), and [Documentation](Documentation-and-Tiers) cover the `@test`/`@bench`/`@doc` workflow.
 - **Under the hood** — [The Virtual Machine](The-Virtual-Machine) and [Memory Management](Memory-Management) explain how it all runs.
