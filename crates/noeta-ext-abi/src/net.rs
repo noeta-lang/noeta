@@ -364,17 +364,101 @@ pub fn request_path(url: &str) -> &str {
     &from_path[..end]
 }
 
+/// One hex digit's value, or `None` when the byte is not a hex digit.
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-decode `application/x-www-form-urlencoded` text: `+` is a space and `%XX` is one byte.
+///
+/// Decoding is done over **bytes** and converted to UTF-8 once at the end, because a non-ASCII
+/// character arrives as several `%XX` in a row — decoding each escape on its own would split a
+/// multi-byte character into invalid fragments. A `%` that begins no valid escape is kept verbatim
+/// rather than dropped, so malformed input degrades to something readable instead of vanishing.
+pub fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => {
+                        out.push(hi * 16 + lo);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Percent-**encode** one query/form value: everything outside RFC 3986's unreserved set
+/// (`A-Z a-z 0-9 - _ . ~`) becomes `%XX` over its UTF-8 bytes. Space encodes as `%20` rather than
+/// `+` — both decode to a space in a query string and a form body, and `%20` is the form that is
+/// also correct inside a path segment. The inverse of [`percent_decode`] for any input it produces.
+pub fn percent_encode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for &byte in raw.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Parse an `application/x-www-form-urlencoded` payload (`k=v&k2=v2`) into decoded pairs, in wire
+/// order. **Both** halves are percent-decoded — a key can be encoded too — and a pair with no `=`
+/// yields an empty value. Empty segments (a trailing `&`, or `&&`) are skipped rather than
+/// producing a blank key. This is the one parser behind both the query string and the request body:
+/// same wire format, different source.
+pub fn form_pairs(body: &str) -> Vec<(String, String)> {
+    body.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(key), percent_decode(value))
+        })
+        .collect()
+}
+
+/// The decoded value of form field `name` in an `application/x-www-form-urlencoded` payload, or
+/// `None`. First match wins, matching `query_value`/`cookie`.
+pub fn form_value(body: &str, name: &str) -> Option<String> {
+    form_pairs(body)
+        .into_iter()
+        .find_map(|(key, value)| (key == name).then_some(value))
+}
+
 /// The value of query parameter `name` in `url`'s query string (`?k=v&k2=v2`), or `None` — the
-/// dependency-free backing for a `Request`'s `query(name)` accessor (S2). First match wins;
-/// percent-decoding is a follow-on (values arrive raw), matching the minimal parse the sandbox
-/// uses elsewhere.
+/// dependency-free backing for a `Request`'s `query(name)` accessor (S2). First match wins, and the
+/// value is **percent-decoded**: a query string is percent-encoded by definition, so `?title=buy+milk`
+/// yields `buy milk` and `?q=caf%C3%A9` yields `café`. The key is decoded before matching too.
 pub fn query_value(url: &str, name: &str) -> Option<String> {
     let query = url.split_once('?').map(|(_, q)| q)?;
     let query = query.split_once('#').map_or(query, |(q, _)| q);
-    query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (key == name).then(|| value.to_string())
-    })
+    form_value(query, name)
 }
 
 /// The value of request header `name`, matched case-insensitively (HTTP header names are), or
@@ -546,5 +630,78 @@ impl crate::ExternIo for WsCloseIo {
     ) -> Result<crate::NativeOut, crate::StdError> {
         host.net_ws_close_now(self.conn)?;
         Ok(crate::NativeOut::Unit)
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_handles_plus_escapes_and_multibyte() {
+        assert_eq!(percent_decode("buy+milk"), "buy milk");
+        assert_eq!(percent_decode("a%20b"), "a b");
+        // A non-ASCII character arrives as SEVERAL `%XX`; decoding per-escape would split it.
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+        assert_eq!(percent_decode("%F0%9F%A6%80"), "🦀");
+        // Malformed escapes degrade to something readable rather than vanishing.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%4"), "%4");
+    }
+
+    #[test]
+    fn percent_encode_is_the_inverse_over_unreserved() {
+        assert_eq!(percent_encode("buy milk"), "buy%20milk");
+        assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
+        assert_eq!(percent_encode("café"), "caf%C3%A9");
+        for raw in ["buy milk", "café", "a&b=c", "100%", "🦀"] {
+            assert_eq!(percent_decode(&percent_encode(raw)), raw, "roundtrip {raw}");
+        }
+    }
+
+    #[test]
+    fn form_pairs_decodes_both_halves_and_skips_empties() {
+        assert_eq!(
+            form_pairs("title=buy+milk&done=false"),
+            vec![
+                ("title".to_string(), "buy milk".to_string()),
+                ("done".to_string(), "false".to_string()),
+            ]
+        );
+        // A key can be encoded too.
+        assert_eq!(
+            form_pairs("my%20key=v"),
+            vec![("my key".to_string(), "v".to_string())]
+        );
+        // No `=` yields an empty value; empty segments are skipped, not blank-keyed.
+        assert_eq!(
+            form_pairs("flag"),
+            vec![("flag".to_string(), String::new())]
+        );
+        assert_eq!(
+            form_pairs("&a=1&&"),
+            vec![("a".to_string(), "1".to_string())]
+        );
+        assert_eq!(form_pairs(""), vec![]);
+    }
+
+    #[test]
+    fn form_value_takes_the_first_match() {
+        assert_eq!(form_value("a=1&a=2", "a").as_deref(), Some("1"));
+        assert_eq!(form_value("a=1", "b"), None);
+    }
+
+    #[test]
+    fn query_value_percent_decodes() {
+        // The regression this fixes: values arrived raw.
+        assert_eq!(
+            query_value("/s?title=buy+milk", "title").as_deref(),
+            Some("buy milk")
+        );
+        assert_eq!(query_value("/s?q=caf%C3%A9", "q").as_deref(), Some("café"));
+        // Fragment is not part of the query, and a missing query is None.
+        assert_eq!(query_value("/s?a=1#frag", "a").as_deref(), Some("1"));
+        assert_eq!(query_value("/s", "a"), None);
     }
 }

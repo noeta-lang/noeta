@@ -1127,7 +1127,9 @@ impl Checker {
                 result
             }
             Expr::Coalesce {
-                value, fallback, ..
+                value,
+                fallback,
+                span,
             } => {
                 // A generic-call value seeds its instantiation from the FALLBACK's type
                 // (poly-deferrals D1): `o = load(text) ?? default` — with no annotation, the only
@@ -1145,11 +1147,35 @@ impl Checker {
                     };
                 }
                 let v = self.synth(value, env);
-                self.synth(fallback, env);
+                let fb = self.synth(fallback, env);
                 match v {
                     Type::Result(ok, _) => *ok,
                     Type::Option(some) => *some,
-                    _ => Type::Unknown,
+                    // `??` unwraps a fallible value, so a left side that is already a single
+                    // concrete type has nothing to fall back FROM — the fallback is dead and both
+                    // backends abort on it at run time. Reject it here rather than leaking
+                    // `Unknown` (which unified with anything and let the program check clean).
+                    // A `dyn`/hole left side still defers, exactly as before.
+                    _ => {
+                        if !v.defers_to_runtime() {
+                            self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`??` expects a `Result` or `Option` on the left, but this \
+                                         value is `{v}`"
+                                ),
+                            )
+                            .help(
+                                "`??` supplies a value for a `none`/`Err`; a value that is \
+                                     always present does not need it — drop the `?? …`, or use \
+                                     `map.get_or(key, default)` for a lookup that may miss",
+                            );
+                        }
+                        // Recover as the fallback's type: the program meant "a value of that
+                        // shape", so downstream typing stays useful instead of cascading.
+                        fb
+                    }
                 }
             }
             Expr::As { expr, ty, span } => {

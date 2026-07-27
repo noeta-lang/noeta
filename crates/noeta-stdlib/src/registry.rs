@@ -1811,6 +1811,40 @@ const HTTP_SERVER_FNS: &[ExtFn] = &[
         params: &[Str, Str],
         ret: Concrete(COOKIE_SIG),
     },
+    // The form/percent codec as free functions, for a caller holding a body string rather than a
+    // `Request` — a websocket session delivering a client event, a queue consumer, a test. Same
+    // parser as `Request.form_all()`; exposing it here is what keeps every consumer from
+    // hand-rolling percent-decoding.
+    // Build an INBOUND `Request` without a server (named `incoming` because the client module's
+    // `request` verb is an outbound call, and the two share one dispatch). The serve loop is
+    // otherwise the only source of one, so a
+    // handler taking a `Request` — or any framework routing on one — could not be exercised from a
+    // test or a script. Carries no connection, so replying to it is a no-op rather than traffic to
+    // a live socket.
+    ExtFn {
+        param_names: &["method", "url", "body", "headers"],
+        name: "incoming",
+        params: &[Str, Str, OPT_BODY, OPT_HEADERS],
+        ret: Concrete(REQUEST_SIG),
+    },
+    ExtFn {
+        param_names: &["body"],
+        name: "parse_form",
+        params: &[Str],
+        ret: Concrete(SigType::Map(&Str, &Str)),
+    },
+    ExtFn {
+        param_names: &["text"],
+        name: "url_decode",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        param_names: &["text"],
+        name: "url_encode",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
 ];
 
 /// Read the optional `headers: Map<string, string>` argument at `index`, or an empty list if the
@@ -1921,6 +1955,50 @@ fn http_dispatch(
         return Ok(NativeOut::Extern(crate::ExternBox::new(
             crate::cookie::Cookie::new(name, value)?,
         )));
+    }
+    // The form/percent codec — pure string transforms over the same parser `Request.form_all()`
+    // uses, for callers that hold a body rather than a request.
+    if func == "incoming" {
+        want_arity_range(func, args, 2, 4)?;
+        let method = want_str(func, args, 0)?.to_ascii_uppercase();
+        let url = want_str(func, args, 1)?.to_string();
+        let body = match args.get(2) {
+            None => Vec::new(),
+            Some(_) => want_data(func, args, 2)?.to_vec(),
+        };
+        return Ok(NativeOut::Extern(crate::ExternBox::new(
+            crate::net::Request {
+                conn: None,
+                inner: crate::NetRequest {
+                    method,
+                    url,
+                    headers: want_headers(func, args, 3)?,
+                    body,
+                    timeout_ms: None,
+                },
+            },
+        )));
+    }
+    if func == "parse_form" {
+        want_arity(func, args, 1)?;
+        return Ok(NativeOut::Map(
+            crate::net::form_pairs(want_str(func, args, 0)?)
+                .into_iter()
+                .map(|(name, value)| (name, NativeOut::Str(value)))
+                .collect(),
+        ));
+    }
+    if func == "url_decode" {
+        want_arity(func, args, 1)?;
+        return Ok(NativeOut::Str(crate::net::percent_decode(want_str(
+            func, args, 0,
+        )?)));
+    }
+    if func == "url_encode" {
+        want_arity(func, args, 1)?;
+        return Ok(NativeOut::Str(crate::net::percent_encode(want_str(
+            func, args, 0,
+        )?)));
     }
     // The configured-client constructor (http arc H7) — pure, no request performed.
     if func == "new" {
@@ -2980,6 +3058,21 @@ const REQUEST_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Bytes),
     },
+    // The `application/x-www-form-urlencoded` body, decoded — the same wire format `query` parses,
+    // read from the body instead of the URL. `form(name)`/`form_all()` mirror `cookie`/`cookies`:
+    // the single lookup is the common case, the map is there when you want to iterate.
+    ExtFn {
+        param_names: &["name"],
+        name: "form",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        param_names: &[],
+        name: "form_all",
+        params: &[],
+        ret: Concrete(SigType::Map(&Str, &Str)),
+    },
     ExtFn {
         param_names: &[],
         name: "url",
@@ -3067,6 +3160,25 @@ fn request_method_dispatch(
         "body_bytes" => {
             want_arity(method, args, 0)?;
             Ok(NativeOut::Bytes(req.body.clone()))
+        }
+        "form" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            let body = String::from_utf8_lossy(&req.body);
+            Ok(match crate::net::form_value(&body, name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value))),
+                None => NativeOut::None,
+            })
+        }
+        "form_all" => {
+            want_arity(method, args, 0)?;
+            let body = String::from_utf8_lossy(&req.body);
+            Ok(NativeOut::Map(
+                crate::net::form_pairs(&body)
+                    .into_iter()
+                    .map(|(name, value)| (name, NativeOut::Str(value)))
+                    .collect(),
+            ))
         }
         "url" => {
             want_arity(method, args, 0)?;
