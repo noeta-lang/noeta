@@ -1,0 +1,34 @@
+// A handler that aborts at runtime becomes a 500 — `serve` deliberately drops `CtxError::Abort` so
+// one bad request never takes the server down. But the abort's diagnostic is recorded backend-side
+// and a serve loop runs until the listener closes, so nothing was ever printed: the developer got a
+// bare 500 and silence, with no way to learn what failed. The recovery path now drains and reports
+// it, so the failure is named on stderr while the server keeps serving the rest of the script.
+//
+// The reply path is unchanged — the surviving requests still flow — which is the point: reporting
+// is additive to the "worker survives" contract, not a change to it.
+// expect: stdout "GET /"
+// expect: stdout "GET /health"
+// expect: stdout "POST /echo"
+// expect: stdout "GET /users/42"
+// expect: stdout "DELETE /users/42"
+// expect: stdout "GET /ws"
+// expect: stderr "noeta serve: request handler failed: [E0016] index 99 out of bounds for list of length 3"
+// expect: stdout "served"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+
+fn handle(req: Request): Response {
+    path = req.path()
+    echo "${req.method()} ${path}"
+    if path == "/health" {
+        // A genuine runtime abort in the middle of a handler.
+        xs: List<int> = [1, 2, 3]
+        boom = xs[99]
+        return server.response(200, "unreachable ${boom}")
+    }
+    return server.response(200, "ok")
+}
+
+server.serve(8080, handle)
+echo "served"

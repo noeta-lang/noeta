@@ -338,6 +338,20 @@ fn server_error() -> NetResponse {
     }
 }
 
+/// Report the runtime diagnostics behind a handler/session abort the serve loop is **swallowing**
+/// to keep the server alive, so the failure is not silent.
+///
+/// `serve` deliberately recovers from `CtxError::Abort` (a handler's abort becomes a 500, a
+/// websocket session's closes its stream). The diagnostic is recorded backend-side, but a serve
+/// loop runs until Ctrl-C and so never reaches the program end that would print it — without this,
+/// a developer sees a bare 500 or a silently reconnecting socket and nothing else. Draining also
+/// keeps the backend's diagnostic buffer from growing for the life of the process.
+fn report_abort(ctx: &mut dyn NativeCtx, what: &str) {
+    for diagnostic in ctx.drain_runtime_diagnostics() {
+        ctx.write_stderr(&format!("noeta serve: {what} failed: {diagnostic}\n"));
+    }
+}
+
 /// Reply on `conn` — an async leaf, driven to completion (a write is quick).
 fn reply(ctx: &mut dyn NativeCtx, conn: u64, response: NetResponse) -> CtxResult<()> {
     let io = ctx.host().net_reply(conn, response);
@@ -490,6 +504,7 @@ pub fn http_ctx_dispatch(
                                             ws: false,
                                         }),
                                         Err(CtxError::Abort) => {
+                                            report_abort(ctx, "request handler");
                                             end_server_span(ctx, span, 500);
                                             end_server_metrics(ctx, &instruments, metrics, 500);
                                             reply(ctx, conn, server_error())?;
@@ -582,6 +597,7 @@ pub fn http_ctx_dispatch(
                                                 false
                                             }
                                             Err(CtxError::Abort) => {
+                                                report_abort(ctx, "websocket session");
                                                 ws_close(ctx, conn)?;
                                                 true
                                             }
@@ -631,12 +647,20 @@ pub fn http_ctx_dispatch(
                         Ok(None) => false,
                         Err(CtxError::Abort) if in_flight[k].ws => {
                             // A websocket session aborting closes its stream; the server survives
-                            // (the same worker-survives contract as a handler's 500).
+                            // (the same worker-survives contract as a handler's 500). Report first:
+                            // a session dies with no reply to carry a status, so an unreported
+                            // abort is invisible — the client just sees the socket close and
+                            // reconnect.
+                            report_abort(ctx, "websocket session");
                             ctx.free(fut);
                             ws_close(ctx, conn)?;
                             true
                         }
                         Err(CtxError::Abort) => {
+                            // The 500 tells the *client* something failed; this tells the developer
+                            // what (the backend recorded the diagnostic, and a serve loop never
+                            // reaches the program end that would otherwise print it).
+                            report_abort(ctx, "request handler");
                             ctx.free(fut);
                             end_server_span(ctx, span, 500);
                             end_server_metrics(ctx, &instruments, in_flight[k].metrics.take(), 500);
@@ -652,6 +676,10 @@ pub fn http_ctx_dispatch(
                         k += 1;
                     }
                 }
+                // Stream whatever the handlers just echoed. A serve loop never reaches the teardown
+                // that renders the batch-captured buffers, so without this a server's own logging
+                // is invisible until Ctrl-C. No-op under a non-streaming (sandbox) host.
+                ctx.flush_output();
                 // Done when the listener closed and every handler has replied.
                 if closing && in_flight.is_empty() && accept_future.is_none() {
                     return Ok(CtxOut::Out(NativeOut::Unit));

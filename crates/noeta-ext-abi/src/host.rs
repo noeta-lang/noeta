@@ -284,6 +284,21 @@ pub trait Console {
     /// `None` at EOF. In the sandbox this is deterministic: it returns the next scripted stdin line
     /// and does not write anywhere observable.
     fn prompt(&mut self, msg: &str) -> Option<String>;
+
+    /// Stream program output that has **already been produced** straight to the real terminal,
+    /// bypassing the batch output buffer, and report whether it was written.
+    ///
+    /// The seam that makes a long-running program's output *live*. Program output is normally
+    /// batch-captured and rendered when the run ends — right for a program that ends, and useless
+    /// for one that does not: a `noeta serve` app runs until Ctrl-C, so every `echo` a request
+    /// handler makes would be invisible for the entire life of the server.
+    ///
+    /// Returning `false` (the default, and what the sandbox does) means the host wrote nothing and
+    /// the caller must keep the text in the batch buffer — that is what holds the differential
+    /// oracle byte-identical, since only the real host streams.
+    fn stream_output(&mut self, _stream: Stream, _text: &str) -> bool {
+        false
+    }
 }
 
 /// **Operating system** capability (stdlib-gaps) — process execution and system introspection,
