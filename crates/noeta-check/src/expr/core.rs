@@ -812,7 +812,7 @@ impl Checker {
             Expr::Pipeline { left, right, .. } => {
                 // `left |> right` threads `left` as the first argument of `right`.
                 let piped = self.synth(left, env);
-                self.synth_piped(right, piped, env)
+                self.synth_piped(left, right, piped, env)
             }
             Expr::List { items, span } => {
                 // Synthesize a single element type by unifying the items. Concretely incompatible

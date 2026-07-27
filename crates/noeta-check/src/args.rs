@@ -25,20 +25,29 @@ impl Checker {
     /// Returns the binding, or `None` when the arguments are malformed enough that later checks
     /// would only produce noise (an unknown or duplicated label). A purely positional call is the
     /// identity binding and costs one `any_named` scan.
+    ///
+    /// `piped` marks a call desugared from a pipeline, whose *first* argument is the value from
+    /// the left of the `|>` — see [`Self::bind_positional`] for what that changes.
     pub(crate) fn bind_arguments(
         &mut self,
         args: &[CallArg],
         param_names: &[String],
         callee: &str,
+        piped: bool,
     ) -> Option<Binding> {
         if !CallArg::any_named(args) {
+            // No label claims anything, so both binding rules agree: argument `i` supplies
+            // parameter `i`, piped or not.
             return Some((0..args.len()).map(Some).collect());
         }
 
         // A label may not precede a positional argument: `f(a: 1, 2)` gives 2 no position to take,
-        // since the labels have already claimed parameters out of order.
+        // since the labels have already claimed parameters out of order. The piped argument is
+        // exempt — it is always first, and is never one the author could have written after a
+        // label.
         if let Some(bad) = args
             .iter()
+            .skip(usize::from(piped))
             .skip_while(|a| a.name.is_none())
             .find(|a| a.name.is_none())
         {
@@ -51,17 +60,13 @@ impl Checker {
             return None;
         }
 
+        // Labels first: each claims the parameter it names, wherever that parameter sits. The
+        // positional arguments then take what is left, which is the only order that lets the piped
+        // value find its parameter.
         let mut binding: Binding = vec![None; param_names.len()];
         let mut ok = true;
         for (i, arg) in args.iter().enumerate() {
-            let Some(label) = &arg.name else {
-                // Positional: takes the next position, which is its own index because every
-                // positional argument precedes every named one.
-                if let Some(slot) = binding.get_mut(i) {
-                    *slot = Some(i);
-                } // an over-long call is an arity error, reported by the caller
-                continue;
-            };
+            let Some(label) = &arg.name else { continue };
             let Some(p) = param_names.iter().position(|n| n == label) else {
                 let d = self.error(
                     DiagnosticCode::InvalidArgument,
@@ -95,7 +100,64 @@ impl Checker {
             }
             binding[p] = Some(i);
         }
+        self.bind_positional(args, param_names, callee, piped, &mut binding, &mut ok);
         ok.then_some(binding)
+    }
+
+    /// Place the **positional** arguments into `binding`, which already holds every label's claim.
+    ///
+    /// The two rules differ in what "this argument's parameter" means:
+    ///
+    /// - A written positional argument takes the parameter at **its own index** — the author chose
+    ///   that position, so a label that already claimed the same parameter is the "given `x` more
+    ///   than once" error, reported at the label.
+    /// - The **piped** value has no written position at all: `x |> f(…)` says only that `x` is an
+    ///   argument of `f`, so it takes the first parameter no label claimed, and the RHS's own
+    ///   positionals follow it into the parameters still free. With no labels this is exactly
+    ///   "piped value first, written arguments after" — the pipe's behaviour before labels bound —
+    ///   so nothing that does not use a label through a pipe changes meaning.
+    fn bind_positional(
+        &mut self,
+        args: &[CallArg],
+        param_names: &[String],
+        callee: &str,
+        piped: bool,
+        binding: &mut Binding,
+        ok: &mut bool,
+    ) {
+        let positions = |args: &[CallArg]| -> Vec<usize> {
+            (0..args.len())
+                .filter(|&i| args[i].name.is_none())
+                .collect()
+        };
+        if piped {
+            let unclaimed: Vec<usize> = (0..param_names.len())
+                .filter(|&p| binding[p].is_none())
+                .collect();
+            // Zipping stops at the shorter side: more positionals than free parameters is an
+            // over-long call, an arity error the caller reports against the argument count.
+            for (i, p) in positions(args).into_iter().zip(unclaimed) {
+                binding[p] = Some(i);
+            }
+            return;
+        }
+        for i in positions(args) {
+            match binding.get(i) {
+                Some(None) => binding[i] = Some(i),
+                // Claimed by a label already: report it where the label is, naming it.
+                Some(Some(claimed)) => {
+                    let label = args[*claimed].name.clone().unwrap_or_default();
+                    self.error(
+                        DiagnosticCode::InvalidArgument,
+                        args[*claimed].span,
+                        format!("`{callee}` was given `{label}` more than once"),
+                    );
+                    *ok = false;
+                }
+                // An over-long call is an arity error, reported by the caller.
+                None => {}
+            }
+        }
     }
 }
 
@@ -121,7 +183,10 @@ impl Checker {
         span: Span,
         call_span: Span,
     ) -> Option<(Vec<CallArg>, Vec<crate::Type>)> {
-        let binding = self.bind_arguments(args, param_names, callee)?;
+        // A pipeline's desugared call is marked at its span by `synth_piped`, which is what tells
+        // binding that argument zero is the piped value and has no written position of its own.
+        let piped = self.sites.piped_calls.contains(&call_span);
+        let binding = self.bind_arguments(args, param_names, callee, piped)?;
 
         // A named argument that skips a defaulted parameter (`f(1, c: 9)`) leaves a *hole*, carried
         // to the callee as a **supplied mask** on the call: the callee still evaluates the default,

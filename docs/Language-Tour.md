@@ -162,7 +162,7 @@ twice = fn(f, x) => f(f(x))
 echo twice(inc, 10)         // 12
 ```
 
-The pipe `|>` threads a value as the first argument of the next call, which reads left-to-right:
+The pipe `|>` threads a value into the next call as its first argument — or, if a [label](Functions-and-Closures#piping-into-a-parameter-that-isnt-the-first) has already claimed that parameter, into the first one still free. Either way it reads left-to-right:
 
 ```noeta
 fn double(n: int): int { return n * 2 }

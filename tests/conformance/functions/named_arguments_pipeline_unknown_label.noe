@@ -1,0 +1,11 @@
+// A label naming no parameter is rejected through a pipeline, exactly as in a direct call.
+//
+// This is the case that made the old behaviour indefensible: because `|>` passed no argument
+// expressions to the checker, `g(zzz: "hi")` reached binding with its label already gone. Nothing
+// could complain, so the program ran with `"hi"` bound positionally to `b` — a typo in a label
+// silently became a working call.
+// expect: error E0061 at 11:13
+// expect: exit 1
+fn g(a: int, b: string): int { return a + b.len() }
+
+echo 1 |> g(zzz: "hi")

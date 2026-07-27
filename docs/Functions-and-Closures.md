@@ -102,7 +102,7 @@ echo f(1, c: 9)    // 129 — `b` skipped, and still defaults
 
 The skipped parameter's default is evaluated by the callee in its own scope, exactly as when an argument list simply stops early — skipping one and omitting a trailing one are the same thing to the function being called.
 
-Named arguments work the same on methods and associated functions (`m.f(1, c: 9)`, `M.mk(b: 5, a: 1)`).
+Named arguments work the same on methods and associated functions (`m.f(1, c: 9)`, `M.mk(b: 5, a: 1)`), and through [the pipe operator](#the-pipe-operator).
 
 A label must name a parameter of the callee (an unknown one is E0061, with the closest match suggested), and no parameter may be filled twice — once positionally and again by name.
 
@@ -217,7 +217,7 @@ When a type declares **both** a method and a field of the same name, the method 
 
 ## The pipe operator
 
-`|>` threads the left value as the **first argument** of the right call. It turns nested calls into a left-to-right pipeline:
+`|>` threads the left value in as an **argument** of the right call — by default the first one. It turns nested calls into a left-to-right pipeline:
 
 ```noeta
 fn inc(x: int): int { return x + 1 }
@@ -230,6 +230,43 @@ echo [1, 2, 3, 4]
     .filter(fn(n) => n % 2 == 0)
     .map(fn(n) => n * 10)
     .sum()                    // 60  (collection work chains as methods)
+```
+
+### Piping into a parameter that isn't the first
+
+The piped value is the one argument with no written position, so it takes the first parameter **no label claimed**. Labelling the parameters you supply is therefore how you choose where the piped value lands:
+
+```noeta
+fn div(a: int, b: int): int { return a / b }
+
+// sample:start
+echo 100 |> div(b: 5)    // 20 — `b` is named, so the piped value fills `a`
+echo 5 |> div(a: 100)    // 20 — `a` is named, so the piped value fills `b`
+// sample:end
+```
+
+This composes with everything labels already do. A label may skip a defaulted parameter through a pipe, and the right-hand side's own positional arguments follow the piped value into whatever parameters are still free:
+
+```noeta
+fn f(a: int, b: int = 2, c: int = 3): int { return a * 100 + b * 10 + c }
+fn g(a: int, b: int, c: int): int { return a * 100 + b * 10 + c }
+
+// sample:start
+echo 1 |> f(c: 9)        // 129 — piped into `a`; `b` still defaults
+echo 5 |> g(6, c: 9)     // 569 — `c` is named, so `a` and `b` are free: piped, then 6
+// sample:end
+```
+
+Evaluation order is unchanged by any of this: the left operand runs first, then the right-hand side's arguments in the order written, however the binding permutes them. A method binds the same way, with the receiver staying the receiver — `10 |> box.scale(k: 4)` calls `box.scale(4, 10)`.
+
+Without a label there is no way to thread the value into a later parameter, and there is no placeholder syntax (`_` is not a piped-value hole). Use a closure when the target parameter has nothing to name it by:
+
+```noeta
+fn div(a: int, b: int): int { return a / b }
+
+// sample:start
+echo 5 |> fn(n) => div(100, n)   // 20
+// sample:end
 ```
 
 ## See also

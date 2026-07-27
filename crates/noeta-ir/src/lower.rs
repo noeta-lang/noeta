@@ -2728,9 +2728,15 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Lower `left |> right`, desugaring to a call/method with `left` threaded as the leading
-    /// argument — mirroring `eval_pipeline`. `left` is evaluated first (matching the
-    /// tree-walker), then the callee/receiver, then any remaining arguments.
+    /// Lower `left |> right`, desugaring to a call/method with `left` threaded as an argument —
+    /// mirroring `eval_pipeline`. `left` is evaluated first (matching the tree-walker), then the
+    /// callee/receiver, then any remaining arguments.
+    ///
+    /// Which *parameter* the piped value ends up in is the checker's answer, not this pass's: a
+    /// labelled right-hand side (`x |> f(b: 1)`) records a binding at the call span exactly as a
+    /// labelled direct call does, and [`Self::permute_args`] applies it here. The desugared
+    /// argument list this builds — piped value first, written arguments after — is the same list
+    /// the checker bound, so the two agree by construction.
     fn lower_pipeline(
         &mut self,
         left: &Expr,
@@ -2774,6 +2780,7 @@ impl Lowerer<'_> {
                     for a in args {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
+                    let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -2785,8 +2792,7 @@ impl Lowerer<'_> {
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
                             reflect: self.sites.construction_sites.get(span).cloned(),
-                            // A `|>` desugar builds its argument list positionally.
-                            supplied: None,
+                            supplied,
                             span: *span,
                         },
                         *span,
@@ -2797,15 +2803,13 @@ impl Lowerer<'_> {
                     for a in args {
                         arg_atoms.push(self.lower_expr(&a.value, out)?);
                     }
+                    let (arg_atoms, supplied) = self.permute_args(arg_atoms, *span);
                     Ok(self.emit(
                         out,
                         Rvalue::Call {
                             callee,
                             args: arg_atoms,
-                            // A pipeline prepends its left operand, so the parameter positions are
-                            // shifted by one and the checker's binding does not describe this list.
-                            // Labels through a pipeline are rejected at the call site instead.
-                            supplied: None,
+                            supplied,
                             span: *span,
                         },
                         *span,
@@ -2829,7 +2833,8 @@ impl Lowerer<'_> {
                         args: vec![left_atom],
                         reuse: false,
                         reflect: self.sites.construction_sites.get(span).cloned(),
-                        // A `|>` desugar builds its argument list positionally.
+                        // A bare callee takes the piped value and nothing else, so there is no
+                        // argument list to rebind.
                         supplied: None,
                         span: *span,
                     },
@@ -2871,8 +2876,19 @@ impl Lowerer<'_> {
         for arg in noeta_ast::CallArg::values(args) {
             atoms.push(self.lower_expr(arg, out)?);
         }
+        Ok(self.permute_args(atoms, call_span))
+    }
+
+    /// Reorder an already-evaluated argument list into **parameter** order, and say which
+    /// parameters it supplies.
+    ///
+    /// `atoms` is in the order the arguments were evaluated, which for a pipeline means the piped
+    /// value at index 0 — the same list the checker bound, so the binding it recorded indexes into
+    /// this one. A call with no recorded binding is already in parameter order and passes through
+    /// untouched.
+    fn permute_args(&self, atoms: Vec<Atom>, call_span: Span) -> (Vec<Atom>, Option<u64>) {
         let Some(binding) = self.sites.arg_orders.get(&call_span) else {
-            return Ok((atoms, None));
+            return (atoms, None);
         };
         // Permute into parameter order, and say which parameters were supplied. A skipped one
         // contributes no atom — the callee fills its default, over its own upvalues, exactly as it
@@ -2896,7 +2912,7 @@ impl Lowerer<'_> {
         // `mask` has exactly `permuted.len()` bits set by construction, so "the low `len` bits are
         // all set" is the same as "the set bits are the prefix" — and it does not overflow at 64.
         let is_prefix = mask.trailing_ones() as usize == permuted.len();
-        Ok((permuted, if is_prefix { None } else { Some(mask) }))
+        (permuted, if is_prefix { None } else { Some(mask) })
     }
 
     /// Lower `a && b` / `a || b` to a [`Stmt::Logical`] writing into a fresh temp, so the

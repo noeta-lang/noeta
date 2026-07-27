@@ -1718,6 +1718,51 @@ fn pipeline_threads_the_piped_value_as_first_arg() {
 }
 
 #[test]
+fn pipeline_binds_named_arguments() {
+    // A label on the right of a pipe binds to the parameter it names; the piped value takes the
+    // first parameter no label claimed. Both orders type-check, and both are the SAME call.
+    let add = "fn add(a: int, b: string): string { return b ~ a; }\n";
+    assert!(codes(&format!("{add}echo 5 |> add(b: \"x\");\n")).is_empty());
+    assert!(codes(&format!("{add}echo \"x\" |> add(a: 5);\n")).is_empty());
+    // The types follow the binding, not the written position: piping a `string` into the call whose
+    // label already claimed `b` leaves it bound to `a: int`, which is the ordinary mismatch. This
+    // is what silently passed while `|>` discarded labels.
+    assert_eq!(
+        codes(&format!("{add}echo \"x\" |> add(b: \"y\");\n")),
+        ["E0007"]
+    );
+    // A label naming no parameter is caught through a pipe, exactly as in a direct call.
+    assert_eq!(
+        codes(&format!("{add}echo 5 |> add(zzz: \"x\");\n")),
+        ["E0061"]
+    );
+    // …as is naming the same parameter twice.
+    assert_eq!(
+        codes(&format!("{add}echo 5 |> add(b: \"x\", b: \"y\");\n")),
+        ["E0061"]
+    );
+    // A label may skip a defaulted parameter through a pipe: the piped value supplies `a` and `b`
+    // keeps its default.
+    let f = "fn f(a: int, b: int = 2, c: int = 3): int { return a + b + c; }\n";
+    assert!(codes(&format!("{f}echo 1 |> f(c: 9);\n")).is_empty());
+    // The piped value counts toward arity — `sub` is fully supplied by the pipe plus its label, so
+    // the extra positional is one argument too many and reports as an ordinary arity error.
+    assert_eq!(
+        codes("fn sub(a: int, b: int): int { return a - b; }\necho 1 |> sub(2, a: 3);\n"),
+        ["E0007"]
+    );
+}
+
+#[test]
+fn pipeline_passes_argument_expressions_for_literal_adaptation() {
+    // A bare literal adapts into a fixed-width parameter through a pipe, on both sides of the `|>`
+    // — `takes(200, 5)` always did, but the piped form reported TWO spurious `E0007`s because the
+    // pipeline handed the checker no argument expressions to adapt.
+    let src = "fn takes(x: u8, y: u8): u8 { return x + y; }\necho 200 |> takes(5);\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
 fn parameter_default_omitted_at_call_is_clean() {
     // A trailing default makes its argument optional: the call may omit it or supply it.
     let src = "fn greet(name: string, greeting: string = \"Hi\"): string { return greeting ~ name; }\n\

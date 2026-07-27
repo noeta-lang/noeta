@@ -242,13 +242,15 @@ echo [1, 2] ~ [3, 4]              // [1, 2, 3, 4]
 echo "users/" ~ 42 ~ "/profile"  // users/42/profile
 ```
 
-**`|>` pipe** — threads the left value as the *first argument* of the right call, reading left-to-right:
+**`|>` pipe** — threads the left value in as an *argument* of the right call, reading left-to-right. It takes the first parameter no [label](Functions-and-Closures#named-arguments) claimed, which by default is the first one:
 
 ```noeta
 fn inc(x: int): int { return x + 1 }
 fn add(a: int, b: int): int { return a + b }
+fn div(a: int, b: int): int { return a / b }
 echo 5 |> inc |> inc      // inc(inc(5))  -> 7
 echo 5 |> add(10)         // add(5, 10)   -> 15
+echo 5 |> div(a: 100)     // div(100, 5)  -> 20  (`a` is named, so the pipe fills `b`)
 ```
 
 **`??` coalesce** supplies a fallback for `none`/absent (short-circuiting — the fallback runs only when needed); **`??=`** is `x = x ?? y`. The `?` try operator and these are covered in [Error Handling](Error-Handling).
