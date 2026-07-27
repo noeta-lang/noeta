@@ -27,21 +27,25 @@ use noeta_ext_abi::{
 /// canonical render through the [`NativeCtx`] seam). Each takes any value (`Dyn`) and returns unit.
 pub const IO_CTX_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["value"],
         name: "out",
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["value"],
         name: "outln",
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["value"],
         name: "err",
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+        param_names: &["value"],
         name: "errln",
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::Unit),
@@ -82,24 +86,28 @@ pub fn io_ctx_dispatch<C: NativeCtx + ?Sized>(
 pub const IO_FNS: &[ExtFn] = &[
     // The next line of stdin (without its newline), or `none` at EOF — pair with `??`/`while`.
     ExtFn {
+        param_names: &[],
         name: "stdin_line",
         params: &[],
         ret: RetTy::Concrete(SigType::Option(&SigType::String)),
     },
     // All remaining stdin, read to EOF as one string.
     ExtFn {
+        param_names: &[],
         name: "stdin_all",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
     },
     // Whether standard *output* is a terminal — the "should I colorize?" check.
     ExtFn {
+        param_names: &[],
         name: "is_tty",
         params: &[],
         ret: RetTy::Concrete(SigType::Bool),
     },
     // Whether standard *input* is a terminal (vs a pipe/file).
     ExtFn {
+        param_names: &[],
         name: "stdin_is_tty",
         params: &[],
         ret: RetTy::Concrete(SigType::Bool),
@@ -107,6 +115,7 @@ pub const IO_FNS: &[ExtFn] = &[
     // Write `msg` to the terminal now (bypassing the batch buffer) and read one line — the single
     // interactive path. `none` at EOF.
     ExtFn {
+        param_names: &["message"],
         name: "prompt",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Option(&SigType::String)),

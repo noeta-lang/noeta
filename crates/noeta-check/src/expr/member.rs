@@ -139,7 +139,8 @@ impl Checker {
         &mut self,
         recv: &Type,
         name: &str,
-        args: &[Type],
+        args: &mut [Type],
+        arg_exprs: &[noeta_ast::CallArg],
         span: Span,
         call_span: Span,
     ) -> Option<Type> {
@@ -166,7 +167,22 @@ impl Checker {
         })?;
         let params = stdlib::bundle_method_params(self.reg(), &method.sig, args);
         let required = noeta_ext_abi::SigType::required_count(method.sig.params);
-        self.check_args(&params, required, args, &[], span, name);
+        // A kernel method's declared parameter names bind a label here, through the same
+        // `order_arguments` a declared call uses — `v.scale(factor: 2.0)`. Passing the argument
+        // EXPRESSIONS (this used to pass `&[]`) is also what lets `check_args` see a label it
+        // cannot bind and refuse it, instead of the list arriving label-free and the label being
+        // silently dropped on the floor.
+        let bound = self.bind_sig_args(
+            &method.sig,
+            arg_exprs,
+            &params,
+            required,
+            args,
+            span,
+            call_span,
+        );
+        let arg_exprs = bound.as_deref().unwrap_or(arg_exprs);
+        self.check_args(&params, required, args, arg_exprs, span, name);
         // Record the `(trait, method)` route: the fold-in unified the bundle runtime route onto the
         // trait route, so every kernel method dispatches through `Registry::dispatch_trait_method`.
         self.sites

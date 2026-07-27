@@ -115,11 +115,13 @@ use noeta_ext_abi::{
 
 const FX_FNS: &[ExtFn] = &[
     ExtFn {
+param_names: &[],
         name: "double",
         params: &[SigType::Int],
         ret: RetTy::Concrete(SigType::Int),
     },
     ExtFn {
+param_names: &[],
         name: "acc",
         params: &[],
         ret: RetTy::Concrete(SigType::Named("Acc")),
@@ -151,11 +153,13 @@ fn fx_dispatch(
 // transform producing a new list.
 const FX_CTX_FNS: &[ExtFn] = &[
     ExtFn {
+param_names: &[],
         name: "sum_r",
         params: &[SigType::Dyn],
         ret: RetTy::Concrete(SigType::F32),
     },
     ExtFn {
+param_names: &[],
         name: "brighten_all",
         params: &[SigType::Dyn, SigType::F32],
         ret: RetTy::SameAsArg(0),
@@ -262,11 +266,13 @@ impl ExternValue for Acc {
 
 const ACC_METHODS: &[ExtFn] = &[
     ExtFn {
+param_names: &[],
         name: "add",
         params: &[SigType::Int],
         ret: RetTy::Concrete(SigType::Unit),
     },
     ExtFn {
+param_names: &[],
         name: "total",
         params: &[],
         ret: RetTy::Concrete(SigType::Int),
@@ -302,6 +308,7 @@ fn acc_method_dispatch(
 }
 
 const ACC_CTX_METHODS: &[ExtFn] = &[ExtFn {
+param_names: &[],
     name: "apply",
     params: &[SigType::Fn(&[SigType::Int], &SigType::Int)],
     ret: RetTy::Concrete(SigType::Unit),
@@ -368,6 +375,7 @@ const PIXELS_BUNDLE: ExtTrait = ExtTrait {
     namespace: "imgfx.fx",
     methods: &[ExtTraitMethod {
         sig: ExtFn {
+param_names: &[],
             name: "brighten",
             params: &[SigType::F32],
             ret: RetTy::SameAsArg(0),
@@ -983,6 +991,7 @@ use noeta_ext_abi::registry::{ExtFn, ExtModule, Extension, NativeOut, RetTy, Sig
 use noeta_ext_abi::{no_function_error, CommandCtx, ExtCommand, Host, NativeValue, ParsedArgs, StdError};
 
 const GFX_FNS: &[ExtFn] = &[ExtFn {
+param_names: &[],
     name: "triple",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Int),
@@ -1182,6 +1191,7 @@ use noeta_ext_abi::registry::{ExtFn, ExtModule, Extension, NativeOut, RetTy, Sig
 use noeta_ext_abi::{no_function_error, CommandCtx, ExtCommand, Host, NativeValue, ParsedArgs, StdError};
 
 const FX_FNS: &[ExtFn] = &[ExtFn {
+param_names: &[],
     name: "triple",
     params: &[SigType::Int],
     ret: RetTy::Concrete(SigType::Int),

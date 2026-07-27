@@ -564,7 +564,7 @@ fn guide_search(query: &str) -> Vec<DocHit> {
 // ---- The API-reference corpus dispatch (Arc 2). Static, workspace-independent. ----------------
 
 /// The compact signature detail shown next to a function node — the rendered signature without its
-/// leading `fn ` (`sqrt(float): float`).
+/// leading `fn ` (`sqrt(x: float): float`).
 fn api_detail(signature: &str) -> String {
     signature
         .strip_prefix("fn ")
@@ -1413,10 +1413,13 @@ mod tests {
         let sqrt = fns.iter().find(|f| f.title == "sqrt").expect("math.sqrt");
         assert_eq!(sqrt.kind, DocKind::Function);
         assert!(sqrt.has_page && !sqrt.expandable);
-        assert_eq!(sqrt.detail.as_deref(), Some("sqrt(float): float"));
+        assert_eq!(sqrt.detail.as_deref(), Some("sqrt(x: float): float"));
 
         let rendered = page(&ctx, &sqrt.id).expect("the function page renders");
-        assert_eq!(rendered.signature.as_deref(), Some("fn sqrt(float): float"));
+        assert_eq!(
+            rendered.signature.as_deref(),
+            Some("fn sqrt(x: float): float")
+        );
         assert!(rendered.markdown.contains("square root"));
 
         // Search spans the API corpus.

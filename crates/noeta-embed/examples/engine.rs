@@ -20,6 +20,7 @@ use noeta_ext_abi::{Host, StdError, no_function_error};
 static EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 static ENGINE_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "emit",
     params: &[SigType::String],
     ret: RetTy::Concrete(SigType::Unit),

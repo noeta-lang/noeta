@@ -64,21 +64,25 @@ const ATTR_VALUE: SigType =
 /// calls a closure), so they live in the ctx table.
 pub const TRACING_CTX_FNS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["name"],
         name: "span",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
     },
     ExtFn {
+        param_names: &["name", "f"],
         name: "with_span",
         params: &[SigType::String, SigType::Fn(&[], &VAR_A)],
         ret: RetTy::Concrete(VAR_A),
     },
     ExtFn {
+        param_names: &[],
         name: "current_context",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
     },
     ExtFn {
+        param_names: &["name", "traceparent"],
         name: "span_from",
         params: &[SigType::String, SigType::String],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
@@ -90,26 +94,31 @@ pub const TRACING_CTX_FNS: &[ExtFn] = &[
 /// finalizes.
 pub const SPAN_METHODS: &[ExtFn] = &[
     ExtFn {
+        param_names: &["key", "value"],
         name: "set_attribute",
         params: &[SigType::String, ATTR_VALUE],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
     },
     ExtFn {
+        param_names: &["name"],
         name: "add_event",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
     },
     ExtFn {
+        param_names: &[],
         name: "context",
         params: &[],
         ret: RetTy::Concrete(SigType::String),
     },
     ExtFn {
+        param_names: &["message"],
         name: "record_error",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
     },
     ExtFn {
+        param_names: &[],
         name: "end",
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),

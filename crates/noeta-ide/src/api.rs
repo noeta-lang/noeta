@@ -21,7 +21,7 @@ type Ext = &'static (dyn noeta_stdlib::Extension + Sync);
 #[derive(Debug, Clone)]
 pub struct ApiFn {
     pub name: String,
-    /// The whole signature, `fn sqrt(float): float` (from [`ExtFn::render`]).
+    /// The whole signature, `fn sqrt(x: float): float` (from [`ExtFn::render`]).
     pub signature: String,
     /// The markdown prose from the module's [`ExtModule::docs`] table, or empty.
     pub doc: String,
@@ -276,11 +276,11 @@ mod tests {
             .iter()
             .find(|f| f.name == "sqrt")
             .expect("math.sqrt exists");
-        assert_eq!(sqrt.signature, "fn sqrt(float): float");
+        assert_eq!(sqrt.signature, "fn sqrt(x: float): float");
         assert!(sqrt.doc.contains("square root"));
         let hyp = math.functions.iter().find(|f| f.name == "hypot").unwrap();
         assert!(hyp.doc.contains("Euclidean"));
-        assert_eq!(hyp.signature, "fn hypot(float, float): float");
+        assert_eq!(hyp.signature, "fn hypot(x: float, y: float): float");
     }
 
     #[test]
@@ -361,6 +361,7 @@ mod tests {
     // have caught it).
 
     static DIVERGENT_FNS: &[noeta_stdlib::ExtFn] = &[noeta_stdlib::ExtFn {
+        param_names: &[],
         name: "connect",
         params: &[noeta_stdlib::SigType::Int],
         ret: noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Int),

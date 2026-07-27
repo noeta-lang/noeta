@@ -1764,30 +1764,58 @@ fn pipeline_passes_argument_expressions_for_literal_adaptation() {
 
 #[test]
 fn a_label_that_cannot_bind_is_rejected_not_ignored() {
-    // A callee with no parameter names has nothing for a label to name. Every one of these used to
-    // check CLEAN with the label silently discarded, which is the same silent-wrongness that
-    // labelled user calls were fixed for.
+    // A callee that declares no parameter names has nothing for a label to name. Every one of these
+    // used to check CLEAN with the label silently discarded, which is the same silent-wrongness
+    // that labelled user calls were fixed for.
     //
-    // A native module function.
-    assert_eq!(
-        codes("use std.math;\necho math.pow(base: 2.0, exp: 3.0);\n"),
-        ["E0061", "E0061"]
-    );
-    // A built-in method — including a label naming nothing at all.
+    // A built-in METHOD — resolved from the receiver's type rather than a module signature, so it
+    // has no `ExtFn::param_names` to consult. Including a label naming nothing at all.
     assert_eq!(
         codes("echo \"abc\".replace(zzz: \"a\", \"b\");\n"),
         ["E0061"]
     );
     assert_eq!(codes("echo [1, 2, 3].map(f: fn(n) => n * 2);\n"), ["E0061"]);
     // A function VALUE: the closure had parameter names, but `Type::Fn` carries only types, so the
-    // call site cannot see them.
+    // call site cannot see them. No registry entry can ever fix this one.
     assert_eq!(
         codes("g = fn(a: int, b: int): int => a - b;\necho g(b: 1, a: 10);\n"),
         ["E0061", "E0061"]
     );
-    // Through a pipe too — the pipeline reaches the same callees.
+}
+
+#[test]
+fn a_named_native_signature_binds_labels() {
+    // `math.pow` declares `param_names: &["base", "exp"]`, so it accepts labels and REORDERS by
+    // them — through exactly the binding a declared Noeta function uses. Written positionally it is
+    // unchanged, and the reordered form used to compute 3² because the labels were discarded.
+    let math = "use std.math;\n";
+    assert!(codes(&format!("{math}echo math.pow(2.0, 3.0);\n")).is_empty());
+    assert!(codes(&format!("{math}echo math.pow(base: 2.0, exp: 3.0);\n")).is_empty());
+    assert!(codes(&format!("{math}echo math.pow(exp: 3.0, base: 2.0);\n")).is_empty());
+    // And through a pipe: the label claims `exp`, so the piped value fills `base`.
+    assert!(codes(&format!("{math}echo 2.0 |> math.pow(exp: 3.0);\n")).is_empty());
+    // A label naming no parameter is caught precisely, and ONLY once — the recovery path must not
+    // also report "does not take named arguments" for a signature that plainly does.
     assert_eq!(
-        codes("use std.math;\necho 2.0 |> math.pow(exp: 3.0);\n"),
+        codes(&format!("{math}echo math.pow(zzz: 2.0, exp: 3.0);\n")),
+        ["E0061"]
+    );
+}
+
+#[test]
+fn kernel_methods_bind_labels() {
+    // A kernel method's parameters are all `SigType::Dyn`, so the names carry the whole distinction
+    // between `scale`'s scalar `factor` and `add`'s whole `other` vector. This path used to pass no
+    // argument expressions at all, so a label was dropped before anything could bind or refuse it.
+    let prelude = "use std.vec;\n\
+                   @packed struct V3 { x: f32; y: f32; z: f32 }\n\
+                   impl vec.Kernels for V3 {}\n\
+                   a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 };\n\
+                   b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 };\n";
+    assert!(codes(&format!("{prelude}echo a.add(other: b).x;\n")).is_empty());
+    assert!(codes(&format!("{prelude}echo a.scale(factor: 2.0f32).x;\n")).is_empty());
+    assert_eq!(
+        codes(&format!("{prelude}echo a.add(zzz: b).x;\n")),
         ["E0061"]
     );
 }

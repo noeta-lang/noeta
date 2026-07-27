@@ -24,6 +24,7 @@ use noeta_ext_abi::{ErrorKind, Host, StdError};
 // --- A minimal native extension: `plugin.demo.answer(): int` → 42 --------------------------------
 
 const DEMO_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "answer",
     params: &[],
     ret: RetTy::Concrete(SigType::Int),
@@ -33,6 +34,7 @@ const DEMO_FNS: &[ExtFn] = &[ExtFn {
 // the typed-call seam works through a per-session instance registry and the session/REPL extend path
 // (`hot_swap` recompiles carrying the checker's `typed_module_call_sites`), not only the std default.
 const DEMO_TYPED_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "make_default",
     params: &[],
     ret: RetTy::TypeArg(TypeArgWrap::Plain),
@@ -122,6 +124,7 @@ static PLUGIN: PluginExtension = PluginExtension;
 // --- A *second*, disjoint extension: `other.misc.ping(): int` → 7 --------------------------------
 
 const MISC_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "ping",
     params: &[],
     ret: RetTy::Concrete(SigType::Int),

@@ -16,6 +16,7 @@ use noeta_ext_abi::{CtxError, CtxOut, NativeCtx, Slot, ctx_arity, no_function_er
 /// are `() -> string` (each rendered value JSON-quoted), so a `${value}` is always injected as a
 /// safely-escaped JSON string — the point of an embedded, checked template over raw concatenation.
 pub const TEMPLATE_CTX_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &["statics", "holes"],
     name: "render",
     params: &[
         SigType::List(&SigType::String),

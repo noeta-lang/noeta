@@ -1,0 +1,32 @@
+// Kernel methods declare parameter names, so a `name:` label binds on them like any other call.
+//
+// A kernel's parameters are all `SigType::Dyn` in the registry — the element type is resolved from
+// the bound shape, not the signature — so the types alone say nothing about what an argument IS.
+// The names are what disambiguate at the call site: `scale` takes a scalar `factor` while `add`
+// takes a whole `other` vector, and the bulk `*_all` forms take a second *list*, not a single value.
+//
+// This path also used to hand the checker no argument expressions at all, so a label here was not
+// merely unbound — it was dropped before anything could complain about it.
+// expect: stdout "11.0"
+// expect: stdout "11.0"
+// expect: stdout "2.0"
+// expect: stdout "140.0"
+// expect: stdout "11.0"
+// expect: exit 0
+use std.vec
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+impl vec.Kernels for V3 {}
+
+a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
+b = V3 { x: 10.0f32, y: 20.0f32, z: 30.0f32 }
+
+echo a.add(b).x               // positional, unchanged
+echo a.add(other: b).x        // labelled
+echo a.scale(factor: 2.0f32).x
+echo a.dot(other: b)
+
+// The bulk form binds the same way; its operand is a second list.
+xs = [a]
+ys = [b]
+echo xs.add_all(other: ys)[0].x

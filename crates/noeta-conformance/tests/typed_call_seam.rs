@@ -21,6 +21,7 @@ use noeta_vm::VmBackend;
 // --- The fixture extension: `testext.build.make_default::<T>(): T` -------------------------------
 
 const BUILD_TYPED_FNS: &[ExtFn] = &[ExtFn {
+    param_names: &[],
     name: "make_default",
     params: &[],
     // Plain call-site-typed: the result is the turbofish `T` itself.
