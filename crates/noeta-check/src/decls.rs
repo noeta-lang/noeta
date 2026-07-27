@@ -217,7 +217,20 @@ impl Checker {
         self.check_type_opt(&e.backing);
         for variant in &e.variants {
             for field in &variant.fields {
-                self.check_type_opt(&field.ty);
+                match &field.ty {
+                    Some(ty) => self.check_type_ref(ty),
+                    // A POSITIONAL payload (`Leaf(Item)`) is parsed with its type as the field's
+                    // *name* and no annotation, so `check_type_opt` saw nothing and the one
+                    // parameter list in the language whose types are spelled this way went
+                    // unvalidated: `enum Tree { Leaf(Bogus); }` checked clean while the named form
+                    // `Leaf(item: Bogus)` was correctly E0013. Reconstruct the annotation the same
+                    // way `variant_field_type` does and put it through the same rule.
+                    None => self.check_type_ref(&TypeRef::Named {
+                        name: field.name.clone(),
+                        args: Vec::new(),
+                        span: field.name_span,
+                    }),
+                }
             }
             self.check_attrs(&variant.attrs, TargetKind::Variant);
             // A variant's payload fields are parsed by the shared parameter grammar, so they can
