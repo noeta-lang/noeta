@@ -173,6 +173,11 @@ fn plan_for(stmt: &Stmt, sources: &[Source], registry: &'static Registry) -> Vec
     let Some(keyword) = keyword_of(stmt) else {
         return Vec::new();
     };
+    // The declaration's own shape, through the shared derivation the checker hands
+    // `ExtDerive::validate` — one walk, so a derive recipe and an expansion hook in the same
+    // extension can never disagree about what a struct looks like. Derived once and cloned per
+    // directive: a declaration may carry several, and they all decorate the same members.
+    let shape = noeta_ast::shape::decl_shape(stmt);
     let mut plans = Vec::new();
     for f in &at.decorators.foreign {
         let Some(directive) = registry.find_ext_directive(&f.name) else {
@@ -221,6 +226,7 @@ fn plan_for(stmt: &Stmt, sources: &[Source], registry: &'static Registry) -> Vec
                     .to_string(),
                 site,
                 source_dir: source_dir_of(f.name_span, sources),
+                fields: shape.clone(),
             },
             keyword,
             span: f.name_span,

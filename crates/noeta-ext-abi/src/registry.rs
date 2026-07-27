@@ -1976,8 +1976,11 @@ impl PartialEq for ExtDirective {
 /// What an [`ExtDirective::expand`] hook is given: the invocation, and the declaration it decorates.
 ///
 /// Deliberately narrow. A hook receives what the directive was written with and what it was written
-/// on — not the surrounding program — so its output depends only on inputs the compiler can key a
-/// memoized result on.
+/// on — the declaration's name **and its own members**, but not the surrounding program — so its
+/// output depends only on inputs the compiler can key a memoized result on. A declaration's fields
+/// are part of what the directive was written on, so generating from a struct's *shape* stays inside
+/// that rationale: the fields live in the same source text the memoized link is already keyed on, and
+/// editing one re-runs the expansion.
 #[derive(Debug, Clone)]
 pub struct DirectiveCtx {
     /// Positional arguments, already checked against [`ExtDirective::max_args`], rendered as source
@@ -1997,6 +2000,29 @@ pub struct DirectiveCtx {
     /// The directory of the source file the directive was written in, so a relative path argument
     /// (`"petstore.yaml"`) resolves against the file rather than the process's working directory.
     pub source_dir: String,
+    /// The decorated declaration's members as `(name, declared type spelling)` pairs, in declaration
+    /// order — so a hook can generate something derived from the declaration's **shape** and not
+    /// only from its name.
+    ///
+    /// - a `struct` or a `class`: its fields, each with its declared type;
+    /// - an `enum`: its **variants**, each with its payload spelling as declared — `"(index: int)"`
+    ///   for a named payload, `"(T)"` for a positional one, and the **empty string** for a variant
+    ///   that carries none. A variant is what an enum is made of, so it is the enum's analogue of a
+    ///   field;
+    /// - a `Function`, `Method` or `Trait` site: **empty**. Those declare no typed members.
+    ///
+    /// A spelling is the *declared surface* one, at full fidelity: `List<int>` arrives as
+    /// `"List<int>"` and never as `"List"`, and `?User` as `"?User"` and never as `"Option<User>"`.
+    /// Nothing is normalized through the type lattice, because a hook writes source and source is
+    /// written in the surface language. The one adjustment is that a namespace-qualified identity
+    /// renders as its short name (`std.id.Uuid` → `Uuid`): the linker qualifies an imported type
+    /// before a hook runs, and generated code spelling that identity would name something the
+    /// consumer's file cannot resolve. An unannotated member reports `dyn`.
+    ///
+    /// The derivation is `noeta_ast::shape`'s, shared with the checker's [`ExtDerive::validate`]
+    /// argument — one walk, so a derive recipe and an expansion hook in the same extension can never
+    /// see the same declaration differently.
+    pub fields: Vec<(String, String)>,
 }
 
 /// An extension-declared **derive recipe** (derive layer 4) — the native counterpart of deriving
@@ -2017,6 +2043,10 @@ pub struct ExtDerive {
     /// Optional compile-time shape validation: given the deriving type's name and its
     /// `(field name, field type spelling)` pairs, return `Some(message)` to reject the derive at
     /// the declaration (E0050). `None` (the field or the result) accepts.
+    ///
+    /// The pairs are the declaration's shape exactly as [`DirectiveCtx::fields`] reports it — the
+    /// same `noeta_ast::shape` derivation, so a recipe and an expansion hook in one extension read
+    /// one answer. See that field for what a spelling is.
     #[allow(clippy::type_complexity)]
     pub validate: Option<fn(&str, &[(String, String)]) -> Option<String>>,
 }
