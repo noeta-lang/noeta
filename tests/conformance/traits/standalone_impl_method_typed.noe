@@ -1,0 +1,27 @@
+// The positive half of the standalone-impl signature registration: a correct call through a
+// standalone `impl Trait for T` still dispatches AND is now typed — its return feeds an `int`
+// context without a hole, and a generic target's parameters resolve through the impl too.
+// expect: stdout "true"
+// expect: stdout "7"
+// expect: exit 0
+trait Keyed {
+    fn same(other: int): bool
+    fn key(): int
+}
+
+class Door {
+    code: int
+    fn new(c: int): Door { return Door { code: c } }
+}
+
+impl Keyed for Door {
+    fn same(other: int): bool { return self.code == other }
+    fn key(): int { return self.code }
+}
+
+d = Door.new(7)
+echo d.same(7)
+// The return types the impl declares now flow: `key()` is an `int`, so this is `int` arithmetic,
+// not a deferred hole widened at the binding.
+n: int = d.key()
+echo n

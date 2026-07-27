@@ -147,10 +147,33 @@ impl Checker {
         type_tps: &HashSet<String>,
         type_generics: &[(String, Vec<BoundReq>)],
     ) {
-        self.symbols.method_instance.insert(
-            (type_name.to_string(), m.name.clone()),
-            m.body.iter().any(|s| s.mentions("self")),
-        );
+        self.collect_method_sig_classified(type_name, m, type_tps, type_generics, true);
+    }
+
+    /// [`Self::collect_method_sig`] with control over the receiver classification.
+    ///
+    /// `classify_instance: false` registers the SIGNATURE only, leaving `method_instance` untouched.
+    /// That is what a standalone `impl Trait for T` needs: instance-ness is inferred from whether a
+    /// body mentions `self`, and a trait method whose implementation happens not to need `self`
+    /// (`fn greet(who: string): string { return "hi " ~ who }`) is still part of the trait's
+    /// *instance* interface — classifying it from the body would make `c.greet(…)` an E0047
+    /// ("associated function") even though the runtime dispatches it on the instance. An absent
+    /// entry already reads as "instance" at the call site, which is the pre-existing behavior for
+    /// these methods; only their types were missing.
+    fn collect_method_sig_classified(
+        &mut self,
+        type_name: &str,
+        m: &FnDecl,
+        type_tps: &HashSet<String>,
+        type_generics: &[(String, Vec<BoundReq>)],
+        classify_instance: bool,
+    ) {
+        if classify_instance {
+            self.symbols.method_instance.insert(
+                (type_name.to_string(), m.name.clone()),
+                m.body.iter().any(|s| s.mentions("self")),
+            );
+        }
         let own_generics: Vec<(String, Vec<BoundReq>)> = m
             .type_params
             .iter()
@@ -679,6 +702,57 @@ impl Checker {
             let type_name = type_name.to_string();
             for m in plans.iter().flatten() {
                 self.register_synth_method(&type_name, m);
+            }
+        }
+        // A STANDALONE `impl Trait for T { … }`'s method signatures. The in-body `impl` half was
+        // already folded into each type's own method walk above (`.impls` chained into `methods`);
+        // this closes the other half, which the surface has carried unfinished since standalone
+        // impls first parsed ("runtime dispatch … is a later slice" — dispatch landed, this did not).
+        //
+        // Without it the methods dispatch correctly at runtime (the loader hoists them onto the
+        // target) while the checker never learns their signatures, so the call typed as a hole and
+        // NOTHING was checked: `d.same("nope")` against `fn same(other: int): bool` checked clean,
+        // ran, and printed `false` — a wrong answer rather than a diagnostic.
+        //
+        // Placement is load-bearing. AFTER the type walk, so `symbols.type_params` already carries
+        // the target's parameters (stored there for exactly this purpose). BEFORE the UT5
+        // default-fallback below, whose `register_synth_method` skips an already-registered key —
+        // so a method the impl really provides wins over the trait's default.
+        for stmt in &program.stmts {
+            let Stmt::Impl(d) = stmt else { continue };
+            let type_params = self
+                .symbols
+                .type_params
+                .get(&d.target)
+                .cloned()
+                .unwrap_or_default();
+            let tps: HashSet<String> = type_params.iter().map(|p| p.name.clone()).collect();
+            let generics: Vec<(String, Vec<BoundReq>)> = type_params
+                .iter()
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        bound_reqs(&p.bounds, &self.imports.extern_types),
+                    )
+                })
+                .collect();
+            // Mirror the in-body path's `Self::Name` projection (slice 1a, `bake_impl_assoc`): a
+            // signature written against an associated type resolves to this impl's binding for it,
+            // so a concrete receiver types against the implementor's type rather than a hole.
+            let assoc: HashMap<&str, &TypeRef> = d
+                .assoc_bindings
+                .iter()
+                .map(|(n, t)| (n.as_str(), t))
+                .collect();
+            for m in &d.methods {
+                if assoc.is_empty() {
+                    self.collect_method_sig_classified(&d.target, m, &tps, &generics, false);
+                } else {
+                    let resolved = subst_self_assoc_in_fn(m, &assoc);
+                    self.collect_method_sig_classified(
+                        &d.target, &resolved, &tps, &generics, false,
+                    );
+                }
             }
         }
         // GENERIC-trait impls (in-body and standalone) register their INSTANTIATED omitted
