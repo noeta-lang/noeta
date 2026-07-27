@@ -12,6 +12,7 @@
 | `Error` | `message()` returns `"${self}"` — the type's display story (a hand-written `impl Display`'s `to_string()`, or the structural rendering under `@derive(Display)`). Requires the type to have `Display` at all (E0050 otherwise); `@derive(Error, via: field)` instead forwards `message()` into the field's own `Error` implementation. See [Error Handling](Error-Handling#deriving-error). |
 | `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
 | `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). |
+| `Deserialize<Json>` | The mirror of `Serialize<Json>`: records the type's **decode recipe** in a runtime registry keyed by type name — what `json.try_parse::<T>(text)` and the by-name `json.decode_typed(name, text)` decode *through*. Derivable for a non-generic value **struct** whose fields are all JSON-decodable (numbers, `bool`, `string`, `?T`, `List`, string-keyed `Map`, or another such struct); anything else is E0050. A `?T` field may be **omitted** from the JSON entirely — it decodes to `none` — while a missing non-optional field is an error. |
 
 ```noeta check
 @derive(Equatable, Comparable, Display, Clone)
@@ -25,6 +26,16 @@ echo Point.new(1, 2) < Point.new(1, 3)   // true
 @derive(Serialize<Json>)
 class User { name: string  id: int  active: bool }
 echo User.new("Ada", 7, true).to_json()  // {"name":"Ada","id":7,"active":true}
+```
+
+```noeta
+@derive(Deserialize<Json>)
+struct Account { name: string  nickname: ?string }
+
+echo match json.try_parse::<Account>("{\"name\": \"Ada\"}") {
+    Ok(a)  => "${a.name}/${a.nickname}",   // Ada/none — the `?string` field may be omitted
+    Err(e) => e.message(),
+}
 ```
 
 ## Deriving a user trait

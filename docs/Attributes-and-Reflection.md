@@ -118,7 +118,7 @@ echo match type_of(5) {
 
 ### `params_of(name): List<ParamInfo>`
 
-Reflects a **top-level function's signature** by name — one `ParamInfo` per parameter, in declaration order: `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`. `type` is the parameter's *declared* type as the same `Type` ADT `type_of` returns, `optional` reports whether a call may omit the parameter (it declared a default), and `attrs` holds the parameter's own `#[...]` attribute instances:
+Reflects a **callable's parameters** by name — one `ParamInfo` per parameter, in declaration order: `{ name: string, type: Type, optional: bool, attrs: List<dyn> }`. The name is a top-level function's bare name or a method's qualified `Type.method` (the same target keying the attribute manifest). `type` is the parameter's *declared* type as the same `Type` ADT `type_of` returns, `optional` reports whether a call may omit the parameter (it declared a default), and `attrs` holds the parameter's own `#[...]` attribute instances:
 
 ```noeta
 fn scale(factor: f64, xs: List<f32>, ns: List<i32>, label: string = "x"): void { return }
@@ -133,6 +133,106 @@ for p in params_of("scale") {
 ```
 
 **Declared types and fixed widths.** `params_of` and `type_of` answer with the *same* `Type` for the same declared type — they share one decoder, so they cannot drift. A runtime scalar carries no width tag, so at **top level** a declared fixed-width scalar erases exactly as its value does: every `iN`/`uN` parameter reflects `Type.Int` and `f64` reflects `Type.Float`, while `f32` is reified and keeps `Type.F32`. In **container-element position** a width is a physically distinct storage slot and is preserved at any depth: `List<i32>` reflects `Type.List(Type.IntN(32, true))`. The practical consequence: matching a signature from `params_of` against runtime values (dependency injection, CLI/router derivation) works for every scalar width — `type_of(5)` is `Type.Int`, and so is an `i32` parameter's `type`. See [Fixed-Width Integers](Fixed-Width-Integers) for the erasure model.
+
+### `returns_of(name): ?Type`
+
+The other half of the same signature index: a callable's **declared return type**, keyed by exactly the string `params_of` takes (a bare fn name, or a qualified `Type.method`). It is what makes a signature reflectable *end to end* — a framework deriving an OpenAPI spec from controller methods reads the request shape out of `params_of` and the response shape out of `returns_of`.
+
+```noeta
+struct Repo {
+    id: int
+    fn find(key: string): ?int { return some(self.id) }
+}
+
+class UsersController {
+    seen: int
+    fn new(): UsersController { return UsersController { seen: 0 } }
+    fn create(req: string): List<string> { return [req] }
+    fn purge(): void { return }
+}
+
+fn describe(target: string): string {
+    return match returns_of(target) {
+        some(t) => "${t}",
+        none    => "no such callable",
+    }
+}
+
+echo describe("Repo.find")               // Type.Option(Type.Int)
+echo describe("UsersController.create")  // Type.List(Type.String)
+echo describe("UsersController.purge")   // Type.Unit
+echo describe("UsersController.crate")   // no such callable  (a typo, not a void method)
+```
+
+The result is a `?Type`, and the option is the point. `params_of` answers an unknown target with the empty list because an empty parameter list is a legitimate answer — folding "unknown" into it loses nothing. A return type has no such spare value: `void` is a real answer (`some(Type.Unit)`), so an empty one would make a mistyped target indistinguishable from a `void` method — precisely the silently-vanishing route a reflection-driven framework has to be able to detect. Hence `none`, which you have to look at.
+
+The `Type` comes out of the same decoder `ParamInfo.type` goes through, so a signature's parameters and its return can never disagree about how a declared type spells — including the kind-agnostic `Type.Named(name, [])` a declared struct/class/enum annotation reflects as. A trait's abstract method signature is indexed too, under `Trait.method`. An `async fn f(): T` reports `T`, the type written in the declaration, not the `Future<T>` a call to it evaluates to — reflection reports declared types throughout.
+
+### `field_specs_of::<T>(): List<FieldSpec>` / `field_specs_of(name): List<FieldSpec>`
+
+The **type-level** field schema of a declared struct or class — one `FieldSpec` per field in declaration order: `{ name: string, type: Type, optional: bool }`. It is the declaration-side twin of `fields_of`: that one reflects an *instance*'s field **values** (and so sees the runtime-erased type), this one reflects the **declaration**, so `type` is precise and `optional` reports whether the field declared a default. An unknown name, or an enum, yields the empty list.
+
+Two surfaces, one node: the turbofish `field_specs_of::<T>()` when you know the type statically, and `field_specs_of(name)` when you hold it only as a runtime string (a `Type.Struct(name, _)` you just reflected). The turbofish is sugar — the parser lowers `T` to its name — so both behave identically.
+
+```noeta
+struct ServerOpts {
+    port: int
+    host: string = "localhost"
+    verbose: bool = false
+}
+
+for spec in field_specs_of::<ServerOpts>() {
+    echo "${spec.name}: ${spec.type} optional=${spec.optional}"
+}
+// port: Type.Int optional=false
+// host: Type.String optional=true
+// verbose: Type.Bool optional=true
+```
+
+### `construct::<T>(fields): Result<dyn, string>` / `construct(name, fields): Result<dyn, string>`
+
+Builds a struct or class value **at runtime** from field values, through the *same* construction path a `T { … }` literal takes — so field defaults and full-initialization are honored identically, and a type that appears in no literal anywhere in the program still constructs. Like `field_specs_of` it has a turbofish and a runtime-string surface; like `invoke` it is fallible by construction, returning a `Result` rather than aborting. Both surfaces are typed `Result<dyn, string>` — the turbofish only spells the type *name*, so narrow the `Ok` payload back with `.as<T>()` when you need the static type.
+
+`fields` accepts either shape:
+
+- a **`List<dyn>`** — positional, in declaration order. A list shorter than the field count fills the remaining fields from their defaults, so trailing optional fields may simply be left off. It cannot express a *gap* (an omitted middle field), by design.
+- a **`Map<string, dyn>`** — named, sparse and in any order. This is the form a CLI expanding a struct into `--field` flags produces: supply `port` and `verbose` and let the middle `host` fall back to its default.
+
+```noeta
+struct ServerOpts {
+    port: int
+    host: string = "localhost"
+    verbose: bool = false
+}
+
+mut named: Map<string, dyn> = {}
+named["port"] = 3000
+named["verbose"] = true
+
+match construct::<ServerOpts>(named) {
+    Ok(v) => {
+        o = v.as<ServerOpts>() ?? ServerOpts { port: 0 }
+        echo "${o.port}/${o.host}/${o.verbose}"    // 3000/localhost/true
+    },
+    Err(e) => {
+        echo e
+    },
+}
+```
+
+Every rejection is an `Err(string)` carrying a ready-to-surface message, never an abort:
+
+| Situation | Message |
+|---|---|
+| the name is not a string | ``construct type name must be a string, found <kind>`` |
+| the name is not a declared struct/class (an enum, or unknown) | ``` `Foo` is not a constructible struct or class ``` |
+| `fields` is neither a list nor a map | ``construct fields must be a list or a map, found <kind>`` |
+| more positional values than fields | ``` `Foo` has 2 field(s), but 3 value(s) were given ``` |
+| a named field the type does not have | ``` `Foo` has no field `nope` ``` |
+| a value whose scalar kind disagrees with the declared field type | ``` field `port` of `Foo` expects int, got string ``` |
+| a field that is neither supplied nor defaulted | ``` missing required field `port` of `Foo` ``` |
+
+Validation runs through one shared planner, so both backends accept, reject, and *word* every case identically.
 
 ### `attributes_of::<T>(): List<Attributed<T>>`
 
