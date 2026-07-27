@@ -1148,6 +1148,12 @@ impl TypeRepr {
             }
             TypeRepr::Option(t) => {
                 f.write_str("?")?;
+                // A nested optional needs the space: `??` lexes as the null-coalescing operator,
+                // so `??int` is not a writable annotation — `? ?int` is (the spelling round-trip
+                // oracle caught the bare form failing to re-parse).
+                if matches!(**t, TypeRepr::Option(_)) {
+                    f.write_str(" ")?;
+                }
                 t.fmt_spelling(f, name)
             }
             TypeRepr::Map(k, v) => {
