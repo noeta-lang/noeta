@@ -51,7 +51,9 @@ fn default_out(recipe: &TypeRecipe) -> NativeOut {
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(f, r)| (f.clone(), default_out(r)))
+                // A field's declared default is a DECODE concern (what an omitted JSON key means);
+                // this producer builds a value from nothing, so every field is produced.
+                .map(|f| (f.name.clone(), default_out(&f.recipe)))
                 .collect(),
             has_validator: *has_validator,
         },

@@ -1011,6 +1011,14 @@ struct Symbols {
     /// default supplies it. Keyed by type name → optional field names. The construction gate consults
     /// this to suppress the missing-field error (E0009) for a defaulted field.
     attribute_optional_fields: HashMap<String, HashSet<String>>,
+    /// Per struct/class, each field whose declared default means something to a **JSON decode**
+    /// (json-defaults): type name → field name → [`noeta_ext_abi::FieldDefault`]. Read by
+    /// [`Checker::type_to_recipe`] when it bakes a `TypeRecipe::Struct`, so an omitted field with a
+    /// literal default decodes to that default instead of erroring — the same optionality
+    /// `attribute_optional_fields` above gives an attribute construction, and `construct(name,
+    /// fields)` gives a dynamic construction. Only non-[`noeta_ext_abi::FieldDefault::Required`]
+    /// fields are stored; an absent entry *is* `Required`.
+    field_defaults: HashMap<String, HashMap<String, noeta_ext_abi::FieldDefault>>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// The **type-param forwarding table** (poly-values F2b + composite slots D2a): top-level

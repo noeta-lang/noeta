@@ -920,6 +920,13 @@ impl Checker {
     /// Record which of a type's `fields` carry a default (`name: T = …`) — and so are **optional** in
     /// an attribute construction (object-model slice 6i). Used by the construction gate to omit a
     /// defaulted field without an E0009.
+    ///
+    /// The same walk records each default's **decode** classification (json-defaults) into
+    /// `symbols.field_defaults`, so the one "this field declared a default" reading feeds both the
+    /// construction gate and the JSON decode recipe. The two tables differ only where they must: a
+    /// construction runs the default's thunk, so *any* default makes the field optional; a decode can
+    /// only bake a literal, so a non-literal default is recorded as
+    /// [`noeta_ext_abi::FieldDefault::Dynamic`] (see [`Checker::field_default_recipe`]).
     pub(crate) fn record_optional_fields(&mut self, type_name: &str, fields: &[FieldDecl]) {
         let optional: HashSet<String> = fields
             .iter()
@@ -930,6 +937,16 @@ impl Checker {
             self.symbols
                 .attribute_optional_fields
                 .insert(type_name.to_string(), optional);
+        }
+        let decode_defaults: HashMap<String, noeta_ext_abi::FieldDefault> = fields
+            .iter()
+            .map(|f| (f.name.clone(), Checker::field_default_recipe(f)))
+            .filter(|(_, d)| *d != noeta_ext_abi::FieldDefault::Required)
+            .collect();
+        if !decode_defaults.is_empty() {
+            self.symbols
+                .field_defaults
+                .insert(type_name.to_string(), decode_defaults);
         }
     }
 

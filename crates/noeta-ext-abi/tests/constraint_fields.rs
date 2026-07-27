@@ -107,6 +107,7 @@ const EVAL_LIB: &str = "crates/noeta-eval/src/lib.rs";
 const CHECK_TRAITS: &str = "crates/noeta-check/src/traits.rs";
 const CHECK_TIERS: &str = "crates/noeta-check/src/tiers.rs";
 const REGISTRY: &str = "crates/noeta-ext-abi/src/registry.rs";
+const STDLIB_JSON: &str = "crates/noeta-stdlib/src/json.rs";
 const VM_NATIVE_CTX: &str = "crates/noeta-vm/src/native_ctx.rs";
 const CLI_SERVE: &str = "crates/noeta-cli/src/cmd/serve.rs";
 const EMBED_CONSTRAINTS: &str = "crates/noeta-embed/tests/ext_constraint_enforcement.rs";
@@ -124,6 +125,30 @@ use Verdict::{Constraint, Data, Prose};
 /// The classification. One row per `pub` field of every ABI declaration type; the completeness
 /// check below keeps it exhaustive.
 const TABLE: &[Row] = &[
+    // --- FieldRecipe: one field of a call-site struct recipe --------------------------------------
+    Row(
+        "FieldRecipe",
+        "name",
+        Data(Anchor(STDLIB_JSON, "fn decode(")),
+    ),
+    Row(
+        "FieldRecipe",
+        "recipe",
+        Data(Anchor(STDLIB_JSON, "fn decode(")),
+    ),
+    // Optionality is a rule about every document decoded into the type: an absent field is filled
+    // (a `?T` is `none`, a literal default is that default) or it is a missing-field error.
+    Row(
+        "FieldRecipe",
+        "default",
+        Constraint(
+            Anchor(STDLIB_JSON, "fn fill_absent_field("),
+            Anchor(
+                "tests/conformance/di/json_field_defaults.noe",
+                "its default is not a literal",
+            ),
+        ),
+    ),
     // --- ExtFn: one native function's static signature -------------------------------------------
     Row(
         "ExtFn",
@@ -950,10 +975,15 @@ const TABLE: &[Row] = &[
 ];
 
 /// The ABI declaration types whose fields `TABLE` must cover, by source file.
+///
+/// `FieldRecipe` is the one non-`Ext*` entry: it is not something an extension *declares*, but it is
+/// something an extension's typed dispatch **reads** (a call-site `TypeRecipe` is handed to it), and
+/// its `default` field states a rule about programs — exactly the shape this gate exists for.
 const SCANNED: &[(&str, &[&str])] = &[
     (
         "crates/noeta-ext-abi/src/registry.rs",
         &[
+            "FieldRecipe",
             "ExtFn",
             "ExtModule",
             "ExtType",

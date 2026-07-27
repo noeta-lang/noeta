@@ -820,7 +820,11 @@ fn field_defaults(fields: &[FieldDecl]) -> Vec<Option<AttrValue>> {
 /// of the attribute-argument grammar — scalars, a negated numeric literal, and lists thereof — enough
 /// for the literal field defaults an attribute carries; a richer default (a call, a name) folds to
 /// `None` and the field is treated as having no materializable default.
-fn fold_const_expr(expr: &Expr) -> Option<AttrValue> {
+///
+/// **The one definition of "a literal default"**, so every consumer draws the fillable/required line
+/// in the same place: [`TypeInfo::field_defaults`] (what an attribute materializer folds) and the
+/// checker's `type_to_recipe` (what a JSON decode bakes into a `FieldDefault::Literal`) both call it.
+pub fn fold_const_expr(expr: &Expr) -> Option<AttrValue> {
     Some(match expr {
         Expr::Str { value, .. } => AttrValue::Str(value.clone()),
         Expr::Int { value, .. } => AttrValue::Int(*value),

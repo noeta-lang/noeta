@@ -59,10 +59,11 @@ pub use registry::{
     ArenaGetter, AssocDerivation, AttrTarget, BundleReceiver, ClassDispatch, ConstraintArity,
     ConstraintField, ConstraintLayout, CtxTypeDispatch, EnumBacking, ExtAssocType, ExtCapability,
     ExtClass, ExtEnum, ExtField, ExtFielded, ExtFn, ExtModule, ExtRoleTag, ExtStruct, ExtTrait,
-    ExtTraitMethod, ExtType, ExtTypeDirective, ExtVariant, Extension, FieldedDispatch, FieldedKind,
-    HiddenArg, ModuleDispatch, NativeOut, NativeValue, Nominal, NominalKind, NominalType,
-    PackedConstraint, PackedLayoutKind, RetTy, Scalar, ScalarVec, SigType, TraitDispatch,
-    TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch, TypedTypeDispatch, VariantValue,
+    ExtTraitMethod, ExtType, ExtTypeDirective, ExtVariant, Extension, FieldDefault, FieldRecipe,
+    FieldedDispatch, FieldedKind, HiddenArg, ModuleDispatch, NativeOut, NativeValue, Nominal,
+    NominalKind, NominalType, PackedConstraint, PackedLayoutKind, RetTy, Scalar, ScalarVec,
+    SigType, TraitDispatch, TypeArgInfo, TypeDispatch, TypeRecipe, TypedDispatch,
+    TypedTypeDispatch, VariantValue,
 };
 // The Ring 1 bodies moved to `ring1` (audit-2 F8); the glob keeps every existing path
 // (`noeta_ext_abi::Arg`, `noeta_stdlib::string_method`, ...) compiling unchanged. The shared
