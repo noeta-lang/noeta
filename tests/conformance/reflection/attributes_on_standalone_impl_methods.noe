@@ -1,0 +1,45 @@
+// A `#[...]` data attribute on a method of a **standalone** `impl Trait for T { … }` reaches the
+// reflection manifest under the same qualified `Type.method` key an in-body method gets — so the
+// three ways to write a method (a type's own body, an in-body `impl Trait { … }` block, and a
+// standalone impl) are one surface to `attributes_of`.
+//
+// The in-body block needs no arm of its own: the parser flattens its methods into the type's own
+// method table, so they are scanned through the struct/class/enum walk. A standalone impl is a
+// top-level statement of its own and was scanned by nothing, so — exactly like the struct-method
+// gap before it — an attribute there type-checked (its bodies run through the same `check_fn`) and
+// then silently did not exist. The manifest is built statically from the AST, so both backends
+// agree by construction.
+// expect: stdout "Counter.describe /counter"
+// expect: stdout "Holder.describe /holder"
+// expect: stdout "counter=7"
+// expect: stdout "holder"
+// expect: exit 0
+@attribute
+struct Route { path: string }
+
+trait Describe { fn describe(): string }
+
+class Counter {
+    count: int
+    fn new(count: int): Counter { return Counter { count: count }; }
+}
+
+// The standalone form — the one the manifest used to miss.
+impl Describe for Counter {
+    #[Route("/counter")]
+    fn describe(): string { return "counter=${self.count}"; }
+}
+
+// The in-body form, for contrast: same key, and it already worked.
+class Holder {
+    impl Describe {
+        #[Route("/holder")]
+        fn describe(): string { return "holder"; }
+    }
+}
+
+for r in attributes_of::<Route>() {
+    echo "${r.target} ${r.value.path}";
+}
+echo Counter.new(7).describe();
+echo Holder.describe();

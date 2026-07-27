@@ -1,0 +1,56 @@
+// The `doc` tier's runtime stamp is opt-in, for a **member** exactly as for a top-level
+// declaration. With the tier inactive (the ordinary run this corpus makes) every `@doc { … }` block
+// strips before lowering, so `attributes_of::<Doc>()` is empty however the prose was written: above
+// a function, above a type, above a trait, or leading a method in any of the three carriers a method
+// has (a type's own body, an in-body `impl Trait { … }` block, and a standalone `impl Trait for T`).
+//
+// This is the half of the doc-stamping contract the corpus can pin: activating a tier is a CLI
+// decision (`noeta run --tier doc`), so the *stamped* half is asserted through the CLI. Both are
+// worth pinning — production must carry no doc text, and a framework that asks for it must get it.
+// The blocks are stripped identically on both backends, so the differential agrees by construction.
+// expect: stdout "no runtime docstrings"
+// expect: stdout "5"
+// expect: exit 0
+use std.doc.Doc
+
+@doc { A documented function. }
+fn top(): int { return 1; }
+
+@doc { A documented trait. }
+trait Area { fn area(): int }
+
+@doc { A documented class. }
+class K {
+    pub n: int
+
+    @doc { A method in the class's own body. }
+    fn double(): int { return self.n * 2; }
+
+    impl Area {
+        @doc { A method in an in-body impl block. }
+        fn area(): int { return self.n; }
+    }
+}
+
+@doc { A documented struct. }
+struct P { y: int }
+
+impl Area for P {
+    @doc { A method in a standalone impl. }
+    fn area(): int { return self.y; }
+}
+
+@doc { A documented enum. }
+enum E {
+    One
+    Two
+
+    @doc { A method on an enum. }
+    fn tag(): int { return 1; }
+}
+
+for d in attributes_of::<Doc>() {
+    echo "leaked ${d.target}";
+}
+echo "no runtime docstrings";
+echo K { n: 5 }.area();
