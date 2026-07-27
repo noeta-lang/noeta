@@ -1,6 +1,6 @@
-# Standard Library
+# Built-ins (Ring 1)
 
-The always-available surface — strings, lists, maps, sets, options/results, iterators, and integer bit-methods. These need no import. For the `use std.{…}` modules (`math`, `json`, `fs`, …), see the [standard library reference](Std).
+The **no-import surface**: strings, lists, maps, sets, options/results, iterators, `bytes`, and integer bit-methods are available in every program without a single `use`. For the importable `use std.{…}` modules (`math`, `json`, `fs`, …), see the [standard library reference](Std).
 
 > [!NOTE]
 > **Collections are value-semantic (copy-on-write).** A method like `set`/`add`/`remove` returns a **new** value; the receiver is unchanged. The exceptions — file handles, iterators, and channel endpoints — are *reference* values with a shared mutable cursor. Display forms are deterministic: lists `[1, 2, 3]`, maps `{"a": 1}`, sets `{1, 2, 3}` (sorted, de-duplicated), `some(x)`/`none`, `Ok(x)`/`Err(e)`; whole floats print with one decimal (`2.0`).
@@ -104,20 +104,12 @@ echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }
 
 Iterating a map (`for v in m`) yields values in key order; equality is structural (order-independent).
 
-A map's key type `K` is `string`, `int` (or any fixed-width integer — `Map<u8, V>` works), a **key-capable** native type, or a **key-capable `@packed` struct** — immutable, totally ordered, stably hashed. Int keys are the leanest kind (an immediate: zero-allocation, one-word hash) and iterate in numeric order: `{1: "one", -7: "neg"}` displays negatives first, and `keys()` returns real ints. `Uuid` is a key-capable native type: `Map<Uuid, Order>` works end to end. A mutable native type (`FileHandle`), `float`/`f32` (NaN makes float keys a footgun), and `bool` are rejected statically.
+A map's key type `K` must be immutable, totally ordered, and stably hashed. The rules:
 
-A `@packed` struct whose fields are all integers/`bool` (or nested such structs) keys a map **by content** — the spatial-hash idiom:
+- **Allowed**: `string`; `int` and any fixed-width integer (`Map<u8, V>` works) — the leanest kind (zero-allocation, one-word hash), iterating in numeric order; a **key-capable native type** (`Uuid`: `Map<Uuid, Order>` works end to end); a **key-capable `@packed` struct** — all fields integers/`bool` (or nested such structs), keyed by content.
+- **Rejected statically**: mutable native types (`FileHandle`), `float`/`f32` (NaN makes float keys a footgun), `bool`, and any float-fielded struct.
 
-```noeta
-@packed struct Cell { x: int; y: int }
-
-mut grid: Map<Cell, int> = {}
-grid[Cell { x: 3, y: 4 }] = 42          // keyed by value, not identity
-echo grid[Cell { x: 3, y: 4 }]          // 42 — a fresh equal value finds it
-echo grid.keys()                        // [Cell {x: 3, y: 4}] — full struct values again
-```
-
-Iteration/display order over packed keys is **field-wise** (declaration order, negatives before positives), the same total order sets and `sorted()` use. Float/`f32` fields disqualify a struct as a key (`NaN != NaN` makes float keys a footgun); a non-key-capable type in key position is rejected statically.
+Packed-struct keys are the spatial-hash idiom — see [Fixed-Width Ints & Packed Types](Fixed-Width-Integers#packed-value-types--packed) for the worked example and ordering details.
 
 ## Set
 
@@ -141,6 +133,18 @@ echo s.contains(2)    // true
 | `len` | `len() -> int` | `#{7,7,9}.len()` → `2` |
 | `iter` | `iter() -> Iterator<T>` | sorted iteration |
 
+## `bytes`
+
+An opaque binary buffer — what `string.to_bytes()`, a packed list's `.to_bytes()`, and a `crypto` digest return. It compares by content, and `type_of(b)` is `Type.Bytes`.
+
+| Method | Signature | Example → result |
+|---|---|---|
+| `len` | `len() -> int` | `"hé".to_bytes().len()` → `3` (UTF-8 bytes, not chars) |
+| `to_hex` | `to_hex() -> string` | `"hé".to_bytes().to_hex()` → `68c3a9` (lowercase — the usual way to display a digest) |
+| `decode` | `decode() -> ?string` | `"hé".to_bytes().decode()` → `some(hé)`; `none` when the bytes are not valid UTF-8 (the inverse of `string.to_bytes()`) |
+
+For round-tripping packed numeric data through `bytes` (`xs.to_bytes()` / `from_bytes::<T>(...)`), see [Fixed-Width Ints & Packed Types](Fixed-Width-Integers#bytes--serialize-a-packed-list).
+
 ## Option and Result
 
 Full treatment in [Error Handling](Error-Handling). In brief:
@@ -148,7 +152,7 @@ Full treatment in [Error Handling](Error-Handling). In brief:
 - `Option` (`?T`): `some(x)` / `none`; unwrap-or-default with `??`; `.first()`/`.last()`/`.next()`/`.recv()` return options.
 - `Result<T, E>`: `Ok(x)` / `Err(e)` (and `Ok()` for `Result<void, E>`); propagate with `?`.
 
-The constructors — and `panic` — are **first-class values**: `results.map(Ok)`, `xs.map(some)`, or `handler = panic` pass the genuine callable, with the exact arity behavior and error text of a direct call. In an expected-type position they instantiate precisely (`ints.map(Ok)` is `List<Result<int, ?>>`); a bare binding stays a deferred dynamic value. `assert` remains a special form.
+The constructors — and `panic` — are ordinary values you can pass around: `results.map(Ok)`, `xs.map(some)`, and `handler = panic` all work, and behave exactly as a direct call would (same arity rules, same error text). Where the context pins a type, they take it precisely — `ints.map(Ok)` is `List<Result<int, ?>>`; bound bare, they stay dynamic until used. `assert` is the exception: a special form, not a value.
 
 ## Iterators
 
@@ -177,7 +181,7 @@ Generators (`yield`) produce iterators too — see [Concurrency](Concurrency#gen
 
 ## Integer bit-methods
 
-Every integer (and fixed-width integer) carries bit-manipulation methods and total conversions — `count_ones()`, `rotate_left(n)`, `to_u8()`, and more. The `to_*` conversions also bridge to the float domain (`to_float`/`to_f32`) and back (`float.to_int()`). See [Fixed-Width Integers & Bitwise](Fixed-Width-Integers#bit-intrinsics-and-conversions).
+Every integer (and fixed-width integer) carries bit-manipulation methods and total conversions — `count_ones()`, `rotate_left(n)`, `to_u8()`, and more. The `to_*` conversions also bridge to the float domain (`to_float`/`to_f32`) and back (`float.to_int()`). See [Fixed-Width Ints & Packed Types](Fixed-Width-Integers#bit-intrinsics-and-conversions).
 
 ## Diagnostic codes you'll see
 

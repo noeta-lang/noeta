@@ -2,6 +2,36 @@
 
 The language has lazy iterators, generators, `async`/`await` with structured concurrency, and true-parallel isolates communicating over typed channels — all built on one stackless state-machine substrate (see [Concurrency Internals](Concurrency-Internals) for how). This page is the surface.
 
+Here is the heart of it in one complete program — two tasks spawned, both in flight at once, joined with `.await`:
+
+```noeta
+use std.task.{sleep}
+
+async fn fetch_user(id: int): string {
+    sleep(20).await                     // stand-in for a real request
+    return "user-${id}"
+}
+
+concurrent {
+    a = spawn fetch_user(1)             // both requests start now…
+    b = spawn fetch_user(2)
+    echo "requests in flight"
+    echo a.await                        // …and run while we wait
+    echo b.await
+}
+echo "done"
+```
+
+```console
+$ noeta run fetch.noe
+requests in flight
+user-1
+user-2
+done
+```
+
+An `async fn` suspends instead of blocking, `spawn` schedules a call as a task inside a `concurrent` scope, and `.await` waits for a result. The rest of this page builds the full picture: iterators and generators first (the same state-machine substrate in synchronous form), then async/await, structured scopes, cancellation, isolates, and channels.
+
 ## Lazy iterators
 
 `xs.iter()` produces an `Iterator<T>` — a **reference** value with a shared cursor. Adapters are lazy and fuse (no intermediate lists are built); a terminal like `.collect()` or `.sum()` drives them.
@@ -93,7 +123,7 @@ concurrent {
 
 ### Nested `concurrent` interleaves
 
-A `concurrent { … }` block opened **inside a spawned task's own body** is a genuine suspension point, not an atomic step: its join yields out of the task's poll while the inner scope's tasks are still pending, so those inner tasks interleave with the outer scope's siblings across scheduler rounds (rather than the inner scope being driven to completion inside one poll of the outer task). Two sibling tasks that each open their own `concurrent` therefore run interleaved, not one-after-the-other. Scopes close by identity, so a nested block can finish while a sibling's block is still open — structured guarantees (a block joins all its tasks before it returns) hold regardless of interleaving. Under the sandbox clock the interleaving is deterministic and both backends agree.
+A `concurrent { … }` block opened **inside a spawned task's own body** does not run as one atomic step: the inner scope's tasks interleave with the outer scope's siblings. Two sibling tasks that each open their own `concurrent` therefore run interleaved, not one-after-the-other, and a nested block can finish while a sibling's block is still open. The structured guarantee is unaffected by any of this — every block joins all of its tasks before it returns. For the scheduler mechanics behind the interleaving, see [Concurrency Internals](Concurrency-Internals).
 
 ### Cancellation
 
@@ -154,14 +184,11 @@ async fn produce(tx: Sender<int>): void {
 
 async fn consume(rx: Receiver<int>): int {
     mut total = 0
-    mut running = true
-    while running {
-        (delta, keep) = match rx.recv().await {
-            some(v) => (v, true),
-            none    => (0, false),
+    while true {
+        match rx.recv().await {
+            some(v) => { total = total + v },
+            none    => { return total },        // channel closed and drained
         }
-        total = total + delta
-        running = keep
     }
     return total
 }

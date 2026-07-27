@@ -10,7 +10,7 @@ Four `@` decorators attach metadata to or drive codegen on a *declaration* — `
 
 ### `@derive(...)` — synthesize trait impls
 
-Generates trait implementations from a type's shape. Covered in [Generics & Traits](Generics-and-Traits#derive--synthesized-implementations). The derivable set is closed: `Equatable`, `Comparable`, `Display`, `Error`, `Clone`, `Serialize<Format>`.
+Generates trait implementations from a type's shape. Covered in [Generics & Traits](Generics-and-Traits#derive--synthesized-implementations). The **built-in recipe set** is closed — `Equatable`, `Comparable`, `Display`, `Error`, `Clone`, `Serialize<Format>` — but **user traits are derivable too**: a fully-defaulted trait's defaults are adopted wholesale (the `Inspectable` example below), and a required method can be bridged onto a field/method or delegated `via:` a field. What `@derive` never does is run arbitrary code — every synthesized method is a mechanical bridge, forward, or default.
 
 ### `@attribute` — mark a struct usable as `#[...]`
 
@@ -39,7 +39,9 @@ The `#[Skip]` / `#[Name]` / `#[Group]` / `#[Data]` attributes used by the [test 
 
 ### `@role(Enum.Variant)` — a semantic role tag
 
-Rides on an `@attribute` struct and confers a typed architectural role on every declaration the attribute annotates, indexed at build time (zero runtime cost). Only a struct marked `@attribute` may carry `@role`, and the variant must be fieldless.
+Roles exist to make **architecture queryable**: they tag declarations with typed architectural meaning — this is an entry point, that crosses a trust boundary — that tooling can index and answer questions about, from `roles_of()` in-language to the manifest `noeta mcp` serves to AI agents (see [Where this is headed](#where-this-is-headed)).
+
+`@role` rides on an `@attribute` struct and confers a typed architectural role on every declaration the attribute annotates, indexed at build time (zero runtime cost). Only a struct marked `@attribute` may carry `@role`, and the variant must be fieldless.
 
 ```noeta
 @attribute(Function, Method)
@@ -67,6 +69,8 @@ Two more directive families use the `@` sigil but are not decorators in this fou
 
 ## The reflection surface
 
+A handful of prelude functions expose type and metadata at runtime — no import needed.
+
 ### `fields_of(value)` — value-level field reflection
 
 `fields_of(value)` returns a struct/class instance's fields as `List<FieldEntry>` — each `{ name: string, value: dyn }`, in declaration order (any other value yields the empty list). It is the value-level counterpart of `type_of`, and what lets a fully-defaulted trait implement *structural* behavior over `self` in pure Noeta — no macro system:
@@ -82,8 +86,6 @@ trait Inspectable {
 @derive(Inspectable)
 struct User { name: string; id: int }
 ```
-
-A handful of prelude functions expose type and metadata at runtime.
 
 ### `traits_of(value): List<string>` — trait-membership reflection
 
@@ -171,20 +173,27 @@ The compile-time `(declaration, role)` index built from `@role(...)` tags — ea
 
 Fallible dispatch by name. With three operands, `recv` is a value (→ an instance method) or a bare type name (→ an associated function):
 
-```noeta check
-echo match invoke(Shape.new(2, 3), "area", []) {
-    Ok(v)  => "area = ${v}",
+```noeta
+struct Rect {
+    w: int
+    h: int
+    fn new(w: int, h: int): Rect { return Rect { w: w, h: h } }
+    fn area(): int { return self.w * self.h }
+}
+
+echo match invoke(Rect.new(2, 3), "area", []) {
+    Ok(v)  => "area = ${v}",             // area = 6
     Err(e) => "no such method",
 }
 ```
 
 With two, `name` is a **top-level function** — the same string `params_of` takes for a free fn, so reflecting a signature and then calling it round-trips on one name:
 
-```noeta check
+```noeta
 fn greet(who: string = "stranger"): string { return "hi ${who}" }
 
 echo match invoke("greet", ["ada"]) {
-    Ok(v)  => v,
+    Ok(v)  => v,                         // hi ada
     Err(e) => "no such function",
 }
 ```
