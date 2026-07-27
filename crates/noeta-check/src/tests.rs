@@ -381,37 +381,26 @@ fn generic_call_violating_a_bound_is_reported() {
     assert_eq!(codes(src), ["E0025"]);
 }
 
-// --- The `Mergeable` bound (p2p P2): CRDT extern types satisfy it, nothing else does, and it is
-//     intrinsic (not user-implementable). The bound is seeded from the extension registry.
-
-// The positive case — every registered CRDT *satisfies* `T: Mergeable` — needs the actual CRDT
-// types, which left `std` for the `para.crdt` package (para-namespace S2) and now live in the
-// standalone para-p2p repo (github.com/noeta-lang/para-p2p). It can't be checked against this
-// std-only registry, so it lives in that repo's conformance corpus, where the p2p extension is
-// installed (`tests/conformance/crdt/mergeable_bound_satisfied.noe`). The bound *name* itself is
-// still checker-intrinsic, so the negative/intrinsic cases below stay here.
+// --- `Mergeable` is no longer a built-in ------------------------------------------------------
+//
+// It was a closed `BuiltinTrait` satisfied only by the CRDT extern types, with `impl`/`@derive`
+// rejected outright, so that a value with no runtime merge could not pass the checker. That closed
+// the door on the legitimate case too: an app cannot define its own CRDT. It is now an ordinary
+// native `ExtTrait` declared by the para-p2p package (`para.crdt.Mergeable`) with a REQUIRED
+// `merge` method, so the checker enforces that an implementor actually supplies one — the failure
+// mode the closure existed to prevent — while a user type may join the bound like any other trait.
+//
+// Nothing about it is checkable against this std-only registry any more (the trait ships with the
+// package), so its tests live in that repo's conformance corpus:
+// `tests/conformance/crdt/{mergeable_bound_satisfied,user_mergeable}.noe`.
 
 #[test]
-fn a_non_crdt_violates_the_mergeable_bound() {
-    // A plain value has no convergence story, so it cannot satisfy `Mergeable`: `E0025`.
+fn a_name_no_built_in_trait_claims_is_not_a_bound() {
+    // With `Mergeable` gone from the built-in set and no extension installed, the name is simply
+    // unknown — the generic path reports the bad bound rather than silently accepting it.
     let src = "fn store<T: Mergeable>(v: T): T { return v; }\n\
                echo store(42);\n";
-    assert_eq!(codes(src), ["E0025"]);
-}
-
-#[test]
-fn mergeable_is_intrinsic_so_a_user_impl_is_rejected() {
-    // `Mergeable` is a built-in capability of the CRDT types, not something a user type may claim —
-    // otherwise a non-convergent value would pass the checker but have no runtime merge: `E0015`.
-    let src = "class Thing {\n  x: int\n  impl Mergeable {}\n}\n";
-    assert_eq!(codes(src), ["E0015"]);
-}
-
-#[test]
-fn mergeable_cannot_be_derived() {
-    // Nor is it derivable (its behavior is not field-wise synthesizable): `E0014`.
-    let src = "@derive(Mergeable)\nclass Thing { x: int }\n";
-    assert_eq!(codes(src), ["E0014"]);
+    assert!(!codes(src).is_empty(), "an unknown bound must be reported");
 }
 
 #[test]

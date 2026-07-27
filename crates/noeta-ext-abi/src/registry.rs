@@ -899,8 +899,9 @@ pub struct ExtType {
     pub arena_getter: Option<ArenaGetter>,
     /// The **built-in traits this type declares** (p2p P2) — the extern-type analogue of a user
     /// type's `@derive`/`impl`. The checker seeds these into its trait-impl table so a
-    /// `T: Mergeable` bound (or any built-in-trait bound) is satisfied by this type. The CRDT types
-    /// declare `["Mergeable"]`; a non-built-in name is ignored. Default empty.
+    /// built-in-trait bound is satisfied by this type. A name matching a native [`ExtTrait`]
+    /// instead makes the type satisfy *that* trait (recorded by `seed_ext_traits`) — which is how
+    /// the CRDT extern types satisfy the package-declared `Mergeable`. Default empty.
     pub traits: &'static [&'static str],
     /// Whether plain-`methods` arguments are **deep-marshalled** (a `Map`/`List`/object argument
     /// projects to a full [`crate::NativeValue`] tree) rather than the cheap shallow projection

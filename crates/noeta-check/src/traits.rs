@@ -106,18 +106,6 @@ impl Checker {
             .help("only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)");
             return;
         };
-        if t.intrinsic() {
-            self.error(
-                DiagnosticCode::InvalidImpl,
-                trait_span,
-                format!("`{trait_name}` cannot be implemented"),
-            )
-            .help(format!(
-                "`{trait_name}` is a built-in capability satisfied only by the runtime types that \
-                 provide it (e.g. the CRDT types for `Mergeable`), not by a user `impl`"
-            ));
-            return;
-        }
         let Some((req_name, req_arity)) = t.required_method() else {
             return; // a marker trait (e.g. `Clone`, `Attribute`) imposes no hand-written method
         };
@@ -1765,14 +1753,8 @@ impl Checker {
                 };
                 let bound = &bound.name;
                 if !self.satisfies(concrete, t) {
-                    let help = if t.intrinsic() {
-                        format!(
-                            "`{bound}` is a built-in capability — only the runtime types that \
-                             provide it (the CRDT types for `Mergeable`) satisfy this bound"
-                        )
-                    } else {
-                        format!("`{concrete}` must `@derive` or `impl {bound}` to be used here")
-                    };
+                    let help =
+                        format!("`{concrete}` must `@derive` or `impl {bound}` to be used here");
                     self.error(
                         DiagnosticCode::TraitBoundNotSatisfied,
                         span,
@@ -1948,14 +1930,7 @@ impl Checker {
             if self.satisfies(&concrete, t) {
                 continue;
             }
-            let help = if t.intrinsic() {
-                format!(
-                    "`{bound}` is a built-in capability — only the runtime types that provide it \
-                     (the CRDT types `GCounter`/`PnCounter`/`GSet`) satisfy this bound"
-                )
-            } else {
-                format!("`{concrete}` must `@derive` or `impl {bound}`")
-            };
+            let help = format!("`{concrete}` must `@derive` or `impl {bound}`");
             self.error(
                 DiagnosticCode::TraitBoundNotSatisfied,
                 span,

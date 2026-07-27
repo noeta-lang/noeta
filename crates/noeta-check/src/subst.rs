@@ -363,9 +363,7 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
                 )
         }
         // No built-in *primitive* type satisfies these marker/protocol traits without an explicit
-        // `impl`. `Mergeable` in particular is satisfied only by the CRDT extern types, which are
-        // `Type::Named` and so resolve through the seeded `trait_impls` table in `satisfies`, never
-        // reaching here — no primitive is ever `Mergeable`.
+        // `impl`.
         Bt::Clone
         | Bt::Error
         | Bt::From
@@ -378,8 +376,7 @@ pub(crate) fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         | Bt::Members
         | Bt::DynamicCall
         | Bt::TryAdd
-        | Bt::Validate
-        | Bt::Mergeable => false,
+        | Bt::Validate => false,
     }
 }
 

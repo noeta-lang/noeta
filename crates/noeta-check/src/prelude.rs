@@ -428,7 +428,7 @@ impl Checker {
     /// Seed the built-in traits that **native declarations** advertise through the extension registry
     /// (p2p P2; unified across kinds in native-extensibility Slice C) into the trait-impl table — the
     /// native analogue of processing a user type's `@derive`/`impl`. This is what makes
-    /// `satisfies(GCounter, Mergeable)` true, so a `T: Mergeable` bound accepts a CRDT. Iterates
+    /// `satisfies(Uuid, Comparable)` true, so a `T: Comparable` bound accepts a native type. Iterates
     /// **every** native kind — extern types, fielded (class/struct), and enums — so a native class,
     /// struct, or enum declaring a built-in trait (`traits: ["Comparable"]`) actually satisfies it,
     /// not only an [`ExtType`] (the pre-Slice-C latent gap). Runs at prelude time, once, from every
@@ -441,7 +441,7 @@ impl Checker {
         // registry borrow is live, then release it before the `&mut self` `record_trait_impls`
         // writes. Keyed by the **qualified identity** (e.g. `para.crdt.GCounter` when a program
         // installs the out-of-tree para-p2p package) the checker stores in `Type::Named`, so a
-        // `T: Mergeable` bound resolves against the same string.
+        // built-in-trait bound resolves against the same string.
         let decls: Vec<(String, &'static [&'static str])> = {
             let reg = self.reg();
             let types = reg
