@@ -468,13 +468,15 @@ pub fn build(
                         ));
                     }
                 }
+                // A method's attributes are keyed by its qualified `Struct.method` name, exactly as
+                // the class and enum arms key theirs — the checker validates a struct method's
+                // `#[...]` through the same `check_fn`, so omitting the record here made a
+                // well-formed `#[Get("/users")]` on a struct method type-check and then vanish from
+                // `attributes_of::<Get>()` with no diagnostic.
                 for method in &decl.methods {
-                    push_params(
-                        &mut manifest,
-                        &mut params,
-                        format!("{}.{}", decl.name, method.name),
-                        &method.params,
-                    );
+                    let target = format!("{}.{}", decl.name, method.name);
+                    push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
+                    push_params(&mut manifest, &mut params, target, &method.params);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
