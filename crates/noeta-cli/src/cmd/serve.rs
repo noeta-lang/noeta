@@ -314,8 +314,10 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
             });
         }
 
+        // Armed, not printed: the serve loop emits it once the listener is actually bound, so a
+        // bind clash or a check error is never preceded by "listening on …".
         if let Some(banner) = banner {
-            eprintln!("{banner}");
+            noeta_stdlib::serve::arm_serve_banner(banner.to_string());
         }
         // Hot mode (server-hmr W1, armed by the `--watch` wrapper for `serve`): run through the
         // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.

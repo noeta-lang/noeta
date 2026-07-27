@@ -1,0 +1,62 @@
+// `Socket.recv_timeout(ms)` + `Socket.closed()` — a session that acts on its own schedule rather
+// than only when the client speaks. `recv_timeout` yields the next message, or `none` when the
+// deadline passes with nothing complete; `closed()` says which `none` it is, so the loop can tell
+// "nothing yet, do my periodic work" from "the peer is gone, stop".
+//
+// This is what a server-pushed update needs: a LiveView session blocked in a plain `recv` has
+// nothing to wake it when server-side state changes (a peer's message arriving over p2p, say), and
+// racing `recv` against a timer cannot stand in — a race cancels the losing recv and a message it
+// had already consumed dies with the cancelled task.
+//
+// The sandbox has no real clock to wait on and a fixed scripted conversation, so a deadline cannot
+// change what arrives: `recv_timeout` resolves exactly like `recv` here, and the session walks the
+// same two frames and the same close. That is the point — a timed session stays deterministic and
+// terminates in-oracle, so both backends agree on it.
+// expect: stdout "GET /"
+// expect: stdout "GET /health"
+// expect: stdout "POST /echo"
+// expect: stdout "GET /users/42"
+// expect: stdout "DELETE /users/42"
+// expect: stdout "ws got first frame (closed=false)"
+// expect: stdout "ws got second frame (closed=true)"
+// expect: stdout "ws idle, and the peer is gone"
+// expect: stdout "served"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response, Socket}
+
+async fn session(sock: Socket): bool {
+    mut going = true
+    while going {
+        msg = sock.recv_timeout(50).await
+        match msg {
+            some(text) => {
+                // `closed()` reads the conversation's state *after* this frame was taken, so it
+                // flips on the last one — the session still handles that frame, then stops.
+                echo "ws got ${text} (closed=${sock.closed()})"
+                sock.send("echoed")
+            },
+            none => {
+                if sock.closed() {
+                    echo "ws idle, and the peer is gone"
+                    going = false
+                } else {
+                    // The idle branch a real session does its periodic work in.
+                    echo "ws idle, still connected"
+                }
+            },
+        }
+    }
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" {
+        return server.websocket(session)
+    }
+    echo "${req.method()} ${req.path()}"
+    return server.response(200, "ok")
+}
+
+server.serve(8080, fetch)
+echo "served"

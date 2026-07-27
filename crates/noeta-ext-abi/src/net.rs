@@ -484,6 +484,24 @@ impl crate::ExternIo for WsRecvIo {
     }
 }
 
+/// The default **timed** receive descriptor. The sandbox has no real clock to wait on and a fixed
+/// scripted conversation, so a deadline cannot change what arrives: it resolves exactly like
+/// [`WsRecvIo`], which keeps a session that polls with a timeout deterministic and identical on
+/// both backends. `RealHost` overrides [`crate::Network::net_ws_recv_timeout`] with a real wait.
+#[derive(Debug)]
+pub struct WsRecvTimeoutIo {
+    pub conn: u64,
+}
+
+impl crate::ExternIo for WsRecvTimeoutIo {
+    fn run_sync(
+        &mut self,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NativeOut, crate::StdError> {
+        Ok(ws_recv_outcome(host.net_ws_recv_next(self.conn)?))
+    }
+}
+
 /// Materialize a recv result as the language-facing `?string`.
 pub fn ws_recv_outcome(next: Option<String>) -> crate::NativeOut {
     match next {
