@@ -14,6 +14,7 @@
 // expect: stdout "GET /echo"
 // expect: stdout "err: mismatch method: expected int, found JSON string"
 // expect: stdout "aborting door: GET"
+// expect: stdout "default: n/a"
 // expect: exit 0
 use std.http.client
 use std.json
@@ -39,3 +40,8 @@ echo match r.json::<Wrong>() {
 
 // The aborting spelling still works and is unchanged.
 echo "aborting door: ${json.parse::<Echo>(r.body()).method}"
+
+// A field with a literal default is filled when the body omits it — this door shares the one decode
+// walk with `json.try_parse::<T>` / `json.decode_typed`, so the rule cannot differ between them.
+struct Partial { method: string  note: string = "n/a" }
+echo "default: ${r.json::<Partial>()?.note}"
